@@ -7,6 +7,9 @@ llm:
   models:
   - name: "*"
     provider: anthropic
+    authorization:
+      rules:
+      - 'request.headers["x-api-key"] == "local-gateway-placeholder"'
     params:
       apiKey: mock-provider-key
       baseUrl: http://anthropic-mock:8000/v1

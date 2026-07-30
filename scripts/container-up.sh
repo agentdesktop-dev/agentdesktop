@@ -104,6 +104,12 @@ Run the smoke request:
 Run the real Claude Code smoke path:
   ./scripts/container-claude-smoke.sh
 
+Run Claude Code directly against local Agent Gateway:
+  ./scripts/container-claude-smoke.sh native
+
+Exercise Agent Gateway policy allow and deny:
+  ./scripts/container-policy-smoke.sh
+
 Open a shell in the connector container:
   $container_engine exec -it $connector_container /bin/sh
 

@@ -162,6 +162,20 @@ Claude Code -> connector loopback listener -> Agent Gateway -> mock Anthropic AP
 
 In this mode, the connector and Agent Gateway share a container network namespace. The connector runs in `standalone` mode and reaches Agent Gateway at `127.0.0.1:4000`; Agent Gateway remains a separate container and process. The mock supports Anthropic streaming messages, non-streaming messages, and token counting. The environment remains running for inspection; stop it with `./scripts/container-down.sh`.
 
+Gateway-aware applications can bypass the connector and use the native local Agent Gateway path. Exercise that path with the same real Claude Code client:
+
+```bash
+./scripts/container-claude-smoke.sh native
+```
+
+The standalone smoke configuration also contains an Agent Gateway authorization rule requiring the local placeholder credential. Display one allowed response and one native Agent Gateway `403` denial through the connector:
+
+```bash
+./scripts/container-policy-smoke.sh
+```
+
+The connector does not evaluate this rule or rewrite either response. Users own equivalent authorization and provider configuration in Agent Gateway.
+
 ## Host Claude Code smoke test
 
 This milestone forwards Claude's incoming authentication headers unchanged. Configure Agent Gateway to accept the chosen placeholder or gateway credential and to provide the real Anthropic credential upstream.
