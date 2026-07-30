@@ -34,6 +34,18 @@ cargo run
 
 The deployment mode is required. `standalone` accepts only a local Agent Gateway at `localhost` or a loopback IP; `managed` permits a remote upstream. The listen address must always be loopback. The upstream URL must use HTTP or HTTPS and may contain a path prefix, but not a query string or fragment.
 
+In standalone mode, the connector can optionally own the lifecycle of a separately installed Agent Gateway process:
+
+```bash
+cargo run -- \
+  --mode standalone \
+  --upstream http://127.0.0.1:4000 \
+  --gateway-binary /usr/local/bin/agentgateway \
+  --gateway-config "$HOME/.config/agentgateway/config.yaml"
+```
+
+The binary and config options must be provided together. The connector starts `agentgateway -f <config>`, stops it during connector shutdown, and exits if the local Agent Gateway process exits unexpectedly. Agent Gateway remains a separate process and retains ownership of policy and provider credentials.
+
 ## Test
 
 ```bash

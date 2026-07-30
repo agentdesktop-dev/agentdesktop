@@ -2,6 +2,9 @@ use std::net::{SocketAddr, TcpListener};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 struct Connector(Child);
 
 impl Drop for Connector {
@@ -63,5 +66,42 @@ async fn fails_closed_when_agent_gateway_is_unavailable() {
     assert_eq!(
         response.text().await.unwrap(),
         "agent gateway unavailable\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn exits_when_owned_local_gateway_exits() {
+    let fixture_dir =
+        std::env::temp_dir().join(format!("agentgateway-edge-e2e-{}", std::process::id()));
+    std::fs::create_dir_all(&fixture_dir).unwrap();
+    let gateway = fixture_dir.join("agentgateway");
+    let gateway_config = fixture_dir.join("config.yaml");
+    std::fs::write(&gateway, "#!/bin/sh\nexit 23\n").unwrap();
+    std::fs::set_permissions(&gateway, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(&gateway_config, "").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-connector"))
+        .args([
+            "--mode",
+            "standalone",
+            "--listen",
+            &unused_address().to_string(),
+            "--upstream",
+            "http://127.0.0.1:4000",
+            "--gateway-binary",
+            gateway.to_str().unwrap(),
+            "--gateway-config",
+            gateway_config.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    std::fs::remove_dir_all(fixture_dir).unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("local Agent Gateway exited unexpectedly with exit status: 23")
     );
 }

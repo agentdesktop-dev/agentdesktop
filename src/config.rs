@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use clap::{Parser, ValueEnum};
@@ -28,6 +29,14 @@ pub struct Config {
     /// Base URL of the Agent Gateway upstream.
     #[arg(long, env = "AGENTGATEWAY_EDGE_UPSTREAM")]
     pub upstream: Url,
+
+    /// Agent Gateway executable to manage in standalone mode.
+    #[arg(long, env = "AGENTGATEWAY_EDGE_GATEWAY_BINARY")]
+    pub gateway_binary: Option<PathBuf>,
+
+    /// Agent Gateway configuration passed to the managed executable.
+    #[arg(long, env = "AGENTGATEWAY_EDGE_GATEWAY_CONFIG")]
+    pub gateway_config: Option<PathBuf>,
 }
 
 impl Config {
@@ -60,6 +69,16 @@ impl Config {
                 "standalone mode requires a loopback Agent Gateway upstream, got {}",
                 self.upstream
             );
+        }
+
+        match (&self.gateway_binary, &self.gateway_config) {
+            (Some(_), Some(_)) if self.mode == DeploymentMode::Managed => {
+                bail!("local Agent Gateway lifecycle is only available in standalone mode");
+            }
+            (Some(_), None) | (None, Some(_)) => {
+                bail!("gateway binary and config must be provided together");
+            }
+            _ => {}
         }
 
         Ok(self)
@@ -173,5 +192,60 @@ mod tests {
         let error = parse(&["connector", "--upstream", "http://127.0.0.1:4000"]).unwrap_err();
 
         assert!(error.to_string().contains("--mode"));
+    }
+
+    #[test]
+    fn accepts_local_gateway_lifecycle_in_standalone_mode() {
+        let config = parse(&[
+            "connector",
+            "--mode",
+            "standalone",
+            "--upstream",
+            "http://127.0.0.1:4000",
+            "--gateway-binary",
+            "/usr/bin/agentgateway",
+            "--gateway-config",
+            "/etc/agentgateway/config.yaml",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            config.gateway_binary.unwrap(),
+            std::path::Path::new("/usr/bin/agentgateway")
+        );
+    }
+
+    #[test]
+    fn rejects_partial_local_gateway_lifecycle_configuration() {
+        let error = parse(&[
+            "connector",
+            "--mode",
+            "standalone",
+            "--upstream",
+            "http://127.0.0.1:4000",
+            "--gateway-binary",
+            "/usr/bin/agentgateway",
+        ])
+        .unwrap_err();
+
+        assert!(error.to_string().contains("must be provided together"));
+    }
+
+    #[test]
+    fn rejects_local_gateway_lifecycle_in_managed_mode() {
+        let error = parse(&[
+            "connector",
+            "--mode",
+            "managed",
+            "--upstream",
+            "https://gateway.example",
+            "--gateway-binary",
+            "/usr/bin/agentgateway",
+            "--gateway-config",
+            "/etc/agentgateway/config.yaml",
+        ])
+        .unwrap_err();
+
+        assert!(error.to_string().contains("only available in standalone"));
     }
 }
