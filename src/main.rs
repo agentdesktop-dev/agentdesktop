@@ -21,7 +21,7 @@ async fn main() -> anyhow::Result<()> {
         listener.local_addr()?,
         config.upstream
     );
-    let serve = proxy::serve(listener, config.upstream, shutdown_signal());
+    let serve = proxy::serve(listener, config.upstream, config.mode, shutdown_signal());
     if let Some(gateway) = &mut local_gateway {
         tokio::select! {
             result = serve => {

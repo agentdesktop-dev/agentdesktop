@@ -2,14 +2,17 @@ use std::collections::HashSet;
 use std::future::Future;
 
 use anyhow::Result;
-use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::header::{CONNECTION, CONTENT_TYPE, HOST};
 use axum::http::{HeaderMap, HeaderName, Request, Response, StatusCode};
-use axum::routing::any;
+use axum::routing::{any, get};
+use axum::{Json, Router};
 use reqwest::{Client, Url};
-use tokio::net::TcpListener;
+use serde::Serialize;
+use tokio::net::{TcpListener, TcpStream};
+
+use crate::config::DeploymentMode;
 
 const GATEWAY_ERROR: &str = "agent gateway unavailable\n";
 
@@ -17,23 +20,67 @@ const GATEWAY_ERROR: &str = "agent gateway unavailable\n";
 struct ProxyState {
     client: Client,
     upstream: Url,
+    mode: DeploymentMode,
+}
+
+#[derive(Serialize)]
+struct HealthResponse {
+    status: &'static str,
+    mode: &'static str,
+    gateway: &'static str,
 }
 
 pub async fn serve(
     listener: TcpListener,
     upstream: Url,
+    mode: DeploymentMode,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     let state = ProxyState {
         client: Client::new(),
         upstream,
+        mode,
     };
-    let app = Router::new().fallback(any(forward)).with_state(state);
+    let app = Router::new()
+        .route("/_agentgateway/healthz", get(health))
+        .fallback(any(forward))
+        .with_state(state);
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await?;
     Ok(())
+}
+
+async fn health(State(state): State<ProxyState>) -> (StatusCode, Json<HealthResponse>) {
+    let reachable = gateway_reachable(&state.upstream).await;
+    let status = if reachable {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        status,
+        Json(HealthResponse {
+            status: if reachable { "ok" } else { "degraded" },
+            mode: state.mode.as_str(),
+            gateway: if reachable {
+                "reachable"
+            } else {
+                "unreachable"
+            },
+        }),
+    )
+}
+
+async fn gateway_reachable(upstream: &Url) -> bool {
+    let Some(host) = upstream.host_str() else {
+        return false;
+    };
+    let Some(port) = upstream.port_or_known_default() else {
+        return false;
+    };
+    TcpStream::connect((host, port)).await.is_ok()
 }
 
 async fn forward(State(state): State<ProxyState>, request: Request<Body>) -> Response<Body> {
@@ -143,7 +190,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         tokio::spawn(async move {
-            serve(listener, upstream, async {
+            serve(listener, upstream, DeploymentMode::Standalone, async {
                 let _ = shutdown_rx.await;
             })
             .await
@@ -305,12 +352,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reports_reachable_gateway_health() {
+        let gateway = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (proxy_address, shutdown) =
+            start_proxy(Url::parse(&format!("http://{}", gateway.local_addr().unwrap())).unwrap())
+                .await;
+
+        let response = Client::new()
+            .get(format!("http://{proxy_address}/_agentgateway/healthz"))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.text().await.unwrap(),
+            r#"{"status":"ok","mode":"standalone","gateway":"reachable"}"#
+        );
+        shutdown.send(()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reports_unreachable_gateway_health() {
+        let gateway = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream = Url::parse(&format!("http://{}", gateway.local_addr().unwrap())).unwrap();
+        drop(gateway);
+        let (proxy_address, shutdown) = start_proxy(upstream).await;
+
+        let response = Client::new()
+            .get(format!("http://{proxy_address}/_agentgateway/healthz"))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.text().await.unwrap(),
+            r#"{"status":"degraded","mode":"standalone","gateway":"unreachable"}"#
+        );
+        shutdown.send(()).unwrap();
+    }
+
+    #[tokio::test]
     async fn exits_cleanly_after_shutdown_signal() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let server = tokio::spawn(serve(
             listener,
             Url::parse("http://127.0.0.1:1").unwrap(),
+            DeploymentMode::Standalone,
             async {
                 let _ = shutdown_rx.await;
             },

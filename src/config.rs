@@ -85,6 +85,15 @@ impl Config {
     }
 }
 
+impl DeploymentMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Standalone => "standalone",
+            Self::Managed => "managed",
+        }
+    }
+}
+
 fn is_local_host(upstream: &Url) -> bool {
     upstream.host_str().is_some_and(|host| {
         host.eq_ignore_ascii_case("localhost")

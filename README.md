@@ -46,6 +46,20 @@ cargo run -- \
 
 The binary and config options must be provided together. The connector starts `agentgateway -f <config>`, stops it during connector shutdown, and exits if the local Agent Gateway process exits unexpectedly. Agent Gateway remains a separate process and retains ownership of policy and provider credentials.
 
+Query connector and gateway reachability on the same loopback listener:
+
+```bash
+curl http://127.0.0.1:8080/_agentgateway/healthz
+```
+
+A reachable gateway returns `200 OK`:
+
+```json
+{"status":"ok","mode":"standalone","gateway":"reachable"}
+```
+
+An unreachable gateway returns `503 Service Unavailable` with `status` set to `degraded`. The check establishes a fresh TCP connection to the configured upstream. It reports connector liveness and gateway reachability; it does not interpret Agent Gateway configuration or policy health.
+
 ## Test
 
 ```bash
