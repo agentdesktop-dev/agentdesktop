@@ -6,6 +6,8 @@ The current pre-pre-MVP does not implement user identity, device enrollment, MDM
 
 For a local installation, including credential ownership, file permissions, logs, retention, and removal, see [Standalone Operations](docs/deployment/standalone.md).
 
+The proposed managed user/device trust boundary is documented in [Managed Identity Contract v1](docs/architecture/managed-identity-v1.md). It is a design contract, not implemented behavior.
+
 ## Run
 
 Start Agent Gateway with a route that accepts Anthropic-compatible requests at `/v1/messages`, then run:

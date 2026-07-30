@@ -101,6 +101,8 @@ In self-managed local mode, the user owns Agent Gateway configuration and policy
 
 The identity design in this section applies to managed remote mode. Self-managed local mode does not require organizational user or device identity by default because the user and Agent Gateway share the same device and administrative boundary. Local process isolation and access to the loopback listener still require explicit security review.
 
+The proposed wire-level user/device trust boundary is specified in [Managed Identity Contract v1](docs/architecture/managed-identity-v1.md). The contract records required Agent Gateway work and must be agreed before OAuth implementation begins.
+
 ### User identity
 
 MDM enrollment identity and local usernames are not sufficiently portable or trustworthy as the identity of the current user. Use browser-based OAuth 2.0 Authorization Code with PKCE for the normal laptop flow. Use Device Authorization Flow only as a fallback for headless devices or environments where browser callbacks cannot work.
