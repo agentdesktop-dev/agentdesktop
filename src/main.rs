@@ -4,6 +4,8 @@ use agentgateway_edge_connector::proxy;
 use anyhow::bail;
 use tokio::net::TcpListener;
 
+const LOCAL_GATEWAY_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = Config::parse_and_validate()?;
@@ -14,6 +16,12 @@ async fn main() -> anyhow::Result<()> {
         }
         _ => None,
     };
+    if let Some(gateway) = &mut local_gateway {
+        gateway
+            .wait_until_reachable(&config.upstream, LOCAL_GATEWAY_STARTUP_TIMEOUT)
+            .await?;
+        println!("local Agent Gateway is reachable at {}", config.upstream);
+    }
     let listener = TcpListener::bind(config.listen).await?;
     println!(
         "running in {:?} mode, listening on {} and forwarding to {}",

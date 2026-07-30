@@ -44,7 +44,7 @@ cargo run -- \
   --gateway-config "$HOME/.config/agentgateway/config.yaml"
 ```
 
-The binary and config options must be provided together. The connector starts `agentgateway -f <config>`, stops it during connector shutdown, and exits if the local Agent Gateway process exits unexpectedly. Agent Gateway remains a separate process and retains ownership of policy and provider credentials.
+The binary and config options must be provided together. The connector starts `agentgateway -f <config>`, waits up to 10 seconds for its configured loopback upstream to accept TCP connections, and only then opens the application listener. It stops Agent Gateway during connector shutdown and exits if the local process exits unexpectedly. Agent Gateway remains a separate process and retains ownership of policy and provider credentials.
 
 Query connector and gateway reachability on the same loopback listener:
 
