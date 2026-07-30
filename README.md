@@ -40,6 +40,75 @@ cargo fmt --check
 
 Tests use a local fake Agent Gateway and do not contact Claude, Anthropic, or a remote service.
 
+## Podman kick-the-tires environment
+
+The Podman environment runs Agent Gateway and the connector as separate containers on a private network. The connector remains bound to `127.0.0.1` inside its container and is not published to the host. Use `podman exec` to exercise it.
+
+Requirements:
+
+- Podman 5 or newer
+- Network access on the first run to pull images and build dependencies
+
+Start the credential-free environment:
+
+```bash
+./scripts/podman-up.sh smoke
+```
+
+Send an Anthropic-shaped request through the connector to Agent Gateway:
+
+```bash
+./scripts/podman-smoke.sh
+```
+
+The response should contain:
+
+```json
+{"id":"msg_smoke","type":"message","role":"assistant","content":[{"type":"text","text":"hello through the edge connector"}]}
+```
+
+The smoke gateway returns a deterministic direct response, so this path requires no provider credential. It is a manual environment for exploring:
+
+```text
+curl in connector container -> connector loopback listener -> Agent Gateway
+```
+
+The Podman scripts manage the environment and send manual requests; they are not test runners. Product behavior such as fail-closed handling is covered by the Rust integration tests under `tests/`.
+
+Inspect the running environment:
+
+```bash
+podman ps --filter name=agentgateway-edge
+podman logs agentgateway-edge-connector
+podman logs agentgateway-edge-gateway
+podman exec -it agentgateway-edge-connector /bin/sh
+```
+
+Stop and remove the containers and network:
+
+```bash
+./scripts/podman-down.sh
+```
+
+### Real Anthropic request
+
+To replace the deterministic response with Agent Gateway's Anthropic provider:
+
+```bash
+export ANTHROPIC_API_KEY=your-provider-key
+./scripts/podman-up.sh anthropic
+./scripts/podman-smoke.sh
+```
+
+The API key is passed only to the Agent Gateway container. The connector receives the placeholder `x-api-key` header from the test client but never receives the provider credential from the environment.
+
+Override the published Agent Gateway image when testing another version:
+
+```bash
+AGENTGATEWAY_IMAGE=ghcr.io/agentgateway/agentgateway:latest \
+  ./scripts/podman-up.sh smoke
+```
+
 ## Claude Code smoke test
 
 This milestone forwards Claude's incoming authentication headers unchanged. Configure Agent Gateway to accept the chosen placeholder or gateway credential and to provide the real Anthropic credential upstream.

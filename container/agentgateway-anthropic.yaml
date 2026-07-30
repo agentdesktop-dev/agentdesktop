@@ -1,0 +1,13 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+config:
+  readinessAddr: 0.0.0.0:15021
+
+llm:
+  port: 4000
+  models:
+  - name: anthropic/*
+    provider: anthropic
+    params:
+      apiKey: $ANTHROPIC_API_KEY
+    transformation:
+      model: llmRequest.model.stripPrefix("anthropic/")

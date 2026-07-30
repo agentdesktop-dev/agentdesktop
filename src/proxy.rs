@@ -324,29 +324,6 @@ mod tests {
             .unwrap();
     }
 
-    #[tokio::test]
-    async fn returns_stable_error_when_upstream_is_unavailable() {
-        let unavailable = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let unavailable_address = unavailable.local_addr().unwrap();
-        drop(unavailable);
-        let (proxy_address, shutdown) =
-            start_proxy(Url::parse(&format!("http://{unavailable_address}")).unwrap()).await;
-
-        let response = Client::new()
-            .post(format!("http://{proxy_address}/v1/messages"))
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-        assert_eq!(
-            response.headers()["x-agentgateway-edge-error"],
-            "upstream-unavailable"
-        );
-        assert_eq!(response.text().await.unwrap(), GATEWAY_ERROR);
-        shutdown.send(()).unwrap();
-    }
-
     #[test]
     fn removes_standard_and_connection_nominated_hop_headers() {
         let mut headers = HeaderMap::from_iter([

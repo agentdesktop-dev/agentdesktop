@@ -1,0 +1,18 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+config:
+  readinessAddr: 0.0.0.0:15021
+
+binds:
+- port: 4000
+  listeners:
+  - name: smoke
+    protocol: HTTP
+    routes:
+    - name: claude-smoke
+      matches:
+      - path:
+          pathPrefix: /v1/messages
+      policies:
+        directResponse:
+          status: 200
+          body: '{"id":"msg_smoke","type":"message","role":"assistant","content":[{"type":"text","text":"hello through the edge connector"}],"model":"smoke","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":5}}'
