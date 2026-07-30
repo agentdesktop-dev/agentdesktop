@@ -109,14 +109,14 @@ MDM enrollment identity and local usernames are not sufficiently portable or tru
 
 - Perform login once and silently refresh short-lived credentials afterward.
 - Use the system browser to benefit from existing enterprise SSO sessions.
-- Store refresh credentials only in the platform credential store: macOS Keychain, Windows Credential Manager, or a supported Linux secret service.
+- Prefer the platform credential store. On Linux, an explicitly configured protected-file fallback is allowed; strict mode requires Secret Service and fails during setup when it is unavailable.
 - Run the application-facing endpoint in the user session so identity is not ambiguous on shared machines.
 
 ### Device identity
 
-- MDM-managed devices should receive a non-exportable device key and certificate during enrollment where platform support permits.
-- Unmanaged devices need an explicit enrollment flow that produces an equivalent connector device identity.
-- Bind the short-lived user token to the device key, preferably using a standard proof-of-possession mechanism such as an mTLS certificate confirmation claim.
+- Bind short-lived user tokens to a connector-held DPoP key so proof survives ordinary TLS-terminating gateways.
+- Treat the initial DPoP key as connector-instance proof, not verified organizational device identity.
+- MDM-managed and unmanaged devices need enrollment that associates an approved device with the DPoP key or a platform-backed replacement key before managed mode is public.
 - Agent Gateway must derive device identity from verified cryptographic material. It must not trust a connector-supplied device ID header by itself.
 - Include both stable user and device identifiers in the verified policy context so Agent Gateway can authorize or revoke either one.
 - A revoked device or user returns a stable `403` response and a machine-readable reason. The connector translates this into an actionable application-facing error.
@@ -147,7 +147,7 @@ Implement this immediately after the Claude pre-MVP and include it in the initia
 - Support both local and managed destinations with the same capture semantics: local Agent Gateway over a loopback or local-only transport, and remote Agent Gateway over an authenticated tunnel.
 - Preserve the original destination and send the original TLS stream unchanged to Agent Gateway.
 - Prefer Agent Gateway's existing HTTP/2 CONNECT/HBONE support rather than designing a custom destination-header protocol. Validate and harden the laptop-client authentication boundary before committing to the wire contract.
-- In managed mode, authenticate the outer CONNECT with user credentials and device mTLS. Agent Gateway must turn validated credentials into trusted source context before evaluating policy.
+- In managed mode, authenticate each outer CONNECT with a DPoP-bound user token and proof. Agent Gateway must turn validated credentials into immutable trusted tunnel context before evaluating policy on inspected inner requests.
 - In self-managed local mode, secure connector-to-gateway communication with loopback or local IPC access controls. Do not require organizational OAuth or device enrollment.
 - Use one CONNECT stream per captured TCP flow while pooling underlying HTTP/2 connections per user identity.
 - Agent Gateway performs TLS MITM according to policy, remotely in managed mode or on-device in local mode. The connector never possesses the issuing CA private key.
@@ -282,8 +282,8 @@ Each increment must be independently usable and tested. Add the narrowest behavi
 ### Phase 2: User and device identity for managed mode
 
 1. Document trust boundaries and define the versioned user/device identity contract with Agent Gateway.
-2. Add OAuth Authorization Code with PKCE and secure platform token storage.
-3. Add managed and unmanaged device enrollment plus device-bound short-lived credentials.
+2. Add OAuth Authorization Code with PKCE, DPoP-bound access tokens, and secure token storage with an explicit protected-file fallback on Linux.
+3. Add refresh rotation and restart restoration, then device enrollment that upgrades connector-instance proof to verified device identity. Both are managed-release requirements.
 4. Make Agent Gateway construct policy context only from verified identity.
 5. Add tests for login, refresh, expiry, logout, token/device binding, concurrent users, and user or device revocation.
 6. Verify that identity credentials are stripped before provider forwarding and never appear in logs.
