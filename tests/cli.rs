@@ -38,3 +38,26 @@ fn claude_adapter_sets_selected_path_environment() {
         "http://localhost:4444/anthropic/\ntest-placeholder"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn identity_storage_check_selects_protected_file() {
+    let temporary = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-identity"))
+        .args([
+            "storage-check",
+            "--credential-storage",
+            "file",
+            "--storage-dir",
+            temporary.path().join("identity").to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("credential storage is ready: file")
+    );
+}

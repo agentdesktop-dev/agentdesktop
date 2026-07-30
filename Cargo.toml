@@ -7,14 +7,19 @@ default-run = "agentgateway-edge-connector"
 [dependencies]
 anyhow = "1.0"
 axum = "0.8"
+base64 = "0.22"
 clap = { version = "4.5", features = ["derive", "env"] }
+keyring = { version = "4.1.5", default-features = false, features = ["v1", "zbus-secret-service-keyring-store"] }
 reqwest = { version = "0.13", default-features = false, features = ["http2", "rustls", "stream"] }
+rustix = { version = "1", features = ["fs", "process"] }
 serde = { version = "1.0", features = ["derive"] }
+sha2 = "0.10"
 tokio = { version = "1.53", features = ["macros", "net", "process", "rt-multi-thread", "signal", "time"] }
 url = "2.5"
 
 [dev-dependencies]
 futures-util = "0.3"
 http-body-util = "0.1"
+tempfile = "3"
 tokio-stream = "0.1"
 

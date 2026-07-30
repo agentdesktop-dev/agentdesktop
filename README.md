@@ -8,6 +8,23 @@ For a local installation, including credential ownership, file permissions, logs
 
 The proposed managed user/device trust boundary is documented in [Managed Identity Contract v1](docs/architecture/managed-identity-v1.md). It is a design contract, not implemented behavior.
 
+## Managed identity storage preflight
+
+Managed identity is experimental. Validate credential persistence before login or installation:
+
+```bash
+cargo run --bin agentgateway-edge-identity -- storage-check
+```
+
+The default `auto` mode uses Linux Secret Service when a write/read/delete preflight succeeds and otherwise persists an owner-only protected-file backend. Require Secret Service with no fallback using:
+
+```bash
+cargo run --bin agentgateway-edge-identity -- \
+  storage-check --credential-storage secret-service
+```
+
+Select the protected file explicitly with `--credential-storage file`. The selected backend is persisted and revalidated on later startup; runtime does not silently switch stores. Override the XDG-based identity directory with `AGENTGATEWAY_EDGE_IDENTITY_DIR`.
+
 ## Run
 
 Start Agent Gateway with a route that accepts Anthropic-compatible requests at `/v1/messages`, then run:

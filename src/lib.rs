@@ -1,4 +1,5 @@
 pub mod apps;
 pub mod config;
+pub mod identity;
 pub mod local_gateway;
 pub mod proxy;
