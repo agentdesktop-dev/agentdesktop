@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+readonly root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly connector_container="agentgateway-edge-connector"
 
-podman exec "$connector_container" curl \
+source "$root_dir/scripts/container-engine.sh"
+
+"$container_engine" exec "$connector_container" curl \
   --fail-with-body \
   --silent \
   --show-error \
