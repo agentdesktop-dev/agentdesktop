@@ -4,6 +4,8 @@ An early, policy-free edge connector that forwards Claude Code HTTP traffic from
 
 The current pre-pre-MVP does not implement user identity, device enrollment, MDM integration, transparent capture, or telemetry export. See [AGENTS.md](AGENTS.md) for the architecture and incremental delivery plan.
 
+For a local installation, including credential ownership, file permissions, logs, retention, and removal, see [Standalone Operations](docs/deployment/standalone.md).
+
 ## Run
 
 Start Agent Gateway with a route that accepts Anthropic-compatible requests at `/v1/messages`, then run:
