@@ -2,6 +2,7 @@
 name = "agentgateway-edge-connector"
 version = "0.1.0"
 edition = "2024"
+default-run = "agentgateway-edge-connector"
 
 [dependencies]
 anyhow = "1.0"

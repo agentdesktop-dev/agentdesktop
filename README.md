@@ -34,6 +34,31 @@ cargo run
 
 The deployment mode is required. `standalone` accepts only a local Agent Gateway at `localhost` or a loopback IP; `managed` permits a remote upstream. The listen address must always be loopback. The upstream URL must use HTTP or HTTPS and may contain a path prefix, but not a query string or fragment.
 
+## Configure Claude Code
+
+Launch Claude Code directly against the default standalone Agent Gateway listener:
+
+```bash
+cargo run --bin agentgateway-edge-claude -- --path native
+```
+
+Or route it through the connector:
+
+```bash
+cargo run --bin agentgateway-edge-claude -- --path connector
+```
+
+The helper selects exactly one path and launches `claude` with `ANTHROPIC_BASE_URL` and a local placeholder `ANTHROPIC_API_KEY`. The native and connector defaults are `http://127.0.0.1:4000` and `http://127.0.0.1:8080`, respectively. Override the selected loopback endpoint and pass Claude arguments after `--`:
+
+```bash
+cargo run --bin agentgateway-edge-claude -- \
+  --path native \
+  --base-url http://127.0.0.1:4040 \
+  -- --model sonnet
+```
+
+Set `AGENTGATEWAY_EDGE_CLAUDE_CREDENTIAL` when the local Agent Gateway policy expects a different placeholder. This value is sent to Agent Gateway, not the AI provider credential. Agent Gateway remains responsible for replacing or removing application credentials before provider forwarding.
+
 In standalone mode, the connector can optionally own the lifecycle of a separately installed Agent Gateway process:
 
 ```bash
@@ -183,9 +208,7 @@ This milestone forwards Claude's incoming authentication headers unchanged. Conf
 With Agent Gateway and the connector running directly on the host:
 
 ```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8080
-export ANTHROPIC_AUTH_TOKEN=local-gateway-placeholder
-claude
+cargo run --bin agentgateway-edge-claude -- --path connector
 ```
 
 Send a simple prompt and verify:
