@@ -66,6 +66,7 @@ gateway_args+=("$gateway_image" -f /etc/agentgateway/config.yaml)
 "$container_engine" run --detach \
   --name "$connector_container" \
   --network "$network" \
+  --env AGENTGATEWAY_EDGE_MODE=managed \
   --env AGENTGATEWAY_EDGE_LISTEN=127.0.0.1:8080 \
   --env AGENTGATEWAY_EDGE_UPSTREAM=http://agentgateway:4000 \
   "$connector_image" >/dev/null

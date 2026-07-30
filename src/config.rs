@@ -1,12 +1,22 @@
 use std::net::SocketAddr;
 
 use anyhow::{Result, bail};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use url::Url;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum DeploymentMode {
+    Standalone,
+    Managed,
+}
 
 #[derive(Clone, Debug, Parser)]
 #[command(version, about)]
 pub struct Config {
+    /// Connector deployment mode.
+    #[arg(long, env = "AGENTGATEWAY_EDGE_MODE")]
+    pub mode: DeploymentMode,
+
     /// Loopback address on which to accept Claude traffic.
     #[arg(
         long,
@@ -45,13 +55,29 @@ impl Config {
             bail!("upstream URL must not contain a query string or fragment");
         }
 
+        if self.mode == DeploymentMode::Standalone && !is_local_host(&self.upstream) {
+            bail!(
+                "standalone mode requires a loopback Agent Gateway upstream, got {}",
+                self.upstream
+            );
+        }
+
         Ok(self)
     }
 }
 
+fn is_local_host(upstream: &Url) -> bool {
+    upstream.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{Config, DeploymentMode};
     use clap::Parser;
 
     fn parse(args: &[&str]) -> anyhow::Result<Config> {
@@ -62,6 +88,8 @@ mod tests {
     fn accepts_loopback_listener_and_http_upstream() {
         let config = parse(&[
             "connector",
+            "--mode",
+            "managed",
             "--listen",
             "[::1]:9000",
             "--upstream",
@@ -71,12 +99,39 @@ mod tests {
 
         assert_eq!(config.listen.to_string(), "[::1]:9000");
         assert_eq!(config.upstream.as_str(), "https://gateway.example/base/");
+        assert_eq!(config.mode, DeploymentMode::Managed);
+    }
+
+    #[test]
+    fn accepts_loopback_upstream_in_standalone_mode() {
+        for upstream in ["http://localhost:4000", "http://127.0.0.1:4000"] {
+            let config =
+                parse(&["connector", "--mode", "standalone", "--upstream", upstream]).unwrap();
+
+            assert_eq!(config.mode, DeploymentMode::Standalone);
+        }
+    }
+
+    #[test]
+    fn rejects_remote_upstream_in_standalone_mode() {
+        let error = parse(&[
+            "connector",
+            "--mode",
+            "standalone",
+            "--upstream",
+            "https://gateway.example",
+        ])
+        .unwrap_err();
+
+        assert!(error.to_string().contains("requires a loopback"));
     }
 
     #[test]
     fn rejects_non_loopback_listener() {
         let error = parse(&[
             "connector",
+            "--mode",
+            "managed",
             "--listen",
             "0.0.0.0:8080",
             "--upstream",
@@ -91,6 +146,8 @@ mod tests {
     fn rejects_unsupported_upstream_scheme() {
         let error = parse(&[
             "connector",
+            "--mode",
+            "managed",
             "--upstream",
             "file:///var/run/agentgateway.sock",
         ])
@@ -105,8 +162,16 @@ mod tests {
             "https://gateway.example/?tenant=one",
             "https://gateway.example/#fragment",
         ] {
-            let error = parse(&["connector", "--upstream", upstream]).unwrap_err();
+            let error =
+                parse(&["connector", "--mode", "managed", "--upstream", upstream]).unwrap_err();
             assert!(error.to_string().contains("query string or fragment"));
         }
+    }
+
+    #[test]
+    fn requires_deployment_mode() {
+        let error = parse(&["connector", "--upstream", "http://127.0.0.1:4000"]).unwrap_err();
+
+        assert!(error.to_string().contains("--mode"));
     }
 }

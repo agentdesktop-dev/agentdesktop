@@ -9,13 +9,16 @@ The current pre-pre-MVP does not implement user identity, device enrollment, MDM
 Start Agent Gateway with a route that accepts Anthropic-compatible requests at `/v1/messages`, then run:
 
 ```bash
-cargo run -- --upstream http://127.0.0.1:4000
+cargo run -- \
+  --mode standalone \
+  --upstream http://127.0.0.1:4000
 ```
 
 The connector listens on `127.0.0.1:8080` by default. Override either setting with flags:
 
 ```bash
 cargo run -- \
+  --mode managed \
   --listen 127.0.0.1:8081 \
   --upstream https://agentgateway.example.internal
 ```
@@ -23,12 +26,13 @@ cargo run -- \
 Or use environment variables:
 
 ```bash
+export AGENTGATEWAY_EDGE_MODE=managed
 export AGENTGATEWAY_EDGE_LISTEN=127.0.0.1:8081
 export AGENTGATEWAY_EDGE_UPSTREAM=https://agentgateway.example.internal
 cargo run
 ```
 
-The listen address must be loopback. The upstream URL must use HTTP or HTTPS and may contain a path prefix, but not a query string or fragment.
+The deployment mode is required. `standalone` accepts only a local Agent Gateway at `localhost` or a loopback IP; `managed` permits a remote upstream. The listen address must always be loopback. The upstream URL must use HTTP or HTTPS and may contain a path prefix, but not a query string or fragment.
 
 ## Test
 

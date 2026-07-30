@@ -7,7 +7,8 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::parse_and_validate()?;
     let listener = TcpListener::bind(config.listen).await?;
     println!(
-        "listening on {} and forwarding to {}",
+        "running in {:?} mode, listening on {} and forwarding to {}",
+        config.mode,
         listener.local_addr()?,
         config.upstream
     );

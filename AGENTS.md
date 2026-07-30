@@ -28,21 +28,19 @@ The edge connector is intentionally thin. It integrates gateway-aware applicatio
 - Supporting transparent QUIC interception in the first release.
 - Providing policy simulation in this repository; that belongs in Agent Gateway.
 
-## Current milestone: Claude forwarding pre-pre-MVP
+## Current milestone: Self-managed standalone mode
 
-The first milestone is intentionally smaller than the target architecture. It proves only that Claude Code can use a local endpoint which forwards its HTTP traffic to a separately running Agent Gateway. That Agent Gateway may be remote or bound to loopback on the same device.
+The Claude forwarding pre-pre-MVP established the shared forwarding core. The current milestone makes self-managed local operation an explicit standalone product mode before adding managed identity or transparent capture.
 
 Include only:
 
-- One Rust binary.
-- A loopback HTTP listener.
-- A configured Agent Gateway upstream URL.
-- Streaming request and response forwarding.
-- Basic configuration, startup validation, graceful shutdown, and useful errors.
-- Automated unit and integration tests for every supported behavior.
-- A short manual end-to-end test using Claude Code and Agent Gateway.
+- An explicit standalone deployment mode whose Agent Gateway upstream is local-only.
+- A separate local Agent Gateway process using user-owned configuration and policy.
+- Native Claude Code configuration for direct or connector-assisted local use.
+- Local lifecycle and health reporting needed for a usable standalone workflow.
+- Deterministic tests and a real-Agent-Gateway smoke path for supported behavior.
 
-Do not include OAuth, device identity, MDM integration, transparent capture, HBONE, TLS MITM logic, a control plane, or OpenTelemetry export in this milestone. Do not create placeholder abstractions for them. The pre-pre-MVP should establish a small, reliable forwarding core that later features can extend without changing its observable proxy behavior.
+Do not include OAuth, device identity, MDM integration, transparent capture, HBONE, a control plane, or OpenTelemetry export in this milestone. Agent Gateway remains a separate process and owns provider credentials, policy, and any future TLS inspection. Do not create placeholder abstractions for later phases.
 
 ## Architecture
 
@@ -257,7 +255,7 @@ Do not create empty abstraction crates in anticipation of these boundaries.
 
 Each increment must be independently usable and tested. Add the narrowest behavior first, add tests that fail without it, and keep all earlier tests as regression coverage. Fixes for escaped defects require a regression test. Do not combine identity, capture, telemetry, and deployment work in one increment.
 
-### Phase 0: Claude forwarding pre-pre-MVP
+### Phase 0: Claude forwarding foundation
 
 1. Create one Rust package and binary with minimal dependencies.
 2. Parse and validate the loopback listen address and Agent Gateway upstream URL.
@@ -268,29 +266,18 @@ Each increment must be independently usable and tested. Add the narrowest behavi
 7. Add integration tests with a local fake Agent Gateway covering request fidelity, response fidelity, streaming, upstream failure, cancellation, and graceful shutdown.
 8. Add a manual smoke-test recipe for Claude Code against a real Agent Gateway.
 
-### Phase 1: Forwarder reliability
+### Phase 1: Self-managed standalone Agent Gateway
 
-1. Add explicit connection, request, and shutdown timeouts, each with deterministic tests.
-2. Add bounded concurrency and resource limits with overload tests.
-3. Add retry behavior only if an Agent Gateway request can be proven replay-safe; test that streaming or non-idempotent requests are never duplicated.
-4. Test long-lived streams, slow clients, slow upstreams, disconnects, malformed requests, and repeated startup/shutdown.
-5. Establish measured latency, memory, and no-breakage baselines before adding identity or capture.
+1. Add explicit **standalone** and **managed** deployment modes with mode-specific configuration validation.
+2. Keep local Agent Gateway and the connector as separate processes using user-owned Agent Gateway configuration and policy.
+3. Configure native applications, beginning with Claude Code, to connect directly to local Agent Gateway or use the connector when integration requires it.
+4. Add local lifecycle management and health reporting without embedding Agent Gateway or duplicating its configuration schema.
+5. Add example Agent Gateway policy for securing personal agents without creating a connector-specific policy format.
+6. Add end-to-end tests against a real local Agent Gateway for policy allow and deny, streaming, gateway restart, and fail-closed behavior.
+7. Document provider credential storage, configuration file permissions, logs, and data-retention implications for a single-user machine.
+8. Keep standalone mode fully functional without OAuth, MDM, enrollment, or a remote control-plane service.
 
-### Phase 2: Self-managed local Agent Gateway
-
-1. Provide a one-click local installation path for Agent Gateway, the connector, starter Agent Gateway policy, and optional trust setup.
-2. Keep Agent Gateway and the connector as separate processes managed by the platform service manager.
-3. Add per-application profiles with an explicit **native** path for gateway-aware applications and a **captured** path for transparent redirection. Prevent profiles from enabling both paths for the same application.
-4. Configure native applications, beginning with Claude Code, to connect directly to the local Agent Gateway.
-5. Redirect selected captured applications to the local Agent Gateway while preserving original destinations and TLS bytes.
-6. Add convenient executable-path selectors and stronger platform-native selectors where available; document the security difference.
-7. Provide informed, one-click CA trust installation and scoped removal on Linux, macOS, and Windows.
-8. Add example Agent Gateway policies for securing personal agents without creating a connector-specific policy format.
-9. Add end-to-end tests using a real local Agent Gateway process for native and captured traffic, policy allow and deny, streaming, gateway restart, trust setup, and fail-closed behavior.
-10. Document provider credential storage, configuration file permissions, logs, and data-retention implications for a single-user machine.
-11. Keep this mode fully functional without OAuth, MDM, enrollment, or any remote control-plane service.
-
-### Phase 3: User and device identity for managed remote mode
+### Phase 2: User and device identity for managed mode
 
 1. Document trust boundaries and define the versioned user/device identity contract with Agent Gateway.
 2. Add OAuth Authorization Code with PKCE and secure platform token storage.
@@ -299,29 +286,54 @@ Each increment must be independently usable and tested. Add the narrowest behavi
 5. Add tests for login, refresh, expiry, logout, token/device binding, concurrent users, and user or device revocation.
 6. Verify that identity credentials are stripped before provider forwarding and never appear in logs.
 
-### Phase 4: OpenTelemetry and deployment
+### Phase 3: Transparent capture and Agent Gateway TLS inspection
+
+1. Specify and test the authenticated HBONE/CONNECT contract with Agent Gateway.
+2. Implement one platform end to end first, including process selection, original destination, TCP forwarding, UDP/443 denial, and fail-closed behavior against both standalone and managed Agent Gateway deployments.
+3. Preserve original TLS bytes in the connector; Agent Gateway alone performs policy-driven TLS MITM.
+4. Add per-application profiles with explicit **native** and **captured** paths and prevent both paths from being enabled for one application.
+5. Add informed CA trust installation and scoped removal for the first platform.
+6. Define child/helper process semantics and publish initial routed/enforced guidance.
+
+### Phase 4: Installation and basic UI
+
+1. Provide an installer that packages Agent Gateway, the connector, starter standalone policy, and optional trust setup while keeping processes separate.
+2. Add a basic local UI for standalone and managed modes covering deployment mode, gateway status, application profiles, identity status, and actionable failures.
+3. Make installation, upgrades, rollback, trust changes, and uninstall idempotent and reversible.
+4. Add Claude Code configuration helpers for standalone and managed modes plus initial MDM deployment examples.
+5. Keep Agent Gateway policy editing and inspection controls in Agent Gateway rather than duplicating them in the connector UI.
+
+### Phase 5: Cross-platform parity
+
+1. Support standalone and managed native gateway mode on Linux, macOS, and Windows.
+2. Add transparent capture implementations for Linux, macOS, and Windows behind one behavioral contract.
+3. Implement platform-native process identity, service management, credential storage, and trust installation/removal.
+4. Test installation, upgrades, rollback, native routing, captured routing, helper processes, QUIC denial, and fail-closed behavior on every platform.
+5. Publish the compatibility matrix and platform-specific routed/enforced deployment guidance.
+
+### Phase 6: Forwarder reliability
+
+1. Add explicit connection, request, and shutdown timeouts, each with deterministic tests.
+2. Add bounded concurrency and resource limits with overload tests.
+3. Add retry behavior only if an Agent Gateway request can be proven replay-safe; test that streaming or non-idempotent requests are never duplicated.
+4. Test long-lived streams, slow clients, slow upstreams, disconnects, malformed requests, and repeated startup/shutdown.
+5. Establish measured latency, memory, and no-breakage baselines across deployment modes and platforms.
+
+### Phase 7: OpenTelemetry and operational visibility
 
 1. Add OTel traces, metrics, and structured logs without changing forwarding behavior.
 2. Add trace-correlation tests with Agent Gateway and tests that sensitive values are never exported.
-3. Add Claude Code configuration helpers for both local and remote modes plus MDM deployment examples for managed mode.
-4. Test macOS, Windows, and Linux installation, trust, upgrades, and rollback in both deployment modes.
+3. Cover identity, capture, trust, gateway health, and application-profile failures with stable operational signals.
+4. Verify bounded buffering and that telemetry failure never blocks traffic or changes fail-closed behavior.
 
-### Phase 5: Transparent capture for the initial release
-
-1. Specify and test the authenticated HBONE/CONNECT contract with Agent Gateway.
-2. Implement one platform end to end first, including process selection, original destination, TCP forwarding, UDP/443 denial, and fail-closed behavior against both local and remote Agent Gateway deployments.
-3. Add the remaining macOS, Windows, and Linux capture implementations behind the same behavioral contract.
-4. Add application profiles and child/helper process semantics.
-5. Publish the compatibility matrix and routed/enforced deployment guidance.
-6. Load-test connection pooling, identity isolation, long-lived streams, gateway loss, and token rotation.
-
-### Phase 6: Hardening and fleet operations
+### Phase 8: Hardening and fleet operations
 
 1. Add signed updates, rollback, staged rollout, and minimum-version enforcement.
 2. Harden local IPC and privilege separation between user identity and privileged capture services.
 3. Complete third-party security review and privacy review.
 4. Add a Go connector-management service only if fleet requirements demonstrate the need.
 5. Evaluate smarter outage behavior without moving AI policy to the edge.
+6. Load-test connection pooling, identity isolation, long-lived streams, gateway loss, and token rotation.
 
 ## Pre-pre-MVP acceptance criteria
 

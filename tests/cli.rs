@@ -8,9 +8,7 @@ fn help_exits_successfully() {
         .unwrap();
 
     assert!(output.status.success());
-    assert!(
-        String::from_utf8(output.stdout)
-            .unwrap()
-            .contains("--upstream <UPSTREAM>")
-    );
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("--mode <MODE>"));
+    assert!(help.contains("--upstream <UPSTREAM>"));
 }

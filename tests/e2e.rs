@@ -25,6 +25,8 @@ async fn fails_closed_when_agent_gateway_is_unavailable() {
     let _connector = Connector(
         Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-connector"))
             .args([
+                "--mode",
+                "standalone",
                 "--listen",
                 &listen.to_string(),
                 "--upstream",
