@@ -160,7 +160,7 @@ This exercises the complete manual path without a provider credential:
 Claude Code -> connector loopback listener -> Agent Gateway -> mock Anthropic API
 ```
 
-The mock supports Anthropic streaming messages, non-streaming messages, and token counting. The environment remains running for inspection; stop it with `./scripts/container-down.sh`.
+In this mode, the connector and Agent Gateway share a container network namespace. The connector runs in `standalone` mode and reaches Agent Gateway at `127.0.0.1:4000`; Agent Gateway remains a separate container and process. The mock supports Anthropic streaming messages, non-streaming messages, and token counting. The environment remains running for inspection; stop it with `./scripts/container-down.sh`.
 
 ## Host Claude Code smoke test
 
