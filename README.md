@@ -95,9 +95,10 @@ An unreachable gateway returns `503 Service Unavailable` with `status` set to `d
 cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --check
+node --test tests/fixtures/fake-authorization-server.test.mjs
 ```
 
-Tests use a local fake Agent Gateway and do not contact Claude, Anthropic, or a remote service.
+Tests use local fake Agent Gateway and authorization server processes. They do not contact Claude, Anthropic, an identity provider, or a remote service.
 
 ## Container kick-the-tires environment
 
