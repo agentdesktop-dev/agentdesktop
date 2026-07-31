@@ -1,6 +1,6 @@
 # Linux capture prototype
 
-The first Linux transparent-capture mechanism targets an externally managed cgroup v2 scope and nftables. It is a prototype boundary and does not enable the `captured` application path yet.
+The first Linux transparent-capture mechanism targets an externally managed cgroup v2 scope and nftables. A separate unprivileged relay recovers the original destination and opens one HTTP/2 CONNECT stream per redirected TCP flow. It is a prototype boundary and does not enable the `captured` application path yet.
 
 ## Behavior
 
@@ -37,7 +37,17 @@ sudo agentgateway-edge-capture-setup install \
 sudo agentgateway-edge-capture-setup remove
 ```
 
-Do not place the connector or Agent Gateway in the selected application scope. Doing so can redirect the tunnel transport back into the capture listener. The capture listener must recover the original destination and establish HBONE before captured mode is made available.
+Do not place the connector or Agent Gateway in the selected application scope. Doing so can redirect the tunnel transport back into the capture listener.
+
+Start the prototype relay outside the selected scope after an HBONE listener is ready:
+
+```bash
+cargo run --bin agentgateway-edge-capture -- \
+  --listen 127.0.0.1:15001 \
+  --hbone-endpoint 127.0.0.1:15008
+```
+
+Both endpoints are restricted to loopback. The relay uses Linux `SO_ORIGINAL_DST`, preserves raw bytes, bounds concurrent tunnels, and closes failed or overloaded flows without direct fallback. Its current HBONE connection is cleartext, unauthenticated, and established once at startup. This is suitable only for isolated local interoperability work; trusted standalone or managed use requires an authenticated Agent Gateway contract and reconnect lifecycle.
 
 ## Isolated validation
 
@@ -47,9 +57,9 @@ Run the opt-in behavior test with Podman:
 sh tests/linux-capture-container.sh
 ```
 
-The test uses rootless Podman with private network and cgroup namespaces. Rootless `--privileged` grants the disposable container enough namespaced privilege to create a child cgroup and nftables table; it does not use host network or cgroup namespaces. The test proves TCP/443 redirection, UDP/443 rejection, counters, and scoped table removal. It downloads nftables and small networking tools into the disposable container.
+The test uses rootless Podman with private network and cgroup namespaces. Rootless `--privileged` grants the disposable container enough namespaced privilege to create a child cgroup and nftables table; it does not use host network or cgroup namespaces. It builds and runs the real relay against a minimal packaged Python h2 peer, then proves original-destination CONNECT authority, bidirectional bytes, TCP/443 redirection, UDP/443 rejection, counters, and scoped table removal. It downloads Rust dependencies, nftables, and small networking tools into the disposable container.
 
-This does not prove production host attribution, resistance to a local administrator, or compatibility with an existing host firewall. Those require a disposable host or VM test.
+This does not prove production host attribution, resistance to a local administrator, compatibility with an existing host firewall, or interoperability with an authenticated real Agent Gateway. Those require a disposable host or VM and the agreed Agent Gateway authentication boundary.
 
 ## eBPF strengthening path
 

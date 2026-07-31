@@ -11,6 +11,7 @@ use http::{Method, Request, StatusCode, Uri};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpStream, ToSocketAddrs};
 
+#[derive(Clone)]
 pub struct HboneClient {
     sender: SendRequest<Bytes>,
 }

@@ -1,7 +1,10 @@
 use std::fmt::Write as _;
+use std::io;
+use std::net::SocketAddr;
 use std::path::{Component, Path};
 
 use anyhow::{Result, bail};
+use tokio::net::TcpStream;
 
 pub const CAPTURE_TABLE: &str = "agentgateway_edge";
 
@@ -91,11 +94,24 @@ pub fn remove_ruleset() -> String {
     format!("delete table inet {CAPTURE_TABLE}\n")
 }
 
+pub fn original_destination(stream: &TcpStream) -> io::Result<SocketAddr> {
+    match stream.local_addr()? {
+        SocketAddr::V4(_) => Ok(SocketAddr::V4(rustix::net::sockopt::ip_original_dst(
+            stream,
+        )?)),
+        SocketAddr::V6(_) => Ok(SocketAddr::V6(rustix::net::sockopt::ipv6_original_dst(
+            stream,
+        )?)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
-    use super::{CAPTURE_TABLE, CaptureSpec, remove_ruleset};
+    use tokio::net::{TcpListener, TcpStream};
+
+    use super::{CAPTURE_TABLE, CaptureSpec, original_destination, remove_ruleset};
 
     #[test]
     fn renders_exact_cgroup_ancestors_tcp_redirect_and_udp_denial() {
@@ -142,5 +158,15 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn reads_destination_from_ipv4_socket() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let _client = TcpStream::connect(address).await.unwrap();
+        let (accepted, _) = listener.accept().await.unwrap();
+
+        assert_eq!(original_destination(&accepted).unwrap(), address);
     }
 }

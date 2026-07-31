@@ -11,7 +11,7 @@ Last updated: 2026-07-30
 | Claude native/connector launcher | Supported | Build not validated | Build not validated |
 | Secret Service credentials | Supported | Unavailable | Unavailable |
 | Protected-file credential fallback | Supported | Unavailable | Unavailable |
-| Transparent process capture | Prototype rules validated in private container; unavailable at runtime | Unavailable | Unavailable |
+| Transparent process capture | Prototype kernel-to-HBONE path validated in private container; unsupported for applications | Unavailable | Unavailable |
 | CA trust installation/removal | Unavailable | Unavailable | Unavailable |
 | Transactional bundle installer | Supported | Build not validated | Build not validated |
 | User service integration | Generated systemd unit | Unavailable | Unavailable |
@@ -20,6 +20,6 @@ The local `/_agentgateway/status` response exposes the current binary's capabili
 
 ## Required validation environments
 
-- Linux capture: private-container coverage validates cgroup v2/nftables TCP/443 redirection and UDP/443 denial. A disposable privileged host is still required for process attribution, existing-firewall compatibility, original-destination recovery, restart behavior, and anti-bypass verification.
+- Linux capture: private-container coverage validates cgroup v2/nftables TCP/443 redirection, original-destination recovery, bidirectional HBONE forwarding, and UDP/443 denial. A disposable privileged host is still required for production process attribution, existing-firewall compatibility, restart behavior, and anti-bypass verification. Real Agent Gateway authentication and interoperability remain required before application support.
 - macOS: supported hardware and OS with Network Extension entitlements, code signing, System Extension lifecycle tests, and Keychain trust tests.
 - Windows: supported Windows VM or hardware with WFP development/signing, service lifecycle tests, and certificate-store tests.

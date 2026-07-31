@@ -2,7 +2,7 @@
 
 An early, policy-free edge connector that forwards Claude Code HTTP traffic from a loopback listener to an independently running Agent Gateway.
 
-The current pre-pre-MVP includes experimental managed browser login, DPoP-authenticated forwarding, refresh restoration, and opt-in OTLP trace export, but does not yet implement device enrollment, MDM integration, transparent capture, or metric export. See [AGENTS.md](AGENTS.md) for the architecture and incremental delivery plan.
+The current pre-pre-MVP includes experimental managed browser login, DPoP-authenticated forwarding, refresh restoration, opt-in OTLP trace export, and an isolated Linux transparent-capture prototype. Supported transparent capture remains unavailable until HBONE authentication and lifecycle integration are complete. Device enrollment, MDM integration, and metric export are not implemented. See [AGENTS.md](AGENTS.md) for the architecture and incremental delivery plan.
 
 For a local installation, including credential ownership, file permissions, logs, retention, and removal, see [Standalone Operations](docs/deployment/standalone.md).
 

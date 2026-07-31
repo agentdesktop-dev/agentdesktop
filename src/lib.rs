@@ -1,4 +1,6 @@
 pub mod apps;
+#[cfg(target_os = "linux")]
+pub mod capture;
 pub mod config;
 pub mod hbone;
 pub mod identity;
