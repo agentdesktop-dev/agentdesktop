@@ -2,7 +2,7 @@
 
 An early, policy-free edge connector that forwards Claude Code HTTP traffic from a loopback listener to an independently running Agent Gateway.
 
-The current pre-pre-MVP includes experimental managed browser login, DPoP-authenticated forwarding, and refresh restoration, but does not yet implement device enrollment, MDM integration, transparent capture, or telemetry export. See [AGENTS.md](AGENTS.md) for the architecture and incremental delivery plan.
+The current pre-pre-MVP includes experimental managed browser login, DPoP-authenticated forwarding, refresh restoration, and opt-in OTLP trace export, but does not yet implement device enrollment, MDM integration, transparent capture, or metric export. See [AGENTS.md](AGENTS.md) for the architecture and incremental delivery plan.
 
 For a local installation, including credential ownership, file permissions, logs, retention, and removal, see [Standalone Operations](docs/deployment/standalone.md).
 
@@ -98,7 +98,9 @@ Forwarding defaults to a 5-second connection timeout, 30-second response-header 
 
 The connector does not retry forwarded requests. In particular, non-idempotent and streaming requests are never replayed after an upstream disconnect.
 
-The connector emits JSON structured logs to standard error. Runtime events use fixed event and reason values and omit upstream URLs, paths, queries, request and response bodies, and authorization headers. Valid W3C `traceparent` and `tracestate` headers are propagated to Agent Gateway; when `traceparent` is absent or malformed, the connector generates a new context and removes untrusted `tracestate`. The active `traceparent` is returned on success and stable local error responses. OpenTelemetry span and metric export is not implemented yet.
+The connector emits JSON structured logs to standard error. Runtime events use fixed event and reason values and omit upstream URLs, paths, queries, request and response bodies, and authorization headers. Valid W3C `traceparent` and `tracestate` headers are propagated to Agent Gateway; when `traceparent` is absent or malformed, the connector generates a new context and removes untrusted `tracestate`. The active `traceparent` is returned on success and stable local error responses.
+
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` to an HTTP(S) OTLP/gRPC collector endpoint, such as `http://127.0.0.1:4317`, to export forwarding spans. Export uses the OpenTelemetry SDK's bounded batch processor, shares the propagated W3C trace ID with Agent Gateway, and flushes on orderly connector shutdown. Spans contain fixed service metadata, deployment mode, and response status only; they omit URLs, process details, identities, headers, and application content. When the variable is absent, no exporter or background export task is created. Metric export and automated collector-correlation coverage are not implemented yet.
 
 ## Configure Claude Code
 

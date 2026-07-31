@@ -13,6 +13,9 @@ getrandom = "0.4"
 futures-util = "0.3"
 keyring = { version = "4.1.5", default-features = false, features = ["v1", "zbus-secret-service-keyring-store"] }
 oauth2 = { version = "5.0.0", default-features = false }
+opentelemetry = "0.31"
+opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"] }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 open = "5.4.0"
 p256 = { version = "0.14.0", features = ["pkcs8"] }
 reqwest = { version = "0.13", default-features = false, features = ["form", "http2", "json", "rustls", "stream"] }
@@ -22,6 +25,7 @@ serde_json = "1.0"
 sha2 = "0.10"
 tokio = { version = "1.53", features = ["macros", "net", "process", "rt-multi-thread", "signal", "time"] }
 tracing = "0.1"
+tracing-opentelemetry = "0.32"
 tracing-subscriber = { version = "0.3", features = ["json"] }
 url = "2.5"
 

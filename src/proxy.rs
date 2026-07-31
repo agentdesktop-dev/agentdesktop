@@ -18,6 +18,8 @@ use reqwest::{Client, Url};
 use serde::Serialize;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
+use tracing::Instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::config::DeploymentMode;
 use crate::identity::oauth::ManagedIdentity;
@@ -289,63 +291,74 @@ async fn gateway_reachable(upstream: &Url) -> bool {
 async fn forward(State(state): State<ProxyState>, mut request: Request<Body>) -> Response<Body> {
     state.metrics.requests.fetch_add(1, Ordering::Relaxed);
     let trace_context = ensure_trace_context(request.headers_mut());
-    let mut response = match forward_request(&state, request).await {
-        Ok(response) => {
-            state
-                .metrics
-                .upstream_responses
-                .fetch_add(1, Ordering::Relaxed);
-            response
-        }
-        Err(error) => {
-            tracing::warn!(event = "forward_failed", reason = failure_reason(&error));
-            if error.downcast_ref::<IdentityError>().is_some() {
+    let span = tracing::info_span!(
+        "forward",
+        mode = state.mode.as_str(),
+        http.response.status_code = tracing::field::Empty
+    );
+    let _ = span.set_parent(trace_context.parent());
+    let mut response = async {
+        match forward_request(&state, request).await {
+            Ok(response) => {
                 state
                     .metrics
-                    .identity_failures
+                    .upstream_responses
                     .fetch_add(1, Ordering::Relaxed);
-                Response::builder()
-                    .status(StatusCode::UNAUTHORIZED)
-                    .header(CONTENT_TYPE, "text/plain; charset=utf-8")
-                    .header("x-agentgateway-edge-error", "identity-unavailable")
-                    .body(Body::from(IDENTITY_ERROR))
-                    .expect("static error response must be valid")
-            } else if error.downcast_ref::<OverloadError>().is_some() {
-                state
-                    .metrics
-                    .overload_rejections
-                    .fetch_add(1, Ordering::Relaxed);
-                Response::builder()
-                    .status(StatusCode::SERVICE_UNAVAILABLE)
-                    .header(CONTENT_TYPE, "text/plain; charset=utf-8")
-                    .header("x-agentgateway-edge-error", "overloaded")
-                    .body(Body::from(OVERLOAD_ERROR))
-                    .expect("static error response must be valid")
-            } else if error.downcast_ref::<UpstreamTimeout>().is_some() {
-                state
-                    .metrics
-                    .upstream_timeouts
-                    .fetch_add(1, Ordering::Relaxed);
-                Response::builder()
-                    .status(StatusCode::GATEWAY_TIMEOUT)
-                    .header(CONTENT_TYPE, "text/plain; charset=utf-8")
-                    .header("x-agentgateway-edge-error", "upstream-timeout")
-                    .body(Body::from(TIMEOUT_ERROR))
-                    .expect("static error response must be valid")
-            } else {
-                state
-                    .metrics
-                    .upstream_failures
-                    .fetch_add(1, Ordering::Relaxed);
-                Response::builder()
-                    .status(StatusCode::BAD_GATEWAY)
-                    .header(CONTENT_TYPE, "text/plain; charset=utf-8")
-                    .header("x-agentgateway-edge-error", "upstream-unavailable")
-                    .body(Body::from(GATEWAY_ERROR))
-                    .expect("static error response must be valid")
+                response
+            }
+            Err(error) => {
+                tracing::warn!(event = "forward_failed", reason = failure_reason(&error));
+                if error.downcast_ref::<IdentityError>().is_some() {
+                    state
+                        .metrics
+                        .identity_failures
+                        .fetch_add(1, Ordering::Relaxed);
+                    Response::builder()
+                        .status(StatusCode::UNAUTHORIZED)
+                        .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+                        .header("x-agentgateway-edge-error", "identity-unavailable")
+                        .body(Body::from(IDENTITY_ERROR))
+                        .expect("static error response must be valid")
+                } else if error.downcast_ref::<OverloadError>().is_some() {
+                    state
+                        .metrics
+                        .overload_rejections
+                        .fetch_add(1, Ordering::Relaxed);
+                    Response::builder()
+                        .status(StatusCode::SERVICE_UNAVAILABLE)
+                        .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+                        .header("x-agentgateway-edge-error", "overloaded")
+                        .body(Body::from(OVERLOAD_ERROR))
+                        .expect("static error response must be valid")
+                } else if error.downcast_ref::<UpstreamTimeout>().is_some() {
+                    state
+                        .metrics
+                        .upstream_timeouts
+                        .fetch_add(1, Ordering::Relaxed);
+                    Response::builder()
+                        .status(StatusCode::GATEWAY_TIMEOUT)
+                        .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+                        .header("x-agentgateway-edge-error", "upstream-timeout")
+                        .body(Body::from(TIMEOUT_ERROR))
+                        .expect("static error response must be valid")
+                } else {
+                    state
+                        .metrics
+                        .upstream_failures
+                        .fetch_add(1, Ordering::Relaxed);
+                    Response::builder()
+                        .status(StatusCode::BAD_GATEWAY)
+                        .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+                        .header("x-agentgateway-edge-error", "upstream-unavailable")
+                        .body(Body::from(GATEWAY_ERROR))
+                        .expect("static error response must be valid")
+                }
             }
         }
-    };
+    }
+    .instrument(span.clone())
+    .await;
+    span.record("http.response.status_code", response.status().as_u16());
     trace_context.apply_to_response(response.headers_mut());
     response
 }

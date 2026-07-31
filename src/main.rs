@@ -10,7 +10,7 @@ const LOCAL_GATEWAY_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    agentgateway_edge_connector::telemetry::init()?;
+    let _telemetry = agentgateway_edge_connector::telemetry::init()?;
     let config = Config::parse_and_validate()?;
     let identity = if let Some(issuer) = &config.identity_issuer {
         let identity_dir = config
