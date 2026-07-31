@@ -14,7 +14,7 @@ use serde::Serialize;
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::config::DeploymentMode;
-use crate::identity::oauth::StoredSession;
+use crate::identity::oauth::ManagedIdentity;
 
 const GATEWAY_ERROR: &str = "agent gateway unavailable\n";
 const IDENTITY_ERROR: &str = "managed identity unavailable\n";
@@ -24,7 +24,7 @@ struct ProxyState {
     client: Client,
     upstream: Url,
     mode: DeploymentMode,
-    identity: Option<StoredSession>,
+    identity: Option<ManagedIdentity>,
 }
 
 #[derive(Debug)]
@@ -58,7 +58,7 @@ pub async fn serve_with_identity(
     listener: TcpListener,
     upstream: Url,
     mode: DeploymentMode,
-    identity: Option<StoredSession>,
+    identity: Option<ManagedIdentity>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     let state = ProxyState {
@@ -142,29 +142,19 @@ async fn forward_request(state: &ProxyState, request: Request<Body>) -> Result<R
         headers.remove("dpop");
     }
     if let Some(identity) = &state.identity {
-        if identity.is_expired().map_err(identity_error)? {
-            return Err(identity_error(anyhow::anyhow!(
-                "managed access token has expired"
-            )));
-        }
-        let proof = identity
-            .dpop_key()
-            .and_then(|key| {
-                key.proof(
-                    parts.method.as_str(),
-                    url.as_str(),
-                    Some(&identity.access_token),
-                )
-            })
+        let credentials = identity
+            .credentials(parts.method.as_str(), url.as_str())
+            .await
             .map_err(identity_error)?;
         headers.insert(
             "proxy-authorization",
-            HeaderValue::from_str(&format!("DPoP {}", identity.access_token))
+            HeaderValue::from_str(&format!("DPoP {}", credentials.access_token))
                 .map_err(|error| identity_error(error.into()))?,
         );
         headers.insert(
             "dpop",
-            HeaderValue::from_str(&proof).map_err(|error| identity_error(error.into()))?,
+            HeaderValue::from_str(&credentials.proof)
+                .map_err(|error| identity_error(error.into()))?,
         );
     }
 
@@ -245,6 +235,8 @@ mod tests {
 
     use super::*;
     use crate::identity::dpop::{DpopKey, decode_jwt_claims};
+    use crate::identity::oauth::StoredSession;
+    use crate::identity::storage::{CredentialStorageMode, CredentialStore};
 
     #[derive(Clone, Debug)]
     struct CapturedRequest {
@@ -287,15 +279,25 @@ mod tests {
         });
 
         let key = DpopKey::generate();
-        let identity = StoredSession {
+        let session = StoredSession {
             issuer: Url::parse("https://identity.example/").unwrap(),
             gateway_origin: Url::parse(&format!("http://{fake_address}/")).unwrap(),
+            client_id: "connector".into(),
+            audience: "gateway".into(),
             access_token: "managed-token".into(),
             expires_at: u64::MAX,
             scope: "agentgateway.invoke".into(),
+            refresh_token: "refresh-token".into(),
             dpop_private_key: base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .encode(key.to_pkcs8_der().unwrap()),
         };
+        let temporary = tempfile::tempdir().unwrap();
+        let store = CredentialStore::setup(
+            CredentialStorageMode::File,
+            &temporary.path().join("identity"),
+        )
+        .unwrap();
+        let identity = ManagedIdentity::new(session, store);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_address = listener.local_addr().unwrap();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -334,18 +336,30 @@ mod tests {
 
     #[tokio::test]
     async fn expired_managed_identity_fails_locally() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = CredentialStore::setup(
+            CredentialStorageMode::File,
+            &temporary.path().join("identity"),
+        )
+        .unwrap();
         let state = ProxyState {
             client: Client::new(),
             upstream: Url::parse("http://127.0.0.1:9").unwrap(),
             mode: DeploymentMode::Managed,
-            identity: Some(StoredSession {
-                issuer: Url::parse("https://identity.example/").unwrap(),
-                gateway_origin: Url::parse("http://127.0.0.1:9/").unwrap(),
-                access_token: "expired-token".into(),
-                expires_at: 0,
-                scope: "agentgateway.invoke".into(),
-                dpop_private_key: String::new(),
-            }),
+            identity: Some(ManagedIdentity::new(
+                StoredSession {
+                    issuer: Url::parse("https://identity.example/").unwrap(),
+                    gateway_origin: Url::parse("http://127.0.0.1:9/").unwrap(),
+                    client_id: "connector".into(),
+                    audience: "gateway".into(),
+                    access_token: "expired-token".into(),
+                    expires_at: 0,
+                    scope: "agentgateway.invoke".into(),
+                    refresh_token: "expired-refresh-token".into(),
+                    dpop_private_key: String::new(),
+                },
+                store,
+            )),
         };
         let request = Request::builder()
             .uri("/v1/messages")

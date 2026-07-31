@@ -1,5 +1,5 @@
 use agentgateway_edge_connector::config::{Config, upstream_origin};
-use agentgateway_edge_connector::identity::oauth::load_session_for;
+use agentgateway_edge_connector::identity::oauth::{ManagedIdentity, load_session_for};
 use agentgateway_edge_connector::identity::storage::{CredentialStore, default_storage_root};
 use agentgateway_edge_connector::local_gateway::LocalGateway;
 use agentgateway_edge_connector::proxy;
@@ -18,10 +18,7 @@ async fn main() -> anyhow::Result<()> {
             .map_or_else(default_storage_root, Ok)?;
         let store = CredentialStore::load(&identity_dir)?;
         let session = load_session_for(issuer, &upstream_origin(&config.upstream)?, &store)?;
-        if session.is_expired()? {
-            bail!("managed identity session has expired; run identity login again");
-        }
-        Some(session)
+        Some(ManagedIdentity::new(session, store))
     } else {
         None
     };

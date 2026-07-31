@@ -35,7 +35,7 @@ enum SelectedBackend {
     File,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum CredentialStore {
     SecretService,
     File(ProtectedFileStore),
@@ -107,7 +107,7 @@ impl CredentialStore {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ProtectedFileStore {
     root: PathBuf,
 }

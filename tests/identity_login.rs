@@ -2,7 +2,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, Stdio};
 
 use agentgateway_edge_connector::identity::dpop::decode_jwt_claims;
-use agentgateway_edge_connector::identity::oauth::{LoginConfig, load_session};
+use agentgateway_edge_connector::identity::oauth::{LoginConfig, ManagedIdentity, load_session};
 use agentgateway_edge_connector::identity::storage::CredentialStore;
 use url::Url;
 
@@ -89,7 +89,7 @@ async fn browser_pkce_login_persists_dpop_bound_session() {
         gateway_origin: Url::parse("https://gateway.example").unwrap(),
     };
     let store = CredentialStore::load(&storage_dir).unwrap();
-    let session = load_session(&config, &store).unwrap();
+    let mut session = load_session(&config, &store).unwrap();
     assert!(!session.is_expired().unwrap());
     let claims = decode_jwt_claims(&session.access_token).unwrap();
     assert_eq!(claims["iss"], issuer_url);
@@ -97,4 +97,17 @@ async fn browser_pkce_login_persists_dpop_bound_session() {
         claims["cnf"]["jkt"],
         session.dpop_key().unwrap().thumbprint().unwrap()
     );
+
+    let original_refresh_token = session.refresh_token.clone();
+    session.expires_at = 0;
+    let identity = ManagedIdentity::new(session, store.clone());
+    let (first, second) = tokio::join!(
+        identity.credentials("POST", "https://gateway.example/v1/messages"),
+        identity.credentials("POST", "https://gateway.example/v1/messages"),
+    );
+    assert!(!first.unwrap().access_token.is_empty());
+    assert!(!second.unwrap().access_token.is_empty());
+    let restored = load_session(&config, &store).unwrap();
+    assert_ne!(restored.refresh_token, original_refresh_token);
+    assert!(!restored.is_expired().unwrap());
 }

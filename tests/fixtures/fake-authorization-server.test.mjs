@@ -75,6 +75,7 @@ test("issues a DPoP-bound token for an S256 authorization code", async (context)
   const token = await response.json();
   assert.equal(token.token_type, "DPoP");
   assert.equal(token.scope, server.scope);
+  assert.equal(typeof token.refresh_token, "string");
 
   const [header, claims] = token.access_token.split(".").slice(0, 2).map(decodeJson);
   assert.equal(header.alg, "ES256");
@@ -102,6 +103,43 @@ test("issues a DPoP-bound token for an S256 authorization code", async (context)
   });
   assert.equal(replay.status, 400);
   assert.equal((await replay.json()).error, "invalid_grant");
+
+  const refreshProof = dpopProof(
+    proofKeys.privateKey,
+    proofKeys.publicKey,
+    "POST",
+    tokenEndpoint,
+  );
+  const refreshed = await fetch(tokenEndpoint, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      dpop: refreshProof,
+    },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      client_id: server.clientId,
+      refresh_token: token.refresh_token,
+    }),
+  });
+  assert.equal(refreshed.status, 200);
+  const refreshedToken = await refreshed.json();
+  assert.notEqual(refreshedToken.refresh_token, token.refresh_token);
+
+  const refreshReplay = await fetch(tokenEndpoint, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      dpop: dpopProof(proofKeys.privateKey, proofKeys.publicKey, "POST", tokenEndpoint),
+    },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      client_id: server.clientId,
+      refresh_token: token.refresh_token,
+    }),
+  });
+  assert.equal(refreshReplay.status, 400);
+  assert.equal((await refreshReplay.json()).error, "invalid_grant");
 });
 
 test("rejects a wrong PKCE verifier", async (context) => {

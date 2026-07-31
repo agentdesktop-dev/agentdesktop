@@ -1,4 +1,5 @@
 use std::io;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -7,6 +8,7 @@ use oauth2::PkceCodeChallenge;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 use url::Url;
 
 use super::dpop::{DpopKey, Es256VerificationJwk, verify_es256_jwt};
@@ -42,16 +44,31 @@ struct TokenResponse {
     token_type: String,
     expires_in: u64,
     scope: String,
+    refresh_token: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoredSession {
     pub issuer: Url,
     pub gateway_origin: Url,
+    pub client_id: String,
+    pub audience: String,
     pub access_token: String,
     pub expires_at: u64,
     pub scope: String,
+    pub refresh_token: String,
     pub dpop_private_key: String,
+}
+
+#[derive(Clone)]
+pub struct ManagedIdentity {
+    session: Arc<Mutex<StoredSession>>,
+    store: CredentialStore,
+}
+
+pub struct ManagedCredentials {
+    pub access_token: String,
+    pub proof: String,
 }
 
 impl StoredSession {
@@ -63,6 +80,30 @@ impl StoredSession {
 
     pub fn is_expired(&self) -> Result<bool> {
         Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() >= self.expires_at)
+    }
+}
+
+impl ManagedIdentity {
+    pub fn new(session: StoredSession, store: CredentialStore) -> Self {
+        Self {
+            session: Arc::new(Mutex::new(session)),
+            store,
+        }
+    }
+
+    pub async fn credentials(&self, method: &str, target_uri: &str) -> Result<ManagedCredentials> {
+        let mut session = self.session.lock().await;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        if session.expires_at <= now.saturating_add(30) {
+            refresh_session(&mut session, &self.store).await?;
+        }
+        let proof = session
+            .dpop_key()?
+            .proof(method, target_uri, Some(&session.access_token))?;
+        Ok(ManagedCredentials {
+            access_token: session.access_token.clone(),
+            proof,
+        })
     }
 }
 
@@ -131,20 +172,18 @@ where
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let token_expiry =
         validate_access_token(config, &token.access_token, &dpop_key, &key_set, now)?;
-    let granted_scopes: std::collections::HashSet<_> = token.scope.split_whitespace().collect();
-    if config
-        .scope
-        .split_whitespace()
-        .any(|scope| !granted_scopes.contains(scope))
-    {
-        bail!("authorization server did not grant every requested scope");
-    }
+    validate_granted_scopes(&config.scope, &token.scope)?;
     let session = StoredSession {
         issuer: config.issuer.clone(),
         gateway_origin: config.gateway_origin.clone(),
+        client_id: config.client_id.clone(),
+        audience: config.audience.clone(),
         access_token: token.access_token,
         expires_at: token_expiry.min(now.saturating_add(token.expires_in)),
         scope: token.scope,
+        refresh_token: token
+            .refresh_token
+            .context("authorization server did not issue a refresh token")?,
         dpop_private_key: base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(dpop_key.to_pkcs8_der()?),
     };
@@ -153,6 +192,85 @@ where
         &serde_json::to_vec(&session)?,
     )?;
     Ok(session)
+}
+
+fn validate_granted_scopes(requested: &str, granted: &str) -> Result<()> {
+    let granted_scopes: std::collections::HashSet<_> = granted.split_whitespace().collect();
+    if requested
+        .split_whitespace()
+        .any(|scope| !granted_scopes.contains(scope))
+    {
+        bail!("authorization server did not grant every requested scope");
+    }
+    Ok(())
+}
+
+async fn refresh_session(session: &mut StoredSession, store: &CredentialStore) -> Result<()> {
+    let config = LoginConfig {
+        issuer: session.issuer.clone(),
+        client_id: session.client_id.clone(),
+        audience: session.audience.clone(),
+        scope: session.scope.clone(),
+        gateway_origin: session.gateway_origin.clone(),
+    };
+    let client = reqwest::Client::new();
+    let metadata: AuthorizationServerMetadata = client
+        .get(
+            config
+                .issuer
+                .join(".well-known/oauth-authorization-server")?,
+        )
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    validate_metadata(&config, &metadata)?;
+    let dpop_key = session.dpop_key()?;
+    let proof = dpop_key.proof("POST", metadata.token_endpoint.as_str(), None)?;
+    let token: TokenResponse = client
+        .post(metadata.token_endpoint)
+        .header("dpop", proof)
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", session.client_id.as_str()),
+            ("refresh_token", session.refresh_token.as_str()),
+        ])
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    if !token.token_type.eq_ignore_ascii_case("dpop") {
+        bail!("authorization server returned token_type other than DPoP");
+    }
+    let key_set: JsonWebKeySet = client
+        .get(metadata.jwks_uri)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let token_expiry =
+        validate_access_token(&config, &token.access_token, &dpop_key, &key_set, now)?;
+    validate_granted_scopes(&config.scope, &token.scope)?;
+    let refresh_token = token
+        .refresh_token
+        .context("authorization server did not rotate the refresh token")?;
+    let refreshed = StoredSession {
+        access_token: token.access_token,
+        expires_at: token_expiry.min(now.saturating_add(token.expires_in)),
+        scope: token.scope,
+        refresh_token,
+        ..session.clone()
+    };
+    store.put(
+        &session_record(&refreshed.issuer, &refreshed.gateway_origin),
+        &serde_json::to_vec(&refreshed)?,
+    )?;
+    *session = refreshed;
+    Ok(())
 }
 
 pub fn load_session(config: &LoginConfig, store: &CredentialStore) -> Result<StoredSession> {

@@ -2,7 +2,7 @@
 
 An early, policy-free edge connector that forwards Claude Code HTTP traffic from a loopback listener to an independently running Agent Gateway.
 
-The current pre-pre-MVP includes experimental managed browser login, but does not yet attach identity to forwarded traffic or implement refresh, device enrollment, MDM integration, transparent capture, or telemetry export. See [AGENTS.md](AGENTS.md) for the architecture and incremental delivery plan.
+The current pre-pre-MVP includes experimental managed browser login, DPoP-authenticated forwarding, and refresh restoration, but does not yet implement device enrollment, MDM integration, transparent capture, or telemetry export. See [AGENTS.md](AGENTS.md) for the architecture and incremental delivery plan.
 
 For a local installation, including credential ownership, file permissions, logs, retention, and removal, see [Standalone Operations](docs/deployment/standalone.md).
 
@@ -49,7 +49,7 @@ cargo run -- \
   --identity-issuer https://identity.example/
 ```
 
-The connector fails at startup if storage or the matching session is unavailable or expired. For each request it removes application-supplied connector identity headers, preserves the application `Authorization` header, and adds a fresh `Proxy-Authorization: DPoP` token and DPoP proof. Refresh is not yet implemented, the DPoP key is not verified organizational device identity, and Agent Gateway still needs the contract's DPoP validation and credential-stripping changes before this is a trusted end-to-end managed identity path.
+The connector fails at startup if storage or the matching session is unavailable. Before expiry it serializes refresh, uses the same DPoP key, verifies the rotated access token, and persists the new refresh token before forwarding continues. Refresh failure fails new requests closed locally; the issuer must enforce refresh-token rotation and reuse detection. For each request the connector removes application-supplied connector identity headers, preserves the application `Authorization` header, and adds a fresh `Proxy-Authorization: DPoP` token and DPoP proof. The DPoP key is not verified organizational device identity, and Agent Gateway still needs the contract's DPoP validation and credential-stripping changes before this is a trusted end-to-end managed identity path.
 
 ## Run
 
@@ -266,4 +266,4 @@ Send a simple prompt and verify:
 3. Stopping Agent Gateway causes the connector to return `502 Bad Gateway` with `x-agentgateway-edge-error: upstream-unavailable`.
 4. The connector never attempts a direct connection to Anthropic.
 
-Gateway-side DPoP validation and stripping, refresh, and enrolled device identity are later increments.
+Gateway-side DPoP validation and stripping and enrolled device identity are later increments.

@@ -94,6 +94,7 @@ async function readForm(request) {
 
 export async function startFakeAuthorizationServer() {
   const codes = new Map();
+  const refreshTokens = new Set();
   const signingKeys = generateKeyPairSync("ec", { namedCurve: "P-256" });
   const publicJwk = signingKeys.publicKey.export({ format: "jwk" });
   publicJwk.use = "sig";
@@ -143,20 +144,32 @@ export async function startFakeAuthorizationServer() {
     if (request.method === "POST" && url.pathname === "/token") {
       try {
         const form = await readForm(request);
-        const code = form.get("code");
-        const authorization = codes.get(code);
-        if (
-          form.get("grant_type") !== "authorization_code" ||
-          form.get("client_id") !== clientId ||
-          !authorization ||
-          form.get("redirect_uri") !== authorization.redirectUri ||
-          base64url(sha256(form.get("code_verifier") ?? "")) !== authorization.challenge
-        ) {
+        if (form.get("client_id") !== clientId) {
           return json(response, 400, { error: "invalid_grant" });
         }
         const proofJwk = verifyDpop(request.headers.dpop, "POST", `${issuer}token`);
-        codes.delete(code);
+        if (form.get("grant_type") === "authorization_code") {
+          const code = form.get("code");
+          const authorization = codes.get(code);
+          if (
+            !authorization ||
+            form.get("redirect_uri") !== authorization.redirectUri ||
+            base64url(sha256(form.get("code_verifier") ?? "")) !== authorization.challenge
+          ) {
+            return json(response, 400, { error: "invalid_grant" });
+          }
+          codes.delete(code);
+        } else if (form.get("grant_type") === "refresh_token") {
+          const refreshToken = form.get("refresh_token");
+          if (!refreshTokens.delete(refreshToken)) {
+            return json(response, 400, { error: "invalid_grant" });
+          }
+        } else {
+          return json(response, 400, { error: "unsupported_grant_type" });
+        }
         const now = Math.floor(Date.now() / 1000);
+        const refreshToken = randomUUID();
+        refreshTokens.add(refreshToken);
         const accessToken = signJwt(
           { typ: "at+jwt", alg: "ES256", kid: publicJwk.kid },
           {
@@ -176,6 +189,7 @@ export async function startFakeAuthorizationServer() {
           token_type: "DPoP",
           expires_in: 300,
           scope,
+          refresh_token: refreshToken,
         });
       } catch {
         return json(response, 400, { error: "invalid_dpop_proof" });
