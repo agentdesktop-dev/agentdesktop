@@ -3,6 +3,7 @@ use std::fmt;
 use std::future::{Future, IntoFuture};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -58,6 +59,40 @@ struct ProxyState {
     shutdown_timeout: Duration,
     max_in_flight: usize,
     in_flight: Arc<Semaphore>,
+    metrics: Arc<OperationalMetrics>,
+}
+
+#[derive(Default)]
+struct OperationalMetrics {
+    requests: AtomicU64,
+    upstream_responses: AtomicU64,
+    identity_failures: AtomicU64,
+    overload_rejections: AtomicU64,
+    upstream_timeouts: AtomicU64,
+    upstream_failures: AtomicU64,
+}
+
+#[derive(Serialize)]
+struct MetricsSnapshot {
+    requests: u64,
+    upstream_responses: u64,
+    identity_failures: u64,
+    overload_rejections: u64,
+    upstream_timeouts: u64,
+    upstream_failures: u64,
+}
+
+impl OperationalMetrics {
+    fn snapshot(&self) -> MetricsSnapshot {
+        MetricsSnapshot {
+            requests: self.requests.load(Ordering::Relaxed),
+            upstream_responses: self.upstream_responses.load(Ordering::Relaxed),
+            identity_failures: self.identity_failures.load(Ordering::Relaxed),
+            overload_rejections: self.overload_rejections.load(Ordering::Relaxed),
+            upstream_timeouts: self.upstream_timeouts.load(Ordering::Relaxed),
+            upstream_failures: self.upstream_failures.load(Ordering::Relaxed),
+        }
+    }
 }
 
 struct ClientPool {
@@ -117,6 +152,7 @@ struct StatusResponse {
     request_timeout_ms: u128,
     shutdown_timeout_ms: u128,
     platform: PlatformCapabilities,
+    metrics: MetricsSnapshot,
 }
 
 pub async fn serve(
@@ -160,6 +196,7 @@ pub async fn serve_with_identity(
         shutdown_timeout: options.shutdown_timeout,
         max_in_flight: options.max_in_flight,
         in_flight: Arc::new(Semaphore::new(options.max_in_flight)),
+        metrics: Arc::new(OperationalMetrics::default()),
     };
     let app = Router::new()
         .route("/_agentgateway/healthz", get(health))
@@ -214,6 +251,7 @@ async fn status(State(state): State<ProxyState>) -> Json<StatusResponse> {
         request_timeout_ms: state.request_timeout.as_millis(),
         shutdown_timeout_ms: state.shutdown_timeout.as_millis(),
         platform: capabilities(),
+        metrics: state.metrics.snapshot(),
     })
 }
 
@@ -249,12 +287,23 @@ async fn gateway_reachable(upstream: &Url) -> bool {
 }
 
 async fn forward(State(state): State<ProxyState>, mut request: Request<Body>) -> Response<Body> {
+    state.metrics.requests.fetch_add(1, Ordering::Relaxed);
     let trace_context = ensure_trace_context(request.headers_mut());
     let mut response = match forward_request(&state, request).await {
-        Ok(response) => response,
+        Ok(response) => {
+            state
+                .metrics
+                .upstream_responses
+                .fetch_add(1, Ordering::Relaxed);
+            response
+        }
         Err(error) => {
             tracing::warn!(event = "forward_failed", reason = failure_reason(&error));
             if error.downcast_ref::<IdentityError>().is_some() {
+                state
+                    .metrics
+                    .identity_failures
+                    .fetch_add(1, Ordering::Relaxed);
                 Response::builder()
                     .status(StatusCode::UNAUTHORIZED)
                     .header(CONTENT_TYPE, "text/plain; charset=utf-8")
@@ -262,6 +311,10 @@ async fn forward(State(state): State<ProxyState>, mut request: Request<Body>) ->
                     .body(Body::from(IDENTITY_ERROR))
                     .expect("static error response must be valid")
             } else if error.downcast_ref::<OverloadError>().is_some() {
+                state
+                    .metrics
+                    .overload_rejections
+                    .fetch_add(1, Ordering::Relaxed);
                 Response::builder()
                     .status(StatusCode::SERVICE_UNAVAILABLE)
                     .header(CONTENT_TYPE, "text/plain; charset=utf-8")
@@ -269,6 +322,10 @@ async fn forward(State(state): State<ProxyState>, mut request: Request<Body>) ->
                     .body(Body::from(OVERLOAD_ERROR))
                     .expect("static error response must be valid")
             } else if error.downcast_ref::<UpstreamTimeout>().is_some() {
+                state
+                    .metrics
+                    .upstream_timeouts
+                    .fetch_add(1, Ordering::Relaxed);
                 Response::builder()
                     .status(StatusCode::GATEWAY_TIMEOUT)
                     .header(CONTENT_TYPE, "text/plain; charset=utf-8")
@@ -276,6 +333,10 @@ async fn forward(State(state): State<ProxyState>, mut request: Request<Body>) ->
                     .body(Body::from(TIMEOUT_ERROR))
                     .expect("static error response must be valid")
             } else {
+                state
+                    .metrics
+                    .upstream_failures
+                    .fetch_add(1, Ordering::Relaxed);
                 Response::builder()
                     .status(StatusCode::BAD_GATEWAY)
                     .header(CONTENT_TYPE, "text/plain; charset=utf-8")
@@ -631,6 +692,7 @@ mod tests {
             shutdown_timeout: Duration::from_secs(1),
             max_in_flight: 1,
             in_flight: Arc::new(Semaphore::new(1)),
+            metrics: Arc::new(OperationalMetrics::default()),
         };
 
         client_for_generation(&state, 2).unwrap();
@@ -751,7 +813,9 @@ mod tests {
             shutdown_timeout: Duration::from_secs(1),
             max_in_flight: 1,
             in_flight: Arc::new(Semaphore::new(1)),
+            metrics: Arc::new(OperationalMetrics::default()),
         };
+        let metrics = state.metrics.clone();
         let request = Request::builder()
             .uri("/v1/messages")
             .body(Body::empty())
@@ -764,6 +828,10 @@ mod tests {
             response.headers()["x-agentgateway-edge-error"],
             "identity-unavailable"
         );
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.requests, 1);
+        assert_eq!(snapshot.identity_failures, 1);
+        assert_eq!(snapshot.upstream_responses, 0);
     }
 
     #[tokio::test]
@@ -829,6 +897,16 @@ mod tests {
         );
         assert_eq!(request.headers["tracestate"], "vendor=value");
         assert_eq!(request.body, "claude request");
+        let metrics: serde_json::Value = Client::new()
+            .get(format!("http://{proxy_address}/_agentgateway/status"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(metrics["metrics"]["requests"], 1);
+        assert_eq!(metrics["metrics"]["upstream_responses"], 1);
         shutdown.send(()).unwrap();
     }
 
@@ -1010,7 +1088,14 @@ mod tests {
         assert_eq!(response["platform"]["os"], std::env::consts::OS);
         assert_eq!(response["platform"]["native_gateway"], true);
         assert_eq!(response["platform"]["transparent_capture"], false);
-        assert_eq!(response.as_object().unwrap().len(), 10);
+        assert_eq!(response["metrics"]["requests"], 0);
+        assert_eq!(response["metrics"]["upstream_responses"], 0);
+        assert_eq!(response["metrics"]["identity_failures"], 0);
+        assert_eq!(response["metrics"]["overload_rejections"], 0);
+        assert_eq!(response["metrics"]["upstream_timeouts"], 0);
+        assert_eq!(response["metrics"]["upstream_failures"], 0);
+        assert_eq!(response["metrics"].as_object().unwrap().len(), 6);
+        assert_eq!(response.as_object().unwrap().len(), 11);
         shutdown.send(()).unwrap();
     }
 

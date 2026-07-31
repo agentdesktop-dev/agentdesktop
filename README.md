@@ -157,7 +157,7 @@ Read the local operational status API:
 curl http://127.0.0.1:8080/_agentgateway/status
 ```
 
-The response contains connector version, deployment mode, gateway reachability, identity readiness, active/maximum forwarding count, and configured timeout values. It does not expose gateway addresses, identity claims, credentials, application traffic, or policy. This API is the backend for a future local UI; no graphical UI is implemented yet.
+The response contains connector version, deployment mode, gateway reachability, identity readiness, active/maximum forwarding count, configured timeout values, and fixed counters for request attempts, upstream responses, identity failures, overload rejections, upstream timeouts, and upstream failures. Counters have no request-, destination-, process-, or identity-derived labels. The API does not expose gateway addresses, identity claims, credentials, application traffic, or policy. This API is the backend for a future local UI and telemetry exporter; no graphical UI is implemented yet.
 
 ## Install a standalone bundle
 
