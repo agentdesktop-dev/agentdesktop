@@ -487,6 +487,7 @@ mod tests {
     use base64::Engine;
     use futures_util::StreamExt;
     use http_body_util::BodyExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::{Mutex, mpsc, oneshot};
     use tokio_stream::wrappers::ReceiverStream;
 
@@ -1170,6 +1171,44 @@ mod tests {
                 .unwrap()
                 .unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn rejects_malformed_http_without_contacting_upstream() {
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_address = upstream.local_addr().unwrap();
+        let (proxy_address, shutdown) =
+            start_proxy(Url::parse(&format!("http://{upstream_address}")).unwrap()).await;
+        let mut connection = TcpStream::connect(proxy_address).await.unwrap();
+        connection
+            .write_all(b"THIS IS NOT HTTP\r\n\r\n")
+            .await
+            .unwrap();
+        connection.shutdown().await.unwrap();
+        let mut response = Vec::new();
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            connection.read_to_end(&mut response),
+        )
+        .await
+        .expect("connector did not reject malformed request")
+        .unwrap();
+
+        assert!(String::from_utf8_lossy(&response).contains("400 Bad Request"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), upstream.accept())
+                .await
+                .is_err(),
+            "malformed request reached Agent Gateway"
+        );
+        let health = Client::new()
+            .get(format!("http://{proxy_address}/_agentgateway/healthz"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
+        shutdown.send(()).unwrap();
     }
 
     #[test]
