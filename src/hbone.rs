@@ -6,6 +6,7 @@ use std::task::{Context, Poll, ready};
 use anyhow::{Context as _, Result, bail};
 use bytes::{Buf, Bytes};
 use h2::client::SendRequest;
+use http::HeaderMap;
 use http::uri::Authority;
 use http::{Method, Request, StatusCode, Uri};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -14,10 +15,18 @@ use tokio::net::{TcpStream, ToSocketAddrs};
 #[derive(Clone)]
 pub struct HboneClient {
     sender: SendRequest<Bytes>,
+    connect_headers: HeaderMap,
 }
 
 impl HboneClient {
     pub async fn connect(endpoint: impl ToSocketAddrs) -> Result<Self> {
+        Self::connect_with_headers(endpoint, HeaderMap::new()).await
+    }
+
+    pub async fn connect_with_headers(
+        endpoint: impl ToSocketAddrs,
+        connect_headers: HeaderMap,
+    ) -> Result<Self> {
         let stream = TcpStream::connect(endpoint).await?;
         let (sender, connection) = h2::client::handshake(stream)
             .await
@@ -27,7 +36,10 @@ impl HboneClient {
                 tracing::warn!(event = "hbone_connection_failed", reason = %error);
             }
         });
-        Ok(Self { sender })
+        Ok(Self {
+            sender,
+            connect_headers,
+        })
     }
 
     pub async fn open_tunnel(&self, authority: Authority) -> Result<HboneTunnel> {
@@ -35,10 +47,11 @@ impl HboneClient {
             bail!("HBONE destination authority requires an explicit port");
         }
         let uri = Uri::builder().authority(authority).build()?;
-        let request = Request::builder()
+        let mut request = Request::builder()
             .method(Method::CONNECT)
             .uri(uri)
             .body(())?;
+        request.headers_mut().extend(self.connect_headers.clone());
         let mut sender = self
             .sender
             .clone()
@@ -144,7 +157,7 @@ fn h2_error(error: h2::Error) -> io::Error {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use http::{Method, Response};
+    use http::{HeaderMap, HeaderValue, Method, Response};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
@@ -165,6 +178,8 @@ mod tests {
                 tokio::spawn(async move {
                     assert_eq!(request.method(), Method::CONNECT);
                     assert_eq!(request.uri().authority().unwrap(), "203.0.113.7:443");
+                    let token = request.headers().get("x-agentgateway-edge-token").unwrap();
+                    assert_eq!(token, "test-token");
                     let mut receive = request.into_body();
                     let mut send = respond.send_response(Response::new(()), false).unwrap();
                     let bytes = receive.data().await.unwrap().unwrap();
@@ -182,7 +197,13 @@ mod tests {
         });
 
         let response = timeout(Duration::from_secs(1), async {
-            let client = HboneClient::connect(address).await.unwrap();
+            let mut headers = HeaderMap::new();
+            let mut token = HeaderValue::from_static("test-token");
+            token.set_sensitive(true);
+            headers.insert("x-agentgateway-edge-token", token);
+            let client = HboneClient::connect_with_headers(address, headers)
+                .await
+                .unwrap();
             let mut tunnel = client
                 .open_tunnel("203.0.113.7:443".parse().unwrap())
                 .await

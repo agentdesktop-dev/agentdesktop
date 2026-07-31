@@ -19,7 +19,7 @@ This contract carries one captured TCP flow from the edge connector to Agent Gat
 
 Standalone local mode and managed remote mode use the same stream contract but different outer authentication.
 
-Standalone local mode will use a connector-created local-only Agent Gateway endpoint. A private Unix socket is preferred if Agent Gateway gains compatible HTTP/2 listener support. Until then, the supported prototype target is an ephemeral loopback listener with an ephemeral credential passed directly to the connector-started Agent Gateway process. No organizational OAuth or device enrollment is required.
+Standalone local mode uses a local-only Agent Gateway endpoint. A private Unix socket is preferred if Agent Gateway gains compatible HTTP/2 listener support. The current prototype uses loopback and requires an opaque token from a current-user-owned `0600` file. The connector marks the token sensitive and sends it only as `x-agentgateway-edge-token` on CONNECT. Agent Gateway compares it through `source.connectHeaders` on the re-entered route, so it never enters the inner TCP stream. No organizational OAuth or device enrollment is required. Token creation, delivery to Agent Gateway, and rotation are not yet integrated into lifecycle management.
 
 Managed remote mode requires TLS plus a short-lived DPoP-bound access token on every CONNECT request. Agent Gateway must validate the token, DPoP proof, replay uniqueness, method and target binding, then derive immutable user and device policy context. Connector authentication headers must not enter the inner TCP stream or provider request.
 
@@ -29,14 +29,11 @@ The connector never retries or opens the original provider connection when conne
 
 ## Current implementation status
 
-The connector implements and deterministically tests the plain HTTP/2 CONNECT stream primitive, explicit destination-port validation, bidirectional byte fidelity, flow-control release, and half-close signaling against a fake HTTP/2 peer.
+The connector implements and deterministically tests the HTTP/2 CONNECT stream primitive, explicit destination-port validation, bidirectional byte fidelity, flow-control release, half-close signaling, Linux original-destination recovery, bounded relay concurrency, and protected local-token loading. Private-container coverage validates cgroup v2/nftables redirection and UDP denial through the real relay. An opt-in smoke test proves local token rejection/acceptance and dynamic forwarding against a real Agent Gateway.
 
 The following remain required before captured mode can be enabled:
 
-- Real Agent Gateway interoperability coverage.
-- Standalone local endpoint authentication.
 - Managed TLS and per-CONNECT DPoP authentication.
 - Connection pooling keyed by identity generation.
-- Original-destination recovery from the Linux redirect listener.
-- cgroup v2 and nftables TCP/443 redirection with UDP/443 denial.
+- Integrated standalone token creation, delivery, and rotation.
 - Fail-closed restart, cancellation, and stale-rule tests.

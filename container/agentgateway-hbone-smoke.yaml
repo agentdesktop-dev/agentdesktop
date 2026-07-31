@@ -19,5 +19,9 @@ binds:
     protocol: HTTP
     routes:
     - name: dynamic-forward
+      policies:
+        authorization:
+          rules:
+          - 'source.connectHeaders["x-agentgateway-edge-token"] == "${AGENTGATEWAY_EDGE_CAPTURE_TOKEN}"'
       backends:
       - dynamic: {}

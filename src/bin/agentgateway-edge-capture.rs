@@ -6,11 +6,14 @@ fn main() -> anyhow::Result<()> {
 #[cfg(target_os = "linux")]
 mod linux {
     use std::net::SocketAddr;
+    use std::path::PathBuf;
 
     use agentgateway_edge_connector::capture;
+    use agentgateway_edge_connector::capture::{TUNNEL_TOKEN_HEADER, load_tunnel_token};
     use agentgateway_edge_connector::hbone::HboneClient;
     use anyhow::{Result, bail};
     use clap::Parser;
+    use http::HeaderMap;
     use tokio::net::TcpListener;
 
     #[derive(Debug, Parser)]
@@ -20,6 +23,8 @@ mod linux {
         listen: SocketAddr,
         #[arg(long, default_value = "127.0.0.1:15008")]
         hbone_endpoint: SocketAddr,
+        #[arg(long, env = "AGENTGATEWAY_EDGE_CAPTURE_TOKEN_FILE")]
+        token_file: PathBuf,
         #[arg(long, default_value_t = 128)]
         max_tunnels: usize,
     }
@@ -32,7 +37,9 @@ mod linux {
         if cli.max_tunnels == 0 {
             bail!("max tunnels must be greater than zero");
         }
-        let hbone = HboneClient::connect(cli.hbone_endpoint).await?;
+        let mut connect_headers = HeaderMap::new();
+        connect_headers.insert(TUNNEL_TOKEN_HEADER, load_tunnel_token(&cli.token_file)?);
+        let hbone = HboneClient::connect_with_headers(cli.hbone_endpoint, connect_headers).await?;
         let listener = TcpListener::bind(cli.listen).await?;
         tracing::info!(event = "capture_started", listen = %listener.local_addr()?);
         capture::serve(listener, hbone, cli.max_tunnels, shutdown_signal()).await

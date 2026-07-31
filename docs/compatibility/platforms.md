@@ -20,6 +20,6 @@ The local `/_agentgateway/status` response exposes the current binary's capabili
 
 ## Required validation environments
 
-- Linux capture: private-container coverage validates cgroup v2/nftables TCP/443 redirection, original-destination recovery, bidirectional HBONE forwarding, and UDP/443 denial. An opt-in smoke test validates unauthenticated HTTP/2 CONNECT interoperability with a real local Agent Gateway. A disposable privileged host is still required for production process attribution, existing-firewall compatibility, restart behavior, and anti-bypass verification. Agent Gateway authentication remains required before application support.
+- Linux capture: private-container coverage validates cgroup v2/nftables TCP/443 redirection, original-destination recovery, bidirectional HBONE forwarding, and UDP/443 denial. An opt-in smoke test validates local token rejection/acceptance and HTTP/2 CONNECT interoperability with a real Agent Gateway. A disposable privileged host is still required for production process attribution, existing-firewall compatibility, restart behavior, and anti-bypass verification. Integrated token lifecycle and managed DPoP authentication remain required before application support.
 - macOS: supported hardware and OS with Network Extension entitlements, code signing, System Extension lifecycle tests, and Keychain trust tests.
 - Windows: supported Windows VM or hardware with WFP development/signing, service lifecycle tests, and certificate-store tests.

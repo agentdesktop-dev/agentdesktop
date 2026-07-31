@@ -1,8 +1,12 @@
+use std::fs;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result, bail};
+use http::header::HeaderValue;
 use http::uri::Authority;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -10,6 +14,34 @@ use tokio::sync::Semaphore;
 
 use crate::hbone::HboneClient;
 use crate::platform::linux::original_destination;
+
+pub const TUNNEL_TOKEN_HEADER: &str = "x-agentgateway-edge-token";
+
+pub fn load_tunnel_token(path: &Path) -> Result<HeaderValue> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("read tunnel token metadata from {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!("tunnel token {} must be a regular file", path.display());
+    }
+    if metadata.uid() != rustix::process::getuid().as_raw() {
+        bail!(
+            "tunnel token {} must be owned by the current user",
+            path.display()
+        );
+    }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        bail!("tunnel token {} must have mode 0600", path.display());
+    }
+    let token = fs::read_to_string(path)
+        .with_context(|| format!("read tunnel token from {}", path.display()))?;
+    let mut value =
+        HeaderValue::from_str(token.trim()).context("tunnel token is not a valid header value")?;
+    if value.is_empty() {
+        bail!("tunnel token must not be empty");
+    }
+    value.set_sensitive(true);
+    Ok(value)
+}
 
 pub async fn serve(
     listener: TcpListener,
@@ -62,13 +94,41 @@ async fn forward_to(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
     use bytes::Bytes;
     use http::{Method, Response};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::time::{Duration, timeout};
 
-    use super::{HboneClient, forward_to};
+    use super::{HboneClient, forward_to, load_tunnel_token};
+
+    #[test]
+    fn loads_owner_only_tunnel_token_as_sensitive() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("token");
+        fs::write(&path, "local-token\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let token = load_tunnel_token(&path).unwrap();
+
+        assert_eq!(token, "local-token");
+        assert!(token.is_sensitive());
+    }
+
+    #[test]
+    fn rejects_tunnel_token_with_group_or_world_access() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("token");
+        fs::write(&path, "local-token").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let error = load_tunnel_token(&path).unwrap_err();
+
+        assert!(error.to_string().contains("mode 0600"));
+    }
 
     #[tokio::test]
     async fn relays_tcp_flow_to_original_destination_over_hbone() {

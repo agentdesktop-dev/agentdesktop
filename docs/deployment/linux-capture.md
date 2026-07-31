@@ -44,10 +44,13 @@ Start the prototype relay outside the selected scope after an HBONE listener is 
 ```bash
 cargo run --bin agentgateway-edge-capture -- \
   --listen 127.0.0.1:15001 \
-  --hbone-endpoint 127.0.0.1:15008
+  --hbone-endpoint 127.0.0.1:15008 \
+  --token-file "$XDG_RUNTIME_DIR/agentgateway-edge/capture-token"
 ```
 
-Both endpoints are restricted to loopback. The relay uses Linux `SO_ORIGINAL_DST`, preserves raw bytes, bounds concurrent tunnels, and closes failed or overloaded flows without direct fallback. Its current HBONE connection is cleartext, unauthenticated, and established once at startup. This is suitable only for isolated local interoperability work; trusted standalone or managed use requires an authenticated Agent Gateway contract and reconnect lifecycle.
+The token file is required, must be a regular file owned by the current user with mode `0600`, and must contain a non-empty HTTP header value. Agent Gateway must receive the same value through its protected startup environment and authorize the re-entered route with `source.connectHeaders["x-agentgateway-edge-token"]`. The smoke config demonstrates this policy without creating a second policy format.
+
+Both endpoints are restricted to loopback. The relay uses Linux `SO_ORIGINAL_DST`, preserves raw bytes, bounds concurrent tunnels, and closes failed or overloaded flows without direct fallback. Its current HBONE connection is cleartext and established once at startup. The opaque token prevents unrelated local clients from using a correctly configured tunnel listener, but creation, rotation, and process lifecycle are not integrated. Managed use additionally requires TLS and DPoP-bound organizational identity.
 
 ## Isolated validation
 
@@ -59,7 +62,7 @@ sh tests/linux-capture-container.sh
 
 The test uses rootless Podman with private network and cgroup namespaces. Rootless `--privileged` grants the disposable container enough namespaced privilege to create a child cgroup and nftables table; it does not use host network or cgroup namespaces. It builds and runs the real relay against a minimal packaged Python h2 peer, then proves original-destination CONNECT authority, bidirectional bytes, TCP/443 redirection, UDP/443 rejection, counters, and scoped table removal. It downloads Rust dependencies, nftables, and small networking tools into the disposable container.
 
-This does not prove production host attribution, resistance to a local administrator, compatibility with an existing host firewall, or interoperability with an authenticated real Agent Gateway. Those require a disposable host or VM and the agreed Agent Gateway authentication boundary.
+This does not prove production host attribution, resistance to a local administrator, or compatibility with an existing host firewall. Those require a disposable host or VM.
 
 ## Real Agent Gateway interoperability
 
@@ -72,7 +75,7 @@ AGENTGATEWAY_BINARY=../agentgateway/target/debug/agentgateway \
 
 The test starts the config in `container/agentgateway-hbone-smoke.yaml`, the real connector relay, and a loopback HTTP target. It verifies that Agent Gateway accepts the connector's HTTP/2 CONNECT, re-enters an internal wildcard route, dynamically forwards the inner request, and returns the response. It does not install nftables; the private-container test covers the kernel redirect and original-destination boundary separately.
 
-This smoke path is intentionally loopback-only and unauthenticated. It proves transport compatibility with the tested Agent Gateway revision, not the managed identity contract or a secure production tunnel.
+This smoke path generates an ephemeral token, proves that Agent Gateway returns `403` for a wrong CONNECT token, then proves dynamic forwarding succeeds with the protected valid token. It is intentionally loopback-only and does not prove the managed identity contract or a secure remote production tunnel.
 
 ## eBPF strengthening path
 

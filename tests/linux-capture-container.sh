@@ -33,7 +33,9 @@ cargo run --quiet --bin agentgateway-edge-capture-setup -- \
         fi
       done
       test "$ready" = yes
-      /tmp/target/debug/agentgateway-edge-capture &
+      printf private-container-token > /tmp/capture-token
+      chmod 0600 /tmp/capture-token
+      /tmp/target/debug/agentgateway-edge-capture --token-file /tmp/capture-token &
       relay=$!
       ready=
       for attempt in $(seq 1 1000); do
