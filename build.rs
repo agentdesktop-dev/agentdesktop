@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-const PAYLOADS: [(&str, &str); 5] = [
+const STANDALONE_PAYLOADS: [(&str, &str); 5] = [
     ("installer", "AGENTGATEWAY_EDGE_PAYLOAD_INSTALLER"),
     ("connector", "AGENTGATEWAY_EDGE_PAYLOAD_CONNECTOR"),
     ("identity", "AGENTGATEWAY_EDGE_PAYLOAD_IDENTITY"),
@@ -14,36 +14,51 @@ const PAYLOADS: [(&str, &str); 5] = [
     ("config", "AGENTGATEWAY_EDGE_PAYLOAD_CONFIG"),
 ];
 
+const MANAGED_PAYLOADS: [(&str, &str); 3] = [
+    ("installer", "AGENTGATEWAY_EDGE_PAYLOAD_INSTALLER"),
+    ("connector", "AGENTGATEWAY_EDGE_PAYLOAD_CONNECTOR"),
+    ("identity", "AGENTGATEWAY_EDGE_PAYLOAD_IDENTITY"),
+];
+
 fn main() {
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_EMBEDDED_INSTALLER");
-    for (_, variable) in PAYLOADS {
+    println!("cargo:rerun-if-env-changed=AGENTGATEWAY_EDGE_INSTALLER_MODE");
+    for (_, variable) in STANDALONE_PAYLOADS {
         println!("cargo:rerun-if-env-changed={variable}");
     }
 
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set"));
     let generated = output.join("embedded_payload.rs");
-    let configured_payloads = PAYLOADS
+    let mode =
+        env::var("AGENTGATEWAY_EDGE_INSTALLER_MODE").unwrap_or_else(|_| "standalone".to_owned());
+    let payloads: &[(&str, &str)] = match mode.as_str() {
+        "standalone" => &STANDALONE_PAYLOADS,
+        "managed" => &MANAGED_PAYLOADS,
+        other => panic!("unsupported AGENTGATEWAY_EDGE_INSTALLER_MODE {other:?}"),
+    };
+    let configured_payloads = payloads
         .iter()
         .filter(|(_, variable)| env::var_os(variable).is_some())
         .count();
     if env::var_os("CARGO_FEATURE_EMBEDDED_INSTALLER").is_none() || configured_payloads == 0 {
         fs::write(
             generated,
-            "const EMBEDDED: bool = false;\nconst PAYLOADS: &[EmbeddedPayload] = &[];\n",
+            "const EMBEDDED: bool = false;\nconst INSTALLER_MODE: &str = \"none\";\nconst PAYLOADS: &[EmbeddedPayload] = &[];\n",
         )
         .expect("write empty embedded payload");
         return;
     }
-    if configured_payloads != PAYLOADS.len() {
+    if configured_payloads != payloads.len() {
         panic!(
-            "embedded-installer requires all {} AGENTGATEWAY_EDGE_PAYLOAD_* variables",
-            PAYLOADS.len()
+            "{mode} embedded installer requires all {} mode-specific payload variables",
+            payloads.len()
         );
     }
 
-    let mut source =
-        String::from("const EMBEDDED: bool = true;\nconst PAYLOADS: &[EmbeddedPayload] = &[\n");
-    for (name, variable) in PAYLOADS {
+    let mut source = format!(
+        "const EMBEDDED: bool = true;\nconst INSTALLER_MODE: &str = {mode:?};\nconst PAYLOADS: &[EmbeddedPayload] = &[\n"
+    );
+    for (name, variable) in payloads {
         let path = env::var_os(variable)
             .map(PathBuf::from)
             .unwrap_or_else(|| panic!("{variable} is required with embedded-installer"));

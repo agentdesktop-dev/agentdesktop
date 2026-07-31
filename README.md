@@ -243,6 +243,19 @@ scripts/build-embedded-installer.sh \
 
 The resulting `target/release/agentgateway-edge-installer` is the only file delivered to the user. A build with no embedded payload remains available for repository-wide compilation and reports an actionable error if run.
 
+## Build a managed development installer
+
+Build a generic managed template and customizer, or create an organization-specific one-file executable from the strict non-secret bootstrap example:
+
+```bash
+scripts/build-managed-installer.sh
+scripts/build-managed-installer.sh \
+  examples/managed-organization.json \
+  target/release/example-agentgateway-edge-installer
+```
+
+The generic template also accepts `--organization <file>` for two-file development. Managed installation leaves the service inactive and does not open a browser or change AI agent settings. The installed `connect-agents` command owns browser login, enrollment approval, service readiness, and separate Claude consent. Customize the executable before applying a publisher signature. See [Managed installer development](docs/deployment/managed-installer.md) for the schema, MDM ownership boundary, and current security limitations.
+
 ## Test
 
 ```bash

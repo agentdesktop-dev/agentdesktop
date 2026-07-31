@@ -7,6 +7,8 @@ use std::process::{Command as ProcessCommand, ExitCode, Output};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use agentgateway_edge_connector::customization::read_customized_bootstrap;
+use agentgateway_edge_connector::organization::OrganizationBootstrap;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use sha2::{Digest, Sha256};
@@ -40,6 +42,11 @@ struct InstallArgs {
     root: Option<PathBuf>,
     #[arg(long, help = "Use or create this Agent Gateway configuration")]
     config: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Use this organization bootstrap (managed development builds)"
+    )]
+    organization: Option<PathBuf>,
     #[arg(long, help = "Accept the installation summary without prompting")]
     yes: bool,
     #[arg(long, help = "Install files without starting the user service")]
@@ -87,6 +94,7 @@ fn run() -> Result<()> {
         None => InstallArgs {
             root: None,
             config: None,
+            organization: None,
             yes: false,
             no_start: false,
             connect_agents: false,
@@ -96,6 +104,17 @@ fn run() -> Result<()> {
 }
 
 fn install(args: InstallArgs) -> Result<()> {
+    match INSTALLER_MODE {
+        "standalone" => install_standalone(args),
+        "managed" => install_managed(args),
+        _ => bail!("embedded installer has an unsupported deployment mode"),
+    }
+}
+
+fn install_standalone(args: InstallArgs) -> Result<()> {
+    if args.organization.is_some() {
+        bail!("--organization is only available for managed installers");
+    }
     if args.no_start && args.connect_agents {
         bail!("--connect-agents requires the service to start");
     }
@@ -212,6 +231,96 @@ fn install(args: InstallArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn install_managed(args: InstallArgs) -> Result<()> {
+    if args.config.is_some() || args.no_start || args.connect_agents {
+        bail!("managed installation does not accept standalone service or agent setup options");
+    }
+    let root = args.root.map_or_else(default_root, Ok)?;
+    if !root.is_absolute() {
+        bail!("install root must be absolute");
+    }
+    let bootstrap = load_organization(args.organization.as_deref())?;
+    print_managed_summary(&root, &bootstrap);
+    if !args.yes && !confirm()? {
+        println!("Installation cancelled; no files were changed.");
+        return Ok(());
+    }
+
+    let parent = root.parent().context("install root has no parent")?;
+    fs::create_dir_all(parent)?;
+    let payload = tempfile::Builder::new()
+        .prefix("agentgateway-edge-installer-")
+        .tempdir_in(parent)
+        .context("failed to create temporary extraction directory")?;
+    extract_payload(payload.path())?;
+    let organization = payload.path().join("organization.json");
+    fs::write(&organization, serde_json::to_vec_pretty(&bootstrap)?)?;
+    set_mode(&organization, 0o600)?;
+    run_internal(
+        payload.path(),
+        [
+            "managed-install".to_owned(),
+            "--root".to_owned(),
+            root.to_string_lossy().into_owned(),
+            "--connector".to_owned(),
+            payload
+                .path()
+                .join("connector")
+                .to_string_lossy()
+                .into_owned(),
+            "--identity".to_owned(),
+            payload
+                .path()
+                .join("identity")
+                .to_string_lossy()
+                .into_owned(),
+            "--organization".to_owned(),
+            organization.to_string_lossy().into_owned(),
+            "--control".to_owned(),
+            payload
+                .path()
+                .join("installer")
+                .to_string_lossy()
+                .into_owned(),
+        ],
+    )?;
+
+    println!("\nInstallation complete");
+    println!("  Organization: {}", bootstrap.organization.display_name);
+    println!("  Files:        {}", root.display());
+    println!("  Service:      installed, awaiting user sign-in");
+    println!("\nNo AI agent settings were changed.");
+    println!(
+        "To sign in and connect your AI agents, run:\n  {} connect-agents",
+        root.join("bin/agentgateway-edge-connector").display()
+    );
+    Ok(())
+}
+
+fn load_organization(path: Option<&Path>) -> Result<OrganizationBootstrap> {
+    if let Some(path) = path {
+        return OrganizationBootstrap::parse(&fs::read(path).with_context(|| {
+            format!("organization bootstrap {} is unavailable", path.display())
+        })?);
+    }
+    read_customized_bootstrap(&env::current_exe()?)?
+        .context("this generic managed installer requires --organization <file>")
+}
+
+fn print_managed_summary(root: &Path, bootstrap: &OrganizationBootstrap) {
+    println!(
+        "Agent Gateway Edge for {}\n",
+        bootstrap.organization.display_name
+    );
+    println!("This installs for the current user:");
+    println!("  - Edge connector");
+    println!("  - Identity helper");
+    println!("\nLocation:     {}", root.display());
+    println!("Agent Gateway: {}", bootstrap.gateway.url);
+    println!("Service:      installed but not started");
+    println!("\nSign-in and AI agent settings are left to the user.");
 }
 
 fn wait_for_health() -> Result<()> {

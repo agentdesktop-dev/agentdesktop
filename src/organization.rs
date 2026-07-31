@@ -86,10 +86,8 @@ fn validate_text(name: &str, value: &str) -> Result<()> {
 
 fn validate_scope(scope: &str) -> Result<()> {
     validate_text("OAuth scope", scope)?;
-    if scope
-        .split_ascii_whitespace()
-        .any(|item| item.is_empty() || !item.is_ascii())
-    {
+    let items: Vec<_> = scope.split_ascii_whitespace().collect();
+    if items.is_empty() || items.iter().any(|item| !item.is_ascii()) || items.join(" ") != scope {
         bail!("OAuth scope must contain space-separated ASCII values");
     }
     Ok(())

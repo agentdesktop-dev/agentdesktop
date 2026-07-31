@@ -1,0 +1,17 @@
+{
+  "format_version": 1,
+  "organization": {
+    "id": "example",
+    "display_name": "Example Organization",
+    "support_url": "https://support.example.com/agent-desktop"
+  },
+  "identity": {
+    "issuer": "https://login.example.com/",
+    "client_id": "agent-desktop",
+    "audience": "https://gateway.example.com",
+    "scope": "agentgateway.invoke"
+  },
+  "gateway": {
+    "url": "https://gateway.example.com/"
+  }
+}

@@ -49,6 +49,21 @@ tests/vm/vm.sh copy \
 
 The VM fixture points Agent Gateway at the laptop mock LLM through `host.test:8000`. It is specific to this QEMU environment and must not be used as a general release configuration.
 
+Simulate the MDM-owned half of managed installation over SSH with an organization-specific executable:
+
+```bash
+scripts/build-managed-installer.sh \
+  examples/managed-organization.json \
+  target/example-managed-installer
+tests/vm/vm.sh copy \
+  target/example-managed-installer \
+  /home/agentedge/Downloads/example-managed-installer
+tests/vm/vm.sh ssh \
+  /home/agentedge/Downloads/example-managed-installer install --yes
+```
+
+This step must preserve existing Claude settings and service activation state and must not install a local Agent Gateway. The user-owned `connect-agents` step needs a reachable HTTPS identity/enrollment simulation and managed gateway. The checked-in example endpoints are documentation values and cannot drive that step. Real managed security validation remains blocked until Agent Gateway enforces the managed identity contract.
+
 The test-only `agentedge` account has passwordless sudo. SSH password authentication is exposed only through the QEMU user-network forward on host loopback. Do not publish the VM's SSH port on a non-loopback host address.
 
 ## Clean-slate lifecycle

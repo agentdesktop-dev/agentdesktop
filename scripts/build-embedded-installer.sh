@@ -20,6 +20,7 @@ cargo build --release \
   --bin agentgateway-edge-connector \
   --bin agentgateway-edge-identity
 
+AGENTGATEWAY_EDGE_INSTALLER_MODE=standalone \
 AGENTGATEWAY_EDGE_PAYLOAD_INSTALLER=$root/target/release/agentgateway-edge-install \
 AGENTGATEWAY_EDGE_PAYLOAD_CONNECTOR=$root/target/release/agentgateway-edge-connector \
 AGENTGATEWAY_EDGE_PAYLOAD_IDENTITY=$root/target/release/agentgateway-edge-identity \

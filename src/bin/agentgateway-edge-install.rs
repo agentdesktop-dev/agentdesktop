@@ -305,7 +305,7 @@ fn managed_systemd_unit(root: &Path, bootstrap: &OrganizationBootstrap) -> Strin
     let upstream = quote_systemd_value(bootstrap.gateway.url.as_str());
     let issuer = quote_systemd_value(bootstrap.identity.issuer.as_str());
     format!(
-        "[Unit]\nDescription=Agent Gateway Edge Connector\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={connector} --mode managed --upstream {upstream} --identity-issuer {issuer}\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=read-only\n\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription=Agent Gateway Edge Connector\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={connector} --mode managed --upstream {upstream} --identity-issuer {issuer}\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\n\n[Install]\nWantedBy=default.target\n"
     )
 }
 
