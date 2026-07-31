@@ -193,7 +193,7 @@ async fn forward(State(state): State<ProxyState>, request: Request<Body>) -> Res
     match forward_request(&state, request).await {
         Ok(response) => response,
         Err(error) => {
-            eprintln!("failed to forward request to Agent Gateway: {error:#}");
+            tracing::warn!(event = "forward_failed", reason = failure_reason(&error));
             if error.downcast_ref::<IdentityError>().is_some() {
                 return Response::builder()
                     .status(StatusCode::UNAUTHORIZED)
@@ -225,6 +225,18 @@ async fn forward(State(state): State<ProxyState>, request: Request<Body>) -> Res
                 .body(Body::from(GATEWAY_ERROR))
                 .expect("static error response must be valid")
         }
+    }
+}
+
+fn failure_reason(error: &anyhow::Error) -> &'static str {
+    if error.downcast_ref::<IdentityError>().is_some() {
+        "identity_unavailable"
+    } else if error.downcast_ref::<OverloadError>().is_some() {
+        "overloaded"
+    } else if error.downcast_ref::<UpstreamTimeout>().is_some() {
+        "upstream_timeout"
+    } else {
+        "upstream_unavailable"
     }
 }
 
@@ -516,6 +528,14 @@ mod tests {
 
         assert!(error.to_string().contains("graceful shutdown exceeded"));
         drop(response);
+    }
+
+    #[test]
+    fn failure_logging_never_formats_sensitive_error_details() {
+        let error =
+            anyhow::anyhow!("request failed for https://gateway.example/private?prompt=secret");
+
+        assert_eq!(failure_reason(&error), "upstream_unavailable");
     }
 
     #[tokio::test]

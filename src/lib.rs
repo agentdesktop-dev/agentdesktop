@@ -3,3 +3,4 @@ pub mod config;
 pub mod identity;
 pub mod local_gateway;
 pub mod proxy;
+pub mod telemetry;

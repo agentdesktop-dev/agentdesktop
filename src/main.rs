@@ -10,6 +10,7 @@ const LOCAL_GATEWAY_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    agentgateway_edge_connector::telemetry::init()?;
     let config = Config::parse_and_validate()?;
     let identity = if let Some(issuer) = &config.identity_issuer {
         let identity_dir = config
@@ -24,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let mut local_gateway = match (&config.gateway_binary, &config.gateway_config) {
         (Some(binary), Some(gateway_config)) => {
-            println!("starting local Agent Gateway from {}", binary.display());
+            tracing::info!(event = "local_gateway_starting");
             Some(LocalGateway::spawn(binary, gateway_config)?)
         }
         _ => None,
@@ -33,14 +34,13 @@ async fn main() -> anyhow::Result<()> {
         gateway
             .wait_until_reachable(&config.upstream, LOCAL_GATEWAY_STARTUP_TIMEOUT)
             .await?;
-        println!("local Agent Gateway is reachable at {}", config.upstream);
+        tracing::info!(event = "local_gateway_ready");
     }
     let listener = TcpListener::bind(config.listen).await?;
-    println!(
-        "running in {:?} mode, listening on {} and forwarding to {}",
-        config.mode,
-        listener.local_addr()?,
-        config.upstream
+    tracing::info!(
+        event = "connector_started",
+        mode = config.mode.as_str(),
+        listen = %listener.local_addr()?
     );
     let serve = proxy::serve_with_identity(
         listener,
@@ -72,6 +72,7 @@ async fn main() -> anyhow::Result<()> {
 
 async fn shutdown_signal() {
     if let Err(error) = tokio::signal::ctrl_c().await {
-        eprintln!("failed to install shutdown signal handler: {error}");
+        let _ = error;
+        tracing::error!(event = "shutdown_signal_failed");
     }
 }
