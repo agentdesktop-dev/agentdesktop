@@ -52,6 +52,9 @@ struct ProxyState {
     mode: DeploymentMode,
     identity: Option<ManagedIdentity>,
     request_timeout: Duration,
+    connect_timeout: Duration,
+    shutdown_timeout: Duration,
+    max_in_flight: usize,
     in_flight: Arc<Semaphore>,
 }
 
@@ -95,6 +98,19 @@ struct HealthResponse {
     gateway: &'static str,
 }
 
+#[derive(Serialize)]
+struct StatusResponse {
+    version: &'static str,
+    mode: &'static str,
+    gateway: &'static str,
+    identity: &'static str,
+    in_flight: usize,
+    max_in_flight: usize,
+    connect_timeout_ms: u128,
+    request_timeout_ms: u128,
+    shutdown_timeout_ms: u128,
+}
+
 pub async fn serve(
     listener: TcpListener,
     upstream: Url,
@@ -129,10 +145,14 @@ pub async fn serve_with_identity(
         mode,
         identity,
         request_timeout: options.request_timeout,
+        connect_timeout: options.connect_timeout,
+        shutdown_timeout: options.shutdown_timeout,
+        max_in_flight: options.max_in_flight,
         in_flight: Arc::new(Semaphore::new(options.max_in_flight)),
     };
     let app = Router::new()
         .route("/_agentgateway/healthz", get(health))
+        .route("/_agentgateway/status", get(status))
         .fallback(any(forward))
         .with_state(state);
 
@@ -157,6 +177,32 @@ pub async fn serve_with_identity(
         } => anyhow::bail!("graceful shutdown exceeded configured timeout"),
     }
     Ok(())
+}
+
+async fn status(State(state): State<ProxyState>) -> Json<StatusResponse> {
+    let gateway = if gateway_reachable(&state.upstream).await {
+        "reachable"
+    } else {
+        "unreachable"
+    };
+    let identity = match &state.identity {
+        Some(identity) => identity.status().await.unwrap_or("unavailable"),
+        None if state.mode == DeploymentMode::Managed => "not-configured",
+        None => "not-required",
+    };
+    Json(StatusResponse {
+        version: env!("CARGO_PKG_VERSION"),
+        mode: state.mode.as_str(),
+        gateway,
+        identity,
+        in_flight: state
+            .max_in_flight
+            .saturating_sub(state.in_flight.available_permits()),
+        max_in_flight: state.max_in_flight,
+        connect_timeout_ms: state.connect_timeout.as_millis(),
+        request_timeout_ms: state.request_timeout.as_millis(),
+        shutdown_timeout_ms: state.shutdown_timeout.as_millis(),
+    })
 }
 
 async fn health(State(state): State<ProxyState>) -> (StatusCode, Json<HealthResponse>) {
@@ -624,25 +670,30 @@ mod tests {
             &temporary.path().join("identity"),
         )
         .unwrap();
+        let identity = ManagedIdentity::new(
+            StoredSession {
+                issuer: Url::parse("https://identity.example/").unwrap(),
+                gateway_origin: Url::parse("http://127.0.0.1:9/").unwrap(),
+                client_id: "connector".into(),
+                audience: "gateway".into(),
+                access_token: "expired-token".into(),
+                expires_at: 0,
+                scope: "agentgateway.invoke".into(),
+                refresh_token: "expired-refresh-token".into(),
+                dpop_private_key: String::new(),
+            },
+            store,
+        );
+        assert_eq!(identity.status().await.unwrap(), "refresh-required");
         let state = ProxyState {
             client: Client::new(),
             upstream: Url::parse("http://127.0.0.1:9").unwrap(),
             mode: DeploymentMode::Managed,
-            identity: Some(ManagedIdentity::new(
-                StoredSession {
-                    issuer: Url::parse("https://identity.example/").unwrap(),
-                    gateway_origin: Url::parse("http://127.0.0.1:9/").unwrap(),
-                    client_id: "connector".into(),
-                    audience: "gateway".into(),
-                    access_token: "expired-token".into(),
-                    expires_at: 0,
-                    scope: "agentgateway.invoke".into(),
-                    refresh_token: "expired-refresh-token".into(),
-                    dpop_private_key: String::new(),
-                },
-                store,
-            )),
+            identity: Some(identity),
             request_timeout: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(1),
+            shutdown_timeout: Duration::from_secs(1),
+            max_in_flight: 1,
             in_flight: Arc::new(Semaphore::new(1)),
         };
         let request = Request::builder()
@@ -864,6 +915,43 @@ mod tests {
             response.text().await.unwrap(),
             r#"{"status":"degraded","mode":"standalone","gateway":"unreachable"}"#
         );
+        shutdown.send(()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reports_privacy_safe_operational_status() {
+        let gateway = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let options = ProxyOptions {
+            connect_timeout: Duration::from_millis(101),
+            request_timeout: Duration::from_millis(202),
+            shutdown_timeout: Duration::from_millis(303),
+            max_in_flight: 7,
+        };
+        let (proxy_address, shutdown) = start_proxy_with_options(
+            Url::parse(&format!("http://{}", gateway.local_addr().unwrap())).unwrap(),
+            options,
+        )
+        .await;
+
+        let response: serde_json::Value = Client::new()
+            .get(format!("http://{proxy_address}/_agentgateway/status"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        assert_eq!(response["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(response["mode"], "standalone");
+        assert_eq!(response["gateway"], "reachable");
+        assert_eq!(response["identity"], "not-required");
+        assert_eq!(response["in_flight"], 0);
+        assert_eq!(response["max_in_flight"], 7);
+        assert_eq!(response["connect_timeout_ms"], 101);
+        assert_eq!(response["request_timeout_ms"], 202);
+        assert_eq!(response["shutdown_timeout_ms"], 303);
+        assert_eq!(response.as_object().unwrap().len(), 9);
         shutdown.send(()).unwrap();
     }
 

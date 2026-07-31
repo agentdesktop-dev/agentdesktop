@@ -150,6 +150,14 @@ A reachable gateway returns `200 OK`:
 
 An unreachable gateway returns `503 Service Unavailable` with `status` set to `degraded`. The check establishes a fresh TCP connection to the configured upstream. It reports connector liveness and gateway reachability; it does not interpret Agent Gateway configuration or policy health.
 
+Read the local operational status API:
+
+```bash
+curl http://127.0.0.1:8080/_agentgateway/status
+```
+
+The response contains connector version, deployment mode, gateway reachability, identity readiness, active/maximum forwarding count, and configured timeout values. It does not expose gateway addresses, identity claims, credentials, application traffic, or policy. This API is the backend for a future local UI; no graphical UI is implemented yet.
+
 ## Test
 
 ```bash

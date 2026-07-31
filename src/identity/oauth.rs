@@ -105,6 +105,15 @@ impl ManagedIdentity {
             proof,
         })
     }
+
+    pub async fn status(&self) -> Result<&'static str> {
+        let session = self.session.lock().await;
+        if session.is_expired()? {
+            Ok("refresh-required")
+        } else {
+            Ok("ready")
+        }
+    }
 }
 
 pub async fn login<F>(
