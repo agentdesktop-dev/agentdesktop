@@ -4,7 +4,7 @@ An early, policy-free edge connector that forwards Claude Code HTTP traffic from
 
 Source: [github.com/agentdesktop-dev/agentdesktop](https://github.com/agentdesktop-dev/agentdesktop)
 
-The current pre-pre-MVP includes experimental managed browser login, DPoP-authenticated forwarding, refresh restoration, opt-in OTLP trace export, and an isolated Linux transparent-capture prototype. Supported transparent capture remains unavailable until HBONE authentication and lifecycle integration are complete. Device enrollment, MDM integration, and metric export are not implemented. See [AGENTS.md](AGENTS.md) for the architecture and incremental delivery plan.
+The current development build includes experimental managed browser login, DPoP-authenticated forwarding, refresh restoration, an enrollment client and mock authority, opt-in OTLP trace export, and an isolated Linux transparent-capture prototype. Supported transparent capture remains unavailable until authentication and lifecycle integration are complete. Production enrollment authority integration, Agent Gateway identity enforcement, MDM product integration, and metric export are not implemented. See [AGENTS.md](AGENTS.md) for the architecture and incremental delivery plan.
 
 For a local installation, including credential ownership, file permissions, logs, retention, and removal, see [Standalone Operations](docs/deployment/standalone.md).
 
@@ -13,7 +13,7 @@ Tested platform behavior is listed in [Platform Compatibility](docs/compatibilit
 The isolated Linux cgroup v2/nftables prototype is documented in [Linux Capture Prototype](docs/deployment/linux-capture.md).
 Manual desktop journeys and future headless E2E tests use the [QEMU desktop test environment](tests/vm/README.md).
 
-The managed user/device trust boundary is documented in [Managed Identity Contract v1](docs/architecture/managed-identity-v1.md). Browser PKCE login and connector-instance DPoP proof are implemented; the rest remains a design contract.
+The managed user/device trust boundary is documented in [Managed Identity Contract v1](docs/architecture/managed-identity-v1.md). Browser PKCE login, connector-instance DPoP proof, refresh restoration, the enrollment client, and the repository's mock enrollment authority are implemented. Production authority integration and Agent Gateway enforcement remain design-contract work.
 
 ## Managed identity storage preflight
 
@@ -125,13 +125,13 @@ Set `OTEL_EXPORTER_OTLP_ENDPOINT` to an HTTP(S) OTLP/gRPC collector endpoint, su
 
 ## Configure Claude Code
 
-Connect supported AI agents already installed for the current user:
+Connect Claude Code when it is already installed for the current user:
 
 ```bash
 cargo run -- connect-agents
 ```
 
-After consent, the connector detects Claude Code and adds the standalone connector endpoint and local placeholder credential to the `env` object in `~/.claude/settings.json`. It preserves unrelated settings, treats matching values as already connected, and refuses to replace an existing provider or gateway configuration. The interactive installer asks for this consent separately after the service is ready.
+After consent, Agent Desktop detects Claude Code and adds the local connector endpoint and placeholder credential to the `env` object in `~/.claude/settings.json`. It preserves unrelated settings, treats matching values as already connected, and refuses to replace an existing provider or gateway configuration. The interactive installer asks for this consent separately after the service is ready.
 
 Launch Claude Code normally after it is connected:
 
@@ -177,7 +177,7 @@ The response contains connector version, deployment mode, gateway reachability, 
 
 ## Install a standalone bundle
 
-The development release artifact is one self-contained executable containing a tested Agent Gateway and connector version set. Download the installer for the current platform and run it:
+The current installer is a self-contained Linux development executable containing a tested Agent Gateway and Agent Desktop version set. Public downloads and non-Linux packages are not available yet; build it with `scripts/build-embedded-installer.sh` as shown below, then run:
 
 ```bash
 chmod +x agentdesktop-installer
@@ -376,7 +376,7 @@ The connector does not evaluate this rule or rewrite either response. Users own 
 
 ## Host Claude Code smoke test
 
-This milestone forwards Claude's incoming authentication headers unchanged. Configure Agent Gateway to accept the chosen placeholder or gateway credential and to provide the real Anthropic credential upstream.
+In standalone forwarding, Agent Desktop preserves Claude's end-to-end application authentication headers while removing hop-by-hop headers required by HTTP proxy semantics. Configure Agent Gateway to accept the chosen placeholder or gateway credential and to provide the real Anthropic credential upstream.
 
 With Agent Gateway and the connector running directly on the host:
 
@@ -392,4 +392,4 @@ Send a simple prompt and verify:
 3. Stopping Agent Gateway causes the connector to return `502 Bad Gateway` with `x-agentdesktop-error: upstream-unavailable`.
 4. The connector never attempts a direct connection to Anthropic.
 
-Gateway-side DPoP validation and stripping and enrolled device identity are later increments.
+Gateway-side DPoP validation and credential stripping, plus production enforcement of enrolled device identity, remain later increments.
