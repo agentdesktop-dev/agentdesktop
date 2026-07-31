@@ -159,6 +159,32 @@ curl http://127.0.0.1:8080/_agentgateway/status
 
 The response contains connector version, deployment mode, gateway reachability, identity readiness, active/maximum forwarding count, and configured timeout values. It does not expose gateway addresses, identity claims, credentials, application traffic, or policy. This API is the backend for a future local UI; no graphical UI is implemented yet.
 
+## Install a standalone bundle
+
+Build the connector binaries, then stage them with a separately obtained Agent Gateway binary and starter configuration into a dedicated installation root:
+
+```bash
+cargo build --release
+cargo run --bin agentgateway-edge-install -- install \
+  --root "$HOME/.local/lib/agentgateway-edge" \
+  --connector target/release/agentgateway-edge-connector \
+  --identity target/release/agentgateway-edge-identity \
+  --claude target/release/agentgateway-edge-claude \
+  --agentgateway /path/to/agentgateway \
+  --starter-config container/agentgateway-smoke.yaml
+```
+
+Installation builds a complete sibling staging tree, verifies all inputs before replacing the active tree, and restores the previous tree if activation fails. Re-running the command upgrades the dedicated root. The starter configuration is installed as an example and remains Agent Gateway configuration; the connector does not interpret it.
+
+Remove only a manifest-owned bundle:
+
+```bash
+cargo run --bin agentgateway-edge-install -- uninstall \
+  --root "$HOME/.local/lib/agentgateway-edge"
+```
+
+The installer refuses to remove directories without its manifest. It does not yet install a system/user service, alter CA trust, create application profiles, or download/update either binary.
+
 ## Test
 
 ```bash
