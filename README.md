@@ -114,6 +114,8 @@ Or route it through the connector:
 cargo run --bin agentgateway-edge-claude -- --path connector
 ```
 
+`--path` is a single mutually exclusive route selector. `--path captured` is recognized but fails before Claude starts while the current platform capability reports transparent capture as unavailable. The launcher never pretends capture is active and never falls back to a native or direct provider path.
+
 The helper selects exactly one path and launches `claude` with `ANTHROPIC_BASE_URL` and a local placeholder `ANTHROPIC_API_KEY`. The native and connector defaults are `http://127.0.0.1:4000` and `http://127.0.0.1:8080`, respectively. Override the selected loopback endpoint and pass Claude arguments after `--`:
 
 ```bash

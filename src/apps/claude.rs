@@ -9,6 +9,7 @@ const CONNECTOR_BASE_URL: &str = "http://127.0.0.1:8080";
 pub enum ClaudePath {
     Native,
     Connector,
+    Captured,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -19,11 +20,15 @@ pub struct ClaudeConfig {
 
 impl ClaudeConfig {
     pub fn standalone(path: ClaudePath, base_url: Option<Url>, api_key: String) -> Result<Self> {
+        if path == ClaudePath::Captured {
+            bail!("Claude captured path is unavailable on this platform build");
+        }
         let base_url = match base_url {
             Some(base_url) => base_url,
             None => Url::parse(match path {
                 ClaudePath::Native => NATIVE_BASE_URL,
                 ClaudePath::Connector => CONNECTOR_BASE_URL,
+                ClaudePath::Captured => unreachable!("captured path was rejected"),
             })?,
         };
 
@@ -91,5 +96,13 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("requires a loopback"));
+    }
+
+    #[test]
+    fn rejects_captured_path_before_launch() {
+        let error = ClaudeConfig::standalone(ClaudePath::Captured, None, "placeholder".to_owned())
+            .unwrap_err();
+
+        assert!(error.to_string().contains("captured path is unavailable"));
     }
 }

@@ -13,7 +13,7 @@ use url::Url;
     about = "Launch Claude Code through a standalone Agent Gateway path"
 )]
 struct Cli {
-    /// Route Claude directly to Agent Gateway or through the connector.
+    /// Route Claude directly, through the connector, or require transparent capture.
     #[arg(long, value_enum)]
     path: ClaudePath,
 

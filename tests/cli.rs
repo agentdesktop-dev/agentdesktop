@@ -61,3 +61,23 @@ fn identity_storage_check_selects_protected_file() {
             .contains("credential storage is ready: file")
     );
 }
+
+#[test]
+fn claude_adapter_rejects_unavailable_capture_before_launch() {
+    let output = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-claude"))
+        .args([
+            "--path",
+            "captured",
+            "--claude-binary",
+            "/path/that/must/not/run",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("captured path is unavailable")
+    );
+}
