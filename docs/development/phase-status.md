@@ -48,6 +48,10 @@ Revisit the initial screen before public packaging. It should answer only what w
 - Agent Gateway DPoP work when its source checkout and contribution boundary are available.
 - Linux local token/process lifecycle integration, real Agent Gateway restart tests, managed Agent Gateway DPoP authentication, and disposable-host tests; do not expose a captured application path before those boundaries work end to end.
 
+## Deferred architecture questions
+
+- Re-evaluate whether `agentgateway-edge-install` can become connector subcommands after the current capture and identity work. A merge is acceptable only if install, atomic upgrade, verification, service control, tamper-safe uninstall, and stable-command ownership retain their current transaction guarantees. In particular, upgrade and uninstall must execute from a verified transient copy or another mechanism that can safely replace or remove the installed connector executable while it is not the active service process. Do not carry both implementations or add an abstraction in anticipation of this decision.
+
 ## Next implementation steps
 
 The next milestone is a Linux capture-session controller inside the main connector, using the existing in-process relay and the narrow privileged setup helper. Do not add another product binary, change the nftables selection mechanism, or add another capture abstraction first. The controller owns one session as a transaction and performs these steps in order:
