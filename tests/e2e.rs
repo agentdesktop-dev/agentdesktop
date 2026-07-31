@@ -71,6 +71,9 @@ async fn fails_closed_when_agent_gateway_is_unavailable() {
     .expect("connector did not start");
 
     assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
+    let traceparent = response.headers()["traceparent"].to_str().unwrap();
+    assert_eq!(traceparent.len(), 55);
+    assert!(traceparent.starts_with("00-"));
     assert_eq!(
         response.headers()["x-agentgateway-edge-error"],
         "upstream-unavailable"

@@ -19,6 +19,7 @@ use tokio::sync::{Semaphore, watch};
 
 use crate::config::DeploymentMode;
 use crate::identity::oauth::ManagedIdentity;
+use crate::telemetry::ensure_trace_context;
 
 const GATEWAY_ERROR: &str = "agent gateway unavailable\n";
 const IDENTITY_ERROR: &str = "managed identity unavailable\n";
@@ -189,43 +190,45 @@ async fn gateway_reachable(upstream: &Url) -> bool {
     TcpStream::connect((host, port)).await.is_ok()
 }
 
-async fn forward(State(state): State<ProxyState>, request: Request<Body>) -> Response<Body> {
-    match forward_request(&state, request).await {
+async fn forward(State(state): State<ProxyState>, mut request: Request<Body>) -> Response<Body> {
+    let trace_context = ensure_trace_context(request.headers_mut());
+    let mut response = match forward_request(&state, request).await {
         Ok(response) => response,
         Err(error) => {
             tracing::warn!(event = "forward_failed", reason = failure_reason(&error));
             if error.downcast_ref::<IdentityError>().is_some() {
-                return Response::builder()
+                Response::builder()
                     .status(StatusCode::UNAUTHORIZED)
                     .header(CONTENT_TYPE, "text/plain; charset=utf-8")
                     .header("x-agentgateway-edge-error", "identity-unavailable")
                     .body(Body::from(IDENTITY_ERROR))
-                    .expect("static error response must be valid");
-            }
-            if error.downcast_ref::<OverloadError>().is_some() {
-                return Response::builder()
+                    .expect("static error response must be valid")
+            } else if error.downcast_ref::<OverloadError>().is_some() {
+                Response::builder()
                     .status(StatusCode::SERVICE_UNAVAILABLE)
                     .header(CONTENT_TYPE, "text/plain; charset=utf-8")
                     .header("x-agentgateway-edge-error", "overloaded")
                     .body(Body::from(OVERLOAD_ERROR))
-                    .expect("static error response must be valid");
-            }
-            if error.downcast_ref::<UpstreamTimeout>().is_some() {
-                return Response::builder()
+                    .expect("static error response must be valid")
+            } else if error.downcast_ref::<UpstreamTimeout>().is_some() {
+                Response::builder()
                     .status(StatusCode::GATEWAY_TIMEOUT)
                     .header(CONTENT_TYPE, "text/plain; charset=utf-8")
                     .header("x-agentgateway-edge-error", "upstream-timeout")
                     .body(Body::from(TIMEOUT_ERROR))
-                    .expect("static error response must be valid");
+                    .expect("static error response must be valid")
+            } else {
+                Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+                    .header("x-agentgateway-edge-error", "upstream-unavailable")
+                    .body(Body::from(GATEWAY_ERROR))
+                    .expect("static error response must be valid")
             }
-            Response::builder()
-                .status(StatusCode::BAD_GATEWAY)
-                .header(CONTENT_TYPE, "text/plain; charset=utf-8")
-                .header("x-agentgateway-edge-error", "upstream-unavailable")
-                .body(Body::from(GATEWAY_ERROR))
-                .expect("static error response must be valid")
         }
-    }
+    };
+    trace_context.apply_to_response(response.headers_mut());
+    response
 }
 
 fn failure_reason(error: &anyhow::Error) -> &'static str {
@@ -691,6 +694,11 @@ mod tests {
             .post(format!("http://{proxy_address}/v1/messages?beta=true"))
             .header("x-api-key", "placeholder")
             .header("x-request-marker", "preserved")
+            .header(
+                "traceparent",
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            )
+            .header("tracestate", "vendor=value")
             .body("claude request")
             .send()
             .await
@@ -698,12 +706,21 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::CREATED);
         assert_eq!(response.headers()["x-upstream-response"], "preserved");
+        assert_eq!(
+            response.headers()["traceparent"],
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        );
         assert_eq!(response.text().await.unwrap(), "gateway response");
         let request = captured.lock().await.take().unwrap();
         assert_eq!(request.method, Method::POST);
         assert_eq!(request.uri, "/gateway-base/v1/messages?beta=true");
         assert_eq!(request.headers["x-api-key"], "placeholder");
         assert_eq!(request.headers["x-request-marker"], "preserved");
+        assert_eq!(
+            request.headers["traceparent"],
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        );
+        assert_eq!(request.headers["tracestate"], "vendor=value");
         assert_eq!(request.body, "claude request");
         shutdown.send(()).unwrap();
     }
