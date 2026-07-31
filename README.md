@@ -7,6 +7,7 @@ The current pre-pre-MVP includes experimental managed browser login, DPoP-authen
 For a local installation, including credential ownership, file permissions, logs, retention, and removal, see [Standalone Operations](docs/deployment/standalone.md).
 
 Verified progress and environment-dependent blockers are tracked in [Phase Status](docs/development/phase-status.md).
+Tested platform behavior is listed in [Platform Compatibility](docs/compatibility/platforms.md).
 
 The managed user/device trust boundary is documented in [Managed Identity Contract v1](docs/architecture/managed-identity-v1.md). Browser PKCE login and connector-instance DPoP proof are implemented; the rest remains a design contract.
 

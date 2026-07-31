@@ -19,6 +19,7 @@ use tokio::sync::{Semaphore, watch};
 
 use crate::config::DeploymentMode;
 use crate::identity::oauth::ManagedIdentity;
+use crate::platform::{PlatformCapabilities, capabilities};
 use crate::telemetry::ensure_trace_context;
 
 const GATEWAY_ERROR: &str = "agent gateway unavailable\n";
@@ -109,6 +110,7 @@ struct StatusResponse {
     connect_timeout_ms: u128,
     request_timeout_ms: u128,
     shutdown_timeout_ms: u128,
+    platform: PlatformCapabilities,
 }
 
 pub async fn serve(
@@ -202,6 +204,7 @@ async fn status(State(state): State<ProxyState>) -> Json<StatusResponse> {
         connect_timeout_ms: state.connect_timeout.as_millis(),
         request_timeout_ms: state.request_timeout.as_millis(),
         shutdown_timeout_ms: state.shutdown_timeout.as_millis(),
+        platform: capabilities(),
     })
 }
 
@@ -951,7 +954,10 @@ mod tests {
         assert_eq!(response["connect_timeout_ms"], 101);
         assert_eq!(response["request_timeout_ms"], 202);
         assert_eq!(response["shutdown_timeout_ms"], 303);
-        assert_eq!(response.as_object().unwrap().len(), 9);
+        assert_eq!(response["platform"]["os"], std::env::consts::OS);
+        assert_eq!(response["platform"]["native_gateway"], true);
+        assert_eq!(response["platform"]["transparent_capture"], false);
+        assert_eq!(response.as_object().unwrap().len(), 10);
         shutdown.send(()).unwrap();
     }
 
