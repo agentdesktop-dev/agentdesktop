@@ -69,10 +69,10 @@ source "qemu" "fedora_workstation" {
   memory           = var.memory
   net_device       = "virtio-net"
   output_directory = "${path.root}/../.artifacts/base"
-  shutdown_command = "echo agentedge | sudo -S systemctl poweroff"
-  ssh_password     = "agentedge"
+  shutdown_command = "echo agentdesktop | sudo -S systemctl poweroff"
+  ssh_password     = "agentdesktop"
   ssh_timeout      = "45m"
-  ssh_username     = "agentedge"
+  ssh_username     = "agentdesktop"
   vm_name          = "fedora-workstation-base.qcow2"
 }
 

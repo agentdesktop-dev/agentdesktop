@@ -4,12 +4,12 @@ lang en_US.UTF-8
 keyboard us
 timezone Etc/UTC --utc
 
-network --bootproto=dhcp --device=link --activate --hostname=agentedge-vm
+network --bootproto=dhcp --device=link --activate --hostname=agentdesktop-vm
 url --mirrorlist="https://mirrors.fedoraproject.org/mirrorlist?repo=fedora-44&arch=x86_64"
 repo --name=updates --mirrorlist="https://mirrors.fedoraproject.org/mirrorlist?repo=updates-released-f44&arch=x86_64"
 
 rootpw --lock
-user --name=agentedge --groups=wheel --password=agentedge --plaintext
+user --name=agentdesktop --groups=wheel --password=agentdesktop --plaintext
 firewall --enabled --service=ssh
 selinux --enforcing
 services --enabled=sshd,qemu-guest-agent
@@ -29,7 +29,7 @@ qemu-guest-agent
 %end
 
 %post
-cat > /etc/ssh/sshd_config.d/90-agentedge-vm.conf <<'EOF'
+cat > /etc/ssh/sshd_config.d/90-agentdesktop-vm.conf <<'EOF'
 PasswordAuthentication yes
 PermitRootLogin no
 EOF
@@ -39,7 +39,7 @@ cat >> /etc/hosts <<'EOF'
 10.0.2.100 host.test
 EOF
 
-echo 'agentedge ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/agentedge
-chmod 0440 /etc/sudoers.d/agentedge
+echo 'agentdesktop ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/agentdesktop
+chmod 0440 /etc/sudoers.d/agentdesktop
 systemctl set-default graphical.target
 %end

@@ -3,7 +3,7 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 gateway=${AGENTGATEWAY_BINARY:-$root/../agentgateway/target/debug/agentgateway}
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/agentgateway-edge-hbone.XXXXXX")
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/agentdesktop-hbone.XXXXXX")
 gateway_pid=
 relay_pid=
 target_pid=
@@ -38,13 +38,13 @@ test -x "$gateway" || {
 }
 
 cd "$root"
-cargo build --quiet --bin agentgateway-edge-connector
+cargo build --quiet --bin agentdesktop
 
 python3 -m http.server 18080 --bind 127.0.0.1 >"$tmp/target.log" 2>&1 &
 target_pid=$!
 wait_tcp 18080 "$target_pid"
 
-AGENTGATEWAY_EDGE_CAPTURE_TOKEN=$token \
+AGENTDESKTOP_CAPTURE_TOKEN=$token \
   "$gateway" -f container/agentgateway-hbone-smoke.yaml >"$tmp/gateway.log" 2>&1 &
 gateway_pid=$!
 wait_tcp 15008 "$gateway_pid" || {
@@ -54,7 +54,7 @@ wait_tcp 15008 "$gateway_pid" || {
 
 printf wrong-token >"$tmp/token"
 chmod 0600 "$tmp/token"
-target/debug/agentgateway-edge-connector capture \
+target/debug/agentdesktop capture \
   --listen 127.0.0.1:15001 \
   --hbone-endpoint 127.0.0.1:15008 \
   --token-file "$tmp/token" >"$tmp/relay.log" 2>&1 &
@@ -73,7 +73,7 @@ wait "$relay_pid" 2>/dev/null || true
 relay_pid=
 
 printf %s "$token" >"$tmp/token"
-target/debug/agentgateway-edge-connector capture \
+target/debug/agentdesktop capture \
   --listen 127.0.0.1:15001 \
   --hbone-endpoint 127.0.0.1:15008 \
   --token-file "$tmp/token" >"$tmp/relay.log" 2>&1 &

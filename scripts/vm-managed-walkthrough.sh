@@ -7,7 +7,7 @@ runtime=$state/runtime
 vm=$root/tests/vm/vm.sh
 issuer=https://host.test:18080/
 gateway=https://host.test:4000/
-install_root=/home/agentedge/.local/lib/agentgateway-edge
+install_root=/home/agentdesktop/.local/lib/agentdesktop
 
 usage() {
   cat <<'EOF'
@@ -65,7 +65,7 @@ wait_for_url() {
 create_certificates() {
   mkdir -p "$runtime"
   openssl req -x509 -newkey rsa:2048 -nodes \
-    -subj '/CN=Agent Gateway Edge Walkthrough CA' \
+    -subj '/CN=Agent Desktop Walkthrough CA' \
     -keyout "$runtime/ca.key" \
     -out "$runtime/ca.crt" \
     -days 2 >/dev/null 2>&1
@@ -96,19 +96,19 @@ start_services() {
     MOCK_ANTHROPIC_PORT=18081 \
     node "$root/container/mock-anthropic.mjs"
   start_service authority env \
-    AGENTGATEWAY_EDGE_FAKE_ISSUER="$issuer" \
-    AGENTGATEWAY_EDGE_FAKE_LISTEN_HOST=127.0.0.1 \
-    AGENTGATEWAY_EDGE_FAKE_PORT=18080 \
-    AGENTGATEWAY_EDGE_FAKE_TLS_KEY="$runtime/host.test.key" \
-    AGENTGATEWAY_EDGE_FAKE_TLS_CERTIFICATE="$runtime/host.test.crt" \
-    AGENTGATEWAY_EDGE_FAKE_AUTO_APPROVE=1 \
+    AGENTDESKTOP_FAKE_ISSUER="$issuer" \
+    AGENTDESKTOP_FAKE_LISTEN_HOST=127.0.0.1 \
+    AGENTDESKTOP_FAKE_PORT=18080 \
+    AGENTDESKTOP_FAKE_TLS_KEY="$runtime/host.test.key" \
+    AGENTDESKTOP_FAKE_TLS_CERTIFICATE="$runtime/host.test.crt" \
+    AGENTDESKTOP_FAKE_AUTO_APPROVE=1 \
     node "$root/tests/fixtures/fake-authorization-server.mjs"
   start_service gateway env \
-    AGENTGATEWAY_EDGE_FAKE_LISTEN_HOST=127.0.0.1 \
-    AGENTGATEWAY_EDGE_FAKE_PORT=4000 \
-    AGENTGATEWAY_EDGE_FAKE_TLS_KEY="$runtime/host.test.key" \
-    AGENTGATEWAY_EDGE_FAKE_TLS_CERTIFICATE="$runtime/host.test.crt" \
-    AGENTGATEWAY_EDGE_FAKE_PROVIDER=http://127.0.0.1:18081/ \
+    AGENTDESKTOP_FAKE_LISTEN_HOST=127.0.0.1 \
+    AGENTDESKTOP_FAKE_PORT=4000 \
+    AGENTDESKTOP_FAKE_TLS_KEY="$runtime/host.test.key" \
+    AGENTDESKTOP_FAKE_TLS_CERTIFICATE="$runtime/host.test.crt" \
+    AGENTDESKTOP_FAKE_PROVIDER=http://127.0.0.1:18081/ \
     node "$root/tests/fixtures/fake-managed-gateway.mjs"
 
   wait_for_url curl --silent --fail \
@@ -146,8 +146,8 @@ write_organization() {
   },
   "identity": {
     "issuer": "$issuer",
-    "client_id": "agentgateway-edge-test",
-    "audience": "agentgateway-edge",
+    "client_id": "agentdesktop-test",
+    "audience": "agentdesktop",
     "scope": "agentgateway.invoke"
   },
   "gateway": {
@@ -166,7 +166,7 @@ prepare_vm() {
     printf 'VM base does not contain Claude Code; rebuild it with tests/vm/vm.sh build\n' >&2
     exit 1
   }
-  "$vm" ssh "test ! -e '$install_root' && test ! -e /home/agentedge/.config/agentgateway-edge-connector/identity" || {
+  "$vm" ssh "test ! -e '$install_root' && test ! -e /home/agentdesktop/.config/agentdesktop/identity" || {
     printf 'VM contains prior connector state; use prepare --reset for a clean walkthrough\n' >&2
     exit 1
   }
@@ -174,12 +174,12 @@ prepare_vm() {
   write_organization
   "$root/scripts/build-managed-installer.sh" \
     "$state/organization.json" \
-    "$state/agentgateway-edge-installer"
-  "$vm" ssh install -d -m 0755 /home/agentedge/Downloads
-  "$vm" copy "$runtime/ca.crt" /home/agentedge/Downloads/agentgateway-edge-walkthrough-ca.crt
-  "$vm" copy "$state/agentgateway-edge-installer" /home/agentedge/Downloads/agentgateway-edge-installer
+    "$state/agentdesktop-installer"
+  "$vm" ssh install -d -m 0755 /home/agentdesktop/Downloads
+  "$vm" copy "$runtime/ca.crt" /home/agentdesktop/Downloads/agentdesktop-walkthrough-ca.crt
+  "$vm" copy "$state/agentdesktop-installer" /home/agentdesktop/Downloads/agentdesktop-installer
   "$vm" ssh \
-    "sudo install -m 0644 /home/agentedge/Downloads/agentgateway-edge-walkthrough-ca.crt /etc/pki/ca-trust/source/anchors/agentgateway-edge-walkthrough-ca.crt && sudo update-ca-trust && chmod +x /home/agentedge/Downloads/agentgateway-edge-installer && /home/agentedge/Downloads/agentgateway-edge-installer install --yes"
+    "sudo install -m 0644 /home/agentdesktop/Downloads/agentdesktop-walkthrough-ca.crt /etc/pki/ca-trust/source/anchors/agentdesktop-walkthrough-ca.crt && sudo update-ca-trust && chmod +x /home/agentdesktop/Downloads/agentdesktop-installer && /home/agentdesktop/Downloads/agentdesktop-installer install --yes"
 
   cat <<'EOF'
 
@@ -188,7 +188,7 @@ Managed walkthrough is ready.
 In the Fedora desktop:
   1. Open Terminal.
   2. Run:
-      agentgateway-edge connect-agents
+      agentdesktop connect-agents
   3. Complete the browser sign-in and return to Terminal.
   4. Approve the separate Claude Code settings prompt.
   5. Launch `claude` normally and ask it to reply with exactly SMOKE_OK.

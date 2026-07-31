@@ -7,8 +7,8 @@ use std::process::{Command as ProcessCommand, ExitCode, Output};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use agentgateway_edge_connector::customization::read_customized_bootstrap;
-use agentgateway_edge_connector::organization::OrganizationBootstrap;
+use agentdesktop::customization::read_customized_bootstrap;
+use agentdesktop::organization::OrganizationBootstrap;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use sha2::{Digest, Sha256};
@@ -22,10 +22,7 @@ struct EmbeddedPayload {
 include!(concat!(env!("OUT_DIR"), "/embedded_payload.rs"));
 
 #[derive(Debug, Parser)]
-#[command(
-    version,
-    about = "Install the self-contained Agent Gateway Edge bundle"
-)]
+#[command(version, about = "Install the self-contained Agent Desktop bundle")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -58,13 +55,13 @@ struct InstallArgs {
     connect_agents: bool,
 }
 
-const SUPPORT_URL: &str = "https://github.com/solo-io/agent-desktop/issues/new";
+const SUPPORT_URL: &str = "https://github.com/agentdesktop-dev/agentdesktop/issues/new";
 
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("\nAgent Gateway Edge setup could not finish.");
+            eprintln!("\nAgent Desktop setup could not finish.");
             match write_support_report(&error) {
                 Ok(path) => {
                     eprintln!("\nGet help:");
@@ -136,7 +133,7 @@ fn install_standalone(args: InstallArgs) -> Result<()> {
     let parent = root.parent().context("install root has no parent")?;
     fs::create_dir_all(parent)?;
     let payload = tempfile::Builder::new()
-        .prefix("agentgateway-edge-installer-")
+        .prefix("agentdesktop-installer-")
         .tempdir_in(parent)
         .context("failed to create temporary extraction directory")?;
     extract_payload(payload.path())?;
@@ -210,11 +207,11 @@ fn install_standalone(args: InstallArgs) -> Result<()> {
     if args.no_start {
         println!(
             "\nStart later with:\n  {} service enable --root {}",
-            root.join("bin/agentgateway-edge-install").display(),
+            root.join("bin/agentdesktop-install").display(),
             root.display()
         );
     } else {
-        println!("\nAgent Gateway Edge is ready.");
+        println!("\nAgent Desktop is ready.");
         if args.connect_agents {
             run_agent_setup(payload.path(), true)?;
         } else if args.yes {
@@ -222,7 +219,7 @@ fn install_standalone(args: InstallArgs) -> Result<()> {
         } else {
             run_agent_setup(payload.path(), false)?;
         }
-        println!("\nUpdate AI agent connections later with:\n  agentgateway-edge connect-agents");
+        println!("\nUpdate AI agent connections later with:\n  agentdesktop connect-agents");
         print_command_path_warning(&command_link);
     }
     Ok(())
@@ -247,7 +244,7 @@ fn install_managed(args: InstallArgs) -> Result<()> {
     let parent = root.parent().context("install root has no parent")?;
     fs::create_dir_all(parent)?;
     let payload = tempfile::Builder::new()
-        .prefix("agentgateway-edge-installer-")
+        .prefix("agentdesktop-installer-")
         .tempdir_in(parent)
         .context("failed to create temporary extraction directory")?;
     extract_payload(payload.path())?;
@@ -284,14 +281,14 @@ fn install_managed(args: InstallArgs) -> Result<()> {
     println!("  Files:        {}", root.display());
     println!("  Service:      installed, awaiting user sign-in");
     println!("\nNo AI agent settings were changed.");
-    println!("To sign in and connect your AI agents, run:\n  agentgateway-edge connect-agents");
+    println!("To sign in and connect your AI agents, run:\n  agentdesktop connect-agents");
     print_command_path_warning(&command_link);
     Ok(())
 }
 
 fn default_command_link() -> Result<PathBuf> {
     let home = env::var_os("HOME").context("HOME is not set")?;
-    Ok(PathBuf::from(home).join(".local/bin/agentgateway-edge"))
+    Ok(PathBuf::from(home).join(".local/bin/agentdesktop"))
 }
 
 fn print_command_path_warning(command_link: &Path) {
@@ -320,11 +317,11 @@ fn load_organization(path: Option<&Path>) -> Result<OrganizationBootstrap> {
 
 fn print_managed_summary(root: &Path, bootstrap: &OrganizationBootstrap) {
     println!(
-        "Agent Gateway Edge for {}\n",
+        "Agent Desktop for {}\n",
         bootstrap.organization.display_name
     );
     println!("This installs for the current user:");
-    println!("  - Edge connector");
+    println!("  - Agent Desktop");
     println!("\nLocation:     {}", root.display());
     println!("Agent Gateway: {}", bootstrap.gateway.url);
     println!("Service:      installed but not started");
@@ -350,12 +347,7 @@ fn write_support_report(error: &anyhow::Error) -> Result<PathBuf> {
             "Service status",
             command_output(
                 "systemctl",
-                &[
-                    "--user",
-                    "status",
-                    "--no-pager",
-                    "agentgateway-edge.service",
-                ],
+                &["--user", "status", "--no-pager", "agentdesktop.service"],
             ),
         ),
         (
@@ -364,7 +356,7 @@ fn write_support_report(error: &anyhow::Error) -> Result<PathBuf> {
                 "journalctl",
                 &[
                     "--user-unit",
-                    "agentgateway-edge.service",
+                    "agentdesktop.service",
                     "--no-pager",
                     "--lines=200",
                 ],
@@ -382,7 +374,7 @@ fn support_report_path() -> Result<PathBuf> {
         let home = env::var_os("HOME").context("HOME is not set")?;
         PathBuf::from(home).join(".local/state")
     };
-    Ok(state.join("agent-desktop/install-support.txt"))
+    Ok(state.join("agentdesktop/install-support.txt"))
 }
 
 fn command_output(command: &str, args: &[&str]) -> String {
@@ -421,7 +413,7 @@ fn write_support_report_to(
         .open(path)
         .with_context(|| format!("failed to create support report {}", path.display()))?;
     set_mode(path, 0o600)?;
-    writeln!(report, "Agent Gateway Edge installer support report")?;
+    writeln!(report, "Agent Desktop installer support report")?;
     writeln!(report, "Installer version: {}", env!("CARGO_PKG_VERSION"))?;
     writeln!(report, "\nInstallation error:\n{error:#}")?;
     for (heading, content) in diagnostics {
@@ -436,7 +428,7 @@ fn health_check(address: SocketAddr) -> bool {
         stream.set_read_timeout(Some(Duration::from_secs(1)))?;
         stream.set_write_timeout(Some(Duration::from_secs(1)))?;
         stream.write_all(
-            b"GET /_agentgateway/healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            b"GET /_agentdesktop/healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
         )?;
         let mut response = String::new();
         stream.read_to_string(&mut response)?;
@@ -447,7 +439,7 @@ fn health_check(address: SocketAddr) -> bool {
 
 fn default_root() -> Result<PathBuf> {
     let home = env::var_os("HOME").context("HOME is not set; pass --root explicitly")?;
-    Ok(PathBuf::from(home).join(".local/lib/agentgateway-edge"))
+    Ok(PathBuf::from(home).join(".local/lib/agentdesktop"))
 }
 
 fn default_config() -> Result<PathBuf> {
@@ -459,10 +451,10 @@ fn default_config() -> Result<PathBuf> {
 }
 
 fn print_summary(root: &Path, config: &Path, start: bool) {
-    println!("Agent Gateway Edge\n");
+    println!("Agent Desktop\n");
     println!("This installs for the current user:");
     println!("  - Agent Gateway");
-    println!("  - Edge connector");
+    println!("  - Agent Desktop");
     println!("\nLocation: {}", root.display());
     println!("Config:   {}", config.display());
     println!(

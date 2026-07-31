@@ -1,4 +1,4 @@
-# Agent Gateway Edge Connector
+# Agent Desktop
 
 ## Purpose
 

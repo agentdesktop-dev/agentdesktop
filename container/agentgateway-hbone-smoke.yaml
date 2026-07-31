@@ -22,6 +22,6 @@ binds:
       policies:
         authorization:
           rules:
-          - 'source.connectHeaders["x-agentgateway-edge-token"] == "${AGENTGATEWAY_EDGE_CAPTURE_TOKEN}"'
+          - 'source.connectHeaders["x-agentdesktop-token"] == "${AGENTDESKTOP_CAPTURE_TOKEN}"'
       backends:
       - dynamic: {}

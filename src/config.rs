@@ -14,49 +14,41 @@ pub enum DeploymentMode {
 #[derive(Args, Clone, Debug)]
 pub struct Config {
     /// Connector deployment mode.
-    #[arg(long, env = "AGENTGATEWAY_EDGE_MODE")]
+    #[arg(long, env = "AGENTDESKTOP_MODE")]
     pub mode: DeploymentMode,
 
     /// Loopback address on which to accept Claude traffic.
-    #[arg(
-        long,
-        env = "AGENTGATEWAY_EDGE_LISTEN",
-        default_value = "127.0.0.1:8080"
-    )]
+    #[arg(long, env = "AGENTDESKTOP_LISTEN", default_value = "127.0.0.1:8080")]
     pub listen: SocketAddr,
 
     /// Base URL of the Agent Gateway upstream.
-    #[arg(long, env = "AGENTGATEWAY_EDGE_UPSTREAM")]
+    #[arg(long, env = "AGENTDESKTOP_UPSTREAM")]
     pub upstream: Url,
 
     /// Agent Gateway executable to manage in standalone mode.
-    #[arg(long, env = "AGENTGATEWAY_EDGE_GATEWAY_BINARY")]
+    #[arg(long, env = "AGENTDESKTOP_GATEWAY_BINARY")]
     pub gateway_binary: Option<PathBuf>,
 
     /// Agent Gateway configuration passed to the managed executable.
-    #[arg(long, env = "AGENTGATEWAY_EDGE_GATEWAY_CONFIG")]
+    #[arg(long, env = "AGENTDESKTOP_GATEWAY_CONFIG")]
     pub gateway_config: Option<PathBuf>,
 
     /// Authorization-server issuer for DPoP-authenticated managed forwarding.
-    #[arg(long, env = "AGENTGATEWAY_EDGE_IDENTITY_ISSUER")]
+    #[arg(long, env = "AGENTDESKTOP_IDENTITY_ISSUER")]
     pub identity_issuer: Option<Url>,
 
     /// Directory containing the persisted managed identity backend selection.
-    #[arg(long, env = "AGENTGATEWAY_EDGE_IDENTITY_DIR")]
+    #[arg(long, env = "AGENTDESKTOP_IDENTITY_DIR")]
     pub identity_dir: Option<PathBuf>,
 
     /// Maximum time to establish an upstream connection.
-    #[arg(
-        long,
-        env = "AGENTGATEWAY_EDGE_CONNECT_TIMEOUT_MS",
-        default_value_t = 5_000
-    )]
+    #[arg(long, env = "AGENTDESKTOP_CONNECT_TIMEOUT_MS", default_value_t = 5_000)]
     pub connect_timeout_ms: u64,
 
     /// Maximum time to receive upstream response headers.
     #[arg(
         long,
-        env = "AGENTGATEWAY_EDGE_REQUEST_TIMEOUT_MS",
+        env = "AGENTDESKTOP_REQUEST_TIMEOUT_MS",
         default_value_t = 30_000
     )]
     pub request_timeout_ms: u64,
@@ -64,13 +56,13 @@ pub struct Config {
     /// Maximum time to drain requests after shutdown begins.
     #[arg(
         long,
-        env = "AGENTGATEWAY_EDGE_SHUTDOWN_TIMEOUT_MS",
+        env = "AGENTDESKTOP_SHUTDOWN_TIMEOUT_MS",
         default_value_t = 10_000
     )]
     pub shutdown_timeout_ms: u64,
 
     /// Maximum number of requests forwarding or streaming concurrently.
-    #[arg(long, env = "AGENTGATEWAY_EDGE_MAX_IN_FLIGHT", default_value_t = 128)]
+    #[arg(long, env = "AGENTDESKTOP_MAX_IN_FLIGHT", default_value_t = 128)]
     pub max_in_flight: usize,
 }
 

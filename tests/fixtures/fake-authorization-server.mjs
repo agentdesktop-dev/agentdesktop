@@ -11,8 +11,8 @@ import { createServer as createHttpServer } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import { fileURLToPath } from "node:url";
 
-const clientId = "agentgateway-edge-test";
-const audience = "agentgateway-edge";
+const clientId = "agentdesktop-test";
+const audience = "agentdesktop";
 const scope = "agentgateway.invoke";
 const subject = "test-user";
 
@@ -326,8 +326,8 @@ export const fakeAuthorizationInternals = {
 };
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const tlsKey = process.env.AGENTGATEWAY_EDGE_FAKE_TLS_KEY;
-  const tlsCertificate = process.env.AGENTGATEWAY_EDGE_FAKE_TLS_CERTIFICATE;
+  const tlsKey = process.env.AGENTDESKTOP_FAKE_TLS_KEY;
+  const tlsCertificate = process.env.AGENTDESKTOP_FAKE_TLS_CERTIFICATE;
   if (Boolean(tlsKey) !== Boolean(tlsCertificate)) {
     throw new Error("both fake TLS key and certificate paths are required");
   }
@@ -338,11 +338,11 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
       }
     : undefined;
   const server = await startFakeAuthorizationServer({
-    issuer: process.env.AGENTGATEWAY_EDGE_FAKE_ISSUER,
-    listenHost: process.env.AGENTGATEWAY_EDGE_FAKE_LISTEN_HOST ?? "127.0.0.1",
-    port: Number(process.env.AGENTGATEWAY_EDGE_FAKE_PORT ?? "0"),
+    issuer: process.env.AGENTDESKTOP_FAKE_ISSUER,
+    listenHost: process.env.AGENTDESKTOP_FAKE_LISTEN_HOST ?? "127.0.0.1",
+    port: Number(process.env.AGENTDESKTOP_FAKE_PORT ?? "0"),
     tls,
-    autoApprove: process.env.AGENTGATEWAY_EDGE_FAKE_AUTO_APPROVE === "1",
+    autoApprove: process.env.AGENTDESKTOP_FAKE_AUTO_APPROVE === "1",
   });
   console.log(server.issuer);
   const close = async () => {

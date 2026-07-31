@@ -2,13 +2,13 @@ import { readFile } from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
 
-const listenHost = process.env.AGENTGATEWAY_EDGE_FAKE_LISTEN_HOST ?? "127.0.0.1";
-const listenPort = Number(process.env.AGENTGATEWAY_EDGE_FAKE_PORT ?? "4000");
+const listenHost = process.env.AGENTDESKTOP_FAKE_LISTEN_HOST ?? "127.0.0.1";
+const listenPort = Number(process.env.AGENTDESKTOP_FAKE_PORT ?? "4000");
 const provider = new URL(
-  process.env.AGENTGATEWAY_EDGE_FAKE_PROVIDER ?? "http://127.0.0.1:8000/",
+  process.env.AGENTDESKTOP_FAKE_PROVIDER ?? "http://127.0.0.1:8000/",
 );
-const keyPath = process.env.AGENTGATEWAY_EDGE_FAKE_TLS_KEY;
-const certificatePath = process.env.AGENTGATEWAY_EDGE_FAKE_TLS_CERTIFICATE;
+const keyPath = process.env.AGENTDESKTOP_FAKE_TLS_KEY;
+const certificatePath = process.env.AGENTDESKTOP_FAKE_TLS_CERTIFICATE;
 
 if (!keyPath || !certificatePath) {
   throw new Error("fake managed gateway requires TLS key and certificate paths");

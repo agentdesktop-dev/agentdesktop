@@ -6,7 +6,7 @@ use std::path::{Component, Path};
 use anyhow::{Result, bail};
 use tokio::net::TcpStream;
 
-pub const CAPTURE_TABLE: &str = "agentgateway_edge";
+pub const CAPTURE_TABLE: &str = "agentdesktop";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CaptureSpec {
@@ -58,7 +58,7 @@ impl CaptureSpec {
             .join(" ");
         let mut ruleset = format!(
             "table inet {CAPTURE_TABLE} {{\n\
-             \tcomment \"Agent Gateway Edge Connector ephemeral capture\"\n"
+             \tcomment \"Agent Desktop ephemeral capture\"\n"
         );
         writeln!(
             ruleset,

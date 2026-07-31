@@ -1,9 +1,9 @@
 use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, Stdio};
 
-use agentgateway_edge_connector::identity::dpop::decode_jwt_claims;
-use agentgateway_edge_connector::identity::oauth::{LoginConfig, ManagedIdentity, load_session};
-use agentgateway_edge_connector::identity::storage::CredentialStore;
+use agentdesktop::identity::dpop::decode_jwt_claims;
+use agentdesktop::identity::oauth::{LoginConfig, ManagedIdentity, load_session};
+use agentdesktop::identity::storage::CredentialStore;
 use url::Url;
 
 struct FakeIssuer(Child);
@@ -33,16 +33,16 @@ async fn browser_pkce_login_persists_dpop_bound_session() {
 
     let temporary = tempfile::tempdir().unwrap();
     let storage_dir = temporary.path().join("identity");
-    let mut login = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-connector"))
+    let mut login = Command::new(env!("CARGO_BIN_EXE_agentdesktop"))
         .args([
             "identity",
             "login",
             "--issuer",
             issuer_url,
             "--client-id",
-            "agentgateway-edge-test",
+            "agentdesktop-test",
             "--audience",
-            "agentgateway-edge",
+            "agentdesktop",
             "--scope",
             "agentgateway.invoke",
             "--gateway-origin",
@@ -84,8 +84,8 @@ async fn browser_pkce_login_persists_dpop_bound_session() {
 
     let config = LoginConfig {
         issuer: Url::parse(issuer_url).unwrap(),
-        client_id: "agentgateway-edge-test".into(),
-        audience: "agentgateway-edge".into(),
+        client_id: "agentdesktop-test".into(),
+        audience: "agentdesktop".into(),
         scope: "agentgateway.invoke".into(),
         gateway_origin: Url::parse("https://gateway.example").unwrap(),
     };
@@ -114,7 +114,7 @@ async fn browser_pkce_login_persists_dpop_bound_session() {
     assert_eq!(restored.generation, original_generation + 1);
     assert!(!restored.is_expired().unwrap());
 
-    let logout = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-connector"))
+    let logout = Command::new(env!("CARGO_BIN_EXE_agentdesktop"))
         .args([
             "identity",
             "logout",

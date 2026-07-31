@@ -58,7 +58,7 @@ Credential storage is selected during setup:
 | `secret-service` | Require Linux Secret Service and fail setup when its preflight fails. This is strict mode. |
 | `file` | Explicitly use the protected file store. |
 
-The configured value is exposed as `--credential-storage auto|secret-service|file` and `AGENTGATEWAY_EDGE_CREDENTIAL_STORAGE`. Setup persists the selected backend. Runtime never silently changes from Secret Service to file storage.
+The configured value is exposed as `--credential-storage auto|secret-service|file` and `AGENTDESKTOP_CREDENTIAL_STORAGE`. Setup persists the selected backend. Runtime never silently changes from Secret Service to file storage.
 
 The file store uses an owner-only `0700` directory and owner-only `0600` files, performs atomic replacement without following symbolic links, verifies ownership and permissions before every read, and refuses unsafe paths. Records are scoped by operating-system user, exact issuer, and Agent Gateway authority. File storage relies on operating-system permissions; it does not protect against root or compromise of the same user account.
 
@@ -182,7 +182,7 @@ The response body uses Agent Gateway's JSON error envelope:
 }
 ```
 
-The connector translates these into stable application-facing errors and may add `x-agentgateway-edge-error` with the same code. It must not expose token contents, proof details, policy expressions, issuer internals, or revocation-service responses.
+The connector translates these into stable application-facing errors and may add `x-agentdesktop-error` with the same code. It must not expose token contents, proof details, policy expressions, issuer internals, or revocation-service responses.
 
 Connectivity to the authorization server is not required for every request. If a token expires and refresh cannot complete, new requests fail closed locally. Existing requests are not replayed automatically.
 

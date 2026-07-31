@@ -3,11 +3,11 @@
   "organization": {
     "id": "example",
     "display_name": "Example Organization",
-    "support_url": "https://support.example.com/agent-desktop"
+    "support_url": "https://support.example.com/agentdesktop"
   },
   "identity": {
     "issuer": "https://login.example.com/",
-    "client_id": "agent-desktop",
+    "client_id": "agentdesktop",
     "audience": "https://gateway.example.com",
     "scope": "agentgateway.invoke"
   },

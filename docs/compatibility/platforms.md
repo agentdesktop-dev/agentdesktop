@@ -16,7 +16,7 @@ Last updated: 2026-07-30
 | Transactional bundle installer | Supported | Build not validated | Build not validated |
 | User service integration | Generated systemd unit | Unavailable | Unavailable |
 
-The local `/_agentgateway/status` response exposes the current binary's capability flags. Application launch and native HTTP forwarding are unprivileged. Transparent capture and trust installation remain false until their platform implementations satisfy process identity, fail-closed routing, scoped removal, and privileged integration tests.
+The local `/_agentdesktop/status` response exposes the current binary's capability flags. Application launch and native HTTP forwarding are unprivileged. Transparent capture and trust installation remain false until their platform implementations satisfy process identity, fail-closed routing, scoped removal, and privileged integration tests.
 
 ## Required validation environments
 

@@ -2,8 +2,8 @@
 set -euo pipefail
 
 readonly root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly connector_container="agentgateway-edge-connector"
-readonly claude_image="localhost/agentgateway-edge-claude:2.1.212"
+readonly connector_container="agentdesktop"
+readonly claude_image="localhost/agentdesktop-claude:2.1.212"
 readonly path="${1:-connector}"
 
 source "$root_dir/scripts/container-engine.sh"

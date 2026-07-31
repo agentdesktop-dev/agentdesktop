@@ -35,7 +35,7 @@ Decisions validated in the initial Fedora walkthrough:
 - Starting the product immediately and at login is the correct default.
 - Readiness verification belongs to the installer. Success says the product is ready; failure gives the user an issue URL and an owner-only support report to attach.
 - Connecting an installed AI agent requires consent separate from installation. Interactive setup asks after readiness; unattended `--yes` leaves agent settings unchanged unless the script also passes `--connect-agents`.
-- Users invoke the manifest-owned `agentgateway-edge` command through the conventional `~/.local/bin` directory. The installer does not expose private helpers or edit shell startup files, refuses command-path conflicts, and verifies the link before service operations, upgrades, or removal.
+- Users invoke the manifest-owned `agentdesktop` command through the conventional `~/.local/bin` directory. The installer does not expose private helpers or edit shell startup files, refuses command-path conflicts, and verifies the link before service operations, upgrades, or removal.
 - The current component, destination, and configuration details are understandable, but users may not care about them and may find them distracting. Keep them during development, then simplify the initial screen after the complete first-agent journey establishes which choices a user actually needs to make.
 - The current network warning is too technical for the target user. Do not try to teach listener exposure in installer copy. Remove the need for the warning by making Agent Gateway use an address-capable loopback listener or equivalent local-only transport, then replace it with no warning unless the user must make a concrete security choice.
 
@@ -50,7 +50,7 @@ Revisit the initial screen before public packaging. It should answer only what w
 
 ## Deferred architecture questions
 
-- Re-evaluate whether `agentgateway-edge-install` can become connector subcommands after the current capture and identity work. A merge is acceptable only if install, atomic upgrade, verification, service control, tamper-safe uninstall, and stable-command ownership retain their current transaction guarantees. In particular, upgrade and uninstall must execute from a verified transient copy or another mechanism that can safely replace or remove the installed connector executable while it is not the active service process. Do not carry both implementations or add an abstraction in anticipation of this decision.
+- Re-evaluate whether `agentdesktop-install` can become connector subcommands after the current capture and identity work. A merge is acceptable only if install, atomic upgrade, verification, service control, tamper-safe uninstall, and stable-command ownership retain their current transaction guarantees. In particular, upgrade and uninstall must execute from a verified transient copy or another mechanism that can safely replace or remove the installed connector executable while it is not the active service process. Do not carry both implementations or add an abstraction in anticipation of this decision.
 
 ## Next implementation steps
 

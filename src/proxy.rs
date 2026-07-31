@@ -201,8 +201,8 @@ pub async fn serve_with_identity(
         metrics: Arc::new(OperationalMetrics::default()),
     };
     let app = Router::new()
-        .route("/_agentgateway/healthz", get(health))
-        .route("/_agentgateway/status", get(status))
+        .route("/_agentdesktop/healthz", get(health))
+        .route("/_agentdesktop/status", get(status))
         .fallback(any(forward))
         .with_state(state);
 
@@ -316,7 +316,7 @@ async fn forward(State(state): State<ProxyState>, mut request: Request<Body>) ->
                     Response::builder()
                         .status(StatusCode::UNAUTHORIZED)
                         .header(CONTENT_TYPE, "text/plain; charset=utf-8")
-                        .header("x-agentgateway-edge-error", "identity-unavailable")
+                        .header("x-agentdesktop-error", "identity-unavailable")
                         .body(Body::from(IDENTITY_ERROR))
                         .expect("static error response must be valid")
                 } else if error.downcast_ref::<OverloadError>().is_some() {
@@ -327,7 +327,7 @@ async fn forward(State(state): State<ProxyState>, mut request: Request<Body>) ->
                     Response::builder()
                         .status(StatusCode::SERVICE_UNAVAILABLE)
                         .header(CONTENT_TYPE, "text/plain; charset=utf-8")
-                        .header("x-agentgateway-edge-error", "overloaded")
+                        .header("x-agentdesktop-error", "overloaded")
                         .body(Body::from(OVERLOAD_ERROR))
                         .expect("static error response must be valid")
                 } else if error.downcast_ref::<UpstreamTimeout>().is_some() {
@@ -338,7 +338,7 @@ async fn forward(State(state): State<ProxyState>, mut request: Request<Body>) ->
                     Response::builder()
                         .status(StatusCode::GATEWAY_TIMEOUT)
                         .header(CONTENT_TYPE, "text/plain; charset=utf-8")
-                        .header("x-agentgateway-edge-error", "upstream-timeout")
+                        .header("x-agentdesktop-error", "upstream-timeout")
                         .body(Body::from(TIMEOUT_ERROR))
                         .expect("static error response must be valid")
                 } else {
@@ -349,7 +349,7 @@ async fn forward(State(state): State<ProxyState>, mut request: Request<Body>) ->
                     Response::builder()
                         .status(StatusCode::BAD_GATEWAY)
                         .header(CONTENT_TYPE, "text/plain; charset=utf-8")
-                        .header("x-agentgateway-edge-error", "upstream-unavailable")
+                        .header("x-agentdesktop-error", "upstream-unavailable")
                         .body(Body::from(GATEWAY_ERROR))
                         .expect("static error response must be valid")
                 }
@@ -592,7 +592,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(second.headers()["x-agentgateway-edge-error"], "overloaded");
+        assert_eq!(second.headers()["x-agentdesktop-error"], "overloaded");
         release_tx.send(()).unwrap();
         drop(first);
         shutdown.send(()).unwrap();
@@ -625,7 +625,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
         assert_eq!(
-            response.headers()["x-agentgateway-edge-error"],
+            response.headers()["x-agentdesktop-error"],
             "upstream-timeout"
         );
         shutdown.send(()).unwrap();
@@ -667,7 +667,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
         assert_eq!(
-            response.headers()["x-agentgateway-edge-error"],
+            response.headers()["x-agentdesktop-error"],
             "upstream-timeout"
         );
         drop(body_tx);
@@ -882,7 +882,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(
-            response.headers()["x-agentgateway-edge-error"],
+            response.headers()["x-agentdesktop-error"],
             "identity-unavailable"
         );
         let snapshot = metrics.snapshot();
@@ -955,7 +955,7 @@ mod tests {
         assert_eq!(request.headers["tracestate"], "vendor=value");
         assert_eq!(request.body, "claude request");
         let metrics: serde_json::Value = Client::new()
-            .get(format!("http://{proxy_address}/_agentgateway/status"))
+            .get(format!("http://{proxy_address}/_agentdesktop/status"))
             .send()
             .await
             .unwrap()
@@ -1075,7 +1075,7 @@ mod tests {
                 .await;
 
         let response = Client::new()
-            .get(format!("http://{proxy_address}/_agentgateway/healthz"))
+            .get(format!("http://{proxy_address}/_agentdesktop/healthz"))
             .send()
             .await
             .unwrap();
@@ -1096,7 +1096,7 @@ mod tests {
         let (proxy_address, shutdown) = start_proxy(upstream).await;
 
         let response = Client::new()
-            .get(format!("http://{proxy_address}/_agentgateway/healthz"))
+            .get(format!("http://{proxy_address}/_agentdesktop/healthz"))
             .send()
             .await
             .unwrap();
@@ -1125,7 +1125,7 @@ mod tests {
         .await;
 
         let response: serde_json::Value = Client::new()
-            .get(format!("http://{proxy_address}/_agentgateway/status"))
+            .get(format!("http://{proxy_address}/_agentdesktop/status"))
             .send()
             .await
             .unwrap()
@@ -1259,7 +1259,7 @@ mod tests {
             "malformed request reached Agent Gateway"
         );
         let health = Client::new()
-            .get(format!("http://{proxy_address}/_agentgateway/healthz"))
+            .get(format!("http://{proxy_address}/_agentdesktop/healthz"))
             .send()
             .await
             .unwrap();

@@ -7,32 +7,31 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 const STANDALONE_PAYLOADS: [(&str, &str); 4] = [
-    ("installer", "AGENTGATEWAY_EDGE_PAYLOAD_INSTALLER"),
-    ("connector", "AGENTGATEWAY_EDGE_PAYLOAD_CONNECTOR"),
-    ("agentgateway", "AGENTGATEWAY_EDGE_PAYLOAD_AGENTGATEWAY"),
-    ("config", "AGENTGATEWAY_EDGE_PAYLOAD_CONFIG"),
+    ("installer", "AGENTDESKTOP_PAYLOAD_INSTALLER"),
+    ("connector", "AGENTDESKTOP_PAYLOAD_CONNECTOR"),
+    ("agentgateway", "AGENTDESKTOP_PAYLOAD_AGENTGATEWAY"),
+    ("config", "AGENTDESKTOP_PAYLOAD_CONFIG"),
 ];
 
 const MANAGED_PAYLOADS: [(&str, &str); 2] = [
-    ("installer", "AGENTGATEWAY_EDGE_PAYLOAD_INSTALLER"),
-    ("connector", "AGENTGATEWAY_EDGE_PAYLOAD_CONNECTOR"),
+    ("installer", "AGENTDESKTOP_PAYLOAD_INSTALLER"),
+    ("connector", "AGENTDESKTOP_PAYLOAD_CONNECTOR"),
 ];
 
 fn main() {
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_EMBEDDED_INSTALLER");
-    println!("cargo:rerun-if-env-changed=AGENTGATEWAY_EDGE_INSTALLER_MODE");
+    println!("cargo:rerun-if-env-changed=AGENTDESKTOP_INSTALLER_MODE");
     for (_, variable) in STANDALONE_PAYLOADS {
         println!("cargo:rerun-if-env-changed={variable}");
     }
 
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set"));
     let generated = output.join("embedded_payload.rs");
-    let mode =
-        env::var("AGENTGATEWAY_EDGE_INSTALLER_MODE").unwrap_or_else(|_| "standalone".to_owned());
+    let mode = env::var("AGENTDESKTOP_INSTALLER_MODE").unwrap_or_else(|_| "standalone".to_owned());
     let payloads: &[(&str, &str)] = match mode.as_str() {
         "standalone" => &STANDALONE_PAYLOADS,
         "managed" => &MANAGED_PAYLOADS,
-        other => panic!("unsupported AGENTGATEWAY_EDGE_INSTALLER_MODE {other:?}"),
+        other => panic!("unsupported AGENTDESKTOP_INSTALLER_MODE {other:?}"),
     };
     let configured_payloads = payloads
         .iter()

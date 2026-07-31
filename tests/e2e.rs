@@ -38,7 +38,7 @@ async fn fails_closed_when_agent_gateway_is_unavailable() {
     let listen = unused_address();
     let upstream = unused_address();
     let _connector = Connector(
-        Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-connector"))
+        Command::new(env!("CARGO_BIN_EXE_agentdesktop"))
             .args([
                 "serve",
                 "--mode",
@@ -76,7 +76,7 @@ async fn fails_closed_when_agent_gateway_is_unavailable() {
     assert_eq!(traceparent.len(), 55);
     assert!(traceparent.starts_with("00-"));
     assert_eq!(
-        response.headers()["x-agentgateway-edge-error"],
+        response.headers()["x-agentdesktop-error"],
         "upstream-unavailable"
     );
     assert_eq!(
@@ -88,8 +88,7 @@ async fn fails_closed_when_agent_gateway_is_unavailable() {
 #[cfg(unix)]
 #[test]
 fn exits_when_owned_local_gateway_exits() {
-    let fixture_dir =
-        std::env::temp_dir().join(format!("agentgateway-edge-e2e-{}", std::process::id()));
+    let fixture_dir = std::env::temp_dir().join(format!("agentdesktop-e2e-{}", std::process::id()));
     std::fs::create_dir_all(&fixture_dir).unwrap();
     let gateway = fixture_dir.join("agentgateway");
     let gateway_config = fixture_dir.join("config.yaml");
@@ -97,7 +96,7 @@ fn exits_when_owned_local_gateway_exits() {
     std::fs::set_permissions(&gateway, std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::write(&gateway_config, "").unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-connector"))
+    let output = Command::new(env!("CARGO_BIN_EXE_agentdesktop"))
         .args([
             "serve",
             "--mode",
@@ -126,10 +125,8 @@ fn exits_when_owned_local_gateway_exits() {
 #[cfg(unix)]
 #[tokio::test]
 async fn waits_for_owned_local_gateway_before_listening() {
-    let fixture_dir = std::env::temp_dir().join(format!(
-        "agentgateway-edge-readiness-e2e-{}",
-        std::process::id()
-    ));
+    let fixture_dir =
+        std::env::temp_dir().join(format!("agentdesktop-readiness-e2e-{}", std::process::id()));
     std::fs::create_dir_all(&fixture_dir).unwrap();
     let gateway = fixture_dir.join("agentgateway");
     let gateway_config = fixture_dir.join("config.yaml");
@@ -140,7 +137,7 @@ async fn waits_for_owned_local_gateway_before_listening() {
     let listen = unused_address();
     let upstream = unused_address();
     let mut connector = Connector(
-        Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-connector"))
+        Command::new(env!("CARGO_BIN_EXE_agentdesktop"))
             .args([
                 "serve",
                 "--mode",

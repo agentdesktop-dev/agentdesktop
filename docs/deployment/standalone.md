@@ -7,15 +7,15 @@ This guide covers a single-user installation where Agent Gateway and the edge co
 The standalone release is distributed as one platform-specific executable containing Agent Gateway, the connector, helper commands, and a starter Agent Gateway configuration:
 
 ```bash
-chmod +x agentgateway-edge-installer
-./agentgateway-edge-installer
+chmod +x agentdesktop-installer
+./agentdesktop-installer
 ```
 
-The installer displays its destination, service behavior, and network ownership boundary before changing files. It installs for the current user under `$HOME/.local/lib/agentgateway-edge` by default, starts a user systemd service after confirmation, and verifies that the product is ready before reporting success. Users do not need to run a separate health check. If Claude Code is installed, an interactive installation asks separately before changing its settings.
+The installer displays its destination, service behavior, and network ownership boundary before changing files. It installs for the current user under `$HOME/.local/lib/agentdesktop` by default, starts a user systemd service after confirmation, and verifies that the product is ready before reporting success. Users do not need to run a separate health check. If Claude Code is installed, an interactive installation asks separately before changing its settings.
 
 Use `install --yes` for non-interactive installation; it does not change AI agent settings. Add `--connect-agents` to explicitly permit that change in a script. Use `--no-start` to leave the service disabled and `--root` to select another absolute destination. `--connect-agents` cannot be combined with `--no-start`.
 
-If setup cannot finish, the installer saves an owner-only support report at `$XDG_STATE_HOME/agent-desktop/install-support.txt`, or `$HOME/.local/state/agent-desktop/install-support.txt` when `XDG_STATE_HOME` is unset. The error screen directs the user to [open an issue](https://github.com/solo-io/agent-desktop/issues/new) and attach that report. The report contains the installer error, service status, and recent service startup log; it does not include Agent Gateway configuration contents.
+If setup cannot finish, the installer saves an owner-only support report at `$XDG_STATE_HOME/agentdesktop/install-support.txt`, or `$HOME/.local/state/agentdesktop/install-support.txt` when `XDG_STATE_HOME` is unset. The error screen directs the user to [open an issue](https://github.com/agentdesktop-dev/agentdesktop/issues/new) and attach that report. The report contains the installer error, service status, and recent service startup log; it does not include Agent Gateway configuration contents.
 
 The connector listener is restricted to loopback. The current Agent Gateway `llm.port` schema accepts only a port and binds a wildcard address; it cannot yet express a loopback address. The QEMU journey is isolated behind QEMU user-mode NAT, but a public host installation requires an address-capable Agent Gateway listener or equivalent local-only transport before this package can claim local-only exposure. Host firewall policy is not a substitute for making that default explicit in the product.
 
@@ -79,15 +79,15 @@ A loopback listener is reachable by other processes running as the same user and
 
 ## Connect Claude Code
 
-The guided installer detects Claude Code after Agent Gateway Edge becomes ready and asks for separate consent before changing it. If accepted, it adds the connector endpoint and local placeholder credential to `~/.claude/settings.json` while preserving unrelated settings. It refuses to replace an existing provider or gateway configuration.
+The guided installer detects Claude Code after Agent Desktop becomes ready and asks for separate consent before changing it. If accepted, it adds the connector endpoint and local placeholder credential to `~/.claude/settings.json` while preserving unrelated settings. It refuses to replace an existing provider or gateway configuration.
 
 Run the same setup manually with:
 
 ```bash
-agentgateway-edge connect-agents
+agentdesktop connect-agents
 ```
 
-The installer owns `~/.local/bin/agentgateway-edge` as a stable link to the private bundle. It does not edit shell startup files or add directories to `PATH`; environments that do not already include `~/.local/bin` receive an installer warning. The command can be rerun at any time without reinstalling Agent Gateway Edge. Matching settings are reported as already connected; conflicting provider or gateway settings are left unchanged. After connection, launch `claude` normally. Claude Code applies the user settings to terminal and IDE sessions, so Agent Gateway Edge does not install or require a Claude-specific launcher. Requests fail when Agent Gateway is unavailable and do not fall back to Anthropic directly.
+The installer owns `~/.local/bin/agentdesktop` as a stable link to the private bundle. It does not edit shell startup files or add directories to `PATH`; environments that do not already include `~/.local/bin` receive an installer warning. The command can be rerun at any time without reinstalling Agent Desktop. Matching settings are reported as already connected; conflicting provider or gateway settings are left unchanged. After connection, launch `claude` normally. Claude Code applies the user settings to terminal and IDE sessions, so Agent Desktop does not install or require a Claude-specific launcher. Requests fail when Agent Gateway is unavailable and do not fall back to Anthropic directly.
 
 Application configuration is routed rather than enforced: a user who can change application settings can bypass it. Enforced routing requires later transparent capture and, where necessary, host firewall or MDM controls.
 
@@ -98,7 +98,7 @@ Do not configure the same application for both a native route and future transpa
 Agent Gateway may be started independently, or the connector may supervise a separately installed executable:
 
 ```bash
-agentgateway-edge-connector \
+agentdesktop \
   serve \
   --mode standalone \
   --upstream http://127.0.0.1:4000 \
@@ -111,10 +111,10 @@ With supervision enabled, the connector starts `agentgateway -f <config>`, waits
 The self-contained installer includes a hardened user-systemd unit and enables it by default. If installation used `--no-start`, activate it later or stop it before uninstalling with:
 
 ```bash
-"$HOME/.local/lib/agentgateway-edge/bin/agentgateway-edge-install" \
-  service enable --root "$HOME/.local/lib/agentgateway-edge"
-"$HOME/.local/lib/agentgateway-edge/bin/agentgateway-edge-install" \
-  service disable --root "$HOME/.local/lib/agentgateway-edge"
+"$HOME/.local/lib/agentdesktop/bin/agentdesktop-install" \
+  service enable --root "$HOME/.local/lib/agentdesktop"
+"$HOME/.local/lib/agentdesktop/bin/agentdesktop-install" \
+  service disable --root "$HOME/.local/lib/agentdesktop"
 ```
 
 Enable validates the complete bundle integrity manifest before asking `systemctl --user` to enable and start the generated unit. Disable performs the same validation before stopping and disabling the named unit. Disable the service before uninstalling the bundle; install and uninstall do not implicitly alter the current user session.
@@ -122,7 +122,7 @@ Enable validates the complete bundle integrity manifest before asking `systemctl
 Check connector and upstream reachability with:
 
 ```bash
-curl --fail http://127.0.0.1:8080/_agentgateway/healthz
+curl --fail http://127.0.0.1:8080/_agentdesktop/healthz
 ```
 
 This health endpoint checks TCP reachability. It does not verify provider credentials, policy correctness, or provider availability.

@@ -1,6 +1,8 @@
-# Agent Gateway Edge Connector
+# Agent Desktop
 
 An early, policy-free edge connector that forwards Claude Code HTTP traffic from a loopback listener to an independently running Agent Gateway.
+
+Source: [github.com/agentdesktop-dev/agentdesktop](https://github.com/agentdesktop-dev/agentdesktop)
 
 The current pre-pre-MVP includes experimental managed browser login, DPoP-authenticated forwarding, refresh restoration, opt-in OTLP trace export, and an isolated Linux transparent-capture prototype. Supported transparent capture remains unavailable until HBONE authentication and lifecycle integration are complete. Device enrollment, MDM integration, and metric export are not implemented. See [AGENTS.md](AGENTS.md) for the architecture and incremental delivery plan.
 
@@ -27,7 +29,7 @@ The default `auto` mode uses Linux Secret Service when a write/read/delete prefl
 cargo run -- identity storage-check --credential-storage secret-service
 ```
 
-Select the protected file explicitly with `--credential-storage file`. The selected backend is persisted and revalidated on later startup; runtime does not silently switch stores. Override the XDG-based identity directory with `AGENTGATEWAY_EDGE_IDENTITY_DIR`.
+Select the protected file explicitly with `--credential-storage file`. The selected backend is persisted and revalidated on later startup; runtime does not silently switch stores. Override the XDG-based identity directory with `AGENTDESKTOP_IDENTITY_DIR`.
 
 ## Experimental managed login
 
@@ -36,7 +38,7 @@ Run browser Authorization Code login against an issuer that advertises PKCE `S25
 ```bash
 cargo run -- identity login \
   --issuer https://identity.example/ \
-  --client-id agentgateway-edge \
+  --client-id agentdesktop \
   --audience https://gateway.example \
   --scope agentgateway.invoke \
   --gateway-origin https://gateway.example
@@ -105,15 +107,15 @@ cargo run -- serve \
 Or use environment variables:
 
 ```bash
-export AGENTGATEWAY_EDGE_MODE=managed
-export AGENTGATEWAY_EDGE_LISTEN=127.0.0.1:8081
-export AGENTGATEWAY_EDGE_UPSTREAM=https://agentgateway.example.internal
+export AGENTDESKTOP_MODE=managed
+export AGENTDESKTOP_LISTEN=127.0.0.1:8081
+export AGENTDESKTOP_UPSTREAM=https://agentgateway.example.internal
 cargo run -- serve
 ```
 
 The deployment mode is required. `standalone` accepts only a local Agent Gateway at `localhost` or a loopback IP; `managed` permits a remote upstream. The listen address must always be loopback. The upstream URL must use HTTP or HTTPS and may contain a path prefix, but not a query string or fragment.
 
-Forwarding defaults to a 5-second connection timeout, 30-second response-header timeout, 10-second graceful-shutdown deadline, and 128 in-flight requests. Override them with `--connect-timeout-ms`, `--request-timeout-ms`, `--shutdown-timeout-ms`, and `--max-in-flight`. Concurrency permits remain held until streamed response bodies finish or are dropped. Overload returns `503` with `x-agentgateway-edge-error: overloaded`; an upstream response-header timeout returns `504` with `x-agentgateway-edge-error: upstream-timeout`.
+Forwarding defaults to a 5-second connection timeout, 30-second response-header timeout, 10-second graceful-shutdown deadline, and 128 in-flight requests. Override them with `--connect-timeout-ms`, `--request-timeout-ms`, `--shutdown-timeout-ms`, and `--max-in-flight`. Concurrency permits remain held until streamed response bodies finish or are dropped. Overload returns `503` with `x-agentdesktop-error: overloaded`; an upstream response-header timeout returns `504` with `x-agentdesktop-error: upstream-timeout`.
 
 The connector does not retry forwarded requests. In particular, non-idempotent and streaming requests are never replayed after an upstream disconnect.
 
@@ -137,7 +139,7 @@ Launch Claude Code normally after it is connected:
 claude
 ```
 
-Claude Code reads these user settings for ordinary terminal and IDE launches, so no Claude wrapper is installed. A bundle installation provides the stable `agentgateway-edge` command through `~/.local/bin`; run `agentgateway-edge connect-agents` at any time to connect newly installed supported agents or restore matching settings without reinstalling the product. The placeholder is sent to Agent Gateway, not the AI provider. Agent Gateway remains responsible for replacing or removing application credentials before provider forwarding.
+Claude Code reads these user settings for ordinary terminal and IDE launches, so no Claude wrapper is installed. A bundle installation provides the stable `agentdesktop` command through `~/.local/bin`; run `agentdesktop connect-agents` at any time to connect newly installed supported agents or restore matching settings without reinstalling the product. The placeholder is sent to Agent Gateway, not the AI provider. Agent Gateway remains responsible for replacing or removing application credentials before provider forwarding.
 
 In standalone mode, the connector can optionally own the lifecycle of a separately installed Agent Gateway process:
 
@@ -154,7 +156,7 @@ The binary and config options must be provided together. The connector starts `a
 Query connector and gateway reachability on the same loopback listener:
 
 ```bash
-curl http://127.0.0.1:8080/_agentgateway/healthz
+curl http://127.0.0.1:8080/_agentdesktop/healthz
 ```
 
 A reachable gateway returns `200 OK`:
@@ -168,7 +170,7 @@ An unreachable gateway returns `503 Service Unavailable` with `status` set to `d
 Read the local operational status API:
 
 ```bash
-curl http://127.0.0.1:8080/_agentgateway/status
+curl http://127.0.0.1:8080/_agentdesktop/status
 ```
 
 The response contains connector version, deployment mode, gateway reachability, identity readiness, active/maximum forwarding count, configured timeout values, and fixed counters for request attempts, upstream responses, identity failures, overload rejections, upstream timeouts, and upstream failures. Counters have no request-, destination-, process-, or identity-derived labels. The API does not expose gateway addresses, identity claims, credentials, application traffic, or policy. This API is the backend for a future local UI and telemetry exporter; no graphical UI is implemented yet.
@@ -178,20 +180,20 @@ The response contains connector version, deployment mode, gateway reachability, 
 The development release artifact is one self-contained executable containing a tested Agent Gateway and connector version set. Download the installer for the current platform and run it:
 
 ```bash
-chmod +x agentgateway-edge-installer
-./agentgateway-edge-installer
+chmod +x agentdesktop-installer
+./agentdesktop-installer
 ```
 
-The guided installer shows the components, per-user destination, service behavior, and network ownership boundary before changing files. The connector listener is loopback-only. The current Agent Gateway `llm.port` configuration binds a wildcard address and cannot express a loopback address, so the installer explicitly tells users to review Agent Gateway exposure. A public standalone package remains blocked on an address-capable Agent Gateway listener or equivalent local-only transport. The default root is `$HOME/.local/lib/agentgateway-edge`; after confirmation the installer verifies and extracts every embedded component, atomically activates the bundle, enables the user systemd service, and waits until the product is ready before reporting success. Agent Gateway remains a separate executable and process after extraction.
+The guided installer shows the components, per-user destination, service behavior, and network ownership boundary before changing files. The connector listener is loopback-only. The current Agent Gateway `llm.port` configuration binds a wildcard address and cannot express a loopback address, so the installer explicitly tells users to review Agent Gateway exposure. A public standalone package remains blocked on an address-capable Agent Gateway listener or equivalent local-only transport. The default root is `$HOME/.local/lib/agentdesktop`; after confirmation the installer verifies and extracts every embedded component, atomically activates the bundle, enables the user systemd service, and waits until the product is ready before reporting success. Agent Gateway remains a separate executable and process after extraction.
 
-If setup fails, the installer creates an owner-only support report under `$XDG_STATE_HOME/agent-desktop`, or `$HOME/.local/state/agent-desktop` by default. It gives the user the report path and directs them to [open an issue](https://github.com/solo-io/agent-desktop/issues/new) and attach it. Users are not asked to understand or run a health check.
+If setup fails, the installer creates an owner-only support report under `$XDG_STATE_HOME/agentdesktop`, or `$HOME/.local/state/agentdesktop` by default. It gives the user the report path and directs them to [open an issue](https://github.com/agentdesktop-dev/agentdesktop/issues/new) and attach it. Users are not asked to understand or run a health check.
 
 For unattended installation or installation without starting the service:
 
 ```bash
-./agentgateway-edge-installer install --yes
-./agentgateway-edge-installer install --yes --no-start
-./agentgateway-edge-installer install --yes --connect-agents
+./agentdesktop-installer install --yes
+./agentdesktop-installer install --yes --no-start
+./agentdesktop-installer install --yes --connect-agents
 ```
 
 `--yes` accepts installation only and leaves AI agent settings unchanged. `--connect-agents` explicitly permits automatic configuration for scripted setup and requires the service to start.
@@ -201,8 +203,8 @@ Use `--root` to override the installation root. Re-running the installer upgrade
 Verify every manifest-owned file before use or removal:
 
 ```bash
-"$HOME/.local/lib/agentgateway-edge/bin/agentgateway-edge-install" verify \
-  --root "$HOME/.local/lib/agentgateway-edge"
+"$HOME/.local/lib/agentdesktop/bin/agentdesktop-install" verify \
+  --root "$HOME/.local/lib/agentdesktop"
 ```
 
 The manifest records SHA-256 hashes. Verification, upgrade, and uninstall reject missing, modified, non-regular, symlinked, or path-traversing entries.
@@ -210,24 +212,24 @@ The manifest records SHA-256 hashes. Verification, upgrade, and uninstall reject
 The guided installer enables and starts the generated hardened user-systemd unit by default. If installation used `--no-start`, enable it later with the installed control command:
 
 ```bash
-"$HOME/.local/lib/agentgateway-edge/bin/agentgateway-edge-install" \
+"$HOME/.local/lib/agentdesktop/bin/agentdesktop-install" \
   service enable \
-  --root "$HOME/.local/lib/agentgateway-edge"
+  --root "$HOME/.local/lib/agentdesktop"
 ```
 
 The unit starts the connector and its separately packaged Agent Gateway process in standalone mode. Before uninstalling, stop and unlink it:
 
 ```bash
-"$HOME/.local/lib/agentgateway-edge/bin/agentgateway-edge-install" \
+"$HOME/.local/lib/agentdesktop/bin/agentdesktop-install" \
   service disable \
-  --root "$HOME/.local/lib/agentgateway-edge"
+  --root "$HOME/.local/lib/agentdesktop"
 ```
 
 The self-contained installer installs its control command with the bundle. Remove only a manifest-owned bundle:
 
 ```bash
-"$HOME/.local/lib/agentgateway-edge/bin/agentgateway-edge-install" uninstall \
-  --root "$HOME/.local/lib/agentgateway-edge"
+"$HOME/.local/lib/agentdesktop/bin/agentdesktop-install" uninstall \
+  --root "$HOME/.local/lib/agentdesktop"
 ```
 
 The installer refuses to remove directories without its manifest or bundles whose owned files were modified. It does not alter CA trust, create application profiles, cryptographically verify a publisher signature, or download/update components at runtime.
@@ -240,7 +242,7 @@ scripts/build-embedded-installer.sh \
   container/agentgateway-smoke.yaml
 ```
 
-The resulting `target/release/agentgateway-edge-installer` is the only file delivered to the user. A build with no embedded payload remains available for repository-wide compilation and reports an actionable error if run.
+The resulting `target/release/agentdesktop-installer` is the only file delivered to the user. A build with no embedded payload remains available for repository-wide compilation and reports an actionable error if run.
 
 ## Build a managed development installer
 
@@ -250,10 +252,10 @@ Build a generic managed template and customizer, or create an organization-speci
 scripts/build-managed-installer.sh
 scripts/build-managed-installer.sh \
   examples/managed-organization.json \
-  target/release/example-agentgateway-edge-installer
+  target/release/example-agentdesktop-installer
 ```
 
-The generic template also accepts `--organization <file>` for two-file development. Managed installation leaves the service inactive and does not open a browser or change AI agent settings. The installed `agentgateway-edge connect-agents` command owns browser login, enrollment approval, service readiness, and separate Claude consent. Customize the executable before applying a publisher signature. See [Managed installer development](docs/deployment/managed-installer.md) for the schema, MDM ownership boundary, and current security limitations.
+The generic template also accepts `--organization <file>` for two-file development. Managed installation leaves the service inactive and does not open a browser or change AI agent settings. The installed `agentdesktop connect-agents` command owns browser login, enrollment approval, service readiness, and separate Claude consent. Customize the executable before applying a publisher signature. See [Managed installer development](docs/deployment/managed-installer.md) for the schema, MDM ownership boundary, and current security limitations.
 
 ## Test
 
@@ -290,7 +292,7 @@ Send an Anthropic-shaped request through the connector to Agent Gateway:
 The response should contain:
 
 ```json
-{"id":"msg_smoke","type":"message","role":"assistant","content":[{"type":"text","text":"hello through the edge connector"}]}
+{"id":"msg_smoke","type":"message","role":"assistant","content":[{"type":"text","text":"hello through Agent Desktop"}]}
 ```
 
 The smoke gateway returns a deterministic direct response, so this path requires no provider credential. It is a manual environment for exploring:
@@ -305,10 +307,10 @@ Inspect the running environment:
 
 ```bash
 container_engine="$(command -v podman || command -v docker)"
-"$container_engine" ps --filter name=agentgateway-edge
-"$container_engine" logs agentgateway-edge-connector
-"$container_engine" logs agentgateway-edge-gateway
-"$container_engine" exec -it agentgateway-edge-connector /bin/sh
+"$container_engine" ps --filter name=agentdesktop
+"$container_engine" logs agentdesktop
+"$container_engine" logs agentdesktop-gateway
+"$container_engine" exec -it agentdesktop /bin/sh
 ```
 
 Stop and remove the containers and network:
@@ -387,7 +389,7 @@ Send a simple prompt and verify:
 
 1. Claude receives a streamed response.
 2. Agent Gateway records the request and applies its configured route and policies.
-3. Stopping Agent Gateway causes the connector to return `502 Bad Gateway` with `x-agentgateway-edge-error: upstream-unavailable`.
+3. Stopping Agent Gateway causes the connector to return `502 Bad Gateway` with `x-agentdesktop-error: upstream-unavailable`.
 4. The connector never attempts a direct connection to Anthropic.
 
 Gateway-side DPoP validation and stripping and enrolled device identity are later increments.

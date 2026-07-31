@@ -4,7 +4,7 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 organization=${1:-}
 output=${2:-}
-template=$root/target/release/agentgateway-edge-managed-installer
+template=$root/target/release/agentdesktop-managed-installer
 caller=$(pwd)
 
 if [ -n "$organization" ]; then
@@ -22,16 +22,16 @@ fi
 
 cd "$root"
 cargo build --release \
-  --bin agentgateway-edge-install \
-  --bin agentgateway-edge-connector \
-  --bin agentgateway-edge-customize
+  --bin agentdesktop-install \
+  --bin agentdesktop \
+  --bin agentdesktop-customize
 
-AGENTGATEWAY_EDGE_INSTALLER_MODE=managed \
-AGENTGATEWAY_EDGE_PAYLOAD_INSTALLER=$root/target/release/agentgateway-edge-install \
-AGENTGATEWAY_EDGE_PAYLOAD_CONNECTOR=$root/target/release/agentgateway-edge-connector \
-  cargo build --release --features embedded-installer --bin agentgateway-edge-installer
+AGENTDESKTOP_INSTALLER_MODE=managed \
+AGENTDESKTOP_PAYLOAD_INSTALLER=$root/target/release/agentdesktop-install \
+AGENTDESKTOP_PAYLOAD_CONNECTOR=$root/target/release/agentdesktop \
+  cargo build --release --features embedded-installer --bin agentdesktop-installer
 
-cp "$root/target/release/agentgateway-edge-installer" "$template"
+cp "$root/target/release/agentdesktop-installer" "$template"
 printf 'built generic managed installer %s\n' "$template"
 
 if [ -n "$organization" ]; then
@@ -40,9 +40,9 @@ if [ -n "$organization" ]; then
     exit 1
   }
   if [ -z "$output" ]; then
-    output=$root/target/release/agentgateway-edge-organization-installer
+    output=$root/target/release/agentdesktop-organization-installer
   fi
   rm -f "$output"
-  "$root/target/release/agentgateway-edge-customize" \
+  "$root/target/release/agentdesktop-customize" \
     "$template" "$organization" --output "$output"
 fi

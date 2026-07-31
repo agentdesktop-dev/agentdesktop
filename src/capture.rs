@@ -17,7 +17,7 @@ use tokio::sync::Semaphore;
 use crate::hbone::HboneClient;
 use crate::platform::linux::original_destination;
 
-pub const TUNNEL_TOKEN_HEADER: &str = "x-agentgateway-edge-token";
+pub const TUNNEL_TOKEN_HEADER: &str = "x-agentdesktop-token";
 
 #[derive(Args, Debug)]
 pub struct CaptureArgs {
@@ -25,7 +25,7 @@ pub struct CaptureArgs {
     listen: SocketAddr,
     #[arg(long, default_value = "127.0.0.1:15008")]
     hbone_endpoint: SocketAddr,
-    #[arg(long, env = "AGENTGATEWAY_EDGE_CAPTURE_TOKEN_FILE")]
+    #[arg(long, env = "AGENTDESKTOP_CAPTURE_TOKEN_FILE")]
     token_file: PathBuf,
     #[arg(long, default_value_t = 128)]
     max_tunnels: usize,

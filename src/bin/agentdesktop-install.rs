@@ -2,17 +2,17 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
-use agentgateway_edge_connector::organization::OrganizationBootstrap;
+use agentdesktop::organization::OrganizationBootstrap;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const MANIFEST: &str = "agentgateway-edge-install.json";
-const SYSTEMD_UNIT: &str = "share/systemd/user/agentgateway-edge.service";
+const MANIFEST: &str = "agentdesktop-install.json";
+const SYSTEMD_UNIT: &str = "share/systemd/user/agentdesktop.service";
 
 #[derive(Debug, Parser)]
-#[command(version, about = "Install or remove an Agent Gateway edge bundle")]
+#[command(version, about = "Install or remove an Agent Desktop bundle")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -105,7 +105,7 @@ fn main() -> Result<()> {
             command_link,
         } => {
             let mut files: Vec<(&Path, &str, bool)> = vec![
-                (connector.as_path(), "bin/agentgateway-edge-connector", true),
+                (connector.as_path(), "bin/agentdesktop", true),
                 (agentgateway.as_path(), "bin/agentgateway", true),
                 (
                     starter_config.as_path(),
@@ -114,7 +114,7 @@ fn main() -> Result<()> {
                 ),
             ];
             if let Some(control) = &control {
-                files.push((control.as_path(), "bin/agentgateway-edge-install", true));
+                files.push((control.as_path(), "bin/agentdesktop-install", true));
             }
             install(
                 &root,
@@ -133,11 +133,11 @@ fn main() -> Result<()> {
         } => {
             let bootstrap = OrganizationBootstrap::parse(&fs::read(&organization)?)?;
             let mut files: Vec<(&Path, &str, bool)> = vec![
-                (connector.as_path(), "bin/agentgateway-edge-connector", true),
+                (connector.as_path(), "bin/agentdesktop", true),
                 (organization.as_path(), "share/organization.json", false),
             ];
             if let Some(control) = &control {
-                files.push((control.as_path(), "bin/agentgateway-edge-install", true));
+                files.push((control.as_path(), "bin/agentdesktop-install", true));
             }
             install(
                 &root,
@@ -171,13 +171,13 @@ fn service(root: &Path, systemctl: &Path, enable: bool) -> Result<()> {
         run_systemctl(
             systemctl,
             ["restart"],
-            Some(Path::new("agentgateway-edge.service")),
+            Some(Path::new("agentdesktop.service")),
         )?;
     } else {
         run_systemctl(
             systemctl,
             ["disable", "--now"],
-            Some(Path::new("agentgateway-edge.service")),
+            Some(Path::new("agentdesktop.service")),
         )?;
     }
     println!(
@@ -305,21 +305,21 @@ fn install(
 }
 
 fn standalone_systemd_unit(root: &Path, gateway_config: Option<&Path>) -> String {
-    let connector = quote_systemd_arg(&root.join("bin/agentgateway-edge-connector"));
+    let connector = quote_systemd_arg(&root.join("bin/agentdesktop"));
     let agentgateway = quote_systemd_arg(&root.join("bin/agentgateway"));
     let config =
         quote_systemd_arg(gateway_config.unwrap_or(&root.join("share/examples/agentgateway.yaml")));
     format!(
-        "[Unit]\nDescription=Agent Gateway Edge Connector\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={connector} serve --mode standalone --upstream http://127.0.0.1:4000 --gateway-binary {agentgateway} --gateway-config {config}\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=read-only\n\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription=Agent Desktop\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={connector} serve --mode standalone --upstream http://127.0.0.1:4000 --gateway-binary {agentgateway} --gateway-config {config}\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=read-only\n\n[Install]\nWantedBy=default.target\n"
     )
 }
 
 fn managed_systemd_unit(root: &Path, bootstrap: &OrganizationBootstrap) -> String {
-    let connector = quote_systemd_arg(&root.join("bin/agentgateway-edge-connector"));
+    let connector = quote_systemd_arg(&root.join("bin/agentdesktop"));
     let upstream = quote_systemd_value(bootstrap.gateway.url.as_str());
     let issuer = quote_systemd_value(bootstrap.identity.issuer.as_str());
     format!(
-        "[Unit]\nDescription=Agent Gateway Edge Connector\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={connector} serve --mode managed --upstream {upstream} --identity-issuer {issuer}\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\n\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription=Agent Desktop\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={connector} serve --mode managed --upstream {upstream} --identity-issuer {issuer}\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\n\n[Install]\nWantedBy=default.target\n"
     )
 }
 
@@ -400,7 +400,7 @@ fn remove_owned_tree_if_present(path: &Path, validate_external: bool) -> Result<
 fn install_command_link(root: &Path, command_link: &Path) -> Result<()> {
     use std::os::unix::fs::symlink;
 
-    let target = root.join("bin/agentgateway-edge-connector");
+    let target = root.join("bin/agentdesktop");
     if let Ok(metadata) = fs::symlink_metadata(command_link) {
         if metadata.file_type().is_symlink() && fs::read_link(command_link)? == target {
             return Ok(());
@@ -427,7 +427,7 @@ fn install_command_link(_root: &Path, _command_link: &Path) -> Result<()> {
 fn validate_command_link(root: &Path, command_link: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(command_link)
         .with_context(|| format!("installed command {} is missing", command_link.display()))?;
-    let expected = root.join("bin/agentgateway-edge-connector");
+    let expected = root.join("bin/agentdesktop");
     if !metadata.file_type().is_symlink() || fs::read_link(command_link)? != expected {
         bail!(
             "installed command {} has been modified",

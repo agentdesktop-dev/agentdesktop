@@ -8,7 +8,7 @@ use base64::Engine;
 use clap::ValueEnum;
 use sha2::{Digest, Sha256};
 
-const SERVICE: &str = "agentgateway-edge-connector";
+const SERVICE: &str = "agentdesktop";
 const BACKEND_FILE: &str = "credential-storage";
 
 pub fn default_storage_root() -> Result<PathBuf> {

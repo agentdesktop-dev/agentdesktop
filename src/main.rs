@@ -1,9 +1,7 @@
-use agentgateway_edge_connector::apps::claude::{
-    ConnectionStatus, connect_installed, is_installed,
-};
-use agentgateway_edge_connector::config::{Config, upstream_origin};
-use agentgateway_edge_connector::identity::oauth::{ManagedIdentity, load_session_for};
-use agentgateway_edge_connector::identity::{
+use agentdesktop::apps::claude::{ConnectionStatus, connect_installed, is_installed};
+use agentdesktop::config::{Config, upstream_origin};
+use agentdesktop::identity::oauth::{ManagedIdentity, load_session_for};
+use agentdesktop::identity::{
     cli::IdentityCommand,
     enrollment::{
         DeviceStatus, EnrollmentClient, EnrollmentStatus, load_enrollment_for, save_enrollment_for,
@@ -11,9 +9,9 @@ use agentgateway_edge_connector::identity::{
     oauth::{LoginConfig, login},
     storage::{CredentialStorageMode, CredentialStore, default_storage_root},
 };
-use agentgateway_edge_connector::local_gateway::LocalGateway;
-use agentgateway_edge_connector::organization::OrganizationBootstrap;
-use agentgateway_edge_connector::proxy::{self, ProxyOptions};
+use agentdesktop::local_gateway::LocalGateway;
+use agentdesktop::organization::OrganizationBootstrap;
+use agentdesktop::proxy::{self, ProxyOptions};
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
@@ -39,14 +37,14 @@ enum ConnectorCommand {
         #[arg(long, help = "Connect supported agents without prompting")]
         yes: bool,
     },
-    /// Configure managed identity for the edge connector.
+    /// Configure managed identity for Agent Desktop.
     Identity {
         #[command(subcommand)]
         command: IdentityCommand,
     },
     /// Relay redirected Linux TCP flows over HBONE.
     #[cfg(target_os = "linux")]
-    Capture(agentgateway_edge_connector::capture::CaptureArgs),
+    Capture(agentdesktop::capture::CaptureArgs),
 }
 
 #[tokio::main]
@@ -54,19 +52,17 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         ConnectorCommand::Serve(config) => serve(config.validate()?).await,
         ConnectorCommand::ConnectAgents { yes } => connect_agents(yes).await,
-        ConnectorCommand::Identity { command } => {
-            agentgateway_edge_connector::identity::cli::run(command).await
-        }
+        ConnectorCommand::Identity { command } => agentdesktop::identity::cli::run(command).await,
         #[cfg(target_os = "linux")]
         ConnectorCommand::Capture(args) => {
-            let _telemetry = agentgateway_edge_connector::telemetry::init()?;
-            agentgateway_edge_connector::capture::run(args).await
+            let _telemetry = agentdesktop::telemetry::init()?;
+            agentdesktop::capture::run(args).await
         }
     }
 }
 
 async fn serve(config: Config) -> anyhow::Result<()> {
-    let _telemetry = agentgateway_edge_connector::telemetry::init()?;
+    let _telemetry = agentdesktop::telemetry::init()?;
     let identity = if let Some(issuer) = &config.identity_issuer {
         let identity_dir = config
             .identity_dir
@@ -144,7 +140,7 @@ async fn connect_agents(yes: bool) -> anyhow::Result<()> {
         use std::io::Write;
 
         println!("Claude Code was found.");
-        println!("This will update your Claude Code settings so requests use Agent Gateway Edge.");
+        println!("This will update your Claude Code settings so requests use Agent Desktop.");
         print!("Connect Claude Code? [Y/n] ");
         std::io::stdout().flush()?;
         let mut answer = String::new();
@@ -268,16 +264,16 @@ async fn prepare_managed_connection(
         }
     }
 
-    let control = root.join("bin/agentgateway-edge-install");
+    let control = root.join("bin/agentdesktop-install");
     let status = Command::new(control)
         .args(["service", "enable", "--root"])
         .arg(root)
         .status()?;
     if !status.success() {
-        anyhow::bail!("could not start Agent Gateway Edge");
+        anyhow::bail!("could not start Agent Desktop");
     }
     wait_for_managed_health().await?;
-    println!("Agent Gateway Edge is ready.");
+    println!("Agent Desktop is ready.");
     Ok(())
 }
 
@@ -286,7 +282,7 @@ async fn wait_for_managed_health() -> anyhow::Result<()> {
     let client = reqwest::Client::new();
     while Instant::now() < deadline {
         if client
-            .get("http://127.0.0.1:8080/_agentgateway/healthz")
+            .get("http://127.0.0.1:8080/_agentdesktop/healthz")
             .send()
             .await
             .is_ok_and(|response| response.status().is_success())
@@ -295,7 +291,7 @@ async fn wait_for_managed_health() -> anyhow::Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    anyhow::bail!("Agent Gateway Edge did not become ready")
+    anyhow::bail!("Agent Desktop did not become ready")
 }
 
 async fn shutdown_signal() {

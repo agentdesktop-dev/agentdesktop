@@ -33,7 +33,7 @@ tests/vm/vm.sh ssh
 Copy a connector build or scenario into the guest with:
 
 ```bash
-tests/vm/vm.sh copy target/release/agentgateway-edge-connector
+tests/vm/vm.sh copy target/release/agentdesktop
 ```
 
 For the installation journey, build and transfer the single embedded artifact:
@@ -43,8 +43,8 @@ scripts/build-embedded-installer.sh \
   ../agentgateway/target/ci/agentgateway \
   tests/vm/fixtures/agentgateway-standalone.yaml
 tests/vm/vm.sh copy \
-  target/release/agentgateway-edge-installer \
-  /home/agentedge/Downloads/agentgateway-edge-installer
+  target/release/agentdesktop-installer \
+  /home/agentdesktop/Downloads/agentdesktop-installer
 ```
 
 The VM fixture points Agent Gateway at the laptop mock LLM through `host.test:8000`. It is specific to this QEMU environment and must not be used as a general release configuration.
@@ -59,7 +59,7 @@ The harness generates a short-lived test CA, starts a TLS authorization/enrollme
 
 These are test fixtures, not production identity or Agent Gateway implementations. The gateway fixture requires and strips connector DPoP headers but does not validate token signatures, proof claims, replay, or approved device state. Real managed security validation remains blocked until Agent Gateway enforces the managed identity contract.
 
-The test-only `agentedge` account has passwordless sudo. SSH password authentication is exposed only through the QEMU user-network forward on host loopback. Do not publish the VM's SSH port on a non-loopback host address.
+The test-only `agentdesktop` account has passwordless sudo. SSH password authentication is exposed only through the QEMU user-network forward on host loopback. Do not publish the VM's SSH port on a non-loopback host address.
 
 ## Clean-slate lifecycle
 

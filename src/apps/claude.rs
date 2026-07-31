@@ -80,7 +80,7 @@ fn connect_settings(path: &Path) -> Result<ConnectionStatus> {
             && existing.as_str() != Some(value)
         {
             bail!(
-                "Claude Code already configures {name}; disconnect its existing provider or gateway before connecting Agent Gateway Edge"
+                "Claude Code already configures {name}; disconnect its existing provider or gateway before connecting Agent Desktop"
             );
         }
         environment.insert(name.to_owned(), Value::String(value.to_owned()));

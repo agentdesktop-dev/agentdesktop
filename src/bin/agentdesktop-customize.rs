@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 
-use agentgateway_edge_connector::customization::{customize_installer, default_customized_name};
+use agentdesktop::customization::{customize_installer, default_customized_name};
 use anyhow::Result;
 use clap::Parser;
 
 #[derive(Debug, Parser)]
 #[command(
     version,
-    about = "Create an organization-specific Agent Gateway Edge installer"
+    about = "Create an organization-specific Agent Desktop installer"
 )]
 struct Cli {
     /// Generic managed installer template.
@@ -23,9 +23,9 @@ struct Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let bootstrap = agentgateway_edge_connector::organization::OrganizationBootstrap::parse(
-        &std::fs::read(&cli.organization)?,
-    )?;
+    let bootstrap = agentdesktop::organization::OrganizationBootstrap::parse(&std::fs::read(
+        &cli.organization,
+    )?)?;
     let output = cli
         .output
         .unwrap_or_else(|| default_customized_name(&cli.installer, &bootstrap.organization.id));

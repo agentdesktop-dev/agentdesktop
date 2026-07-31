@@ -2,7 +2,7 @@ use std::process::Command;
 
 #[test]
 fn help_exits_successfully() {
-    let output = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-connector"))
+    let output = Command::new(env!("CARGO_BIN_EXE_agentdesktop"))
         .arg("--help")
         .output()
         .unwrap();
@@ -13,7 +13,7 @@ fn help_exits_successfully() {
         assert!(help.contains(command));
     }
 
-    let output = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-connector"))
+    let output = Command::new(env!("CARGO_BIN_EXE_agentdesktop"))
         .args(["serve", "--help"])
         .output()
         .unwrap();
@@ -27,7 +27,7 @@ fn help_exits_successfully() {
 #[test]
 fn identity_storage_check_selects_protected_file() {
     let temporary = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-connector"))
+    let output = Command::new(env!("CARGO_BIN_EXE_agentdesktop"))
         .args([
             "identity",
             "storage-check",
@@ -56,7 +56,7 @@ fn connector_subcommand_persists_claude_settings() {
     std::fs::create_dir_all(&binary_directory).unwrap();
     std::fs::write(binary_directory.join("claude"), "installed").unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-connector"))
+    let output = Command::new(env!("CARGO_BIN_EXE_agentdesktop"))
         .args(["connect-agents", "--yes"])
         .env("HOME", home)
         .env("PATH", &binary_directory)
@@ -90,7 +90,7 @@ fn connector_subcommand_does_not_treat_eof_as_consent() {
     std::fs::create_dir_all(&binary_directory).unwrap();
     std::fs::write(binary_directory.join("claude"), "installed").unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-connector"))
+    let output = Command::new(env!("CARGO_BIN_EXE_agentdesktop"))
         .arg("connect-agents")
         .env("HOME", home)
         .env("PATH", &binary_directory)

@@ -257,7 +257,7 @@ mod tests {
                 tokio::spawn(async move {
                     assert_eq!(request.method(), Method::CONNECT);
                     assert_eq!(request.uri().authority().unwrap(), "203.0.113.7:443");
-                    let token = request.headers().get("x-agentgateway-edge-token").unwrap();
+                    let token = request.headers().get("x-agentdesktop-token").unwrap();
                     assert_eq!(token, "test-token");
                     let mut receive = request.into_body();
                     let mut send = respond.send_response(Response::new(()), false).unwrap();
@@ -279,7 +279,7 @@ mod tests {
             let mut headers = HeaderMap::new();
             let mut token = HeaderValue::from_static("test-token");
             token.set_sensitive(true);
-            headers.insert("x-agentgateway-edge-token", token);
+            headers.insert("x-agentdesktop-token", token);
             let client = HboneClient::connect_with_headers(address, headers)
                 .await
                 .unwrap();

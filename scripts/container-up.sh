@@ -2,13 +2,13 @@
 set -euo pipefail
 
 readonly root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly network="agentgateway-edge-smoke"
-readonly gateway_container="agentgateway-edge-gateway"
-readonly connector_container="agentgateway-edge-connector"
-readonly mock_container="agentgateway-edge-anthropic-mock"
-readonly connector_image="localhost/agentgateway-edge-connector:dev"
+readonly network="agentdesktop-smoke"
+readonly gateway_container="agentdesktop-gateway"
+readonly connector_container="agentdesktop"
+readonly mock_container="agentdesktop-anthropic-mock"
+readonly connector_image="localhost/agentdesktop:dev"
 readonly gateway_image="${AGENTGATEWAY_IMAGE:-ghcr.io/agentgateway/agentgateway:latest}"
-readonly mock_image="localhost/agentgateway-edge-anthropic-mock:dev"
+readonly mock_image="localhost/agentdesktop-anthropic-mock:dev"
 readonly mode="${1:-smoke}"
 
 source "$root_dir/scripts/container-engine.sh"
@@ -52,9 +52,9 @@ if [[ "$mode" == "claude" ]]; then
   "$container_engine" run --detach \
     --name "$connector_container" \
     --network "$network" \
-    --env AGENTGATEWAY_EDGE_MODE=standalone \
-    --env AGENTGATEWAY_EDGE_LISTEN=127.0.0.1:8080 \
-    --env AGENTGATEWAY_EDGE_UPSTREAM=http://127.0.0.1:4000 \
+    --env AGENTDESKTOP_MODE=standalone \
+    --env AGENTDESKTOP_LISTEN=127.0.0.1:8080 \
+    --env AGENTDESKTOP_UPSTREAM=http://127.0.0.1:4000 \
     "$connector_image" serve >/dev/null
 fi
 
@@ -78,9 +78,9 @@ if [[ "$mode" != "claude" ]]; then
   "$container_engine" run --detach \
     --name "$connector_container" \
     --network "$network" \
-    --env AGENTGATEWAY_EDGE_MODE=managed \
-    --env AGENTGATEWAY_EDGE_LISTEN=127.0.0.1:8080 \
-    --env AGENTGATEWAY_EDGE_UPSTREAM=http://agentgateway:4000 \
+    --env AGENTDESKTOP_MODE=managed \
+    --env AGENTDESKTOP_LISTEN=127.0.0.1:8080 \
+    --env AGENTDESKTOP_UPSTREAM=http://agentgateway:4000 \
     "$connector_image" serve >/dev/null
 fi
 
@@ -96,7 +96,7 @@ if "$container_engine" exec "$connector_container" \
     --connect-timeout 1 --max-time 35 \
     "$readiness_url"; then
   cat <<EOF
-Agent Gateway and the edge connector are ready in $mode mode using $container_engine.
+Agent Gateway and Agent Desktop are ready in $mode mode using $container_engine.
 
 Run the smoke request:
   ./scripts/container-smoke.sh

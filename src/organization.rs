@@ -117,11 +117,11 @@ mod tests {
           "organization": {
             "id": "acme",
             "display_name": "Acme Corporation",
-            "support_url": "https://help.acme.example/agent-desktop"
+            "support_url": "https://help.acme.example/agentdesktop"
           },
           "identity": {
             "issuer": "https://login.acme.example/",
-            "client_id": "agent-desktop",
+            "client_id": "agentdesktop",
             "audience": "https://gateway.acme.example",
             "scope": "agentgateway.invoke"
           },

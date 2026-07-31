@@ -6,7 +6,7 @@ vm_root=$root/tests/vm
 artifacts=$vm_root/.artifacts
 state=$vm_root/.state
 base=$artifacts/base/fedora-workstation-base.qcow2
-overlay=$state/agentedge.qcow2
+overlay=$state/agentdesktop.qcow2
 pidfile=$state/qemu.pid
 serial_log=$state/serial.log
 monitor=$state/qmp.sock
@@ -84,7 +84,7 @@ stop() {
 prepare_askpass() {
   mkdir -p "$state"
   askpass=$state/askpass.sh
-  printf '%s\n' '#!/bin/sh' 'printf "%s\n" agentedge' > "$askpass"
+  printf '%s\n' '#!/bin/sh' 'printf "%s\n" agentdesktop' > "$askpass"
   chmod 0700 "$askpass"
   printf '%s\n' "$askpass"
 }
@@ -93,7 +93,7 @@ ssh_guest() {
   require setsid
   require ssh
   askpass=$(prepare_askpass)
-  DISPLAY=agentedge-vm \
+  DISPLAY=agentdesktop-vm \
     SSH_ASKPASS=$askpass \
     SSH_ASKPASS_REQUIRE=force \
     setsid -w ssh \
@@ -102,7 +102,7 @@ ssh_guest() {
       -o StrictHostKeyChecking=no \
       -o UserKnownHostsFile="$state/known_hosts" \
       -p "$ssh_port" \
-      agentedge@127.0.0.1 "$@"
+      agentdesktop@127.0.0.1 "$@"
 }
 
 copy_guest() {
@@ -113,8 +113,8 @@ copy_guest() {
   require scp
   require setsid
   askpass=$(prepare_askpass)
-  destination=${2:-/home/agentedge/}
-  DISPLAY=agentedge-vm \
+  destination=${2:-/home/agentdesktop/}
+  DISPLAY=agentdesktop-vm \
     SSH_ASKPASS=$askpass \
     SSH_ASKPASS_REQUIRE=force \
     setsid -w scp -r \
@@ -123,11 +123,11 @@ copy_guest() {
       -o StrictHostKeyChecking=no \
       -o UserKnownHostsFile="$state/known_hosts" \
       -P "$ssh_port" \
-      "$1" "agentedge@127.0.0.1:$destination"
+      "$1" "agentdesktop@127.0.0.1:$destination"
 }
 
 network_backend() {
-  backend="user,id=net0,hostname=agentedge-vm,hostfwd=tcp:127.0.0.1:${ssh_port}-:22"
+  backend="user,id=net0,hostname=agentdesktop-vm,hostfwd=tcp:127.0.0.1:${ssh_port}-:22"
   old_ifs=$IFS
   IFS=,
   for mapping in $host_forwards; do
@@ -183,7 +183,7 @@ start() {
   fi
 
   qemu-system-x86_64 \
-    -name agentedge-e2e \
+    -name agentdesktop-e2e \
     -machine "q35,accel=$accelerator" \
     -cpu "$cpu" \
     -smp "$cpus" \

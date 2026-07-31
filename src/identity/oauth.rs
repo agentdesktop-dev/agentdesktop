@@ -424,7 +424,7 @@ async fn receive_callback(listener: &TcpListener, expected_state: &str) -> Resul
         .find(|(name, _)| name == "code")
         .map(|(_, value)| value.into_owned())
         .context("OAuth callback is missing authorization code")?;
-    const RESPONSE_BODY: &str = "Agent Gateway Edge Connector login complete.\n";
+    const RESPONSE_BODY: &str = "Agent Desktop login complete.\n";
     let response = format!(
         "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{RESPONSE_BODY}",
         RESPONSE_BODY.len()

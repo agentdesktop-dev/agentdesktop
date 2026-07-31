@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentgateway-edge-connector"
+name = "agentdesktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",

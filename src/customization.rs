@@ -99,7 +99,7 @@ fn decode_bootstrap(installer: &[u8]) -> Result<Option<OrganizationBootstrap>> {
 pub fn default_customized_name(template: &Path, organization_id: &str) -> PathBuf {
     let name = template
         .file_name()
-        .unwrap_or_else(|| std::ffi::OsStr::new("agent-desktop-installer"))
+        .unwrap_or_else(|| std::ffi::OsStr::new("agentdesktop-installer"))
         .to_string_lossy();
     template.with_file_name(format!("{organization_id}-{name}"))
 }
@@ -123,11 +123,11 @@ mod tests {
               "organization": {
                 "id": "acme",
                 "display_name": "Acme Corporation",
-                "support_url": "https://help.acme.example/agent-desktop"
+                "support_url": "https://help.acme.example/agentdesktop"
               },
               "identity": {
                 "issuer": "https://login.acme.example/",
-                "client_id": "agent-desktop",
+                "client_id": "agentdesktop",
                 "audience": "https://gateway.acme.example",
                 "scope": "agentgateway.invoke"
               },
@@ -161,7 +161,7 @@ mod tests {
             br#"{
               "format_version": 1,
               "organization": {"id":"acme","display_name":"Acme","support_url":"https://help.acme.example/"},
-              "identity": {"issuer":"https://login.acme.example/","client_id":"agent-desktop","audience":"gateway","scope":"invoke"},
+              "identity": {"issuer":"https://login.acme.example/","client_id":"agentdesktop","audience":"gateway","scope":"invoke"},
               "gateway": {"url":"https://gateway.acme.example/"}
             }"#,
         )

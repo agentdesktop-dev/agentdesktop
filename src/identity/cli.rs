@@ -16,12 +16,12 @@ pub enum IdentityCommand {
     StorageCheck {
         #[arg(
             long,
-            env = "AGENTGATEWAY_EDGE_CREDENTIAL_STORAGE",
+            env = "AGENTDESKTOP_CREDENTIAL_STORAGE",
             value_enum,
             default_value = "auto"
         )]
         credential_storage: CredentialStorageMode,
-        #[arg(long, env = "AGENTGATEWAY_EDGE_IDENTITY_DIR")]
+        #[arg(long, env = "AGENTDESKTOP_IDENTITY_DIR")]
         storage_dir: Option<PathBuf>,
     },
     /// Authenticate in the system browser using Authorization Code with PKCE.
@@ -38,12 +38,12 @@ pub enum IdentityCommand {
         gateway_origin: Url,
         #[arg(
             long,
-            env = "AGENTGATEWAY_EDGE_CREDENTIAL_STORAGE",
+            env = "AGENTDESKTOP_CREDENTIAL_STORAGE",
             value_enum,
             default_value = "auto"
         )]
         credential_storage: CredentialStorageMode,
-        #[arg(long, env = "AGENTGATEWAY_EDGE_IDENTITY_DIR")]
+        #[arg(long, env = "AGENTDESKTOP_IDENTITY_DIR")]
         storage_dir: Option<PathBuf>,
         /// Print the authorization URL instead of opening a browser.
         #[arg(long)]
@@ -55,7 +55,7 @@ pub enum IdentityCommand {
         issuer: Url,
         #[arg(long)]
         gateway_origin: Url,
-        #[arg(long, env = "AGENTGATEWAY_EDGE_IDENTITY_DIR")]
+        #[arg(long, env = "AGENTDESKTOP_IDENTITY_DIR")]
         storage_dir: Option<PathBuf>,
     },
     /// Request approval for the current session's DPoP key.
@@ -64,7 +64,7 @@ pub enum IdentityCommand {
         issuer: Url,
         #[arg(long)]
         gateway_origin: Url,
-        #[arg(long, env = "AGENTGATEWAY_EDGE_IDENTITY_DIR")]
+        #[arg(long, env = "AGENTDESKTOP_IDENTITY_DIR")]
         storage_dir: Option<PathBuf>,
     },
     /// Read an existing enrollment and device revocation status.
@@ -75,7 +75,7 @@ pub enum IdentityCommand {
         gateway_origin: Url,
         #[arg(long)]
         enrollment_id: Option<String>,
-        #[arg(long, env = "AGENTGATEWAY_EDGE_IDENTITY_DIR")]
+        #[arg(long, env = "AGENTDESKTOP_IDENTITY_DIR")]
         storage_dir: Option<PathBuf>,
     },
 }

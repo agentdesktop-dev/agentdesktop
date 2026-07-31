@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly connector_container="agentgateway-edge-connector"
+readonly connector_container="agentdesktop"
 readonly request='{"model":"claude-sonnet-5","max_tokens":64,"messages":[{"role":"user","content":"Reply with exactly SMOKE_OK"}]}'
 
 source "$root_dir/scripts/container-engine.sh"

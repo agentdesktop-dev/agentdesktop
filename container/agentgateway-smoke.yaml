@@ -15,4 +15,4 @@ binds:
       policies:
         directResponse:
           status: 200
-          body: '{"id":"msg_smoke","type":"message","role":"assistant","content":[{"type":"text","text":"hello through the edge connector"}],"model":"smoke","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":5}}'
+          body: '{"id":"msg_smoke","type":"message","role":"assistant","content":[{"type":"text","text":"hello through Agent Desktop"}],"model":"smoke","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":5}}'

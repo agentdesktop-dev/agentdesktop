@@ -16,14 +16,14 @@ test -f "$config" || {
 
 cd "$root"
 cargo build --release \
-  --bin agentgateway-edge-install \
-  --bin agentgateway-edge-connector
+  --bin agentdesktop-install \
+  --bin agentdesktop
 
-AGENTGATEWAY_EDGE_INSTALLER_MODE=standalone \
-AGENTGATEWAY_EDGE_PAYLOAD_INSTALLER=$root/target/release/agentgateway-edge-install \
-AGENTGATEWAY_EDGE_PAYLOAD_CONNECTOR=$root/target/release/agentgateway-edge-connector \
-AGENTGATEWAY_EDGE_PAYLOAD_AGENTGATEWAY=$agentgateway \
-AGENTGATEWAY_EDGE_PAYLOAD_CONFIG=$config \
-  cargo build --release --features embedded-installer --bin agentgateway-edge-installer
+AGENTDESKTOP_INSTALLER_MODE=standalone \
+AGENTDESKTOP_PAYLOAD_INSTALLER=$root/target/release/agentdesktop-install \
+AGENTDESKTOP_PAYLOAD_CONNECTOR=$root/target/release/agentdesktop \
+AGENTDESKTOP_PAYLOAD_AGENTGATEWAY=$agentgateway \
+AGENTDESKTOP_PAYLOAD_CONFIG=$config \
+  cargo build --release --features embedded-installer --bin agentdesktop-installer
 
-printf 'built %s\n' "$root/target/release/agentgateway-edge-installer"
+printf 'built %s\n' "$root/target/release/agentdesktop-installer"

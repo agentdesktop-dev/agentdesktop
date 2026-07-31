@@ -4,7 +4,7 @@ The first Linux transparent-capture mechanism targets an externally managed cgro
 
 ## Behavior
 
-The privileged setup binary owns one `inet agentgateway_edge` table. For every component in the configured absolute cgroup path, it emits a `socket cgroupv2 level` match. This selects the scope and descendant cgroups, so child and helper processes remain in the application profile without executable-name matching.
+The privileged setup binary owns one `inet agentdesktop` table. For every component in the configured absolute cgroup path, it emits a `socket cgroupv2 level` match. This selects the scope and descendant cgroups, so child and helper processes remain in the application profile without executable-name matching.
 
 For matching sockets, the table:
 
@@ -20,7 +20,7 @@ Rules are ephemeral and do not survive reboot. Installation replaces the connect
 The application scope must already exist. Render rules without privilege:
 
 ```bash
-cargo run --bin agentgateway-edge-capture-setup -- render \
+cargo run --bin agentdesktop-capture-setup -- render \
   --cgroup /user.slice/user-1000.slice/app.slice/claude.scope \
   --redirect-port 15001
 ```
@@ -28,13 +28,13 @@ cargo run --bin agentgateway-edge-capture-setup -- render \
 Preflight, installation, and removal require root because nftables validation uses kernel netlink:
 
 ```bash
-sudo agentgateway-edge-capture-setup preflight \
+sudo agentdesktop-capture-setup preflight \
   --cgroup /user.slice/user-1000.slice/app.slice/claude.scope \
   --redirect-port 15001
-sudo agentgateway-edge-capture-setup install \
+sudo agentdesktop-capture-setup install \
   --cgroup /user.slice/user-1000.slice/app.slice/claude.scope \
   --redirect-port 15001
-sudo agentgateway-edge-capture-setup remove
+sudo agentdesktop-capture-setup remove
 ```
 
 Do not place the connector or Agent Gateway in the selected application scope. Doing so can redirect the tunnel transport back into the capture listener.
@@ -42,13 +42,13 @@ Do not place the connector or Agent Gateway in the selected application scope. D
 Start the prototype relay outside the selected scope after an HBONE listener is ready:
 
 ```bash
-cargo run --bin agentgateway-edge-connector -- capture \
+cargo run --bin agentdesktop -- capture \
   --listen 127.0.0.1:15001 \
   --hbone-endpoint 127.0.0.1:15008 \
-  --token-file "$XDG_RUNTIME_DIR/agentgateway-edge/capture-token"
+  --token-file "$XDG_RUNTIME_DIR/agentdesktop/capture-token"
 ```
 
-The capture relay is a connector subcommand rather than a separate product binary. The token file is required, must be a regular file owned by the current user with mode `0600`, and must contain a non-empty HTTP header value. Agent Gateway must receive the same value through its protected startup environment and authorize the re-entered route with `source.connectHeaders["x-agentgateway-edge-token"]`. The smoke config demonstrates this policy without creating a second policy format.
+The capture relay is a connector subcommand rather than a separate product binary. The token file is required, must be a regular file owned by the current user with mode `0600`, and must contain a non-empty HTTP header value. Agent Gateway must receive the same value through its protected startup environment and authorize the re-entered route with `source.connectHeaders["x-agentdesktop-token"]`. The smoke config demonstrates this policy without creating a second policy format.
 
 Both endpoints are restricted to loopback. The relay uses Linux `SO_ORIGINAL_DST`, preserves raw bytes, bounds concurrent tunnels, and closes failed or overloaded flows without direct fallback. Its cleartext HBONE pool reconnects lazily for later flows after observed transport loss; it never retries a failed CONNECT or replays inner bytes. The opaque token prevents unrelated local clients from using a correctly configured tunnel listener, but creation, rotation, and process lifecycle are not integrated. Managed use additionally requires TLS and DPoP-bound organizational identity.
 

@@ -9,9 +9,7 @@ mod linux {
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
 
-    use agentgateway_edge_connector::platform::linux::{
-        CAPTURE_TABLE, CaptureSpec, remove_ruleset,
-    };
+    use agentdesktop::platform::linux::{CAPTURE_TABLE, CaptureSpec, remove_ruleset};
     use anyhow::{Context, Result, bail};
     use clap::{Parser, Subcommand};
 
