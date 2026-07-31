@@ -1,15 +1,36 @@
+use agentgateway_edge_connector::apps::claude::{
+    ConnectionStatus, connect_installed, is_installed,
+};
 use agentgateway_edge_connector::config::{Config, upstream_origin};
 use agentgateway_edge_connector::identity::oauth::{ManagedIdentity, load_session_for};
 use agentgateway_edge_connector::identity::storage::{CredentialStore, default_storage_root};
 use agentgateway_edge_connector::local_gateway::LocalGateway;
 use agentgateway_edge_connector::proxy::{self, ProxyOptions};
 use anyhow::bail;
+use clap::{Parser, Subcommand};
 use tokio::net::TcpListener;
 
 const LOCAL_GATEWAY_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+#[derive(Debug, Parser)]
+struct AgentSetupCli {
+    #[command(subcommand)]
+    command: AgentSetupCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentSetupCommand {
+    ConnectAgents {
+        #[arg(long, help = "Connect supported agents without prompting")]
+        yes: bool,
+    },
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("connect-agents")) {
+        return connect_agents(AgentSetupCli::parse());
+    }
     let _telemetry = agentgateway_edge_connector::telemetry::init()?;
     let config = Config::parse_and_validate()?;
     let identity = if let Some(issuer) = &config.identity_issuer {
@@ -68,6 +89,39 @@ async fn main() -> anyhow::Result<()> {
     } else {
         serve.await
     }
+}
+
+fn connect_agents(cli: AgentSetupCli) -> anyhow::Result<()> {
+    let AgentSetupCommand::ConnectAgents { yes } = cli.command;
+    if !is_installed()? {
+        println!("No supported AI agents were found.");
+        return Ok(());
+    }
+    if !yes {
+        use std::io::Write;
+
+        println!("Claude Code was found.");
+        println!("This will update your Claude Code settings so requests use Agent Gateway Edge.");
+        print!("Connect Claude Code? [Y/n] ");
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        let bytes_read = std::io::stdin().read_line(&mut answer)?;
+        if bytes_read == 0
+            || !matches!(
+                answer.trim().to_ascii_lowercase().as_str(),
+                "" | "y" | "yes"
+            )
+        {
+            println!("No agents were changed.");
+            return Ok(());
+        }
+    }
+    match connect_installed()? {
+        ConnectionStatus::Connected => println!("Claude Code connected."),
+        ConnectionStatus::AlreadyConnected => println!("Claude Code is already connected."),
+        ConnectionStatus::NotInstalled => println!("No supported AI agents were found."),
+    }
+    Ok(())
 }
 
 async fn shutdown_signal() {

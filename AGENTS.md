@@ -257,6 +257,8 @@ Do not create empty abstraction crates in anticipation of these boundaries.
 
 Each increment must be independently usable and tested. Add the narrowest behavior first, add tests that fail without it, and keep all earlier tests as regression coverage. Fixes for escaped defects require a regression test. Do not combine identity, capture, telemetry, and deployment work in one increment.
 
+Verified progress, active blockers, and deferred user-journey findings are maintained in [Phase Status](docs/development/phase-status.md).
+
 ### Phase 0: Claude forwarding foundation
 
 1. Create one Rust package and binary with minimal dependencies.

@@ -8,7 +8,7 @@ Last updated: 2026-07-30
 | --- | --- | --- | --- |
 | Standalone native gateway forwarding | Supported | Build not validated | Build not validated |
 | Managed native gateway forwarding | Experimental | Build not validated | Build not validated |
-| Claude native/connector launcher | Supported | Build not validated | Build not validated |
+| Persistent Claude Code connector configuration | Supported | Build not validated | Build not validated |
 | Secret Service credentials | Supported | Unavailable | Unavailable |
 | Protected-file credential fallback | Supported | Unavailable | Unavailable |
 | Transparent process capture | Prototype kernel-to-HBONE path validated in private container; unsupported for applications | Unavailable | Unavailable |

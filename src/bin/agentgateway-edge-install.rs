@@ -30,8 +30,6 @@ enum Command {
         #[arg(long)]
         identity: PathBuf,
         #[arg(long)]
-        claude: PathBuf,
-        #[arg(long)]
         agentgateway: PathBuf,
         #[arg(long)]
         starter_config: PathBuf,
@@ -89,7 +87,6 @@ fn main() -> Result<()> {
             root,
             connector,
             identity,
-            claude,
             agentgateway,
             starter_config,
             control,
@@ -98,7 +95,6 @@ fn main() -> Result<()> {
             let mut files: Vec<(&Path, &str, bool)> = vec![
                 (connector.as_path(), "bin/agentgateway-edge-connector", true),
                 (identity.as_path(), "bin/agentgateway-edge-identity", true),
-                (claude.as_path(), "bin/agentgateway-edge-claude", true),
                 (agentgateway.as_path(), "bin/agentgateway", true),
                 (
                     starter_config.as_path(),

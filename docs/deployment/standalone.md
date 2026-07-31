@@ -11,7 +11,11 @@ chmod +x agentgateway-edge-installer
 ./agentgateway-edge-installer
 ```
 
-The installer displays its destination, service behavior, and network ownership boundary before changing files. It installs for the current user under `$HOME/.local/lib/agentgateway-edge` by default and starts a user systemd service after confirmation. Use `install --yes` for non-interactive installation, `--no-start` to leave the service disabled, and `--root` to select another absolute destination.
+The installer displays its destination, service behavior, and network ownership boundary before changing files. It installs for the current user under `$HOME/.local/lib/agentgateway-edge` by default, starts a user systemd service after confirmation, and verifies that the product is ready before reporting success. Users do not need to run a separate health check. If Claude Code is installed, an interactive installation asks separately before changing its settings.
+
+Use `install --yes` for non-interactive installation; it does not change AI agent settings. Add `--connect-agents` to explicitly permit that change in a script. Use `--no-start` to leave the service disabled and `--root` to select another absolute destination. `--connect-agents` cannot be combined with `--no-start`.
+
+If setup cannot finish, the installer saves an owner-only support report at `$XDG_STATE_HOME/agent-desktop/install-support.txt`, or `$HOME/.local/state/agent-desktop/install-support.txt` when `XDG_STATE_HOME` is unset. The error screen directs the user to [open an issue](https://github.com/solo-io/agent-desktop/issues/new) and attach that report. The report contains the installer error, service status, and recent service startup log; it does not include Agent Gateway configuration contents.
 
 The connector listener is restricted to loopback. The current Agent Gateway `llm.port` schema accepts only a port and binds a wildcard address; it cannot yet express a loopback address. The QEMU journey is isolated behind QEMU user-mode NAT, but a public host installation requires an address-capable Agent Gateway listener or equivalent local-only transport before this package can claim local-only exposure. Host firewall policy is not a substitute for making that default explicit in the product.
 
@@ -55,11 +59,10 @@ Supply provider credentials only to Agent Gateway using an Agent Gateway-support
 Do not put a provider key in:
 
 - Claude Code configuration.
-- `AGENTGATEWAY_EDGE_CLAUDE_CREDENTIAL`.
 - Connector arguments or environment variables.
 - Connector service definitions.
 
-The Claude adapter's credential is a local placeholder accepted by Agent Gateway policy. Agent Gateway must supply the real provider credential and prevent the application placeholder from reaching the provider.
+The Claude adapter writes only a local placeholder accepted by Agent Gateway policy. Agent Gateway must supply the real provider credential and prevent the application placeholder from reaching the provider.
 
 Environment variables can be visible to the process owner and privileged diagnostic tools. Prefer the platform secret facility supported by the selected Agent Gateway deployment when one is available. Credential rotation is an Agent Gateway and provider operation; the connector does not cache provider credentials.
 
@@ -74,19 +77,19 @@ Standalone connector validation rejects a non-loopback Agent Gateway upstream an
 
 A loopback listener is reachable by other processes running as the same user and may be reachable by other local users depending on operating-system controls. The example Agent Gateway authorization rule protects the mock workflow, but production policy belongs in the user's Agent Gateway configuration.
 
-## Native and connector paths
+## Connect Claude Code
 
-Use one path for each gateway-aware application:
+The guided installer detects Claude Code after Agent Gateway Edge becomes ready and asks for separate consent before changing it. If accepted, it adds the connector endpoint and local placeholder credential to `~/.claude/settings.json` while preserving unrelated settings. It refuses to replace an existing provider or gateway configuration.
+
+Run the same setup manually with:
 
 ```bash
-# Directly to local Agent Gateway
-cargo run --bin agentgateway-edge-claude -- --path native
-
-# Through the connector
-cargo run --bin agentgateway-edge-claude -- --path connector
+"$HOME/.local/lib/agentgateway-edge/bin/agentgateway-edge-connector" connect-agents
 ```
 
-Both paths fail when Agent Gateway is unavailable. Neither path falls back to Anthropic directly. Native application configuration is routed rather than enforced: a user who can change application settings can bypass it. Enforced routing requires later transparent capture and, where necessary, host firewall or MDM controls.
+This command can be rerun at any time without reinstalling Agent Gateway Edge. Matching settings are reported as already connected; conflicting provider or gateway settings are left unchanged. After connection, launch `claude` normally. Claude Code applies the user settings to terminal and IDE sessions, so Agent Gateway Edge does not install or require a Claude-specific launcher. Requests fail when Agent Gateway is unavailable and do not fall back to Anthropic directly.
+
+Application configuration is routed rather than enforced: a user who can change application settings can bypass it. Enforced routing requires later transparent capture and, where necessary, host firewall or MDM controls.
 
 Do not configure the same application for both a native route and future transparent capture. The current milestone does not implement transparent capture.
 
@@ -157,7 +160,7 @@ Before uninstalling:
 - Agent Gateway configuration and referenced secret files are user-readable only.
 - Provider credentials are available to Agent Gateway, not the connector or application.
 - Agent Gateway policy allows intended local clients and denies invalid placeholders.
-- Native and connector paths each complete a test request.
+- Claude Code launched normally completes a request through the connector.
 - Stopping Agent Gateway causes requests to fail without direct provider fallback.
 - Log destinations and retention periods are known.
 - No CA or trust-store changes are expected for this milestone.

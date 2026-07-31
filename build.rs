@@ -6,11 +6,10 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-const PAYLOADS: [(&str, &str); 6] = [
+const PAYLOADS: [(&str, &str); 5] = [
     ("installer", "AGENTGATEWAY_EDGE_PAYLOAD_INSTALLER"),
     ("connector", "AGENTGATEWAY_EDGE_PAYLOAD_CONNECTOR"),
     ("identity", "AGENTGATEWAY_EDGE_PAYLOAD_IDENTITY"),
-    ("claude", "AGENTGATEWAY_EDGE_PAYLOAD_CLAUDE"),
     ("agentgateway", "AGENTGATEWAY_EDGE_PAYLOAD_AGENTGATEWAY"),
     ("config", "AGENTGATEWAY_EDGE_PAYLOAD_CONFIG"),
 ];

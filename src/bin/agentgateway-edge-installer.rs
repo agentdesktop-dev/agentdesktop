@@ -3,7 +3,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Cursor, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
+use std::process::{Command as ProcessCommand, ExitCode, Output};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -44,9 +44,39 @@ struct InstallArgs {
     yes: bool,
     #[arg(long, help = "Install files without starting the user service")]
     no_start: bool,
+    #[arg(
+        long,
+        help = "Connect supported AI agents without a separate confirmation"
+    )]
+    connect_agents: bool,
 }
 
-fn main() -> Result<()> {
+const SUPPORT_URL: &str = "https://github.com/solo-io/agent-desktop/issues/new";
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("\nAgent Gateway Edge setup could not finish.");
+            match write_support_report(&error) {
+                Ok(path) => {
+                    eprintln!("\nGet help:");
+                    eprintln!("  1. Open {SUPPORT_URL}");
+                    eprintln!("  2. Create an issue and attach this support report:");
+                    eprintln!("     {}", path.display());
+                }
+                Err(report_error) => {
+                    eprintln!("\nGet help at {SUPPORT_URL}");
+                    eprintln!("The installer could not save a support report: {report_error:#}");
+                    eprintln!("Installation error: {error:#}");
+                }
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<()> {
     if !EMBEDDED {
         bail!(
             "this development build has no embedded payload; build it with scripts/build-embedded-installer.sh"
@@ -59,12 +89,16 @@ fn main() -> Result<()> {
             config: None,
             yes: false,
             no_start: false,
+            connect_agents: false,
         },
     };
     install(args)
 }
 
 fn install(args: InstallArgs) -> Result<()> {
+    if args.no_start && args.connect_agents {
+        bail!("--connect-agents requires the service to start");
+    }
     let root = args.root.map_or_else(default_root, Ok)?;
     if !root.is_absolute() {
         bail!("install root must be absolute");
@@ -106,8 +140,6 @@ fn install(args: InstallArgs) -> Result<()> {
                 .join("identity")
                 .to_string_lossy()
                 .into_owned(),
-            "--claude".to_owned(),
-            payload.path().join("claude").to_string_lossy().into_owned(),
             "--agentgateway".to_owned(),
             payload
                 .path()
@@ -166,7 +198,18 @@ fn install(args: InstallArgs) -> Result<()> {
             root.display()
         );
     } else {
-        println!("\nCheck health:\n  curl http://127.0.0.1:8080/_agentgateway/healthz");
+        println!("\nAgent Gateway Edge is ready.");
+        if args.connect_agents {
+            run_agent_setup(payload.path(), true)?;
+        } else if args.yes {
+            println!("AI agent settings were not changed.");
+        } else {
+            run_agent_setup(payload.path(), false)?;
+        }
+        println!(
+            "\nUpdate AI agent connections later with:\n  {} connect-agents",
+            root.join("bin/agentgateway-edge-connector").display()
+        );
     }
     Ok(())
 }
@@ -180,9 +223,94 @@ fn wait_for_health() -> Result<()> {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    bail!(
-        "service started but did not become healthy; inspect it with `systemctl --user status agentgateway-edge.service`"
-    )
+    bail!("the installed service did not become ready")
+}
+
+fn write_support_report(error: &anyhow::Error) -> Result<PathBuf> {
+    let path = support_report_path()?;
+    let diagnostics = [
+        (
+            "Service status",
+            command_output(
+                "systemctl",
+                &[
+                    "--user",
+                    "status",
+                    "--no-pager",
+                    "agentgateway-edge.service",
+                ],
+            ),
+        ),
+        (
+            "Recent service log",
+            command_output(
+                "journalctl",
+                &[
+                    "--user-unit",
+                    "agentgateway-edge.service",
+                    "--no-pager",
+                    "--lines=200",
+                ],
+            ),
+        ),
+    ];
+    write_support_report_to(&path, error, &diagnostics)?;
+    Ok(path)
+}
+
+fn support_report_path() -> Result<PathBuf> {
+    let state = if let Some(state_home) = env::var_os("XDG_STATE_HOME") {
+        PathBuf::from(state_home)
+    } else {
+        let home = env::var_os("HOME").context("HOME is not set")?;
+        PathBuf::from(home).join(".local/state")
+    };
+    Ok(state.join("agent-desktop/install-support.txt"))
+}
+
+fn command_output(command: &str, args: &[&str]) -> String {
+    match ProcessCommand::new(command).args(args).output() {
+        Ok(output) => format_output(output),
+        Err(error) => format!("Could not collect this information: {error}"),
+    }
+}
+
+fn format_output(output: Output) -> String {
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    if text.trim().is_empty() {
+        text = format!(
+            "Command exited with {} and produced no output.",
+            output.status
+        );
+    }
+    text
+}
+
+fn write_support_report_to(
+    path: &Path,
+    error: &anyhow::Error,
+    diagnostics: &[(&str, String)],
+) -> Result<()> {
+    fs::create_dir_all(path.parent().context("support report path has no parent")?)?;
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut report = options
+        .open(path)
+        .with_context(|| format!("failed to create support report {}", path.display()))?;
+    set_mode(path, 0o600)?;
+    writeln!(report, "Agent Gateway Edge installer support report")?;
+    writeln!(report, "Installer version: {}", env!("CARGO_PKG_VERSION"))?;
+    writeln!(report, "\nInstallation error:\n{error:#}")?;
+    for (heading, content) in diagnostics {
+        writeln!(report, "\n{heading}:\n{content}")?;
+    }
+    Ok(())
 }
 
 fn health_check(address: SocketAddr) -> bool {
@@ -218,7 +346,7 @@ fn print_summary(root: &Path, config: &Path, start: bool) {
     println!("This installs for the current user:");
     println!("  - Agent Gateway");
     println!("  - Edge connector");
-    println!("  - Identity and Claude Code helpers");
+    println!("  - Identity helper");
     println!("\nLocation: {}", root.display());
     println!("Config:   {}", config.display());
     println!(
@@ -270,11 +398,12 @@ fn confirm() -> Result<bool> {
     print!("\nContinue? [Y/n] ");
     io::stdout().flush()?;
     let mut answer = String::new();
-    io::stdin().read_line(&mut answer)?;
-    Ok(matches!(
-        answer.trim().to_ascii_lowercase().as_str(),
-        "" | "y" | "yes"
-    ))
+    let bytes_read = io::stdin().read_line(&mut answer)?;
+    Ok(bytes_read > 0
+        && matches!(
+            answer.trim().to_ascii_lowercase().as_str(),
+            "" | "y" | "yes"
+        ))
 }
 
 fn extract_payload(directory: &Path) -> Result<()> {
@@ -313,6 +442,21 @@ fn run_internal<const N: usize>(directory: &Path, args: [String; N]) -> Result<(
     Ok(())
 }
 
+fn run_agent_setup(directory: &Path, automatic: bool) -> Result<()> {
+    let mut command = ProcessCommand::new(directory.join("connector"));
+    command.arg("connect-agents");
+    if automatic {
+        command.arg("--yes");
+    }
+    let status = command
+        .status()
+        .context("failed to configure supported AI agents")?;
+    if !status.success() {
+        bail!("supported AI agent configuration failed with {status}");
+    }
+    Ok(())
+}
+
 fn hex_sha256(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -329,4 +473,58 @@ fn set_mode(path: &Path, mode: u32) -> Result<()> {
 #[cfg(not(unix))]
 fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_connection_requires_an_explicit_install_flag() {
+        let Cli {
+            command: Some(Command::Install(defaults)),
+        } = Cli::try_parse_from(["installer", "install", "--yes"]).unwrap()
+        else {
+            panic!("install command was not parsed");
+        };
+        assert!(defaults.yes);
+        assert!(!defaults.connect_agents);
+
+        let Cli {
+            command: Some(Command::Install(automatic)),
+        } = Cli::try_parse_from(["installer", "install", "--yes", "--connect-agents"]).unwrap()
+        else {
+            panic!("install command was not parsed");
+        };
+        assert!(automatic.connect_agents);
+    }
+
+    #[test]
+    fn support_report_contains_failure_and_diagnostics() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("install-support.txt");
+        fs::write(&path, "old report").unwrap();
+
+        write_support_report_to(
+            &path,
+            &anyhow::anyhow!("service did not become ready"),
+            &[("Service status", "service failed".to_owned())],
+        )
+        .unwrap();
+
+        let report = fs::read_to_string(&path).unwrap();
+        assert!(report.contains("service did not become ready"));
+        assert!(report.contains("Service status:\nservice failed"));
+        assert!(!report.contains("old report"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
 }

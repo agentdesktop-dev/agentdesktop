@@ -124,30 +124,21 @@ Set `OTEL_EXPORTER_OTLP_ENDPOINT` to an HTTP(S) OTLP/gRPC collector endpoint, su
 
 ## Configure Claude Code
 
-Launch Claude Code directly against the default standalone Agent Gateway listener:
+Connect supported AI agents already installed for the current user:
 
 ```bash
-cargo run --bin agentgateway-edge-claude -- --path native
+cargo run -- connect-agents
 ```
 
-Or route it through the connector:
+After consent, the connector detects Claude Code and adds the standalone connector endpoint and local placeholder credential to the `env` object in `~/.claude/settings.json`. It preserves unrelated settings, treats matching values as already connected, and refuses to replace an existing provider or gateway configuration. The interactive installer asks for this consent separately after the service is ready.
+
+Launch Claude Code normally after it is connected:
 
 ```bash
-cargo run --bin agentgateway-edge-claude -- --path connector
+claude
 ```
 
-`--path` is a single mutually exclusive route selector. `--path captured` is recognized but fails before Claude starts while the current platform capability reports transparent capture as unavailable. The launcher never pretends capture is active and never falls back to a native or direct provider path.
-
-The helper selects exactly one path and launches `claude` with `ANTHROPIC_BASE_URL` and a local placeholder `ANTHROPIC_API_KEY`. The native and connector defaults are `http://127.0.0.1:4000` and `http://127.0.0.1:8080`, respectively. Override the selected loopback endpoint and pass Claude arguments after `--`:
-
-```bash
-cargo run --bin agentgateway-edge-claude -- \
-  --path native \
-  --base-url http://127.0.0.1:4040 \
-  -- --model sonnet
-```
-
-Set `AGENTGATEWAY_EDGE_CLAUDE_CREDENTIAL` when the local Agent Gateway policy expects a different placeholder. This value is sent to Agent Gateway, not the AI provider credential. Agent Gateway remains responsible for replacing or removing application credentials before provider forwarding.
+Claude Code reads these user settings for ordinary terminal and IDE launches, so no wrapper command is installed. Re-run the installed connector's `connect-agents` subcommand at any time to connect newly installed supported agents or restore matching settings without reinstalling the product. The placeholder is sent to Agent Gateway, not the AI provider. Agent Gateway remains responsible for replacing or removing application credentials before provider forwarding.
 
 In standalone mode, the connector can optionally own the lifecycle of a separately installed Agent Gateway process:
 
@@ -192,14 +183,19 @@ chmod +x agentgateway-edge-installer
 ./agentgateway-edge-installer
 ```
 
-The guided installer shows the components, per-user destination, service behavior, and network ownership boundary before changing files. The connector listener is loopback-only. The current Agent Gateway `llm.port` configuration binds a wildcard address and cannot express a loopback address, so the installer explicitly tells users to review Agent Gateway exposure. A public standalone package remains blocked on an address-capable Agent Gateway listener or equivalent local-only transport. The default root is `$HOME/.local/lib/agentgateway-edge`; after confirmation the installer verifies and extracts every embedded component, atomically activates the bundle, and enables the user systemd service. Agent Gateway remains a separate executable and process after extraction.
+The guided installer shows the components, per-user destination, service behavior, and network ownership boundary before changing files. The connector listener is loopback-only. The current Agent Gateway `llm.port` configuration binds a wildcard address and cannot express a loopback address, so the installer explicitly tells users to review Agent Gateway exposure. A public standalone package remains blocked on an address-capable Agent Gateway listener or equivalent local-only transport. The default root is `$HOME/.local/lib/agentgateway-edge`; after confirmation the installer verifies and extracts every embedded component, atomically activates the bundle, enables the user systemd service, and waits until the product is ready before reporting success. Agent Gateway remains a separate executable and process after extraction.
+
+If setup fails, the installer creates an owner-only support report under `$XDG_STATE_HOME/agent-desktop`, or `$HOME/.local/state/agent-desktop` by default. It gives the user the report path and directs them to [open an issue](https://github.com/solo-io/agent-desktop/issues/new) and attach it. Users are not asked to understand or run a health check.
 
 For unattended installation or installation without starting the service:
 
 ```bash
 ./agentgateway-edge-installer install --yes
 ./agentgateway-edge-installer install --yes --no-start
+./agentgateway-edge-installer install --yes --connect-agents
 ```
+
+`--yes` accepts installation only and leaves AI agent settings unchanged. `--connect-agents` explicitly permits automatic configuration for scripted setup and requires the service to start.
 
 Use `--root` to override the installation root. Re-running the installer upgrades a manifest-owned bundle and restores the prior tree if activation fails. The starter configuration remains Agent Gateway configuration; the connector does not interpret it.
 
@@ -371,7 +367,8 @@ This milestone forwards Claude's incoming authentication headers unchanged. Conf
 With Agent Gateway and the connector running directly on the host:
 
 ```bash
-cargo run --bin agentgateway-edge-claude -- --path connector
+cargo run -- connect-agents --yes
+claude
 ```
 
 Send a simple prompt and verify:

@@ -6,7 +6,7 @@ fn installs_upgrades_and_uninstalls_standalone_bundle() {
     let temporary = tempfile::tempdir().unwrap();
     let fixtures = temporary.path().join("fixtures");
     fs::create_dir(&fixtures).unwrap();
-    for name in ["connector", "identity", "claude", "agentgateway", "config"] {
+    for name in ["connector", "identity", "agentgateway", "config"] {
         fs::write(fixtures.join(name), format!("first-{name}")).unwrap();
     }
     let root = temporary.path().join("agentgateway-edge");
@@ -21,8 +21,6 @@ fn installs_upgrades_and_uninstalls_standalone_bundle() {
                 fixtures.join("connector").to_str().unwrap(),
                 "--identity",
                 fixtures.join("identity").to_str().unwrap(),
-                "--claude",
-                fixtures.join("claude").to_str().unwrap(),
                 "--agentgateway",
                 fixtures.join("agentgateway").to_str().unwrap(),
                 "--starter-config",

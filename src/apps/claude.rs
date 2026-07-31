@@ -1,108 +1,171 @@
-use anyhow::{Result, bail};
-use clap::ValueEnum;
-use url::Url;
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
 
-const NATIVE_BASE_URL: &str = "http://127.0.0.1:4000";
+use anyhow::{Context, Result, bail};
+use serde_json::{Map, Value};
+
 const CONNECTOR_BASE_URL: &str = "http://127.0.0.1:8080";
+const PLACEHOLDER_CREDENTIAL: &str = "local-gateway-placeholder";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub enum ClaudePath {
-    Native,
-    Connector,
-    Captured,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConnectionStatus {
+    Connected,
+    AlreadyConnected,
+    NotInstalled,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ClaudeConfig {
-    pub base_url: Url,
-    pub api_key: String,
-}
-
-impl ClaudeConfig {
-    pub fn standalone(path: ClaudePath, base_url: Option<Url>, api_key: String) -> Result<Self> {
-        if path == ClaudePath::Captured {
-            bail!("Claude captured path is unavailable on this platform build");
-        }
-        let base_url = match base_url {
-            Some(base_url) => base_url,
-            None => Url::parse(match path {
-                ClaudePath::Native => NATIVE_BASE_URL,
-                ClaudePath::Connector => CONNECTOR_BASE_URL,
-                ClaudePath::Captured => unreachable!("captured path was rejected"),
-            })?,
-        };
-
-        if !matches!(base_url.scheme(), "http" | "https")
-            || base_url.cannot_be_a_base()
-            || base_url.host_str().is_none()
-        {
-            bail!("Claude base URL must be an absolute HTTP or HTTPS URL");
-        }
-        if base_url.query().is_some() || base_url.fragment().is_some() {
-            bail!("Claude base URL must not contain a query string or fragment");
-        }
-        if !base_url.host_str().is_some_and(|host| {
-            host.eq_ignore_ascii_case("localhost")
-                || host
-                    .parse::<std::net::IpAddr>()
-                    .is_ok_and(|ip| ip.is_loopback())
-        }) {
-            bail!("standalone Claude path requires a loopback base URL");
-        }
-        if api_key.is_empty() {
-            bail!("Claude placeholder credential must not be empty");
-        }
-
-        Ok(Self { base_url, api_key })
+pub fn connect_installed() -> Result<ConnectionStatus> {
+    if !is_installed()? {
+        return Ok(ConnectionStatus::NotInstalled);
     }
+    let home = env::var_os("HOME").context("HOME is not set")?;
+    connect_settings(&PathBuf::from(home).join(".claude/settings.json"))
+}
+
+pub fn is_installed() -> Result<bool> {
+    let home = env::var_os("HOME").context("HOME is not set")?;
+    let home = PathBuf::from(home);
+    if home.join(".local/bin/claude").is_file() {
+        return Ok(true);
+    }
+    Ok(env::var_os("PATH").is_some_and(|path| {
+        env::split_paths(&path).any(|directory| directory.join("claude").is_file())
+    }))
+}
+
+fn connect_settings(path: &Path) -> Result<ConnectionStatus> {
+    let mut settings = if path.exists() {
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            bail!(
+                "Claude Code settings {} is not a regular file",
+                path.display()
+            );
+        }
+        serde_json::from_slice::<Value>(&fs::read(path)?)
+            .with_context(|| format!("Claude Code settings {} is not valid JSON", path.display()))?
+    } else {
+        Value::Object(Map::new())
+    };
+    let root = settings.as_object_mut().with_context(|| {
+        format!(
+            "Claude Code settings {} must contain a JSON object",
+            path.display()
+        )
+    })?;
+    let environment = root
+        .entry("env")
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .with_context(|| {
+            format!(
+                "Claude Code settings {} has a non-object env setting",
+                path.display()
+            )
+        })?;
+
+    let desired = [
+        ("ANTHROPIC_BASE_URL", CONNECTOR_BASE_URL),
+        ("ANTHROPIC_API_KEY", PLACEHOLDER_CREDENTIAL),
+    ];
+    if desired
+        .iter()
+        .all(|(name, value)| environment.get(*name).and_then(Value::as_str) == Some(*value))
+    {
+        return Ok(ConnectionStatus::AlreadyConnected);
+    }
+    for (name, value) in desired {
+        if let Some(existing) = environment.get(name)
+            && existing.as_str() != Some(value)
+        {
+            bail!(
+                "Claude Code already configures {name}; disconnect its existing provider or gateway before connecting Agent Gateway Edge"
+            );
+        }
+        environment.insert(name.to_owned(), Value::String(value.to_owned()));
+    }
+
+    let parent = path
+        .parent()
+        .context("Claude Code settings has no parent")?;
+    fs::create_dir_all(parent)?;
+    let mut encoded = serde_json::to_vec_pretty(&settings)?;
+    encoded.push(b'\n');
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    use std::io::Write;
+    temporary.write_all(&encoded)?;
+    temporary.as_file().sync_all()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("failed to update Claude Code settings {}", path.display()))?;
+    Ok(ConnectionStatus::Connected)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ClaudeConfig, ClaudePath};
-    use url::Url;
+    use super::{CONNECTOR_BASE_URL, ConnectionStatus, PLACEHOLDER_CREDENTIAL, connect_settings};
+    use std::fs;
+
+    use serde_json::{Value, json};
 
     #[test]
-    fn selects_path_defaults() {
-        let native =
-            ClaudeConfig::standalone(ClaudePath::Native, None, "placeholder".to_owned()).unwrap();
-        let connector =
-            ClaudeConfig::standalone(ClaudePath::Connector, None, "placeholder".to_owned())
-                .unwrap();
-
-        assert_eq!(native.base_url.as_str(), "http://127.0.0.1:4000/");
-        assert_eq!(connector.base_url.as_str(), "http://127.0.0.1:8080/");
-    }
-
-    #[test]
-    fn accepts_custom_loopback_url() {
-        let config = ClaudeConfig::standalone(
-            ClaudePath::Native,
-            Some(Url::parse("https://localhost:4443/gateway/").unwrap()),
-            "placeholder".to_owned(),
+    fn connects_claude_without_replacing_other_settings() {
+        let temporary = tempfile::tempdir().unwrap();
+        let settings = temporary.path().join(".claude/settings.json");
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::write(
+            &settings,
+            serde_json::to_vec(&json!({"theme": "light"})).unwrap(),
         )
         .unwrap();
 
-        assert_eq!(config.base_url.as_str(), "https://localhost:4443/gateway/");
+        assert_eq!(
+            connect_settings(&settings).unwrap(),
+            ConnectionStatus::Connected
+        );
+        assert_eq!(
+            connect_settings(&settings).unwrap(),
+            ConnectionStatus::AlreadyConnected
+        );
+        let saved: Value = serde_json::from_slice(&fs::read(settings).unwrap()).unwrap();
+        assert_eq!(saved["theme"], "light");
+        assert_eq!(saved["env"]["ANTHROPIC_BASE_URL"], CONNECTOR_BASE_URL);
+        assert_eq!(saved["env"]["ANTHROPIC_API_KEY"], PLACEHOLDER_CREDENTIAL);
     }
 
     #[test]
-    fn rejects_remote_url() {
-        let error = ClaudeConfig::standalone(
-            ClaudePath::Connector,
-            Some(Url::parse("https://gateway.example").unwrap()),
-            "placeholder".to_owned(),
+    fn refuses_to_replace_existing_claude_provider() {
+        let temporary = tempfile::tempdir().unwrap();
+        let settings = temporary.path().join("settings.json");
+        fs::write(
+            &settings,
+            serde_json::to_vec(&json!({
+                "env": {"ANTHROPIC_BASE_URL": "https://existing.example"}
+            }))
+            .unwrap(),
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(error.to_string().contains("requires a loopback"));
-    }
-
-    #[test]
-    fn rejects_captured_path_before_launch() {
-        let error = ClaudeConfig::standalone(ClaudePath::Captured, None, "placeholder".to_owned())
-            .unwrap_err();
-
-        assert!(error.to_string().contains("captured path is unavailable"));
+        let error = connect_settings(&settings).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("already configures ANTHROPIC_BASE_URL")
+        );
+        let saved: Value = serde_json::from_slice(&fs::read(settings).unwrap()).unwrap();
+        assert_eq!(
+            saved["env"]["ANTHROPIC_BASE_URL"],
+            "https://existing.example"
+        );
+        assert!(saved["env"].get("ANTHROPIC_API_KEY").is_none());
     }
 }
