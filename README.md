@@ -138,7 +138,7 @@ Launch Claude Code normally after it is connected:
 claude
 ```
 
-Claude Code reads these user settings for ordinary terminal and IDE launches, so no wrapper command is installed. Re-run the installed connector's `connect-agents` subcommand at any time to connect newly installed supported agents or restore matching settings without reinstalling the product. The placeholder is sent to Agent Gateway, not the AI provider. Agent Gateway remains responsible for replacing or removing application credentials before provider forwarding.
+Claude Code reads these user settings for ordinary terminal and IDE launches, so no Claude wrapper is installed. A bundle installation provides the stable `agentgateway-edge` command through `~/.local/bin`; run `agentgateway-edge connect-agents` at any time to connect newly installed supported agents or restore matching settings without reinstalling the product. The placeholder is sent to Agent Gateway, not the AI provider. Agent Gateway remains responsible for replacing or removing application credentials before provider forwarding.
 
 In standalone mode, the connector can optionally own the lifecycle of a separately installed Agent Gateway process:
 
@@ -254,7 +254,7 @@ scripts/build-managed-installer.sh \
   target/release/example-agentgateway-edge-installer
 ```
 
-The generic template also accepts `--organization <file>` for two-file development. Managed installation leaves the service inactive and does not open a browser or change AI agent settings. The installed `connect-agents` command owns browser login, enrollment approval, service readiness, and separate Claude consent. Customize the executable before applying a publisher signature. See [Managed installer development](docs/deployment/managed-installer.md) for the schema, MDM ownership boundary, and current security limitations.
+The generic template also accepts `--organization <file>` for two-file development. Managed installation leaves the service inactive and does not open a browser or change AI agent settings. The installed `agentgateway-edge connect-agents` command owns browser login, enrollment approval, service readiness, and separate Claude consent. Customize the executable before applying a publisher signature. See [Managed installer development](docs/deployment/managed-installer.md) for the schema, MDM ownership boundary, and current security limitations.
 
 ## Test
 

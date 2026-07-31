@@ -188,7 +188,7 @@ Managed walkthrough is ready.
 In the Fedora desktop:
   1. Open Terminal.
   2. Run:
-     ~/.local/lib/agentgateway-edge/bin/agentgateway-edge-connector connect-agents
+      agentgateway-edge connect-agents
   3. Complete the browser sign-in and return to Terminal.
   4. Approve the separate Claude Code settings prompt.
   5. Launch `claude` normally and ask it to reply with exactly SMOKE_OK.

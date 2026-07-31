@@ -35,6 +35,8 @@ enum Command {
         control: Option<PathBuf>,
         #[arg(long)]
         gateway_config: Option<PathBuf>,
+        #[arg(long)]
+        command_link: PathBuf,
     },
     ManagedInstall {
         #[arg(long)]
@@ -47,6 +49,8 @@ enum Command {
         organization: PathBuf,
         #[arg(long)]
         control: Option<PathBuf>,
+        #[arg(long)]
+        command_link: PathBuf,
     },
     Uninstall {
         #[arg(long)]
@@ -83,6 +87,8 @@ struct InstallManifest {
     format_version: u32,
     connector_version: String,
     files: Vec<InstalledFile>,
+    #[serde(default)]
+    command_link: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -101,6 +107,7 @@ fn main() -> Result<()> {
             starter_config,
             control,
             gateway_config,
+            command_link,
         } => {
             let mut files: Vec<(&Path, &str, bool)> = vec![
                 (connector.as_path(), "bin/agentgateway-edge-connector", true),
@@ -120,6 +127,7 @@ fn main() -> Result<()> {
                 &files,
                 &standalone_systemd_unit(&root, gateway_config.as_deref()),
                 "standalone",
+                &command_link,
             )
         }
         Command::ManagedInstall {
@@ -128,6 +136,7 @@ fn main() -> Result<()> {
             identity,
             organization,
             control,
+            command_link,
         } => {
             let bootstrap = OrganizationBootstrap::parse(&fs::read(&organization)?)?;
             let mut files: Vec<(&Path, &str, bool)> = vec![
@@ -143,6 +152,7 @@ fn main() -> Result<()> {
                 &files,
                 &managed_systemd_unit(&root, &bootstrap),
                 "managed",
+                &command_link,
             )
         }
         Command::Uninstall { root } => uninstall(&root),
@@ -210,9 +220,13 @@ fn install(
     files: &[(&Path, &str, bool)],
     systemd_unit: &str,
     deployment: &str,
+    command_link: &Path,
 ) -> Result<()> {
     if !root.is_absolute() {
         bail!("install root must be absolute");
+    }
+    if !command_link.is_absolute() {
+        bail!("command link must be absolute");
     }
     for (source, _, _) in files {
         if !source.is_file() {
@@ -223,8 +237,8 @@ fn install(
     fs::create_dir_all(parent)?;
     let staging = sibling(root, "staging");
     let backup = sibling(root, "backup");
-    remove_owned_tree_if_present(&staging)?;
-    remove_owned_tree_if_present(&backup)?;
+    remove_owned_tree_if_present(&staging, false)?;
+    remove_owned_tree_if_present(&backup, false)?;
     fs::create_dir(&staging)?;
 
     let stage_result = (|| -> Result<()> {
@@ -258,9 +272,10 @@ fn install(
             })
             .collect::<Result<Vec<_>>>()?;
         let manifest = InstallManifest {
-            format_version: 2,
+            format_version: 3,
             connector_version: env!("CARGO_PKG_VERSION").to_owned(),
             files,
+            command_link: Some(command_link.to_owned()),
         };
         fs::write(
             staging.join(MANIFEST),
@@ -282,6 +297,13 @@ fn install(
             let _ = fs::rename(&backup, root);
         }
         return Err(error.into());
+    }
+    if let Err(error) = install_command_link(root, command_link) {
+        let _ = fs::remove_dir_all(root);
+        if backup.exists() {
+            let _ = fs::rename(&backup, root);
+        }
+        return Err(error);
     }
     if backup.exists() {
         fs::remove_dir_all(backup)?;
@@ -319,22 +341,32 @@ fn quote_systemd_value(value: &str) -> String {
 }
 
 fn uninstall(root: &Path) -> Result<()> {
-    validate_owned_tree(root)?;
+    let manifest = validate_owned_tree(root)?;
+    if let Some(command_link) = manifest.command_link {
+        fs::remove_file(command_link)?;
+    }
     fs::remove_dir_all(root)?;
     println!("removed edge bundle from {}", root.display());
     Ok(())
 }
 
-fn validate_owned_tree(root: &Path) -> Result<()> {
+fn validate_owned_tree(root: &Path) -> Result<InstallManifest> {
+    validate_owned_tree_with_external(root, true)
+}
+
+fn validate_owned_tree_with_external(
+    root: &Path,
+    validate_external: bool,
+) -> Result<InstallManifest> {
     let manifest = root.join(MANIFEST);
     let parsed: InstallManifest = serde_json::from_slice(
         &fs::read(&manifest)
             .with_context(|| format!("{} is not an edge bundle", root.display()))?,
     )?;
-    if parsed.format_version != 2 {
+    if !matches!(parsed.format_version, 2 | 3) {
         bail!("unsupported install manifest format");
     }
-    for installed in parsed.files {
+    for installed in &parsed.files {
         let relative = Path::new(&installed.path);
         if relative.as_os_str().is_empty()
             || !relative
@@ -353,7 +385,10 @@ fn validate_owned_tree(root: &Path) -> Result<()> {
             bail!("installed file {} has been modified", path.display());
         }
     }
-    Ok(())
+    if validate_external && let Some(command_link) = &parsed.command_link {
+        validate_command_link(root, command_link)?;
+    }
+    Ok(parsed)
 }
 
 fn file_sha256(path: &Path) -> Result<String> {
@@ -361,10 +396,51 @@ fn file_sha256(path: &Path) -> Result<String> {
     Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-fn remove_owned_tree_if_present(path: &Path) -> Result<()> {
+fn remove_owned_tree_if_present(path: &Path, validate_external: bool) -> Result<()> {
     if path.exists() {
-        validate_owned_tree(path)?;
+        validate_owned_tree_with_external(path, validate_external)?;
         fs::remove_dir_all(path)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn install_command_link(root: &Path, command_link: &Path) -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let target = root.join("bin/agentgateway-edge-connector");
+    if let Ok(metadata) = fs::symlink_metadata(command_link) {
+        if metadata.file_type().is_symlink() && fs::read_link(command_link)? == target {
+            return Ok(());
+        }
+        bail!(
+            "command path {} already exists and is not owned by this installation",
+            command_link.display()
+        );
+    }
+    fs::create_dir_all(
+        command_link
+            .parent()
+            .context("command link has no parent")?,
+    )?;
+    symlink(target, command_link)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn install_command_link(_root: &Path, _command_link: &Path) -> Result<()> {
+    bail!("stable command links are not implemented on this platform")
+}
+
+fn validate_command_link(root: &Path, command_link: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(command_link)
+        .with_context(|| format!("installed command {} is missing", command_link.display()))?;
+    let expected = root.join("bin/agentgateway-edge-connector");
+    if !metadata.file_type().is_symlink() || fs::read_link(command_link)? != expected {
+        bail!(
+            "installed command {} has been modified",
+            command_link.display()
+        );
     }
     Ok(())
 }

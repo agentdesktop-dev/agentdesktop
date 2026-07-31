@@ -84,10 +84,10 @@ The guided installer detects Claude Code after Agent Gateway Edge becomes ready 
 Run the same setup manually with:
 
 ```bash
-"$HOME/.local/lib/agentgateway-edge/bin/agentgateway-edge-connector" connect-agents
+agentgateway-edge connect-agents
 ```
 
-This command can be rerun at any time without reinstalling Agent Gateway Edge. Matching settings are reported as already connected; conflicting provider or gateway settings are left unchanged. After connection, launch `claude` normally. Claude Code applies the user settings to terminal and IDE sessions, so Agent Gateway Edge does not install or require a Claude-specific launcher. Requests fail when Agent Gateway is unavailable and do not fall back to Anthropic directly.
+The installer owns `~/.local/bin/agentgateway-edge` as a stable link to the private bundle. It does not edit shell startup files or add directories to `PATH`; environments that do not already include `~/.local/bin` receive an installer warning. The command can be rerun at any time without reinstalling Agent Gateway Edge. Matching settings are reported as already connected; conflicting provider or gateway settings are left unchanged. After connection, launch `claude` normally. Claude Code applies the user settings to terminal and IDE sessions, so Agent Gateway Edge does not install or require a Claude-specific launcher. Requests fail when Agent Gateway is unavailable and do not fall back to Anthropic directly.
 
 Application configuration is routed rather than enforced: a user who can change application settings can bypass it. Enforced routing requires later transparent capture and, where necessary, host firewall or MDM controls.
 

@@ -10,6 +10,7 @@ fn installs_upgrades_and_uninstalls_standalone_bundle() {
         fs::write(fixtures.join(name), format!("first-{name}")).unwrap();
     }
     let root = temporary.path().join("agentgateway-edge");
+    let command_link = temporary.path().join("bin/agentgateway-edge");
     let runtime_config = temporary.path().join("config/agentgateway.yaml");
     let install = || {
         Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-install"))
@@ -29,6 +30,8 @@ fn installs_upgrades_and_uninstalls_standalone_bundle() {
                 env!("CARGO_BIN_EXE_agentgateway-edge-install"),
                 "--gateway-config",
                 runtime_config.to_str().unwrap(),
+                "--command-link",
+                command_link.to_str().unwrap(),
             ])
             .output()
             .unwrap()
@@ -44,6 +47,10 @@ fn installs_upgrades_and_uninstalls_standalone_bundle() {
         "first-config"
     );
     assert!(root.join("bin/agentgateway-edge-install").is_file());
+    assert_eq!(
+        fs::read_link(&command_link).unwrap(),
+        root.join("bin/agentgateway-edge-connector")
+    );
     let service =
         fs::read_to_string(root.join("share/systemd/user/agentgateway-edge.service")).unwrap();
     assert!(service.contains("--mode standalone"));
@@ -64,6 +71,20 @@ fn installs_upgrades_and_uninstalls_standalone_bundle() {
         .output()
         .unwrap();
     assert!(verify.status.success());
+
+    #[cfg(unix)]
+    {
+        fs::remove_file(&command_link).unwrap();
+        std::os::unix::fs::symlink("unexpected-target", &command_link).unwrap();
+        let refused = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-install"))
+            .args(["verify", "--root", root.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(!refused.status.success());
+        fs::remove_file(&command_link).unwrap();
+        std::os::unix::fs::symlink(root.join("bin/agentgateway-edge-connector"), &command_link)
+            .unwrap();
+    }
 
     #[cfg(unix)]
     {
@@ -126,6 +147,7 @@ fn installs_upgrades_and_uninstalls_standalone_bundle() {
         .unwrap();
     assert!(uninstall.status.success());
     assert!(!root.exists());
+    assert!(!command_link.exists());
 }
 
 #[test]
@@ -142,6 +164,47 @@ fn refuses_to_remove_an_unowned_directory() {
 
     assert!(!uninstall.status.success());
     assert_eq!(fs::read_to_string(root.join("user-data")).unwrap(), "keep");
+}
+
+#[cfg(unix)]
+#[test]
+fn refuses_to_replace_an_unowned_stable_command() {
+    let temporary = tempfile::tempdir().unwrap();
+    let fixtures = temporary.path().join("fixtures");
+    fs::create_dir(&fixtures).unwrap();
+    for name in ["connector", "identity", "agentgateway", "config"] {
+        fs::write(fixtures.join(name), name).unwrap();
+    }
+    let root = temporary.path().join("agentgateway-edge");
+    let command_link = temporary.path().join("bin/agentgateway-edge");
+    fs::create_dir(command_link.parent().unwrap()).unwrap();
+    fs::write(&command_link, "user-owned command").unwrap();
+
+    let install = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-install"))
+        .args([
+            "install",
+            "--root",
+            root.to_str().unwrap(),
+            "--connector",
+            fixtures.join("connector").to_str().unwrap(),
+            "--identity",
+            fixtures.join("identity").to_str().unwrap(),
+            "--agentgateway",
+            fixtures.join("agentgateway").to_str().unwrap(),
+            "--starter-config",
+            fixtures.join("config").to_str().unwrap(),
+            "--command-link",
+            command_link.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!install.status.success());
+    assert_eq!(
+        fs::read_to_string(command_link).unwrap(),
+        "user-owned command"
+    );
+    assert!(!root.exists());
 }
 
 #[test]
@@ -164,6 +227,7 @@ fn installs_managed_bundle_without_local_gateway() {
     )
     .unwrap();
     let root = temporary.path().join("agentgateway-edge");
+    let command_link = temporary.path().join("bin/agentgateway-edge");
 
     let install = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-install"))
         .args([
@@ -178,12 +242,18 @@ fn installs_managed_bundle_without_local_gateway() {
             organization.to_str().unwrap(),
             "--control",
             env!("CARGO_BIN_EXE_agentgateway-edge-install"),
+            "--command-link",
+            command_link.to_str().unwrap(),
         ])
         .output()
         .unwrap();
 
     assert!(install.status.success(), "{:?}", install.stderr);
     assert!(root.join("share/organization.json").is_file());
+    assert_eq!(
+        fs::read_link(command_link).unwrap(),
+        root.join("bin/agentgateway-edge-connector")
+    );
     assert!(!root.join("bin/agentgateway").exists());
     assert!(!root.join("share/examples/agentgateway.yaml").exists());
     let service =

@@ -119,6 +119,7 @@ fn install_standalone(args: InstallArgs) -> Result<()> {
         bail!("--connect-agents requires the service to start");
     }
     let root = args.root.map_or_else(default_root, Ok)?;
+    let command_link = default_command_link()?;
     if !root.is_absolute() {
         bail!("install root must be absolute");
     }
@@ -175,6 +176,8 @@ fn install_standalone(args: InstallArgs) -> Result<()> {
                 .into_owned(),
             "--gateway-config".to_owned(),
             config.to_string_lossy().into_owned(),
+            "--command-link".to_owned(),
+            command_link.to_string_lossy().into_owned(),
         ],
     )?;
 
@@ -225,10 +228,8 @@ fn install_standalone(args: InstallArgs) -> Result<()> {
         } else {
             run_agent_setup(payload.path(), false)?;
         }
-        println!(
-            "\nUpdate AI agent connections later with:\n  {} connect-agents",
-            root.join("bin/agentgateway-edge-connector").display()
-        );
+        println!("\nUpdate AI agent connections later with:\n  agentgateway-edge connect-agents");
+        print_command_path_warning(&command_link);
     }
     Ok(())
 }
@@ -238,6 +239,7 @@ fn install_managed(args: InstallArgs) -> Result<()> {
         bail!("managed installation does not accept standalone service or agent setup options");
     }
     let root = args.root.map_or_else(default_root, Ok)?;
+    let command_link = default_command_link()?;
     if !root.is_absolute() {
         bail!("install root must be absolute");
     }
@@ -284,6 +286,8 @@ fn install_managed(args: InstallArgs) -> Result<()> {
                 .join("installer")
                 .to_string_lossy()
                 .into_owned(),
+            "--command-link".to_owned(),
+            command_link.to_string_lossy().into_owned(),
         ],
     )?;
 
@@ -292,11 +296,28 @@ fn install_managed(args: InstallArgs) -> Result<()> {
     println!("  Files:        {}", root.display());
     println!("  Service:      installed, awaiting user sign-in");
     println!("\nNo AI agent settings were changed.");
-    println!(
-        "To sign in and connect your AI agents, run:\n  {} connect-agents",
-        root.join("bin/agentgateway-edge-connector").display()
-    );
+    println!("To sign in and connect your AI agents, run:\n  agentgateway-edge connect-agents");
+    print_command_path_warning(&command_link);
     Ok(())
+}
+
+fn default_command_link() -> Result<PathBuf> {
+    let home = env::var_os("HOME").context("HOME is not set")?;
+    Ok(PathBuf::from(home).join(".local/bin/agentgateway-edge"))
+}
+
+fn print_command_path_warning(command_link: &Path) {
+    let Some(directory) = command_link.parent() else {
+        return;
+    };
+    let on_path = env::var_os("PATH")
+        .is_some_and(|path| env::split_paths(&path).any(|entry| entry == directory));
+    if !on_path {
+        println!(
+            "\nThis terminal does not include {} in PATH. The command will be available after your user environment includes that directory.",
+            directory.display()
+        );
+    }
 }
 
 fn load_organization(path: Option<&Path>) -> Result<OrganizationBootstrap> {
