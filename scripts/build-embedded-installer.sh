@@ -17,13 +17,11 @@ test -f "$config" || {
 cd "$root"
 cargo build --release \
   --bin agentgateway-edge-install \
-  --bin agentgateway-edge-connector \
-  --bin agentgateway-edge-identity
+  --bin agentgateway-edge-connector
 
 AGENTGATEWAY_EDGE_INSTALLER_MODE=standalone \
 AGENTGATEWAY_EDGE_PAYLOAD_INSTALLER=$root/target/release/agentgateway-edge-install \
 AGENTGATEWAY_EDGE_PAYLOAD_CONNECTOR=$root/target/release/agentgateway-edge-connector \
-AGENTGATEWAY_EDGE_PAYLOAD_IDENTITY=$root/target/release/agentgateway-edge-identity \
 AGENTGATEWAY_EDGE_PAYLOAD_AGENTGATEWAY=$agentgateway \
 AGENTGATEWAY_EDGE_PAYLOAD_CONFIG=$config \
   cargo build --release --features embedded-installer --bin agentgateway-edge-installer

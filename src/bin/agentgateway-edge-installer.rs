@@ -154,12 +154,6 @@ fn install_standalone(args: InstallArgs) -> Result<()> {
                 .join("connector")
                 .to_string_lossy()
                 .into_owned(),
-            "--identity".to_owned(),
-            payload
-                .path()
-                .join("identity")
-                .to_string_lossy()
-                .into_owned(),
             "--agentgateway".to_owned(),
             payload
                 .path()
@@ -272,12 +266,6 @@ fn install_managed(args: InstallArgs) -> Result<()> {
                 .join("connector")
                 .to_string_lossy()
                 .into_owned(),
-            "--identity".to_owned(),
-            payload
-                .path()
-                .join("identity")
-                .to_string_lossy()
-                .into_owned(),
             "--organization".to_owned(),
             organization.to_string_lossy().into_owned(),
             "--control".to_owned(),
@@ -337,7 +325,6 @@ fn print_managed_summary(root: &Path, bootstrap: &OrganizationBootstrap) {
     );
     println!("This installs for the current user:");
     println!("  - Edge connector");
-    println!("  - Identity helper");
     println!("\nLocation:     {}", root.display());
     println!("Agent Gateway: {}", bootstrap.gateway.url);
     println!("Service:      installed but not started");
@@ -476,7 +463,6 @@ fn print_summary(root: &Path, config: &Path, start: bool) {
     println!("This installs for the current user:");
     println!("  - Agent Gateway");
     println!("  - Edge connector");
-    println!("  - Identity helper");
     println!("\nLocation: {}", root.display());
     println!("Config:   {}", config.display());
     println!(

@@ -16,7 +16,7 @@ This file records verified implementation status and external blockers. A phase 
 - Phase 7, partial: JSON structured lifecycle and failure logs with fixed privacy-safe event categories; validated W3C trace-context propagation and generation; privacy-safe forwarding spans with opt-in bounded OTLP/gRPC export and orderly flush; bounded low-cardinality operational counters. Metric export and automated collector-correlation coverage remain pending.
 - Phase 8, partial: hardened non-root container build and SHA-256 bundle integrity manifests with verification and tamper-safe upgrade/uninstall. Publisher signatures, staged fleet rollout, minimum-version policy, and privileged IPC remain pending.
 
-The managed organization-specific artifact's MDM-owned installation half is validated over SSH in the disposable Fedora desktop VM: installation and manifest verification succeed without adding local Agent Gateway, modifying Claude settings, or changing the existing user-service activation state. Browser login, administrator enrollment approval, and managed gateway forwarding have not yet been validated in that VM.
+The complete managed organization-specific walkthrough has been manually validated in the disposable Fedora desktop VM. Its MDM-owned installation half installs and verifies the bundle without adding local Agent Gateway, modifying Claude settings, or changing the existing user-service activation state. The user-owned half completes browser login, automatic test enrollment approval, service activation, separate Claude settings consent, managed gateway forwarding, and a successful request from plain `claude`. This validates the development fixtures and product journey, not production enrollment or Agent Gateway identity enforcement.
 
 ## Active blockers
 
@@ -47,3 +47,19 @@ Revisit the initial screen before public packaging. It should answer only what w
 - OpenTelemetry metric export and backend correlation tests using the selected Rust OTel 0.31 stack.
 - Agent Gateway DPoP work when its source checkout and contribution boundary are available.
 - Linux local token/process lifecycle integration, real Agent Gateway restart tests, managed Agent Gateway DPoP authentication, and disposable-host tests; do not expose a captured application path before those boundaries work end to end.
+
+## Next implementation steps
+
+The next milestone is a Linux capture-session controller inside the main connector, using the existing in-process relay and the narrow privileged setup helper. Do not add another product binary, change the nftables selection mechanism, or add another capture abstraction first. The controller owns one session as a transaction and performs these steps in order:
+
+1. Validate that Agent Gateway is ready, the capture listener and HBONE addresses are loopback, the target application profile is `captured`, and neither the connector nor Agent Gateway can enter the selected cgroup.
+2. Create a fresh unpredictable capture token in an owner-only runtime directory, pass the same token to the local Agent Gateway through its protected startup environment, and never place it in command-line arguments or logs.
+3. Start the connector's in-process unprivileged capture relay outside the application cgroup and wait for its explicit readiness before changing network rules.
+4. Create a transient systemd scope for the selected application, retain its exact cgroup v2 path, and keep the application stopped until capture is active so no selected connection can escape during setup.
+5. Invoke the narrow privileged setup boundary to preflight and atomically install the connector-owned nftables table for that exact cgroup. Only then release or launch the application in the scope.
+6. Supervise Agent Gateway, relay, scope, and nftables state. A relay or gateway failure keeps TCP and UDP/443 blocked for the selected scope; it never removes rules while the application can still run or retries an ambiguous flow.
+7. On normal exit, cancellation, startup failure, or partial failure, stop the application scope first, remove the connector-owned nftables table second, stop the relay third, and delete the token last. Cleanup must be idempotent and must refuse to remove state it does not own.
+
+Add deterministic process-level tests for every failure boundary: token creation, gateway readiness, relay readiness, scope creation, rule installation, application launch, gateway restart, relay exit, cancellation, and repeated cleanup. Then run the same lifecycle in the disposable Fedora VM with a real Agent Gateway, proving TCP fail-closed behavior, UDP/443 denial, child-process capture, gateway restart recovery for later flows only, and no residual scope, rules, relay, or token. Keep `platform.transparent_capture` false and keep the `captured` application path unavailable until those tests pass.
+
+After the standalone lifecycle is proven, add managed HBONE TLS and per-CONNECT DPoP validation, replay protection, `cnf.jkt` binding, credential stripping, and immutable outer-to-inner identity propagation in Agent Gateway. Re-run the disposable-VM capture journey with inner application headers attempting, and failing, to override the verified tunnel identity.

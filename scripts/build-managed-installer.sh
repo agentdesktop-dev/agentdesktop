@@ -24,13 +24,11 @@ cd "$root"
 cargo build --release \
   --bin agentgateway-edge-install \
   --bin agentgateway-edge-connector \
-  --bin agentgateway-edge-identity \
   --bin agentgateway-edge-customize
 
 AGENTGATEWAY_EDGE_INSTALLER_MODE=managed \
 AGENTGATEWAY_EDGE_PAYLOAD_INSTALLER=$root/target/release/agentgateway-edge-install \
 AGENTGATEWAY_EDGE_PAYLOAD_CONNECTOR=$root/target/release/agentgateway-edge-connector \
-AGENTGATEWAY_EDGE_PAYLOAD_IDENTITY=$root/target/release/agentgateway-edge-identity \
   cargo build --release --features embedded-installer --bin agentgateway-edge-installer
 
 cp "$root/target/release/agentgateway-edge-installer" "$template"

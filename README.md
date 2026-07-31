@@ -18,14 +18,13 @@ The managed user/device trust boundary is documented in [Managed Identity Contra
 Managed identity is experimental. Validate credential persistence before login or installation:
 
 ```bash
-cargo run --bin agentgateway-edge-identity -- storage-check
+cargo run -- identity storage-check
 ```
 
 The default `auto` mode uses Linux Secret Service when a write/read/delete preflight succeeds and otherwise persists an owner-only protected-file backend. Require Secret Service with no fallback using:
 
 ```bash
-cargo run --bin agentgateway-edge-identity -- \
-  storage-check --credential-storage secret-service
+cargo run -- identity storage-check --credential-storage secret-service
 ```
 
 Select the protected file explicitly with `--credential-storage file`. The selected backend is persisted and revalidated on later startup; runtime does not silently switch stores. Override the XDG-based identity directory with `AGENTGATEWAY_EDGE_IDENTITY_DIR`.
@@ -35,7 +34,7 @@ Select the protected file explicitly with `--credential-storage file`. The selec
 Run browser Authorization Code login against an issuer that advertises PKCE `S256`, DPoP `ES256`, and an ES256 JWT signing key through discovery:
 
 ```bash
-cargo run --bin agentgateway-edge-identity -- login \
+cargo run -- identity login \
   --issuer https://identity.example/ \
   --client-id agentgateway-edge \
   --audience https://gateway.example \
@@ -59,7 +58,7 @@ The connector fails at startup if storage or the matching session is unavailable
 Delete only the matching local session with:
 
 ```bash
-cargo run --bin agentgateway-edge-identity -- logout \
+cargo run -- identity logout \
   --issuer https://identity.example/ \
   --gateway-origin https://gateway.example
 ```
@@ -69,7 +68,7 @@ This removes the local session and any locally persisted enrollment record. It d
 Request authority approval for the current session's DPoP key when the issuer advertises the draft enrollment endpoint:
 
 ```bash
-cargo run --bin agentgateway-edge-identity -- enroll-request \
+cargo run -- identity enroll-request \
   --issuer https://identity.example/ \
   --gateway-origin https://gateway.example
 ```
@@ -77,7 +76,7 @@ cargo run --bin agentgateway-edge-identity -- enroll-request \
 The command prints a non-secret pending record containing the authority-generated enrollment ID. After administrator approval, read device and revocation status with:
 
 ```bash
-cargo run --bin agentgateway-edge-identity -- enroll-status \
+cargo run -- identity enroll-status \
   --issuer https://identity.example/ \
   --gateway-origin https://gateway.example
 ```

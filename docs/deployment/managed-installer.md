@@ -1,6 +1,6 @@
 # Managed installer development
 
-The managed development artifact contains the connector, identity helper, installation engine, and an organization bootstrap. It does not contain Agent Gateway, provider credentials, policy, client secrets, access tokens, or refresh tokens.
+The managed development artifact contains the connector, installation engine, and an organization bootstrap. Managed identity commands are part of the connector. The artifact does not contain Agent Gateway, provider credentials, policy, client secrets, access tokens, or refresh tokens.
 
 Build a generic managed template and the customizer:
 

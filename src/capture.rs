@@ -1,11 +1,14 @@
+use std::ffi::OsString;
 use std::fs;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
+use clap::Parser;
+use http::HeaderMap;
 use http::header::HeaderValue;
 use http::uri::Authority;
 use tokio::io::AsyncWriteExt;
@@ -16,6 +19,41 @@ use crate::hbone::HboneClient;
 use crate::platform::linux::original_destination;
 
 pub const TUNNEL_TOKEN_HEADER: &str = "x-agentgateway-edge-token";
+
+#[derive(Debug, Parser)]
+#[command(version, about = "Relay redirected Linux TCP flows over HBONE")]
+struct Cli {
+    #[arg(long, default_value = "127.0.0.1:15001")]
+    listen: SocketAddr,
+    #[arg(long, default_value = "127.0.0.1:15008")]
+    hbone_endpoint: SocketAddr,
+    #[arg(long, env = "AGENTGATEWAY_EDGE_CAPTURE_TOKEN_FILE")]
+    token_file: PathBuf,
+    #[arg(long, default_value_t = 128)]
+    max_tunnels: usize,
+}
+
+pub async fn run_from(arguments: impl IntoIterator<Item = OsString>) -> Result<()> {
+    let cli = Cli::parse_from(arguments);
+    if !cli.listen.ip().is_loopback() || !cli.hbone_endpoint.ip().is_loopback() {
+        bail!("prototype capture and HBONE endpoints must be loopback");
+    }
+    if cli.max_tunnels == 0 {
+        bail!("max tunnels must be greater than zero");
+    }
+    let mut connect_headers = HeaderMap::new();
+    connect_headers.insert(TUNNEL_TOKEN_HEADER, load_tunnel_token(&cli.token_file)?);
+    let hbone = HboneClient::connect_with_headers(cli.hbone_endpoint, connect_headers).await?;
+    let listener = TcpListener::bind(cli.listen).await?;
+    tracing::info!(event = "capture_started", listen = %listener.local_addr()?);
+    serve(listener, hbone, cli.max_tunnels, shutdown_signal()).await
+}
+
+async fn shutdown_signal() {
+    if tokio::signal::ctrl_c().await.is_err() {
+        tracing::error!(event = "shutdown_signal_failed");
+    }
+}
 
 pub fn load_tunnel_token(path: &Path) -> Result<HeaderValue> {
     let metadata = fs::metadata(path)

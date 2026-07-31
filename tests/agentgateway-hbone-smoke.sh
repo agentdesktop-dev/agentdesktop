@@ -38,7 +38,7 @@ test -x "$gateway" || {
 }
 
 cd "$root"
-cargo build --quiet --bin agentgateway-edge-capture
+cargo build --quiet --bin agentgateway-edge-connector
 
 python3 -m http.server 18080 --bind 127.0.0.1 >"$tmp/target.log" 2>&1 &
 target_pid=$!
@@ -54,7 +54,7 @@ wait_tcp 15008 "$gateway_pid" || {
 
 printf wrong-token >"$tmp/token"
 chmod 0600 "$tmp/token"
-target/debug/agentgateway-edge-capture \
+target/debug/agentgateway-edge-connector capture \
   --listen 127.0.0.1:15001 \
   --hbone-endpoint 127.0.0.1:15008 \
   --token-file "$tmp/token" >"$tmp/relay.log" 2>&1 &
@@ -73,7 +73,7 @@ wait "$relay_pid" 2>/dev/null || true
 relay_pid=
 
 printf %s "$token" >"$tmp/token"
-target/debug/agentgateway-edge-capture \
+target/debug/agentgateway-edge-connector capture \
   --listen 127.0.0.1:15001 \
   --hbone-endpoint 127.0.0.1:15008 \
   --token-file "$tmp/token" >"$tmp/relay.log" 2>&1 &

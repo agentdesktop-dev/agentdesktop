@@ -6,7 +6,7 @@ fn installs_upgrades_and_uninstalls_standalone_bundle() {
     let temporary = tempfile::tempdir().unwrap();
     let fixtures = temporary.path().join("fixtures");
     fs::create_dir(&fixtures).unwrap();
-    for name in ["connector", "identity", "agentgateway", "config"] {
+    for name in ["connector", "agentgateway", "config"] {
         fs::write(fixtures.join(name), format!("first-{name}")).unwrap();
     }
     let root = temporary.path().join("agentgateway-edge");
@@ -20,8 +20,6 @@ fn installs_upgrades_and_uninstalls_standalone_bundle() {
                 root.to_str().unwrap(),
                 "--connector",
                 fixtures.join("connector").to_str().unwrap(),
-                "--identity",
-                fixtures.join("identity").to_str().unwrap(),
                 "--agentgateway",
                 fixtures.join("agentgateway").to_str().unwrap(),
                 "--starter-config",
@@ -172,7 +170,7 @@ fn refuses_to_replace_an_unowned_stable_command() {
     let temporary = tempfile::tempdir().unwrap();
     let fixtures = temporary.path().join("fixtures");
     fs::create_dir(&fixtures).unwrap();
-    for name in ["connector", "identity", "agentgateway", "config"] {
+    for name in ["connector", "agentgateway", "config"] {
         fs::write(fixtures.join(name), name).unwrap();
     }
     let root = temporary.path().join("agentgateway-edge");
@@ -187,8 +185,6 @@ fn refuses_to_replace_an_unowned_stable_command() {
             root.to_str().unwrap(),
             "--connector",
             fixtures.join("connector").to_str().unwrap(),
-            "--identity",
-            fixtures.join("identity").to_str().unwrap(),
             "--agentgateway",
             fixtures.join("agentgateway").to_str().unwrap(),
             "--starter-config",
@@ -212,9 +208,7 @@ fn installs_managed_bundle_without_local_gateway() {
     let temporary = tempfile::tempdir().unwrap();
     let fixtures = temporary.path().join("fixtures");
     fs::create_dir(&fixtures).unwrap();
-    for name in ["connector", "identity"] {
-        fs::write(fixtures.join(name), format!("managed-{name}")).unwrap();
-    }
+    fs::write(fixtures.join("connector"), "managed-connector").unwrap();
     let organization = fixtures.join("organization.json");
     fs::write(
         &organization,
@@ -236,8 +230,6 @@ fn installs_managed_bundle_without_local_gateway() {
             root.to_str().unwrap(),
             "--connector",
             fixtures.join("connector").to_str().unwrap(),
-            "--identity",
-            fixtures.join("identity").to_str().unwrap(),
             "--organization",
             organization.to_str().unwrap(),
             "--control",

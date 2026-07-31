@@ -33,8 +33,9 @@ async fn browser_pkce_login_persists_dpop_bound_session() {
 
     let temporary = tempfile::tempdir().unwrap();
     let storage_dir = temporary.path().join("identity");
-    let mut login = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-identity"))
+    let mut login = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-connector"))
         .args([
+            "identity",
             "login",
             "--issuer",
             issuer_url,
@@ -113,8 +114,9 @@ async fn browser_pkce_login_persists_dpop_bound_session() {
     assert_eq!(restored.generation, original_generation + 1);
     assert!(!restored.is_expired().unwrap());
 
-    let logout = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-identity"))
+    let logout = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-connector"))
         .args([
+            "identity",
             "logout",
             "--issuer",
             issuer_url,

@@ -26,8 +26,6 @@ enum Command {
         #[arg(long)]
         connector: PathBuf,
         #[arg(long)]
-        identity: PathBuf,
-        #[arg(long)]
         agentgateway: PathBuf,
         #[arg(long)]
         starter_config: PathBuf,
@@ -43,8 +41,6 @@ enum Command {
         root: PathBuf,
         #[arg(long)]
         connector: PathBuf,
-        #[arg(long)]
-        identity: PathBuf,
         #[arg(long)]
         organization: PathBuf,
         #[arg(long)]
@@ -102,7 +98,6 @@ fn main() -> Result<()> {
         Command::Install {
             root,
             connector,
-            identity,
             agentgateway,
             starter_config,
             control,
@@ -111,7 +106,6 @@ fn main() -> Result<()> {
         } => {
             let mut files: Vec<(&Path, &str, bool)> = vec![
                 (connector.as_path(), "bin/agentgateway-edge-connector", true),
-                (identity.as_path(), "bin/agentgateway-edge-identity", true),
                 (agentgateway.as_path(), "bin/agentgateway", true),
                 (
                     starter_config.as_path(),
@@ -133,7 +127,6 @@ fn main() -> Result<()> {
         Command::ManagedInstall {
             root,
             connector,
-            identity,
             organization,
             control,
             command_link,
@@ -141,7 +134,6 @@ fn main() -> Result<()> {
             let bootstrap = OrganizationBootstrap::parse(&fs::read(&organization)?)?;
             let mut files: Vec<(&Path, &str, bool)> = vec![
                 (connector.as_path(), "bin/agentgateway-edge-connector", true),
-                (identity.as_path(), "bin/agentgateway-edge-identity", true),
                 (organization.as_path(), "share/organization.json", false),
             ];
             if let Some(control) = &control {

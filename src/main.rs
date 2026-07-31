@@ -38,6 +38,22 @@ enum AgentSetupCommand {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("capture")) {
+        let _telemetry = agentgateway_edge_connector::telemetry::init()?;
+        let arguments = std::env::args_os()
+            .take(1)
+            .chain(std::env::args_os().skip(2));
+        #[cfg(target_os = "linux")]
+        return agentgateway_edge_connector::capture::run_from(arguments).await;
+        #[cfg(not(target_os = "linux"))]
+        anyhow::bail!("transparent capture relay is only available on Linux");
+    }
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("identity")) {
+        let arguments = std::env::args_os()
+            .take(1)
+            .chain(std::env::args_os().skip(2));
+        return agentgateway_edge_connector::identity::cli::run_from(arguments).await;
+    }
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("connect-agents")) {
         return connect_agents(AgentSetupCli::parse()).await;
     }

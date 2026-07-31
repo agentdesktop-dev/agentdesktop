@@ -17,8 +17,9 @@ fn help_exits_successfully() {
 #[test]
 fn identity_storage_check_selects_protected_file() {
     let temporary = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-identity"))
+    let output = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-connector"))
         .args([
+            "identity",
             "storage-check",
             "--credential-storage",
             "file",

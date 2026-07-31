@@ -18,7 +18,7 @@ cargo run --quiet --bin agentgateway-edge-capture-setup -- \
       cat > /rules.nft
       apt-get update >/dev/null
       apt-get install -y --no-install-recommends nftables netcat-openbsd iproute2 python3-h2 >/dev/null
-      CARGO_TARGET_DIR=/tmp/target cargo build --quiet --manifest-path /work/Cargo.toml --bin agentgateway-edge-capture
+      CARGO_TARGET_DIR=/tmp/target cargo build --quiet --manifest-path /work/Cargo.toml --bin agentgateway-edge-connector
       mkdir /sys/fs/cgroup/capture-test
       nft --check --file /rules.nft
       nft --file /rules.nft
@@ -35,7 +35,7 @@ cargo run --quiet --bin agentgateway-edge-capture-setup -- \
       test "$ready" = yes
       printf private-container-token > /tmp/capture-token
       chmod 0600 /tmp/capture-token
-      /tmp/target/debug/agentgateway-edge-capture --token-file /tmp/capture-token &
+      /tmp/target/debug/agentgateway-edge-connector capture --token-file /tmp/capture-token &
       relay=$!
       ready=
       for attempt in $(seq 1 1000); do
