@@ -1,1 +1,3 @@
 /target
+/tests/vm/.artifacts/
+/tests/vm/.state/
