@@ -38,7 +38,18 @@ cargo run --bin agentgateway-edge-identity -- login \
   --gateway-origin https://gateway.example
 ```
 
-The command validates credential storage before opening the browser, listens on an ephemeral loopback callback, verifies the access-token signature and issuer, audience, and DPoP binding, then persists the token and DPoP key. `--no-open` prints the authorization URL for non-desktop testing. Tokens are not yet refreshed or attached to connector traffic, and the DPoP key is not verified organizational device identity.
+The command validates credential storage before opening the browser, listens on an ephemeral loopback callback, verifies the access-token signature and issuer, audience, expiry, scope, and DPoP binding, then persists the token and DPoP key. `--gateway-origin` must be the upstream origin without a path. `--no-open` prints the authorization URL for non-desktop testing.
+
+Attach the persisted session to managed forwarding by supplying the same issuer:
+
+```bash
+cargo run -- \
+  --mode managed \
+  --upstream https://gateway.example \
+  --identity-issuer https://identity.example/
+```
+
+The connector fails at startup if storage or the matching session is unavailable or expired. For each request it removes application-supplied connector identity headers, preserves the application `Authorization` header, and adds a fresh `Proxy-Authorization: DPoP` token and DPoP proof. Refresh is not yet implemented, the DPoP key is not verified organizational device identity, and Agent Gateway still needs the contract's DPoP validation and credential-stripping changes before this is a trusted end-to-end managed identity path.
 
 ## Run
 
@@ -255,4 +266,4 @@ Send a simple prompt and verify:
 3. Stopping Agent Gateway causes the connector to return `502 Bad Gateway` with `x-agentgateway-edge-error: upstream-unavailable`.
 4. The connector never attempts a direct connection to Anthropic.
 
-Managed forwarding, refresh, enrolled device identity, and connector-only credential stripping are later increments.
+Gateway-side DPoP validation and stripping, refresh, and enrolled device identity are later increments.

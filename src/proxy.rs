@@ -1,11 +1,12 @@
 use std::collections::HashSet;
+use std::fmt;
 use std::future::Future;
 
 use anyhow::Result;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::header::{CONNECTION, CONTENT_TYPE, HOST};
-use axum::http::{HeaderMap, HeaderName, Request, Response, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use axum::routing::{any, get};
 use axum::{Json, Router};
 use reqwest::{Client, Url};
@@ -13,15 +14,29 @@ use serde::Serialize;
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::config::DeploymentMode;
+use crate::identity::oauth::StoredSession;
 
 const GATEWAY_ERROR: &str = "agent gateway unavailable\n";
+const IDENTITY_ERROR: &str = "managed identity unavailable\n";
 
 #[derive(Clone)]
 struct ProxyState {
     client: Client,
     upstream: Url,
     mode: DeploymentMode,
+    identity: Option<StoredSession>,
 }
+
+#[derive(Debug)]
+struct IdentityError(anyhow::Error);
+
+impl fmt::Display for IdentityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::error::Error for IdentityError {}
 
 #[derive(Serialize)]
 struct HealthResponse {
@@ -36,10 +51,21 @@ pub async fn serve(
     mode: DeploymentMode,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
+    serve_with_identity(listener, upstream, mode, None, shutdown).await
+}
+
+pub async fn serve_with_identity(
+    listener: TcpListener,
+    upstream: Url,
+    mode: DeploymentMode,
+    identity: Option<StoredSession>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<()> {
     let state = ProxyState {
         client: Client::new(),
         upstream,
         mode,
+        identity,
     };
     let app = Router::new()
         .route("/_agentgateway/healthz", get(health))
@@ -88,6 +114,14 @@ async fn forward(State(state): State<ProxyState>, request: Request<Body>) -> Res
         Ok(response) => response,
         Err(error) => {
             eprintln!("failed to forward request to Agent Gateway: {error:#}");
+            if error.downcast_ref::<IdentityError>().is_some() {
+                return Response::builder()
+                    .status(StatusCode::UNAUTHORIZED)
+                    .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+                    .header("x-agentgateway-edge-error", "identity-unavailable")
+                    .body(Body::from(IDENTITY_ERROR))
+                    .expect("static error response must be valid");
+            }
             Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
                 .header(CONTENT_TYPE, "text/plain; charset=utf-8")
@@ -104,6 +138,35 @@ async fn forward_request(state: &ProxyState, request: Request<Body>) -> Result<R
     let mut headers = parts.headers;
     remove_hop_by_hop_headers(&mut headers);
     headers.remove(HOST);
+    if state.mode == DeploymentMode::Managed {
+        headers.remove("dpop");
+    }
+    if let Some(identity) = &state.identity {
+        if identity.is_expired().map_err(identity_error)? {
+            return Err(identity_error(anyhow::anyhow!(
+                "managed access token has expired"
+            )));
+        }
+        let proof = identity
+            .dpop_key()
+            .and_then(|key| {
+                key.proof(
+                    parts.method.as_str(),
+                    url.as_str(),
+                    Some(&identity.access_token),
+                )
+            })
+            .map_err(identity_error)?;
+        headers.insert(
+            "proxy-authorization",
+            HeaderValue::from_str(&format!("DPoP {}", identity.access_token))
+                .map_err(|error| identity_error(error.into()))?,
+        );
+        headers.insert(
+            "dpop",
+            HeaderValue::from_str(&proof).map_err(|error| identity_error(error.into()))?,
+        );
+    }
 
     let upstream_response = state
         .client
@@ -122,6 +185,10 @@ async fn forward_request(state: &ProxyState, request: Request<Body>) -> Result<R
     *response.status_mut() = status;
     *response.headers_mut() = headers;
     Ok(response)
+}
+
+fn identity_error(error: anyhow::Error) -> anyhow::Error {
+    IdentityError(error).into()
 }
 
 fn upstream_url(upstream: &Url, uri: &axum::http::Uri) -> Result<Url> {
@@ -170,12 +237,14 @@ mod tests {
     use axum::extract::State;
     use axum::http::{HeaderMap, Method, Uri};
     use axum::routing::any;
+    use base64::Engine;
     use futures_util::StreamExt;
     use http_body_util::BodyExt;
     use tokio::sync::{Mutex, mpsc, oneshot};
     use tokio_stream::wrappers::ReceiverStream;
 
     use super::*;
+    use crate::identity::dpop::{DpopKey, decode_jwt_claims};
 
     #[derive(Clone, Debug)]
     struct CapturedRequest {
@@ -197,6 +266,99 @@ mod tests {
             .unwrap();
         });
         (address, shutdown_tx)
+    }
+
+    #[tokio::test]
+    async fn managed_identity_replaces_connector_headers_and_preserves_authorization() {
+        let captured = Arc::new(Mutex::new(None));
+        let fake_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fake_address = fake_listener.local_addr().unwrap();
+        let fake_app = Router::new()
+            .fallback(any(
+                move |State(captured): State<Arc<Mutex<Option<HeaderMap>>>>,
+                      request: Request<Body>| async move {
+                    *captured.lock().await = Some(request.headers().clone());
+                    StatusCode::NO_CONTENT
+                },
+            ))
+            .with_state(captured.clone());
+        tokio::spawn(async move {
+            axum::serve(fake_listener, fake_app).await.unwrap();
+        });
+
+        let key = DpopKey::generate();
+        let identity = StoredSession {
+            issuer: Url::parse("https://identity.example/").unwrap(),
+            gateway_origin: Url::parse(&format!("http://{fake_address}/")).unwrap(),
+            access_token: "managed-token".into(),
+            expires_at: u64::MAX,
+            scope: "agentgateway.invoke".into(),
+            dpop_private_key: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(key.to_pkcs8_der().unwrap()),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_address = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            serve_with_identity(
+                listener,
+                Url::parse(&format!("http://{fake_address}")).unwrap(),
+                DeploymentMode::Managed,
+                Some(identity),
+                async {
+                    let _ = shutdown_rx.await;
+                },
+            )
+            .await
+            .unwrap();
+        });
+
+        let response = Client::new()
+            .post(format!("http://{proxy_address}/v1/messages"))
+            .header("authorization", "Bearer application-token")
+            .header("proxy-authorization", "DPoP attacker-token")
+            .header("dpop", "attacker-proof")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let headers = captured.lock().await.take().unwrap();
+        assert_eq!(headers["authorization"], "Bearer application-token");
+        assert_eq!(headers["proxy-authorization"], "DPoP managed-token");
+        let proof = decode_jwt_claims(headers["dpop"].to_str().unwrap()).unwrap();
+        assert_eq!(proof["htm"], "POST");
+        assert_eq!(proof["htu"], format!("http://{fake_address}/v1/messages"));
+        assert!(proof["ath"].is_string());
+        shutdown_tx.send(()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn expired_managed_identity_fails_locally() {
+        let state = ProxyState {
+            client: Client::new(),
+            upstream: Url::parse("http://127.0.0.1:9").unwrap(),
+            mode: DeploymentMode::Managed,
+            identity: Some(StoredSession {
+                issuer: Url::parse("https://identity.example/").unwrap(),
+                gateway_origin: Url::parse("http://127.0.0.1:9/").unwrap(),
+                access_token: "expired-token".into(),
+                expires_at: 0,
+                scope: "agentgateway.invoke".into(),
+                dpop_private_key: String::new(),
+            }),
+        };
+        let request = Request::builder()
+            .uri("/v1/messages")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = forward(State(state), request).await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers()["x-agentgateway-edge-error"],
+            "identity-unavailable"
+        );
     }
 
     #[tokio::test]

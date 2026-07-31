@@ -1,4 +1,6 @@
-use agentgateway_edge_connector::config::Config;
+use agentgateway_edge_connector::config::{Config, upstream_origin};
+use agentgateway_edge_connector::identity::oauth::load_session_for;
+use agentgateway_edge_connector::identity::storage::{CredentialStore, default_storage_root};
 use agentgateway_edge_connector::local_gateway::LocalGateway;
 use agentgateway_edge_connector::proxy;
 use anyhow::bail;
@@ -9,6 +11,20 @@ const LOCAL_GATEWAY_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = Config::parse_and_validate()?;
+    let identity = if let Some(issuer) = &config.identity_issuer {
+        let identity_dir = config
+            .identity_dir
+            .clone()
+            .map_or_else(default_storage_root, Ok)?;
+        let store = CredentialStore::load(&identity_dir)?;
+        let session = load_session_for(issuer, &upstream_origin(&config.upstream)?, &store)?;
+        if session.is_expired()? {
+            bail!("managed identity session has expired; run identity login again");
+        }
+        Some(session)
+    } else {
+        None
+    };
     let mut local_gateway = match (&config.gateway_binary, &config.gateway_config) {
         (Some(binary), Some(gateway_config)) => {
             println!("starting local Agent Gateway from {}", binary.display());
@@ -29,7 +45,13 @@ async fn main() -> anyhow::Result<()> {
         listener.local_addr()?,
         config.upstream
     );
-    let serve = proxy::serve(listener, config.upstream, config.mode, shutdown_signal());
+    let serve = proxy::serve_with_identity(
+        listener,
+        config.upstream,
+        config.mode,
+        identity,
+        shutdown_signal(),
+    );
     if let Some(gateway) = &mut local_gateway {
         tokio::select! {
             result = serve => {

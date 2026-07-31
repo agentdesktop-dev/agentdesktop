@@ -37,6 +37,14 @@ pub struct Config {
     /// Agent Gateway configuration passed to the managed executable.
     #[arg(long, env = "AGENTGATEWAY_EDGE_GATEWAY_CONFIG")]
     pub gateway_config: Option<PathBuf>,
+
+    /// Authorization-server issuer for DPoP-authenticated managed forwarding.
+    #[arg(long, env = "AGENTGATEWAY_EDGE_IDENTITY_ISSUER")]
+    pub identity_issuer: Option<Url>,
+
+    /// Directory containing the persisted managed identity backend selection.
+    #[arg(long, env = "AGENTGATEWAY_EDGE_IDENTITY_DIR")]
+    pub identity_dir: Option<PathBuf>,
 }
 
 impl Config {
@@ -71,6 +79,13 @@ impl Config {
             );
         }
 
+        if self.mode == DeploymentMode::Standalone && self.identity_issuer.is_some() {
+            bail!("managed identity is only available in managed mode");
+        }
+        if self.identity_dir.is_some() && self.identity_issuer.is_none() {
+            bail!("identity directory requires an identity issuer");
+        }
+
         match (&self.gateway_binary, &self.gateway_config) {
             (Some(_), Some(_)) if self.mode == DeploymentMode::Managed => {
                 bail!("local Agent Gateway lifecycle is only available in standalone mode");
@@ -83,6 +98,10 @@ impl Config {
 
         Ok(self)
     }
+}
+
+pub fn upstream_origin(upstream: &Url) -> Result<Url> {
+    Ok(Url::parse(&upstream.origin().ascii_serialization())?)
 }
 
 impl DeploymentMode {
@@ -105,8 +124,9 @@ fn is_local_host(upstream: &Url) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, DeploymentMode};
+    use super::{Config, DeploymentMode, upstream_origin};
     use clap::Parser;
+    use url::Url;
 
     fn parse(args: &[&str]) -> anyhow::Result<Config> {
         Config::try_parse_from(args)?.validate()
@@ -256,5 +276,33 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("only available in standalone"));
+    }
+
+    #[test]
+    fn derives_identity_origin_without_upstream_path() {
+        let origin =
+            upstream_origin(&Url::parse("https://gateway.example:8443/base/path/").unwrap())
+                .unwrap();
+
+        assert_eq!(origin.as_str(), "https://gateway.example:8443/");
+    }
+
+    #[test]
+    fn accepts_managed_identity_configuration() {
+        let config = parse(&[
+            "connector",
+            "--mode",
+            "managed",
+            "--upstream",
+            "https://gateway.example/base/",
+            "--identity-issuer",
+            "https://identity.example/",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            config.identity_issuer.unwrap().as_str(),
+            "https://identity.example/"
+        );
     }
 }

@@ -44,7 +44,7 @@ struct TokenResponse {
     scope: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoredSession {
     pub issuer: Url,
     pub gateway_origin: Url,
@@ -75,6 +75,7 @@ where
     F: FnOnce(&Url) -> Result<()>,
 {
     validate_issuer(&config.issuer)?;
+    validate_gateway_origin(&config.gateway_origin)?;
     let client = reqwest::Client::new();
     let discovery_url = config
         .issuer
@@ -127,25 +128,45 @@ where
         .error_for_status()?
         .json()
         .await?;
-    validate_access_token(config, &token.access_token, &dpop_key, &key_set)?;
-
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let token_expiry =
+        validate_access_token(config, &token.access_token, &dpop_key, &key_set, now)?;
+    let granted_scopes: std::collections::HashSet<_> = token.scope.split_whitespace().collect();
+    if config
+        .scope
+        .split_whitespace()
+        .any(|scope| !granted_scopes.contains(scope))
+    {
+        bail!("authorization server did not grant every requested scope");
+    }
     let session = StoredSession {
         issuer: config.issuer.clone(),
         gateway_origin: config.gateway_origin.clone(),
         access_token: token.access_token,
-        expires_at: now + token.expires_in,
+        expires_at: token_expiry.min(now.saturating_add(token.expires_in)),
         scope: token.scope,
         dpop_private_key: base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(dpop_key.to_pkcs8_der()?),
     };
-    store.put(&session_record(config), &serde_json::to_vec(&session)?)?;
+    store.put(
+        &session_record(&config.issuer, &config.gateway_origin),
+        &serde_json::to_vec(&session)?,
+    )?;
     Ok(session)
 }
 
 pub fn load_session(config: &LoginConfig, store: &CredentialStore) -> Result<StoredSession> {
-    let session: StoredSession = serde_json::from_slice(&store.get(&session_record(config))?)?;
-    if session.issuer != config.issuer || session.gateway_origin != config.gateway_origin {
+    load_session_for(&config.issuer, &config.gateway_origin, store)
+}
+
+pub fn load_session_for(
+    issuer: &Url,
+    gateway_origin: &Url,
+    store: &CredentialStore,
+) -> Result<StoredSession> {
+    let session: StoredSession =
+        serde_json::from_slice(&store.get(&session_record(issuer, gateway_origin))?)?;
+    if session.issuer != *issuer || session.gateway_origin != *gateway_origin {
         bail!("stored identity session does not match configured issuer and gateway");
     }
     Ok(session)
@@ -164,6 +185,18 @@ fn validate_issuer(issuer: &Url) -> Result<()> {
         });
     if !loopback {
         bail!("authorization-server issuer must use HTTPS unless it is loopback");
+    }
+    Ok(())
+}
+
+fn validate_gateway_origin(gateway_origin: &Url) -> Result<()> {
+    if !matches!(gateway_origin.scheme(), "http" | "https")
+        || gateway_origin.host_str().is_none()
+        || gateway_origin.path() != "/"
+        || gateway_origin.query().is_some()
+        || gateway_origin.fragment().is_some()
+    {
+        bail!("gateway origin must be an HTTP(S) origin without a path, query, or fragment");
     }
     Ok(())
 }
@@ -267,7 +300,8 @@ fn validate_access_token(
     token: &str,
     dpop_key: &DpopKey,
     key_set: &JsonWebKeySet,
-) -> Result<()> {
+    now: u64,
+) -> Result<u64> {
     let claims = verify_es256_jwt(token, &key_set.keys)?;
     if claims["iss"] != config.issuer.as_str() {
         bail!("access token issuer does not match configured issuer");
@@ -284,11 +318,20 @@ fn validate_access_token(
     if claims["cnf"]["jkt"] != dpop_key.thumbprint()? {
         bail!("access token is not bound to the connector DPoP key");
     }
-    Ok(())
+    if claims["sub"].as_str().is_none_or(str::is_empty) {
+        bail!("access token has no subject");
+    }
+    let expires_at = claims["exp"]
+        .as_u64()
+        .context("access token has no numeric expiry")?;
+    if expires_at <= now {
+        bail!("access token has expired");
+    }
+    Ok(expires_at)
 }
 
-fn session_record(config: &LoginConfig) -> String {
-    format!("{}|{}|session", config.issuer, config.gateway_origin)
+fn session_record(issuer: &Url, gateway_origin: &Url) -> String {
+    format!("{issuer}|{gateway_origin}|session")
 }
 
 fn random_secret() -> String {
