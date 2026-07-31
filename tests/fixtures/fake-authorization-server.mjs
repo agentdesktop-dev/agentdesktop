@@ -6,7 +6,9 @@ import {
   sign,
   verify,
 } from "node:crypto";
-import { createServer } from "node:http";
+import { readFile } from "node:fs/promises";
+import { createServer as createHttpServer } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
 import { fileURLToPath } from "node:url";
 
 const clientId = "agentgateway-edge-test";
@@ -93,7 +95,13 @@ async function readForm(request) {
   return new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
 }
 
-export async function startFakeAuthorizationServer() {
+export async function startFakeAuthorizationServer({
+  issuer: configuredIssuer,
+  listenHost = "127.0.0.1",
+  port = 0,
+  tls,
+  autoApprove = false,
+} = {}) {
   const codes = new Map();
   const refreshTokens = new Set();
   const accessTokens = new Map();
@@ -106,8 +114,8 @@ export async function startFakeAuthorizationServer() {
   publicJwk.alg = "ES256";
   publicJwk.kid = "fake-signing-key";
 
-  let issuer;
-  const server = createServer(async (request, response) => {
+  let issuer = configuredIssuer;
+  const handleRequest = async (request, response) => {
     const url = new URL(request.url, issuer);
     if (request.method === "GET" && url.pathname === "/.well-known/oauth-authorization-server") {
       return json(response, 200, {
@@ -240,6 +248,17 @@ export async function startFakeAuthorizationServer() {
             dpop_jkt: identity.jkt,
           };
           enrollments.set(enrollmentId, enrollment);
+          if (autoApprove) {
+            setTimeout(() => {
+              const pending = enrollments.get(enrollmentId);
+              if (pending?.status === "pending") {
+                const deviceId = randomUUID();
+                pending.status = "approved";
+                pending.device_id = deviceId;
+                devices.set(deviceId, "active");
+              }
+            }, 500);
+          }
           return json(response, 202, enrollment);
         }
 
@@ -264,11 +283,14 @@ export async function startFakeAuthorizationServer() {
       }
     }
     return json(response, 404, { error: "not_found" });
-  });
+  };
+  const server = tls
+    ? createHttpsServer(tls, handleRequest)
+    : createHttpServer(handleRequest);
 
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise((resolve) => server.listen(port, listenHost, resolve));
   const address = server.address();
-  issuer = `http://127.0.0.1:${address.port}/`;
+  issuer ??= `${tls ? "https" : "http"}://127.0.0.1:${address.port}/`;
 
   return {
     issuer,
@@ -304,7 +326,24 @@ export const fakeAuthorizationInternals = {
 };
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const server = await startFakeAuthorizationServer();
+  const tlsKey = process.env.AGENTGATEWAY_EDGE_FAKE_TLS_KEY;
+  const tlsCertificate = process.env.AGENTGATEWAY_EDGE_FAKE_TLS_CERTIFICATE;
+  if (Boolean(tlsKey) !== Boolean(tlsCertificate)) {
+    throw new Error("both fake TLS key and certificate paths are required");
+  }
+  const tls = tlsKey
+    ? {
+        key: await readFile(tlsKey),
+        cert: await readFile(tlsCertificate),
+      }
+    : undefined;
+  const server = await startFakeAuthorizationServer({
+    issuer: process.env.AGENTGATEWAY_EDGE_FAKE_ISSUER,
+    listenHost: process.env.AGENTGATEWAY_EDGE_FAKE_LISTEN_HOST ?? "127.0.0.1",
+    port: Number(process.env.AGENTGATEWAY_EDGE_FAKE_PORT ?? "0"),
+    tls,
+    autoApprove: process.env.AGENTGATEWAY_EDGE_FAKE_AUTO_APPROVE === "1",
+  });
   console.log(server.issuer);
   const close = async () => {
     await server.close();

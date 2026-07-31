@@ -49,20 +49,15 @@ tests/vm/vm.sh copy \
 
 The VM fixture points Agent Gateway at the laptop mock LLM through `host.test:8000`. It is specific to this QEMU environment and must not be used as a general release configuration.
 
-Simulate the MDM-owned half of managed installation over SSH with an organization-specific executable:
+Prepare a complete managed user walkthrough from the immutable Fedora base:
 
 ```bash
-scripts/build-managed-installer.sh \
-  examples/managed-organization.json \
-  target/example-managed-installer
-tests/vm/vm.sh copy \
-  target/example-managed-installer \
-  /home/agentedge/Downloads/example-managed-installer
-tests/vm/vm.sh ssh \
-  /home/agentedge/Downloads/example-managed-installer install --yes
+scripts/vm-managed-walkthrough.sh prepare --reset
 ```
 
-This step must preserve existing Claude settings and service activation state and must not install a local Agent Gateway. The user-owned `connect-agents` step needs a reachable HTTPS identity/enrollment simulation and managed gateway. The checked-in example endpoints are documentation values and cannot drive that step. Real managed security validation remains blocked until Agent Gateway enforces the managed identity contract.
+The harness generates a short-lived test CA, starts a TLS authorization/enrollment authority with delayed automatic approval, starts a TLS managed-gateway relay to the `SMOKE_OK` provider, builds an organization-specific installer, and uses SSH to simulate MDM trust and software installation. It leaves browser sign-in, service activation, separate Claude consent, and the final plain `claude` request for the interactive desktop walkthrough. Run `scripts/vm-managed-walkthrough.sh stop` afterward.
+
+These are test fixtures, not production identity or Agent Gateway implementations. The gateway fixture requires and strips connector DPoP headers but does not validate token signatures, proof claims, replay, or approved device state. Real managed security validation remains blocked until Agent Gateway enforces the managed identity contract.
 
 The test-only `agentedge` account has passwordless sudo. SSH password authentication is exposed only through the QEMU user-network forward on host loopback. Do not publish the VM's SSH port on a non-loopback host address.
 

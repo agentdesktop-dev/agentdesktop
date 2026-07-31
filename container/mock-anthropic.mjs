@@ -1,6 +1,7 @@
 import http from "node:http";
 
-const port = 8000;
+const port = Number(process.env.MOCK_ANTHROPIC_PORT ?? "8000");
+const host = process.env.MOCK_ANTHROPIC_HOST ?? "0.0.0.0";
 const model = "claude-sonnet-4-20250514";
 
 const message = {
@@ -110,6 +111,6 @@ const server = http.createServer((request, response) => {
   });
 });
 
-server.listen(port, "0.0.0.0", () => {
-  console.log(`mock Anthropic API listening on ${port}`);
+server.listen(port, host, () => {
+  console.log(`mock Anthropic API listening on ${host}:${port}`);
 });
