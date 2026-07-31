@@ -61,6 +61,19 @@ The test uses rootless Podman with private network and cgroup namespaces. Rootle
 
 This does not prove production host attribution, resistance to a local administrator, compatibility with an existing host firewall, or interoperability with an authenticated real Agent Gateway. Those require a disposable host or VM and the agreed Agent Gateway authentication boundary.
 
+## Real Agent Gateway interoperability
+
+Run the opt-in local smoke test against a built Agent Gateway checkout:
+
+```bash
+AGENTGATEWAY_BINARY=../agentgateway/target/debug/agentgateway \
+  sh tests/agentgateway-hbone-smoke.sh
+```
+
+The test starts the config in `container/agentgateway-hbone-smoke.yaml`, the real connector relay, and a loopback HTTP target. It verifies that Agent Gateway accepts the connector's HTTP/2 CONNECT, re-enters an internal wildcard route, dynamically forwards the inner request, and returns the response. It does not install nftables; the private-container test covers the kernel redirect and original-destination boundary separately.
+
+This smoke path is intentionally loopback-only and unauthenticated. It proves transport compatibility with the tested Agent Gateway revision, not the managed identity contract or a secure production tunnel.
+
 ## eBPF strengthening path
 
 An eBPF cgroup `connect4`/`connect6` implementation can improve the production design by selecting sockets at connect time, preserving destination metadata without conntrack lookup, reducing interaction with unrelated nftables policy, and attaching directly to the delegated application cgroup. It still needs a privileged loader, pinned-program lifecycle, kernel compatibility checks, UDP/443 denial, and equivalent fail-closed tests. The nftables prototype remains useful as a simple baseline and fallback; eBPF must not introduce different routing or policy semantics.

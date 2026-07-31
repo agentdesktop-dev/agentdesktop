@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+config:
+  readinessAddr: 127.0.0.1:15022
+
+binds:
+- port: 15008
+  tunnelProtocol: connect
+  listeners:
+  - name: capture-hbone
+    protocol: HTTP
+    routes:
+    - name: reject-ordinary-http
+      policies:
+        directResponse:
+          status: 405
+- mode: internal
+  listeners:
+  - name: captured-http
+    protocol: HTTP
+    routes:
+    - name: dynamic-forward
+      backends:
+      - dynamic: {}
