@@ -9,6 +9,16 @@ fn help_exits_successfully() {
 
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
+    for command in ["serve", "connect-agents", "identity", "capture"] {
+        assert!(help.contains(command));
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-connector"))
+        .args(["serve", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
     assert!(help.contains("--mode <MODE>"));
     assert!(help.contains("--upstream <UPSTREAM>"));
 }

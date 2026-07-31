@@ -4,6 +4,7 @@ use agentgateway_edge_connector::apps::claude::{
 use agentgateway_edge_connector::config::{Config, upstream_origin};
 use agentgateway_edge_connector::identity::oauth::{ManagedIdentity, load_session_for};
 use agentgateway_edge_connector::identity::{
+    cli::IdentityCommand,
     enrollment::{
         DeviceStatus, EnrollmentClient, EnrollmentStatus, load_enrollment_for, save_enrollment_for,
     },
@@ -23,42 +24,49 @@ use tokio::net::TcpListener;
 const LOCAL_GATEWAY_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Debug, Parser)]
-struct AgentSetupCli {
+#[command(version, about = "Route AI application traffic through Agent Gateway")]
+struct Cli {
     #[command(subcommand)]
-    command: AgentSetupCommand,
+    command: ConnectorCommand,
 }
 
 #[derive(Debug, Subcommand)]
-enum AgentSetupCommand {
+enum ConnectorCommand {
+    /// Run the application-facing forwarding service.
+    Serve(Config),
+    /// Connect supported AI agents to the installed service.
     ConnectAgents {
         #[arg(long, help = "Connect supported agents without prompting")]
         yes: bool,
     },
+    /// Configure managed identity for the edge connector.
+    Identity {
+        #[command(subcommand)]
+        command: IdentityCommand,
+    },
+    /// Relay redirected Linux TCP flows over HBONE.
+    #[cfg(target_os = "linux")]
+    Capture(agentgateway_edge_connector::capture::CaptureArgs),
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("capture")) {
-        let _telemetry = agentgateway_edge_connector::telemetry::init()?;
-        let arguments = std::env::args_os()
-            .take(1)
-            .chain(std::env::args_os().skip(2));
+    match Cli::parse().command {
+        ConnectorCommand::Serve(config) => serve(config.validate()?).await,
+        ConnectorCommand::ConnectAgents { yes } => connect_agents(yes).await,
+        ConnectorCommand::Identity { command } => {
+            agentgateway_edge_connector::identity::cli::run(command).await
+        }
         #[cfg(target_os = "linux")]
-        return agentgateway_edge_connector::capture::run_from(arguments).await;
-        #[cfg(not(target_os = "linux"))]
-        anyhow::bail!("transparent capture relay is only available on Linux");
+        ConnectorCommand::Capture(args) => {
+            let _telemetry = agentgateway_edge_connector::telemetry::init()?;
+            agentgateway_edge_connector::capture::run(args).await
+        }
     }
-    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("identity")) {
-        let arguments = std::env::args_os()
-            .take(1)
-            .chain(std::env::args_os().skip(2));
-        return agentgateway_edge_connector::identity::cli::run_from(arguments).await;
-    }
-    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("connect-agents")) {
-        return connect_agents(AgentSetupCli::parse()).await;
-    }
+}
+
+async fn serve(config: Config) -> anyhow::Result<()> {
     let _telemetry = agentgateway_edge_connector::telemetry::init()?;
-    let config = Config::parse_and_validate()?;
     let identity = if let Some(issuer) = &config.identity_issuer {
         let identity_dir = config
             .identity_dir
@@ -117,8 +125,7 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-async fn connect_agents(cli: AgentSetupCli) -> anyhow::Result<()> {
-    let AgentSetupCommand::ConnectAgents { yes } = cli.command;
+async fn connect_agents(yes: bool) -> anyhow::Result<()> {
     if let Some((root, bootstrap)) = installed_managed_bootstrap()? {
         prepare_managed_connection(&root, &bootstrap)
             .await

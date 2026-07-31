@@ -40,6 +40,7 @@ async fn fails_closed_when_agent_gateway_is_unavailable() {
     let _connector = Connector(
         Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-connector"))
             .args([
+                "serve",
                 "--mode",
                 "standalone",
                 "--listen",
@@ -98,6 +99,7 @@ fn exits_when_owned_local_gateway_exits() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-connector"))
         .args([
+            "serve",
             "--mode",
             "standalone",
             "--listen",
@@ -140,6 +142,7 @@ async fn waits_for_owned_local_gateway_before_listening() {
     let mut connector = Connector(
         Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-connector"))
             .args([
+                "serve",
                 "--mode",
                 "standalone",
                 "--listen",

@@ -1,4 +1,3 @@
-use std::ffi::OsString;
 use std::fs;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -7,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
-use clap::Parser;
+use clap::Args;
 use http::HeaderMap;
 use http::header::HeaderValue;
 use http::uri::Authority;
@@ -20,9 +19,8 @@ use crate::platform::linux::original_destination;
 
 pub const TUNNEL_TOKEN_HEADER: &str = "x-agentgateway-edge-token";
 
-#[derive(Debug, Parser)]
-#[command(version, about = "Relay redirected Linux TCP flows over HBONE")]
-struct Cli {
+#[derive(Args, Debug)]
+pub struct CaptureArgs {
     #[arg(long, default_value = "127.0.0.1:15001")]
     listen: SocketAddr,
     #[arg(long, default_value = "127.0.0.1:15008")]
@@ -33,20 +31,19 @@ struct Cli {
     max_tunnels: usize,
 }
 
-pub async fn run_from(arguments: impl IntoIterator<Item = OsString>) -> Result<()> {
-    let cli = Cli::parse_from(arguments);
-    if !cli.listen.ip().is_loopback() || !cli.hbone_endpoint.ip().is_loopback() {
+pub async fn run(args: CaptureArgs) -> Result<()> {
+    if !args.listen.ip().is_loopback() || !args.hbone_endpoint.ip().is_loopback() {
         bail!("prototype capture and HBONE endpoints must be loopback");
     }
-    if cli.max_tunnels == 0 {
+    if args.max_tunnels == 0 {
         bail!("max tunnels must be greater than zero");
     }
     let mut connect_headers = HeaderMap::new();
-    connect_headers.insert(TUNNEL_TOKEN_HEADER, load_tunnel_token(&cli.token_file)?);
-    let hbone = HboneClient::connect_with_headers(cli.hbone_endpoint, connect_headers).await?;
-    let listener = TcpListener::bind(cli.listen).await?;
+    connect_headers.insert(TUNNEL_TOKEN_HEADER, load_tunnel_token(&args.token_file)?);
+    let hbone = HboneClient::connect_with_headers(args.hbone_endpoint, connect_headers).await?;
+    let listener = TcpListener::bind(args.listen).await?;
     tracing::info!(event = "capture_started", listen = %listener.local_addr()?);
-    serve(listener, hbone, cli.max_tunnels, shutdown_signal()).await
+    serve(listener, hbone, args.max_tunnels, shutdown_signal()).await
 }
 
 async fn shutdown_signal() {

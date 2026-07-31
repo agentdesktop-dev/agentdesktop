@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
-use clap::{Parser, ValueEnum};
+use clap::{Args, ValueEnum};
 use url::Url;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -11,8 +11,7 @@ pub enum DeploymentMode {
     Managed,
 }
 
-#[derive(Clone, Debug, Parser)]
-#[command(version, about)]
+#[derive(Args, Clone, Debug)]
 pub struct Config {
     /// Connector deployment mode.
     #[arg(long, env = "AGENTGATEWAY_EDGE_MODE")]
@@ -76,11 +75,7 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn parse_and_validate() -> Result<Self> {
-        Self::parse().validate()
-    }
-
-    fn validate(self) -> Result<Self> {
+    pub fn validate(self) -> Result<Self> {
         if !self.listen.ip().is_loopback() {
             bail!("listen address must be loopback, got {}", self.listen);
         }
@@ -163,8 +158,14 @@ mod tests {
     use clap::Parser;
     use url::Url;
 
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        config: Config,
+    }
+
     fn parse(args: &[&str]) -> anyhow::Result<Config> {
-        Config::try_parse_from(args)?.validate()
+        Cli::try_parse_from(args)?.config.validate()
     }
 
     #[test]

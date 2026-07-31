@@ -55,7 +55,7 @@ if [[ "$mode" == "claude" ]]; then
     --env AGENTGATEWAY_EDGE_MODE=standalone \
     --env AGENTGATEWAY_EDGE_LISTEN=127.0.0.1:8080 \
     --env AGENTGATEWAY_EDGE_UPSTREAM=http://127.0.0.1:4000 \
-    "$connector_image" >/dev/null
+    "$connector_image" serve >/dev/null
 fi
 
 gateway_args=(
@@ -81,7 +81,7 @@ if [[ "$mode" != "claude" ]]; then
     --env AGENTGATEWAY_EDGE_MODE=managed \
     --env AGENTGATEWAY_EDGE_LISTEN=127.0.0.1:8080 \
     --env AGENTGATEWAY_EDGE_UPSTREAM=http://agentgateway:4000 \
-    "$connector_image" >/dev/null
+    "$connector_image" serve >/dev/null
 fi
 
 if [[ "$mode" == "claude" ]]; then

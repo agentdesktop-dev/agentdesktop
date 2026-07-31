@@ -51,7 +51,7 @@ fn installs_upgrades_and_uninstalls_standalone_bundle() {
     );
     let service =
         fs::read_to_string(root.join("share/systemd/user/agentgateway-edge.service")).unwrap();
-    assert!(service.contains("--mode standalone"));
+    assert!(service.contains("serve --mode standalone"));
     assert!(service.contains("--gateway-binary"));
     assert!(service.contains("NoNewPrivileges=true"));
     assert!(service.contains(root.to_str().unwrap()));
@@ -250,7 +250,7 @@ fn installs_managed_bundle_without_local_gateway() {
     assert!(!root.join("share/examples/agentgateway.yaml").exists());
     let service =
         fs::read_to_string(root.join("share/systemd/user/agentgateway-edge.service")).unwrap();
-    assert!(service.contains("--mode managed"));
+    assert!(service.contains("serve --mode managed"));
     assert!(service.contains("--upstream \"https://gateway.acme.example/\""));
     assert!(service.contains("--identity-issuer \"https://login.acme.example/\""));
     assert!(!service.contains("--gateway-binary"));

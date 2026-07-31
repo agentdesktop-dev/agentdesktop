@@ -99,6 +99,7 @@ Agent Gateway may be started independently, or the connector may supervise a sep
 
 ```bash
 agentgateway-edge-connector \
+  serve \
   --mode standalone \
   --upstream http://127.0.0.1:4000 \
   --gateway-binary /usr/local/bin/agentgateway \

@@ -47,7 +47,7 @@ The command validates credential storage before opening the browser, listens on 
 Attach the persisted session to managed forwarding by supplying the same issuer:
 
 ```bash
-cargo run -- \
+cargo run -- serve \
   --mode managed \
   --upstream https://gateway.example \
   --identity-issuer https://identity.example/
@@ -88,7 +88,7 @@ Both operations load the existing issuer/gateway-scoped session, refresh it when
 Start Agent Gateway with a route that accepts Anthropic-compatible requests at `/v1/messages`, then run:
 
 ```bash
-cargo run -- \
+cargo run -- serve \
   --mode standalone \
   --upstream http://127.0.0.1:4000
 ```
@@ -96,7 +96,7 @@ cargo run -- \
 The connector listens on `127.0.0.1:8080` by default. Override either setting with flags:
 
 ```bash
-cargo run -- \
+cargo run -- serve \
   --mode managed \
   --listen 127.0.0.1:8081 \
   --upstream https://agentgateway.example.internal
@@ -108,7 +108,7 @@ Or use environment variables:
 export AGENTGATEWAY_EDGE_MODE=managed
 export AGENTGATEWAY_EDGE_LISTEN=127.0.0.1:8081
 export AGENTGATEWAY_EDGE_UPSTREAM=https://agentgateway.example.internal
-cargo run
+cargo run -- serve
 ```
 
 The deployment mode is required. `standalone` accepts only a local Agent Gateway at `localhost` or a loopback IP; `managed` permits a remote upstream. The listen address must always be loopback. The upstream URL must use HTTP or HTTPS and may contain a path prefix, but not a query string or fragment.
@@ -142,7 +142,7 @@ Claude Code reads these user settings for ordinary terminal and IDE launches, so
 In standalone mode, the connector can optionally own the lifecycle of a separately installed Agent Gateway process:
 
 ```bash
-cargo run -- \
+cargo run -- serve \
   --mode standalone \
   --upstream http://127.0.0.1:4000 \
   --gateway-binary /usr/local/bin/agentgateway \

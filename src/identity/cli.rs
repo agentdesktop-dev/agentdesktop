@@ -1,7 +1,6 @@
-use std::ffi::OsString;
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::Subcommand;
 use url::Url;
 
 use super::enrollment::{
@@ -10,16 +9,9 @@ use super::enrollment::{
 use super::oauth::{LoginConfig, ManagedIdentity, delete_session_for, load_session_for, login};
 use super::storage::{self, CredentialStorageMode, CredentialStore, default_storage_root};
 
-#[derive(Debug, Parser)]
-#[command(version, about = "Configure managed identity for the edge connector")]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
-
 #[derive(Debug, Subcommand)]
 #[allow(clippy::large_enum_variant)]
-enum Command {
+pub enum IdentityCommand {
     /// Validate credential storage and persist the selected backend.
     StorageCheck {
         #[arg(
@@ -88,9 +80,9 @@ enum Command {
     },
 }
 
-pub async fn run_from(arguments: impl IntoIterator<Item = OsString>) -> anyhow::Result<()> {
-    match Cli::parse_from(arguments).command {
-        Command::StorageCheck {
+pub async fn run(command: IdentityCommand) -> anyhow::Result<()> {
+    match command {
+        IdentityCommand::StorageCheck {
             credential_storage,
             storage_dir,
         } => {
@@ -102,7 +94,7 @@ pub async fn run_from(arguments: impl IntoIterator<Item = OsString>) -> anyhow::
                 storage_dir.display()
             );
         }
-        Command::Login {
+        IdentityCommand::Login {
             issuer,
             client_id,
             audience,
@@ -139,7 +131,7 @@ pub async fn run_from(arguments: impl IntoIterator<Item = OsString>) -> anyhow::
                 store.backend_name()
             );
         }
-        Command::Logout {
+        IdentityCommand::Logout {
             issuer,
             gateway_origin,
             storage_dir,
@@ -150,7 +142,7 @@ pub async fn run_from(arguments: impl IntoIterator<Item = OsString>) -> anyhow::
             delete_enrollment_for(&issuer, &gateway_origin, &store)?;
             println!("managed identity session deleted");
         }
-        Command::EnrollRequest {
+        IdentityCommand::EnrollRequest {
             issuer,
             gateway_origin,
             storage_dir,
@@ -161,7 +153,7 @@ pub async fn run_from(arguments: impl IntoIterator<Item = OsString>) -> anyhow::
             save_enrollment_for(&issuer, &gateway_origin, &store, &enrollment)?;
             println!("{}", serde_json::to_string_pretty(&enrollment)?);
         }
-        Command::EnrollStatus {
+        IdentityCommand::EnrollStatus {
             issuer,
             gateway_origin,
             enrollment_id,
