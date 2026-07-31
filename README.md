@@ -2,11 +2,11 @@
 
 An early, policy-free edge connector that forwards Claude Code HTTP traffic from a loopback listener to an independently running Agent Gateway.
 
-The current pre-pre-MVP does not implement user identity, device enrollment, MDM integration, transparent capture, or telemetry export. See [AGENTS.md](AGENTS.md) for the architecture and incremental delivery plan.
+The current pre-pre-MVP includes experimental managed browser login, but does not yet attach identity to forwarded traffic or implement refresh, device enrollment, MDM integration, transparent capture, or telemetry export. See [AGENTS.md](AGENTS.md) for the architecture and incremental delivery plan.
 
 For a local installation, including credential ownership, file permissions, logs, retention, and removal, see [Standalone Operations](docs/deployment/standalone.md).
 
-The proposed managed user/device trust boundary is documented in [Managed Identity Contract v1](docs/architecture/managed-identity-v1.md). It is a design contract, not implemented behavior.
+The managed user/device trust boundary is documented in [Managed Identity Contract v1](docs/architecture/managed-identity-v1.md). Browser PKCE login and connector-instance DPoP proof are implemented; the rest remains a design contract.
 
 ## Managed identity storage preflight
 
@@ -24,6 +24,21 @@ cargo run --bin agentgateway-edge-identity -- \
 ```
 
 Select the protected file explicitly with `--credential-storage file`. The selected backend is persisted and revalidated on later startup; runtime does not silently switch stores. Override the XDG-based identity directory with `AGENTGATEWAY_EDGE_IDENTITY_DIR`.
+
+## Experimental managed login
+
+Run browser Authorization Code login against an issuer that advertises PKCE `S256`, DPoP `ES256`, and an ES256 JWT signing key through discovery:
+
+```bash
+cargo run --bin agentgateway-edge-identity -- login \
+  --issuer https://identity.example/ \
+  --client-id agentgateway-edge \
+  --audience https://gateway.example \
+  --scope agentgateway.invoke \
+  --gateway-origin https://gateway.example
+```
+
+The command validates credential storage before opening the browser, listens on an ephemeral loopback callback, verifies the access-token signature and issuer, audience, and DPoP binding, then persists the token and DPoP key. `--no-open` prints the authorization URL for non-desktop testing. Tokens are not yet refreshed or attached to connector traffic, and the DPoP key is not verified organizational device identity.
 
 ## Run
 
@@ -240,4 +255,4 @@ Send a simple prompt and verify:
 3. Stopping Agent Gateway causes the connector to return `502 Bad Gateway` with `x-agentgateway-edge-error: upstream-unavailable`.
 4. The connector never attempts a direct connection to Anthropic.
 
-OAuth, device-bound identity, and connector-only credential stripping are later increments.
+Managed forwarding, refresh, enrolled device identity, and connector-only credential stripping are later increments.

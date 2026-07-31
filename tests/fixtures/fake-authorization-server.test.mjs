@@ -27,7 +27,7 @@ function dpopProof(privateKey, publicKey, method, targetUrl) {
 async function authorizationCode(server, verifier) {
   const redirectUri = "http://127.0.0.1:49152/callback";
   const challenge = base64url(createHash("sha256").update(verifier).digest());
-  const authorize = new URL(`${server.issuer}/authorize`);
+  const authorize = new URL("authorize", server.issuer);
   authorize.search = new URLSearchParams({
     response_type: "code",
     client_id: server.clientId,
@@ -48,7 +48,7 @@ test("issues a DPoP-bound token for an S256 authorization code", async (context)
   const server = await startFakeAuthorizationServer();
   context.after(() => server.close());
 
-  const metadata = await fetch(`${server.issuer}/.well-known/oauth-authorization-server`).then((response) => response.json());
+  const metadata = await fetch(new URL(".well-known/oauth-authorization-server", server.issuer)).then((response) => response.json());
   assert.equal(metadata.issuer, server.issuer);
   assert.deepEqual(metadata.code_challenge_methods_supported, ["S256"]);
   assert.deepEqual(metadata.dpop_signing_alg_values_supported, ["ES256"]);
@@ -56,11 +56,12 @@ test("issues a DPoP-bound token for an S256 authorization code", async (context)
   const verifier = base64url(randomBytes(32));
   const { code, redirectUri } = await authorizationCode(server, verifier);
   const proofKeys = generateKeyPairSync("ec", { namedCurve: "P-256" });
-  const response = await fetch(`${server.issuer}/token`, {
+  const tokenEndpoint = new URL("token", server.issuer).toString();
+  const response = await fetch(tokenEndpoint, {
     method: "POST",
     headers: {
       "content-type": "application/x-www-form-urlencoded",
-      dpop: dpopProof(proofKeys.privateKey, proofKeys.publicKey, "POST", `${server.issuer}/token`),
+      dpop: dpopProof(proofKeys.privateKey, proofKeys.publicKey, "POST", tokenEndpoint),
     },
     body: new URLSearchParams({
       grant_type: "authorization_code",
@@ -85,11 +86,11 @@ test("issues a DPoP-bound token for an S256 authorization code", async (context)
     jwkThumbprint(proofKeys.publicKey.export({ format: "jwk" })),
   );
 
-  const replay = await fetch(`${server.issuer}/token`, {
+  const replay = await fetch(tokenEndpoint, {
     method: "POST",
     headers: {
       "content-type": "application/x-www-form-urlencoded",
-      dpop: dpopProof(proofKeys.privateKey, proofKeys.publicKey, "POST", `${server.issuer}/token`),
+      dpop: dpopProof(proofKeys.privateKey, proofKeys.publicKey, "POST", tokenEndpoint),
     },
     body: new URLSearchParams({
       grant_type: "authorization_code",
@@ -109,12 +110,13 @@ test("rejects a wrong PKCE verifier", async (context) => {
   const verifier = base64url(randomBytes(32));
   const { code, redirectUri } = await authorizationCode(server, verifier);
   const proofKeys = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const tokenEndpoint = new URL("token", server.issuer).toString();
 
-  const response = await fetch(`${server.issuer}/token`, {
+  const response = await fetch(tokenEndpoint, {
     method: "POST",
     headers: {
       "content-type": "application/x-www-form-urlencoded",
-      dpop: dpopProof(proofKeys.privateKey, proofKeys.publicKey, "POST", `${server.issuer}/token`),
+      dpop: dpopProof(proofKeys.privateKey, proofKeys.publicKey, "POST", tokenEndpoint),
     },
     body: new URLSearchParams({
       grant_type: "authorization_code",

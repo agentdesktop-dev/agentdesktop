@@ -7,6 +7,7 @@ import {
   verify,
 } from "node:crypto";
 import { createServer } from "node:http";
+import { fileURLToPath } from "node:url";
 
 const clientId = "agentgateway-edge-test";
 const audience = "agentgateway-edge";
@@ -105,9 +106,9 @@ export async function startFakeAuthorizationServer() {
     if (request.method === "GET" && url.pathname === "/.well-known/oauth-authorization-server") {
       return json(response, 200, {
         issuer,
-        authorization_endpoint: `${issuer}/authorize`,
-        token_endpoint: `${issuer}/token`,
-        jwks_uri: `${issuer}/jwks`,
+        authorization_endpoint: `${issuer}authorize`,
+        token_endpoint: `${issuer}token`,
+        jwks_uri: `${issuer}jwks`,
         response_types_supported: ["code"],
         code_challenge_methods_supported: ["S256"],
         dpop_signing_alg_values_supported: ["ES256"],
@@ -153,7 +154,7 @@ export async function startFakeAuthorizationServer() {
         ) {
           return json(response, 400, { error: "invalid_grant" });
         }
-        const proofJwk = verifyDpop(request.headers.dpop, "POST", `${issuer}/token`);
+        const proofJwk = verifyDpop(request.headers.dpop, "POST", `${issuer}token`);
         codes.delete(code);
         const now = Math.floor(Date.now() / 1000);
         const accessToken = signJwt(
@@ -185,7 +186,7 @@ export async function startFakeAuthorizationServer() {
 
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
-  issuer = `http://127.0.0.1:${address.port}`;
+  issuer = `http://127.0.0.1:${address.port}/`;
 
   return {
     issuer,
@@ -202,3 +203,14 @@ export const fakeAuthorizationInternals = {
   jwkThumbprint,
   signJwt,
 };
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  const server = await startFakeAuthorizationServer();
+  console.log(server.issuer);
+  const close = async () => {
+    await server.close();
+    process.exit(0);
+  };
+  process.on("SIGINT", close);
+  process.on("SIGTERM", close);
+}
