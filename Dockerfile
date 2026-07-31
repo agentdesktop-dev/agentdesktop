@@ -1,11 +1,11 @@
 # syntax=docker/dockerfile:1
 
-FROM docker.io/library/rust:1.97-bookworm AS builder
+FROM cgr.dev/chainguard/rust:latest-dev AS builder
 
 WORKDIR /build
-COPY Cargo.toml Cargo.lock ./
-COPY src ./src
-COPY tests ./tests
+COPY --chown=65532:65532 Cargo.toml Cargo.lock ./
+COPY --chown=65532:65532 src ./src
+COPY --chown=65532:65532 tests ./tests
 RUN cargo build --locked --release
 
 FROM cgr.dev/chainguard/wolfi-base:latest
