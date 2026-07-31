@@ -12,6 +12,11 @@ variable "accelerator" {
   default = "kvm"
 }
 
+variable "cpu_model" {
+  type    = string
+  default = "host"
+}
+
 variable "cpus" {
   type    = number
   default = 4
@@ -52,6 +57,7 @@ source "qemu" "fedora_workstation" {
   boot_command     = ["e<wait>", "<down><down><end>", " inst.text inst.ks=http://{{ .HTTPIP }}:{{ .HTTPPort }}/fedora.ks", "<leftCtrlOn>x<leftCtrlOff>"]
   boot_wait        = "10s"
   cpus             = var.cpus
+  cpu_model        = var.cpu_model
   disk_compression = true
   disk_interface   = "virtio"
   disk_size        = var.disk_size
@@ -77,7 +83,7 @@ build {
     inline = [
       "sudo dnf install -y nodejs npm",
       "sudo npm install --global --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code@${var.claude_code_version}",
-      "claude --version | grep -F '${var.claude_code_version}'",
+      "timeout 30s claude --version | grep -F '${var.claude_code_version}'",
       "sudo npm cache clean --force",
     ]
   }

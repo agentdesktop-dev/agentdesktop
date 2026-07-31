@@ -267,9 +267,16 @@ case "$command" in
     require packer
     mkdir -p "$artifacts"
     accelerator=kvm
-    test -r /dev/kvm || accelerator=tcg
+    cpu_model=host
+    if ! test -r /dev/kvm; then
+      accelerator=tcg
+      cpu_model=max
+    fi
     packer init "$vm_root/packer"
-    packer build -force -var "accelerator=$accelerator" "$vm_root/packer"
+    packer build -force \
+      -var "accelerator=$accelerator" \
+      -var "cpu_model=$cpu_model" \
+      "$vm_root/packer"
     ;;
   reset)
     require qemu-img
