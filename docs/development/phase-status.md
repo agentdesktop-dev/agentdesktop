@@ -8,7 +8,7 @@ This file records verified implementation status and external blockers. A phase 
 
 - Phase 0: streaming Claude-compatible HTTP forwarding, HTTP fidelity, fail-closed upstream errors, cancellation, and graceful shutdown.
 - Phase 1: explicit standalone mode, separate local Agent Gateway lifecycle, health reporting, native and connector-assisted Claude paths, policy smoke tests, and standalone operations guidance.
-- Phase 2, partial: browser Authorization Code with PKCE, DPoP-bound access tokens, signed-token validation, protected credential storage, refresh rotation, restart restoration, and per-request managed DPoP headers.
+- Phase 2, partial: browser Authorization Code with PKCE, DPoP-bound access tokens, signed-token validation, protected credential storage, refresh rotation, restart restoration, local logout, and per-request managed DPoP headers.
 - Phase 6, partial: explicit connection, response-header, and shutdown timeouts; bounded full-stream concurrency; deterministic timeout, overload, and forced-shutdown tests.
 - Phase 7, partial: JSON structured lifecycle and failure logs with fixed privacy-safe event categories. Traces, metrics, propagation, and OTLP export remain pending.
 

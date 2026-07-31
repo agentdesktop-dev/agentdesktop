@@ -290,6 +290,16 @@ pub fn load_session_for(
     Ok(session)
 }
 
+pub fn delete_session_for(
+    issuer: &Url,
+    gateway_origin: &Url,
+    store: &CredentialStore,
+) -> Result<()> {
+    validate_issuer(issuer)?;
+    validate_gateway_origin(gateway_origin)?;
+    store.delete(&session_record(issuer, gateway_origin))
+}
+
 fn validate_issuer(issuer: &Url) -> Result<()> {
     if issuer.scheme() == "https" {
         return Ok(());

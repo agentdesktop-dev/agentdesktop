@@ -4,7 +4,7 @@ use agentgateway_edge_connector::identity::storage::{
     CredentialStorageMode, CredentialStore, default_storage_root,
 };
 use agentgateway_edge_connector::identity::{
-    oauth::{LoginConfig, login},
+    oauth::{LoginConfig, delete_session_for, login},
     storage,
 };
 use clap::{Parser, Subcommand};
@@ -65,6 +65,17 @@ enum Command {
         #[arg(long)]
         no_open: bool,
     },
+    /// Delete a persisted managed identity session.
+    Logout {
+        #[arg(long)]
+        issuer: Url,
+
+        #[arg(long)]
+        gateway_origin: Url,
+
+        #[arg(long, env = "AGENTGATEWAY_EDGE_IDENTITY_DIR")]
+        storage_dir: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -116,6 +127,16 @@ async fn main() -> anyhow::Result<()> {
                 session.issuer,
                 store.backend_name()
             );
+        }
+        Command::Logout {
+            issuer,
+            gateway_origin,
+            storage_dir,
+        } => {
+            let storage_dir = storage_dir.map_or_else(storage::default_storage_root, Ok)?;
+            let store = CredentialStore::load(&storage_dir)?;
+            delete_session_for(&issuer, &gateway_origin, &store)?;
+            println!("managed identity session deleted");
         }
     }
     Ok(())

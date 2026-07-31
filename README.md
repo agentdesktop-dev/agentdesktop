@@ -53,6 +53,16 @@ cargo run -- \
 
 The connector fails at startup if storage or the matching session is unavailable. Before expiry it serializes refresh, uses the same DPoP key, verifies the rotated access token, and persists the new refresh token before forwarding continues. Refresh failure fails new requests closed locally; the issuer must enforce refresh-token rotation and reuse detection. For each request the connector removes application-supplied connector identity headers, preserves the application `Authorization` header, and adds a fresh `Proxy-Authorization: DPoP` token and DPoP proof. The DPoP key is not verified organizational device identity, and Agent Gateway still needs the contract's DPoP validation and credential-stripping changes before this is a trusted end-to-end managed identity path.
 
+Delete only the matching local session with:
+
+```bash
+cargo run --bin agentgateway-edge-identity -- logout \
+  --issuer https://identity.example/ \
+  --gateway-origin https://gateway.example
+```
+
+This removes local credentials but does not invoke an issuer revocation endpoint.
+
 ## Run
 
 Start Agent Gateway with a route that accepts Anthropic-compatible requests at `/v1/messages`, then run:

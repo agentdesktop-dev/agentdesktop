@@ -110,4 +110,19 @@ async fn browser_pkce_login_persists_dpop_bound_session() {
     let restored = load_session(&config, &store).unwrap();
     assert_ne!(restored.refresh_token, original_refresh_token);
     assert!(!restored.is_expired().unwrap());
+
+    let logout = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-identity"))
+        .args([
+            "logout",
+            "--issuer",
+            issuer_url,
+            "--gateway-origin",
+            "https://gateway.example",
+            "--storage-dir",
+            storage_dir.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(logout.status.success(), "{:?}", logout.stderr);
+    assert!(load_session(&config, &store).is_err());
 }
