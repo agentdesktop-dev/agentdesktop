@@ -1,6 +1,8 @@
 use std::cmp;
 use std::io;
+use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, ready};
 
 use anyhow::{Context as _, Result, bail};
@@ -10,36 +12,85 @@ use http::HeaderMap;
 use http::uri::Authority;
 use http::{Method, Request, StatusCode, Uri};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::net::{TcpStream, ToSocketAddrs};
+use tokio::net::TcpStream;
+use tokio::sync::{Mutex, Notify};
 
 #[derive(Clone)]
 pub struct HboneClient {
-    sender: SendRequest<Bytes>,
+    inner: Arc<HboneInner>,
+}
+
+struct HboneInner {
+    endpoint: SocketAddr,
     connect_headers: HeaderMap,
+    connection: Mutex<ConnectionState>,
+    connection_changed: Notify,
+}
+
+#[derive(Default)]
+struct ConnectionState {
+    generation: u64,
+    sender: Option<SendRequest<Bytes>>,
 }
 
 impl HboneClient {
-    pub async fn connect(endpoint: impl ToSocketAddrs) -> Result<Self> {
+    pub async fn connect(endpoint: SocketAddr) -> Result<Self> {
         Self::connect_with_headers(endpoint, HeaderMap::new()).await
     }
 
     pub async fn connect_with_headers(
-        endpoint: impl ToSocketAddrs,
+        endpoint: SocketAddr,
         connect_headers: HeaderMap,
     ) -> Result<Self> {
-        let stream = TcpStream::connect(endpoint).await?;
+        let client = Self {
+            inner: Arc::new(HboneInner {
+                endpoint,
+                connect_headers,
+                connection: Mutex::new(ConnectionState::default()),
+                connection_changed: Notify::new(),
+            }),
+        };
+        client.sender().await?;
+        Ok(client)
+    }
+
+    async fn sender(&self) -> Result<(u64, SendRequest<Bytes>)> {
+        let mut state = self.inner.connection.lock().await;
+        if let Some(sender) = &state.sender {
+            return Ok((state.generation, sender.clone()));
+        }
+        let stream = TcpStream::connect(self.inner.endpoint).await?;
         let (sender, connection) = h2::client::handshake(stream)
             .await
             .context("HBONE HTTP/2 handshake failed")?;
-        tokio::spawn(async move {
-            if let Err(error) = connection.await {
-                tracing::warn!(event = "hbone_connection_failed", reason = %error);
+        state.generation = state.generation.wrapping_add(1);
+        let generation = state.generation;
+        state.sender = Some(sender.clone());
+        tokio::spawn(drive_connection(
+            Arc::downgrade(&self.inner),
+            generation,
+            connection,
+        ));
+        Ok((generation, sender))
+    }
+
+    async fn invalidate(&self, generation: u64) {
+        let mut state = self.inner.connection.lock().await;
+        if state.generation == generation {
+            state.sender = None;
+            self.inner.connection_changed.notify_waiters();
+        }
+    }
+
+    #[cfg(test)]
+    async fn wait_until_disconnected(&self) {
+        loop {
+            let changed = self.inner.connection_changed.notified();
+            if self.inner.connection.lock().await.sender.is_none() {
+                return;
             }
-        });
-        Ok(Self {
-            sender,
-            connect_headers,
-        })
+            changed.await;
+        }
     }
 
     pub async fn open_tunnel(&self, authority: Authority) -> Result<HboneTunnel> {
@@ -51,14 +102,24 @@ impl HboneClient {
             .method(Method::CONNECT)
             .uri(uri)
             .body(())?;
-        request.headers_mut().extend(self.connect_headers.clone());
-        let mut sender = self
-            .sender
-            .clone()
-            .ready()
-            .await
-            .context("HBONE connection is unavailable")?;
-        let (response, send) = sender.send_request(request, false)?;
+        request
+            .headers_mut()
+            .extend(self.inner.connect_headers.clone());
+        let (generation, sender) = self.sender().await?;
+        let mut sender = match sender.ready().await {
+            Ok(sender) => sender,
+            Err(error) => {
+                self.invalidate(generation).await;
+                return Err(error).context("HBONE connection is unavailable");
+            }
+        };
+        let (response, send) = match sender.send_request(request, false) {
+            Ok(stream) => stream,
+            Err(error) => {
+                self.invalidate(generation).await;
+                return Err(error.into());
+            }
+        };
         let response = response.await.context("HBONE CONNECT response failed")?;
         if response.status() != StatusCode::OK {
             bail!("HBONE CONNECT rejected with status {}", response.status());
@@ -69,6 +130,24 @@ impl HboneClient {
             buffered: Bytes::new(),
             write_closed: false,
         })
+    }
+}
+
+async fn drive_connection(
+    inner: Weak<HboneInner>,
+    generation: u64,
+    connection: h2::client::Connection<TcpStream, Bytes>,
+) {
+    let result = connection.await;
+    if let Some(inner) = inner.upgrade() {
+        let mut state = inner.connection.lock().await;
+        if state.generation == generation {
+            state.sender = None;
+            inner.connection_changed.notify_waiters();
+        }
+    }
+    if let Err(error) = result {
+        tracing::warn!(event = "hbone_connection_failed", reason = %error);
     }
 }
 
@@ -242,5 +321,55 @@ mod tests {
 
         assert!(error.to_string().contains("requires an explicit port"));
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconnects_for_a_later_tunnel_after_connection_shutdown() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (closed_tx, closed_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (first, _) = listener.accept().await.unwrap();
+            let first = h2::server::handshake(first).await.unwrap();
+            drop(first);
+            closed_tx.send(()).unwrap();
+
+            let (second, _) = listener.accept().await.unwrap();
+            let mut second = h2::server::handshake(second).await.unwrap();
+            let handler = if let Some(result) = second.accept().await {
+                let (request, mut respond) = result.unwrap();
+                Some(tokio::spawn(async move {
+                    assert_eq!(request.uri().authority().unwrap(), "203.0.113.11:443");
+                    let mut receive = request.into_body();
+                    let mut send = respond.send_response(Response::new(()), false).unwrap();
+                    while receive.data().await.transpose().unwrap().is_some() {}
+                    send.send_data(Bytes::from_static(b"after restart"), true)
+                        .unwrap();
+                }))
+            } else {
+                None
+            };
+            while second.accept().await.is_some() {}
+            handler.unwrap().await.unwrap();
+        });
+
+        timeout(Duration::from_secs(1), async {
+            let client = HboneClient::connect(address).await.unwrap();
+            closed_rx.await.unwrap();
+            client.wait_until_disconnected().await;
+            let mut tunnel = client
+                .open_tunnel("203.0.113.11:443".parse().unwrap())
+                .await
+                .unwrap();
+            tunnel.shutdown().await.unwrap();
+            let mut response = Vec::new();
+            tunnel.read_to_end(&mut response).await.unwrap();
+            assert_eq!(response, b"after restart");
+            drop(tunnel);
+            drop(client);
+            server.await.unwrap();
+        })
+        .await
+        .expect("HBONE reconnect timed out");
     }
 }

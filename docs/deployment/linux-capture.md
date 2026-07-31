@@ -50,7 +50,7 @@ cargo run --bin agentgateway-edge-capture -- \
 
 The token file is required, must be a regular file owned by the current user with mode `0600`, and must contain a non-empty HTTP header value. Agent Gateway must receive the same value through its protected startup environment and authorize the re-entered route with `source.connectHeaders["x-agentgateway-edge-token"]`. The smoke config demonstrates this policy without creating a second policy format.
 
-Both endpoints are restricted to loopback. The relay uses Linux `SO_ORIGINAL_DST`, preserves raw bytes, bounds concurrent tunnels, and closes failed or overloaded flows without direct fallback. Its current HBONE connection is cleartext and established once at startup. The opaque token prevents unrelated local clients from using a correctly configured tunnel listener, but creation, rotation, and process lifecycle are not integrated. Managed use additionally requires TLS and DPoP-bound organizational identity.
+Both endpoints are restricted to loopback. The relay uses Linux `SO_ORIGINAL_DST`, preserves raw bytes, bounds concurrent tunnels, and closes failed or overloaded flows without direct fallback. Its cleartext HBONE pool reconnects lazily for later flows after observed transport loss; it never retries a failed CONNECT or replays inner bytes. The opaque token prevents unrelated local clients from using a correctly configured tunnel listener, but creation, rotation, and process lifecycle are not integrated. Managed use additionally requires TLS and DPoP-bound organizational identity.
 
 ## Isolated validation
 

@@ -25,15 +25,15 @@ Managed remote mode requires TLS plus a short-lived DPoP-bound access token on e
 
 ## Failure behavior
 
-The connector never retries or opens the original provider connection when connection setup, authentication, CONNECT response, or stream forwarding fails. Transparent-capture rules must continue denying direct TCP and UDP/443 bypass while capture is enabled.
+The connector never retries a CONNECT, replays inner bytes, or opens the original provider connection when connection setup, authentication, CONNECT response, or stream forwarding fails. After the HTTP/2 driver observes transport loss, a later flow may establish a new pooled connection. The failed or ambiguous flow remains failed closed. Transparent-capture rules must continue denying direct TCP and UDP/443 bypass while capture is enabled.
 
 ## Current implementation status
 
-The connector implements and deterministically tests the HTTP/2 CONNECT stream primitive, explicit destination-port validation, bidirectional byte fidelity, flow-control release, half-close signaling, Linux original-destination recovery, bounded relay concurrency, and protected local-token loading. Private-container coverage validates cgroup v2/nftables redirection and UDP denial through the real relay. An opt-in smoke test proves local token rejection/acceptance and dynamic forwarding against a real Agent Gateway.
+The connector implements and deterministically tests the HTTP/2 CONNECT stream primitive, explicit destination-port validation, bidirectional byte fidelity, flow-control release, half-close signaling, generation-safe lazy reconnect for later flows after observed transport loss, Linux original-destination recovery, bounded relay concurrency, and protected local-token loading. Private-container coverage validates cgroup v2/nftables redirection and UDP denial through the real relay. An opt-in smoke test proves local token rejection/acceptance and dynamic forwarding against a real Agent Gateway.
 
 The following remain required before captured mode can be enabled:
 
 - Managed TLS and per-CONNECT DPoP authentication.
 - Connection pooling keyed by identity generation.
 - Integrated standalone token creation, delivery, and rotation.
-- Fail-closed restart, cancellation, and stale-rule tests.
+- Real Agent Gateway restart, cancellation, and stale-rule tests.
