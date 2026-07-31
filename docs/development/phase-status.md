@@ -9,7 +9,7 @@ This file records verified implementation status and external blockers. A phase 
 - Phase 0: streaming Claude-compatible HTTP forwarding, HTTP fidelity, fail-closed upstream errors, cancellation, and graceful shutdown.
 - Phase 1: explicit standalone mode, separate local Agent Gateway lifecycle, health reporting, native and connector-assisted Claude paths, policy smoke tests, and standalone operations guidance.
 - Phase 2, partial: browser Authorization Code with PKCE, DPoP-bound access tokens, signed-token validation, protected credential storage, refresh rotation, restart restoration, credential-generation pool isolation, local logout, and per-request managed DPoP headers.
-- Phase 3, blocked implementation: application routing recognizes mutually exclusive native, connector, and captured choices; captured mode fails before application launch because no transparent redirector is installed. HBONE and privileged OS capture remain blocked as documented below.
+- Phase 3, partial transport: application routing recognizes mutually exclusive native, connector, and captured choices; captured mode still fails before application launch because no transparent redirector is installed. A pooled HTTP/2 CONNECT primitive now validates explicit destination ports and preserves bidirectional bytes against a deterministic fake peer. Local/managed authentication, real Agent Gateway interoperability, and privileged OS capture remain blocked as documented below.
 - Phase 4, partial: transactional standalone bundle install/upgrade/uninstall, generated hardened Linux user-systemd unit with explicit enable/disable lifecycle, and a privacy-safe local status API. Application-profile UI, trust workflow, binary download/update, and graphical UI remain pending.
 - Phase 5, partial: runtime platform capability reporting and a published compatibility matrix. Linux native forwarding is validated; transparent capture, trust integration, installers, and macOS/Windows builds remain unavailable.
 - Phase 6, partial: explicit connection, upload/response-header, and shutdown timeouts; bounded full-stream concurrency; no request retries; deterministic slow-client, timeout, overload, disconnect, malformed-request isolation, forced-shutdown, and repeated lifecycle tests.
@@ -20,7 +20,7 @@ This file records verified implementation status and external blockers. A phase 
 
 - Verified device enrollment requires an enrollment authority, approval and revocation API, and an agreed Agent Gateway device-identity contract. A connector-generated DPoP key remains connector-instance proof and is not labeled as organizational device identity.
 - Trusted managed identity requires Agent Gateway support for DPoP proof validation, replay protection, `cnf.jkt` binding, connector credential stripping, and immutable trusted policy context.
-- Transparent capture requires an authenticated HBONE contract plus a privileged OS integration. Linux implementation needs a selected cgroup/eBPF mechanism and a disposable privileged test host. Container-only tests cannot establish host process attribution or anti-bypass behavior.
+- Transparent capture requires authenticated HBONE plus privileged OS integration. The selected first Linux mechanism is cgroup v2 with nftables, targeting an externally managed systemd scope, TCP/443 redirection, and UDP/443 denial. Rootful Podman can validate isolated rule behavior but cannot establish production host process attribution or anti-bypass guarantees. eBPF remains a documented future strengthening path.
 - macOS capture, trust installation, packaging, and signing require macOS with Network Extension entitlements. Windows capture, trust installation, packaging, and signing require Windows with WFP development and signing facilities.
 - Additional platform installers and the capture/trust UI depend on final package names and the first supported capture/trust platform.
 
@@ -29,4 +29,4 @@ This file records verified implementation status and external blockers. A phase 
 - Measured latency and memory reliability baselines.
 - OpenTelemetry metric export and backend correlation tests using the selected Rust OTel 0.31 stack.
 - Agent Gateway DPoP work when its source checkout and contribution boundary are available.
-- Linux capture design and preflight checks once the cgroup/eBPF mechanism is selected; do not expose a captured application path before redirection and fail-closed denial work end to end.
+- Linux cgroup v2/nftables capture design, privileged setup CLI, preflight checks, and rootful-Podman rule tests; do not expose a captured application path before redirection and fail-closed denial work end to end.
