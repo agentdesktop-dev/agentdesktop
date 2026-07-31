@@ -57,4 +57,4 @@ Revocation changes `device_status` to `revoked` without revoking the user or cha
 
 ## Current boundary
 
-Automated tests prove token/key binding, wrong-key rejection, proof replay rejection, explicit approval, authority-assigned device identity, and independent revocation state. The connector enrollment client, persisted enrollment record, administrator API, Agent Gateway status consumption, and outage behavior are not implemented yet.
+Automated tests prove token/key binding, wrong-key rejection, proof replay rejection, explicit approval, authority-assigned device identity, independent revocation state, and connector rejection of mismatched issuer/thumbprint responses. The identity CLI can request and read enrollment using the existing refresh-safe managed session. Persisted enrollment records, a production administrator API, Agent Gateway status consumption, and outage behavior are not implemented yet.

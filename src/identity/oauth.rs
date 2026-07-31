@@ -118,6 +118,10 @@ impl ManagedIdentity {
             Ok("ready")
         }
     }
+
+    pub async fn dpop_thumbprint(&self) -> Result<String> {
+        self.session.lock().await.dpop_key()?.thumbprint()
+    }
 }
 
 pub async fn login<F>(

@@ -4,7 +4,8 @@ use agentgateway_edge_connector::identity::storage::{
     CredentialStorageMode, CredentialStore, default_storage_root,
 };
 use agentgateway_edge_connector::identity::{
-    oauth::{LoginConfig, delete_session_for, login},
+    enrollment::EnrollmentClient,
+    oauth::{LoginConfig, ManagedIdentity, delete_session_for, load_session_for, login},
     storage,
 };
 use clap::{Parser, Subcommand};
@@ -76,6 +77,31 @@ enum Command {
         #[arg(long, env = "AGENTGATEWAY_EDGE_IDENTITY_DIR")]
         storage_dir: Option<PathBuf>,
     },
+    /// Request approval for the current session's DPoP key.
+    EnrollRequest {
+        #[arg(long)]
+        issuer: Url,
+
+        #[arg(long)]
+        gateway_origin: Url,
+
+        #[arg(long, env = "AGENTGATEWAY_EDGE_IDENTITY_DIR")]
+        storage_dir: Option<PathBuf>,
+    },
+    /// Read an existing enrollment and device revocation status.
+    EnrollStatus {
+        #[arg(long)]
+        issuer: Url,
+
+        #[arg(long)]
+        gateway_origin: Url,
+
+        #[arg(long)]
+        enrollment_id: String,
+
+        #[arg(long, env = "AGENTGATEWAY_EDGE_IDENTITY_DIR")]
+        storage_dir: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -138,6 +164,38 @@ async fn main() -> anyhow::Result<()> {
             delete_session_for(&issuer, &gateway_origin, &store)?;
             println!("managed identity session deleted");
         }
+        Command::EnrollRequest {
+            issuer,
+            gateway_origin,
+            storage_dir,
+        } => {
+            let identity = load_identity(&issuer, &gateway_origin, storage_dir)?;
+            let client = EnrollmentClient::discover(&issuer).await?;
+            let enrollment = client.request(&identity).await?;
+            println!("{}", serde_json::to_string_pretty(&enrollment)?);
+        }
+        Command::EnrollStatus {
+            issuer,
+            gateway_origin,
+            enrollment_id,
+            storage_dir,
+        } => {
+            let identity = load_identity(&issuer, &gateway_origin, storage_dir)?;
+            let client = EnrollmentClient::discover(&issuer).await?;
+            let enrollment = client.status(&identity, &enrollment_id).await?;
+            println!("{}", serde_json::to_string_pretty(&enrollment)?);
+        }
     }
     Ok(())
+}
+
+fn load_identity(
+    issuer: &Url,
+    gateway_origin: &Url,
+    storage_dir: Option<PathBuf>,
+) -> anyhow::Result<ManagedIdentity> {
+    let storage_dir = storage_dir.map_or_else(storage::default_storage_root, Ok)?;
+    let store = CredentialStore::load(&storage_dir)?;
+    let session = load_session_for(issuer, gateway_origin, &store)?;
+    Ok(ManagedIdentity::new(session, store))
 }
