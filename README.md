@@ -176,6 +176,15 @@ cargo run --bin agentgateway-edge-install -- install \
 
 Installation builds a complete sibling staging tree, verifies all inputs before replacing the active tree, and restores the previous tree if activation fails. Re-running the command upgrades the dedicated root. The starter configuration is installed as an example and remains Agent Gateway configuration; the connector does not interpret it.
 
+Verify every manifest-owned file before use or removal:
+
+```bash
+cargo run --bin agentgateway-edge-install -- verify \
+  --root "$HOME/.local/lib/agentgateway-edge"
+```
+
+The manifest records SHA-256 hashes. Verification, upgrade, and uninstall reject missing, modified, non-regular, symlinked, or path-traversing entries.
+
 Remove only a manifest-owned bundle:
 
 ```bash
@@ -183,7 +192,7 @@ cargo run --bin agentgateway-edge-install -- uninstall \
   --root "$HOME/.local/lib/agentgateway-edge"
 ```
 
-The installer refuses to remove directories without its manifest. It does not yet install a system/user service, alter CA trust, create application profiles, or download/update either binary.
+The installer refuses to remove directories without its manifest or bundles whose owned files were modified. It does not yet install a system/user service, alter CA trust, create application profiles, cryptographically verify a publisher signature, or download/update either binary.
 
 ## Test
 

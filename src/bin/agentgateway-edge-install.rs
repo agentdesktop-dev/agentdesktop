@@ -1,9 +1,10 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 const MANIFEST: &str = "agentgateway-edge-install.json";
 
@@ -37,12 +38,23 @@ enum Command {
         #[arg(long)]
         root: PathBuf,
     },
+    Verify {
+        #[arg(long)]
+        root: PathBuf,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 struct InstallManifest {
     format_version: u32,
     connector_version: String,
+    files: Vec<InstalledFile>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct InstalledFile {
+    path: String,
+    sha256: String,
 }
 
 fn main() -> Result<()> {
@@ -65,6 +77,11 @@ fn main() -> Result<()> {
             ],
         ),
         Command::Uninstall { root } => uninstall(&root),
+        Command::Verify { root } => {
+            validate_owned_tree(&root)?;
+            println!("verified standalone bundle at {}", root.display());
+            Ok(())
+        }
     }
 }
 
@@ -95,9 +112,20 @@ fn install(root: &Path, files: &[(&Path, &str, bool)]) -> Result<()> {
             })?;
             set_mode(&destination, if *executable { 0o755 } else { 0o600 })?;
         }
+        let files = files
+            .iter()
+            .map(|(_, relative, _)| {
+                let destination = staging.join(relative);
+                Ok(InstalledFile {
+                    path: (*relative).to_owned(),
+                    sha256: file_sha256(&destination)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         let manifest = InstallManifest {
-            format_version: 1,
+            format_version: 2,
             connector_version: env!("CARGO_PKG_VERSION").to_owned(),
+            files,
         };
         fs::write(
             staging.join(MANIFEST),
@@ -140,10 +168,34 @@ fn validate_owned_tree(root: &Path) -> Result<()> {
         &fs::read(&manifest)
             .with_context(|| format!("{} is not an edge bundle", root.display()))?,
     )?;
-    if parsed.format_version != 1 {
+    if parsed.format_version != 2 {
         bail!("unsupported install manifest format");
     }
+    for installed in parsed.files {
+        let relative = Path::new(&installed.path);
+        if relative.as_os_str().is_empty()
+            || !relative
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+        {
+            bail!("install manifest contains an unsafe path");
+        }
+        let path = root.join(relative);
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("installed file {} is missing", path.display()))?;
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            bail!("installed path {} is not a regular file", path.display());
+        }
+        if file_sha256(&path)? != installed.sha256 {
+            bail!("installed file {} has been modified", path.display());
+        }
+    }
     Ok(())
+}
+
+fn file_sha256(path: &Path) -> Result<String> {
+    let digest = Sha256::digest(fs::read(path)?);
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 fn remove_owned_tree_if_present(path: &Path) -> Result<()> {

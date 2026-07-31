@@ -48,6 +48,29 @@ fn installs_upgrades_and_uninstalls_standalone_bundle() {
         "second-connector"
     );
 
+    let verify = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-install"))
+        .args(["verify", "--root", root.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(verify.status.success());
+
+    fs::write(
+        root.join("bin/agentgateway-edge-connector"),
+        "locally-modified",
+    )
+    .unwrap();
+    let refused = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-install"))
+        .args(["uninstall", "--root", root.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(root.exists());
+    fs::write(
+        root.join("bin/agentgateway-edge-connector"),
+        "second-connector",
+    )
+    .unwrap();
+
     let uninstall = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-install"))
         .args(["uninstall", "--root", root.to_str().unwrap()])
         .output()

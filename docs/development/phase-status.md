@@ -13,6 +13,7 @@ This file records verified implementation status and external blockers. A phase 
 - Phase 5, partial: runtime platform capability reporting and a published compatibility matrix. Linux native forwarding is validated; transparent capture, trust integration, installers, and macOS/Windows builds remain unavailable.
 - Phase 6, partial: explicit connection, response-header, and shutdown timeouts; bounded full-stream concurrency; no request retries; deterministic timeout, overload, disconnect, forced-shutdown, and repeated lifecycle tests.
 - Phase 7, partial: JSON structured lifecycle and failure logs with fixed privacy-safe event categories; validated W3C trace-context propagation and generation. OTel spans, metrics, and OTLP export remain pending.
+- Phase 8, partial: hardened non-root container build and SHA-256 bundle integrity manifests with verification and tamper-safe upgrade/uninstall. Publisher signatures, staged fleet rollout, minimum-version policy, and privileged IPC remain pending.
 
 ## Active blockers
 
