@@ -2,9 +2,11 @@ pub mod apps;
 #[cfg(target_os = "linux")]
 pub mod capture;
 pub mod config;
+pub mod customization;
 pub mod hbone;
 pub mod identity;
 pub mod local_gateway;
+pub mod organization;
 pub mod platform;
 pub mod proxy;
 pub mod telemetry;
