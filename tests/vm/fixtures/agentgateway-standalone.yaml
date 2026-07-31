@@ -1,0 +1,15 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+config:
+  readinessAddr: 127.0.0.1:15021
+
+llm:
+  port: 4000
+  models:
+  - name: "*"
+    provider: anthropic
+    authorization:
+      rules:
+      - 'request.headers["x-api-key"] == "local-gateway-placeholder"'
+    params:
+      apiKey: mock-provider-key
+      baseUrl: http://host.test:8000/v1

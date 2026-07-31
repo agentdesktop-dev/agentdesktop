@@ -10,6 +10,7 @@ fn installs_upgrades_and_uninstalls_standalone_bundle() {
         fs::write(fixtures.join(name), format!("first-{name}")).unwrap();
     }
     let root = temporary.path().join("agentgateway-edge");
+    let runtime_config = temporary.path().join("config/agentgateway.yaml");
     let install = || {
         Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-install"))
             .args([
@@ -26,6 +27,10 @@ fn installs_upgrades_and_uninstalls_standalone_bundle() {
                 fixtures.join("agentgateway").to_str().unwrap(),
                 "--starter-config",
                 fixtures.join("config").to_str().unwrap(),
+                "--control",
+                env!("CARGO_BIN_EXE_agentgateway-edge-install"),
+                "--gateway-config",
+                runtime_config.to_str().unwrap(),
             ])
             .output()
             .unwrap()
@@ -40,12 +45,14 @@ fn installs_upgrades_and_uninstalls_standalone_bundle() {
         fs::read_to_string(root.join("share/examples/agentgateway.yaml")).unwrap(),
         "first-config"
     );
+    assert!(root.join("bin/agentgateway-edge-install").is_file());
     let service =
         fs::read_to_string(root.join("share/systemd/user/agentgateway-edge.service")).unwrap();
     assert!(service.contains("--mode standalone"));
     assert!(service.contains("--gateway-binary"));
     assert!(service.contains("NoNewPrivileges=true"));
     assert!(service.contains(root.to_str().unwrap()));
+    assert!(service.contains(runtime_config.to_str().unwrap()));
 
     fs::write(fixtures.join("connector"), "second-connector").unwrap();
     assert!(install().status.success());
@@ -91,7 +98,7 @@ fn installs_upgrades_and_uninstalls_standalone_bundle() {
         assert_eq!(
             invocations,
             format!(
-                "--user enable --now {}\n--user disable --now agentgateway-edge.service\n",
+                "--user enable {}\n--user restart agentgateway-edge.service\n--user disable --now agentgateway-edge.service\n",
                 root.join("share/systemd/user/agentgateway-edge.service")
                     .display()
             )

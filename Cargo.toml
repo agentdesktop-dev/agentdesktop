@@ -3,6 +3,10 @@ name = "agentgateway-edge-connector"
 version = "0.1.0"
 edition = "2024"
 default-run = "agentgateway-edge-connector"
+build = "build.rs"
+
+[features]
+embedded-installer = []
 
 [dependencies]
 anyhow = "1.0"
@@ -31,9 +35,14 @@ tracing = "0.1"
 tracing-opentelemetry = "0.32"
 tracing-subscriber = { version = "0.3", features = ["json"] }
 url = "2.5"
+zstd = "0.13"
+tempfile = "3"
+
+[build-dependencies]
+sha2 = "0.10"
+zstd = "0.13"
 
 [dev-dependencies]
 http-body-util = "0.1"
-tempfile = "3"
 tokio-stream = "0.1"
 

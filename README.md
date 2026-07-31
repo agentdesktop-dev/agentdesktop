@@ -185,55 +185,67 @@ The response contains connector version, deployment mode, gateway reachability, 
 
 ## Install a standalone bundle
 
-Build the connector binaries, then stage them with a separately obtained Agent Gateway binary and starter configuration into a dedicated installation root:
+The development release artifact is one self-contained executable containing a tested Agent Gateway and connector version set. Download the installer for the current platform and run it:
 
 ```bash
-cargo build --release
-cargo run --bin agentgateway-edge-install -- install \
-  --root "$HOME/.local/lib/agentgateway-edge" \
-  --connector target/release/agentgateway-edge-connector \
-  --identity target/release/agentgateway-edge-identity \
-  --claude target/release/agentgateway-edge-claude \
-  --agentgateway /path/to/agentgateway \
-  --starter-config container/agentgateway-smoke.yaml
+chmod +x agentgateway-edge-installer
+./agentgateway-edge-installer
 ```
 
-Installation builds a complete sibling staging tree, verifies all inputs before replacing the active tree, and restores the previous tree if activation fails. Re-running the command upgrades the dedicated root. The starter configuration is installed as an example and remains Agent Gateway configuration; the connector does not interpret it.
+The guided installer shows the components, per-user destination, service behavior, and network ownership boundary before changing files. The connector listener is loopback-only. The current Agent Gateway `llm.port` configuration binds a wildcard address and cannot express a loopback address, so the installer explicitly tells users to review Agent Gateway exposure. A public standalone package remains blocked on an address-capable Agent Gateway listener or equivalent local-only transport. The default root is `$HOME/.local/lib/agentgateway-edge`; after confirmation the installer verifies and extracts every embedded component, atomically activates the bundle, and enables the user systemd service. Agent Gateway remains a separate executable and process after extraction.
+
+For unattended installation or installation without starting the service:
+
+```bash
+./agentgateway-edge-installer install --yes
+./agentgateway-edge-installer install --yes --no-start
+```
+
+Use `--root` to override the installation root. Re-running the installer upgrades a manifest-owned bundle and restores the prior tree if activation fails. The starter configuration remains Agent Gateway configuration; the connector does not interpret it.
 
 Verify every manifest-owned file before use or removal:
 
 ```bash
-cargo run --bin agentgateway-edge-install -- verify \
+"$HOME/.local/lib/agentgateway-edge/bin/agentgateway-edge-install" verify \
   --root "$HOME/.local/lib/agentgateway-edge"
 ```
 
 The manifest records SHA-256 hashes. Verification, upgrade, and uninstall reject missing, modified, non-regular, symlinked, or path-traversing entries.
 
-On Linux with user systemd, explicitly link and enable the generated hardened unit:
+The guided installer enables and starts the generated hardened user-systemd unit by default. If installation used `--no-start`, enable it later with the installed control command:
 
 ```bash
-systemctl --user link \
-  "$HOME/.local/lib/agentgateway-edge/share/systemd/user/agentgateway-edge.service"
-systemctl --user daemon-reload
-systemctl --user enable --now agentgateway-edge.service
+"$HOME/.local/lib/agentgateway-edge/bin/agentgateway-edge-install" \
+  service enable \
+  --root "$HOME/.local/lib/agentgateway-edge"
 ```
 
 The unit starts the connector and its separately packaged Agent Gateway process in standalone mode. Before uninstalling, stop and unlink it:
 
 ```bash
-systemctl --user disable --now agentgateway-edge.service
-systemctl --user revert agentgateway-edge.service
-systemctl --user daemon-reload
-```
-
-Remove only a manifest-owned bundle:
-
-```bash
-cargo run --bin agentgateway-edge-install -- uninstall \
+"$HOME/.local/lib/agentgateway-edge/bin/agentgateway-edge-install" \
+  service disable \
   --root "$HOME/.local/lib/agentgateway-edge"
 ```
 
-The installer refuses to remove directories without its manifest or bundles whose owned files were modified. It generates but does not automatically activate the Linux user service. It does not alter CA trust, create application profiles, cryptographically verify a publisher signature, or download/update either binary.
+The self-contained installer installs its control command with the bundle. Remove only a manifest-owned bundle:
+
+```bash
+"$HOME/.local/lib/agentgateway-edge/bin/agentgateway-edge-install" uninstall \
+  --root "$HOME/.local/lib/agentgateway-edge"
+```
+
+The installer refuses to remove directories without its manifest or bundles whose owned files were modified. It does not alter CA trust, create application profiles, cryptographically verify a publisher signature, or download/update components at runtime.
+
+Build a development artifact from local release binaries and a compatible Agent Gateway checkout with:
+
+```bash
+scripts/build-embedded-installer.sh \
+  ../agentgateway/target/ci/agentgateway \
+  container/agentgateway-smoke.yaml
+```
+
+The resulting `target/release/agentgateway-edge-installer` is the only file delivered to the user. A build with no embedded payload remains available for repository-wide compilation and reports an actionable error if run.
 
 ## Test
 

@@ -2,6 +2,21 @@
 
 This guide covers a single-user installation where Agent Gateway and the edge connector run as separate processes on one machine. It does not require OAuth, device enrollment, MDM, or a control plane.
 
+## Installation
+
+The standalone release is distributed as one platform-specific executable containing Agent Gateway, the connector, helper commands, and a starter Agent Gateway configuration:
+
+```bash
+chmod +x agentgateway-edge-installer
+./agentgateway-edge-installer
+```
+
+The installer displays its destination, service behavior, and network ownership boundary before changing files. It installs for the current user under `$HOME/.local/lib/agentgateway-edge` by default and starts a user systemd service after confirmation. Use `install --yes` for non-interactive installation, `--no-start` to leave the service disabled, and `--root` to select another absolute destination.
+
+The connector listener is restricted to loopback. The current Agent Gateway `llm.port` schema accepts only a port and binds a wildcard address; it cannot yet express a loopback address. The QEMU journey is isolated behind QEMU user-mode NAT, but a public host installation requires an address-capable Agent Gateway listener or equivalent local-only transport before this package can claim local-only exposure. Host firewall policy is not a substitute for making that default explicit in the product.
+
+Embedded components are compressed independently and verified while extracting. Installation uses a sibling staging tree and atomic activation; upgrades validate the existing manifest and restore the prior bundle if activation fails. This payload integrity check does not replace publisher signing, which remains required before public distribution.
+
 ## Ownership
 
 Agent Gateway owns:
@@ -89,11 +104,13 @@ agentgateway-edge-connector \
 
 With supervision enabled, the connector starts `agentgateway -f <config>`, waits for the configured upstream to accept TCP connections, stops the child during connector shutdown, and exits if the child exits unexpectedly. It does not install, update, or rewrite Agent Gateway.
 
-The standalone bundle installer includes a hardened user-systemd unit. Activate or stop it explicitly after installing the bundle at an absolute path:
+The self-contained installer includes a hardened user-systemd unit and enables it by default. If installation used `--no-start`, activate it later or stop it before uninstalling with:
 
 ```bash
-agentgateway-edge-install service enable --root "$HOME/.local/lib/agentgateway-edge"
-agentgateway-edge-install service disable --root "$HOME/.local/lib/agentgateway-edge"
+"$HOME/.local/lib/agentgateway-edge/bin/agentgateway-edge-install" \
+  service enable --root "$HOME/.local/lib/agentgateway-edge"
+"$HOME/.local/lib/agentgateway-edge/bin/agentgateway-edge-install" \
+  service disable --root "$HOME/.local/lib/agentgateway-edge"
 ```
 
 Enable validates the complete bundle integrity manifest before asking `systemctl --user` to enable and start the generated unit. Disable performs the same validation before stopping and disabling the named unit. Disable the service before uninstalling the bundle; install and uninstall do not implicitly alter the current user session.

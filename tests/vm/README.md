@@ -36,6 +36,19 @@ Copy a connector build or scenario into the guest with:
 tests/vm/vm.sh copy target/release/agentgateway-edge-connector
 ```
 
+For the installation journey, build and transfer the single embedded artifact:
+
+```bash
+scripts/build-embedded-installer.sh \
+  ../agentgateway/target/ci/agentgateway \
+  tests/vm/fixtures/agentgateway-standalone.yaml
+tests/vm/vm.sh copy \
+  target/release/agentgateway-edge-installer \
+  /home/agentedge/Downloads/agentgateway-edge-installer
+```
+
+The VM fixture points Agent Gateway at the laptop mock LLM through `host.test:8000`. It is specific to this QEMU environment and must not be used as a general release configuration.
+
 The test-only `agentedge` account has passwordless sudo. SSH password authentication is exposed only through the QEMU user-network forward on host loopback. Do not publish the VM's SSH port on a non-loopback host address.
 
 ## Clean-slate lifecycle

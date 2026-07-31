@@ -35,6 +35,10 @@ enum Command {
         agentgateway: PathBuf,
         #[arg(long)]
         starter_config: PathBuf,
+        #[arg(long)]
+        control: Option<PathBuf>,
+        #[arg(long)]
+        gateway_config: Option<PathBuf>,
     },
     Uninstall {
         #[arg(long)]
@@ -88,16 +92,25 @@ fn main() -> Result<()> {
             claude,
             agentgateway,
             starter_config,
-        } => install(
-            &root,
-            &[
-                (&connector, "bin/agentgateway-edge-connector", true),
-                (&identity, "bin/agentgateway-edge-identity", true),
-                (&claude, "bin/agentgateway-edge-claude", true),
-                (&agentgateway, "bin/agentgateway", true),
-                (&starter_config, "share/examples/agentgateway.yaml", false),
-            ],
-        ),
+            control,
+            gateway_config,
+        } => {
+            let mut files: Vec<(&Path, &str, bool)> = vec![
+                (connector.as_path(), "bin/agentgateway-edge-connector", true),
+                (identity.as_path(), "bin/agentgateway-edge-identity", true),
+                (claude.as_path(), "bin/agentgateway-edge-claude", true),
+                (agentgateway.as_path(), "bin/agentgateway", true),
+                (
+                    starter_config.as_path(),
+                    "share/examples/agentgateway.yaml",
+                    false,
+                ),
+            ];
+            if let Some(control) = &control {
+                files.push((control.as_path(), "bin/agentgateway-edge-install", true));
+            }
+            install(&root, &files, gateway_config.as_deref())
+        }
         Command::Uninstall { root } => uninstall(&root),
         Command::Verify { root } => {
             validate_owned_tree(&root)?;
@@ -113,21 +126,23 @@ fn main() -> Result<()> {
 
 fn service(root: &Path, systemctl: &Path, enable: bool) -> Result<()> {
     validate_owned_tree(root)?;
-    let mut command = ProcessCommand::new(systemctl);
-    command.arg("--user");
     if enable {
-        command
-            .args(["enable", "--now"])
-            .arg(root.join(SYSTEMD_UNIT));
+        run_systemctl(
+            systemctl,
+            ["enable"],
+            Some(root.join(SYSTEMD_UNIT).as_path()),
+        )?;
+        run_systemctl(
+            systemctl,
+            ["restart"],
+            Some(Path::new("agentgateway-edge.service")),
+        )?;
     } else {
-        command.args(["disable", "--now", "agentgateway-edge.service"]);
-    }
-    let output = command.output().context("failed to run systemctl")?;
-    if !output.status.success() {
-        bail!(
-            "systemctl failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        run_systemctl(
+            systemctl,
+            ["disable", "--now"],
+            Some(Path::new("agentgateway-edge.service")),
+        )?;
     }
     println!(
         "{} standalone user service",
@@ -136,7 +151,31 @@ fn service(root: &Path, systemctl: &Path, enable: bool) -> Result<()> {
     Ok(())
 }
 
-fn install(root: &Path, files: &[(&Path, &str, bool)]) -> Result<()> {
+fn run_systemctl<const N: usize>(
+    systemctl: &Path,
+    args: [&str; N],
+    unit: Option<&Path>,
+) -> Result<()> {
+    let mut command = ProcessCommand::new(systemctl);
+    command.arg("--user").args(args);
+    if let Some(unit) = unit {
+        command.arg(unit);
+    }
+    let output = command.output().context("failed to run systemctl")?;
+    if !output.status.success() {
+        bail!(
+            "systemctl failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn install(
+    root: &Path,
+    files: &[(&Path, &str, bool)],
+    gateway_config: Option<&Path>,
+) -> Result<()> {
     if !root.is_absolute() {
         bail!("install root must be absolute");
     }
@@ -168,7 +207,7 @@ fn install(root: &Path, files: &[(&Path, &str, bool)]) -> Result<()> {
         }
         let unit = staging.join(SYSTEMD_UNIT);
         fs::create_dir_all(unit.parent().expect("systemd unit has parent"))?;
-        fs::write(&unit, systemd_unit(root))?;
+        fs::write(&unit, systemd_unit(root, gateway_config))?;
         set_mode(&unit, 0o644)?;
 
         let files = files
@@ -216,10 +255,11 @@ fn install(root: &Path, files: &[(&Path, &str, bool)]) -> Result<()> {
     Ok(())
 }
 
-fn systemd_unit(root: &Path) -> String {
+fn systemd_unit(root: &Path, gateway_config: Option<&Path>) -> String {
     let connector = quote_systemd_arg(&root.join("bin/agentgateway-edge-connector"));
     let agentgateway = quote_systemd_arg(&root.join("bin/agentgateway"));
-    let config = quote_systemd_arg(&root.join("share/examples/agentgateway.yaml"));
+    let config =
+        quote_systemd_arg(gateway_config.unwrap_or(&root.join("share/examples/agentgateway.yaml")));
     format!(
         "[Unit]\nDescription=Agent Gateway Edge Connector\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={connector} --mode standalone --upstream http://127.0.0.1:4000 --gateway-binary {agentgateway} --gateway-config {config}\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=read-only\n\n[Install]\nWantedBy=default.target\n"
     )
