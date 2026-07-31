@@ -12,7 +12,7 @@ This file records verified implementation status and external blockers. A phase 
 - Phase 3, blocked implementation: application routing recognizes mutually exclusive native, connector, and captured choices; captured mode fails before application launch because no transparent redirector is installed. HBONE and privileged OS capture remain blocked as documented below.
 - Phase 4, partial: transactional standalone bundle install/upgrade/uninstall, generated hardened Linux user-systemd unit, and a privacy-safe local status API. Automatic service activation, application-profile UI, trust workflow, binary download/update, and graphical UI remain pending.
 - Phase 5, partial: runtime platform capability reporting and a published compatibility matrix. Linux native forwarding is validated; transparent capture, trust integration, installers, and macOS/Windows builds remain unavailable.
-- Phase 6, partial: explicit connection, response-header, and shutdown timeouts; bounded full-stream concurrency; no request retries; deterministic timeout, overload, disconnect, malformed-request isolation, forced-shutdown, and repeated lifecycle tests.
+- Phase 6, partial: explicit connection, upload/response-header, and shutdown timeouts; bounded full-stream concurrency; no request retries; deterministic slow-client, timeout, overload, disconnect, malformed-request isolation, forced-shutdown, and repeated lifecycle tests.
 - Phase 7, partial: JSON structured lifecycle and failure logs with fixed privacy-safe event categories; validated W3C trace-context propagation and generation; bounded low-cardinality operational counters. OTel spans, metric export, and OTLP export remain pending.
 - Phase 8, partial: hardened non-root container build and SHA-256 bundle integrity manifests with verification and tamper-safe upgrade/uninstall. Publisher signatures, staged fleet rollout, minimum-version policy, and privileged IPC remain pending.
 
@@ -26,7 +26,7 @@ This file records verified implementation status and external blockers. A phase 
 
 ## Work that can continue locally
 
-- Slow-client and measured latency/memory reliability coverage.
+- Measured latency and memory reliability baselines.
 - OpenTelemetry spans, metrics, bounded export, and backend correlation tests after selecting the supported Rust OTel versions and backend profile.
 - Agent Gateway DPoP work when its source checkout and contribution boundary are available.
 - Linux capture design and preflight checks once the cgroup/eBPF mechanism is selected; do not expose a captured application path before redirection and fail-closed denial work end to end.

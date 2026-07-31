@@ -619,6 +619,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn times_out_stalled_streaming_request_body() {
+        let fake_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fake_address = fake_listener.local_addr().unwrap();
+        let fake_app = Router::new().fallback(any(|request: Request<Body>| async move {
+            let mut body = request.into_body().into_data_stream();
+            let _ = body.next().await;
+            std::future::pending::<StatusCode>().await
+        }));
+        tokio::spawn(async move {
+            axum::serve(fake_listener, fake_app).await.unwrap();
+        });
+        let options = ProxyOptions {
+            request_timeout: Duration::from_millis(20),
+            ..ProxyOptions::default()
+        };
+        let (proxy_address, shutdown) = start_proxy_with_options(
+            Url::parse(&format!("http://{fake_address}")).unwrap(),
+            options,
+        )
+        .await;
+        let (body_tx, body_rx) = mpsc::channel::<Result<Bytes, Infallible>>(1);
+        body_tx
+            .send(Ok(Bytes::from_static(b"partial")))
+            .await
+            .unwrap();
+
+        let response = Client::new()
+            .post(format!("http://{proxy_address}/slow-upload"))
+            .body(reqwest::Body::wrap_stream(ReceiverStream::new(body_rx)))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            response.headers()["x-agentgateway-edge-error"],
+            "upstream-timeout"
+        );
+        drop(body_tx);
+        shutdown.send(()).unwrap();
+    }
+
+    #[tokio::test]
     async fn forces_shutdown_after_drain_timeout() {
         let fake_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let fake_address = fake_listener.local_addr().unwrap();
