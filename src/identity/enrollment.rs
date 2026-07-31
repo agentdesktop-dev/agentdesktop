@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use super::oauth::ManagedIdentity;
+use super::storage::CredentialStore;
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -171,6 +172,44 @@ fn validate_record(
     Ok(record)
 }
 
+pub fn save_enrollment_for(
+    issuer: &Url,
+    gateway_origin: &Url,
+    store: &CredentialStore,
+    record: &EnrollmentRecord,
+) -> Result<()> {
+    store.put(
+        &enrollment_record_name(issuer, gateway_origin),
+        &serde_json::to_vec(record)?,
+    )
+}
+
+pub fn load_enrollment_for(
+    issuer: &Url,
+    gateway_origin: &Url,
+    dpop_jkt: &str,
+    store: &CredentialStore,
+) -> Result<EnrollmentRecord> {
+    let record: EnrollmentRecord =
+        serde_json::from_slice(&store.get(&enrollment_record_name(issuer, gateway_origin))?)?;
+    if record.user.iss != *issuer || record.dpop_jkt != dpop_jkt {
+        bail!("persisted enrollment does not match the current identity session");
+    }
+    Ok(record)
+}
+
+pub fn delete_enrollment_for(
+    issuer: &Url,
+    gateway_origin: &Url,
+    store: &CredentialStore,
+) -> Result<()> {
+    store.delete_if_exists(&enrollment_record_name(issuer, gateway_origin))
+}
+
+fn enrollment_record_name(issuer: &Url, gateway_origin: &Url) -> String {
+    format!("enrollment|{issuer}|{gateway_origin}")
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -188,7 +227,7 @@ mod tests {
 
     use super::{
         DeviceStatus, EnrollmentClient, EnrollmentRecord, EnrollmentStatus, EnrollmentUser,
-        validate_record,
+        delete_enrollment_for, load_enrollment_for, save_enrollment_for, validate_record,
     };
     use crate::identity::dpop::{DpopKey, decode_jwt_claims};
     use crate::identity::oauth::{ManagedIdentity, StoredSession};
@@ -305,6 +344,41 @@ mod tests {
         let error = validate_record(record, None, &issuer, "expected-thumbprint").unwrap_err();
 
         assert!(error.to_string().contains("mismatched identity binding"));
+    }
+
+    #[test]
+    fn persists_only_for_the_current_identity_key() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = CredentialStore::setup(
+            CredentialStorageMode::File,
+            &temporary.path().join("identity"),
+        )
+        .unwrap();
+        let issuer = Url::parse("https://issuer.example/").unwrap();
+        let gateway = Url::parse("https://gateway.example/").unwrap();
+        let record = EnrollmentRecord {
+            enrollment_id: "enrollment-1".into(),
+            status: EnrollmentStatus::Pending,
+            user: EnrollmentUser {
+                iss: issuer.clone(),
+                sub: "user-1".into(),
+            },
+            dpop_jkt: "thumbprint".into(),
+            device_id: None,
+            device_status: None,
+        };
+
+        save_enrollment_for(&issuer, &gateway, &store, &record).unwrap();
+        assert_eq!(
+            load_enrollment_for(&issuer, &gateway, "thumbprint", &store).unwrap(),
+            record
+        );
+        let stale = load_enrollment_for(&issuer, &gateway, "rotated-key", &store).unwrap_err();
+        assert!(stale.to_string().contains("current identity session"));
+
+        delete_enrollment_for(&issuer, &gateway, &store).unwrap();
+        delete_enrollment_for(&issuer, &gateway, &store).unwrap();
+        assert!(load_enrollment_for(&issuer, &gateway, "thumbprint", &store).is_err());
     }
 
     async fn metadata(State(state): State<Arc<AuthorityState>>) -> Json<Value> {

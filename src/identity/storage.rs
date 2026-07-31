@@ -99,6 +99,16 @@ impl CredentialStore {
         Ok(())
     }
 
+    pub fn delete_if_exists(&self, record: &str) -> Result<()> {
+        match self {
+            Self::SecretService => match secret_service_entry(record)?.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                Err(error) => Err(error.into()),
+            },
+            Self::File(store) => store.delete_if_exists(record),
+        }
+    }
+
     pub const fn backend_name(&self) -> &'static str {
         match self {
             Self::SecretService => "secret-service",
@@ -140,6 +150,15 @@ impl ProtectedFileStore {
         validate_secure_file(&path)?;
         fs::remove_file(path)?;
         Ok(())
+    }
+
+    fn delete_if_exists(&self, record: &str) -> Result<()> {
+        let path = self.root.join(record_name(record));
+        match fs::symlink_metadata(&path) {
+            Ok(_) => self.delete(record),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 }
 

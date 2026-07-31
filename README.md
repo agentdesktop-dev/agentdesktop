@@ -63,7 +63,7 @@ cargo run --bin agentgateway-edge-identity -- logout \
   --gateway-origin https://gateway.example
 ```
 
-This removes local credentials but does not invoke an issuer revocation endpoint.
+This removes the local session and any locally persisted enrollment record. It does not invoke an issuer token-revocation endpoint or revoke an authority-side device approval.
 
 Request authority approval for the current session's DPoP key when the issuer advertises the draft enrollment endpoint:
 
@@ -78,11 +78,10 @@ The command prints a non-secret pending record containing the authority-generate
 ```bash
 cargo run --bin agentgateway-edge-identity -- enroll-status \
   --issuer https://identity.example/ \
-  --gateway-origin https://gateway.example \
-  --enrollment-id authority-generated-id
+  --gateway-origin https://gateway.example
 ```
 
-Both operations load the existing issuer/gateway-scoped session, refresh it when needed, and send fresh access-token-bound DPoP proofs. Responses are rejected unless their issuer and DPoP thumbprint match the current session. The enrollment record is not yet persisted automatically, and Agent Gateway does not yet enforce its device status.
+Both operations load the existing issuer/gateway-scoped session, refresh it when needed, and send fresh access-token-bound DPoP proofs. Responses are rejected unless their issuer and DPoP thumbprint match the current session. Request and status responses replace the protected issuer/gateway-scoped enrollment record; status uses its enrollment ID by default and accepts `--enrollment-id` for explicit recovery. A stale record from a rotated key is rejected. Agent Gateway does not yet enforce device status.
 
 ## Run
 
