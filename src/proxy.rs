@@ -888,6 +888,58 @@ mod tests {
             .unwrap();
     }
 
+    #[tokio::test]
+    async fn never_retries_non_idempotent_requests_after_upstream_disconnect() {
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_address = upstream.local_addr().unwrap();
+        let observer = tokio::spawn(async move {
+            let (stream, _) = upstream.accept().await.unwrap();
+            drop(stream);
+            tokio::time::timeout(Duration::from_millis(100), upstream.accept())
+                .await
+                .is_err()
+        });
+        let (proxy_address, shutdown) =
+            start_proxy(Url::parse(&format!("http://{upstream_address}")).unwrap()).await;
+
+        let response = Client::new()
+            .post(format!("http://{proxy_address}/v1/messages"))
+            .body("must not be replayed")
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert!(
+            observer.await.unwrap(),
+            "connector retried the POST request"
+        );
+        shutdown.send(()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn supports_repeated_startup_and_shutdown() {
+        for _ in 0..10 {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let (shutdown_tx, shutdown_rx) = oneshot::channel();
+            let server = tokio::spawn(serve(
+                listener,
+                Url::parse("http://127.0.0.1:1").unwrap(),
+                DeploymentMode::Standalone,
+                async {
+                    let _ = shutdown_rx.await;
+                },
+            ));
+
+            shutdown_tx.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(1), server)
+                .await
+                .expect("server did not shut down")
+                .unwrap()
+                .unwrap();
+        }
+    }
+
     #[test]
     fn removes_standard_and_connection_nominated_hop_headers() {
         let mut headers = HeaderMap::from_iter([
