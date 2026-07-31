@@ -185,6 +185,23 @@ cargo run --bin agentgateway-edge-install -- verify \
 
 The manifest records SHA-256 hashes. Verification, upgrade, and uninstall reject missing, modified, non-regular, symlinked, or path-traversing entries.
 
+On Linux with user systemd, explicitly link and enable the generated hardened unit:
+
+```bash
+systemctl --user link \
+  "$HOME/.local/lib/agentgateway-edge/share/systemd/user/agentgateway-edge.service"
+systemctl --user daemon-reload
+systemctl --user enable --now agentgateway-edge.service
+```
+
+The unit starts the connector and its separately packaged Agent Gateway process in standalone mode. Before uninstalling, stop and unlink it:
+
+```bash
+systemctl --user disable --now agentgateway-edge.service
+systemctl --user revert agentgateway-edge.service
+systemctl --user daemon-reload
+```
+
 Remove only a manifest-owned bundle:
 
 ```bash
@@ -192,7 +209,7 @@ cargo run --bin agentgateway-edge-install -- uninstall \
   --root "$HOME/.local/lib/agentgateway-edge"
 ```
 
-The installer refuses to remove directories without its manifest or bundles whose owned files were modified. It does not yet install a system/user service, alter CA trust, create application profiles, cryptographically verify a publisher signature, or download/update either binary.
+The installer refuses to remove directories without its manifest or bundles whose owned files were modified. It generates but does not automatically activate the Linux user service. It does not alter CA trust, create application profiles, cryptographically verify a publisher signature, or download/update either binary.
 
 ## Test
 

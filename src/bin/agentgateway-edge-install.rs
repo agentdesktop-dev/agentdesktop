@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const MANIFEST: &str = "agentgateway-edge-install.json";
+const SYSTEMD_UNIT: &str = "share/systemd/user/agentgateway-edge.service";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -86,6 +87,9 @@ fn main() -> Result<()> {
 }
 
 fn install(root: &Path, files: &[(&Path, &str, bool)]) -> Result<()> {
+    if !root.is_absolute() {
+        bail!("install root must be absolute");
+    }
     for (source, _, _) in files {
         if !source.is_file() {
             bail!("install source {} is not a regular file", source.display());
@@ -112,12 +116,19 @@ fn install(root: &Path, files: &[(&Path, &str, bool)]) -> Result<()> {
             })?;
             set_mode(&destination, if *executable { 0o755 } else { 0o600 })?;
         }
+        let unit = staging.join(SYSTEMD_UNIT);
+        fs::create_dir_all(unit.parent().expect("systemd unit has parent"))?;
+        fs::write(&unit, systemd_unit(root))?;
+        set_mode(&unit, 0o644)?;
+
         let files = files
             .iter()
-            .map(|(_, relative, _)| {
+            .map(|(_, relative, _)| *relative)
+            .chain(std::iter::once(SYSTEMD_UNIT))
+            .map(|relative| {
                 let destination = staging.join(relative);
                 Ok(InstalledFile {
-                    path: (*relative).to_owned(),
+                    path: relative.to_owned(),
                     sha256: file_sha256(&destination)?,
                 })
             })
@@ -153,6 +164,23 @@ fn install(root: &Path, files: &[(&Path, &str, bool)]) -> Result<()> {
     }
     println!("installed standalone bundle at {}", root.display());
     Ok(())
+}
+
+fn systemd_unit(root: &Path) -> String {
+    let connector = quote_systemd_arg(&root.join("bin/agentgateway-edge-connector"));
+    let agentgateway = quote_systemd_arg(&root.join("bin/agentgateway"));
+    let config = quote_systemd_arg(&root.join("share/examples/agentgateway.yaml"));
+    format!(
+        "[Unit]\nDescription=Agent Gateway Edge Connector\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={connector} --mode standalone --upstream http://127.0.0.1:4000 --gateway-binary {agentgateway} --gateway-config {config}\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=read-only\n\n[Install]\nWantedBy=default.target\n"
+    )
+}
+
+fn quote_systemd_arg(path: &Path) -> String {
+    let escaped = path
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 fn uninstall(root: &Path) -> Result<()> {

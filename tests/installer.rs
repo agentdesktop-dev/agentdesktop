@@ -40,6 +40,12 @@ fn installs_upgrades_and_uninstalls_standalone_bundle() {
         fs::read_to_string(root.join("share/examples/agentgateway.yaml")).unwrap(),
         "first-config"
     );
+    let service =
+        fs::read_to_string(root.join("share/systemd/user/agentgateway-edge.service")).unwrap();
+    assert!(service.contains("--mode standalone"));
+    assert!(service.contains("--gateway-binary"));
+    assert!(service.contains("NoNewPrivileges=true"));
+    assert!(service.contains(root.to_str().unwrap()));
 
     fs::write(fixtures.join("connector"), "second-connector").unwrap();
     assert!(install().status.success());

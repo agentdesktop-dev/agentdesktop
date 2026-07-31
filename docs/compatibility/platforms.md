@@ -13,7 +13,8 @@ Last updated: 2026-07-30
 | Protected-file credential fallback | Supported | Unavailable | Unavailable |
 | Transparent process capture | Unavailable | Unavailable | Unavailable |
 | CA trust installation/removal | Unavailable | Unavailable | Unavailable |
-| Installer/service integration | Unavailable | Unavailable | Unavailable |
+| Transactional bundle installer | Supported | Build not validated | Build not validated |
+| User service integration | Generated systemd unit | Unavailable | Unavailable |
 
 The local `/_agentgateway/status` response exposes the current binary's capability flags. Application launch and native HTTP forwarding are unprivileged. Transparent capture and trust installation remain false until their platform implementations satisfy process identity, fail-closed routing, scoped removal, and privileged integration tests.
 
