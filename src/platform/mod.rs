@@ -1,5 +1,8 @@
 use serde::Serialize;
 
+#[cfg(target_os = "linux")]
+pub mod linux;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct PlatformCapabilities {
     pub os: &'static str,

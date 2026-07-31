@@ -8,6 +8,7 @@ For a local installation, including credential ownership, file permissions, logs
 
 Verified progress and environment-dependent blockers are tracked in [Phase Status](docs/development/phase-status.md).
 Tested platform behavior is listed in [Platform Compatibility](docs/compatibility/platforms.md).
+The isolated Linux cgroup v2/nftables prototype is documented in [Linux Capture Prototype](docs/deployment/linux-capture.md).
 
 The managed user/device trust boundary is documented in [Managed Identity Contract v1](docs/architecture/managed-identity-v1.md). Browser PKCE login and connector-instance DPoP proof are implemented; the rest remains a design contract.
 
