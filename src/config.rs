@@ -45,6 +45,34 @@ pub struct Config {
     /// Directory containing the persisted managed identity backend selection.
     #[arg(long, env = "AGENTGATEWAY_EDGE_IDENTITY_DIR")]
     pub identity_dir: Option<PathBuf>,
+
+    /// Maximum time to establish an upstream connection.
+    #[arg(
+        long,
+        env = "AGENTGATEWAY_EDGE_CONNECT_TIMEOUT_MS",
+        default_value_t = 5_000
+    )]
+    pub connect_timeout_ms: u64,
+
+    /// Maximum time to receive upstream response headers.
+    #[arg(
+        long,
+        env = "AGENTGATEWAY_EDGE_REQUEST_TIMEOUT_MS",
+        default_value_t = 30_000
+    )]
+    pub request_timeout_ms: u64,
+
+    /// Maximum time to drain requests after shutdown begins.
+    #[arg(
+        long,
+        env = "AGENTGATEWAY_EDGE_SHUTDOWN_TIMEOUT_MS",
+        default_value_t = 10_000
+    )]
+    pub shutdown_timeout_ms: u64,
+
+    /// Maximum number of requests forwarding or streaming concurrently.
+    #[arg(long, env = "AGENTGATEWAY_EDGE_MAX_IN_FLIGHT", default_value_t = 128)]
+    pub max_in_flight: usize,
 }
 
 impl Config {
@@ -84,6 +112,13 @@ impl Config {
         }
         if self.identity_dir.is_some() && self.identity_issuer.is_none() {
             bail!("identity directory requires an identity issuer");
+        }
+        if self.connect_timeout_ms == 0
+            || self.request_timeout_ms == 0
+            || self.shutdown_timeout_ms == 0
+            || self.max_in_flight == 0
+        {
+            bail!("timeouts and max in-flight requests must be greater than zero");
         }
 
         match (&self.gateway_binary, &self.gateway_config) {
@@ -304,5 +339,27 @@ mod tests {
             config.identity_issuer.unwrap().as_str(),
             "https://identity.example/"
         );
+    }
+
+    #[test]
+    fn rejects_zero_resource_limits() {
+        for argument in [
+            "--connect-timeout-ms",
+            "--request-timeout-ms",
+            "--shutdown-timeout-ms",
+            "--max-in-flight",
+        ] {
+            let error = parse(&[
+                "connector",
+                "--mode",
+                "standalone",
+                "--upstream",
+                "http://127.0.0.1:4000",
+                argument,
+                "0",
+            ])
+            .unwrap_err();
+            assert!(error.to_string().contains("greater than zero"));
+        }
     }
 }

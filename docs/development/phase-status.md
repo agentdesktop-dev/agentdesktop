@@ -9,6 +9,7 @@ This file records verified implementation status and external blockers. A phase 
 - Phase 0: streaming Claude-compatible HTTP forwarding, HTTP fidelity, fail-closed upstream errors, cancellation, and graceful shutdown.
 - Phase 1: explicit standalone mode, separate local Agent Gateway lifecycle, health reporting, native and connector-assisted Claude paths, policy smoke tests, and standalone operations guidance.
 - Phase 2, partial: browser Authorization Code with PKCE, DPoP-bound access tokens, signed-token validation, protected credential storage, refresh rotation, restart restoration, and per-request managed DPoP headers.
+- Phase 6, partial: explicit connection, response-header, and shutdown timeouts; bounded full-stream concurrency; deterministic timeout, overload, and forced-shutdown tests.
 
 ## Active blockers
 
@@ -20,7 +21,7 @@ This file records verified implementation status and external blockers. A phase 
 
 ## Work that can continue locally
 
-- Forwarder timeouts, bounded concurrency, overload behavior, and long-lived stream tests.
+- Slow-client, malformed-request, repeated-startup, and measured latency/memory reliability coverage.
 - Sensitive-data-safe local operational signals before selecting an OpenTelemetry backend/export profile.
 - Agent Gateway DPoP work when its source checkout and contribution boundary are available.
 - Linux capture design and preflight checks once the cgroup/eBPF mechanism is selected; do not expose a captured application path before redirection and fail-closed denial work end to end.

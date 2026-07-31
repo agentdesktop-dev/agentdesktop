@@ -10,6 +10,7 @@ axum = "0.8"
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive", "env"] }
 getrandom = "0.4"
+futures-util = "0.3"
 keyring = { version = "4.1.5", default-features = false, features = ["v1", "zbus-secret-service-keyring-store"] }
 oauth2 = { version = "5.0.0", default-features = false }
 open = "5.4.0"
@@ -23,7 +24,6 @@ tokio = { version = "1.53", features = ["macros", "net", "process", "rt-multi-th
 url = "2.5"
 
 [dev-dependencies]
-futures-util = "0.3"
 http-body-util = "0.1"
 tempfile = "3"
 tokio-stream = "0.1"

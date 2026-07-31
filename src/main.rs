@@ -2,7 +2,7 @@ use agentgateway_edge_connector::config::{Config, upstream_origin};
 use agentgateway_edge_connector::identity::oauth::{ManagedIdentity, load_session_for};
 use agentgateway_edge_connector::identity::storage::{CredentialStore, default_storage_root};
 use agentgateway_edge_connector::local_gateway::LocalGateway;
-use agentgateway_edge_connector::proxy;
+use agentgateway_edge_connector::proxy::{self, ProxyOptions};
 use anyhow::bail;
 use tokio::net::TcpListener;
 
@@ -47,6 +47,12 @@ async fn main() -> anyhow::Result<()> {
         config.upstream,
         config.mode,
         identity,
+        ProxyOptions {
+            connect_timeout: std::time::Duration::from_millis(config.connect_timeout_ms),
+            request_timeout: std::time::Duration::from_millis(config.request_timeout_ms),
+            shutdown_timeout: std::time::Duration::from_millis(config.shutdown_timeout_ms),
+            max_in_flight: config.max_in_flight,
+        },
         shutdown_signal(),
     );
     if let Some(gateway) = &mut local_gateway {

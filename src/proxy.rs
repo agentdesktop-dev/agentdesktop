@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::fmt;
-use std::future::Future;
+use std::future::{Future, IntoFuture};
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use axum::body::Body;
@@ -9,15 +11,38 @@ use axum::http::header::{CONNECTION, CONTENT_TYPE, HOST};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use axum::routing::{any, get};
 use axum::{Json, Router};
+use futures_util::StreamExt;
 use reqwest::{Client, Url};
 use serde::Serialize;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{Semaphore, watch};
 
 use crate::config::DeploymentMode;
 use crate::identity::oauth::ManagedIdentity;
 
 const GATEWAY_ERROR: &str = "agent gateway unavailable\n";
 const IDENTITY_ERROR: &str = "managed identity unavailable\n";
+const OVERLOAD_ERROR: &str = "connector overloaded\n";
+const TIMEOUT_ERROR: &str = "agent gateway timed out\n";
+
+#[derive(Clone, Copy, Debug)]
+pub struct ProxyOptions {
+    pub connect_timeout: Duration,
+    pub request_timeout: Duration,
+    pub shutdown_timeout: Duration,
+    pub max_in_flight: usize,
+}
+
+impl Default for ProxyOptions {
+    fn default() -> Self {
+        Self {
+            connect_timeout: Duration::from_secs(5),
+            request_timeout: Duration::from_secs(30),
+            shutdown_timeout: Duration::from_secs(10),
+            max_in_flight: 128,
+        }
+    }
+}
 
 #[derive(Clone)]
 struct ProxyState {
@@ -25,10 +50,18 @@ struct ProxyState {
     upstream: Url,
     mode: DeploymentMode,
     identity: Option<ManagedIdentity>,
+    request_timeout: Duration,
+    in_flight: Arc<Semaphore>,
 }
 
 #[derive(Debug)]
 struct IdentityError(anyhow::Error);
+
+#[derive(Debug)]
+struct OverloadError;
+
+#[derive(Debug)]
+struct UpstreamTimeout;
 
 impl fmt::Display for IdentityError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -37,6 +70,22 @@ impl fmt::Display for IdentityError {
 }
 
 impl std::error::Error for IdentityError {}
+
+impl fmt::Display for OverloadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("maximum in-flight request limit reached")
+    }
+}
+
+impl std::error::Error for OverloadError {}
+
+impl fmt::Display for UpstreamTimeout {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("upstream response header timeout")
+    }
+}
+
+impl std::error::Error for UpstreamTimeout {}
 
 #[derive(Serialize)]
 struct HealthResponse {
@@ -51,7 +100,15 @@ pub async fn serve(
     mode: DeploymentMode,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
-    serve_with_identity(listener, upstream, mode, None, shutdown).await
+    serve_with_identity(
+        listener,
+        upstream,
+        mode,
+        None,
+        ProxyOptions::default(),
+        shutdown,
+    )
+    .await
 }
 
 pub async fn serve_with_identity(
@@ -59,22 +116,45 @@ pub async fn serve_with_identity(
     upstream: Url,
     mode: DeploymentMode,
     identity: Option<ManagedIdentity>,
+    options: ProxyOptions,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
+    let client = Client::builder()
+        .connect_timeout(options.connect_timeout)
+        .build()?;
     let state = ProxyState {
-        client: Client::new(),
+        client,
         upstream,
         mode,
         identity,
+        request_timeout: options.request_timeout,
+        in_flight: Arc::new(Semaphore::new(options.max_in_flight)),
     };
     let app = Router::new()
         .route("/_agentgateway/healthz", get(health))
         .fallback(any(forward))
         .with_state(state);
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await?;
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    tokio::spawn(async move {
+        shutdown.await;
+        let _ = shutdown_tx.send(true);
+    });
+    let mut server_shutdown = shutdown_rx.clone();
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = server_shutdown.wait_for(|shutdown| *shutdown).await;
+        })
+        .into_future();
+    tokio::pin!(server);
+    let mut timeout_shutdown = shutdown_rx;
+    tokio::select! {
+        result = &mut server => result?,
+        _ = async {
+            let _ = timeout_shutdown.wait_for(|shutdown| *shutdown).await;
+            tokio::time::sleep(options.shutdown_timeout).await;
+        } => anyhow::bail!("graceful shutdown exceeded configured timeout"),
+    }
     Ok(())
 }
 
@@ -122,6 +202,22 @@ async fn forward(State(state): State<ProxyState>, request: Request<Body>) -> Res
                     .body(Body::from(IDENTITY_ERROR))
                     .expect("static error response must be valid");
             }
+            if error.downcast_ref::<OverloadError>().is_some() {
+                return Response::builder()
+                    .status(StatusCode::SERVICE_UNAVAILABLE)
+                    .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+                    .header("x-agentgateway-edge-error", "overloaded")
+                    .body(Body::from(OVERLOAD_ERROR))
+                    .expect("static error response must be valid");
+            }
+            if error.downcast_ref::<UpstreamTimeout>().is_some() {
+                return Response::builder()
+                    .status(StatusCode::GATEWAY_TIMEOUT)
+                    .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+                    .header("x-agentgateway-edge-error", "upstream-timeout")
+                    .body(Body::from(TIMEOUT_ERROR))
+                    .expect("static error response must be valid");
+            }
             Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
                 .header(CONTENT_TYPE, "text/plain; charset=utf-8")
@@ -133,6 +229,11 @@ async fn forward(State(state): State<ProxyState>, request: Request<Body>) -> Res
 }
 
 async fn forward_request(state: &ProxyState, request: Request<Body>) -> Result<Response<Body>> {
+    let permit = state
+        .in_flight
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| anyhow::Error::new(OverloadError))?;
     let (parts, body) = request.into_parts();
     let url = upstream_url(&state.upstream, &parts.uri)?;
     let mut headers = parts.headers;
@@ -158,18 +259,23 @@ async fn forward_request(state: &ProxyState, request: Request<Body>) -> Result<R
         );
     }
 
-    let upstream_response = state
+    let send = state
         .client
         .request(parts.method, url)
         .headers(headers)
         .body(reqwest::Body::wrap_stream(body.into_data_stream()))
-        .send()
-        .await?;
+        .send();
+    let upstream_response = tokio::time::timeout(state.request_timeout, send)
+        .await
+        .map_err(|_| anyhow::Error::new(UpstreamTimeout))??;
 
     let status = upstream_response.status();
     let mut headers = upstream_response.headers().clone();
     remove_hop_by_hop_headers(&mut headers);
-    let body = Body::from_stream(upstream_response.bytes_stream());
+    let body = Body::from_stream(upstream_response.bytes_stream().map(move |chunk| {
+        let _permit = &permit;
+        chunk
+    }));
 
     let mut response = Response::new(body);
     *response.status_mut() = status;
@@ -247,17 +353,169 @@ mod tests {
     }
 
     async fn start_proxy(upstream: Url) -> (std::net::SocketAddr, oneshot::Sender<()>) {
+        start_proxy_with_options(upstream, ProxyOptions::default()).await
+    }
+
+    async fn start_proxy_with_options(
+        upstream: Url,
+        options: ProxyOptions,
+    ) -> (std::net::SocketAddr, oneshot::Sender<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         tokio::spawn(async move {
-            serve(listener, upstream, DeploymentMode::Standalone, async {
-                let _ = shutdown_rx.await;
-            })
+            serve_with_identity(
+                listener,
+                upstream,
+                DeploymentMode::Standalone,
+                None,
+                options,
+                async {
+                    let _ = shutdown_rx.await;
+                },
+            )
             .await
             .unwrap();
         });
         (address, shutdown_tx)
+    }
+
+    #[tokio::test]
+    async fn rejects_overload_while_response_is_streaming() {
+        let (release_tx, release_rx) = oneshot::channel();
+        let release_rx = Arc::new(Mutex::new(Some(release_rx)));
+        let fake_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fake_address = fake_listener.local_addr().unwrap();
+        let fake_app = Router::new()
+            .fallback(any(
+                move |State(release_rx): State<Arc<Mutex<Option<oneshot::Receiver<()>>>>>| async move {
+                    let (body_tx, body_rx) = mpsc::channel::<Result<Bytes, Infallible>>(1);
+                    let release_rx = release_rx.lock().await.take();
+                    tokio::spawn(async move {
+                        body_tx.send(Ok(Bytes::from_static(b"started"))).await.unwrap();
+                        if let Some(release_rx) = release_rx {
+                            let _ = release_rx.await;
+                        }
+                    });
+                    Body::from_stream(ReceiverStream::new(body_rx))
+                },
+            ))
+            .with_state(release_rx);
+        tokio::spawn(async move {
+            axum::serve(fake_listener, fake_app).await.unwrap();
+        });
+        let options = ProxyOptions {
+            max_in_flight: 1,
+            ..ProxyOptions::default()
+        };
+        let (proxy_address, shutdown) = start_proxy_with_options(
+            Url::parse(&format!("http://{fake_address}")).unwrap(),
+            options,
+        )
+        .await;
+        let client = Client::new();
+        let first = client
+            .get(format!("http://{proxy_address}/first"))
+            .send()
+            .await
+            .unwrap();
+
+        let second = client
+            .get(format!("http://{proxy_address}/second"))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(second.headers()["x-agentgateway-edge-error"], "overloaded");
+        release_tx.send(()).unwrap();
+        drop(first);
+        shutdown.send(()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn times_out_waiting_for_upstream_headers() {
+        let fake_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fake_address = fake_listener.local_addr().unwrap();
+        let fake_app =
+            Router::new().fallback(any(|| async { std::future::pending::<StatusCode>().await }));
+        tokio::spawn(async move {
+            axum::serve(fake_listener, fake_app).await.unwrap();
+        });
+        let options = ProxyOptions {
+            request_timeout: Duration::from_millis(20),
+            ..ProxyOptions::default()
+        };
+        let (proxy_address, shutdown) = start_proxy_with_options(
+            Url::parse(&format!("http://{fake_address}")).unwrap(),
+            options,
+        )
+        .await;
+
+        let response = Client::new()
+            .get(format!("http://{proxy_address}/slow"))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            response.headers()["x-agentgateway-edge-error"],
+            "upstream-timeout"
+        );
+        shutdown.send(()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn forces_shutdown_after_drain_timeout() {
+        let fake_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fake_address = fake_listener.local_addr().unwrap();
+        let fake_app = Router::new().fallback(any(|| async {
+            let stream = futures_util::stream::once(async {
+                Ok::<_, Infallible>(Bytes::from_static(b"started"))
+            })
+            .chain(futures_util::stream::pending());
+            Body::from_stream(stream)
+        }));
+        tokio::spawn(async move {
+            axum::serve(fake_listener, fake_app).await.unwrap();
+        });
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_address = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let options = ProxyOptions {
+            shutdown_timeout: Duration::from_millis(20),
+            ..ProxyOptions::default()
+        };
+        let server = tokio::spawn(async move {
+            serve_with_identity(
+                listener,
+                Url::parse(&format!("http://{fake_address}")).unwrap(),
+                DeploymentMode::Standalone,
+                None,
+                options,
+                async {
+                    let _ = shutdown_rx.await;
+                },
+            )
+            .await
+        });
+        let response = Client::new()
+            .get(format!("http://{proxy_address}/stream"))
+            .send()
+            .await
+            .unwrap();
+        shutdown_tx.send(()).unwrap();
+
+        let error = tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .expect("server ignored shutdown deadline")
+            .unwrap()
+            .unwrap_err();
+
+        assert!(error.to_string().contains("graceful shutdown exceeded"));
+        drop(response);
     }
 
     #[tokio::test]
@@ -307,6 +565,7 @@ mod tests {
                 Url::parse(&format!("http://{fake_address}")).unwrap(),
                 DeploymentMode::Managed,
                 Some(identity),
+                ProxyOptions::default(),
                 async {
                     let _ = shutdown_rx.await;
                 },
@@ -360,6 +619,8 @@ mod tests {
                 },
                 store,
             )),
+            request_timeout: Duration::from_secs(1),
+            in_flight: Arc::new(Semaphore::new(1)),
         };
         let request = Request::builder()
             .uri("/v1/messages")

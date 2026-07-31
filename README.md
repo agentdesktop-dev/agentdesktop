@@ -83,6 +83,8 @@ cargo run
 
 The deployment mode is required. `standalone` accepts only a local Agent Gateway at `localhost` or a loopback IP; `managed` permits a remote upstream. The listen address must always be loopback. The upstream URL must use HTTP or HTTPS and may contain a path prefix, but not a query string or fragment.
 
+Forwarding defaults to a 5-second connection timeout, 30-second response-header timeout, 10-second graceful-shutdown deadline, and 128 in-flight requests. Override them with `--connect-timeout-ms`, `--request-timeout-ms`, `--shutdown-timeout-ms`, and `--max-in-flight`. Concurrency permits remain held until streamed response bodies finish or are dropped. Overload returns `503` with `x-agentgateway-edge-error: overloaded`; an upstream response-header timeout returns `504` with `x-agentgateway-edge-error: upstream-timeout`.
+
 ## Configure Claude Code
 
 Launch Claude Code directly against the default standalone Agent Gateway listener:
