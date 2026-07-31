@@ -10,7 +10,7 @@ This harness builds a Fedora Workstation base image and runs each manual or auto
 - KVM for interactive use and normal CI performance; QEMU TCG is selected when KVM is unavailable
 - `ssh` and `setsid` for guest control
 
-The checked-in Packer definition downloads and verifies the Fedora 44 Everything netinstaller, then performs an unattended Workstation installation. The resulting image is stored under the ignored `tests/vm/.artifacts` directory.
+The checked-in Packer definition downloads and verifies the Fedora 44 Everything netinstaller, performs an unattended Workstation installation, and installs the repository-pinned Claude Code version used by the walkthroughs. The resulting image is stored under the ignored `tests/vm/.artifacts` directory. Claude Code is a base-image test prerequisite; connector and Agent Gateway builds remain scenario artifacts and are never baked into the base.
 
 The first build downloads a roughly 1.2 GB installer plus the Workstation package set and can take tens of minutes. Packer caches the verified installer in its user cache, and ordinary clean-slate runs reuse the completed base image rather than reinstalling Fedora. CI should publish or cache the base qcow2 as a separate build artifact.
 

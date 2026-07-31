@@ -17,6 +17,11 @@ variable "cpus" {
   default = 4
 }
 
+variable "claude_code_version" {
+  type    = string
+  default = "2.1.212"
+}
+
 variable "disk_size" {
   type    = string
   default = "50G"
@@ -67,4 +72,13 @@ source "qemu" "fedora_workstation" {
 
 build {
   sources = ["source.qemu.fedora_workstation"]
+
+  provisioner "shell" {
+    inline = [
+      "sudo dnf install -y nodejs npm",
+      "sudo npm install --global --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code@${var.claude_code_version}",
+      "claude --version | grep -F '${var.claude_code_version}'",
+      "sudo npm cache clean --force",
+    ]
+  }
 }

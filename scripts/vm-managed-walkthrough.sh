@@ -162,6 +162,10 @@ prepare_vm() {
     printf 'VM is not running; use prepare --reset\n' >&2
     exit 1
   }
+  "$vm" ssh "command -v claude >/dev/null" || {
+    printf 'VM base does not contain Claude Code; rebuild it with tests/vm/vm.sh build\n' >&2
+    exit 1
+  }
   "$vm" ssh "test ! -e '$install_root' && test ! -e /home/agentedge/.config/agentgateway-edge-connector/identity" || {
     printf 'VM contains prior connector state; use prepare --reset for a clean walkthrough\n' >&2
     exit 1
