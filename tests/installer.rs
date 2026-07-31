@@ -143,3 +143,53 @@ fn refuses_to_remove_an_unowned_directory() {
     assert!(!uninstall.status.success());
     assert_eq!(fs::read_to_string(root.join("user-data")).unwrap(), "keep");
 }
+
+#[test]
+fn installs_managed_bundle_without_local_gateway() {
+    let temporary = tempfile::tempdir().unwrap();
+    let fixtures = temporary.path().join("fixtures");
+    fs::create_dir(&fixtures).unwrap();
+    for name in ["connector", "identity"] {
+        fs::write(fixtures.join(name), format!("managed-{name}")).unwrap();
+    }
+    let organization = fixtures.join("organization.json");
+    fs::write(
+        &organization,
+        br#"{
+          "format_version": 1,
+          "organization": {"id":"acme","display_name":"Acme","support_url":"https://help.acme.example/"},
+          "identity": {"issuer":"https://login.acme.example/","client_id":"agent-desktop","audience":"gateway","scope":"invoke"},
+          "gateway": {"url":"https://gateway.acme.example/"}
+        }"#,
+    )
+    .unwrap();
+    let root = temporary.path().join("agentgateway-edge");
+
+    let install = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-install"))
+        .args([
+            "managed-install",
+            "--root",
+            root.to_str().unwrap(),
+            "--connector",
+            fixtures.join("connector").to_str().unwrap(),
+            "--identity",
+            fixtures.join("identity").to_str().unwrap(),
+            "--organization",
+            organization.to_str().unwrap(),
+            "--control",
+            env!("CARGO_BIN_EXE_agentgateway-edge-install"),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(install.status.success(), "{:?}", install.stderr);
+    assert!(root.join("share/organization.json").is_file());
+    assert!(!root.join("bin/agentgateway").exists());
+    assert!(!root.join("share/examples/agentgateway.yaml").exists());
+    let service =
+        fs::read_to_string(root.join("share/systemd/user/agentgateway-edge.service")).unwrap();
+    assert!(service.contains("--mode managed"));
+    assert!(service.contains("--upstream \"https://gateway.acme.example/\""));
+    assert!(service.contains("--identity-issuer \"https://login.acme.example/\""));
+    assert!(!service.contains("--gateway-binary"));
+}

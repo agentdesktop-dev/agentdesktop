@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
+use agentgateway_edge_connector::organization::OrganizationBootstrap;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -11,10 +12,7 @@ const MANIFEST: &str = "agentgateway-edge-install.json";
 const SYSTEMD_UNIT: &str = "share/systemd/user/agentgateway-edge.service";
 
 #[derive(Debug, Parser)]
-#[command(
-    version,
-    about = "Install or remove a standalone Agent Gateway edge bundle"
-)]
+#[command(version, about = "Install or remove an Agent Gateway edge bundle")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -37,6 +35,18 @@ enum Command {
         control: Option<PathBuf>,
         #[arg(long)]
         gateway_config: Option<PathBuf>,
+    },
+    ManagedInstall {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        connector: PathBuf,
+        #[arg(long)]
+        identity: PathBuf,
+        #[arg(long)]
+        organization: PathBuf,
+        #[arg(long)]
+        control: Option<PathBuf>,
     },
     Uninstall {
         #[arg(long)]
@@ -105,12 +115,40 @@ fn main() -> Result<()> {
             if let Some(control) = &control {
                 files.push((control.as_path(), "bin/agentgateway-edge-install", true));
             }
-            install(&root, &files, gateway_config.as_deref())
+            install(
+                &root,
+                &files,
+                &standalone_systemd_unit(&root, gateway_config.as_deref()),
+                "standalone",
+            )
+        }
+        Command::ManagedInstall {
+            root,
+            connector,
+            identity,
+            organization,
+            control,
+        } => {
+            let bootstrap = OrganizationBootstrap::parse(&fs::read(&organization)?)?;
+            let mut files: Vec<(&Path, &str, bool)> = vec![
+                (connector.as_path(), "bin/agentgateway-edge-connector", true),
+                (identity.as_path(), "bin/agentgateway-edge-identity", true),
+                (organization.as_path(), "share/organization.json", false),
+            ];
+            if let Some(control) = &control {
+                files.push((control.as_path(), "bin/agentgateway-edge-install", true));
+            }
+            install(
+                &root,
+                &files,
+                &managed_systemd_unit(&root, &bootstrap),
+                "managed",
+            )
         }
         Command::Uninstall { root } => uninstall(&root),
         Command::Verify { root } => {
             validate_owned_tree(&root)?;
-            println!("verified standalone bundle at {}", root.display());
+            println!("verified edge bundle at {}", root.display());
             Ok(())
         }
         Command::Service { command } => match command {
@@ -141,7 +179,7 @@ fn service(root: &Path, systemctl: &Path, enable: bool) -> Result<()> {
         )?;
     }
     println!(
-        "{} standalone user service",
+        "{} user service",
         if enable { "enabled" } else { "disabled" }
     );
     Ok(())
@@ -170,7 +208,8 @@ fn run_systemctl<const N: usize>(
 fn install(
     root: &Path,
     files: &[(&Path, &str, bool)],
-    gateway_config: Option<&Path>,
+    systemd_unit: &str,
+    deployment: &str,
 ) -> Result<()> {
     if !root.is_absolute() {
         bail!("install root must be absolute");
@@ -203,7 +242,7 @@ fn install(
         }
         let unit = staging.join(SYSTEMD_UNIT);
         fs::create_dir_all(unit.parent().expect("systemd unit has parent"))?;
-        fs::write(&unit, systemd_unit(root, gateway_config))?;
+        fs::write(&unit, systemd_unit)?;
         set_mode(&unit, 0o644)?;
 
         let files = files
@@ -247,11 +286,11 @@ fn install(
     if backup.exists() {
         fs::remove_dir_all(backup)?;
     }
-    println!("installed standalone bundle at {}", root.display());
+    println!("installed {deployment} bundle at {}", root.display());
     Ok(())
 }
 
-fn systemd_unit(root: &Path, gateway_config: Option<&Path>) -> String {
+fn standalone_systemd_unit(root: &Path, gateway_config: Option<&Path>) -> String {
     let connector = quote_systemd_arg(&root.join("bin/agentgateway-edge-connector"));
     let agentgateway = quote_systemd_arg(&root.join("bin/agentgateway"));
     let config =
@@ -261,18 +300,28 @@ fn systemd_unit(root: &Path, gateway_config: Option<&Path>) -> String {
     )
 }
 
+fn managed_systemd_unit(root: &Path, bootstrap: &OrganizationBootstrap) -> String {
+    let connector = quote_systemd_arg(&root.join("bin/agentgateway-edge-connector"));
+    let upstream = quote_systemd_value(bootstrap.gateway.url.as_str());
+    let issuer = quote_systemd_value(bootstrap.identity.issuer.as_str());
+    format!(
+        "[Unit]\nDescription=Agent Gateway Edge Connector\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={connector} --mode managed --upstream {upstream} --identity-issuer {issuer}\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=read-only\n\n[Install]\nWantedBy=default.target\n"
+    )
+}
+
 fn quote_systemd_arg(path: &Path) -> String {
-    let escaped = path
-        .to_string_lossy()
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
+    quote_systemd_value(&path.to_string_lossy())
+}
+
+fn quote_systemd_value(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{escaped}\"")
 }
 
 fn uninstall(root: &Path) -> Result<()> {
     validate_owned_tree(root)?;
     fs::remove_dir_all(root)?;
-    println!("removed standalone bundle from {}", root.display());
+    println!("removed edge bundle from {}", root.display());
     Ok(())
 }
 
