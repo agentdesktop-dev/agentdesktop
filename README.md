@@ -52,7 +52,7 @@ cargo run -- \
   --identity-issuer https://identity.example/
 ```
 
-The connector fails at startup if storage or the matching session is unavailable. Before expiry it serializes refresh, uses the same DPoP key, verifies the rotated access token, and persists the new refresh token before forwarding continues. Refresh failure fails new requests closed locally; the issuer must enforce refresh-token rotation and reuse detection. For each request the connector removes application-supplied connector identity headers, preserves the application `Authorization` header, and adds a fresh `Proxy-Authorization: DPoP` token and DPoP proof. The DPoP key is not verified organizational device identity, and Agent Gateway still needs the contract's DPoP validation and credential-stripping changes before this is a trusted end-to-end managed identity path.
+The connector fails at startup if storage or the matching session is unavailable. Before expiry it serializes refresh, uses the same DPoP key, verifies the rotated access token, persists the new refresh token, and replaces the managed upstream connection pool before forwarding continues. Refresh failure fails new requests closed locally; the issuer must enforce refresh-token rotation and reuse detection. For each request the connector removes application-supplied connector identity headers, preserves the application `Authorization` header, and adds a fresh `Proxy-Authorization: DPoP` token and DPoP proof. The DPoP key is not verified organizational device identity, and Agent Gateway still needs the contract's DPoP validation and credential-stripping changes before this is a trusted end-to-end managed identity path.
 
 Delete only the matching local session with:
 

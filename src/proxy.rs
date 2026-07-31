@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::future::{Future, IntoFuture};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -48,7 +49,7 @@ impl Default for ProxyOptions {
 
 #[derive(Clone)]
 struct ProxyState {
-    client: Client,
+    clients: Arc<StdMutex<ClientPool>>,
     upstream: Url,
     mode: DeploymentMode,
     identity: Option<ManagedIdentity>,
@@ -57,6 +58,11 @@ struct ProxyState {
     shutdown_timeout: Duration,
     max_in_flight: usize,
     in_flight: Arc<Semaphore>,
+}
+
+struct ClientPool {
+    generation: u64,
+    client: Client,
 }
 
 #[derive(Debug)]
@@ -142,7 +148,10 @@ pub async fn serve_with_identity(
         .connect_timeout(options.connect_timeout)
         .build()?;
     let state = ProxyState {
-        client,
+        clients: Arc::new(StdMutex::new(ClientPool {
+            generation: 0,
+            client,
+        })),
         upstream,
         mode,
         identity,
@@ -306,6 +315,7 @@ async fn forward_request(state: &ProxyState, request: Request<Body>) -> Result<R
     if state.mode == DeploymentMode::Managed {
         headers.remove("dpop");
     }
+    let mut credential_generation = 0;
     if let Some(identity) = &state.identity {
         let credentials = identity
             .credentials(parts.method.as_str(), url.as_str())
@@ -321,10 +331,11 @@ async fn forward_request(state: &ProxyState, request: Request<Body>) -> Result<R
             HeaderValue::from_str(&credentials.proof)
                 .map_err(|error| identity_error(error.into()))?,
         );
+        credential_generation = credentials.generation;
     }
 
-    let send = state
-        .client
+    let client = client_for_generation(state, credential_generation)?;
+    let send = client
         .request(parts.method, url)
         .headers(headers)
         .body(reqwest::Body::wrap_stream(body.into_data_stream()))
@@ -345,6 +356,21 @@ async fn forward_request(state: &ProxyState, request: Request<Body>) -> Result<R
     *response.status_mut() = status;
     *response.headers_mut() = headers;
     Ok(response)
+}
+
+fn client_for_generation(state: &ProxyState, generation: u64) -> Result<Client> {
+    let mut pool = state
+        .clients
+        .lock()
+        .map_err(|_| anyhow::anyhow!("upstream client pool lock poisoned"))?;
+    if pool.generation != generation {
+        pool.client = Client::builder()
+            .connect_timeout(state.connect_timeout)
+            .build()?;
+        pool.generation = generation;
+        tracing::info!(event = "upstream_pool_rotated");
+    }
+    Ok(pool.client.clone())
 }
 
 fn identity_error(error: anyhow::Error) -> anyhow::Error {
@@ -590,6 +616,28 @@ mod tests {
         assert_eq!(failure_reason(&error), "upstream_unavailable");
     }
 
+    #[test]
+    fn rotates_upstream_pool_for_new_credential_generation() {
+        let state = ProxyState {
+            clients: Arc::new(StdMutex::new(ClientPool {
+                generation: 1,
+                client: Client::new(),
+            })),
+            upstream: Url::parse("https://gateway.example").unwrap(),
+            mode: DeploymentMode::Managed,
+            identity: None,
+            request_timeout: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(1),
+            shutdown_timeout: Duration::from_secs(1),
+            max_in_flight: 1,
+            in_flight: Arc::new(Semaphore::new(1)),
+        };
+
+        client_for_generation(&state, 2).unwrap();
+
+        assert_eq!(state.clients.lock().unwrap().generation, 2);
+    }
+
     #[tokio::test]
     async fn managed_identity_replaces_connector_headers_and_preserves_authorization() {
         let captured = Arc::new(Mutex::new(None));
@@ -620,6 +668,7 @@ mod tests {
             refresh_token: "refresh-token".into(),
             dpop_private_key: base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .encode(key.to_pkcs8_der().unwrap()),
+            generation: 1,
         };
         let temporary = tempfile::tempdir().unwrap();
         let store = CredentialStore::setup(
@@ -684,12 +733,16 @@ mod tests {
                 scope: "agentgateway.invoke".into(),
                 refresh_token: "expired-refresh-token".into(),
                 dpop_private_key: String::new(),
+                generation: 1,
             },
             store,
         );
         assert_eq!(identity.status().await.unwrap(), "refresh-required");
         let state = ProxyState {
-            client: Client::new(),
+            clients: Arc::new(StdMutex::new(ClientPool {
+                generation: 0,
+                client: Client::new(),
+            })),
             upstream: Url::parse("http://127.0.0.1:9").unwrap(),
             mode: DeploymentMode::Managed,
             identity: Some(identity),

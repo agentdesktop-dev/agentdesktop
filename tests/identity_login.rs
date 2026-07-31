@@ -99,6 +99,7 @@ async fn browser_pkce_login_persists_dpop_bound_session() {
     );
 
     let original_refresh_token = session.refresh_token.clone();
+    let original_generation = session.generation;
     session.expires_at = 0;
     let identity = ManagedIdentity::new(session, store.clone());
     let (first, second) = tokio::join!(
@@ -109,6 +110,7 @@ async fn browser_pkce_login_persists_dpop_bound_session() {
     assert!(!second.unwrap().access_token.is_empty());
     let restored = load_session(&config, &store).unwrap();
     assert_ne!(restored.refresh_token, original_refresh_token);
+    assert_eq!(restored.generation, original_generation + 1);
     assert!(!restored.is_expired().unwrap());
 
     let logout = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-identity"))

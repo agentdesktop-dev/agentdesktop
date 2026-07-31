@@ -58,6 +58,8 @@ pub struct StoredSession {
     pub scope: String,
     pub refresh_token: String,
     pub dpop_private_key: String,
+    #[serde(default)]
+    pub generation: u64,
 }
 
 #[derive(Clone)]
@@ -69,6 +71,7 @@ pub struct ManagedIdentity {
 pub struct ManagedCredentials {
     pub access_token: String,
     pub proof: String,
+    pub generation: u64,
 }
 
 impl StoredSession {
@@ -103,6 +106,7 @@ impl ManagedIdentity {
         Ok(ManagedCredentials {
             access_token: session.access_token.clone(),
             proof,
+            generation: session.generation,
         })
     }
 
@@ -195,6 +199,7 @@ where
             .context("authorization server did not issue a refresh token")?,
         dpop_private_key: base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(dpop_key.to_pkcs8_der()?),
+        generation: 1,
     };
     store.put(
         &session_record(&config.issuer, &config.gateway_origin),
@@ -272,6 +277,7 @@ async fn refresh_session(session: &mut StoredSession, store: &CredentialStore) -
         expires_at: token_expiry.min(now.saturating_add(token.expires_in)),
         scope: token.scope,
         refresh_token,
+        generation: session.generation.saturating_add(1),
         ..session.clone()
     };
     store.put(
