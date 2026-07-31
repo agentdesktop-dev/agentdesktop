@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command as ProcessCommand;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -43,6 +44,26 @@ enum Command {
         #[arg(long)]
         root: PathBuf,
     },
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceCommand {
+    Enable {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long, default_value = "systemctl", hide = true)]
+        systemctl: PathBuf,
+    },
+    Disable {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long, default_value = "systemctl", hide = true)]
+        systemctl: PathBuf,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -83,7 +104,36 @@ fn main() -> Result<()> {
             println!("verified standalone bundle at {}", root.display());
             Ok(())
         }
+        Command::Service { command } => match command {
+            ServiceCommand::Enable { root, systemctl } => service(&root, &systemctl, true),
+            ServiceCommand::Disable { root, systemctl } => service(&root, &systemctl, false),
+        },
     }
+}
+
+fn service(root: &Path, systemctl: &Path, enable: bool) -> Result<()> {
+    validate_owned_tree(root)?;
+    let mut command = ProcessCommand::new(systemctl);
+    command.arg("--user");
+    if enable {
+        command
+            .args(["enable", "--now"])
+            .arg(root.join(SYSTEMD_UNIT));
+    } else {
+        command.args(["disable", "--now", "agentgateway-edge.service"]);
+    }
+    let output = command.output().context("failed to run systemctl")?;
+    if !output.status.success() {
+        bail!(
+            "systemctl failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    println!(
+        "{} standalone user service",
+        if enable { "enabled" } else { "disabled" }
+    );
+    Ok(())
 }
 
 fn install(root: &Path, files: &[(&Path, &str, bool)]) -> Result<()> {

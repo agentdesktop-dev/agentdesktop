@@ -10,7 +10,7 @@ This file records verified implementation status and external blockers. A phase 
 - Phase 1: explicit standalone mode, separate local Agent Gateway lifecycle, health reporting, native and connector-assisted Claude paths, policy smoke tests, and standalone operations guidance.
 - Phase 2, partial: browser Authorization Code with PKCE, DPoP-bound access tokens, signed-token validation, protected credential storage, refresh rotation, restart restoration, credential-generation pool isolation, local logout, and per-request managed DPoP headers.
 - Phase 3, blocked implementation: application routing recognizes mutually exclusive native, connector, and captured choices; captured mode fails before application launch because no transparent redirector is installed. HBONE and privileged OS capture remain blocked as documented below.
-- Phase 4, partial: transactional standalone bundle install/upgrade/uninstall, generated hardened Linux user-systemd unit, and a privacy-safe local status API. Automatic service activation, application-profile UI, trust workflow, binary download/update, and graphical UI remain pending.
+- Phase 4, partial: transactional standalone bundle install/upgrade/uninstall, generated hardened Linux user-systemd unit with explicit enable/disable lifecycle, and a privacy-safe local status API. Application-profile UI, trust workflow, binary download/update, and graphical UI remain pending.
 - Phase 5, partial: runtime platform capability reporting and a published compatibility matrix. Linux native forwarding is validated; transparent capture, trust integration, installers, and macOS/Windows builds remain unavailable.
 - Phase 6, partial: explicit connection, upload/response-header, and shutdown timeouts; bounded full-stream concurrency; no request retries; deterministic slow-client, timeout, overload, disconnect, malformed-request isolation, forced-shutdown, and repeated lifecycle tests.
 - Phase 7, partial: JSON structured lifecycle and failure logs with fixed privacy-safe event categories; validated W3C trace-context propagation and generation; privacy-safe forwarding spans with opt-in bounded OTLP/gRPC export and orderly flush; bounded low-cardinality operational counters. Metric export and automated collector-correlation coverage remain pending.
@@ -22,7 +22,7 @@ This file records verified implementation status and external blockers. A phase 
 - Trusted managed identity requires Agent Gateway support for DPoP proof validation, replay protection, `cnf.jkt` binding, connector credential stripping, and immutable trusted policy context.
 - Transparent capture requires an authenticated HBONE contract plus a privileged OS integration. Linux implementation needs a selected cgroup/eBPF mechanism and a disposable privileged test host. Container-only tests cannot establish host process attribution or anti-bypass behavior.
 - macOS capture, trust installation, packaging, and signing require macOS with Network Extension entitlements. Windows capture, trust installation, packaging, and signing require Windows with WFP development and signing facilities.
-- Phase 4 installers and UI depend on the final package, service, and daemon names and on the first supported capture/trust platform.
+- Additional platform installers and the capture/trust UI depend on final package names and the first supported capture/trust platform.
 
 ## Work that can continue locally
 

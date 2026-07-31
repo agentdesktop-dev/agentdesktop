@@ -60,6 +60,44 @@ fn installs_upgrades_and_uninstalls_standalone_bundle() {
         .unwrap();
     assert!(verify.status.success());
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let systemctl = temporary.path().join("systemctl");
+        let systemctl_log = temporary.path().join("systemctl.log");
+        fs::write(
+            &systemctl,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SYSTEMCTL_LOG\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+        for action in ["enable", "disable"] {
+            let service = Command::new(env!("CARGO_BIN_EXE_agentgateway-edge-install"))
+                .args([
+                    "service",
+                    action,
+                    "--root",
+                    root.to_str().unwrap(),
+                    "--systemctl",
+                    systemctl.to_str().unwrap(),
+                ])
+                .env("SYSTEMCTL_LOG", &systemctl_log)
+                .output()
+                .unwrap();
+            assert!(service.status.success());
+        }
+        let invocations = fs::read_to_string(systemctl_log).unwrap();
+        assert_eq!(
+            invocations,
+            format!(
+                "--user enable --now {}\n--user disable --now agentgateway-edge.service\n",
+                root.join("share/systemd/user/agentgateway-edge.service")
+                    .display()
+            )
+        );
+    }
+
     fs::write(
         root.join("bin/agentgateway-edge-connector"),
         "locally-modified",

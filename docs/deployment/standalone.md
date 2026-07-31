@@ -89,6 +89,15 @@ agentgateway-edge-connector \
 
 With supervision enabled, the connector starts `agentgateway -f <config>`, waits for the configured upstream to accept TCP connections, stops the child during connector shutdown, and exits if the child exits unexpectedly. It does not install, update, or rewrite Agent Gateway.
 
+The standalone bundle installer includes a hardened user-systemd unit. Activate or stop it explicitly after installing the bundle at an absolute path:
+
+```bash
+agentgateway-edge-install service enable --root "$HOME/.local/lib/agentgateway-edge"
+agentgateway-edge-install service disable --root "$HOME/.local/lib/agentgateway-edge"
+```
+
+Enable validates the complete bundle integrity manifest before asking `systemctl --user` to enable and start the generated unit. Disable performs the same validation before stopping and disabling the named unit. Disable the service before uninstalling the bundle; install and uninstall do not implicitly alter the current user session.
+
 Check connector and upstream reachability with:
 
 ```bash
@@ -119,7 +128,7 @@ The current standalone milestone does not install a CA certificate or modify sys
 Before uninstalling:
 
 1. Stop Claude Code and other configured applications.
-2. Stop the connector and Agent Gateway processes.
+2. Disable the installed user service, or stop independently managed connector and Agent Gateway processes.
 3. Remove application base-URL configuration that points to either loopback endpoint.
 4. Remove connector service definitions and binaries.
 5. Decide separately whether to retain or delete Agent Gateway configuration, credentials, policy, logs, and audit records.
