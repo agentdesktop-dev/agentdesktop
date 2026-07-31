@@ -47,7 +47,7 @@ function signJwt(header, claims, privateKey) {
   return `${input}.${base64url(signature)}`;
 }
 
-function verifyDpop(proof, method, targetUrl) {
+function verifyDpop(proof, method, targetUrl, accessToken) {
   const parts = proof?.split(".");
   if (parts?.length !== 3) {
     throw new Error("invalid DPoP proof");
@@ -62,6 +62,7 @@ function verifyDpop(proof, method, targetUrl) {
     claims.htm !== method ||
     claims.htu !== targetUrl ||
     typeof claims.jti !== "string" ||
+    (accessToken && claims.ath !== base64url(sha256(accessToken))) ||
     Math.abs(Math.floor(Date.now() / 1000) - claims.iat) > 60
   ) {
     throw new Error("invalid DPoP claims");
@@ -76,7 +77,7 @@ function verifyDpop(proof, method, targetUrl) {
   if (!valid) {
     throw new Error("invalid DPoP signature");
   }
-  return header.jwk;
+  return { jwk: header.jwk, claims };
 }
 
 function json(response, status, body) {
@@ -95,6 +96,10 @@ async function readForm(request) {
 export async function startFakeAuthorizationServer() {
   const codes = new Map();
   const refreshTokens = new Set();
+  const accessTokens = new Map();
+  const enrollmentProofs = new Set();
+  const enrollments = new Map();
+  const devices = new Map();
   const signingKeys = generateKeyPairSync("ec", { namedCurve: "P-256" });
   const publicJwk = signingKeys.publicKey.export({ format: "jwk" });
   publicJwk.use = "sig";
@@ -109,6 +114,7 @@ export async function startFakeAuthorizationServer() {
         issuer,
         authorization_endpoint: `${issuer}authorize`,
         token_endpoint: `${issuer}token`,
+        enrollment_endpoint: `${issuer}enrollments`,
         jwks_uri: `${issuer}jwks`,
         response_types_supported: ["code"],
         code_challenge_methods_supported: ["S256"],
@@ -147,7 +153,7 @@ export async function startFakeAuthorizationServer() {
         if (form.get("client_id") !== clientId) {
           return json(response, 400, { error: "invalid_grant" });
         }
-        const proofJwk = verifyDpop(request.headers.dpop, "POST", `${issuer}token`);
+        const proofJwk = verifyDpop(request.headers.dpop, "POST", `${issuer}token`).jwk;
         if (form.get("grant_type") === "authorization_code") {
           const code = form.get("code");
           const authorization = codes.get(code);
@@ -184,6 +190,10 @@ export async function startFakeAuthorizationServer() {
           },
           signingKeys.privateKey,
         );
+        accessTokens.set(accessToken, {
+          sub: subject,
+          jkt: jwkThumbprint(proofJwk),
+        });
         return json(response, 200, {
           access_token: accessToken,
           token_type: "DPoP",
@@ -193,6 +203,64 @@ export async function startFakeAuthorizationServer() {
         });
       } catch {
         return json(response, 400, { error: "invalid_dpop_proof" });
+      }
+    }
+    if (
+      (request.method === "POST" && url.pathname === "/enrollments") ||
+      (request.method === "GET" && url.pathname.startsWith("/enrollments/"))
+    ) {
+      try {
+        const authorization = request.headers.authorization?.match(/^DPoP (.+)$/);
+        const accessToken = authorization?.[1];
+        const identity = accessTokens.get(accessToken);
+        if (!accessToken || !identity) {
+          return json(response, 401, { error: "invalid_token" });
+        }
+        const targetUrl = new URL(url.pathname, issuer).toString();
+        const proof = verifyDpop(
+          request.headers.dpop,
+          request.method,
+          targetUrl,
+          accessToken,
+        );
+        if (jwkThumbprint(proof.jwk) !== identity.jkt) {
+          return json(response, 401, { error: "invalid_dpop_proof" });
+        }
+        if (enrollmentProofs.has(proof.claims.jti)) {
+          return json(response, 401, { error: "dpop_proof_replayed" });
+        }
+        enrollmentProofs.add(proof.claims.jti);
+
+        if (request.method === "POST") {
+          const enrollmentId = randomUUID();
+          const enrollment = {
+            enrollment_id: enrollmentId,
+            status: "pending",
+            user: { iss: issuer, sub: identity.sub },
+            dpop_jkt: identity.jkt,
+          };
+          enrollments.set(enrollmentId, enrollment);
+          return json(response, 202, enrollment);
+        }
+
+        const enrollmentId = url.pathname.slice("/enrollments/".length);
+        const enrollment = enrollments.get(enrollmentId);
+        if (
+          !enrollment ||
+          enrollment.user.sub !== identity.sub ||
+          enrollment.dpop_jkt !== identity.jkt
+        ) {
+          return json(response, 404, { error: "enrollment_not_found" });
+        }
+        const deviceStatus = enrollment.device_id
+          ? devices.get(enrollment.device_id)
+          : undefined;
+        return json(response, 200, {
+          ...enrollment,
+          ...(deviceStatus ? { device_status: deviceStatus } : {}),
+        });
+      } catch {
+        return json(response, 401, { error: "invalid_dpop_proof" });
       }
     }
     return json(response, 404, { error: "not_found" });
@@ -207,6 +275,23 @@ export async function startFakeAuthorizationServer() {
     clientId,
     audience,
     scope,
+    approveEnrollment(enrollmentId, deviceId = randomUUID()) {
+      const enrollment = enrollments.get(enrollmentId);
+      if (!enrollment || enrollment.status !== "pending") {
+        return false;
+      }
+      enrollment.status = "approved";
+      enrollment.device_id = deviceId;
+      devices.set(deviceId, "active");
+      return true;
+    },
+    revokeDevice(deviceId) {
+      if (!devices.has(deviceId)) {
+        return false;
+      }
+      devices.set(deviceId, "revoked");
+      return true;
+    },
     close: () => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
   };
 }

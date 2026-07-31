@@ -4,7 +4,7 @@ Status: proposed contract for the first managed implementation. Neither the conn
 
 This contract defines managed user identity and proof that requests originate from the connector instance that obtained the token. It applies to managed remote mode only. Standalone mode does not use organizational identity.
 
-The first increment provides verified user identity plus connector-instance proof. It must not claim verified organizational device identity. Device enrollment that associates the proof key with an approved device is a managed-release requirement and a fast follow to the first DPoP request.
+The first increment provides verified user identity plus connector-instance proof. It must not claim verified organizational device identity. Device enrollment that associates the proof key with an approved device is a managed-release requirement and a fast follow to the first DPoP request. The executable draft enrollment API is specified in [Device enrollment API v1 draft](device-enrollment-v1.md).
 
 ## Security properties
 

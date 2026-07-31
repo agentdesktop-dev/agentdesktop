@@ -14,12 +14,16 @@ import {
 
 const { base64url, decodeJson, jwkThumbprint, signJwt } = fakeAuthorizationInternals;
 
-function dpopProof(privateKey, publicKey, method, targetUrl) {
+function dpopProof(privateKey, publicKey, method, targetUrl, accessToken) {
   const now = Math.floor(Date.now() / 1000);
   const jwk = publicKey.export({ format: "jwk" });
+  const claims = { htm: method, htu: targetUrl, iat: now, jti: randomUUID() };
+  if (accessToken) {
+    claims.ath = base64url(createHash("sha256").update(accessToken).digest());
+  }
   return signJwt(
     { typ: "dpop+jwt", alg: "ES256", jwk },
-    { htm: method, htu: targetUrl, iat: now, jti: randomUUID() },
+    claims,
     privateKey,
   );
 }
@@ -42,6 +46,28 @@ async function authorizationCode(server, verifier) {
   const callback = new URL(response.headers.get("location"));
   assert.equal(callback.searchParams.get("state"), "test-state");
   return { code: callback.searchParams.get("code"), redirectUri };
+}
+
+async function issueToken(server, proofKeys) {
+  const verifier = base64url(randomBytes(32));
+  const { code, redirectUri } = await authorizationCode(server, verifier);
+  const tokenEndpoint = new URL("token", server.issuer).toString();
+  const response = await fetch(tokenEndpoint, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      dpop: dpopProof(proofKeys.privateKey, proofKeys.publicKey, "POST", tokenEndpoint),
+    },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      client_id: server.clientId,
+      redirect_uri: redirectUri,
+      code,
+      code_verifier: verifier,
+    }),
+  });
+  assert.equal(response.status, 200);
+  return response.json();
 }
 
 test("issues a DPoP-bound token for an S256 authorization code", async (context) => {
@@ -167,4 +193,84 @@ test("rejects a wrong PKCE verifier", async (context) => {
 
   assert.equal(response.status, 400);
   assert.equal((await response.json()).error, "invalid_grant");
+});
+
+test("enrolls only the token-bound key and reports device revocation", async (context) => {
+  const server = await startFakeAuthorizationServer();
+  context.after(() => server.close());
+  const proofKeys = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const token = await issueToken(server, proofKeys);
+  const enrollmentEndpoint = new URL("enrollments", server.issuer).toString();
+
+  const wrongKeys = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const wrong = await fetch(enrollmentEndpoint, {
+    method: "POST",
+    headers: {
+      authorization: `DPoP ${token.access_token}`,
+      dpop: dpopProof(
+        wrongKeys.privateKey,
+        wrongKeys.publicKey,
+        "POST",
+        enrollmentEndpoint,
+        token.access_token,
+      ),
+    },
+  });
+  assert.equal(wrong.status, 401);
+  assert.equal((await wrong.json()).error, "invalid_dpop_proof");
+
+  const enrollmentProof = dpopProof(
+    proofKeys.privateKey,
+    proofKeys.publicKey,
+    "POST",
+    enrollmentEndpoint,
+    token.access_token,
+  );
+  const enrollmentRequest = () => fetch(enrollmentEndpoint, {
+    method: "POST",
+    headers: {
+      authorization: `DPoP ${token.access_token}`,
+      dpop: enrollmentProof,
+    },
+  });
+  const requested = await enrollmentRequest();
+  assert.equal(requested.status, 202);
+  const enrollment = await requested.json();
+  assert.equal(enrollment.status, "pending");
+  assert.equal(enrollment.user.sub, "test-user");
+
+  const replayed = await enrollmentRequest();
+  assert.equal(replayed.status, 401);
+  assert.equal((await replayed.json()).error, "dpop_proof_replayed");
+  assert.equal(server.approveEnrollment(enrollment.enrollment_id, "device-1"), true);
+
+  const statusEndpoint = new URL(
+    `enrollments/${enrollment.enrollment_id}`,
+    server.issuer,
+  ).toString();
+  const readStatus = () => fetch(statusEndpoint, {
+    headers: {
+      authorization: `DPoP ${token.access_token}`,
+      dpop: dpopProof(
+        proofKeys.privateKey,
+        proofKeys.publicKey,
+        "GET",
+        statusEndpoint,
+        token.access_token,
+      ),
+    },
+  });
+  const approved = await readStatus();
+  assert.equal(approved.status, 200);
+  assert.deepEqual(await approved.json(), {
+    ...enrollment,
+    status: "approved",
+    device_id: "device-1",
+    device_status: "active",
+  });
+
+  assert.equal(server.revokeDevice("device-1"), true);
+  const revoked = await readStatus();
+  assert.equal(revoked.status, 200);
+  assert.equal((await revoked.json()).device_status, "revoked");
 });
