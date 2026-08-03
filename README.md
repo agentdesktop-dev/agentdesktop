@@ -141,6 +141,26 @@ claude
 
 Claude Code reads these user settings for ordinary terminal and IDE launches, so no Claude wrapper is installed. A bundle installation provides the stable `agentdesktop` command through `~/.local/bin`; run `agentdesktop connect-agents` at any time to connect newly installed supported agents or restore matching settings without reinstalling the product. The placeholder is sent to Agent Gateway, not the AI provider. Agent Gateway remains responsible for replacing or removing application credentials before provider forwarding.
 
+## Launch an application scope
+
+On Linux, run any command and its descendants in a uniquely owned transient systemd user scope:
+
+```bash
+cargo run -- launch --profile claude -- claude --continue
+```
+
+The command preserves the launched argv and working environment, waits for the complete scope, requests control-group cleanup from systemd, and returns the launched command's exit status. Embedded profiles can add process-local integration settings without changing application configuration: `claude` supplies the connector URL and placeholder credential to the launched process tree, while the default `custom` profile adds no environment variables. Unknown profiles fail and list the available names.
+
+This means Claude can use Agent Desktop for one invocation without changing `~/.claude/settings.json`. The connector must already be installed and listening before Claude sends a request.
+
+Profiles that depend on Agent Desktop check local readiness before starting the application. If the connector is stopped or Agent Gateway is unavailable, `launch` fails immediately with recovery steps instead of letting the application retry until it times out. Use `--skip-preflight` only for debugging or when deliberately testing an unhealthy service:
+
+```bash
+cargo run -- launch --skip-preflight --profile claude -- claude
+```
+
+This is currently process grouping only. It does not yet route traffic, install capture rules, restrict files, or provide a security sandbox. The scope is the process-identity foundation for the transactional Linux capture controller: capture will keep the command stopped until trust, relay, and fail-closed network rules are active. A future profile may request a stronger lightweight-sandbox, container, or VM backend, but Agent Desktop must report the guarantees actually active and must never silently fall back to weaker isolation.
+
 In standalone mode, the connector can optionally own the lifecycle of a separately installed Agent Gateway process:
 
 ```bash

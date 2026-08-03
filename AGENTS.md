@@ -79,6 +79,7 @@ The standard self-managed installation may include both Agent Gateway and the co
 The edge connector owns:
 
 - Per-user loopback listeners and application adapters.
+- Application execution scopes and their process-tree lifecycle when Agent Desktop launches a selected application.
 - OS-specific traffic capture.
 - User login, token refresh, device enrollment, and device proof in managed remote mode.
 - Forwarding and tunnel lifecycle, including authenticated remote connections where required.
@@ -161,6 +162,8 @@ Preferred process selectors:
 
 Executable names and paths are useful rollout selectors but are not security identities. Define whether capture follows child and helper processes for every application profile; a managed cgroup, job, or session is preferable to repeated PID attribution.
 
+`agentdesktop launch [--profile NAME] -- COMMAND [ARGS...]` is the stable application-launch boundary. Its first Linux implementation creates an owned transient systemd user scope for the command and every descendant; it is process grouping, not yet a sandbox or a supported capture path. The capture controller must activate trust, relay, and network rules before releasing the scoped command. Later concrete requirements may add stronger execution backends such as a Linux namespace sandbox or a VM, but profiles must request explicit guarantees, unavailable backends must fail closed rather than downgrade, and the repository must not add speculative sandbox abstractions before implementing one.
+
 ## TLS and trust
 
 - TLS interception occurs only at Agent Gateway.
@@ -224,6 +227,7 @@ src/
   main.rs               connector entry point and lifecycle
   config.rs             bootstrap and runtime configuration
   error.rs              stable internal and application-facing errors
+  launch.rs             application execution-scope lifecycle
   identity/             OAuth, enrollment, token storage, and device proof
   proxy/                loopback HTTP and Agent Gateway transport
   telemetry/            OpenTelemetry setup and semantic conventions

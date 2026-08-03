@@ -9,7 +9,7 @@ fn help_exits_successfully() {
 
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
-    for command in ["serve", "connect-agents", "identity", "capture"] {
+    for command in ["serve", "connect-agents", "identity", "capture", "launch"] {
         assert!(help.contains(command));
     }
 
@@ -21,6 +21,33 @@ fn help_exits_successfully() {
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(help.contains("--mode <MODE>"));
     assert!(help.contains("--upstream <UPSTREAM>"));
+
+    let output = Command::new(env!("CARGO_BIN_EXE_agentdesktop"))
+        .args(["launch", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("--skip-preflight")
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn launch_requires_a_command() {
+    let output = Command::new(env!("CARGO_BIN_EXE_agentdesktop"))
+        .arg("launch")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("<COMMAND>...")
+    );
 }
 
 #[cfg(unix)]

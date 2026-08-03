@@ -5,6 +5,8 @@ pub mod config;
 pub mod customization;
 pub mod hbone;
 pub mod identity;
+#[cfg(target_os = "linux")]
+pub mod launch;
 pub mod local_gateway;
 pub mod organization;
 pub mod platform;

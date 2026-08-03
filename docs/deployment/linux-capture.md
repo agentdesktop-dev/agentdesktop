@@ -64,6 +64,22 @@ The test uses rootless Podman with private network and cgroup namespaces. Rootle
 
 This does not prove production host attribution, resistance to a local administrator, or compatibility with an existing host firewall. Those require a disposable host or VM.
 
+## Application execution scope
+
+The public launch boundary can already place a command and all descendants in an owned transient systemd user scope:
+
+```bash
+agentdesktop launch --profile claude -- claude
+```
+
+The embedded `claude` profile supplies `ANTHROPIC_BASE_URL` and the local placeholder credential only to the launched process tree, so this path does not modify Claude settings. The default `custom` profile supplies no integration environment.
+
+Before launching Claude, the profile checks `/_agentdesktop/healthz` with bounded local timeouts. A stopped connector or unreachable Agent Gateway produces immediate service-start, installation, and retry guidance. `--skip-preflight` bypasses readiness only for deliberate debugging; it does not remove the profile environment or execution scope.
+
+This command currently provides process grouping, profile environment, and exit-status propagation only. It does not invoke the capture helper or claim network isolation. The capture-session controller will use the same boundary with a gated child: create the scope, keep the application stopped, resolve and validate the exact cgroup path, activate trust and nftables capture, and only then release the command. Scope emptiness and controller state, not Claude hooks or individual PIDs, determine cleanup.
+
+The launch interface may later select a stronger sandbox or VM backend. Those backends must preserve the same full-process-tree, explicit-guarantee, fail-closed, and ordered-cleanup semantics; they must not silently replace unavailable isolation with the current process-only scope.
+
 ## Real Agent Gateway interoperability
 
 Run the opt-in local smoke test against a built Agent Gateway checkout:

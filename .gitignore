@@ -1,3 +1,4 @@
 /target
 /tests/vm/.artifacts/
 /tests/vm/.state/
+.vscode/settings.json

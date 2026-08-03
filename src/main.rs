@@ -15,7 +15,7 @@ use agentdesktop::proxy::{self, ProxyOptions};
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitCode, ExitStatus};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 
@@ -45,20 +45,43 @@ enum ConnectorCommand {
     /// Relay redirected Linux TCP flows over HBONE.
     #[cfg(target_os = "linux")]
     Capture(agentdesktop::capture::CaptureArgs),
+    /// Run a command tree in an Agent Desktop execution scope.
+    #[cfg(target_os = "linux")]
+    Launch(agentdesktop::launch::LaunchArgs),
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    match Cli::parse().command {
-        ConnectorCommand::Serve(config) => serve(config.validate()?).await,
-        ConnectorCommand::ConnectAgents { yes } => connect_agents(yes).await,
-        ConnectorCommand::Identity { command } => agentdesktop::identity::cli::run(command).await,
+async fn main() -> anyhow::Result<ExitCode> {
+    let status = match Cli::parse().command {
+        ConnectorCommand::Serve(config) => {
+            serve(config.validate()?).await?;
+            None
+        }
+        ConnectorCommand::ConnectAgents { yes } => {
+            connect_agents(yes).await?;
+            None
+        }
+        ConnectorCommand::Identity { command } => {
+            agentdesktop::identity::cli::run(command).await?;
+            None
+        }
         #[cfg(target_os = "linux")]
         ConnectorCommand::Capture(args) => {
             let _telemetry = agentdesktop::telemetry::init()?;
-            agentdesktop::capture::run(args).await
+            agentdesktop::capture::run(args).await?;
+            None
         }
-    }
+        #[cfg(target_os = "linux")]
+        ConnectorCommand::Launch(args) => Some(agentdesktop::launch::run(args)?),
+    };
+    Ok(status.map_or(ExitCode::SUCCESS, exit_code))
+}
+
+fn exit_code(status: ExitStatus) -> ExitCode {
+    status
+        .code()
+        .and_then(|code| u8::try_from(code).ok())
+        .map_or(ExitCode::FAILURE, ExitCode::from)
 }
 
 async fn serve(config: Config) -> anyhow::Result<()> {
