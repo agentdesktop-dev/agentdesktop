@@ -7,8 +7,10 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/certificate"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/enrollment"
@@ -105,6 +107,92 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 	}
 	if auditCount != 2 {
 		t.Fatalf("audit event count = %d, want 2", auditCount)
+	}
+
+	administrator := enrollment.Principal{Issuer: issuer, Subject: "admin-1"}
+	deviceID, err := identifier.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuance, err := store.BeginIssuance(ctx, administrator, record.ID, deviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issuance.DeviceID != deviceID || string(issuance.CSRDER) != string(request.DER) {
+		t.Fatalf("issuance = %#v", issuance)
+	}
+	duplicateDeviceID, err := identifier.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.BeginIssuance(ctx, administrator, record.ID, duplicateDeviceID); !errors.Is(err, enrollment.ErrNotPending) {
+		t.Fatalf("duplicate claim error = %v, want ErrNotPending", err)
+	}
+	issued := enrollment.IssuedCertificate{
+		ChainPEM:     "certificate-chain",
+		SerialNumber: "01",
+		NotBefore:    time.Unix(1_000, 0),
+		NotAfter:     time.Unix(2_000, 0),
+	}
+	approval, err := store.CompleteIssuance(ctx, administrator, issuance, issued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approval.Status != "approved" || approval.DeviceID != deviceID || approval.CertificatePEM != issued.ChainPEM {
+		t.Fatalf("approval = %#v", approval)
+	}
+	var approvedStatus, storedDeviceID, storedCertificate string
+	if err := pool.QueryRow(ctx, `
+		SELECT enrollments.status, enrollments.device_id, certificates.certificate_pem
+		FROM enrollments
+		JOIN certificates ON certificates.device_id = enrollments.device_id
+		WHERE enrollments.id = $1
+	`, record.ID).Scan(&approvedStatus, &storedDeviceID, &storedCertificate); err != nil {
+		t.Fatal(err)
+	}
+	if approvedStatus != "approved" || storedDeviceID != deviceID || storedCertificate != issued.ChainPEM {
+		t.Fatal("approved enrollment or certificate was not persisted")
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM audit_events
+		WHERE target_id = $1 AND action IN ('enrollment.issuance_started', 'enrollment.approved')
+	`, record.ID).Scan(&auditCount); err != nil {
+		t.Fatal(err)
+	}
+	if auditCount != 2 {
+		t.Fatalf("approval audit event count = %d, want 2", auditCount)
+	}
+
+	abortRequest := validRequest(t)
+	abortEnrollmentID, err := identifier.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	abortRecord, err := store.CreatePending(ctx, enrollment.Principal{Issuer: issuer, Subject: "user-1"}, abortRequest, abortEnrollmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	abortDeviceID, err := identifier.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	abortedIssuance, err := store.BeginIssuance(ctx, administrator, abortRecord.ID, abortDeviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AbortIssuance(ctx, administrator, abortedIssuance); err != nil {
+		t.Fatal(err)
+	}
+	var abortedStatus string
+	var abortedDeviceCount int
+	if err := pool.QueryRow(ctx, `SELECT status FROM enrollments WHERE id = $1`, abortRecord.ID).Scan(&abortedStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM devices WHERE id = $1`, abortDeviceID).Scan(&abortedDeviceCount); err != nil {
+		t.Fatal(err)
+	}
+	if abortedStatus != "pending" || abortedDeviceCount != 0 {
+		t.Fatal("aborted issuance did not restore pending state")
 	}
 }
 

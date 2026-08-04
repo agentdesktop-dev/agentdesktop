@@ -13,6 +13,7 @@ import (
 
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/api"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/auth"
+	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/ca"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/enrollment"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/store/postgres"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/migrations"
@@ -26,9 +27,17 @@ func main() {
 	issuer := required("OAUTH_ISSUER")
 	audience := required("OAUTH_AUDIENCE")
 	scope := required("OAUTH_SCOPE")
+	administratorScope := required("ADMIN_OAUTH_SCOPE")
 	organizationID := required("ORGANIZATION_ID")
 	organizationName := required("ORGANIZATION_NAME")
+	caCertificatePath := required("CA_CERTIFICATE_PATH")
+	caKeyPath := required("CA_PRIVATE_KEY_PATH")
+	trustDomain := required("MTLS_TRUST_DOMAIN")
 	listenAddress := value("LISTEN_ADDRESS", "127.0.0.1:8090")
+	certificateLifetime, err := time.ParseDuration(value("CLIENT_CERTIFICATE_LIFETIME", "24h"))
+	if err != nil {
+		log.Fatalf("invalid CLIENT_CERTIFICATE_LIFETIME: %v", err)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -50,7 +59,24 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	handler := api.NewServer(validator, enrollment.NewService(store))
+	administratorValidator, err := auth.Discover(ctx, client, issuer, audience, administratorScope)
+	if err != nil {
+		log.Fatal(err)
+	}
+	certificateIssuer, err := ca.LoadX509Issuer(
+		caCertificatePath,
+		caKeyPath,
+		trustDomain,
+		certificateLifetime,
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	handler := api.NewServer(
+		validator,
+		administratorValidator,
+		enrollment.NewService(store, certificateIssuer),
+	)
 	server := &http.Server{
 		Addr:              listenAddress,
 		Handler:           handler,

@@ -15,18 +15,58 @@ type Authenticator interface {
 }
 
 type Server struct {
-	authenticator Authenticator
-	enrollments   *enrollment.Service
+	administratorAuthenticator Authenticator
+	authenticator              Authenticator
+	enrollments                *enrollment.Service
 }
 
-func NewServer(authenticator Authenticator, enrollments *enrollment.Service) http.Handler {
-	server := &Server{authenticator: authenticator, enrollments: enrollments}
+func NewServer(
+	authenticator Authenticator,
+	administratorAuthenticator Authenticator,
+	enrollments *enrollment.Service,
+) http.Handler {
+	server := &Server{
+		authenticator:              authenticator,
+		administratorAuthenticator: administratorAuthenticator,
+		enrollments:                enrollments,
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/enrollments", server.requestEnrollment)
+	mux.HandleFunc("POST /v1/admin/enrollments/{enrollmentID}/approve", server.approveEnrollment)
 	mux.HandleFunc("GET /healthz", func(response http.ResponseWriter, _ *http.Request) {
 		response.WriteHeader(http.StatusOK)
 	})
 	return mux
+}
+
+func (server *Server) approveEnrollment(response http.ResponseWriter, request *http.Request) {
+	administrator, err := server.administratorAuthenticator.Authenticate(request)
+	if err != nil {
+		writeError(response, http.StatusUnauthorized, "invalid_admin_token")
+		return
+	}
+	approval, err := server.enrollments.Approve(
+		request.Context(),
+		administrator,
+		request.PathValue("enrollmentID"),
+	)
+	switch {
+	case errors.Is(err, enrollment.ErrNotPending):
+		writeError(response, http.StatusConflict, "enrollment_not_pending")
+		return
+	case errors.Is(err, enrollment.ErrInvalidPrincipal):
+		writeError(response, http.StatusBadRequest, "invalid_request")
+		return
+	case errors.Is(err, enrollment.ErrIssuanceFailed):
+		writeError(response, http.StatusBadGateway, "certificate_issuance_failed")
+		return
+	case err != nil:
+		writeError(response, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	response.Header().Set("content-type", "application/json")
+	response.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(response).Encode(approval)
 }
 
 func (server *Server) requestEnrollment(response http.ResponseWriter, request *http.Request) {

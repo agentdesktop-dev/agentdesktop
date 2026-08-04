@@ -1,6 +1,6 @@
 # Managed mTLS identity contract v1
 
-Status: selected production direction; enrollment request persistence is implemented, while approval, issuance, renewal, recovery, and Agent Gateway enforcement remain incomplete.
+Status: selected production direction; enrollment request persistence, administrator-scoped approval, and local protected-key issuance are implemented. Production CA integration, client delivery, renewal, recovery, revocation, and Agent Gateway enforcement remain incomplete.
 
 ## Trust model
 
@@ -36,10 +36,16 @@ Before expiry, Agent Desktop generates a new local key and CSR and renews over m
 
 An expired certificate cannot authenticate ordinary mTLS renewal. Recovery uses a valid OAuth session plus proof of possession of the enrolled private key, such as a signature over a server nonce bound to the new CSR. The service may use the expired certificate only as identifying evidence. Recovery is allowed only within configured policy and for an approved, non-revoked device; otherwise full re-enrollment and administrator approval are required.
 
+The current Go issuer adapter uses a protected local CA key and Go's X.509 implementation. It is a concrete development and single-instance boundary, not a final production key-management decision. The narrow issuer interface is intended to be replaced by KMS, HSM, `step-ca`, Vault PKI, or a cloud private CA without moving approval policy into the CA adapter.
+
+Approval claims a pending enrollment as `issuing` before calling the CA, preventing concurrent duplicate approval without holding a database transaction across CA I/O. CA failure restores pending state. A process crash while issuance is in progress currently leaves the record in `issuing`; reconciliation and CA idempotency are required before production rollout.
+
 ## Remaining implementation
 
-- Add administrator-authenticated approval and rejection APIs with audit events.
-- Add a narrow CA adapter and issue authority-controlled short-lived client certificates.
+- Replace the local-key issuer with a production protected-key CA adapter.
+- Add authenticated certificate retrieval by the enrolled user and key.
+- Reconcile interrupted issuance without producing an untracked valid certificate.
+- Add administrator rejection and listing APIs.
 - Add certificate download, proactive renewal, expired-certificate recovery, and key rotation.
 - Add device and certificate revocation with fail-closed status consumption by Agent Gateway.
 - Add Agent Desktop CSR/key storage and mTLS connection-pool lifecycle.
