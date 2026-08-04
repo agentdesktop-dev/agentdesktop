@@ -1,15 +1,17 @@
 use std::ffi::OsString;
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
+use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, ExitStatus};
+use std::path::PathBuf;
+use std::process::{Child, Command, ExitStatus};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-
-use crate::apps::claude::{CONNECTOR_BASE_URL, PLACEHOLDER_CREDENTIAL};
 
 #[derive(Debug, Eq, PartialEq)]
 struct EnvironmentVariable {
@@ -22,6 +24,7 @@ struct Profile {
     name: &'static str,
     environment: &'static [EnvironmentVariable],
     preflight: Option<Preflight>,
+    transparent_capture: bool,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -34,24 +37,17 @@ const CUSTOM_PROFILE: Profile = Profile {
     name: "custom",
     environment: &[],
     preflight: None,
+    transparent_capture: false,
 };
 const CLAUDE_PROFILE: Profile = Profile {
     name: "claude",
-    environment: &[
-        EnvironmentVariable {
-            name: "ANTHROPIC_BASE_URL",
-            value: CONNECTOR_BASE_URL,
-        },
-        EnvironmentVariable {
-            name: "ANTHROPIC_API_KEY",
-            value: PLACEHOLDER_CREDENTIAL,
-        },
-    ],
+    environment: &[],
     preflight: Some(Preflight {
         address: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080)),
         request:
             b"GET /_agentdesktop/healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
     }),
+    transparent_capture: true,
 };
 const PROFILES: &[Profile] = &[CUSTOM_PROFILE, CLAUDE_PROFILE];
 
@@ -70,16 +66,68 @@ pub struct LaunchArgs {
     command: Vec<OsString>,
 }
 
-pub fn run(args: LaunchArgs) -> Result<ExitStatus> {
-    run_with_systemd(&args, Path::new("systemd-run"))
+#[derive(Debug, Args)]
+pub struct LaunchChildArgs {
+    #[arg(long)]
+    gate_directory: PathBuf,
+
+    #[arg(long)]
+    controller_pid: u32,
+
+    #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+    command: Vec<OsString>,
 }
 
-fn run_with_systemd(args: &LaunchArgs, systemd_run: &Path) -> Result<ExitStatus> {
+pub fn run(args: LaunchArgs) -> Result<ExitStatus> {
+    let executable = std::env::current_exe().context("resolve the Agent Desktop executable")?;
+    run_with_systemd(
+        &args,
+        Path::new("systemd-run"),
+        Path::new("systemctl"),
+        Path::new("/sys/fs/cgroup"),
+        &executable,
+    )
+}
+
+pub fn run_child(args: LaunchChildArgs) -> Result<()> {
+    let ready = args.gate_directory.join("ready");
+    let release = args.gate_directory.join("release");
+    create_gate_file(&ready)?;
+    while !release.is_file() {
+        if !Path::new("/proc")
+            .join(args.controller_pid.to_string())
+            .is_dir()
+        {
+            bail!("launch controller exited before releasing the application");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let (program, arguments) = args
+        .command
+        .split_first()
+        .context("launch child requires a command")?;
+    Err(Command::new(program).args(arguments).exec())
+        .with_context(|| format!("failed to execute {}", program.to_string_lossy()))
+}
+
+fn run_with_systemd(
+    args: &LaunchArgs,
+    systemd_run: &Path,
+    systemctl: &Path,
+    cgroup_root: &Path,
+    executable: &Path,
+) -> Result<ExitStatus> {
     let profile = resolve_profile(&args.profile)?;
     if !args.skip_preflight
         && let Some(preflight) = &profile.preflight
     {
         check_preflight(profile.name, preflight)?;
+    }
+    if profile.transparent_capture {
+        bail!(
+            "transparent capture for profile '{}' is not available yet; launch Claude normally if it is configured to use Agent Desktop",
+            profile.name
+        );
     }
     let (program, arguments) = args
         .command
@@ -87,11 +135,15 @@ fn run_with_systemd(args: &LaunchArgs, systemd_run: &Path) -> Result<ExitStatus>
         .context("launch requires a command")?;
     let unit = scope_name()?;
     let description = format!("Agent Desktop {} execution scope", profile.name);
+    let gate = tempfile::Builder::new()
+        .prefix("agentdesktop-launch-")
+        .tempdir()
+        .context("create the application launch gate")?;
 
     let mut command = Command::new(systemd_run);
     command
         .args(["--user", "--scope", "--collect", "--quiet", "--unit"])
-        .arg(unit)
+        .arg(&unit)
         .arg("--property")
         .arg("KillMode=control-group")
         .arg("--property")
@@ -103,15 +155,96 @@ fn run_with_systemd(args: &LaunchArgs, systemd_run: &Path) -> Result<ExitStatus>
     }
     command
         .arg("--")
+        .arg(executable)
+        .arg("_launch-child")
+        .arg("--gate-directory")
+        .arg(gate.path())
+        .arg("--controller-pid")
+        .arg(std::process::id().to_string())
+        .arg("--")
         .arg(program)
         .args(arguments)
-        .status()
+        .spawn()
         .with_context(|| {
             format!(
                 "failed to create the Linux execution scope with {}",
                 systemd_run.display()
             )
         })
+        .and_then(|mut child| {
+            wait_for_gate(&mut child, &gate.path().join("ready"))?;
+            let _cgroup = scope_control_group(systemctl, cgroup_root, &unit)
+                .inspect_err(|_| terminate_child(&mut child))?;
+            create_gate_file(&gate.path().join("release"))
+                .inspect_err(|_| terminate_child(&mut child))?;
+            child.wait().context("wait for the Linux execution scope")
+        })
+}
+
+fn terminate_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn scope_control_group(systemctl: &Path, cgroup_root: &Path, unit: &str) -> Result<PathBuf> {
+    let output = Command::new(systemctl)
+        .args(["--user", "show", "--property", "ControlGroup", "--value"])
+        .arg(unit)
+        .output()
+        .with_context(|| format!("inspect application scope {unit}"))?;
+    if !output.status.success() {
+        bail!(
+            "could not inspect application scope {unit}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let cgroup = PathBuf::from(String::from_utf8(output.stdout)?.trim());
+    if !cgroup.is_absolute() || cgroup == Path::new("/") {
+        bail!(
+            "application scope {unit} returned invalid cgroup {}",
+            cgroup.display()
+        );
+    }
+    let host_path = cgroup_root.join(
+        cgroup
+            .strip_prefix("/")
+            .expect("absolute cgroup has a root prefix"),
+    );
+    if !host_path.is_dir() {
+        bail!(
+            "application scope {unit} cgroup {} does not exist",
+            cgroup.display()
+        );
+    }
+    Ok(cgroup)
+}
+
+fn create_gate_file(path: &Path) -> Result<()> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("create launch gate file {}", path.display()))?;
+    Ok(())
+}
+
+fn wait_for_gate(child: &mut Child, ready: &Path) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if ready.is_file() {
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait()? {
+            bail!("application scope exited before its launch gate was ready: {status}");
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("application scope did not reach its launch gate");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn check_preflight(profile: &str, preflight: &Preflight) -> Result<()> {
@@ -200,26 +333,48 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
     use std::thread;
 
     #[test]
     fn preserves_command_arguments_and_exit_status() {
         let temporary = tempfile::tempdir().unwrap();
         let runner = temporary.path().join("systemd-run");
-        let output = temporary.path().join("arguments");
+        let systemctl = temporary.path().join("systemctl");
+        let launcher = temporary.path().join("agentdesktop");
+        let cgroup_root = temporary.path().join("cgroup");
+        let systemd_arguments = temporary.path().join("systemd-arguments");
+        let command_arguments = temporary.path().join("command-arguments");
         fs::write(
             &runner,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexit 23\n",
-                output.display()
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+                systemd_arguments.display()
             ),
         )
         .unwrap();
+        fs::create_dir_all(cgroup_root.join("user.slice/user-1000.slice/app.slice/test.scope"))
+            .unwrap();
+        fs::write(
+            &launcher,
+            format!(
+                "#!/bin/sh\nshift\nwhile [ \"$1\" != -- ]; do if [ \"$1\" = --gate-directory ]; then shift; gate=$1; fi; shift; done\nshift\n: > \"$gate/ready\"\nwhile [ ! -f \"$gate/release\" ]; do :; done\nprintf '%s\\n' \"$@\" > '{}'\nexit 23\n",
+                command_arguments.display()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            &systemctl,
+            "#!/bin/sh\nprintf '/user.slice/user-1000.slice/app.slice/test.scope\\n'\n",
+        )
+        .unwrap();
         fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o700)).unwrap();
 
         let status = run_with_systemd(
             &LaunchArgs {
-                profile: "claude".to_owned(),
+                profile: "custom".to_owned(),
                 skip_preflight: true,
                 command: vec![
                     OsString::from("/opt/Claude Code/claude"),
@@ -228,27 +383,94 @@ mod tests {
                 ],
             },
             &runner,
+            &systemctl,
+            &cgroup_root,
+            &launcher,
         )
         .unwrap();
 
         assert_eq!(status.code(), Some(23));
-        let arguments = fs::read_to_string(output).unwrap();
+        let arguments = fs::read_to_string(systemd_arguments).unwrap();
         assert!(arguments.contains("--user\n--scope\n--collect\n--quiet\n"));
         assert!(arguments.contains("KillMode=control-group\n"));
-        assert!(arguments.contains("Description=Agent Desktop claude execution scope\n"));
-        assert!(arguments.contains("--setenv\nANTHROPIC_BASE_URL=http://127.0.0.1:8080\n"));
-        assert!(arguments.contains("--setenv\nANTHROPIC_API_KEY=local-gateway-placeholder\n"));
-        assert!(
-            arguments.contains("--\n/opt/Claude Code/claude\n--continue\nargument with spaces\n")
+        assert!(arguments.contains("Description=Agent Desktop custom execution scope\n"));
+        assert!(!arguments.contains("--setenv\n"));
+        let arguments = fs::read_to_string(command_arguments).unwrap();
+        assert_eq!(
+            arguments,
+            "/opt/Claude Code/claude\n--continue\nargument with spaces\n"
         );
     }
 
     #[test]
     fn resolves_only_embedded_profiles() {
         assert_eq!(resolve_profile("custom").unwrap().environment, &[]);
-        assert_eq!(resolve_profile("claude").unwrap().environment.len(), 2);
+        assert_eq!(resolve_profile("claude").unwrap().environment, &[]);
+        assert!(resolve_profile("claude").unwrap().transparent_capture);
         let error = resolve_profile("unknown").unwrap_err().to_string();
         assert!(error.contains("available profiles: custom, claude"));
+    }
+
+    #[test]
+    fn captured_profile_fails_before_starting_the_application() {
+        let error = run_with_systemd(
+            &LaunchArgs {
+                profile: "claude".to_owned(),
+                skip_preflight: true,
+                command: vec![OsString::from("claude")],
+            },
+            Path::new("/does/not/exist"),
+            Path::new("/does/not/exist"),
+            Path::new("/does/not/exist"),
+            Path::new("/does/not/exist"),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("transparent capture for profile 'claude' is not available yet"));
+    }
+
+    #[test]
+    fn invalid_cgroup_terminates_scope_without_releasing_target() {
+        let temporary = tempfile::tempdir().unwrap();
+        let runner = temporary.path().join("systemd-run");
+        let systemctl = temporary.path().join("systemctl");
+        let launcher = temporary.path().join("agentdesktop");
+        let marker = temporary.path().join("executed");
+        fs::write(
+            &runner,
+            "#!/bin/sh\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+        )
+        .unwrap();
+        fs::write(&systemctl, "#!/bin/sh\nprintf '/missing.scope\\n'\n").unwrap();
+        fs::write(
+            &launcher,
+            format!(
+                "#!/bin/sh\nshift\nwhile [ \"$1\" != -- ]; do if [ \"$1\" = --gate-directory ]; then shift; gate=$1; fi; shift; done\nshift\n: > \"$gate/ready\"\nwhile [ ! -f \"$gate/release\" ]; do :; done\n: > '{}'\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        for executable in [&runner, &systemctl, &launcher] {
+            fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        let error = run_with_systemd(
+            &LaunchArgs {
+                profile: "custom".to_owned(),
+                skip_preflight: true,
+                command: vec![OsString::from("ignored")],
+            },
+            &runner,
+            &systemctl,
+            &temporary.path().join("cgroup"),
+            &launcher,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("cgroup /missing.scope does not exist"));
+        assert!(!marker.exists());
     }
 
     #[test]
@@ -281,13 +503,10 @@ mod tests {
 
     #[test]
     fn reports_an_absent_service_with_recovery_steps() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        drop(listener);
         let error = check_preflight(
             "claude",
             &Preflight {
-                address,
+                address: "127.0.0.1:0".parse().unwrap(),
                 request: b"GET / HTTP/1.1\r\n\r\n",
             },
         )

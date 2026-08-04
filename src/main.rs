@@ -48,6 +48,9 @@ enum ConnectorCommand {
     /// Run a command tree in an Agent Desktop execution scope.
     #[cfg(target_os = "linux")]
     Launch(agentdesktop::launch::LaunchArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "_launch-child", hide = true)]
+    LaunchChild(agentdesktop::launch::LaunchChildArgs),
 }
 
 #[tokio::main]
@@ -73,6 +76,11 @@ async fn main() -> anyhow::Result<ExitCode> {
         }
         #[cfg(target_os = "linux")]
         ConnectorCommand::Launch(args) => Some(agentdesktop::launch::run(args)?),
+        #[cfg(target_os = "linux")]
+        ConnectorCommand::LaunchChild(args) => {
+            agentdesktop::launch::run_child(args)?;
+            None
+        }
     };
     Ok(status.map_or(ExitCode::SUCCESS, exit_code))
 }

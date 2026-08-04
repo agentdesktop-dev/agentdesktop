@@ -143,20 +143,20 @@ Claude Code reads these user settings for ordinary terminal and IDE launches, so
 
 ## Launch an application scope
 
-On Linux, run any command and its descendants in a uniquely owned transient systemd user scope:
+On Linux, run an arbitrary command and its descendants in a uniquely owned transient systemd user scope:
 
 ```bash
-cargo run -- launch --profile claude -- claude --continue
+cargo run -- launch --profile custom -- command --args
 ```
 
-The command preserves the launched argv and working environment, waits for the complete scope, requests control-group cleanup from systemd, and returns the launched command's exit status. Embedded profiles can add process-local integration settings without changing application configuration: `claude` supplies the connector URL and placeholder credential to the launched process tree, while the default `custom` profile adds no environment variables. Unknown profiles fail and list the available names.
+The command preserves the launched argv and working environment, creates a gated child in the scope, resolves and validates its exact cgroup v2 path before release, waits for the complete scope, requests control-group cleanup from systemd, and returns the launched command's exit status. The default `custom` profile adds no environment variables. Unknown profiles fail and list the available names.
 
-This means Claude can use Agent Desktop for one invocation without changing `~/.claude/settings.json`. The connector must already be installed and listening before Claude sends a request.
+The `claude` launch profile is reserved for transparent capture and currently fails before starting Claude because the token, relay, nftables, and trust transaction is not integrated yet. Claude configured through `connect-agents` should continue to run normally without `agentdesktop launch`.
 
-Profiles that depend on Agent Desktop check local readiness before starting the application. If the connector is stopped or Agent Gateway is unavailable, `launch` fails immediately with recovery steps instead of letting the application retry until it times out. Use `--skip-preflight` only for debugging or when deliberately testing an unhealthy service:
+Profiles that depend on Agent Desktop check local readiness before starting the application. If the connector is stopped or Agent Gateway is unavailable, `launch` fails immediately with recovery steps instead of letting the application retry until it times out. `--skip-preflight` bypasses only that readiness check; it does not enable incomplete transparent capture.
 
 ```bash
-cargo run -- launch --skip-preflight --profile claude -- claude
+cargo run -- launch --skip-preflight --profile custom -- command --args
 ```
 
 This is currently process grouping only. It does not yet route traffic, install capture rules, restrict files, or provide a security sandbox. The scope is the process-identity foundation for the transactional Linux capture controller: capture will keep the command stopped until trust, relay, and fail-closed network rules are active. A future profile may request a stronger lightweight-sandbox, container, or VM backend, but Agent Desktop must report the guarantees actually active and must never silently fall back to weaker isolation.

@@ -11,13 +11,13 @@ Last updated: 2026-08-03
 | Persistent Claude Code connector configuration | Supported | Build not validated | Build not validated |
 | Secret Service credentials | Supported | Unavailable | Unavailable |
 | Protected-file credential fallback | Supported | Unavailable | Unavailable |
-| Owned application execution scope | Transient systemd user scope; process grouping only | Unavailable | Unavailable |
+| Owned application execution scope | Gated transient systemd user scope with validated cgroup v2 path | Unavailable | Unavailable |
 | Transparent process capture | Prototype kernel-to-HBONE path validated in private container; unsupported for applications | Unavailable | Unavailable |
 | CA trust installation/removal | Unavailable | Unavailable | Unavailable |
 | Transactional bundle installer | Supported | Build not validated | Build not validated |
 | User service integration | Generated systemd unit | Unavailable | Unavailable |
 
-The local `/_agentdesktop/status` response exposes the current binary's capability flags. The Linux `agentdesktop launch` command owns a transient systemd user scope for a command tree but does not yet provide network capture or sandbox isolation. Native HTTP forwarding is unprivileged. Transparent capture and trust installation remain false until their platform implementations satisfy process identity, fail-closed routing, scoped removal, and privileged integration tests.
+The local `/_agentdesktop/status` response exposes the current binary's capability flags. The Linux `agentdesktop launch` command owns a gated transient systemd user scope and validates its exact cgroup before release, but does not yet provide network capture or sandbox isolation. Native HTTP forwarding is unprivileged. Transparent capture and trust installation remain false until their platform implementations satisfy process identity, fail-closed routing, scoped removal, and privileged integration tests.
 
 ## Required validation environments
 

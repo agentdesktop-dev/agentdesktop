@@ -69,14 +69,14 @@ This does not prove production host attribution, resistance to a local administr
 The public launch boundary can already place a command and all descendants in an owned transient systemd user scope:
 
 ```bash
-agentdesktop launch --profile claude -- claude
+agentdesktop launch --profile custom -- command --args
 ```
 
-The embedded `claude` profile supplies `ANTHROPIC_BASE_URL` and the local placeholder credential only to the launched process tree, so this path does not modify Claude settings. The default `custom` profile supplies no integration environment.
+The scope starts an internal gated child, validates the exact systemd `ControlGroup` against the cgroup v2 filesystem, and releases the child only afterward. The helper watches its controller process and exits without launching the application if the controller disappears before release. The default `custom` profile supplies no integration environment.
 
-Before launching Claude, the profile checks `/_agentdesktop/healthz` with bounded local timeouts. A stopped connector or unreachable Agent Gateway produces immediate service-start, installation, and retry guidance. `--skip-preflight` bypasses readiness only for deliberate debugging; it does not remove the profile environment or execution scope.
+The `claude` profile is reserved for transparent capture, injects no connector-routing environment, and currently fails before application launch because the full capture transaction is unavailable. Claude configured with the native or connector-assisted path runs normally without `agentdesktop launch`; enabling both paths would risk duplicate routing or loops.
 
-This command currently provides process grouping, profile environment, and exit-status propagation only. It does not invoke the capture helper or claim network isolation. The capture-session controller will use the same boundary with a gated child: create the scope, keep the application stopped, resolve and validate the exact cgroup path, activate trust and nftables capture, and only then release the command. Scope emptiness and controller state, not Claude hooks or individual PIDs, determine cleanup.
+This command currently provides gated process grouping, exact cgroup discovery, and exit-status propagation only. It does not invoke the capture helper or claim network isolation. The capture-session controller will activate trust, relay, and nftables capture at the existing pre-release boundary. Scope emptiness and controller state, not Claude hooks or individual PIDs, determine cleanup.
 
 The launch interface may later select a stronger sandbox or VM backend. Those backends must preserve the same full-process-tree, explicit-guarantee, fail-closed, and ordered-cleanup semantics; they must not silently replace unavailable isolation with the current process-only scope.
 

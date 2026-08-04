@@ -162,7 +162,7 @@ Preferred process selectors:
 
 Executable names and paths are useful rollout selectors but are not security identities. Define whether capture follows child and helper processes for every application profile; a managed cgroup, job, or session is preferable to repeated PID attribution.
 
-`agentdesktop launch [--profile NAME] -- COMMAND [ARGS...]` is the stable application-launch boundary. Its first Linux implementation creates an owned transient systemd user scope for the command and every descendant; it is process grouping, not yet a sandbox or a supported capture path. The capture controller must activate trust, relay, and network rules before releasing the scoped command. Later concrete requirements may add stronger execution backends such as a Linux namespace sandbox or a VM, but profiles must request explicit guarantees, unavailable backends must fail closed rather than downgrade, and the repository must not add speculative sandbox abstractions before implementing one.
+`agentdesktop launch [--profile NAME] -- COMMAND [ARGS...]` is the stable application-launch boundary. Its first Linux implementation creates an owned transient systemd user scope, starts a gated child, and validates the exact cgroup v2 path before release; it is not yet a sandbox or a supported capture path. The capture controller must activate trust, relay, and network rules at that pre-release boundary. Later concrete requirements may add stronger execution backends such as a Linux namespace sandbox or a VM, but profiles must request explicit guarantees, unavailable backends must fail closed rather than downgrade, and the repository must not add speculative sandbox abstractions before implementing one.
 
 ## TLS and trust
 

@@ -1,4 +1,6 @@
 use std::process::Command;
+#[cfg(target_os = "linux")]
+use std::time::{Duration, Instant};
 
 #[test]
 fn help_exits_successfully() {
@@ -48,6 +50,37 @@ fn launch_requires_a_command() {
             .unwrap()
             .contains("<COMMAND>...")
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn launch_child_waits_for_explicit_release() {
+    let temporary = tempfile::tempdir().unwrap();
+    let marker = temporary.path().join("executed");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agentdesktop"))
+        .args([
+            "_launch-child",
+            "--gate-directory",
+            temporary.path().to_str().unwrap(),
+            "--controller-pid",
+            &std::process::id().to_string(),
+            "--",
+            "/usr/bin/touch",
+            marker.to_str().unwrap(),
+        ])
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !temporary.path().join("ready").is_file() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(temporary.path().join("ready").is_file());
+    assert!(!marker.exists());
+
+    std::fs::write(temporary.path().join("release"), "").unwrap();
+    assert!(child.wait().unwrap().success());
+    assert!(marker.is_file());
 }
 
 #[cfg(unix)]

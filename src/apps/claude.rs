@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value};
 
-pub(crate) const CONNECTOR_BASE_URL: &str = "http://127.0.0.1:8080";
-pub(crate) const PLACEHOLDER_CREDENTIAL: &str = "local-gateway-placeholder";
+const CONNECTOR_BASE_URL: &str = "http://127.0.0.1:8080";
+const PLACEHOLDER_CREDENTIAL: &str = "local-gateway-placeholder";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectionStatus {
