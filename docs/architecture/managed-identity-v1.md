@@ -1,6 +1,6 @@
 # Managed Identity Contract v1
 
-Status: proposed contract for the first managed implementation. Neither the connector nor Agent Gateway implements this complete contract yet.
+Status: superseded as the production direction by [Managed mTLS identity contract v1](managed-mtls-v1.md). The DPoP implementation and fixtures remain experimental compatibility work; external OAuth-provider DPoP support is no longer a production prerequisite.
 
 This contract defines managed user identity and proof that requests originate from the connector instance that obtained the token. It applies to managed remote mode only. Standalone mode does not use organizational identity.
 

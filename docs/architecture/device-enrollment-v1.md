@@ -1,5 +1,7 @@
 # Device enrollment API v1 draft
 
+Status: DPoP-based fixture contract. Production enrollment now follows [Managed mTLS identity contract v1](managed-mtls-v1.md); this document remains accurate for the existing experimental connector and mock authority.
+
 ## Scope
 
 This draft defines the executable mock authority used to develop managed device enrollment. It upgrades a DPoP thumbprint from connector-instance proof to an authority-approved device association. It does not make a local device name, connector-supplied ID, or unapproved key into verified device identity.

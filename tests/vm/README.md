@@ -57,7 +57,7 @@ scripts/vm-managed-walkthrough.sh prepare --reset
 
 The harness generates a short-lived test CA, starts a TLS authorization/enrollment authority with delayed automatic approval, starts a TLS managed-gateway relay to the `SMOKE_OK` provider, builds an organization-specific installer, and uses SSH to simulate MDM trust and software installation. It leaves browser sign-in, service activation, separate Claude consent, and the final plain `claude` request for the interactive desktop walkthrough. Run `scripts/vm-managed-walkthrough.sh stop` afterward.
 
-These are test fixtures, not production identity or Agent Gateway implementations. The gateway fixture requires and strips connector DPoP headers but does not validate token signatures, proof claims, replay, or approved device state. Real managed security validation remains blocked until Agent Gateway enforces the managed identity contract.
+These are test fixtures, not production identity or Agent Gateway implementations. The gateway fixture validates issuer-pinned token signatures and DPoP proof binding and replay, then strips connector credentials; it does not enforce approved device state. The selected production path uses mTLS device identity and remains blocked until certificate lifecycle and Agent Gateway mTLS enforcement are complete.
 
 The test-only `agentdesktop` account has passwordless sudo. SSH password authentication is exposed only through the QEMU user-network forward on host loopback. Do not publish the VM's SSH port on a non-loopback host address.
 

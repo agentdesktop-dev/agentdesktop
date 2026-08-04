@@ -21,7 +21,7 @@ Standalone local mode and managed remote mode use the same stream contract but d
 
 Standalone local mode uses a local-only Agent Gateway endpoint. A private Unix socket is preferred if Agent Gateway gains compatible HTTP/2 listener support. The current prototype uses loopback and requires an opaque token from a current-user-owned `0600` file. The connector marks the token sensitive and sends it only as `x-agentdesktop-token` on CONNECT. Agent Gateway compares it through `source.connectHeaders` on the re-entered route, so it never enters the inner TCP stream. No organizational OAuth or device enrollment is required. Token creation, delivery to Agent Gateway, and rotation are not yet integrated into lifecycle management.
 
-Managed remote mode requires TLS plus a short-lived DPoP-bound access token on every CONNECT request. Agent Gateway must validate the token, DPoP proof, replay uniqueness, method and target binding, then derive immutable user and device policy context. Connector authentication headers must not enter the inner TCP stream or provider request.
+Managed remote mode requires mTLS with a short-lived enrollment certificate plus an ordinary OAuth access token on each CONNECT request. Agent Gateway derives immutable device context from the validated client certificate, derives user context from the validated token, and keeps the connection isolated to that identity and certificate generation. Connector authentication headers must not enter the inner TCP stream or provider request.
 
 ## Failure behavior
 
@@ -33,7 +33,7 @@ The connector implements and deterministically tests the HTTP/2 CONNECT stream p
 
 The following remain required before captured mode can be enabled:
 
-- Managed TLS and per-CONNECT DPoP authentication.
+- Managed mTLS, OAuth authentication, and immutable outer-to-inner identity propagation.
 - Connection pooling keyed by identity generation.
 - Integrated standalone token creation, delivery, and rotation.
 - Real Agent Gateway restart, cancellation, and stale-rule tests.

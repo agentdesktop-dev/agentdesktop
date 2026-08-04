@@ -104,8 +104,13 @@ start_services() {
     AGENTDESKTOP_FAKE_AUTO_APPROVE=1 \
     node "$root/tests/fixtures/fake-authorization-server.mjs"
   start_service gateway env \
+    NODE_EXTRA_CA_CERTS="$runtime/ca.crt" \
     AGENTDESKTOP_FAKE_LISTEN_HOST=127.0.0.1 \
     AGENTDESKTOP_FAKE_PORT=4000 \
+    AGENTDESKTOP_FAKE_ISSUER="$issuer" \
+    AGENTDESKTOP_FAKE_AUDIENCE=agentdesktop \
+    AGENTDESKTOP_FAKE_SCOPE=agentgateway.invoke \
+    AGENTDESKTOP_FAKE_GATEWAY_ORIGIN="$gateway" \
     AGENTDESKTOP_FAKE_TLS_KEY="$runtime/host.test.key" \
     AGENTDESKTOP_FAKE_TLS_CERTIFICATE="$runtime/host.test.crt" \
     AGENTDESKTOP_FAKE_PROVIDER=http://127.0.0.1:18081/ \

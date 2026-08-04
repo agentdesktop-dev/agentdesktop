@@ -4,7 +4,7 @@ An early, policy-free edge connector that forwards Claude Code HTTP traffic from
 
 Source: [github.com/agentdesktop-dev/agentdesktop](https://github.com/agentdesktop-dev/agentdesktop)
 
-The current development build includes experimental managed browser login, DPoP-authenticated forwarding, refresh restoration, an enrollment client and mock authority, opt-in OTLP trace export, and supported standalone Linux transparent capture. Managed transparent capture remains unavailable until Agent Gateway identity enforcement and authenticated remote transport are complete. Production enrollment authority integration, MDM product integration, and metric export are not implemented. See [AGENTS.md](AGENTS.md) for the architecture and incremental delivery plan.
+The current development build includes experimental managed browser login and DPoP forwarding, the first Go/PostgreSQL production enrollment backend slice, opt-in OTLP trace export, and supported standalone Linux transparent capture. The selected managed identity direction uses ordinary OAuth for users and short-lived mTLS certificates for devices. Managed transparent capture remains unavailable until certificate lifecycle and Agent Gateway mTLS enforcement are complete. See [AGENTS.md](AGENTS.md) for the architecture and incremental delivery plan.
 
 For a local installation, including credential ownership, file permissions, logs, retention, and removal, see [Standalone Operations](docs/deployment/standalone.md).
 
@@ -13,7 +13,7 @@ Tested platform behavior is listed in [Platform Compatibility](docs/compatibilit
 The Linux cgroup v2/nftables implementation is documented in [Linux Transparent Capture](docs/deployment/linux-capture.md).
 Manual desktop journeys and future headless E2E tests use the [QEMU desktop test environment](tests/vm/README.md).
 
-The managed user/device trust boundary is documented in [Managed Identity Contract v1](docs/architecture/managed-identity-v1.md). Browser PKCE login, connector-instance DPoP proof, refresh restoration, the enrollment client, and the repository's mock enrollment authority are implemented. Production authority integration and Agent Gateway enforcement remain design-contract work.
+The selected production trust boundary is documented in [Managed mTLS identity contract v1](docs/architecture/managed-mtls-v1.md). The initial [Go enrollment control plane](control-plane/README.md) validates ordinary OAuth bearer tokens and P-256 CSRs and persists pending enrollment in PostgreSQL. Browser PKCE login and the older DPoP connector path remain experimental; administrator approval, CA issuance, renewal, recovery, revocation enforcement, and Agent Gateway mTLS work are pending.
 
 ## Managed identity storage preflight
 
