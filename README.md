@@ -4,13 +4,13 @@ An early, policy-free edge connector that forwards Claude Code HTTP traffic from
 
 Source: [github.com/agentdesktop-dev/agentdesktop](https://github.com/agentdesktop-dev/agentdesktop)
 
-The current development build includes experimental managed browser login, DPoP-authenticated forwarding, refresh restoration, an enrollment client and mock authority, opt-in OTLP trace export, and an isolated Linux transparent-capture prototype. Supported transparent capture remains unavailable until authentication and lifecycle integration are complete. Production enrollment authority integration, Agent Gateway identity enforcement, MDM product integration, and metric export are not implemented. See [AGENTS.md](AGENTS.md) for the architecture and incremental delivery plan.
+The current development build includes experimental managed browser login, DPoP-authenticated forwarding, refresh restoration, an enrollment client and mock authority, opt-in OTLP trace export, and supported standalone Linux transparent capture. Managed transparent capture remains unavailable until Agent Gateway identity enforcement and authenticated remote transport are complete. Production enrollment authority integration, MDM product integration, and metric export are not implemented. See [AGENTS.md](AGENTS.md) for the architecture and incremental delivery plan.
 
 For a local installation, including credential ownership, file permissions, logs, retention, and removal, see [Standalone Operations](docs/deployment/standalone.md).
 
 Verified progress and environment-dependent blockers are tracked in [Phase Status](docs/development/phase-status.md).
 Tested platform behavior is listed in [Platform Compatibility](docs/compatibility/platforms.md).
-The isolated Linux cgroup v2/nftables prototype is documented in [Linux Capture Prototype](docs/deployment/linux-capture.md).
+The Linux cgroup v2/nftables implementation is documented in [Linux Transparent Capture](docs/deployment/linux-capture.md).
 Manual desktop journeys and future headless E2E tests use the [QEMU desktop test environment](tests/vm/README.md).
 
 The managed user/device trust boundary is documented in [Managed Identity Contract v1](docs/architecture/managed-identity-v1.md). Browser PKCE login, connector-instance DPoP proof, refresh restoration, the enrollment client, and the repository's mock enrollment authority are implemented. Production authority integration and Agent Gateway enforcement remain design-contract work.
@@ -151,7 +151,7 @@ cargo run -- launch --profile custom -- command --args
 
 The command preserves the launched argv and working environment, creates a gated child in the scope, resolves and validates its exact cgroup v2 path before release, waits for the complete scope, requests control-group cleanup from systemd, and returns the launched command's exit status. The default `custom` profile adds no environment variables. Unknown profiles fail and list the available names.
 
-The `claude` launch profile is reserved for transparent capture and currently fails before starting Claude because the token, relay, nftables, and trust transaction is not integrated yet. Claude configured through `connect-agents` should continue to run normally without `agentdesktop launch`.
+The `claude` launch profile enables standalone Linux transparent capture. It requires installer-created Agent Gateway capture configuration and explicit inspection trust. Claude configured through `connect-agents` should continue to run normally without `agentdesktop launch`; the two routing paths are mutually exclusive.
 
 Profiles that depend on Agent Desktop check local readiness before starting the application. If the connector is stopped or Agent Gateway is unavailable, `launch` fails immediately with recovery steps instead of letting the application retry until it times out. `--skip-preflight` bypasses only that readiness check; it does not enable incomplete transparent capture.
 
@@ -159,7 +159,7 @@ Profiles that depend on Agent Desktop check local readiness before starting the 
 cargo run -- launch --skip-preflight --profile custom -- command --args
 ```
 
-This is currently process grouping only. It does not yet route traffic, install capture rules, restrict files, or provide a security sandbox. The scope is the process-identity foundation for the transactional Linux capture controller: capture will keep the command stopped until trust, relay, and fail-closed network rules are active. A future profile may request a stronger lightweight-sandbox, container, or VM backend, but Agent Desktop must report the guarantees actually active and must never silently fall back to weaker isolation.
+The `custom` profile provides process grouping only. The `claude` profile keeps the command stopped until trust, relay, and fail-closed network rules are active, then captures TCP/443 and rejects UDP/443 for the scope and descendants. This is routed capture, not a filesystem sandbox or an anti-bypass boundary against local administrators. A future profile may request stronger isolation, but Agent Desktop must report the guarantees actually active and must never silently fall back to weaker isolation.
 
 In standalone mode, the connector can optionally own the lifecycle of a separately installed Agent Gateway process:
 

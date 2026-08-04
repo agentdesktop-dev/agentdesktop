@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Eq, PartialEq)]
 struct EnvironmentVariable {
@@ -80,14 +81,70 @@ pub struct LaunchChildArgs {
 
 pub fn run(args: LaunchArgs) -> Result<ExitStatus> {
     let executable = std::env::current_exe().context("resolve the Agent Desktop executable")?;
+    let capture_helper = Path::new("/usr/libexec/agentdesktop-capture-setup");
     run_with_systemd(
         &args,
         Path::new("systemd-run"),
         Path::new("systemctl"),
         Path::new("/sys/fs/cgroup"),
         &executable,
-        |_| bail!("transparent capture is not available yet"),
+        |cgroup| {
+            verify_inspection_trust()?;
+            TcpStream::connect_timeout(
+                &SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 15001)),
+                Duration::from_secs(1),
+            )
+            .context("transparent-capture relay is unavailable")?;
+            run_capture_helper(capture_helper, "install", Some(cgroup))
+        },
+        |cgroup| run_capture_helper(capture_helper, "remove", Some(cgroup)),
     )
+}
+
+fn verify_inspection_trust() -> Result<()> {
+    let config_root = std::env::var_os("XDG_CONFIG_HOME").map_or_else(
+        || {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .context("HOME is not set")
+                .map(|home| home.join(".config"))
+        },
+        |root| Ok(PathBuf::from(root)),
+    )?;
+    let certificate = config_root.join("agentgateway/inspection-ca/ca.crt");
+    let contents = std::fs::read(&certificate)
+        .with_context(|| format!("read inspection CA certificate {}", certificate.display()))?;
+    let fingerprint = Sha256::digest(&contents)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let anchor = Path::new("/etc/pki/ca-trust/source/anchors")
+        .join(format!("agentdesktop-{fingerprint}.pem"));
+    if std::fs::read(&anchor).ok().as_deref() != Some(contents.as_slice()) {
+        bail!("local inspection trust is missing or changed; run `agentdesktop trust install`");
+    }
+    Ok(())
+}
+
+fn run_capture_helper(helper: &Path, action: &str, cgroup: Option<&Path>) -> Result<()> {
+    if !helper.is_file() {
+        bail!(
+            "transparent-capture helper {} is not installed",
+            helper.display()
+        );
+    }
+    let mut command = Command::new("pkexec");
+    command.arg(helper).arg(action);
+    if let Some(cgroup) = cgroup {
+        command.arg("--cgroup").arg(cgroup);
+    }
+    let status = command
+        .status()
+        .with_context(|| format!("authorize transparent-capture {action}"))?;
+    if !status.success() {
+        bail!("transparent-capture {action} failed with {status}");
+    }
+    Ok(())
 }
 
 pub fn run_child(args: LaunchChildArgs) -> Result<()> {
@@ -118,6 +175,7 @@ fn run_with_systemd(
     cgroup_root: &Path,
     executable: &Path,
     prepare_capture: impl FnOnce(&Path) -> Result<()>,
+    cleanup_capture: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<ExitStatus> {
     let profile = resolve_profile(&args.profile)?;
     if !args.skip_preflight
@@ -177,9 +235,21 @@ fn run_with_systemd(
             if profile.transparent_capture {
                 prepare_capture(&cgroup).inspect_err(|_| terminate_child(&mut child))?;
             }
-            create_gate_file(&gate.path().join("release"))
-                .inspect_err(|_| terminate_child(&mut child))?;
-            child.wait().context("wait for the Linux execution scope")
+            let result = create_gate_file(&gate.path().join("release"))
+                .inspect_err(|_| terminate_child(&mut child))
+                .and_then(|()| child.wait().context("wait for the Linux execution scope"));
+            if profile.transparent_capture {
+                let cleanup = cleanup_capture(&cgroup);
+                match (result, cleanup) {
+                    (Ok(status), Ok(())) => Ok(status),
+                    (Err(error), _) => Err(error),
+                    (Ok(_), Err(error)) => {
+                        Err(error.context("application exited but capture cleanup failed"))
+                    }
+                }
+            } else {
+                result
+            }
         })
 }
 
@@ -389,6 +459,7 @@ mod tests {
             &cgroup_root,
             &launcher,
             |_| Ok(()),
+            |_| Ok(()),
         )
         .unwrap();
 
@@ -460,6 +531,7 @@ mod tests {
                 prepared_cgroup = Some(cgroup.to_owned());
                 anyhow::bail!("capture preparation failed")
             },
+            |_| Ok(()),
         )
         .unwrap_err()
         .to_string();
@@ -507,6 +579,7 @@ mod tests {
             &systemctl,
             &temporary.path().join("cgroup"),
             &launcher,
+            |_| Ok(()),
             |_| Ok(()),
         )
         .unwrap_err()

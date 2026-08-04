@@ -28,6 +28,8 @@ enum Command {
         #[arg(long)]
         agentgateway: PathBuf,
         #[arg(long)]
+        capture_setup: Option<PathBuf>,
+        #[arg(long)]
         starter_config: PathBuf,
         #[arg(long)]
         control: Option<PathBuf>,
@@ -35,6 +37,8 @@ enum Command {
         gateway_config: Option<PathBuf>,
         #[arg(long)]
         command_link: PathBuf,
+        #[arg(long, default_value_t = false)]
+        capture_enabled: bool,
     },
     ManagedInstall {
         #[arg(long)]
@@ -99,10 +103,12 @@ fn main() -> Result<()> {
             root,
             connector,
             agentgateway,
+            capture_setup,
             starter_config,
             control,
             gateway_config,
             command_link,
+            capture_enabled,
         } => {
             let mut files: Vec<(&Path, &str, bool)> = vec![
                 (connector.as_path(), "bin/agentdesktop", true),
@@ -116,10 +122,17 @@ fn main() -> Result<()> {
             if let Some(control) = &control {
                 files.push((control.as_path(), "bin/agentdesktop-install", true));
             }
+            if let Some(capture_setup) = &capture_setup {
+                files.push((
+                    capture_setup.as_path(),
+                    "bin/agentdesktop-capture-setup",
+                    true,
+                ));
+            }
             install(
                 &root,
                 &files,
-                &standalone_systemd_unit(&root, gateway_config.as_deref()),
+                &standalone_systemd_unit(&root, gateway_config.as_deref(), capture_enabled),
                 "standalone",
                 &command_link,
             )
@@ -304,13 +317,22 @@ fn install(
     Ok(())
 }
 
-fn standalone_systemd_unit(root: &Path, gateway_config: Option<&Path>) -> String {
+fn standalone_systemd_unit(
+    root: &Path,
+    gateway_config: Option<&Path>,
+    capture_enabled: bool,
+) -> String {
     let connector = quote_systemd_arg(&root.join("bin/agentdesktop"));
     let agentgateway = quote_systemd_arg(&root.join("bin/agentgateway"));
     let config =
         quote_systemd_arg(gateway_config.unwrap_or(&root.join("share/examples/agentgateway.yaml")));
+    let capture = if capture_enabled {
+        " --capture-enabled"
+    } else {
+        ""
+    };
     format!(
-        "[Unit]\nDescription=Agent Desktop\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={connector} serve --mode standalone --upstream http://127.0.0.1:4000 --gateway-binary {agentgateway} --gateway-config {config}\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=read-only\n\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription=Agent Desktop\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={connector} serve --mode standalone --upstream http://127.0.0.1:4000 --gateway-binary {agentgateway} --gateway-config {config}{capture}\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=read-only\n\n[Install]\nWantedBy=default.target\n"
     )
 }
 

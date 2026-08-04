@@ -1144,7 +1144,14 @@ mod tests {
         assert_eq!(response["shutdown_timeout_ms"], 303);
         assert_eq!(response["platform"]["os"], std::env::consts::OS);
         assert_eq!(response["platform"]["native_gateway"], true);
-        assert_eq!(response["platform"]["transparent_capture"], false);
+        assert_eq!(
+            response["platform"]["transparent_capture"],
+            cfg!(target_os = "linux")
+        );
+        assert_eq!(
+            response["platform"]["trust_installation"],
+            cfg!(target_os = "linux")
+        );
         assert_eq!(response["metrics"]["requests"], 0);
         assert_eq!(response["metrics"]["upstream_responses"], 0);
         assert_eq!(response["metrics"]["identity_failures"], 0);

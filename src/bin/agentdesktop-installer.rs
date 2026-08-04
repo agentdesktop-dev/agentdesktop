@@ -53,9 +53,13 @@ struct InstallArgs {
         help = "Connect supported AI agents without a separate confirmation"
     )]
     connect_agents: bool,
+    #[arg(long, help = "Trust the local inspection CA without prompting")]
+    trust_inspection: bool,
 }
 
 const SUPPORT_URL: &str = "https://github.com/agentdesktop-dev/agentdesktop/issues/new";
+const CA_CERT_PLACEHOLDER: &str = "__AGENTDESKTOP_INSPECTION_CA_CERT__";
+const CA_KEY_PLACEHOLDER: &str = "__AGENTDESKTOP_INSPECTION_CA_KEY__";
 
 fn main() -> ExitCode {
     match run() {
@@ -95,6 +99,7 @@ fn run() -> Result<()> {
             yes: false,
             no_start: false,
             connect_agents: false,
+            trust_inspection: false,
         },
     };
     install(args)
@@ -137,40 +142,53 @@ fn install_standalone(args: InstallArgs) -> Result<()> {
         .tempdir_in(parent)
         .context("failed to create temporary extraction directory")?;
     extract_payload(payload.path())?;
-    let config_created = seed_config(&payload.path().join("config"), &config)?;
+    install_privileged_helper(&payload.path().join("capture-setup"))?;
+    let ca_directory = config
+        .parent()
+        .context("Agent Gateway config has no parent")?
+        .join("inspection-ca");
+    let config_created = if config.exists() {
+        seed_config(&payload.path().join("config"), &config, None)?
+    } else {
+        initialize_inspection_ca(&payload.path().join("agentgateway"), &ca_directory)?;
+        seed_config(&payload.path().join("config"), &config, Some(&ca_directory))?
+    };
 
-    run_internal(
-        payload.path(),
-        [
-            "install".to_owned(),
-            "--root".to_owned(),
-            root.to_string_lossy().into_owned(),
-            "--connector".to_owned(),
-            payload
-                .path()
-                .join("connector")
-                .to_string_lossy()
-                .into_owned(),
-            "--agentgateway".to_owned(),
-            payload
-                .path()
-                .join("agentgateway")
-                .to_string_lossy()
-                .into_owned(),
-            "--starter-config".to_owned(),
-            payload.path().join("config").to_string_lossy().into_owned(),
-            "--control".to_owned(),
-            payload
-                .path()
-                .join("installer")
-                .to_string_lossy()
-                .into_owned(),
-            "--gateway-config".to_owned(),
-            config.to_string_lossy().into_owned(),
-            "--command-link".to_owned(),
-            command_link.to_string_lossy().into_owned(),
-        ],
-    )?;
+    let capture_enabled = config_created
+        || (ca_directory.join("ca.crt").is_file() && ca_directory.join("ca.key").is_file());
+    let mut install_arguments = vec![
+        "install".to_owned(),
+        "--root".to_owned(),
+        root.to_string_lossy().into_owned(),
+        "--connector".to_owned(),
+        payload
+            .path()
+            .join("connector")
+            .to_string_lossy()
+            .into_owned(),
+        "--agentgateway".to_owned(),
+        payload
+            .path()
+            .join("agentgateway")
+            .to_string_lossy()
+            .into_owned(),
+        "--starter-config".to_owned(),
+        payload.path().join("config").to_string_lossy().into_owned(),
+        "--control".to_owned(),
+        payload
+            .path()
+            .join("installer")
+            .to_string_lossy()
+            .into_owned(),
+        "--gateway-config".to_owned(),
+        config.to_string_lossy().into_owned(),
+        "--command-link".to_owned(),
+        command_link.to_string_lossy().into_owned(),
+    ];
+    if capture_enabled {
+        install_arguments.push("--capture-enabled".to_owned());
+    }
+    run_internal(payload.path(), install_arguments)?;
 
     if !args.no_start {
         run_internal(
@@ -196,6 +214,18 @@ fn install_standalone(args: InstallArgs) -> Result<()> {
             "preserved"
         }
     );
+    let trust_inspection = capture_enabled
+        && (args.trust_inspection || (!args.yes && confirm_inspection_trust(&ca_directory)?));
+    if args.trust_inspection && !capture_enabled {
+        bail!("inspection trust requires an installer-created capture configuration");
+    } else if trust_inspection {
+        install_inspection_trust(&ca_directory.join("ca.crt"))?;
+        println!("  Trust:   local inspection CA installed");
+    } else if capture_enabled {
+        println!("  Trust:   not installed; transparent capture remains unavailable");
+    } else {
+        println!("  Capture: unavailable with the preserved custom Agent Gateway config");
+    }
     println!(
         "  Service: {}",
         if args.no_start {
@@ -469,7 +499,7 @@ fn print_summary(root: &Path, config: &Path, start: bool) {
     println!("\nThe connector does not store provider credentials.");
 }
 
-fn seed_config(starter: &Path, destination: &Path) -> Result<bool> {
+fn seed_config(starter: &Path, destination: &Path, ca_directory: Option<&Path>) -> Result<bool> {
     if destination.exists() {
         let metadata = fs::symlink_metadata(destination)?;
         if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
@@ -498,8 +528,86 @@ fn seed_config(starter: &Path, destination: &Path) -> Result<bool> {
             destination.display()
         )
     })?;
-    file.write_all(&fs::read(starter)?)?;
+    let mut contents = fs::read_to_string(starter)?;
+    if let Some(ca_directory) = ca_directory {
+        contents = contents
+            .replace(
+                CA_CERT_PLACEHOLDER,
+                &ca_directory.join("ca.crt").to_string_lossy(),
+            )
+            .replace(
+                CA_KEY_PLACEHOLDER,
+                &ca_directory.join("ca.key").to_string_lossy(),
+            );
+    }
+    if contents.contains(CA_CERT_PLACEHOLDER) || contents.contains(CA_KEY_PLACEHOLDER) {
+        bail!("starter Agent Gateway config requires inspection CA initialization");
+    }
+    file.write_all(contents.as_bytes())?;
     Ok(true)
+}
+
+fn initialize_inspection_ca(agentgateway: &Path, state_directory: &Path) -> Result<()> {
+    let status = ProcessCommand::new(agentgateway)
+        .arg("init-ca")
+        .arg("--state-directory")
+        .arg(state_directory)
+        .status()
+        .context("failed to initialize Agent Gateway inspection CA")?;
+    if !status.success() {
+        bail!("Agent Gateway inspection CA initialization failed with {status}");
+    }
+    Ok(())
+}
+
+fn install_privileged_helper(source: &Path) -> Result<()> {
+    let status = ProcessCommand::new("pkexec")
+        .args([
+            "/usr/bin/install",
+            "--owner=root",
+            "--group=root",
+            "--mode=0755",
+        ])
+        .arg(source)
+        .arg("/usr/libexec/agentdesktop-capture-setup")
+        .status()
+        .context("authorize Agent Desktop system integration")?;
+    if !status.success() {
+        bail!("Agent Desktop system integration failed with {status}");
+    }
+    Ok(())
+}
+
+fn confirm_inspection_trust(ca_directory: &Path) -> Result<bool> {
+    let certificate = ca_directory.join("ca.crt");
+    let fingerprint = Sha256::digest(fs::read(&certificate)?);
+    println!("\nOptional secure inspection");
+    println!("Agent Desktop can trust the local Agent Gateway inspection CA.");
+    println!("This applies only when you explicitly launch an app through Agent Desktop.");
+    println!("CA SHA-256: {}", hex_digest(&fingerprint));
+    print!("Enable secure inspection? [y/N] ");
+    io::stdout().flush()?;
+    let mut answer = String::new();
+    let bytes_read = io::stdin().read_line(&mut answer)?;
+    Ok(bytes_read > 0 && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
+}
+
+fn install_inspection_trust(certificate: &Path) -> Result<()> {
+    let status = ProcessCommand::new("pkexec")
+        .arg("/usr/libexec/agentdesktop-capture-setup")
+        .arg("trust-install")
+        .arg("--certificate")
+        .arg(certificate)
+        .status()
+        .context("authorize local inspection CA trust")?;
+    if !status.success() {
+        bail!("local inspection CA trust failed with {status}");
+    }
+    Ok(())
+}
+
+fn hex_digest(digest: &[u8]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn confirm() -> Result<bool> {
@@ -539,7 +647,7 @@ fn extract_payload(directory: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run_internal<const N: usize>(directory: &Path, args: [String; N]) -> Result<()> {
+fn run_internal(directory: &Path, args: impl IntoIterator<Item = String>) -> Result<()> {
     let status = ProcessCommand::new(directory.join("installer"))
         .args(args)
         .status()

@@ -13,3 +13,33 @@ llm:
     params:
       apiKey: mock-provider-key
       baseUrl: http://host.test:8000/v1
+
+binds:
+- port: 15008
+  tunnelProtocol: connect
+  listeners:
+  - name: capture-hbone
+    protocol: HTTP
+    routes:
+    - name: reject-ordinary-http
+      policies:
+        directResponse:
+          status: 405
+- port: 443
+  mode: internal
+  listeners:
+  - name: captured-https
+    protocol: HTTPS
+    tls:
+      mode: dynamicCa
+      cert: __AGENTDESKTOP_INSPECTION_CA_CERT__
+      key: __AGENTDESKTOP_INSPECTION_CA_KEY__
+    routes:
+    - name: dynamic-forward
+      policies:
+        authorization:
+          rules:
+          - 'source.connectHeaders["x-agentdesktop-token"] == "${AGENTDESKTOP_CAPTURE_TOKEN}"'
+        backendTLS: {}
+      backends:
+      - dynamic: {}

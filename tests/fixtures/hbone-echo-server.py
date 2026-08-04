@@ -18,6 +18,7 @@ connection = h2.connection.H2Connection(
 connection.initiate_connection()
 connection_socket.sendall(connection.data_to_send())
 completed = False
+completed_streams = set()
 payloads = {}
 while True:
     data = connection_socket.recv(65535)
@@ -34,7 +35,11 @@ while True:
             payloads[event.stream_id].extend(event.data)
             assert b"client-tls-bytes".startswith(payloads[event.stream_id])
             connection.acknowledge_received_data(event.flow_controlled_length, event.stream_id)
-            if payloads[event.stream_id] == b"client-tls-bytes" and not completed:
+            if (
+                payloads[event.stream_id] == b"client-tls-bytes"
+                and event.stream_id not in completed_streams
+            ):
                 connection.send_data(event.stream_id, b"gateway-tls-bytes", end_stream=True)
+                completed_streams.add(event.stream_id)
                 completed = True
     connection_socket.sendall(connection.data_to_send())

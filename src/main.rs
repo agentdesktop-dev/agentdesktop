@@ -13,11 +13,15 @@ use agentdesktop::local_gateway::LocalGateway;
 use agentdesktop::organization::OrganizationBootstrap;
 use agentdesktop::proxy::{self, ProxyOptions};
 use anyhow::{Context, bail};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, ExitStatus};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
+
+#[cfg(target_os = "linux")]
+use agentdesktop::capture::CaptureRelay;
 
 const LOCAL_GATEWAY_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -48,9 +52,22 @@ enum ConnectorCommand {
     /// Run a command tree in an Agent Desktop execution scope.
     #[cfg(target_os = "linux")]
     Launch(agentdesktop::launch::LaunchArgs),
+    /// Install or remove trust for local Agent Gateway inspection.
+    #[cfg(target_os = "linux")]
+    Trust {
+        #[arg(value_enum)]
+        action: TrustAction,
+    },
     #[cfg(target_os = "linux")]
     #[command(name = "_launch-child", hide = true)]
     LaunchChild(agentdesktop::launch::LaunchChildArgs),
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum TrustAction {
+    Install,
+    Remove,
 }
 
 #[tokio::main]
@@ -77,12 +94,65 @@ async fn main() -> anyhow::Result<ExitCode> {
         #[cfg(target_os = "linux")]
         ConnectorCommand::Launch(args) => Some(agentdesktop::launch::run(args)?),
         #[cfg(target_os = "linux")]
+        ConnectorCommand::Trust { action } => {
+            manage_inspection_trust(action)?;
+            None
+        }
+        #[cfg(target_os = "linux")]
         ConnectorCommand::LaunchChild(args) => {
             agentdesktop::launch::run_child(args)?;
             None
         }
     };
     Ok(status.map_or(ExitCode::SUCCESS, exit_code))
+}
+
+#[cfg(target_os = "linux")]
+fn manage_inspection_trust(action: TrustAction) -> anyhow::Result<()> {
+    let config_root = std::env::var_os("XDG_CONFIG_HOME").map_or_else(
+        || {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .context("HOME is not set")
+                .map(|home| home.join(".config"))
+        },
+        |root| Ok(PathBuf::from(root)),
+    )?;
+    let certificate = config_root.join("agentgateway/inspection-ca/ca.crt");
+    let contents = std::fs::read(&certificate).with_context(|| {
+        format!(
+            "local inspection CA was not found at {}; reinstall Agent Desktop first",
+            certificate.display()
+        )
+    })?;
+    let fingerprint = Sha256::digest(&contents)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    println!("Local Agent Gateway inspection CA");
+    println!("SHA-256: {fingerprint}");
+    println!(
+        "Action: {} system trust for apps explicitly launched through Agent Desktop",
+        match action {
+            TrustAction::Install => "install",
+            TrustAction::Remove => "remove",
+        }
+    );
+    let helper_action = match action {
+        TrustAction::Install => "trust-install",
+        TrustAction::Remove => "trust-remove",
+    };
+    let status = Command::new("pkexec")
+        .arg("/usr/libexec/agentdesktop-capture-setup")
+        .arg(helper_action)
+        .arg("--certificate")
+        .arg(&certificate)
+        .status()
+        .context("authorize inspection trust change")?;
+    if !status.success() {
+        bail!("inspection trust change failed with {status}");
+    }
+    Ok(())
 }
 
 fn exit_code(status: ExitStatus) -> ExitCode {
@@ -118,6 +188,23 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             .await?;
         tracing::info!(event = "local_gateway_ready");
     }
+    #[cfg(target_os = "linux")]
+    let mut capture_relay = if config.capture_enabled {
+        let gateway = local_gateway
+            .as_ref()
+            .context("capture requires an owned local Agent Gateway")?;
+        let relay = CaptureRelay::start(
+            "127.0.0.1:15001".parse()?,
+            "127.0.0.1:15008".parse()?,
+            gateway.capture_token(),
+            config.max_in_flight,
+        )
+        .await?;
+        tracing::info!(event = "capture_relay_ready", listen = %relay.local_addr()?);
+        Some(tokio::spawn(relay.serve(std::future::pending())))
+    } else {
+        None
+    };
     let listener = TcpListener::bind(config.listen).await?;
     tracing::info!(
         event = "connector_started",
@@ -137,7 +224,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         },
         shutdown_signal(),
     );
-    if let Some(gateway) = &mut local_gateway {
+    let result = if let Some(gateway) = &mut local_gateway {
         tokio::select! {
             result = serve => {
                 gateway.stop().await?;
@@ -146,10 +233,24 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             status = gateway.wait() => {
                 bail!("local Agent Gateway exited unexpectedly with {}", status?);
             }
+            result = async {
+                match &mut capture_relay {
+                    Some(relay) => relay.await.context("capture relay task failed")?,
+                    None => std::future::pending().await,
+                }
+            } => {
+                gateway.stop().await?;
+                result
+            }
         }
     } else {
         serve.await
+    };
+    #[cfg(target_os = "linux")]
+    if let Some(relay) = capture_relay {
+        relay.abort();
     }
+    result
 }
 
 async fn connect_agents(yes: bool) -> anyhow::Result<()> {

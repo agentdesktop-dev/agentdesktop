@@ -17,8 +17,8 @@ pub const fn capabilities() -> PlatformCapabilities {
     PlatformCapabilities {
         os: std::env::consts::OS,
         native_gateway: true,
-        transparent_capture: false,
-        trust_installation: false,
+        transparent_capture: cfg!(target_os = "linux"),
+        trust_installation: cfg!(target_os = "linux"),
         secret_service: cfg!(target_os = "linux"),
         protected_file_credentials: cfg!(target_os = "linux"),
     }
@@ -29,12 +29,12 @@ mod tests {
     use super::capabilities;
 
     #[test]
-    fn never_claims_unimplemented_capture_or_trust() {
+    fn reports_platform_features() {
         let capabilities = capabilities();
 
         assert!(capabilities.native_gateway);
-        assert!(!capabilities.transparent_capture);
-        assert!(!capabilities.trust_installation);
+        assert_eq!(capabilities.transparent_capture, cfg!(target_os = "linux"));
+        assert_eq!(capabilities.trust_installation, cfg!(target_os = "linux"));
     }
 
     #[cfg(target_os = "linux")]

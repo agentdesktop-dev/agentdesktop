@@ -64,6 +64,11 @@ pub struct Config {
     /// Maximum number of requests forwarding or streaming concurrently.
     #[arg(long, env = "AGENTDESKTOP_MAX_IN_FLIGHT", default_value_t = 128)]
     pub max_in_flight: usize,
+
+    /// Enable the standalone Linux transparent-capture relay.
+    #[cfg(target_os = "linux")]
+    #[arg(long, env = "AGENTDESKTOP_CAPTURE_ENABLED", default_value_t = false)]
+    pub capture_enabled: bool,
 }
 
 impl Config {
@@ -116,6 +121,13 @@ impl Config {
                 bail!("gateway binary and config must be provided together");
             }
             _ => {}
+        }
+
+        #[cfg(target_os = "linux")]
+        if self.capture_enabled
+            && (self.mode != DeploymentMode::Standalone || self.gateway_binary.is_none())
+        {
+            bail!("transparent capture requires an owned standalone Agent Gateway");
         }
 
         Ok(self)
@@ -304,6 +316,32 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("only available in standalone"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn capture_requires_owned_standalone_gateway() {
+        let external = parse(&[
+            "connector",
+            "--mode",
+            "standalone",
+            "--upstream",
+            "http://127.0.0.1:4000",
+            "--capture-enabled",
+        ])
+        .unwrap_err();
+        assert!(external.to_string().contains("owned standalone"));
+
+        let managed = parse(&[
+            "connector",
+            "--mode",
+            "managed",
+            "--upstream",
+            "https://gateway.example",
+            "--capture-enabled",
+        ])
+        .unwrap_err();
+        assert!(managed.to_string().contains("owned standalone"));
     }
 
     #[test]

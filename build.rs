@@ -6,10 +6,11 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-const STANDALONE_PAYLOADS: [(&str, &str); 4] = [
+const STANDALONE_PAYLOADS: [(&str, &str); 5] = [
     ("installer", "AGENTDESKTOP_PAYLOAD_INSTALLER"),
     ("connector", "AGENTDESKTOP_PAYLOAD_CONNECTOR"),
     ("agentgateway", "AGENTDESKTOP_PAYLOAD_AGENTGATEWAY"),
+    ("capture-setup", "AGENTDESKTOP_PAYLOAD_CAPTURE_SETUP"),
     ("config", "AGENTDESKTOP_PAYLOAD_CONFIG"),
 ];
 

@@ -16,3 +16,31 @@ binds:
         directResponse:
           status: 200
           body: '{"id":"msg_smoke","type":"message","role":"assistant","content":[{"type":"text","text":"hello through Agent Desktop"}],"model":"smoke","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":5}}'
+- port: 15008
+  tunnelProtocol: connect
+  listeners:
+  - name: capture-hbone
+    protocol: HTTP
+    routes:
+    - name: reject-ordinary-http
+      policies:
+        directResponse:
+          status: 405
+- port: 443
+  mode: internal
+  listeners:
+  - name: captured-https
+    protocol: HTTPS
+    tls:
+      mode: dynamicCa
+      cert: __AGENTDESKTOP_INSPECTION_CA_CERT__
+      key: __AGENTDESKTOP_INSPECTION_CA_KEY__
+    routes:
+    - name: dynamic-forward
+      policies:
+        authorization:
+          rules:
+          - 'source.connectHeaders["x-agentdesktop-token"] == "${AGENTDESKTOP_CAPTURE_TOKEN}"'
+        backendTLS: {}
+      backends:
+      - dynamic: {}
