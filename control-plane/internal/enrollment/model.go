@@ -25,10 +25,19 @@ type Issuance struct {
 }
 
 type IssuedCertificate struct {
-	ChainPEM     string
-	NotAfter     time.Time
-	NotBefore    time.Time
-	SerialNumber string
+	ChainPEM     string    `json:"certificate_chain_pem"`
+	NotAfter     time.Time `json:"not_after"`
+	NotBefore    time.Time `json:"not_before"`
+	SerialNumber string    `json:"serial_number"`
+}
+
+type Status struct {
+	EnrollmentID         string             `json:"enrollment_id"`
+	Status               string             `json:"status"`
+	PublicKeyFingerprint string             `json:"public_key_fingerprint"`
+	CreatedAt            time.Time          `json:"created_at"`
+	DeviceID             string             `json:"device_id,omitempty"`
+	Certificate          *IssuedCertificate `json:"certificate,omitempty"`
 }
 
 type Approval struct {

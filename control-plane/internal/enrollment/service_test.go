@@ -47,6 +47,10 @@ func (store *approvalStore) CompleteIssuance(
 	}, nil
 }
 
+func (store *approvalStore) Get(context.Context, Principal, string) (Status, error) {
+	return Status{}, nil
+}
+
 type testIssuer struct {
 	err error
 }

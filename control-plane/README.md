@@ -2,7 +2,7 @@
 
 This Go module is the production backend boundary for managed Agent Desktop enrollment. It validates a standard OAuth bearer token, derives the user from validated `iss` and `sub` claims, validates a signed P-256 CSR, and transactionally persists a pending enrollment in PostgreSQL. A separately scoped administrator token can claim one pending enrollment and issue a short-lived client certificate with authority-controlled SPIFFE identity.
 
-The runtime currently uses a protected local CA key through a narrow issuer interface. This is suitable for development and single-instance deployment, not the final production key boundary; production should replace it with KMS, HSM, `step-ca`, Vault PKI, or a cloud private CA adapter. The service does not yet deliver approved certificates to Agent Desktop, renew certificates, recover expired certificates, reconcile interrupted issuance, or expose revocation state to Agent Gateway. Device private keys are generated and retained by Agent Desktop and must never be submitted to this service or stored in PostgreSQL.
+The runtime currently uses a protected local CA key through a narrow issuer interface. This is suitable for development and single-instance deployment, not the final production key boundary; production should replace it with KMS, HSM, `step-ca`, Vault PKI, or a cloud private CA adapter. The service does not yet renew certificates, recover expired certificates, reconcile interrupted issuance, or expose revocation state to Agent Gateway. Device private keys are generated and retained by Agent Desktop and must never be submitted to this service or stored in PostgreSQL.
 
 ## Local development
 
@@ -61,6 +61,15 @@ Authorization: Bearer <administrator-access-token>
 ```
 
 The response contains the authority-assigned device ID and public certificate chain. The issued leaf has only client-auth extended usage and one SPIFFE URI in the form `spiffe://<trust-domain>/organization/<organization-id>/device/<device-id>`. A second approval returns `409 enrollment_not_pending`.
+
+The authenticated user that created the enrollment can poll it and retrieve the public certificate chain after approval:
+
+```http
+GET /v1/enrollments/{enrollment_id}
+Authorization: Bearer <user-access-token>
+```
+
+Pending responses omit `device_id` and `certificate`. Approved responses include both. Unknown enrollment IDs and enrollments owned by another `(iss, sub)` return the same `404 enrollment_not_found` response. The certificate is usable only with the private key retained by Agent Desktop when it created the CSR.
 
 Run unit tests:
 

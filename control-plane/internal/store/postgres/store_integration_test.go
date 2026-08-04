@@ -59,6 +59,16 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 	if record.Status != "pending" || record.PublicKeyFingerprint != request.PublicKeyFingerprint {
 		t.Fatalf("record = %#v", record)
 	}
+	pending, err := store.Get(ctx, enrollment.Principal{Issuer: issuer, Subject: "user-1"}, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status != "pending" || pending.Certificate != nil {
+		t.Fatalf("pending status = %#v", pending)
+	}
+	if _, err := store.Get(ctx, enrollment.Principal{Issuer: issuer, Subject: "user-2"}, record.ID); !errors.Is(err, enrollment.ErrNotFound) {
+		t.Fatalf("foreign retrieval error = %v, want ErrNotFound", err)
+	}
 	retryID, err := identifier.New()
 	if err != nil {
 		t.Fatal(err)
@@ -140,6 +150,14 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 	}
 	if approval.Status != "approved" || approval.DeviceID != deviceID || approval.CertificatePEM != issued.ChainPEM {
 		t.Fatalf("approval = %#v", approval)
+	}
+	approved, err := store.Get(ctx, enrollment.Principal{Issuer: issuer, Subject: "user-1"}, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved.Status != "approved" || approved.DeviceID != deviceID ||
+		approved.Certificate == nil || approved.Certificate.ChainPEM != issued.ChainPEM {
+		t.Fatalf("approved status = %#v", approved)
 	}
 	var approvedStatus, storedDeviceID, storedCertificate string
 	if err := pool.QueryRow(ctx, `

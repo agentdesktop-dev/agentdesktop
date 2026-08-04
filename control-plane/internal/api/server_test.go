@@ -32,6 +32,17 @@ func (authenticator testAuthenticator) Authenticate(*http.Request) (enrollment.P
 type recordingStore struct {
 	principal enrollment.Principal
 	issuance  enrollment.Issuance
+	status    enrollment.Status
+	getErr    error
+}
+
+func (store *recordingStore) Get(
+	_ context.Context,
+	principal enrollment.Principal,
+	_ string,
+) (enrollment.Status, error) {
+	store.principal = principal
+	return store.status, store.getErr
 }
 
 func (store *recordingStore) CreatePending(
@@ -152,6 +163,37 @@ func TestApprovalRequiresAdministratorAndReturnsCertificate(t *testing.T) {
 	unauthorized.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/admin/enrollments/enrollment-1/approve", nil))
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthorized status = %d", response.Code)
+	}
+}
+
+func TestEnrollmentStatusUsesAuthenticatedOwnerAndReturnsCertificate(t *testing.T) {
+	store := &recordingStore{status: enrollment.Status{
+		EnrollmentID: "enrollment-1",
+		Status:       "approved",
+		Certificate: &enrollment.IssuedCertificate{
+			ChainPEM: "certificate-chain",
+		},
+	}}
+	owner := enrollment.Principal{Issuer: "https://issuer.example/", Subject: "user-1"}
+	handler := NewServer(testAuthenticator{principal: owner}, testAuthenticator{}, enrollment.NewService(store, apiIssuer{}))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/enrollments/enrollment-1", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var record enrollment.Status
+	if err := json.Unmarshal(response.Body.Bytes(), &record); err != nil {
+		t.Fatal(err)
+	}
+	if store.principal != owner || record.Certificate == nil || record.Certificate.ChainPEM != "certificate-chain" {
+		t.Fatalf("record = %#v, principal = %#v", record, store.principal)
+	}
+
+	store.getErr = enrollment.ErrNotFound
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/enrollments/foreign", nil))
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("foreign enrollment status = %d", response.Code)
 	}
 }
 

@@ -246,6 +246,62 @@ func (store *Store) CompleteIssuance(
 	}, nil
 }
 
+func (store *Store) Get(
+	ctx context.Context,
+	principal enrollment.Principal,
+	enrollmentID string,
+) (enrollment.Status, error) {
+	var record enrollment.Status
+	var deviceID, chainPEM, serialNumber *string
+	var notBefore, notAfter *time.Time
+	err := store.pool.QueryRow(ctx, `
+		SELECT enrollments.id, enrollments.status,
+		       enrollments.public_key_fingerprint, enrollments.created_at,
+		       enrollments.device_id, latest_certificate.certificate_pem,
+		       latest_certificate.serial_number, latest_certificate.not_before,
+		       latest_certificate.not_after
+		FROM enrollments
+		JOIN organizations ON organizations.id = enrollments.organization_id
+		JOIN users ON users.id = enrollments.user_id
+		LEFT JOIN LATERAL (
+			SELECT certificate_pem, serial_number, not_before, not_after
+			FROM certificates
+			WHERE certificates.device_id = enrollments.device_id
+			ORDER BY not_after DESC
+			LIMIT 1
+		) AS latest_certificate ON true
+		WHERE enrollments.id = $1 AND organizations.issuer = $2 AND users.subject = $3
+	`, enrollmentID, principal.Issuer, principal.Subject).Scan(
+		&record.EnrollmentID,
+		&record.Status,
+		&record.PublicKeyFingerprint,
+		&record.CreatedAt,
+		&deviceID,
+		&chainPEM,
+		&serialNumber,
+		&notBefore,
+		&notAfter,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return enrollment.Status{}, enrollment.ErrNotFound
+	}
+	if err != nil {
+		return enrollment.Status{}, err
+	}
+	if deviceID != nil {
+		record.DeviceID = *deviceID
+	}
+	if chainPEM != nil && serialNumber != nil && notBefore != nil && notAfter != nil {
+		record.Certificate = &enrollment.IssuedCertificate{
+			ChainPEM:     *chainPEM,
+			SerialNumber: *serialNumber,
+			NotBefore:    *notBefore,
+			NotAfter:     *notAfter,
+		}
+	}
+	return record, nil
+}
+
 func findOrganization(ctx context.Context, transaction pgx.Tx, issuer string) (string, error) {
 	var id string
 	err := transaction.QueryRow(ctx, `SELECT id FROM organizations WHERE issuer = $1`, issuer).Scan(&id)

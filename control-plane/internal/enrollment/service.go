@@ -13,6 +13,7 @@ import (
 var (
 	ErrInvalidPrincipal = errors.New("invalid authenticated principal")
 	ErrIssuanceFailed   = errors.New("certificate issuance failed")
+	ErrNotFound         = errors.New("enrollment not found")
 	ErrNotPending       = errors.New("enrollment is not pending")
 )
 
@@ -21,6 +22,7 @@ type Store interface {
 	BeginIssuance(context.Context, Principal, string, string) (Issuance, error)
 	AbortIssuance(context.Context, Principal, Issuance) error
 	CompleteIssuance(context.Context, Principal, Issuance, IssuedCertificate) (Approval, error)
+	Get(context.Context, Principal, string) (Status, error)
 }
 
 type Service struct {
@@ -45,6 +47,13 @@ func (service *Service) Request(ctx context.Context, principal Principal, encode
 		return Enrollment{}, err
 	}
 	return service.store.CreatePending(ctx, principal, request, id)
+}
+
+func (service *Service) Get(ctx context.Context, principal Principal, enrollmentID string) (Status, error) {
+	if principal.Issuer == "" || principal.Subject == "" || enrollmentID == "" {
+		return Status{}, ErrInvalidPrincipal
+	}
+	return service.store.Get(ctx, principal, enrollmentID)
 }
 
 func (service *Service) Approve(ctx context.Context, administrator Principal, enrollmentID string) (Approval, error) {
