@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
+use base64::Engine as _;
 use clap::Args;
 use http::HeaderMap;
 use http::header::HeaderValue;
@@ -18,6 +19,38 @@ use crate::hbone::HboneClient;
 use crate::platform::linux::original_destination;
 
 pub const TUNNEL_TOKEN_HEADER: &str = "x-agentdesktop-token";
+pub const TUNNEL_TOKEN_ENV: &str = "AGENTDESKTOP_CAPTURE_TOKEN";
+
+pub struct CaptureToken {
+    value: HeaderValue,
+}
+
+impl CaptureToken {
+    pub fn generate() -> Result<Self> {
+        let mut random = [0_u8; 32];
+        getrandom::fill(&mut random).context("generate capture token")?;
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random);
+        Self::from_header_value(HeaderValue::from_str(&encoded)?)
+    }
+
+    fn from_header_value(mut value: HeaderValue) -> Result<Self> {
+        if value.is_empty() {
+            bail!("tunnel token must not be empty");
+        }
+        value.set_sensitive(true);
+        Ok(Self { value })
+    }
+
+    pub(crate) fn environment_value(&self) -> &str {
+        self.value
+            .to_str()
+            .expect("generated and validated capture tokens contain visible ASCII")
+    }
+
+    fn header_value(&self) -> HeaderValue {
+        self.value.clone()
+    }
+}
 
 #[derive(Args, Debug)]
 pub struct CaptureArgs {
@@ -32,18 +65,55 @@ pub struct CaptureArgs {
 }
 
 pub async fn run(args: CaptureArgs) -> Result<()> {
-    if !args.listen.ip().is_loopback() || !args.hbone_endpoint.ip().is_loopback() {
+    let token = load_tunnel_token(&args.token_file)?;
+    let relay =
+        CaptureRelay::start(args.listen, args.hbone_endpoint, &token, args.max_tunnels).await?;
+    tracing::info!(event = "capture_started", listen = %relay.local_addr()?);
+    relay.serve(shutdown_signal()).await
+}
+
+pub struct CaptureRelay {
+    listener: TcpListener,
+    hbone: HboneClient,
+    max_tunnels: usize,
+}
+
+impl CaptureRelay {
+    pub async fn start(
+        listen: SocketAddr,
+        hbone_endpoint: SocketAddr,
+        token: &CaptureToken,
+        max_tunnels: usize,
+    ) -> Result<Self> {
+        validate_capture_endpoints(listen, hbone_endpoint)?;
+        if max_tunnels == 0 {
+            bail!("max tunnels must be greater than zero");
+        }
+        let mut connect_headers = HeaderMap::new();
+        connect_headers.insert(TUNNEL_TOKEN_HEADER, token.header_value());
+        let hbone = HboneClient::connect_with_headers(hbone_endpoint, connect_headers).await?;
+        let listener = TcpListener::bind(listen).await?;
+        Ok(Self {
+            listener,
+            hbone,
+            max_tunnels,
+        })
+    }
+
+    pub fn local_addr(&self) -> Result<SocketAddr> {
+        Ok(self.listener.local_addr()?)
+    }
+
+    pub async fn serve(self, shutdown: impl Future<Output = ()>) -> Result<()> {
+        serve(self.listener, self.hbone, self.max_tunnels, shutdown).await
+    }
+}
+
+fn validate_capture_endpoints(listen: SocketAddr, hbone_endpoint: SocketAddr) -> Result<()> {
+    if !listen.ip().is_loopback() || !hbone_endpoint.ip().is_loopback() {
         bail!("prototype capture and HBONE endpoints must be loopback");
     }
-    if args.max_tunnels == 0 {
-        bail!("max tunnels must be greater than zero");
-    }
-    let mut connect_headers = HeaderMap::new();
-    connect_headers.insert(TUNNEL_TOKEN_HEADER, load_tunnel_token(&args.token_file)?);
-    let hbone = HboneClient::connect_with_headers(args.hbone_endpoint, connect_headers).await?;
-    let listener = TcpListener::bind(args.listen).await?;
-    tracing::info!(event = "capture_started", listen = %listener.local_addr()?);
-    serve(listener, hbone, args.max_tunnels, shutdown_signal()).await
+    Ok(())
 }
 
 async fn shutdown_signal() {
@@ -52,7 +122,7 @@ async fn shutdown_signal() {
     }
 }
 
-pub fn load_tunnel_token(path: &Path) -> Result<HeaderValue> {
+pub fn load_tunnel_token(path: &Path) -> Result<CaptureToken> {
     let metadata = fs::metadata(path)
         .with_context(|| format!("read tunnel token metadata from {}", path.display()))?;
     if !metadata.is_file() {
@@ -69,13 +139,9 @@ pub fn load_tunnel_token(path: &Path) -> Result<HeaderValue> {
     }
     let token = fs::read_to_string(path)
         .with_context(|| format!("read tunnel token from {}", path.display()))?;
-    let mut value =
+    let value =
         HeaderValue::from_str(token.trim()).context("tunnel token is not a valid header value")?;
-    if value.is_empty() {
-        bail!("tunnel token must not be empty");
-    }
-    value.set_sensitive(true);
-    Ok(value)
+    CaptureToken::from_header_value(value)
 }
 
 pub async fn serve(
@@ -135,10 +201,41 @@ mod tests {
     use bytes::Bytes;
     use http::{Method, Response};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use tokio::net::{TcpListener, TcpStream};
     use tokio::time::{Duration, timeout};
 
-    use super::{HboneClient, forward_to, load_tunnel_token};
+    use super::{CaptureRelay, CaptureToken, HboneClient, forward_to, load_tunnel_token};
+
+    #[test]
+    fn generates_unique_sensitive_in_memory_tokens() {
+        let first = CaptureToken::generate().unwrap();
+        let second = CaptureToken::generate().unwrap();
+
+        assert_ne!(first.environment_value(), second.environment_value());
+        assert!(first.header_value().is_sensitive());
+    }
+
+    #[tokio::test]
+    async fn relay_start_returns_after_hbone_handshake_and_listener_bind() {
+        let token = CaptureToken::generate().unwrap();
+        let hbone_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hbone_address = hbone_listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = hbone_listener.accept().await.unwrap();
+            let mut connection = h2::server::handshake(stream).await.unwrap();
+            while connection.accept().await.is_some() {}
+        });
+
+        let relay = CaptureRelay::start("127.0.0.1:0".parse().unwrap(), hbone_address, &token, 1)
+            .await
+            .unwrap();
+        let relay_address = relay.local_addr().unwrap();
+
+        assert!(relay_address.ip().is_loopback());
+        TcpStream::connect(relay_address).await.unwrap();
+        drop(relay);
+        server.await.unwrap();
+    }
 
     #[test]
     fn loads_owner_only_tunnel_token_as_sensitive() {
@@ -149,8 +246,8 @@ mod tests {
 
         let token = load_tunnel_token(&path).unwrap();
 
-        assert_eq!(token, "local-token");
-        assert!(token.is_sensitive());
+        assert_eq!(token.environment_value(), "local-token");
+        assert!(token.header_value().is_sensitive());
     }
 
     #[test]
@@ -160,7 +257,10 @@ mod tests {
         fs::write(&path, "local-token").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
 
-        let error = load_tunnel_token(&path).unwrap_err();
+        let error = match load_tunnel_token(&path) {
+            Ok(_) => panic!("broad token file permissions were accepted"),
+            Err(error) => error,
+        };
 
         assert!(error.to_string().contains("mode 0600"));
     }

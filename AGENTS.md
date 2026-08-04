@@ -181,7 +181,7 @@ The initial failure policy is fail closed.
 - If Agent Gateway is unavailable, authentication expires, enrollment is revoked, or the secure route cannot be established, do not connect directly to the provider.
 - Return stable local errors that distinguish connectivity, authentication, authorization, revocation, and TLS failures.
 - Native gateway configuration provides routed behavior, but does not prevent a user from changing application settings.
-- Transparent capture must deny the original direct connection after redirecting it.
+- Transparent capture must deny the origintion after redirecting it.
 - Strong anti-bypass guarantees may additionally require MDM firewall or egress rules. Document whether a deployment is **routed** or **enforced**.
 
 In local mode, applications connected directly to Agent Gateway fail when it is unavailable. For captured applications, the connector denies the original connection and never bypasses directly to the provider. Smarter fail-open or offline policy may be added later, but the connector must not grow an independent copy of the Agent Gateway policy engine.

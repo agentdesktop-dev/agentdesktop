@@ -86,6 +86,7 @@ pub fn run(args: LaunchArgs) -> Result<ExitStatus> {
         Path::new("systemctl"),
         Path::new("/sys/fs/cgroup"),
         &executable,
+        |_| bail!("transparent capture is not available yet"),
     )
 }
 
@@ -116,6 +117,7 @@ fn run_with_systemd(
     systemctl: &Path,
     cgroup_root: &Path,
     executable: &Path,
+    prepare_capture: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<ExitStatus> {
     let profile = resolve_profile(&args.profile)?;
     if !args.skip_preflight
@@ -124,10 +126,7 @@ fn run_with_systemd(
         check_preflight(profile.name, preflight)?;
     }
     if profile.transparent_capture {
-        bail!(
-            "transparent capture for profile '{}' is not available yet; launch Claude normally if it is configured to use Agent Desktop",
-            profile.name
-        );
+        crate::apps::claude::ensure_capture_routing_is_clear()?;
     }
     let (program, arguments) = args
         .command
@@ -173,8 +172,11 @@ fn run_with_systemd(
         })
         .and_then(|mut child| {
             wait_for_gate(&mut child, &gate.path().join("ready"))?;
-            let _cgroup = scope_control_group(systemctl, cgroup_root, &unit)
+            let cgroup = scope_control_group(systemctl, cgroup_root, &unit)
                 .inspect_err(|_| terminate_child(&mut child))?;
+            if profile.transparent_capture {
+                prepare_capture(&cgroup).inspect_err(|_| terminate_child(&mut child))?;
+            }
             create_gate_file(&gate.path().join("release"))
                 .inspect_err(|_| terminate_child(&mut child))?;
             child.wait().context("wait for the Linux execution scope")
@@ -386,6 +388,7 @@ mod tests {
             &systemctl,
             &cgroup_root,
             &launcher,
+            |_| Ok(()),
         )
         .unwrap();
 
@@ -412,22 +415,61 @@ mod tests {
     }
 
     #[test]
-    fn captured_profile_fails_before_starting_the_application() {
+    fn captured_profile_prepares_exact_cgroup_before_starting_the_application() {
+        let temporary = tempfile::tempdir().unwrap();
+        let runner = temporary.path().join("systemd-run");
+        let systemctl = temporary.path().join("systemctl");
+        let launcher = temporary.path().join("agentdesktop");
+        let cgroup_root = temporary.path().join("cgroup");
+        let marker = temporary.path().join("executed");
+        fs::write(
+            &runner,
+            "#!/bin/sh\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(cgroup_root.join("user.slice/claude.scope")).unwrap();
+        fs::write(
+            &systemctl,
+            "#!/bin/sh\nprintf '/user.slice/claude.scope\\n'\n",
+        )
+        .unwrap();
+        fs::write(
+            &launcher,
+            format!(
+                "#!/bin/sh\nshift\nwhile [ \"$1\" != -- ]; do if [ \"$1\" = --gate-directory ]; then shift; gate=$1; fi; shift; done\nshift\n: > \"$gate/ready\"\nwhile [ ! -f \"$gate/release\" ]; do :; done\n: > '{}'\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        for executable in [&runner, &systemctl, &launcher] {
+            fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        let mut prepared_cgroup = None;
         let error = run_with_systemd(
             &LaunchArgs {
                 profile: "claude".to_owned(),
                 skip_preflight: true,
                 command: vec![OsString::from("claude")],
             },
-            Path::new("/does/not/exist"),
-            Path::new("/does/not/exist"),
-            Path::new("/does/not/exist"),
-            Path::new("/does/not/exist"),
+            &runner,
+            &systemctl,
+            &cgroup_root,
+            &launcher,
+            |cgroup| {
+                prepared_cgroup = Some(cgroup.to_owned());
+                anyhow::bail!("capture preparation failed")
+            },
         )
         .unwrap_err()
         .to_string();
 
-        assert!(error.contains("transparent capture for profile 'claude' is not available yet"));
+        assert!(error.contains("capture preparation failed"));
+        assert_eq!(
+            prepared_cgroup,
+            Some(Path::new("/user.slice/claude.scope").to_owned())
+        );
+        assert!(!marker.exists());
     }
 
     #[test]
@@ -465,6 +507,7 @@ mod tests {
             &systemctl,
             &temporary.path().join("cgroup"),
             &launcher,
+            |_| Ok(()),
         )
         .unwrap_err()
         .to_string();
