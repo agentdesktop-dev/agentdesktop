@@ -11,9 +11,9 @@ import (
 )
 
 type approvalStore struct {
-	aborted   bool
 	completed bool
 	issuance  Issuance
+	issuing   []Issuance
 }
 
 func (store *approvalStore) CreatePending(context.Context, Principal, certificate.Request, string) (Enrollment, error) {
@@ -22,11 +22,6 @@ func (store *approvalStore) CreatePending(context.Context, Principal, certificat
 
 func (store *approvalStore) BeginIssuance(context.Context, Principal, string, string) (Issuance, error) {
 	return store.issuance, nil
-}
-
-func (store *approvalStore) AbortIssuance(context.Context, Principal, Issuance) error {
-	store.aborted = true
-	return nil
 }
 
 func (store *approvalStore) CompleteIssuance(
@@ -51,11 +46,15 @@ func (store *approvalStore) Get(context.Context, Principal, string) (Status, err
 	return Status{}, nil
 }
 
+func (store *approvalStore) ListIssuing(context.Context, time.Time, int) ([]Issuance, error) {
+	return store.issuing, nil
+}
+
 type testIssuer struct {
 	err error
 }
 
-func (issuer testIssuer) Issue(context.Context, ca.Identity, []byte) (ca.Certificate, error) {
+func (issuer testIssuer) Issue(context.Context, ca.IssuanceRequest) (ca.Certificate, error) {
 	if issuer.err != nil {
 		return ca.Certificate{}, issuer.err
 	}
@@ -70,25 +69,49 @@ func (issuer testIssuer) Issue(context.Context, ca.Identity, []byte) (ca.Certifi
 func TestApproveCompletesClaimedIssuance(t *testing.T) {
 	store := &approvalStore{issuance: Issuance{
 		EnrollmentID: "enrollment-1", OrganizationID: "organization-1",
-		DeviceID: "device-1", CSRDER: []byte("csr"),
+		DeviceID: "device-1", CSRDER: []byte("csr"), StartedAt: time.Unix(1_000, 0),
 	}}
 	service := NewService(store, testIssuer{})
 	approval, err := service.Approve(context.Background(), Principal{Issuer: "issuer", Subject: "admin"}, "enrollment-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !store.completed || store.aborted || approval.Status != "approved" || approval.DeviceID != "device-1" {
+	if !store.completed || approval.Status != "approved" || approval.DeviceID != "device-1" {
 		t.Fatalf("approval = %#v, store = %#v", approval, store)
 	}
 }
 
-func TestApproveAbortsClaimWhenIssuerFails(t *testing.T) {
-	store := &approvalStore{issuance: Issuance{EnrollmentID: "enrollment-1"}}
+func TestApproveLeavesClaimForReconciliationWhenIssuerFails(t *testing.T) {
+	store := &approvalStore{issuance: Issuance{EnrollmentID: "enrollment-1", StartedAt: time.Unix(1_000, 0)}}
 	service := NewService(store, testIssuer{err: errors.New("CA unavailable")})
 	if _, err := service.Approve(context.Background(), Principal{Issuer: "issuer", Subject: "admin"}, "enrollment-1"); err == nil {
 		t.Fatal("approval succeeded with failed issuer")
 	}
-	if !store.aborted || store.completed {
+	if store.completed {
 		t.Fatalf("store = %#v", store)
+	}
+}
+
+func TestReconcileRetriesOriginalIssuanceWithoutAborting(t *testing.T) {
+	issuance := Issuance{
+		EnrollmentID: "enrollment-1", OrganizationID: "organization-1",
+		OrganizationIssuer: "issuer", DeviceID: "device-1",
+		CSRDER: []byte("csr"), StartedAt: time.Unix(1_000, 0),
+	}
+	store := &approvalStore{issuing: []Issuance{issuance}}
+	service := NewService(store, testIssuer{})
+	completed, err := service.Reconcile(context.Background(), time.Unix(2_000, 0), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed != 1 || !store.completed {
+		t.Fatalf("completed = %d, store = %#v", completed, store)
+	}
+
+	store = &approvalStore{issuing: []Issuance{issuance}}
+	service = NewService(store, testIssuer{err: errors.New("CA unavailable")})
+	completed, err = service.Reconcile(context.Background(), time.Unix(2_000, 0), 10)
+	if completed != 0 || !errors.Is(err, ErrIssuanceFailed) {
+		t.Fatalf("completed = %d, error = %v, store = %#v", completed, err, store)
 	}
 }

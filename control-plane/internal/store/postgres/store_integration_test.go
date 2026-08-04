@@ -131,6 +131,14 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 	if issuance.DeviceID != deviceID || string(issuance.CSRDER) != string(request.DER) {
 		t.Fatalf("issuance = %#v", issuance)
 	}
+	interrupted, err := store.ListIssuing(ctx, time.Now().Add(time.Minute), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(interrupted) != 1 || interrupted[0].EnrollmentID != record.ID ||
+		interrupted[0].OrganizationIssuer != issuer || !interrupted[0].StartedAt.Equal(issuance.StartedAt) {
+		t.Fatalf("interrupted issuances = %#v", interrupted)
+	}
 	duplicateDeviceID, err := identifier.New()
 	if err != nil {
 		t.Fatal(err)
@@ -181,37 +189,6 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 		t.Fatalf("approval audit event count = %d, want 2", auditCount)
 	}
 
-	abortRequest := validRequest(t)
-	abortEnrollmentID, err := identifier.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	abortRecord, err := store.CreatePending(ctx, enrollment.Principal{Issuer: issuer, Subject: "user-1"}, abortRequest, abortEnrollmentID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	abortDeviceID, err := identifier.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	abortedIssuance, err := store.BeginIssuance(ctx, administrator, abortRecord.ID, abortDeviceID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.AbortIssuance(ctx, administrator, abortedIssuance); err != nil {
-		t.Fatal(err)
-	}
-	var abortedStatus string
-	var abortedDeviceCount int
-	if err := pool.QueryRow(ctx, `SELECT status FROM enrollments WHERE id = $1`, abortRecord.ID).Scan(&abortedStatus); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM devices WHERE id = $1`, abortDeviceID).Scan(&abortedDeviceCount); err != nil {
-		t.Fatal(err)
-	}
-	if abortedStatus != "pending" || abortedDeviceCount != 0 {
-		t.Fatal("aborted issuance did not restore pending state")
-	}
 }
 
 func validRequest(t *testing.T) certificate.Request {

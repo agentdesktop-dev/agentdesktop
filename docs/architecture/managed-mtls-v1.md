@@ -1,6 +1,6 @@
 # Managed mTLS identity contract v1
 
-Status: selected production direction; enrollment request persistence, administrator-scoped approval, local protected-key issuance, and owner-scoped certificate retrieval are implemented. Production CA integration, Agent Desktop certificate lifecycle, renewal, recovery, revocation, and Agent Gateway enforcement remain incomplete.
+Status: selected production direction; enrollment request persistence, administrator-scoped approval, retry-stable local protected-key issuance, interrupted-issuance reconciliation, and owner-scoped certificate retrieval are implemented. Production CA integration, Agent Desktop certificate lifecycle, renewal, expired-certificate recovery, revocation, and Agent Gateway enforcement remain incomplete.
 
 ## Trust model
 
@@ -38,12 +38,11 @@ An expired certificate cannot authenticate ordinary mTLS renewal. Recovery uses 
 
 The current Go issuer adapter uses a protected local CA key and Go's X.509 implementation. It is a concrete development and single-instance boundary, not a final production key-management decision. The narrow issuer interface is intended to be replaced by KMS, HSM, `step-ca`, Vault PKI, or a cloud private CA without moving approval policy into the CA adapter.
 
-Approval claims a pending enrollment as `issuing` before calling the CA, preventing concurrent duplicate approval without holding a database transaction across CA I/O. CA failure restores pending state. A process crash while issuance is in progress currently leaves the record in `issuing`; reconciliation and CA idempotency are required before production rollout.
+Approval claims a pending enrollment as `issuing` before calling the CA, preventing concurrent duplicate approval without holding a database transaction across CA I/O. The claim fixes the enrollment ID, device ID, CSR, and issuance time. CA failures remain `issuing` because timeout errors cannot prove that no certificate was created. A bounded background worker retries stale claims with those same values, while transactional completion permits only one worker to persist and approve the result. External CA adapters must pass the enrollment ID through as an idempotency key.
 
 ## Remaining implementation
 
 - Replace the local-key issuer with a production protected-key CA adapter.
-- Reconcile interrupted issuance without producing an untracked valid certificate.
 - Add administrator rejection and listing APIs.
 - Add Agent Desktop certificate installation, proactive renewal, expired-certificate recovery, and key rotation.
 - Add device and certificate revocation with fail-closed status consumption by Agent Gateway.

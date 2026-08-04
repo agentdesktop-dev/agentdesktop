@@ -25,7 +25,6 @@ func TestX509IssuerUsesAuthorityControlledClientIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	issuer.now = func() time.Time { return time.Unix(2_000_000_000, 0) }
 	clientKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -38,10 +37,16 @@ func TestX509IssuerUsesAuthorityControlledClientIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	issued, err := issuer.Issue(context.Background(), Identity{
-		OrganizationID: "organization-1",
-		DeviceID:       "device-1",
-	}, csrDER)
+	request := IssuanceRequest{
+		ID:       "enrollment-1",
+		CSRDER:   csrDER,
+		IssuedAt: time.Unix(2_000_000_000, 0),
+		Identity: Identity{
+			OrganizationID: "organization-1",
+			DeviceID:       "device-1",
+		},
+	}
+	issued, err := issuer.Issue(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,6 +66,13 @@ func TestX509IssuerUsesAuthorityControlledClientIdentity(t *testing.T) {
 	}
 	if err := certificate.CheckSignatureFrom(issuerCertificate); err != nil {
 		t.Fatal(err)
+	}
+	retried, err := issuer.Issue(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.SerialNumber != issued.SerialNumber || !retried.NotBefore.Equal(issued.NotBefore) || !retried.NotAfter.Equal(issued.NotAfter) {
+		t.Fatalf("retry changed certificate identity or validity: first=%#v retry=%#v", issued, retried)
 	}
 }
 

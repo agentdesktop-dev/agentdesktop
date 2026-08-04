@@ -136,10 +136,11 @@ func (store *Store) BeginIssuance(
 		UPDATE enrollments
 		SET status = 'issuing', device_id = $1, updated_at = now()
 		WHERE id = $2 AND organization_id = $3 AND status = 'pending'
-		RETURNING csr_der, public_key_fingerprint
+		RETURNING csr_der, public_key_fingerprint, updated_at
 	`, deviceID, enrollmentID, organizationID).Scan(
 		&issuance.CSRDER,
 		&issuance.PublicKeyFingerprint,
+		&issuance.StartedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return enrollment.Issuance{}, enrollment.ErrNotPending
@@ -154,40 +155,6 @@ func (store *Store) BeginIssuance(
 		return enrollment.Issuance{}, err
 	}
 	return issuance, nil
-}
-
-func (store *Store) AbortIssuance(
-	ctx context.Context,
-	administrator enrollment.Principal,
-	issuance enrollment.Issuance,
-) error {
-	transaction, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return err
-	}
-	defer transaction.Rollback(ctx)
-	organizationID, err := findOrganization(ctx, transaction, administrator.Issuer)
-	if err != nil {
-		return err
-	}
-	result, err := transaction.Exec(ctx, `
-		UPDATE enrollments
-		SET status = 'pending', device_id = NULL, updated_at = now()
-		WHERE id = $1 AND organization_id = $2 AND device_id = $3 AND status = 'issuing'
-	`, issuance.EnrollmentID, organizationID, issuance.DeviceID)
-	if err != nil {
-		return err
-	}
-	if result.RowsAffected() != 1 {
-		return enrollment.ErrNotPending
-	}
-	if _, err := transaction.Exec(ctx, `DELETE FROM devices WHERE id = $1 AND organization_id = $2`, issuance.DeviceID, organizationID); err != nil {
-		return err
-	}
-	if err := insertAudit(ctx, transaction, organizationID, administrator.Subject, "enrollment.issuance_failed", issuance.EnrollmentID); err != nil {
-		return err
-	}
-	return transaction.Commit(ctx)
 }
 
 func (store *Store) CompleteIssuance(
@@ -208,16 +175,6 @@ func (store *Store) CompleteIssuance(
 	if organizationID != issuance.OrganizationID {
 		return enrollment.Approval{}, enrollment.ErrNotPending
 	}
-	if _, err := transaction.Exec(ctx, `
-		INSERT INTO certificates (
-			serial_number, organization_id, device_id, public_key_fingerprint,
-			certificate_pem, not_before, not_after
-		) VALUES ($1, $2, $3, $4, $5, $6, $7)
-	`, certificate.SerialNumber, organizationID, issuance.DeviceID,
-		issuance.PublicKeyFingerprint, certificate.ChainPEM,
-		certificate.NotBefore, certificate.NotAfter); err != nil {
-		return enrollment.Approval{}, err
-	}
 	result, err := transaction.Exec(ctx, `
 		UPDATE enrollments
 		SET status = 'approved', updated_at = now()
@@ -228,6 +185,16 @@ func (store *Store) CompleteIssuance(
 	}
 	if result.RowsAffected() != 1 {
 		return enrollment.Approval{}, enrollment.ErrNotPending
+	}
+	if _, err := transaction.Exec(ctx, `
+		INSERT INTO certificates (
+			serial_number, organization_id, device_id, public_key_fingerprint,
+			certificate_pem, not_before, not_after
+		) VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`, certificate.SerialNumber, organizationID, issuance.DeviceID,
+		issuance.PublicKeyFingerprint, certificate.ChainPEM,
+		certificate.NotBefore, certificate.NotAfter); err != nil {
+		return enrollment.Approval{}, err
 	}
 	if err := insertAudit(ctx, transaction, organizationID, administrator.Subject, "enrollment.approved", issuance.EnrollmentID); err != nil {
 		return enrollment.Approval{}, err
@@ -244,6 +211,44 @@ func (store *Store) CompleteIssuance(
 		NotBefore:      certificate.NotBefore,
 		NotAfter:       certificate.NotAfter,
 	}, nil
+}
+
+func (store *Store) ListIssuing(
+	ctx context.Context,
+	startedBefore time.Time,
+	limit int,
+) ([]enrollment.Issuance, error) {
+	rows, err := store.pool.Query(ctx, `
+		SELECT enrollments.id, enrollments.organization_id, organizations.issuer,
+		       enrollments.device_id, enrollments.csr_der,
+		       enrollments.public_key_fingerprint, enrollments.updated_at
+		FROM enrollments
+		JOIN organizations ON organizations.id = enrollments.organization_id
+		WHERE enrollments.status = 'issuing' AND enrollments.updated_at <= $1
+		ORDER BY enrollments.updated_at, enrollments.id
+		LIMIT $2
+	`, startedBefore, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	issuances := make([]enrollment.Issuance, 0)
+	for rows.Next() {
+		var issuance enrollment.Issuance
+		if err := rows.Scan(
+			&issuance.EnrollmentID,
+			&issuance.OrganizationID,
+			&issuance.OrganizationIssuer,
+			&issuance.DeviceID,
+			&issuance.CSRDER,
+			&issuance.PublicKeyFingerprint,
+			&issuance.StartedAt,
+		); err != nil {
+			return nil, err
+		}
+		issuances = append(issuances, issuance)
+	}
+	return issuances, rows.Err()
 }
 
 func (store *Store) Get(

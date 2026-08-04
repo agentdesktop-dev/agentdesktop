@@ -19,9 +19,11 @@ type Enrollment struct {
 type Issuance struct {
 	EnrollmentID         string
 	OrganizationID       string
+	OrganizationIssuer   string
 	DeviceID             string
 	CSRDER               []byte
 	PublicKeyFingerprint string
+	StartedAt            time.Time
 }
 
 type IssuedCertificate struct {

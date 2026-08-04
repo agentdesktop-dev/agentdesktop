@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
@@ -24,7 +25,6 @@ type X509Issuer struct {
 	certificate *x509.Certificate
 	chainPEM    string
 	lifetime    time.Duration
-	now         func() time.Time
 	signer      crypto.Signer
 	trustDomain string
 }
@@ -54,7 +54,6 @@ func NewX509Issuer(
 		certificate: certificate,
 		chainPEM:    chainPEM,
 		lifetime:    lifetime,
-		now:         time.Now,
 		signer:      signer,
 		trustDomain: trustDomain,
 	}, nil
@@ -95,41 +94,42 @@ func LoadX509Issuer(certificatePath, keyPath, trustDomain string, lifetime time.
 	return NewX509Issuer(certificate, string(certificatePEM), signer, trustDomain, lifetime)
 }
 
-func (issuer *X509Issuer) Issue(ctx context.Context, identity Identity, csrDER []byte) (Certificate, error) {
+func (issuer *X509Issuer) Issue(ctx context.Context, request IssuanceRequest) (Certificate, error) {
 	if err := ctx.Err(); err != nil {
 		return Certificate{}, err
 	}
-	request, err := x509.ParseCertificateRequest(csrDER)
-	if err != nil || request.CheckSignature() != nil {
+	if request.ID == "" || request.IssuedAt.IsZero() {
+		return Certificate{}, errors.New("certificate request identity and issuance time are required")
+	}
+	csr, err := x509.ParseCertificateRequest(request.CSRDER)
+	if err != nil || csr.CheckSignature() != nil {
 		return Certificate{}, errors.New("invalid certificate signing request")
 	}
-	publicKey, ok := request.PublicKey.(*ecdsa.PublicKey)
+	publicKey, ok := csr.PublicKey.(*ecdsa.PublicKey)
 	if !ok || publicKey.Curve.Params().Name != "P-256" {
 		return Certificate{}, errors.New("client certificate key must use P-256")
 	}
-	identityURI, err := spiffeURI(issuer.trustDomain, identity.OrganizationID, identity.DeviceID)
+	identityURI, err := spiffeURI(issuer.trustDomain, request.Identity.OrganizationID, request.Identity.DeviceID)
 	if err != nil {
 		return Certificate{}, err
 	}
-	serialBytes := make([]byte, 16)
-	if _, err := rand.Read(serialBytes); err != nil {
-		return Certificate{}, err
-	}
+	serialDigest := sha256.Sum256([]byte("agentdesktop-client-certificate:" + request.ID))
+	serialBytes := serialDigest[:20]
 	serialBytes[0] &= 0x7f
 	serial := new(big.Int).SetBytes(serialBytes)
 	if serial.Sign() == 0 {
 		serial.SetInt64(1)
 	}
-	now := issuer.now().UTC()
-	notBefore := now.Add(-defaultBackdate)
+	issuedAt := request.IssuedAt.UTC()
+	notBefore := issuedAt.Add(-defaultBackdate)
 	if notBefore.Before(issuer.certificate.NotBefore) {
 		notBefore = issuer.certificate.NotBefore
 	}
-	notAfter := now.Add(issuer.lifetime)
+	notAfter := issuedAt.Add(issuer.lifetime)
 	if notAfter.After(issuer.certificate.NotAfter) {
 		notAfter = issuer.certificate.NotAfter
 	}
-	if !notAfter.After(now) {
+	if !notAfter.After(issuedAt) {
 		return Certificate{}, errors.New("issuer certificate expires before client certificate")
 	}
 	template := &x509.Certificate{

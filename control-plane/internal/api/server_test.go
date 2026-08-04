@@ -45,6 +45,10 @@ func (store *recordingStore) Get(
 	return store.status, store.getErr
 }
 
+func (store *recordingStore) ListIssuing(context.Context, time.Time, int) ([]enrollment.Issuance, error) {
+	return nil, nil
+}
+
 func (store *recordingStore) CreatePending(
 	_ context.Context,
 	principal enrollment.Principal,
@@ -69,10 +73,6 @@ func (store *recordingStore) BeginIssuance(
 	return store.issuance, nil
 }
 
-func (store *recordingStore) AbortIssuance(context.Context, enrollment.Principal, enrollment.Issuance) error {
-	return nil
-}
-
 func (store *recordingStore) CompleteIssuance(
 	_ context.Context,
 	_ enrollment.Principal,
@@ -92,7 +92,7 @@ func (store *recordingStore) CompleteIssuance(
 
 type apiIssuer struct{}
 
-func (apiIssuer) Issue(context.Context, ca.Identity, []byte) (ca.Certificate, error) {
+func (apiIssuer) Issue(context.Context, ca.IssuanceRequest) (ca.Certificate, error) {
 	return ca.Certificate{
 		ChainPEM:     "certificate-chain",
 		SerialNumber: "01",
@@ -142,7 +142,9 @@ func TestEnrollmentRejectsUnauthenticatedAndUnknownFields(t *testing.T) {
 }
 
 func TestApprovalRequiresAdministratorAndReturnsCertificate(t *testing.T) {
-	store := &recordingStore{issuance: enrollment.Issuance{OrganizationID: "organization-1", CSRDER: []byte("csr")}}
+	store := &recordingStore{issuance: enrollment.Issuance{
+		OrganizationID: "organization-1", CSRDER: []byte("csr"), StartedAt: time.Unix(1_000, 0),
+	}}
 	administrator := testAuthenticator{principal: enrollment.Principal{Issuer: "https://issuer.example/", Subject: "admin-1"}}
 	handler := NewServer(testAuthenticator{}, administrator, enrollment.NewService(store, apiIssuer{}))
 	response := httptest.NewRecorder()

@@ -38,6 +38,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("invalid CLIENT_CERTIFICATE_LIFETIME: %v", err)
 	}
+	reconciliationInterval, err := time.ParseDuration(value("ISSUANCE_RECONCILIATION_INTERVAL", "1m"))
+	if err != nil || reconciliationInterval <= 0 {
+		log.Fatalf("invalid ISSUANCE_RECONCILIATION_INTERVAL: %v", err)
+	}
+	reconciliationGrace, err := time.ParseDuration(value("ISSUANCE_RECONCILIATION_GRACE", "5m"))
+	if err != nil || reconciliationGrace <= 0 {
+		log.Fatalf("invalid ISSUANCE_RECONCILIATION_GRACE: %v", err)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -72,10 +80,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	enrollmentService := enrollment.NewService(store, certificateIssuer)
 	handler := api.NewServer(
 		validator,
 		administratorValidator,
-		enrollment.NewService(store, certificateIssuer),
+		enrollmentService,
 	)
 	server := &http.Server{
 		Addr:              listenAddress,
@@ -94,9 +103,38 @@ func main() {
 			log.Printf("server shutdown failed: %v", err)
 		}
 	}()
+	go reconcileIssuance(ctx, enrollmentService, reconciliationInterval, reconciliationGrace)
 	log.Printf("enrollment server listening on %s", listenAddress)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
+	}
+}
+
+func reconcileIssuance(
+	ctx context.Context,
+	service *enrollment.Service,
+	interval time.Duration,
+	grace time.Duration,
+) {
+	reconcile := func() {
+		completed, err := service.Reconcile(ctx, time.Now().UTC().Add(-grace), 100)
+		if err != nil && ctx.Err() == nil {
+			log.Printf("issuance reconciliation failed: %v", err)
+		}
+		if completed > 0 {
+			log.Printf("reconciled %d interrupted certificate issuances", completed)
+		}
+	}
+	reconcile()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			reconcile()
+		}
 	}
 }
 

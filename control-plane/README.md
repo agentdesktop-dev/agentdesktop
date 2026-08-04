@@ -2,7 +2,7 @@
 
 This Go module is the production backend boundary for managed Agent Desktop enrollment. It validates a standard OAuth bearer token, derives the user from validated `iss` and `sub` claims, validates a signed P-256 CSR, and transactionally persists a pending enrollment in PostgreSQL. A separately scoped administrator token can claim one pending enrollment and issue a short-lived client certificate with authority-controlled SPIFFE identity.
 
-The runtime currently uses a protected local CA key through a narrow issuer interface. This is suitable for development and single-instance deployment, not the final production key boundary; production should replace it with KMS, HSM, `step-ca`, Vault PKI, or a cloud private CA adapter. The service does not yet renew certificates, recover expired certificates, reconcile interrupted issuance, or expose revocation state to Agent Gateway. Device private keys are generated and retained by Agent Desktop and must never be submitted to this service or stored in PostgreSQL.
+The runtime currently uses a protected local CA key through a narrow issuer interface. This is suitable for development and single-instance deployment, not the final production key boundary; production should replace it with KMS, HSM, `step-ca`, Vault PKI, or a cloud private CA adapter. The service does not yet renew certificates, recover expired certificates, or expose revocation state to Agent Gateway. Device private keys are generated and retained by Agent Desktop and must never be submitted to this service or stored in PostgreSQL.
 
 ## Local development
 
@@ -27,6 +27,8 @@ export CA_PRIVATE_KEY_PATH="$PWD/development-ca.key"
 export MTLS_TRUST_DOMAIN=devices.example.com
 go run ./cmd/enrollment-server -migrate
 ```
+
+`ISSUANCE_RECONCILIATION_INTERVAL` defaults to `1m`, and `ISSUANCE_RECONCILIATION_GRACE` defaults to `5m`. The worker retries claims that remain `issuing` beyond the grace period using the original enrollment ID, device ID, CSR, and claim time. An external CA adapter must use the enrollment ID as its idempotency key so a timeout or process crash cannot create a second credential.
 
 For local development only, generate a P-256 CA before startup:
 
@@ -60,7 +62,7 @@ POST /v1/admin/enrollments/{enrollment_id}/approve
 Authorization: Bearer <administrator-access-token>
 ```
 
-The response contains the authority-assigned device ID and public certificate chain. The issued leaf has only client-auth extended usage and one SPIFFE URI in the form `spiffe://<trust-domain>/organization/<organization-id>/device/<device-id>`. A second approval returns `409 enrollment_not_pending`.
+The response contains the authority-assigned device ID and public certificate chain. The issued leaf has only client-auth extended usage and one SPIFFE URI in the form `spiffe://<trust-domain>/organization/<organization-id>/device/<device-id>`. A second approval returns `409 enrollment_not_pending`. If the CA call fails or the process exits after claiming the enrollment, the claim remains `issuing` for reconciliation; it is not reset to `pending` because CA failure can be ambiguous.
 
 The authenticated user that created the enrollment can poll it and retrieve the public certificate chain after approval:
 
