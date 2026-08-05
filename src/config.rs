@@ -37,6 +37,10 @@ pub struct Config {
     #[arg(long, env = "AGENTDESKTOP_IDENTITY_ISSUER")]
     pub identity_issuer: Option<Url>,
 
+    /// Enrollment service origin for managed device certificate renewal.
+    #[arg(long, env = "AGENTDESKTOP_ENROLLMENT_URL")]
+    pub enrollment_url: Option<Url>,
+
     /// Directory containing the persisted managed identity backend selection.
     #[arg(long, env = "AGENTDESKTOP_IDENTITY_DIR")]
     pub identity_dir: Option<PathBuf>,
@@ -101,6 +105,21 @@ impl Config {
 
         if self.mode == DeploymentMode::Standalone && self.identity_issuer.is_some() {
             bail!("managed identity is only available in managed mode");
+        }
+        if self.mode == DeploymentMode::Standalone && self.enrollment_url.is_some() {
+            bail!("certificate enrollment is only available in managed mode");
+        }
+        if self.identity_issuer.is_some() != self.enrollment_url.is_some() {
+            bail!("managed identity issuer and enrollment URL must be provided together");
+        }
+        if let Some(enrollment_url) = &self.enrollment_url
+            && (enrollment_url.scheme() != "https"
+                || enrollment_url.host_str().is_none()
+                || enrollment_url.path() != "/"
+                || enrollment_url.query().is_some()
+                || enrollment_url.fragment().is_some())
+        {
+            bail!("enrollment URL must be an HTTPS origin");
         }
         if self.identity_dir.is_some() && self.identity_issuer.is_none() {
             bail!("identity directory requires an identity issuer");
@@ -363,6 +382,8 @@ mod tests {
             "https://gateway.example/base/",
             "--identity-issuer",
             "https://identity.example/",
+            "--enrollment-url",
+            "https://enrollment.example/",
         ])
         .unwrap();
 
@@ -370,6 +391,39 @@ mod tests {
             config.identity_issuer.unwrap().as_str(),
             "https://identity.example/"
         );
+        assert_eq!(
+            config.enrollment_url.unwrap().as_str(),
+            "https://enrollment.example/"
+        );
+    }
+
+    #[test]
+    fn rejects_partial_or_insecure_enrollment_configuration() {
+        let missing = parse(&[
+            "connector",
+            "--mode",
+            "managed",
+            "--upstream",
+            "https://gateway.example/",
+            "--identity-issuer",
+            "https://identity.example/",
+        ])
+        .unwrap_err();
+        assert!(missing.to_string().contains("provided together"));
+
+        let insecure = parse(&[
+            "connector",
+            "--mode",
+            "managed",
+            "--upstream",
+            "https://gateway.example/",
+            "--identity-issuer",
+            "https://identity.example/",
+            "--enrollment-url",
+            "http://enrollment.example/",
+        ])
+        .unwrap_err();
+        assert!(insecure.to_string().contains("HTTPS origin"));
     }
 
     #[test]

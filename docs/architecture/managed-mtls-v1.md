@@ -1,6 +1,6 @@
 # Managed mTLS identity contract v1
 
-Status: selected production direction; enrollment request persistence, administrator-scoped listing, approval and rejection, retry-stable local protected-key issuance, interrupted issuance and renewal reconciliation, owner-scoped certificate retrieval and valid-certificate renewal, Agent Desktop key/certificate persistence, connector-side mTLS activation, and atomic device/certificate revocation persistence are implemented. Production CA integration, connector renewal scheduling and credential rotation, expired-certificate recovery, revocation consumption, and Agent Gateway enforcement remain incomplete.
+Status: selected production direction; enrollment request persistence, administrator-scoped listing, approval and rejection, retry-stable local protected-key issuance, interrupted issuance and renewal reconciliation, owner-scoped certificate retrieval and valid-certificate renewal, Agent Desktop key/certificate persistence, proactive renewal and credential rotation, connector-side mTLS activation, and atomic device/certificate revocation persistence are implemented. Production CA integration, expired-certificate recovery, revocation consumption, and Agent Gateway enforcement remain incomplete.
 
 ## Trust model
 
@@ -28,7 +28,7 @@ The service returns `202 Accepted` with a server-generated enrollment ID, pendin
 
 The organization bootstrap supplies a distinct HTTPS `enrollment_url`; Agent Desktop does not expect an external OAuth provider to advertise connector-specific enrollment metadata. Agent Desktop generates a P-256 key, stores its PKCS#8 private key through the selected protected credential backend, and verifies that the service fingerprint matches the CSR public key. It polls with ordinary bearer authentication and accepts an approved record only when the returned leaf certificate's SubjectPublicKeyInfo exactly matches the retained private key. The private key is never printed by enrollment commands.
 
-Managed connector startup fails closed unless it can load an approved, key-matching certificate from protected storage. The reqwest/rustls upstream client presents that identity, and OAuth credential-generation pool rotation reapplies the same client identity rather than downgrading to bearer-only transport. Certificate renewal will extend this pool generation boundary to rotate both credentials together.
+Managed connector startup fails closed unless it can load an approved, key-matching certificate from protected storage. The reqwest/rustls upstream client presents that identity. OAuth and device credentials have independent generations on one upstream pool boundary, so rotating either rebuilds future Gateway connections without downgrading the other identity.
 
 ## Gateway authentication
 
@@ -39,6 +39,8 @@ For HBONE, one mTLS HTTP/2 connection may carry multiple CONNECT streams only fo
 ## Renewal and recovery
 
 Before expiry, Agent Desktop generates a new local key and CSR and renews over mTLS using its current certificate. The enrollment service verifies that the device remains active, issues a replacement, and records the new certificate serial and validity. Agent Desktop atomically activates the new key and certificate, opens new Gateway connections, and drains old connections.
+
+Agent Desktop checks the parsed leaf validity at startup and every 15 minutes, renewing within six hours of expiry. It persists the new private key as a protected draft before the request so retries after ambiguous failures use the same CSR fingerprint and server claim. A validated replacement is persisted and reloaded before its device generation is published to the proxy; failures retain the current in-memory identity and retry after one minute. The successful generation change rebuilds the reqwest pool for future connections while existing requests drain normally.
 
 The service persists a renewal claim before CA I/O and keys it by device plus the new public-key fingerprint. The claim fixes the renewal ID, organization, device, CSR, and issuance time. Ambiguous CA failures remain `issuing`; a bounded worker retries them with the renewal ID as the external CA idempotency key. Completion locks the active device and claim, inserts the certificate, transitions the claim, and records audit in one transaction. Device revocation serializes on the same device row, so either renewal completes before revocation and the new certificate is revoked with the device, or renewal fails closed.
 
@@ -51,6 +53,6 @@ Approval claims a pending enrollment as `issuing` before calling the CA, prevent
 ## Remaining implementation
 
 - Replace the local-key issuer with a production protected-key CA adapter.
-- Add connector-side proactive renewal scheduling, expired-certificate recovery, and coordinated key/certificate pool rotation.
+- Add expired-certificate recovery.
 - Add fail-closed Agent Gateway consumption of persisted device and certificate revocation state.
 - Add Agent Gateway mTLS validation and immutable outer-to-inner identity propagation.

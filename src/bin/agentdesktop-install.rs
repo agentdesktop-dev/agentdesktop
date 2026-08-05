@@ -340,8 +340,9 @@ fn managed_systemd_unit(root: &Path, bootstrap: &OrganizationBootstrap) -> Strin
     let connector = quote_systemd_arg(&root.join("bin/agentdesktop"));
     let upstream = quote_systemd_value(bootstrap.gateway.url.as_str());
     let issuer = quote_systemd_value(bootstrap.identity.issuer.as_str());
+    let enrollment_url = quote_systemd_value(bootstrap.identity.enrollment_url.as_str());
     format!(
-        "[Unit]\nDescription=Agent Desktop\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={connector} serve --mode managed --upstream {upstream} --identity-issuer {issuer}\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\n\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription=Agent Desktop\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={connector} serve --mode managed --upstream {upstream} --identity-issuer {issuer} --enrollment-url {enrollment_url}\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\n\n[Install]\nWantedBy=default.target\n"
     )
 }
 

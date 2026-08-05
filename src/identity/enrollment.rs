@@ -8,6 +8,8 @@ use url::Url;
 use x509_parser::parse_x509_certificate;
 use x509_parser::pem::parse_x509_pem;
 
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use super::oauth::ManagedIdentity;
 use super::storage::CredentialStore;
 
@@ -50,6 +52,13 @@ struct PersistedEnrollment<'a> {
     private_key_pkcs8: &'a str,
 }
 
+#[derive(Deserialize, Serialize)]
+struct RenewalDraft {
+    device_id: String,
+    public_key_fingerprint: String,
+    private_key_pkcs8: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct AuthorityRecord {
     enrollment_id: String,
@@ -60,9 +69,19 @@ struct AuthorityRecord {
     certificate: Option<IssuedCertificate>,
 }
 
+#[derive(Debug, Deserialize)]
+struct AuthorityRenewal {
+    renewal_id: String,
+    status: EnrollmentStatus,
+    device_id: String,
+    public_key_fingerprint: String,
+    certificate: IssuedCertificate,
+}
+
 pub struct EnrollmentClient {
     client: Client,
     endpoint: Url,
+    renewal_endpoint: Url,
 }
 
 impl EnrollmentClient {
@@ -78,6 +97,7 @@ impl EnrollmentClient {
         Ok(Self {
             client: Client::new(),
             endpoint: service_url.join("v1/enrollments")?,
+            renewal_endpoint: service_url.join("v1/renewals")?,
         })
     }
 
@@ -86,6 +106,7 @@ impl EnrollmentClient {
         Ok(Self {
             client: Client::new(),
             endpoint: service_url.join("v1/enrollments")?,
+            renewal_endpoint: service_url.join("v1/renewals")?,
         })
     }
 
@@ -137,6 +158,68 @@ impl EnrollmentClient {
         let updated = authority.with_private_key(enrollment.private_key_pkcs8.clone());
         validate_persisted_record(&updated)?;
         Ok(updated)
+    }
+
+    pub async fn renew_and_save(
+        &self,
+        identity: &ManagedIdentity,
+        issuer: &Url,
+        gateway_origin: &Url,
+        store: &CredentialStore,
+    ) -> Result<EnrollmentRecord> {
+        let enrollment = load_enrollment_for(issuer, gateway_origin, store)?;
+        validate_persisted_record(&enrollment)?;
+        if enrollment.status != EnrollmentStatus::Approved {
+            bail!("only an approved device enrollment can be renewed");
+        }
+        let current_device_id = enrollment
+            .device_id
+            .as_deref()
+            .context("approved enrollment is missing its device ID")?;
+        let draft = load_or_create_renewal_draft(issuer, gateway_origin, store, current_device_id)?;
+        let private_key = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&draft.private_key_pkcs8)
+            .context("decode renewal private key")?;
+        let key = KeyPair::try_from(private_key.as_slice()).context("parse renewal private key")?;
+        let csr = CertificateParams::default()
+            .serialize_request(&key)?
+            .pem()?;
+        let client = Client::builder()
+            .identity(device_identity(&enrollment)?)
+            .build()?;
+        let response = client
+            .post(self.renewal_endpoint.clone())
+            .bearer_auth(identity.bearer_token().await?)
+            .json(&serde_json::json!({"csr": csr}))
+            .send()
+            .await?;
+        if response.status() != StatusCode::OK {
+            bail!(
+                "certificate renewal failed with status {}",
+                response.status()
+            );
+        }
+        let authority: AuthorityRenewal = response.json().await?;
+        if authority.renewal_id.is_empty()
+            || authority.status != EnrollmentStatus::Approved
+            || authority.device_id != current_device_id
+            || authority.public_key_fingerprint != draft.public_key_fingerprint
+        {
+            bail!("renewal authority returned an incomplete or mismatched record");
+        }
+        let renewed = EnrollmentRecord {
+            enrollment_id: enrollment.enrollment_id.clone(),
+            status: EnrollmentStatus::Approved,
+            public_key_fingerprint: draft.public_key_fingerprint,
+            created_at: enrollment.created_at.clone(),
+            device_id: Some(authority.device_id),
+            certificate: Some(authority.certificate),
+            private_key_pkcs8: draft.private_key_pkcs8,
+        };
+        validate_persisted_record(&renewed)?;
+        save_enrollment_for(issuer, gateway_origin, store, &renewed)?;
+        store.delete_if_exists(&renewal_record_name(issuer, gateway_origin))?;
+        Ok(renewed)
     }
 }
 
@@ -265,6 +348,34 @@ pub fn load_device_identity_for(
     store: &CredentialStore,
 ) -> Result<reqwest::Identity> {
     let record = load_enrollment_for(issuer, gateway_origin, store)?;
+    device_identity(&record)
+}
+
+pub fn certificate_renewal_due(
+    record: &EnrollmentRecord,
+    now: SystemTime,
+    renew_before: Duration,
+) -> Result<bool> {
+    validate_persisted_record(record)?;
+    let certificate = record
+        .certificate
+        .as_ref()
+        .context("approved enrollment is missing its certificate")?;
+    let (_, pem) = parse_x509_pem(certificate.certificate_chain_pem.as_bytes())
+        .map_err(|_| anyhow::anyhow!("issued certificate chain is not valid PEM"))?;
+    let (_, leaf) = parse_x509_certificate(&pem.contents)
+        .map_err(|_| anyhow::anyhow!("issued leaf certificate is invalid"))?;
+    let timestamp = u64::try_from(leaf.validity().not_after.timestamp())
+        .context("issued certificate expiration precedes the Unix epoch")?;
+    let not_after = UNIX_EPOCH
+        .checked_add(Duration::from_secs(timestamp))
+        .context("issued certificate expiration is out of range")?;
+    Ok(not_after
+        .duration_since(now)
+        .map_or(true, |remaining| remaining <= renew_before))
+}
+
+fn device_identity(record: &EnrollmentRecord) -> Result<reqwest::Identity> {
     if record.status != EnrollmentStatus::Approved {
         bail!("managed device enrollment is not approved");
     }
@@ -294,6 +405,42 @@ pub fn delete_enrollment_for(
 
 fn enrollment_record_name(issuer: &Url, gateway_origin: &Url) -> String {
     format!("enrollment-mtls-v1|{issuer}|{gateway_origin}")
+}
+
+fn renewal_record_name(issuer: &Url, gateway_origin: &Url) -> String {
+    format!("enrollment-mtls-renewal-v1|{issuer}|{gateway_origin}")
+}
+
+fn load_or_create_renewal_draft(
+    issuer: &Url,
+    gateway_origin: &Url,
+    store: &CredentialStore,
+    device_id: &str,
+) -> Result<RenewalDraft> {
+    let record_name = renewal_record_name(issuer, gateway_origin);
+    if let Some(encoded) = store.get_optional(&record_name)? {
+        let draft: RenewalDraft = serde_json::from_slice(&encoded)?;
+        let private_key = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&draft.private_key_pkcs8)
+            .context("decode renewal private key")?;
+        let key = KeyPair::try_from(private_key.as_slice()).context("parse renewal private key")?;
+        if draft.device_id != device_id
+            || key.algorithm() != &PKCS_ECDSA_P256_SHA256
+            || public_key_fingerprint(&key) != draft.public_key_fingerprint
+        {
+            bail!("persisted renewal draft does not match the approved device");
+        }
+        return Ok(draft);
+    }
+    let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
+    let draft = RenewalDraft {
+        device_id: device_id.to_owned(),
+        public_key_fingerprint: public_key_fingerprint(&key),
+        private_key_pkcs8: base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(key.serialize_der()),
+    };
+    store.put(&record_name, &serde_json::to_vec(&draft)?)?;
+    Ok(draft)
 }
 
 #[cfg(test)]
@@ -340,6 +487,7 @@ mod tests {
         let app = Router::new()
             .route("/v1/enrollments", post(request_enrollment))
             .route("/v1/enrollments/{id}", get(enrollment_status))
+            .route("/v1/renewals", post(renew_certificate))
             .with_state(state);
         let server = tokio::spawn(axum::serve(listener, app).into_future());
         let temporary = tempfile::tempdir().unwrap();
@@ -363,6 +511,18 @@ mod tests {
         let approved = client.status(&identity, &pending).await.unwrap();
         assert_eq!(approved.status, EnrollmentStatus::Approved);
         assert_eq!(approved.device_id.as_deref(), Some("device-1"));
+        assert!(
+            !super::certificate_renewal_due(&approved, UNIX_EPOCH, std::time::Duration::ZERO,)
+                .unwrap()
+        );
+        assert!(
+            super::certificate_renewal_due(
+                &approved,
+                UNIX_EPOCH + std::time::Duration::from_secs(100_000_000_000),
+                std::time::Duration::ZERO,
+            )
+            .unwrap()
+        );
         save_enrollment_for(
             &Url::parse("https://issuer.example/").unwrap(),
             &Url::parse("https://gateway.example/").unwrap(),
@@ -370,6 +530,38 @@ mod tests {
             &approved,
         )
         .unwrap();
+        load_device_identity_for(
+            &Url::parse("https://issuer.example/").unwrap(),
+            &Url::parse("https://gateway.example/").unwrap(),
+            &store,
+        )
+        .unwrap();
+
+        let renewed = client
+            .renew_and_save(
+                &identity,
+                &Url::parse("https://issuer.example/").unwrap(),
+                &Url::parse("https://gateway.example/").unwrap(),
+                &store,
+            )
+            .await
+            .unwrap();
+        assert_eq!(renewed.status, EnrollmentStatus::Approved);
+        assert_eq!(renewed.device_id.as_deref(), Some("device-1"));
+        assert_ne!(
+            renewed.public_key_fingerprint,
+            approved.public_key_fingerprint
+        );
+        let persisted = load_enrollment_for(
+            &Url::parse("https://issuer.example/").unwrap(),
+            &Url::parse("https://gateway.example/").unwrap(),
+            &store,
+        )
+        .unwrap();
+        assert_eq!(
+            persisted.public_key_fingerprint,
+            renewed.public_key_fingerprint
+        );
         load_device_identity_for(
             &Url::parse("https://issuer.example/").unwrap(),
             &Url::parse("https://gateway.example/").unwrap(),
@@ -403,6 +595,26 @@ mod tests {
         };
         assert!(save_enrollment_for(&issuer, &gateway, &store, &record).is_err());
         assert!(load_enrollment_for(&issuer, &gateway, &store).is_err());
+    }
+
+    #[test]
+    fn reuses_protected_renewal_draft() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = CredentialStore::setup(
+            CredentialStorageMode::File,
+            &temporary.path().join("identity"),
+        )
+        .unwrap();
+        let issuer = Url::parse("https://issuer.example/").unwrap();
+        let gateway = Url::parse("https://gateway.example/").unwrap();
+
+        let first =
+            super::load_or_create_renewal_draft(&issuer, &gateway, &store, "device-1").unwrap();
+        let retried =
+            super::load_or_create_renewal_draft(&issuer, &gateway, &store, "device-1").unwrap();
+
+        assert_eq!(first.public_key_fingerprint, retried.public_key_fingerprint);
+        assert_eq!(first.private_key_pkcs8, retried.private_key_pkcs8);
     }
 
     async fn request_enrollment(
@@ -447,6 +659,26 @@ mod tests {
                 "serial_number": "01",
                 "not_before": "2026-08-04T00:00:00Z",
                 "not_after": "2026-08-05T00:00:00Z"
+            }
+        }))
+    }
+
+    async fn renew_certificate(headers: HeaderMap, Json(body): Json<Value>) -> Json<Value> {
+        assert_eq!(headers["authorization"], "Bearer access-token");
+        let csr = body["csr"].as_str().unwrap();
+        let request = CertificateSigningRequestParams::from_pem(csr).unwrap();
+        let fingerprint = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(Sha256::digest(request.public_key.subject_public_key_info()));
+        Json(json!({
+            "renewal_id": "renewal-1",
+            "status": "approved",
+            "device_id": "device-1",
+            "public_key_fingerprint": fingerprint,
+            "certificate": {
+                "certificate_chain_pem": issue_for_csr(&request),
+                "serial_number": "02",
+                "not_before": "2026-08-05T00:00:00Z",
+                "not_after": "2026-08-06T00:00:00Z"
             }
         }))
     }

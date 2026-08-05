@@ -53,7 +53,7 @@ impl Default for ProxyOptions {
 #[derive(Clone)]
 struct ProxyState {
     clients: Arc<StdMutex<ClientPool>>,
-    device_identity: Option<reqwest::Identity>,
+    device_identity: Option<ManagedDeviceIdentity>,
     upstream: Url,
     mode: DeploymentMode,
     identity: Option<ManagedIdentity>,
@@ -99,8 +99,48 @@ impl OperationalMetrics {
 }
 
 struct ClientPool {
-    generation: u64,
+    credential_generation: u64,
+    device_generation: u64,
     client: Client,
+}
+
+#[derive(Clone)]
+pub struct ManagedDeviceIdentity {
+    state: Arc<StdMutex<DeviceIdentityState>>,
+}
+
+struct DeviceIdentityState {
+    generation: u64,
+    identity: reqwest::Identity,
+}
+
+impl ManagedDeviceIdentity {
+    pub fn new(identity: reqwest::Identity) -> Self {
+        Self {
+            state: Arc::new(StdMutex::new(DeviceIdentityState {
+                generation: 1,
+                identity,
+            })),
+        }
+    }
+
+    pub fn replace(&self, identity: reqwest::Identity) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("managed device identity lock poisoned"))?;
+        state.identity = identity;
+        state.generation = state.generation.wrapping_add(1);
+        Ok(())
+    }
+
+    fn snapshot(&self) -> Result<(u64, reqwest::Identity)> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("managed device identity lock poisoned"))?;
+        Ok((state.generation, state.identity.clone()))
+    }
 }
 
 #[derive(Debug)]
@@ -195,10 +235,40 @@ pub async fn serve_with_managed_identity(
     options: ProxyOptions,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
-    let client = build_client(options.connect_timeout, device_identity.clone())?;
+    let device_identity = device_identity.map(ManagedDeviceIdentity::new);
+    serve_with_rotating_managed_identity(
+        listener,
+        upstream,
+        mode,
+        identity,
+        device_identity,
+        options,
+        shutdown,
+    )
+    .await
+}
+
+pub async fn serve_with_rotating_managed_identity(
+    listener: TcpListener,
+    upstream: Url,
+    mode: DeploymentMode,
+    identity: Option<ManagedIdentity>,
+    device_identity: Option<ManagedDeviceIdentity>,
+    options: ProxyOptions,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<()> {
+    let (device_generation, initial_identity) = match &device_identity {
+        Some(identity) => {
+            let (generation, identity) = identity.snapshot()?;
+            (generation, Some(identity))
+        }
+        None => (0, None),
+    };
+    let client = build_client(options.connect_timeout, initial_identity)?;
     let state = ProxyState {
         clients: Arc::new(StdMutex::new(ClientPool {
-            generation: 0,
+            credential_generation: 0,
+            device_generation,
             client,
         })),
         device_identity,
@@ -445,13 +515,21 @@ async fn forward_request(state: &ProxyState, request: Request<Body>) -> Result<R
 }
 
 fn client_for_generation(state: &ProxyState, generation: u64) -> Result<Client> {
+    let (device_generation, device_identity) = match &state.device_identity {
+        Some(identity) => {
+            let (generation, identity) = identity.snapshot()?;
+            (generation, Some(identity))
+        }
+        None => (0, None),
+    };
     let mut pool = state
         .clients
         .lock()
         .map_err(|_| anyhow::anyhow!("upstream client pool lock poisoned"))?;
-    if pool.generation != generation {
-        pool.client = build_client(state.connect_timeout, state.device_identity.clone())?;
-        pool.generation = generation;
+    if pool.credential_generation != generation || pool.device_generation != device_generation {
+        pool.client = build_client(state.connect_timeout, device_identity)?;
+        pool.credential_generation = generation;
+        pool.device_generation = device_generation;
         tracing::info!(event = "upstream_pool_rotated");
     }
     Ok(pool.client.clone())
@@ -521,6 +599,7 @@ mod tests {
     use base64::Engine;
     use futures_util::StreamExt;
     use http_body_util::BodyExt;
+    use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::{Mutex, mpsc, oneshot};
     use tokio_stream::wrappers::ReceiverStream;
@@ -759,7 +838,8 @@ mod tests {
     fn rotates_upstream_pool_for_new_credential_generation() {
         let state = ProxyState {
             clients: Arc::new(StdMutex::new(ClientPool {
-                generation: 1,
+                credential_generation: 1,
+                device_generation: 0,
                 client: Client::new(),
             })),
             device_identity: None,
@@ -776,7 +856,43 @@ mod tests {
 
         client_for_generation(&state, 2).unwrap();
 
-        assert_eq!(state.clients.lock().unwrap().generation, 2);
+        assert_eq!(state.clients.lock().unwrap().credential_generation, 2);
+    }
+
+    #[test]
+    fn rotates_upstream_pool_for_new_device_identity_generation() {
+        let device_identity = ManagedDeviceIdentity::new(test_device_identity());
+        let state = ProxyState {
+            clients: Arc::new(StdMutex::new(ClientPool {
+                credential_generation: 0,
+                device_generation: 1,
+                client: Client::new(),
+            })),
+            device_identity: Some(device_identity.clone()),
+            upstream: Url::parse("https://gateway.example").unwrap(),
+            mode: DeploymentMode::Managed,
+            identity: None,
+            request_timeout: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(1),
+            shutdown_timeout: Duration::from_secs(1),
+            max_in_flight: 1,
+            in_flight: Arc::new(Semaphore::new(1)),
+            metrics: Arc::new(OperationalMetrics::default()),
+        };
+
+        device_identity.replace(test_device_identity()).unwrap();
+        client_for_generation(&state, 0).unwrap();
+
+        assert_eq!(state.clients.lock().unwrap().device_generation, 2);
+    }
+
+    fn test_device_identity() -> reqwest::Identity {
+        let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let certificate = CertificateParams::default().self_signed(&key).unwrap();
+        reqwest::Identity::from_pem(
+            format!("{}{}", certificate.pem(), key.serialize_pem()).as_bytes(),
+        )
+        .unwrap()
     }
 
     #[tokio::test]
@@ -881,7 +997,8 @@ mod tests {
         assert_eq!(identity.status().await.unwrap(), "refresh-required");
         let state = ProxyState {
             clients: Arc::new(StdMutex::new(ClientPool {
-                generation: 0,
+                credential_generation: 0,
+                device_generation: 0,
                 client: Client::new(),
             })),
             device_identity: None,

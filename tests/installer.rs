@@ -242,5 +242,6 @@ fn installs_managed_bundle_without_local_gateway() {
     assert!(service.contains("serve --mode managed"));
     assert!(service.contains("--upstream \"https://gateway.acme.example/\""));
     assert!(service.contains("--identity-issuer \"https://login.acme.example/\""));
+    assert!(service.contains("--enrollment-url \"https://enrollment.acme.example/\""));
     assert!(!service.contains("--gateway-binary"));
 }

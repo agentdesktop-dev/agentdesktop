@@ -91,6 +91,17 @@ impl CredentialStore {
         }
     }
 
+    pub fn get_optional(&self, record: &str) -> Result<Option<Vec<u8>>> {
+        match self {
+            Self::SecretService => match secret_service_entry(record)?.get_secret() {
+                Ok(secret) => Ok(Some(secret)),
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(error) => Err(error.into()),
+            },
+            Self::File(store) => store.get_optional(record),
+        }
+    }
+
     pub fn delete(&self, record: &str) -> Result<()> {
         match self {
             Self::SecretService => secret_service_entry(record)?.delete_credential()?,
@@ -143,6 +154,16 @@ impl ProtectedFileStore {
 
     fn get(&self, record: &str) -> Result<Vec<u8>> {
         read_secure_file(&self.root, &record_name(record))
+    }
+
+    fn get_optional(&self, record: &str) -> Result<Option<Vec<u8>>> {
+        let name = record_name(record);
+        let path = self.root.join(&name);
+        match fs::symlink_metadata(path) {
+            Ok(_) => read_secure_file(&self.root, &name).map(Some),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn delete(&self, record: &str) -> Result<()> {

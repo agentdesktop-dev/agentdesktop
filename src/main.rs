@@ -4,27 +4,39 @@ use agentdesktop::identity::oauth::{ManagedIdentity, load_session_for};
 use agentdesktop::identity::{
     cli::IdentityCommand,
     enrollment::{
-        EnrollmentClient, EnrollmentStatus, load_device_identity_for, load_enrollment_for,
-        save_enrollment_for,
+        EnrollmentClient, EnrollmentStatus, certificate_renewal_due, load_device_identity_for,
+        load_enrollment_for, save_enrollment_for,
     },
     oauth::{LoginConfig, login},
     storage::{CredentialStorageMode, CredentialStore, default_storage_root},
 };
 use agentdesktop::local_gateway::LocalGateway;
 use agentdesktop::organization::OrganizationBootstrap;
-use agentdesktop::proxy::{self, ProxyOptions};
+use agentdesktop::proxy::{self, ManagedDeviceIdentity, ProxyOptions};
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, ExitStatus};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::net::TcpListener;
 
 #[cfg(target_os = "linux")]
 use agentdesktop::capture::CaptureRelay;
 
 const LOCAL_GATEWAY_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const CERTIFICATE_RENEW_BEFORE: Duration = Duration::from_secs(6 * 60 * 60);
+const CERTIFICATE_RENEWAL_CHECK_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const CERTIFICATE_RENEWAL_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+
+struct RenewalContext {
+    enrollment_url: url::Url,
+    gateway_origin: url::Url,
+    identity: ManagedIdentity,
+    issuer: url::Url,
+    proxy_identity: ManagedDeviceIdentity,
+    store: CredentialStore,
+}
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Route AI application traffic through Agent Gateway")]
@@ -165,7 +177,8 @@ fn exit_code(status: ExitStatus) -> ExitCode {
 
 async fn serve(config: Config) -> anyhow::Result<()> {
     let _telemetry = agentdesktop::telemetry::init()?;
-    let (identity, device_identity) = if let Some(issuer) = &config.identity_issuer {
+    let (identity, device_identity, renewal_context) = if let Some(issuer) = &config.identity_issuer
+    {
         let identity_dir = config
             .identity_dir
             .clone()
@@ -173,13 +186,27 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         let store = CredentialStore::load(&identity_dir)?;
         let gateway_origin = upstream_origin(&config.upstream)?;
         let session = load_session_for(issuer, &gateway_origin, &store)?;
-        let device_identity = load_device_identity_for(issuer, &gateway_origin, &store)?;
+        let identity = ManagedIdentity::new(session, store.clone());
+        let device_identity =
+            ManagedDeviceIdentity::new(load_device_identity_for(issuer, &gateway_origin, &store)?);
+        let enrollment_url = config
+            .enrollment_url
+            .clone()
+            .context("managed identity requires an enrollment URL")?;
         (
-            Some(ManagedIdentity::new(session, store)),
-            Some(device_identity),
+            Some(identity.clone()),
+            Some(device_identity.clone()),
+            Some(RenewalContext {
+                enrollment_url,
+                gateway_origin,
+                identity,
+                issuer: issuer.clone(),
+                proxy_identity: device_identity,
+                store,
+            }),
         )
     } else {
-        (None, None)
+        (None, None, None)
     };
     let mut local_gateway = match (&config.gateway_binary, &config.gateway_config) {
         (Some(binary), Some(gateway_config)) => {
@@ -217,7 +244,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         mode = config.mode.as_str(),
         listen = %listener.local_addr()?
     );
-    let serve = proxy::serve_with_managed_identity(
+    let renewal_task =
+        renewal_context.map(|context| tokio::spawn(renew_device_certificate(context)));
+    let serve = proxy::serve_with_rotating_managed_identity(
         listener,
         config.upstream,
         config.mode,
@@ -257,7 +286,46 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     if let Some(relay) = capture_relay {
         relay.abort();
     }
+    if let Some(task) = renewal_task {
+        task.abort();
+    }
     result
+}
+
+async fn renew_device_certificate(context: RenewalContext) {
+    loop {
+        let delay = match renew_device_certificate_once(&context).await {
+            Ok(true) => {
+                tracing::info!(event = "device_certificate_renewed");
+                CERTIFICATE_RENEWAL_CHECK_INTERVAL
+            }
+            Ok(false) => CERTIFICATE_RENEWAL_CHECK_INTERVAL,
+            Err(_) => {
+                tracing::warn!(event = "device_certificate_renewal_failed");
+                CERTIFICATE_RENEWAL_RETRY_INTERVAL
+            }
+        };
+        tokio::time::sleep(delay).await;
+    }
+}
+
+async fn renew_device_certificate_once(context: &RenewalContext) -> anyhow::Result<bool> {
+    let enrollment = load_enrollment_for(&context.issuer, &context.gateway_origin, &context.store)?;
+    if !certificate_renewal_due(&enrollment, SystemTime::now(), CERTIFICATE_RENEW_BEFORE)? {
+        return Ok(false);
+    }
+    EnrollmentClient::new(&context.enrollment_url)?
+        .renew_and_save(
+            &context.identity,
+            &context.issuer,
+            &context.gateway_origin,
+            &context.store,
+        )
+        .await?;
+    let replacement =
+        load_device_identity_for(&context.issuer, &context.gateway_origin, &context.store)?;
+    context.proxy_identity.replace(replacement)?;
+    Ok(true)
 }
 
 async fn connect_agents(yes: bool) -> anyhow::Result<()> {

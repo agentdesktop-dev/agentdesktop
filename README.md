@@ -52,10 +52,11 @@ Attach the persisted session to managed forwarding by supplying the same issuer:
 cargo run -- serve \
   --mode managed \
   --upstream https://gateway.example \
-  --identity-issuer https://identity.example/
+  --identity-issuer https://identity.example/ \
+  --enrollment-url https://enrollment.example/
 ```
 
-The connector fails at startup if storage or the matching session is unavailable. Before expiry it serializes refresh, uses the same DPoP key, verifies the rotated access token, persists the new refresh token, and replaces the managed upstream connection pool before forwarding continues. Refresh failure fails new requests closed locally; the issuer must enforce refresh-token rotation and reuse detection. For each request the connector removes application-supplied connector identity headers, preserves the application `Authorization` header, and adds a fresh `Proxy-Authorization: DPoP` token and DPoP proof. The DPoP key is not verified organizational device identity, and Agent Gateway still needs the contract's DPoP validation and credential-stripping changes before this is a trusted end-to-end managed identity path.
+The connector fails at startup if storage, the matching session, or the approved device certificate is unavailable. It renews the device certificate within six hours of expiry using a protected retry-stable draft key, persists and reloads the validated replacement, then rotates the managed upstream connection pool. Renewal failure retains the current identity and retries without direct fallback. OAuth refresh independently serializes, verifies and persists rotated tokens, and rotates the same pool generation boundary. For each request the connector removes application-supplied connector identity headers, preserves the application `Authorization` header, and adds its connector authorization credentials. Agent Gateway still needs the contract's mTLS validation and credential-stripping changes before this is a trusted end-to-end managed identity path.
 
 Delete only the matching local session with:
 
