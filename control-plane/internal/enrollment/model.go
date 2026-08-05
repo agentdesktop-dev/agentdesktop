@@ -42,6 +42,15 @@ type Status struct {
 	Certificate          *IssuedCertificate `json:"certificate,omitempty"`
 }
 
+type AdministrativeRecord struct {
+	EnrollmentID         string    `json:"enrollment_id"`
+	Status               string    `json:"status"`
+	Subject              string    `json:"subject"`
+	PublicKeyFingerprint string    `json:"public_key_fingerprint"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
+}
+
 type Approval struct {
 	EnrollmentID   string    `json:"enrollment_id"`
 	Status         string    `json:"status"`

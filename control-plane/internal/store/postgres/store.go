@@ -251,6 +251,92 @@ func (store *Store) ListIssuing(
 	return issuances, rows.Err()
 }
 
+func (store *Store) List(
+	ctx context.Context,
+	administrator enrollment.Principal,
+	status string,
+	limit int,
+) ([]enrollment.AdministrativeRecord, error) {
+	rows, err := store.pool.Query(ctx, `
+		SELECT enrollments.id, enrollments.status, users.subject,
+		       enrollments.public_key_fingerprint, enrollments.created_at,
+		       enrollments.updated_at
+		FROM enrollments
+		JOIN organizations ON organizations.id = enrollments.organization_id
+		JOIN users ON users.id = enrollments.user_id
+		WHERE organizations.issuer = $1 AND enrollments.status = $2
+		ORDER BY enrollments.created_at, enrollments.id
+		LIMIT $3
+	`, administrator.Issuer, status, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	records := make([]enrollment.AdministrativeRecord, 0)
+	for rows.Next() {
+		var record enrollment.AdministrativeRecord
+		if err := rows.Scan(
+			&record.EnrollmentID,
+			&record.Status,
+			&record.Subject,
+			&record.PublicKeyFingerprint,
+			&record.CreatedAt,
+			&record.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
+func (store *Store) Reject(
+	ctx context.Context,
+	administrator enrollment.Principal,
+	enrollmentID string,
+) (enrollment.AdministrativeRecord, error) {
+	transaction, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return enrollment.AdministrativeRecord{}, err
+	}
+	defer transaction.Rollback(ctx)
+	organizationID, err := findOrganization(ctx, transaction, administrator.Issuer)
+	if err != nil {
+		return enrollment.AdministrativeRecord{}, err
+	}
+	var record enrollment.AdministrativeRecord
+	err = transaction.QueryRow(ctx, `
+		UPDATE enrollments
+		SET status = 'rejected', updated_at = now()
+		FROM users
+		WHERE enrollments.id = $1 AND enrollments.organization_id = $2
+		  AND enrollments.status = 'pending' AND users.id = enrollments.user_id
+		RETURNING enrollments.id, enrollments.status, users.subject,
+		          enrollments.public_key_fingerprint, enrollments.created_at,
+		          enrollments.updated_at
+	`, enrollmentID, organizationID).Scan(
+		&record.EnrollmentID,
+		&record.Status,
+		&record.Subject,
+		&record.PublicKeyFingerprint,
+		&record.CreatedAt,
+		&record.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return enrollment.AdministrativeRecord{}, enrollment.ErrNotPending
+	}
+	if err != nil {
+		return enrollment.AdministrativeRecord{}, err
+	}
+	if err := insertAudit(ctx, transaction, organizationID, administrator.Subject, "enrollment.rejected", enrollmentID); err != nil {
+		return enrollment.AdministrativeRecord{}, err
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return enrollment.AdministrativeRecord{}, err
+	}
+	return record, nil
+}
+
 func (store *Store) Get(
 	ctx context.Context,
 	principal enrollment.Principal,

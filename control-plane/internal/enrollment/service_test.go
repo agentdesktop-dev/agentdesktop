@@ -50,6 +50,14 @@ func (store *approvalStore) ListIssuing(context.Context, time.Time, int) ([]Issu
 	return store.issuing, nil
 }
 
+func (store *approvalStore) List(context.Context, Principal, string, int) ([]AdministrativeRecord, error) {
+	return nil, nil
+}
+
+func (store *approvalStore) Reject(context.Context, Principal, string) (AdministrativeRecord, error) {
+	return AdministrativeRecord{}, nil
+}
+
 type testIssuer struct {
 	err error
 }

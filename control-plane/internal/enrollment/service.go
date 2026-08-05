@@ -23,7 +23,9 @@ type Store interface {
 	BeginIssuance(context.Context, Principal, string, string) (Issuance, error)
 	CompleteIssuance(context.Context, Principal, Issuance, IssuedCertificate) (Approval, error)
 	Get(context.Context, Principal, string) (Status, error)
+	List(context.Context, Principal, string, int) ([]AdministrativeRecord, error)
 	ListIssuing(context.Context, time.Time, int) ([]Issuance, error)
+	Reject(context.Context, Principal, string) (AdministrativeRecord, error)
 }
 
 type Service struct {
@@ -55,6 +57,34 @@ func (service *Service) Get(ctx context.Context, principal Principal, enrollment
 		return Status{}, ErrInvalidPrincipal
 	}
 	return service.store.Get(ctx, principal, enrollmentID)
+}
+
+func (service *Service) List(
+	ctx context.Context,
+	administrator Principal,
+	status string,
+	limit int,
+) ([]AdministrativeRecord, error) {
+	if administrator.Issuer == "" || administrator.Subject == "" || limit <= 0 || limit > 100 ||
+		!validAdministrativeStatus(status) {
+		return nil, ErrInvalidPrincipal
+	}
+	return service.store.List(ctx, administrator, status, limit)
+}
+
+func (service *Service) Reject(
+	ctx context.Context,
+	administrator Principal,
+	enrollmentID string,
+) (AdministrativeRecord, error) {
+	if administrator.Issuer == "" || administrator.Subject == "" || enrollmentID == "" {
+		return AdministrativeRecord{}, ErrInvalidPrincipal
+	}
+	return service.store.Reject(ctx, administrator, enrollmentID)
+}
+
+func validAdministrativeStatus(status string) bool {
+	return status == "pending" || status == "issuing" || status == "approved" || status == "rejected"
 }
 
 func (service *Service) Approve(ctx context.Context, administrator Principal, enrollmentID string) (Approval, error) {

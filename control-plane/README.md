@@ -64,6 +64,18 @@ Authorization: Bearer <administrator-access-token>
 
 The response contains the authority-assigned device ID and public certificate chain. The issued leaf has only client-auth extended usage and one SPIFFE URI in the form `spiffe://<trust-domain>/organization/<organization-id>/device/<device-id>`. A second approval returns `409 enrollment_not_pending`. If the CA call fails or the process exits after claiming the enrollment, the claim remains `issuing` for reconciliation; it is not reset to `pending` because CA failure can be ambiguous.
 
+Administrators can list bounded organization-scoped enrollment metadata and reject a pending request without reading CSR or certificate bytes:
+
+```http
+GET /v1/admin/enrollments?status=pending
+Authorization: Bearer <administrator-access-token>
+
+POST /v1/admin/enrollments/{enrollment_id}/reject
+Authorization: Bearer <administrator-access-token>
+```
+
+The list defaults to `pending`, accepts `pending`, `issuing`, `approved`, or `rejected`, and returns at most 100 records ordered oldest first. Rejection is an audited exact `pending` to `rejected` transition. Unknown, foreign-organization, and already-transitioned enrollment IDs return the same `409 enrollment_not_pending` response.
+
 The authenticated user that created the enrollment can poll it and retrieve the public certificate chain after approval:
 
 ```http

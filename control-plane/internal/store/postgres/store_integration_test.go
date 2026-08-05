@@ -196,6 +196,73 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 		t.Fatalf("approval audit event count = %d, want 2", auditCount)
 	}
 
+	rejectRequest := validRequest(t)
+	rejectEnrollmentID, err := identifier.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejectRecord, err := store.CreatePending(
+		ctx,
+		enrollment.Principal{Issuer: issuer, Subject: "user-2"},
+		rejectRequest,
+		rejectEnrollmentID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingRecords, err := store.List(ctx, administrator, "pending", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pendingRecords) != 1 || pendingRecords[0].EnrollmentID != rejectRecord.ID || pendingRecords[0].Subject != "user-2" {
+		t.Fatalf("pending administrator records = %#v", pendingRecords)
+	}
+	foreignOrganizationID, err := identifier.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignIssuer := "https://issuer.example/" + foreignOrganizationID
+	if err := store.EnsureOrganization(ctx, foreignOrganizationID, foreignIssuer, "Foreign Organization"); err != nil {
+		t.Fatal(err)
+	}
+	foreignAdministrator := enrollment.Principal{Issuer: foreignIssuer, Subject: "foreign-admin"}
+	foreignRecords, err := store.List(ctx, foreignAdministrator, "pending", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(foreignRecords) != 0 {
+		t.Fatalf("foreign administrator records = %#v, want none", foreignRecords)
+	}
+	if _, err := store.Reject(ctx, foreignAdministrator, rejectRecord.ID); !errors.Is(err, enrollment.ErrNotPending) {
+		t.Fatalf("foreign rejection error = %v, want ErrNotPending", err)
+	}
+	rejected, err := store.Reject(ctx, administrator, rejectRecord.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rejected.Status != "rejected" || rejected.Subject != "user-2" {
+		t.Fatalf("rejected record = %#v", rejected)
+	}
+	if _, err := store.Reject(ctx, administrator, rejectRecord.ID); !errors.Is(err, enrollment.ErrNotPending) {
+		t.Fatalf("repeat rejection error = %v, want ErrNotPending", err)
+	}
+	ownerStatus, err := store.Get(ctx, enrollment.Principal{Issuer: issuer, Subject: "user-2"}, rejectRecord.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ownerStatus.Status != "rejected" || ownerStatus.DeviceID != "" || ownerStatus.Certificate != nil {
+		t.Fatalf("owner rejection status = %#v", ownerStatus)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM audit_events
+		WHERE target_id = $1 AND action = 'enrollment.rejected' AND actor_subject = 'admin-1'
+	`, rejectRecord.ID).Scan(&auditCount); err != nil {
+		t.Fatal(err)
+	}
+	if auditCount != 1 {
+		t.Fatalf("rejection audit event count = %d, want 1", auditCount)
+	}
+
 }
 
 func validRequest(t *testing.T) certificate.Request {

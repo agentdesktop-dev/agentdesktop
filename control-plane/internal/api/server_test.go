@@ -30,10 +30,11 @@ func (authenticator testAuthenticator) Authenticate(*http.Request) (enrollment.P
 }
 
 type recordingStore struct {
-	principal enrollment.Principal
-	issuance  enrollment.Issuance
-	status    enrollment.Status
-	getErr    error
+	principal    enrollment.Principal
+	issuance     enrollment.Issuance
+	status       enrollment.Status
+	getErr       error
+	adminRecords []enrollment.AdministrativeRecord
 }
 
 func (store *recordingStore) Get(
@@ -47,6 +48,14 @@ func (store *recordingStore) Get(
 
 func (store *recordingStore) ListIssuing(context.Context, time.Time, int) ([]enrollment.Issuance, error) {
 	return nil, nil
+}
+
+func (store *recordingStore) List(context.Context, enrollment.Principal, string, int) ([]enrollment.AdministrativeRecord, error) {
+	return store.adminRecords, nil
+}
+
+func (store *recordingStore) Reject(_ context.Context, _ enrollment.Principal, id string) (enrollment.AdministrativeRecord, error) {
+	return enrollment.AdministrativeRecord{EnrollmentID: id, Status: "rejected"}, nil
 }
 
 func (store *recordingStore) CreatePending(
@@ -196,6 +205,36 @@ func TestEnrollmentStatusUsesAuthenticatedOwnerAndReturnsCertificate(t *testing.
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/enrollments/foreign", nil))
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("foreign enrollment status = %d", response.Code)
+	}
+}
+
+func TestAdministratorListsAndRejectsPendingEnrollment(t *testing.T) {
+	store := &recordingStore{adminRecords: []enrollment.AdministrativeRecord{{
+		EnrollmentID: "enrollment-1",
+		Status:       "pending",
+		Subject:      "user-1",
+	}}}
+	administrator := testAuthenticator{principal: enrollment.Principal{
+		Issuer: "https://issuer.example/", Subject: "admin-1",
+	}}
+	handler := NewServer(testAuthenticator{}, administrator, enrollment.NewService(store, apiIssuer{}))
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/admin/enrollments", nil))
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"enrollment_id":"enrollment-1"`)) {
+		t.Fatalf("list status = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/admin/enrollments/enrollment-1/reject", nil))
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"status":"rejected"`)) {
+		t.Fatalf("reject status = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/admin/enrollments?status=unknown", nil))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid filter status = %d", response.Code)
 	}
 }
 
