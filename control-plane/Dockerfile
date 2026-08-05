@@ -1,10 +1,10 @@
-FROM golang:1.26-alpine AS build
+FROM golang:1.25.8-trixie AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/enrollment-server ./cmd/enrollment-server
+RUN CGO_ENABLED=1 go build -trimpath -ldflags='-s -w' -o /out/enrollment-server ./cmd/enrollment-server
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build /out/enrollment-server /usr/local/bin/enrollment-server
 ENTRYPOINT ["/usr/local/bin/enrollment-server"]

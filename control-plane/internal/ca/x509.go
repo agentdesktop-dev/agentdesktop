@@ -60,17 +60,9 @@ func NewX509Issuer(
 }
 
 func LoadX509Issuer(certificatePath, keyPath, trustDomain string, lifetime time.Duration) (*X509Issuer, error) {
-	certificatePEM, err := os.ReadFile(filepath.Clean(certificatePath))
+	certificate, certificatePEM, err := loadIssuerCertificate(certificatePath)
 	if err != nil {
-		return nil, fmt.Errorf("read issuer certificate: %w", err)
-	}
-	block, rest := pem.Decode(certificatePEM)
-	if block == nil || block.Type != "CERTIFICATE" || len(strings.TrimSpace(string(rest))) != 0 {
-		return nil, errors.New("issuer certificate file must contain one PEM certificate")
-	}
-	certificate, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("parse issuer certificate: %w", err)
+		return nil, err
 	}
 	keyInfo, err := os.Lstat(filepath.Clean(keyPath))
 	if err != nil {
@@ -91,7 +83,36 @@ func LoadX509Issuer(certificatePath, keyPath, trustDomain string, lifetime time.
 	if err != nil {
 		return nil, err
 	}
-	return NewX509Issuer(certificate, string(certificatePEM), signer, trustDomain, lifetime)
+	return NewX509Issuer(certificate, certificatePEM, signer, trustDomain, lifetime)
+}
+
+func LoadX509IssuerWithSigner(
+	certificatePath string,
+	signer crypto.Signer,
+	trustDomain string,
+	lifetime time.Duration,
+) (*X509Issuer, error) {
+	certificate, certificatePEM, err := loadIssuerCertificate(certificatePath)
+	if err != nil {
+		return nil, err
+	}
+	return NewX509Issuer(certificate, certificatePEM, signer, trustDomain, lifetime)
+}
+
+func loadIssuerCertificate(certificatePath string) (*x509.Certificate, string, error) {
+	certificatePEM, err := os.ReadFile(filepath.Clean(certificatePath))
+	if err != nil {
+		return nil, "", fmt.Errorf("read issuer certificate: %w", err)
+	}
+	block, rest := pem.Decode(certificatePEM)
+	if block == nil || block.Type != "CERTIFICATE" || len(strings.TrimSpace(string(rest))) != 0 {
+		return nil, "", errors.New("issuer certificate file must contain one PEM certificate")
+	}
+	certificate, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, "", fmt.Errorf("parse issuer certificate: %w", err)
+	}
+	return certificate, string(certificatePEM), nil
 }
 
 func (issuer *X509Issuer) Issue(ctx context.Context, request IssuanceRequest) (Certificate, error) {
