@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://agentgateway.dev/schema/config
 config:
-  readinessAddr: 127.0.0.1:15021
+  readinessAddr: 0.0.0.0:15021
 
 llm:
   port: 8443
@@ -13,7 +13,7 @@ llm:
       mode: strict
       location:
         header:
-          name: proxy-authorization
+          name: x-agentdesktop-authorization
           prefix: 'Bearer '
       issuer: $OIDC_ISSUER
       audiences: [$OIDC_AUDIENCE]

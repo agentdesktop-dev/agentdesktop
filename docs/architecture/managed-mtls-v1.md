@@ -32,7 +32,7 @@ Managed connector startup fails closed unless it can load an approved, key-match
 
 ## Gateway authentication
 
-Agent Gateway requires a client certificate chaining to the configured enrollment CA. It validates the chain, validity, client-auth usage, organization scope, and revocation status before constructing immutable device context. Agent Gateway separately validates the ordinary OAuth bearer token and constructs user context from its verified claims. The authenticated connection is isolated by organization, user, device, and certificate generation; inspected inner headers cannot override this context.
+Agent Gateway requires a client certificate chaining to the configured enrollment CA. It validates the chain, validity, client-auth usage, organization scope, and revocation status before constructing immutable device context. Agent Desktop replaces any caller-supplied `X-AgentDesktop-Authorization` value with the ordinary OAuth bearer token while preserving the application's `Authorization` header. Agent Gateway validates and removes that dedicated end-to-end header, then constructs user context from verified claims. The authenticated connection is isolated by organization, user, device, and certificate generation; inspected inner headers cannot override this context.
 
 For HBONE, one mTLS HTTP/2 connection may carry multiple CONNECT streams only for that same immutable context. OAuth credentials are carried on the outer request and stripped before inner traffic, policy extensions, logs, traces, mirrors, or provider forwarding.
 

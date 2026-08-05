@@ -475,7 +475,7 @@ async fn forward_request(state: &ProxyState, request: Request<Body>) -> Result<R
     if let Some(identity) = &state.identity {
         let credentials = identity.credentials().await.map_err(identity_error)?;
         headers.insert(
-            "proxy-authorization",
+            "x-agentdesktop-authorization",
             HeaderValue::from_str(&format!("Bearer {}", credentials.access_token))
                 .map_err(|error| identity_error(error.into()))?,
         );
@@ -569,6 +569,7 @@ fn remove_hop_by_hop_headers(headers: &mut HeaderMap) {
         "keep-alive",
         "proxy-authenticate",
         "proxy-authorization",
+        "x-agentdesktop-authorization",
         "te",
         "trailer",
         "transfer-encoding",
@@ -942,7 +943,8 @@ mod tests {
         let response = Client::new()
             .post(format!("http://{proxy_address}/v1/messages"))
             .header("authorization", "Bearer application-token")
-            .header("proxy-authorization", "DPoP attacker-token")
+            .header("proxy-authorization", "Bearer proxy-token")
+            .header("x-agentdesktop-authorization", "DPoP attacker-token")
             .header("dpop", "attacker-proof")
             .send()
             .await
@@ -950,7 +952,11 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         let headers = captured.lock().await.take().unwrap();
         assert_eq!(headers["authorization"], "Bearer application-token");
-        assert_eq!(headers["proxy-authorization"], "Bearer managed-token");
+        assert_eq!(
+            headers["x-agentdesktop-authorization"],
+            "Bearer managed-token"
+        );
+        assert!(!headers.contains_key("proxy-authorization"));
         assert!(!headers.contains_key("dpop"));
         shutdown_tx.send(()).unwrap();
     }

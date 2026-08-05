@@ -56,7 +56,7 @@ cargo run -- serve \
   --enrollment-url https://enrollment.example/
 ```
 
-The connector fails at startup if storage, the matching session, or the approved device certificate is unavailable. It renews the device certificate within six hours of expiry using a protected retry-stable draft key, persists and reloads the validated replacement, then rotates the managed upstream connection pool. Renewal failure retains the current identity and retries without direct fallback. OAuth refresh independently serializes, verifies and persists rotated tokens, and rotates the same pool generation boundary. For each request the connector replaces `Proxy-Authorization` with its bearer token and preserves the application's `Authorization` header. Agent Gateway validates and removes the connector token, authorizes the current mTLS certificate against the control plane, and owns provider credentials.
+The connector fails at startup if storage, the matching session, or the approved device certificate is unavailable. It renews the device certificate within six hours of expiry using a protected retry-stable draft key, persists and reloads the validated replacement, then rotates the managed upstream connection pool. Renewal failure retains the current identity and retries without direct fallback. OAuth refresh independently serializes, verifies and persists rotated tokens, and rotates the same pool generation boundary. For each request the connector replaces `X-AgentDesktop-Authorization` with its bearer token and preserves the application's `Authorization` header. Agent Gateway validates and removes the connector token, authorizes the current mTLS certificate against the control plane, and owns provider credentials.
 
 Delete only the matching local session with:
 

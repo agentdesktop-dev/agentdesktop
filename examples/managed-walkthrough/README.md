@@ -1,10 +1,10 @@
 # Managed native walkthrough
 
-This walkthrough exercises ordinary OAuth user identity and authority-issued mTLS device identity through Agent Desktop and Agent Gateway. It covers browser login, administrator approval, a Claude request, immediate device revocation, and denial of the next request. Agent Gateway uses the checked-in configuration only; it needs no source changes.
+This walkthrough exercises ordinary OAuth user identity and authority-issued mTLS device identity through Agent Desktop and Agent Gateway. It covers browser login, administrator approval, a Claude request, immediate device revocation, and denial of the next request. Agent Gateway uses the checked-in configuration only; it needs no source changes. All infrastructure runs in one disposable Podman pod. Agent Desktop and Claude remain host processes, but trust the generated CAs through a process-local bundle; the walkthrough never changes the host trust store or uses `sudo`.
 
 The walkthrough uses the repository's mock OIDC and Anthropic servers. It expects:
 
-- Fedora with `openssl`, `curl`, `jq`, Rust, Go, PostgreSQL 17, Claude Code, and Agent Gateway built at `../agentgateway/target/debug/agentgateway`.
+- Fedora with Podman, `openssl`, `curl`, `jq`, Rust, and Claude Code.
 - Repository root as the current directory unless a command says otherwise.
 
 Use these fixed local values:
@@ -21,74 +21,27 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:18081
 export ANTHROPIC_API_KEY=mock-provider-key
 ```
 
-## Start local dependencies
+## Start disposable infrastructure
 
-Start the mock OIDC server in terminal 1:
-
-```bash
-AGENTDESKTOP_FAKE_PORT=18080 \
-AGENTDESKTOP_FAKE_ADMIN_SCOPE="$ADMIN_SCOPE" \
-node tests/fixtures/fake-authorization-server.mjs
-```
-
-The server performs a deterministic test-user login when the browser opens. Its `/admin-token` endpoint issues a signed, one-hour administrator JWT for this local walkthrough. An arbitrary token will not pass control-plane signature, issuer, audience, expiry, subject, and scope validation.
-
-Start the mock Anthropic API in terminal 2:
+Start OIDC, mock Anthropic, PostgreSQL 17, the enrollment service, and Agent Gateway:
 
 ```bash
-MOCK_ANTHROPIC_HOST=127.0.0.1 \
-MOCK_ANTHROPIC_PORT=18081 \
-node container/mock-anthropic.mjs
+scripts/managed-walkthrough.sh start
 ```
 
-It accepts the fake Gateway-owned API key and returns `SMOKE_OK`; it never contacts Anthropic.
+The launcher binds every published port to `127.0.0.1`, creates fresh certificates, builds the enrollment image, and waits for every service to become ready. The mock OIDC server performs a deterministic test-user login when the browser opens. Its `/admin-token` endpoint issues a signed, one-hour administrator JWT for this local walkthrough. An arbitrary token will not pass control-plane signature, issuer, audience, expiry, subject, and scope validation.
 
-## Prepare trust
-
-Generate disposable development certificates:
-
-```bash
-examples/managed-walkthrough/generate-certificates.sh
-```
-
-Trust the two server CAs on the walkthrough machine. This affects the system trust store and requires administrator approval:
-
-```bash
-sudo cp examples/managed-walkthrough/certs/enrollment-ca.crt \
-  /etc/pki/ca-trust/source/anchors/agentdesktop-walkthrough-enrollment-ca.crt
-sudo cp examples/managed-walkthrough/certs/gateway-server-ca.crt \
-  /etc/pki/ca-trust/source/anchors/agentdesktop-walkthrough-gateway-ca.crt
-sudo update-ca-trust
-```
-
-## Start the enrollment service
-
-Create an empty PostgreSQL database, then start the service in terminal 3:
-
-```bash
-cd control-plane
-export DATABASE_URL=postgres://agentdesktop:agentdesktop@127.0.0.1:5432/agentdesktop
-export OAUTH_ISSUER="$OIDC_ISSUER"
-export OAUTH_AUDIENCE="$OIDC_AUDIENCE"
-export OAUTH_SCOPE="$USER_SCOPE"
-export ADMIN_OAUTH_SCOPE="$ADMIN_SCOPE"
-export ORGANIZATION_ID
-export ORGANIZATION_NAME='Walkthrough Organization'
-export CA_SIGNER_BACKEND=file
-export CA_CERTIFICATE_PATH="$PWD/../examples/managed-walkthrough/certs/enrollment-ca.crt"
-export CA_PRIVATE_KEY_PATH="$PWD/../examples/managed-walkthrough/certs/enrollment-ca.key"
-export SERVER_TLS_CERTIFICATE_PATH="$PWD/../examples/managed-walkthrough/certs/enrollment-server.crt"
-export SERVER_TLS_PRIVATE_KEY_PATH="$PWD/../examples/managed-walkthrough/certs/enrollment-server.key"
-export MTLS_TRUST_DOMAIN=agentdesktop.test
-export GATEWAY_CLIENT_SPIFFE_ID=spiffe://agentdesktop.test/service/agentgateway
-go run ./cmd/enrollment-server -migrate
-```
+The mock Anthropic API accepts the fake Gateway-owned API key and returns `SMOKE_OK`; it never contacts Anthropic.
 
 ## Log in and enroll
 
-In terminal 4, log in and create the device enrollment:
+Set the process-local trust bundle, then log in and create the device enrollment:
 
 ```bash
+export SSL_CERT_FILE="$PWD/examples/managed-walkthrough/certs/process-ca-bundle.crt"
+export AGENTDESKTOP_IDENTITY_DIR="$PWD/examples/managed-walkthrough/certs/identity"
+export AGENTDESKTOP_CREDENTIAL_STORAGE=file
+
 cargo run -- identity login \
   --issuer "$OIDC_ISSUER" \
   --client-id "$OIDC_CLIENT_ID" \
@@ -121,20 +74,12 @@ cargo run -- identity enroll-status \
   --gateway-origin https://localhost:8443
 ```
 
-## Start the data path
+## Start Agent Desktop
 
-Start Agent Gateway from its configuration directory in terminal 5 so relative certificate paths resolve correctly:
-
-```bash
-cd examples/managed-walkthrough
-export OIDC_ISSUER OIDC_AUDIENCE OIDC_JWKS_URL
-export ANTHROPIC_BASE_URL ANTHROPIC_API_KEY
-../../../agentgateway/target/debug/agentgateway -f agentgateway.yaml
-```
-
-Start Agent Desktop in terminal 6:
+Start Agent Desktop with the same process-local CA bundle:
 
 ```bash
+SSL_CERT_FILE="$PWD/examples/managed-walkthrough/certs/process-ca-bundle.crt" \
 cargo run -- serve \
   --mode managed \
   --upstream https://localhost:8443 \
@@ -163,11 +108,8 @@ curl --fail-with-body -X POST \
 
 The first request returns `SMOKE_OK`. After revocation, the next Claude request must fail with authorization denied. Agent Gateway does not cache device authorization, so revocation takes effect on the next request without restarting either process.
 
-Remove only the walkthrough trust anchors when finished:
+Delete the pod, database, and generated runtime state when finished:
 
 ```bash
-sudo rm -f \
-  /etc/pki/ca-trust/source/anchors/agentdesktop-walkthrough-enrollment-ca.crt \
-  /etc/pki/ca-trust/source/anchors/agentdesktop-walkthrough-gateway-ca.crt
-sudo update-ca-trust
+scripts/managed-walkthrough.sh stop
 ```
