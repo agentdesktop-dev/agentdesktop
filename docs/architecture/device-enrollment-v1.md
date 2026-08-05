@@ -1,6 +1,6 @@
 # Device enrollment API v1 draft
 
-Status: DPoP-based fixture contract. Production enrollment now follows [Managed mTLS identity contract v1](managed-mtls-v1.md); this document remains accurate for the existing experimental connector and mock authority.
+Status: superseded DPoP-based fixture contract. Production enrollment follows [Managed mTLS identity contract v1](managed-mtls-v1.md). This document describes only the retained JavaScript authorization-server and gateway fixtures; the Rust connector no longer implements this enrollment protocol.
 
 ## Scope
 
@@ -57,6 +57,6 @@ Approval is an authority-side administrative action. The mock exposes it only as
 
 Revocation changes `device_status` to `revoked` without revoking the user or changing the key association. Agent Gateway must consume an authenticated, fail-closed source of this status before exposing verified device identity or returning `device_revoked`.
 
-## Current boundary
+## Fixture boundary
 
-Automated tests prove token/key binding, wrong-key rejection, proof replay rejection, explicit approval, authority-assigned device identity, independent revocation state, and connector rejection of mismatched issuer/thumbprint responses. The identity CLI can request and read enrollment using the existing refresh-safe managed session. Validated records use the existing protected issuer/gateway-scoped backend, reject stale DPoP keys, and are removed locally on logout. A production administrator API, Agent Gateway status consumption, and outage behavior are not implemented yet.
+Fixture tests prove token/key binding, wrong-key rejection, proof replay rejection, explicit approval, authority-assigned device identity, and independent revocation state. They remain regression coverage for the experimental DPoP forwarding path and must not be treated as the production enrollment contract.

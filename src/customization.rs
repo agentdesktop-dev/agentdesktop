@@ -127,6 +127,7 @@ mod tests {
               },
               "identity": {
                 "issuer": "https://login.acme.example/",
+                                "enrollment_url": "https://enrollment.acme.example/",
                 "client_id": "agentdesktop",
                 "audience": "https://gateway.acme.example",
                 "scope": "agentgateway.invoke"
@@ -161,7 +162,7 @@ mod tests {
             br#"{
               "format_version": 1,
               "organization": {"id":"acme","display_name":"Acme","support_url":"https://help.acme.example/"},
-              "identity": {"issuer":"https://login.acme.example/","client_id":"agentdesktop","audience":"gateway","scope":"invoke"},
+              "identity": {"issuer":"https://login.acme.example/","enrollment_url":"https://enrollment.acme.example/","client_id":"agentdesktop","audience":"gateway","scope":"invoke"},
               "gateway": {"url":"https://gateway.acme.example/"}
             }"#,
         )

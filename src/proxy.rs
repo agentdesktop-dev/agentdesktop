@@ -53,6 +53,7 @@ impl Default for ProxyOptions {
 #[derive(Clone)]
 struct ProxyState {
     clients: Arc<StdMutex<ClientPool>>,
+    device_identity: Option<reqwest::Identity>,
     upstream: Url,
     mode: DeploymentMode,
     identity: Option<ManagedIdentity>,
@@ -182,14 +183,25 @@ pub async fn serve_with_identity(
     options: ProxyOptions,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
-    let client = Client::builder()
-        .connect_timeout(options.connect_timeout)
-        .build()?;
+    serve_with_managed_identity(listener, upstream, mode, identity, None, options, shutdown).await
+}
+
+pub async fn serve_with_managed_identity(
+    listener: TcpListener,
+    upstream: Url,
+    mode: DeploymentMode,
+    identity: Option<ManagedIdentity>,
+    device_identity: Option<reqwest::Identity>,
+    options: ProxyOptions,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<()> {
+    let client = build_client(options.connect_timeout, device_identity.clone())?;
     let state = ProxyState {
         clients: Arc::new(StdMutex::new(ClientPool {
             generation: 0,
             client,
         })),
+        device_identity,
         upstream,
         mode,
         identity,
@@ -438,13 +450,22 @@ fn client_for_generation(state: &ProxyState, generation: u64) -> Result<Client> 
         .lock()
         .map_err(|_| anyhow::anyhow!("upstream client pool lock poisoned"))?;
     if pool.generation != generation {
-        pool.client = Client::builder()
-            .connect_timeout(state.connect_timeout)
-            .build()?;
+        pool.client = build_client(state.connect_timeout, state.device_identity.clone())?;
         pool.generation = generation;
         tracing::info!(event = "upstream_pool_rotated");
     }
     Ok(pool.client.clone())
+}
+
+fn build_client(
+    connect_timeout: Duration,
+    device_identity: Option<reqwest::Identity>,
+) -> Result<Client> {
+    let mut builder = Client::builder().connect_timeout(connect_timeout);
+    if let Some(identity) = device_identity {
+        builder = builder.identity(identity);
+    }
+    Ok(builder.build()?)
 }
 
 fn identity_error(error: anyhow::Error) -> anyhow::Error {
@@ -741,6 +762,7 @@ mod tests {
                 generation: 1,
                 client: Client::new(),
             })),
+            device_identity: None,
             upstream: Url::parse("https://gateway.example").unwrap(),
             mode: DeploymentMode::Managed,
             identity: None,
@@ -862,6 +884,7 @@ mod tests {
                 generation: 0,
                 client: Client::new(),
             })),
+            device_identity: None,
             upstream: Url::parse("http://127.0.0.1:9").unwrap(),
             mode: DeploymentMode::Managed,
             identity: Some(identity),

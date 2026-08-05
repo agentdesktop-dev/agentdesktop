@@ -7,6 +7,7 @@
   },
   "identity": {
     "issuer": "https://login.example.com/",
+    "enrollment_url": "https://enrollment.example.com/",
     "client_id": "agentdesktop",
     "audience": "https://gateway.example.com",
     "scope": "agentgateway.invoke"

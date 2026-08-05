@@ -1,82 +1,105 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
+use base64::Engine;
+use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256, PublicKeyData};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use url::Url;
+use x509_parser::parse_x509_certificate;
+use x509_parser::pem::parse_x509_pem;
 
 use super::oauth::ManagedIdentity;
 use super::storage::CredentialStore;
 
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum EnrollmentStatus {
     Pending,
+    Issuing,
     Approved,
+    Rejected,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum DeviceStatus {
-    Active,
-    Revoked,
+pub struct IssuedCertificate {
+    pub certificate_chain_pem: String,
+    pub serial_number: String,
+    pub not_before: String,
+    pub not_after: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-pub struct EnrollmentUser {
-    pub iss: Url,
-    pub sub: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[derive(Clone, Deserialize, Eq, PartialEq)]
 pub struct EnrollmentRecord {
     pub enrollment_id: String,
     pub status: EnrollmentStatus,
-    pub user: EnrollmentUser,
-    pub dpop_jkt: String,
+    pub public_key_fingerprint: String,
+    pub created_at: String,
     pub device_id: Option<String>,
-    pub device_status: Option<DeviceStatus>,
+    pub certificate: Option<IssuedCertificate>,
+    private_key_pkcs8: String,
+}
+
+#[derive(Serialize)]
+struct PersistedEnrollment<'a> {
+    enrollment_id: &'a str,
+    status: EnrollmentStatus,
+    public_key_fingerprint: &'a str,
+    created_at: &'a str,
+    device_id: Option<&'a str>,
+    certificate: Option<&'a IssuedCertificate>,
+    private_key_pkcs8: &'a str,
 }
 
 #[derive(Debug, Deserialize)]
-struct EnrollmentMetadata {
-    issuer: Url,
-    enrollment_endpoint: Url,
+struct AuthorityRecord {
+    enrollment_id: String,
+    status: EnrollmentStatus,
+    public_key_fingerprint: String,
+    created_at: String,
+    device_id: Option<String>,
+    certificate: Option<IssuedCertificate>,
 }
 
 pub struct EnrollmentClient {
     client: Client,
-    issuer: Url,
     endpoint: Url,
 }
 
 impl EnrollmentClient {
-    pub async fn discover(issuer: &Url) -> Result<Self> {
-        let discovery = issuer.join(".well-known/oauth-authorization-server")?;
-        let metadata: EnrollmentMetadata = Client::new()
-            .get(discovery)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        if metadata.issuer != *issuer {
-            bail!("enrollment metadata issuer does not match configured issuer");
-        }
-        if metadata.enrollment_endpoint.query().is_some()
-            || metadata.enrollment_endpoint.fragment().is_some()
+    pub fn new(service_url: &Url) -> Result<Self> {
+        if service_url.scheme() != "https"
+            || service_url.host_str().is_none()
+            || service_url.path() != "/"
+            || service_url.query().is_some()
+            || service_url.fragment().is_some()
         {
-            bail!("enrollment endpoint must not contain a query or fragment");
+            bail!("enrollment service URL must be an HTTPS origin");
         }
         Ok(Self {
             client: Client::new(),
-            issuer: issuer.clone(),
-            endpoint: metadata.enrollment_endpoint,
+            endpoint: service_url.join("v1/enrollments")?,
+        })
+    }
+
+    #[cfg(test)]
+    fn for_test(service_url: &Url) -> Result<Self> {
+        Ok(Self {
+            client: Client::new(),
+            endpoint: service_url.join("v1/enrollments")?,
         })
     }
 
     pub async fn request(&self, identity: &ManagedIdentity) -> Result<EnrollmentRecord> {
+        let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
+        let fingerprint = public_key_fingerprint(&key);
+        let csr = CertificateParams::default()
+            .serialize_request(&key)?
+            .pem()?;
         let response = self
-            .authenticated(identity, reqwest::Method::POST, self.endpoint.clone())
-            .await?
+            .client
+            .post(self.endpoint.clone())
+            .bearer_auth(identity.bearer_token().await?)
+            .json(&serde_json::json!({"csr": csr}))
             .send()
             .await?;
         if response.status() != StatusCode::ACCEPTED {
@@ -85,91 +108,122 @@ impl EnrollmentClient {
                 response.status()
             );
         }
-        validate_record(
-            response.json().await?,
-            Some(EnrollmentStatus::Pending),
-            &self.issuer,
-            &identity.dpop_thumbprint().await?,
-        )
+        let authority: AuthorityRecord = response.json().await?;
+        validate_authority_record(&authority, Some(EnrollmentStatus::Pending), &fingerprint)?;
+        Ok(authority.with_key(&key))
     }
 
     pub async fn status(
         &self,
         identity: &ManagedIdentity,
-        enrollment_id: &str,
+        enrollment: &EnrollmentRecord,
     ) -> Result<EnrollmentRecord> {
-        if enrollment_id.is_empty() {
-            bail!("enrollment ID must not be empty");
-        }
+        validate_persisted_record(enrollment)?;
         let mut endpoint = self.endpoint.clone();
         endpoint
             .path_segments_mut()
             .map_err(|_| anyhow::anyhow!("enrollment endpoint cannot be a base URL"))?
-            .push(enrollment_id);
-        let response = self
-            .authenticated(identity, reqwest::Method::GET, endpoint)
-            .await?
+            .push(&enrollment.enrollment_id);
+        let authority: AuthorityRecord = self
+            .client
+            .get(endpoint)
+            .bearer_auth(identity.bearer_token().await?)
             .send()
             .await?
-            .error_for_status()?;
-        validate_record(
-            response.json().await?,
-            None,
-            &self.issuer,
-            &identity.dpop_thumbprint().await?,
-        )
-    }
-
-    async fn authenticated(
-        &self,
-        identity: &ManagedIdentity,
-        method: reqwest::Method,
-        endpoint: Url,
-    ) -> Result<reqwest::RequestBuilder> {
-        let credentials = identity
-            .credentials(method.as_str(), endpoint.as_str())
+            .error_for_status()?
+            .json()
             .await?;
-        Ok(self
-            .client
-            .request(method, endpoint)
-            .header(
-                "authorization",
-                format!("DPoP {}", credentials.access_token),
-            )
-            .header("dpop", credentials.proof))
+        validate_authority_record(&authority, None, &enrollment.public_key_fingerprint)?;
+        let updated = authority.with_private_key(enrollment.private_key_pkcs8.clone());
+        validate_persisted_record(&updated)?;
+        Ok(updated)
     }
 }
 
-fn validate_record(
-    record: EnrollmentRecord,
+impl AuthorityRecord {
+    fn with_key(self, key: &KeyPair) -> EnrollmentRecord {
+        self.with_private_key(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.serialize_der()),
+        )
+    }
+
+    fn with_private_key(self, private_key_pkcs8: String) -> EnrollmentRecord {
+        EnrollmentRecord {
+            enrollment_id: self.enrollment_id,
+            status: self.status,
+            public_key_fingerprint: self.public_key_fingerprint,
+            created_at: self.created_at,
+            device_id: self.device_id,
+            certificate: self.certificate,
+            private_key_pkcs8,
+        }
+    }
+}
+
+fn validate_authority_record(
+    record: &AuthorityRecord,
     expected: Option<EnrollmentStatus>,
-    issuer: &Url,
-    dpop_jkt: &str,
-) -> Result<EnrollmentRecord> {
-    if record.enrollment_id.is_empty() || record.user.sub.is_empty() || record.dpop_jkt.is_empty() {
-        bail!("enrollment authority returned an incomplete identity record");
+    fingerprint: &str,
+) -> Result<()> {
+    if record.enrollment_id.is_empty()
+        || record.public_key_fingerprint != fingerprint
+        || record.created_at.is_empty()
+    {
+        bail!("enrollment authority returned an incomplete or mismatched record");
     }
     if expected.is_some_and(|expected| record.status != expected) {
         bail!("enrollment authority returned an unexpected status");
     }
-    if record.user.iss != *issuer || record.dpop_jkt != dpop_jkt {
-        bail!("enrollment authority returned mismatched identity binding");
-    }
     match record.status {
-        EnrollmentStatus::Pending
-            if record.device_id.is_some() || record.device_status.is_some() =>
+        EnrollmentStatus::Pending | EnrollmentStatus::Issuing
+            if record.device_id.is_some() || record.certificate.is_some() =>
         {
-            bail!("pending enrollment must not contain device identity")
+            bail!("incomplete enrollment must not contain a device credential")
         }
         EnrollmentStatus::Approved
             if record.device_id.as_deref().is_none_or(str::is_empty)
-                || record.device_status.is_none() =>
+                || record.certificate.is_none() =>
         {
-            bail!("approved enrollment is missing device identity or status")
+            bail!("approved enrollment is missing its device credential")
+        }
+        EnrollmentStatus::Rejected
+            if record.device_id.is_some() || record.certificate.is_some() =>
+        {
+            bail!("rejected enrollment must not contain a device credential")
         }
         _ => {}
     }
-    Ok(record)
+    Ok(())
+}
+
+fn validate_persisted_record(record: &EnrollmentRecord) -> Result<()> {
+    let private_key = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(&record.private_key_pkcs8)
+        .context("decode enrollment private key")?;
+    let key = KeyPair::try_from(private_key.as_slice()).context("parse enrollment private key")?;
+    if key.algorithm() != &PKCS_ECDSA_P256_SHA256
+        || public_key_fingerprint(&key) != record.public_key_fingerprint
+    {
+        bail!("persisted enrollment key does not match its fingerprint");
+    }
+    if let Some(certificate) = &record.certificate {
+        let (_, pem) = parse_x509_pem(certificate.certificate_chain_pem.as_bytes())
+            .map_err(|_| anyhow::anyhow!("issued certificate chain is not valid PEM"))?;
+        if pem.label != "CERTIFICATE" {
+            bail!("issued certificate chain does not begin with a certificate");
+        }
+        let (_, leaf) = parse_x509_certificate(&pem.contents)
+            .map_err(|_| anyhow::anyhow!("issued leaf certificate is invalid"))?;
+        if leaf.public_key().raw != key.subject_public_key_info() {
+            bail!("issued certificate does not match the enrollment private key");
+        }
+    }
+    Ok(())
+}
+
+fn public_key_fingerprint(key: &KeyPair) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(Sha256::digest(key.subject_public_key_info()))
 }
 
 pub fn save_enrollment_for(
@@ -178,24 +232,56 @@ pub fn save_enrollment_for(
     store: &CredentialStore,
     record: &EnrollmentRecord,
 ) -> Result<()> {
+    validate_persisted_record(record)?;
+    let persisted = PersistedEnrollment {
+        enrollment_id: &record.enrollment_id,
+        status: record.status,
+        public_key_fingerprint: &record.public_key_fingerprint,
+        created_at: &record.created_at,
+        device_id: record.device_id.as_deref(),
+        certificate: record.certificate.as_ref(),
+        private_key_pkcs8: &record.private_key_pkcs8,
+    };
     store.put(
         &enrollment_record_name(issuer, gateway_origin),
-        &serde_json::to_vec(record)?,
+        &serde_json::to_vec(&persisted)?,
     )
 }
 
 pub fn load_enrollment_for(
     issuer: &Url,
     gateway_origin: &Url,
-    dpop_jkt: &str,
     store: &CredentialStore,
 ) -> Result<EnrollmentRecord> {
     let record: EnrollmentRecord =
         serde_json::from_slice(&store.get(&enrollment_record_name(issuer, gateway_origin))?)?;
-    if record.user.iss != *issuer || record.dpop_jkt != dpop_jkt {
-        bail!("persisted enrollment does not match the current identity session");
-    }
+    validate_persisted_record(&record)?;
     Ok(record)
+}
+
+pub fn load_device_identity_for(
+    issuer: &Url,
+    gateway_origin: &Url,
+    store: &CredentialStore,
+) -> Result<reqwest::Identity> {
+    let record = load_enrollment_for(issuer, gateway_origin, store)?;
+    if record.status != EnrollmentStatus::Approved {
+        bail!("managed device enrollment is not approved");
+    }
+    let certificate = record
+        .certificate
+        .as_ref()
+        .context("approved enrollment is missing its certificate")?;
+    let private_key = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(&record.private_key_pkcs8)
+        .context("decode enrollment private key")?;
+    let key = KeyPair::try_from(private_key.as_slice()).context("parse enrollment private key")?;
+    let identity_pem = format!(
+        "{}{}",
+        certificate.certificate_chain_pem,
+        key.serialize_pem()
+    );
+    Ok(reqwest::Identity::from_pem(identity_pem.as_bytes())?)
 }
 
 pub fn delete_enrollment_for(
@@ -207,7 +293,7 @@ pub fn delete_enrollment_for(
 }
 
 fn enrollment_record_name(issuer: &Url, gateway_origin: &Url) -> String {
-    format!("enrollment|{issuer}|{gateway_origin}")
+    format!("enrollment-mtls-v1|{issuer}|{gateway_origin}")
 }
 
 #[cfg(test)]
@@ -220,51 +306,164 @@ mod tests {
     use axum::routing::{get, post};
     use axum::{Json, Router};
     use base64::Engine;
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertificateSigningRequestParams, CertifiedIssuer,
+        IsCa, KeyPair, PKCS_ECDSA_P256_SHA256, PublicKeyData,
+    };
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use tokio::net::TcpListener;
     use url::Url;
 
     use super::{
-        DeviceStatus, EnrollmentClient, EnrollmentRecord, EnrollmentStatus, EnrollmentUser,
-        delete_enrollment_for, load_enrollment_for, save_enrollment_for, validate_record,
+        EnrollmentClient, EnrollmentStatus, load_device_identity_for, load_enrollment_for,
+        save_enrollment_for,
     };
-    use crate::identity::dpop::{DpopKey, decode_jwt_claims};
+    use crate::identity::dpop::DpopKey;
     use crate::identity::oauth::{ManagedIdentity, StoredSession};
     use crate::identity::storage::{CredentialStorageMode, CredentialStore};
 
     struct AuthorityState {
-        issuer: Url,
-        enrollment_endpoint: Url,
-        dpop_jkt: String,
+        fingerprint: tokio::sync::Mutex<String>,
+        certificate: tokio::sync::Mutex<String>,
     }
 
     #[tokio::test]
-    async fn discovers_and_reads_dpop_bound_enrollment() {
+    async fn requests_csr_and_installs_matching_certificate() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let issuer = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
-        let key = DpopKey::generate();
+        let service_url =
+            Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
         let state = Arc::new(AuthorityState {
-            enrollment_endpoint: issuer.join("enrollments").unwrap(),
-            issuer: issuer.clone(),
-            dpop_jkt: key.thumbprint().unwrap(),
+            fingerprint: tokio::sync::Mutex::new(String::new()),
+            certificate: tokio::sync::Mutex::new(String::new()),
         });
         let app = Router::new()
-            .route("/.well-known/oauth-authorization-server", get(metadata))
-            .route("/enrollments", post(request_enrollment))
-            .route("/enrollments/{id}", get(enrollment_status))
+            .route("/v1/enrollments", post(request_enrollment))
+            .route("/v1/enrollments/{id}", get(enrollment_status))
             .with_state(state);
         let server = tokio::spawn(axum::serve(listener, app).into_future());
-
         let temporary = tempfile::tempdir().unwrap();
         let store = CredentialStore::setup(
             CredentialStorageMode::File,
             &temporary.path().join("identity"),
         )
         .unwrap();
-        let identity = ManagedIdentity::new(
+        let identity = test_identity(&store);
+        let client = EnrollmentClient::for_test(&service_url).unwrap();
+
+        let pending = client.request(&identity).await.unwrap();
+        assert_eq!(pending.status, EnrollmentStatus::Pending);
+        save_enrollment_for(
+            &Url::parse("https://issuer.example/").unwrap(),
+            &Url::parse("https://gateway.example/").unwrap(),
+            &store,
+            &pending,
+        )
+        .unwrap();
+        let approved = client.status(&identity, &pending).await.unwrap();
+        assert_eq!(approved.status, EnrollmentStatus::Approved);
+        assert_eq!(approved.device_id.as_deref(), Some("device-1"));
+        save_enrollment_for(
+            &Url::parse("https://issuer.example/").unwrap(),
+            &Url::parse("https://gateway.example/").unwrap(),
+            &store,
+            &approved,
+        )
+        .unwrap();
+        load_device_identity_for(
+            &Url::parse("https://issuer.example/").unwrap(),
+            &Url::parse("https://gateway.example/").unwrap(),
+            &store,
+        )
+        .unwrap();
+
+        server.abort();
+    }
+
+    #[test]
+    fn rejects_persisted_key_mismatch() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = CredentialStore::setup(
+            CredentialStorageMode::File,
+            &temporary.path().join("identity"),
+        )
+        .unwrap();
+        let issuer = Url::parse("https://issuer.example/").unwrap();
+        let gateway = Url::parse("https://gateway.example/").unwrap();
+        let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let record = super::EnrollmentRecord {
+            enrollment_id: "enrollment-1".into(),
+            status: EnrollmentStatus::Pending,
+            public_key_fingerprint: "attacker-fingerprint".into(),
+            created_at: "2026-08-04T00:00:00Z".into(),
+            device_id: None,
+            certificate: None,
+            private_key_pkcs8: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(key.serialize_der()),
+        };
+        assert!(save_enrollment_for(&issuer, &gateway, &store, &record).is_err());
+        assert!(load_enrollment_for(&issuer, &gateway, &store).is_err());
+    }
+
+    async fn request_enrollment(
+        State(state): State<Arc<AuthorityState>>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> (StatusCode, Json<Value>) {
+        assert_eq!(headers["authorization"], "Bearer access-token");
+        let csr = body["csr"].as_str().unwrap();
+        let request = CertificateSigningRequestParams::from_pem(csr).unwrap();
+        let fingerprint = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(Sha256::digest(request.public_key.subject_public_key_info()));
+        let certificate = issue_for_csr(&request);
+        *state.fingerprint.lock().await = fingerprint.clone();
+        *state.certificate.lock().await = certificate;
+        (
+            StatusCode::ACCEPTED,
+            Json(json!({
+                "enrollment_id": "enrollment-1",
+                "status": "pending",
+                "public_key_fingerprint": fingerprint,
+                "created_at": "2026-08-04T00:00:00Z"
+            })),
+        )
+    }
+
+    async fn enrollment_status(
+        Path(id): Path<String>,
+        State(state): State<Arc<AuthorityState>>,
+        headers: HeaderMap,
+    ) -> Json<Value> {
+        assert_eq!(id, "enrollment-1");
+        assert_eq!(headers["authorization"], "Bearer access-token");
+        Json(json!({
+            "enrollment_id": id,
+            "status": "approved",
+            "public_key_fingerprint": state.fingerprint.lock().await.clone(),
+            "created_at": "2026-08-04T00:00:00Z",
+            "device_id": "device-1",
+            "certificate": {
+                "certificate_chain_pem": state.certificate.lock().await.clone(),
+                "serial_number": "01",
+                "not_before": "2026-08-04T00:00:00Z",
+                "not_after": "2026-08-05T00:00:00Z"
+            }
+        }))
+    }
+
+    fn issue_for_csr(request: &CertificateSigningRequestParams) -> String {
+        let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut ca_params = CertificateParams::default();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca = CertifiedIssuer::self_signed(ca_params, ca_key).unwrap();
+        request.signed_by(&ca).unwrap().pem()
+    }
+
+    fn test_identity(store: &CredentialStore) -> ManagedIdentity {
+        let dpop_key = DpopKey::generate();
+        ManagedIdentity::new(
             StoredSession {
-                issuer: issuer.clone(),
+                issuer: Url::parse("https://issuer.example/").unwrap(),
                 gateway_origin: Url::parse("https://gateway.example/").unwrap(),
                 client_id: "client".into(),
                 audience: "gateway".into(),
@@ -277,158 +476,10 @@ mod tests {
                 scope: "agentgateway.invoke".into(),
                 refresh_token: "refresh-token".into(),
                 dpop_private_key: base64::engine::general_purpose::URL_SAFE_NO_PAD
-                    .encode(key.to_pkcs8_der().unwrap()),
+                    .encode(dpop_key.to_pkcs8_der().unwrap()),
                 generation: 1,
             },
-            store,
-        );
-
-        let client = EnrollmentClient::discover(&issuer).await.unwrap();
-        let pending = client.request(&identity).await.unwrap();
-        assert_eq!(pending.status, EnrollmentStatus::Pending);
-        let approved = client
-            .status(&identity, &pending.enrollment_id)
-            .await
-            .unwrap();
-        assert_eq!(approved.status, EnrollmentStatus::Approved);
-        assert_eq!(approved.device_id.as_deref(), Some("device-1"));
-        assert_eq!(approved.device_status, Some(DeviceStatus::Active));
-
-        server.abort();
-    }
-
-    #[test]
-    fn rejects_device_identity_on_pending_record() {
-        let record = EnrollmentRecord {
-            enrollment_id: "enrollment-1".into(),
-            status: EnrollmentStatus::Pending,
-            user: EnrollmentUser {
-                iss: Url::parse("https://issuer.example/").unwrap(),
-                sub: "user-1".into(),
-            },
-            dpop_jkt: "thumbprint".into(),
-            device_id: Some("untrusted-device".into()),
-            device_status: None,
-        };
-
-        let error = validate_record(
-            record,
-            None,
-            &Url::parse("https://issuer.example/").unwrap(),
-            "thumbprint",
+            store.clone(),
         )
-        .unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("must not contain device identity")
-        );
-    }
-
-    #[test]
-    fn rejects_mismatched_authority_identity_binding() {
-        let issuer = Url::parse("https://issuer.example/").unwrap();
-        let record = EnrollmentRecord {
-            enrollment_id: "enrollment-1".into(),
-            status: EnrollmentStatus::Pending,
-            user: EnrollmentUser {
-                iss: issuer.clone(),
-                sub: "user-1".into(),
-            },
-            dpop_jkt: "different-thumbprint".into(),
-            device_id: None,
-            device_status: None,
-        };
-
-        let error = validate_record(record, None, &issuer, "expected-thumbprint").unwrap_err();
-
-        assert!(error.to_string().contains("mismatched identity binding"));
-    }
-
-    #[test]
-    fn persists_only_for_the_current_identity_key() {
-        let temporary = tempfile::tempdir().unwrap();
-        let store = CredentialStore::setup(
-            CredentialStorageMode::File,
-            &temporary.path().join("identity"),
-        )
-        .unwrap();
-        let issuer = Url::parse("https://issuer.example/").unwrap();
-        let gateway = Url::parse("https://gateway.example/").unwrap();
-        let record = EnrollmentRecord {
-            enrollment_id: "enrollment-1".into(),
-            status: EnrollmentStatus::Pending,
-            user: EnrollmentUser {
-                iss: issuer.clone(),
-                sub: "user-1".into(),
-            },
-            dpop_jkt: "thumbprint".into(),
-            device_id: None,
-            device_status: None,
-        };
-
-        save_enrollment_for(&issuer, &gateway, &store, &record).unwrap();
-        assert_eq!(
-            load_enrollment_for(&issuer, &gateway, "thumbprint", &store).unwrap(),
-            record
-        );
-        let stale = load_enrollment_for(&issuer, &gateway, "rotated-key", &store).unwrap_err();
-        assert!(stale.to_string().contains("current identity session"));
-
-        delete_enrollment_for(&issuer, &gateway, &store).unwrap();
-        delete_enrollment_for(&issuer, &gateway, &store).unwrap();
-        assert!(load_enrollment_for(&issuer, &gateway, "thumbprint", &store).is_err());
-    }
-
-    async fn metadata(State(state): State<Arc<AuthorityState>>) -> Json<Value> {
-        Json(json!({
-            "issuer": state.issuer,
-            "enrollment_endpoint": state.enrollment_endpoint,
-        }))
-    }
-
-    async fn request_enrollment(
-        State(state): State<Arc<AuthorityState>>,
-        headers: HeaderMap,
-    ) -> (StatusCode, Json<Value>) {
-        assert_credentials(&headers, "POST", state.enrollment_endpoint.as_str());
-        (
-            StatusCode::ACCEPTED,
-            Json(json!({
-                "enrollment_id": "enrollment-1",
-                "status": "pending",
-                "user": {"iss": state.issuer, "sub": "user-1"},
-                "dpop_jkt": state.dpop_jkt,
-            })),
-        )
-    }
-
-    async fn enrollment_status(
-        Path(id): Path<String>,
-        State(state): State<Arc<AuthorityState>>,
-        headers: HeaderMap,
-    ) -> Json<Value> {
-        assert_eq!(id, "enrollment-1");
-        let endpoint = state.issuer.join("enrollments/enrollment-1").unwrap();
-        assert_credentials(&headers, "GET", endpoint.as_str());
-        Json(json!({
-            "enrollment_id": id,
-            "status": "approved",
-            "user": {"iss": state.issuer, "sub": "user-1"},
-            "dpop_jkt": state.dpop_jkt,
-            "device_id": "device-1",
-            "device_status": "active",
-        }))
-    }
-
-    fn assert_credentials(headers: &HeaderMap, method: &str, endpoint: &str) {
-        assert_eq!(headers["authorization"], "DPoP access-token");
-        let claims = decode_jwt_claims(headers["dpop"].to_str().unwrap()).unwrap();
-        assert_eq!(claims["htm"], method);
-        assert_eq!(claims["htu"], endpoint);
-        let expected =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest("access-token"));
-        assert_eq!(claims["ath"], expected);
     }
 }

@@ -293,7 +293,7 @@ func (store *Store) Get(
 	if err != nil {
 		return enrollment.Status{}, err
 	}
-	if deviceID != nil {
+	if record.Status == "approved" && deviceID != nil {
 		record.DeviceID = *deviceID
 	}
 	if chainPEM != nil && serialNumber != nil && notBefore != nil && notAfter != nil {

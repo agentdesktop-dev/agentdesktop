@@ -1,6 +1,6 @@
 # Managed mTLS identity contract v1
 
-Status: selected production direction; enrollment request persistence, administrator-scoped approval, retry-stable local protected-key issuance, interrupted-issuance reconciliation, and owner-scoped certificate retrieval are implemented. Production CA integration, Agent Desktop certificate lifecycle, renewal, expired-certificate recovery, revocation, and Agent Gateway enforcement remain incomplete.
+Status: selected production direction; enrollment request persistence, administrator-scoped approval, retry-stable local protected-key issuance, interrupted-issuance reconciliation, owner-scoped certificate retrieval, Agent Desktop key/certificate persistence, and connector-side mTLS activation are implemented. Production CA integration, renewal, expired-certificate recovery, revocation, and Agent Gateway enforcement remain incomplete.
 
 ## Trust model
 
@@ -24,6 +24,10 @@ Content-Type: application/json
 
 The service returns `202 Accepted` with a server-generated enrollment ID, pending status, canonical issuer and subject, and the validated public-key fingerprint. Request data cannot supply or override organization, user, approval, or device identity.
 
+The organization bootstrap supplies a distinct HTTPS `enrollment_url`; Agent Desktop does not expect an external OAuth provider to advertise connector-specific enrollment metadata. Agent Desktop generates a P-256 key, stores its PKCS#8 private key through the selected protected credential backend, and verifies that the service fingerprint matches the CSR public key. It polls with ordinary bearer authentication and accepts an approved record only when the returned leaf certificate's SubjectPublicKeyInfo exactly matches the retained private key. The private key is never printed by enrollment commands.
+
+Managed connector startup fails closed unless it can load an approved, key-matching certificate from protected storage. The reqwest/rustls upstream client presents that identity, and OAuth credential-generation pool rotation reapplies the same client identity rather than downgrading to bearer-only transport. Certificate renewal will extend this pool generation boundary to rotate both credentials together.
+
 ## Gateway authentication
 
 Agent Gateway requires a client certificate chaining to the configured enrollment CA. It validates the chain, validity, client-auth usage, organization scope, and revocation status before constructing immutable device context. Agent Gateway separately validates the ordinary OAuth bearer token and constructs user context from its verified claims. The authenticated connection is isolated by organization, user, device, and certificate generation; inspected inner headers cannot override this context.
@@ -44,7 +48,6 @@ Approval claims a pending enrollment as `issuing` before calling the CA, prevent
 
 - Replace the local-key issuer with a production protected-key CA adapter.
 - Add administrator rejection and listing APIs.
-- Add Agent Desktop certificate installation, proactive renewal, expired-certificate recovery, and key rotation.
+- Add proactive renewal, expired-certificate recovery, and coordinated key/certificate pool rotation.
 - Add device and certificate revocation with fail-closed status consumption by Agent Gateway.
-- Add Agent Desktop CSR/key storage and mTLS connection-pool lifecycle.
 - Add Agent Gateway mTLS validation and immutable outer-to-inner identity propagation.

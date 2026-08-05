@@ -58,23 +58,25 @@ pub enum IdentityCommand {
         #[arg(long, env = "AGENTDESKTOP_IDENTITY_DIR")]
         storage_dir: Option<PathBuf>,
     },
-    /// Request approval for the current session's DPoP key.
+    /// Generate a device key and request managed mTLS enrollment.
     EnrollRequest {
         #[arg(long)]
         issuer: Url,
+        #[arg(long)]
+        enrollment_url: Url,
         #[arg(long)]
         gateway_origin: Url,
         #[arg(long, env = "AGENTDESKTOP_IDENTITY_DIR")]
         storage_dir: Option<PathBuf>,
     },
-    /// Read an existing enrollment and device revocation status.
+    /// Read the current managed mTLS enrollment status.
     EnrollStatus {
         #[arg(long)]
         issuer: Url,
         #[arg(long)]
-        gateway_origin: Url,
+        enrollment_url: Url,
         #[arg(long)]
-        enrollment_id: Option<String>,
+        gateway_origin: Url,
         #[arg(long, env = "AGENTDESKTOP_IDENTITY_DIR")]
         storage_dir: Option<PathBuf>,
     },
@@ -144,38 +146,34 @@ pub async fn run(command: IdentityCommand) -> anyhow::Result<()> {
         }
         IdentityCommand::EnrollRequest {
             issuer,
+            enrollment_url,
             gateway_origin,
             storage_dir,
         } => {
             let (identity, store) = load_identity(&issuer, &gateway_origin, storage_dir)?;
-            let client = EnrollmentClient::discover(&issuer).await?;
+            let client = EnrollmentClient::new(&enrollment_url)?;
             let enrollment = client.request(&identity).await?;
             save_enrollment_for(&issuer, &gateway_origin, &store, &enrollment)?;
-            println!("{}", serde_json::to_string_pretty(&enrollment)?);
+            println!(
+                "enrollment {} is {:?}",
+                enrollment.enrollment_id, enrollment.status
+            );
         }
         IdentityCommand::EnrollStatus {
             issuer,
+            enrollment_url,
             gateway_origin,
-            enrollment_id,
             storage_dir,
         } => {
             let (identity, store) = load_identity(&issuer, &gateway_origin, storage_dir)?;
-            let enrollment_id = match enrollment_id {
-                Some(enrollment_id) => enrollment_id,
-                None => {
-                    load_enrollment_for(
-                        &issuer,
-                        &gateway_origin,
-                        &identity.dpop_thumbprint().await?,
-                        &store,
-                    )?
-                    .enrollment_id
-                }
-            };
-            let client = EnrollmentClient::discover(&issuer).await?;
-            let enrollment = client.status(&identity, &enrollment_id).await?;
+            let current = load_enrollment_for(&issuer, &gateway_origin, &store)?;
+            let client = EnrollmentClient::new(&enrollment_url)?;
+            let enrollment = client.status(&identity, &current).await?;
             save_enrollment_for(&issuer, &gateway_origin, &store, &enrollment)?;
-            println!("{}", serde_json::to_string_pretty(&enrollment)?);
+            println!(
+                "enrollment {} is {:?}",
+                enrollment.enrollment_id, enrollment.status
+            );
         }
     }
     Ok(())

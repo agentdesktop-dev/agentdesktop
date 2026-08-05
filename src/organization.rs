@@ -23,6 +23,7 @@ pub struct Organization {
 #[serde(deny_unknown_fields)]
 pub struct IdentityBootstrap {
     pub issuer: Url,
+    pub enrollment_url: Url,
     pub client_id: String,
     pub audience: String,
     pub scope: String,
@@ -54,6 +55,11 @@ impl OrganizationBootstrap {
             true,
         )?;
         validate_https_url("identity issuer", &self.identity.issuer, false)?;
+        validate_https_url(
+            "enrollment service URL",
+            &self.identity.enrollment_url,
+            false,
+        )?;
         validate_text("OAuth client ID", &self.identity.client_id)?;
         validate_text("OAuth audience", &self.identity.audience)?;
         validate_scope(&self.identity.scope)?;
@@ -121,6 +127,7 @@ mod tests {
           },
           "identity": {
             "issuer": "https://login.acme.example/",
+                        "enrollment_url": "https://enrollment.acme.example/",
             "client_id": "agentdesktop",
             "audience": "https://gateway.acme.example",
             "scope": "agentgateway.invoke"

@@ -95,11 +95,7 @@ impl ManagedIdentity {
     }
 
     pub async fn credentials(&self, method: &str, target_uri: &str) -> Result<ManagedCredentials> {
-        let mut session = self.session.lock().await;
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        if session.expires_at <= now.saturating_add(30) {
-            refresh_session(&mut session, &self.store).await?;
-        }
+        let session = self.refreshed_session().await?;
         let proof = session
             .dpop_key()?
             .proof(method, target_uri, Some(&session.access_token))?;
@@ -108,6 +104,19 @@ impl ManagedIdentity {
             proof,
             generation: session.generation,
         })
+    }
+
+    pub async fn bearer_token(&self) -> Result<String> {
+        Ok(self.refreshed_session().await?.access_token.clone())
+    }
+
+    async fn refreshed_session(&self) -> Result<tokio::sync::MutexGuard<'_, StoredSession>> {
+        let mut session = self.session.lock().await;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        if session.expires_at <= now.saturating_add(30) {
+            refresh_session(&mut session, &self.store).await?;
+        }
+        Ok(session)
     }
 
     pub async fn status(&self) -> Result<&'static str> {

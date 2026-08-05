@@ -4,7 +4,8 @@ use agentdesktop::identity::oauth::{ManagedIdentity, load_session_for};
 use agentdesktop::identity::{
     cli::IdentityCommand,
     enrollment::{
-        DeviceStatus, EnrollmentClient, EnrollmentStatus, load_enrollment_for, save_enrollment_for,
+        EnrollmentClient, EnrollmentStatus, load_device_identity_for, load_enrollment_for,
+        save_enrollment_for,
     },
     oauth::{LoginConfig, login},
     storage::{CredentialStorageMode, CredentialStore, default_storage_root},
@@ -164,16 +165,21 @@ fn exit_code(status: ExitStatus) -> ExitCode {
 
 async fn serve(config: Config) -> anyhow::Result<()> {
     let _telemetry = agentdesktop::telemetry::init()?;
-    let identity = if let Some(issuer) = &config.identity_issuer {
+    let (identity, device_identity) = if let Some(issuer) = &config.identity_issuer {
         let identity_dir = config
             .identity_dir
             .clone()
             .map_or_else(default_storage_root, Ok)?;
         let store = CredentialStore::load(&identity_dir)?;
-        let session = load_session_for(issuer, &upstream_origin(&config.upstream)?, &store)?;
-        Some(ManagedIdentity::new(session, store))
+        let gateway_origin = upstream_origin(&config.upstream)?;
+        let session = load_session_for(issuer, &gateway_origin, &store)?;
+        let device_identity = load_device_identity_for(issuer, &gateway_origin, &store)?;
+        (
+            Some(ManagedIdentity::new(session, store)),
+            Some(device_identity),
+        )
     } else {
-        None
+        (None, None)
     };
     let mut local_gateway = match (&config.gateway_binary, &config.gateway_config) {
         (Some(binary), Some(gateway_config)) => {
@@ -211,11 +217,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         mode = config.mode.as_str(),
         listen = %listener.local_addr()?
     );
-    let serve = proxy::serve_with_identity(
+    let serve = proxy::serve_with_managed_identity(
         listener,
         config.upstream,
         config.mode,
         identity,
+        device_identity,
         ProxyOptions {
             connect_timeout: std::time::Duration::from_millis(config.connect_timeout_ms),
             request_timeout: std::time::Duration::from_millis(config.request_timeout_ms),
@@ -343,56 +350,50 @@ async fn prepare_managed_connection(
         }
     };
     let identity = ManagedIdentity::new(session, store.clone());
-    let client = EnrollmentClient::discover(&bootstrap.identity.issuer).await?;
-    let thumbprint = identity.dpop_thumbprint().await?;
-    let enrollment = match load_enrollment_for(
-        &bootstrap.identity.issuer,
-        &gateway_origin,
-        &thumbprint,
-        &store,
-    ) {
-        Ok(enrollment) => enrollment,
-        Err(_) => {
-            let enrollment = client.request(&identity).await?;
-            save_enrollment_for(
-                &bootstrap.identity.issuer,
-                &gateway_origin,
-                &store,
-                &enrollment,
-            )?;
-            enrollment
-        }
-    };
+    let client = EnrollmentClient::new(&bootstrap.identity.enrollment_url)?;
+    let mut enrollment =
+        match load_enrollment_for(&bootstrap.identity.issuer, &gateway_origin, &store) {
+            Ok(enrollment) => enrollment,
+            Err(_) => {
+                let enrollment = client.request(&identity).await?;
+                save_enrollment_for(
+                    &bootstrap.identity.issuer,
+                    &gateway_origin,
+                    &store,
+                    &enrollment,
+                )?;
+                enrollment
+            }
+        };
     let deadline = Instant::now() + Duration::from_secs(300);
-    let enrollment_id = enrollment.enrollment_id;
     let mut announced = false;
     loop {
-        let enrollment = client.status(&identity, &enrollment_id).await?;
+        enrollment = client.status(&identity, &enrollment).await?;
         save_enrollment_for(
             &bootstrap.identity.issuer,
             &gateway_origin,
             &store,
             &enrollment,
         )?;
-        match (enrollment.status, enrollment.device_status) {
-            (EnrollmentStatus::Approved, Some(DeviceStatus::Active)) => break,
-            (EnrollmentStatus::Approved, Some(DeviceStatus::Revoked)) => {
-                anyhow::bail!("this device is no longer approved by your organization")
-            }
-            (EnrollmentStatus::Pending, _) if Instant::now() < deadline => {
+        match enrollment.status {
+            EnrollmentStatus::Approved => break,
+            EnrollmentStatus::Pending | EnrollmentStatus::Issuing if Instant::now() < deadline => {
                 if !announced {
                     println!("Waiting for your organization to approve this device...");
                     announced = true;
                 }
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
-            (EnrollmentStatus::Pending, _) => {
+            EnrollmentStatus::Pending | EnrollmentStatus::Issuing => {
                 anyhow::bail!(
                     "device approval did not complete; contact {}",
                     bootstrap.organization.support_url
                 )
             }
-            _ => anyhow::bail!("the enrollment authority returned an invalid device state"),
+            EnrollmentStatus::Rejected => anyhow::bail!(
+                "this device enrollment was rejected; contact {}",
+                bootstrap.organization.support_url
+            ),
         }
     }
 

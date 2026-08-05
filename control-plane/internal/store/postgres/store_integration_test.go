@@ -139,6 +139,13 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 		interrupted[0].OrganizationIssuer != issuer || !interrupted[0].StartedAt.Equal(issuance.StartedAt) {
 		t.Fatalf("interrupted issuances = %#v", interrupted)
 	}
+	issuing, err := store.Get(ctx, enrollment.Principal{Issuer: issuer, Subject: "user-1"}, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issuing.Status != "issuing" || issuing.DeviceID != "" || issuing.Certificate != nil {
+		t.Fatalf("issuing status exposed provisional credential = %#v", issuing)
+	}
 	duplicateDeviceID, err := identifier.New()
 	if err != nil {
 		t.Fatal(err)

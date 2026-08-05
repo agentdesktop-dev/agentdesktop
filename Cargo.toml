@@ -38,6 +38,8 @@ tracing-subscriber = { version = "0.3", features = ["json"] }
 url = "2.5"
 zstd = "0.13"
 tempfile = "3"
+rcgen = { version = "0.14.5", default-features = false, features = ["crypto", "pem", "ring", "x509-parser", "zeroize"] }
+x509-parser = "0.18.1"
 
 [build-dependencies]
 sha2 = "0.10"
