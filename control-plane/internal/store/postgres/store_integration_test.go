@@ -249,7 +249,7 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 	}
 	renewedCertificate := renewal.Certificate{
 		ChainPEM: "renewed-certificate-chain", SerialNumber: "02",
-		NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(2 * time.Hour),
+		NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(-time.Second),
 	}
 	renewed, err := store.Complete(ctx, owner, renewalClaim, renewedCertificate)
 	if err != nil {
@@ -273,6 +273,9 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 	if completedRetry.Completed == nil || completedRetry.Completed.SerialNumber != renewedCertificate.SerialNumber {
 		t.Fatalf("completed renewal retry = %#v", completedRetry)
 	}
+	if _, err := store.Begin(ctx, owner, presentedDevice, validRequest(t), retryRenewalID); !errors.Is(err, renewal.ErrNotActive) {
+		t.Fatalf("stale certificate new renewal error = %v, want ErrNotActive", err)
+	}
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*) FROM audit_events
 		WHERE target_id = $1 AND action IN ('certificate.renewal_started', 'certificate.renewed')
@@ -281,6 +284,67 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 	}
 	if auditCount != 2 {
 		t.Fatalf("renewal audit event count = %d, want 2", auditCount)
+	}
+
+	recoveryRequest := validRequest(t)
+	challengeID, err := identifier.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge, err := store.CreateRecoveryChallenge(
+		ctx, owner, deviceID, renewedCertificate.SerialNumber, recoveryRequest,
+		challengeID, []byte("recovery-nonce"), time.Now().Add(5*time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadedChallenge, err := store.GetRecoveryChallenge(ctx, owner, challenge.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loadedChallenge.DeviceID != deviceID || loadedChallenge.CertificatePEM != renewedCertificate.ChainPEM ||
+		loadedChallenge.PublicKeyFingerprint != recoveryRequest.PublicKeyFingerprint {
+		t.Fatalf("recovery challenge = %#v", loadedChallenge)
+	}
+	if _, err := store.GetRecoveryChallenge(
+		ctx, enrollment.Principal{Issuer: issuer, Subject: "user-2"}, challenge.ID,
+	); !errors.Is(err, renewal.ErrNotActive) {
+		t.Fatalf("foreign recovery challenge error = %v, want ErrNotActive", err)
+	}
+	recoveryRenewalID, err := identifier.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveryClaim, err := store.BeginRecovery(ctx, owner, loadedChallenge, recoveryRenewalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayedClaim, err := store.BeginRecovery(ctx, owner, loadedChallenge, "unused-replay-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayedClaim.ID != recoveryClaim.ID {
+		t.Fatalf("replayed recovery claim = %#v, want %#v", replayedClaim, recoveryClaim)
+	}
+	recoveredCertificate := renewal.Certificate{
+		ChainPEM: "recovered-certificate-chain", SerialNumber: "03",
+		NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(2 * time.Hour),
+	}
+	recovered, err := store.Complete(ctx, owner, recoveryClaim, recoveredCertificate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Certificate.SerialNumber != recoveredCertificate.SerialNumber {
+		t.Fatalf("recovery response = %#v", recovered)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM audit_events
+		WHERE target_id = $1 AND action IN ('certificate.recovery_challenged', 'certificate.recovery_started')
+	`, challenge.ID).Scan(&auditCount); err != nil {
+		t.Fatal(err)
+	}
+	if auditCount != 2 {
+		t.Fatalf("recovery audit event count = %d, want 2", auditCount)
 	}
 
 	rejectRequest := validRequest(t)

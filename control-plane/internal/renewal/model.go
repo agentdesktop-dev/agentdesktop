@@ -2,6 +2,30 @@ package renewal
 
 import "time"
 
+type RecoveryChallenge struct {
+	ID                    string
+	OrganizationID        string
+	OrganizationIssuer    string
+	UserID                string
+	DeviceID              string
+	PresentedSerialNumber string
+	CSRDER                []byte
+	PublicKeyFingerprint  string
+	Nonce                 []byte
+	CertificatePEM        string
+	ExpiresAt             time.Time
+	RenewalID             *string
+	Completed             *Certificate
+}
+
+type RecoveryChallengeResponse struct {
+	ChallengeID          string    `json:"challenge_id"`
+	DeviceID             string    `json:"device_id"`
+	PublicKeyFingerprint string    `json:"public_key_fingerprint"`
+	Nonce                string    `json:"nonce"`
+	ExpiresAt            time.Time `json:"expires_at"`
+}
+
 type Claim struct {
 	ID                   string
 	OrganizationID       string

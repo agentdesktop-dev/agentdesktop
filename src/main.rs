@@ -4,8 +4,8 @@ use agentdesktop::identity::oauth::{ManagedIdentity, load_session_for};
 use agentdesktop::identity::{
     cli::IdentityCommand,
     enrollment::{
-        EnrollmentClient, EnrollmentStatus, certificate_renewal_due, load_device_identity_for,
-        load_enrollment_for, save_enrollment_for,
+        EnrollmentClient, EnrollmentStatus, certificate_expired, certificate_renewal_due,
+        load_device_identity_for, load_enrollment_for, save_enrollment_for,
     },
     oauth::{LoginConfig, login},
     storage::{CredentialStorageMode, CredentialStore, default_storage_root},
@@ -314,14 +314,26 @@ async fn renew_device_certificate_once(context: &RenewalContext) -> anyhow::Resu
     if !certificate_renewal_due(&enrollment, SystemTime::now(), CERTIFICATE_RENEW_BEFORE)? {
         return Ok(false);
     }
-    EnrollmentClient::new(&context.enrollment_url)?
-        .renew_and_save(
-            &context.identity,
-            &context.issuer,
-            &context.gateway_origin,
-            &context.store,
-        )
-        .await?;
+    let client = EnrollmentClient::new(&context.enrollment_url)?;
+    if certificate_expired(&enrollment, SystemTime::now())? {
+        client
+            .recover_and_save(
+                &context.identity,
+                &context.issuer,
+                &context.gateway_origin,
+                &context.store,
+            )
+            .await?;
+    } else {
+        client
+            .renew_and_save(
+                &context.identity,
+                &context.issuer,
+                &context.gateway_origin,
+                &context.store,
+            )
+            .await?;
+    }
     let replacement =
         load_device_identity_for(&context.issuer, &context.gateway_origin, &context.store)?;
     context.proxy_identity.replace(replacement)?;

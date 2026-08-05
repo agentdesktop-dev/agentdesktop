@@ -18,7 +18,8 @@ CREATE TABLE devices (
     organization_id uuid NOT NULL REFERENCES organizations(id),
     status text NOT NULL CHECK (status IN ('active', 'revoked')),
     created_at timestamptz NOT NULL DEFAULT now(),
-    revoked_at timestamptz
+    revoked_at timestamptz,
+    current_certificate_serial_number text
 );
 
 CREATE TABLE enrollments (
@@ -52,6 +53,9 @@ CREATE TABLE certificates (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
+ALTER TABLE devices ADD CONSTRAINT devices_current_certificate_fk
+    FOREIGN KEY (current_certificate_serial_number) REFERENCES certificates(serial_number);
+
 CREATE TABLE certificate_renewals (
     id uuid PRIMARY KEY,
     organization_id uuid NOT NULL REFERENCES organizations(id),
@@ -70,6 +74,25 @@ CREATE TABLE certificate_renewals (
 
 CREATE INDEX certificate_renewals_issuing_idx
     ON certificate_renewals (updated_at, id) WHERE status = 'issuing';
+
+CREATE TABLE certificate_recovery_challenges (
+    id uuid PRIMARY KEY,
+    organization_id uuid NOT NULL REFERENCES organizations(id),
+    user_id uuid NOT NULL REFERENCES users(id),
+    device_id uuid NOT NULL REFERENCES devices(id),
+    presented_serial_number text NOT NULL REFERENCES certificates(serial_number),
+    csr_der bytea NOT NULL,
+    public_key_fingerprint text NOT NULL,
+    nonce bytea NOT NULL,
+    expires_at timestamptz NOT NULL,
+    renewal_id uuid UNIQUE REFERENCES certificate_renewals(id),
+    used_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CHECK ((renewal_id IS NULL) = (used_at IS NULL))
+);
+
+CREATE INDEX certificate_recovery_challenges_expiry_idx
+    ON certificate_recovery_challenges (expires_at, id) WHERE used_at IS NULL;
 
 CREATE TABLE audit_events (
     id uuid PRIMARY KEY,

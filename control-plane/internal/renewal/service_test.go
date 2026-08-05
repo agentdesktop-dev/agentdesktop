@@ -5,7 +5,9 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"testing"
@@ -18,9 +20,48 @@ import (
 )
 
 type recordingStore struct {
-	claim     Claim
-	completed bool
-	issuing   []Claim
+	claim             Claim
+	recoveryChallenge RecoveryChallenge
+	recoveryClaim     Claim
+	completed         bool
+	issuing           []Claim
+}
+
+func (store *recordingStore) CreateRecoveryChallenge(
+	_ context.Context,
+	_ enrollment.Principal,
+	deviceID string,
+	serial string,
+	request certificate.Request,
+	id string,
+	nonce []byte,
+	expiresAt time.Time,
+) (RecoveryChallenge, error) {
+	store.recoveryChallenge.ID = id
+	store.recoveryChallenge.DeviceID = deviceID
+	store.recoveryChallenge.PresentedSerialNumber = serial
+	store.recoveryChallenge.CSRDER = request.DER
+	store.recoveryChallenge.PublicKeyFingerprint = request.PublicKeyFingerprint
+	store.recoveryChallenge.Nonce = nonce
+	store.recoveryChallenge.ExpiresAt = expiresAt
+	return store.recoveryChallenge, nil
+}
+
+func (store *recordingStore) GetRecoveryChallenge(
+	context.Context,
+	enrollment.Principal,
+	string,
+) (RecoveryChallenge, error) {
+	return store.recoveryChallenge, nil
+}
+
+func (store *recordingStore) BeginRecovery(
+	context.Context,
+	enrollment.Principal,
+	RecoveryChallenge,
+	string,
+) (Claim, error) {
+	return store.recoveryClaim, nil
 }
 
 func (store *recordingStore) Begin(
@@ -118,6 +159,41 @@ func TestReconcileRetriesStableClaim(t *testing.T) {
 	if completed != 1 || !store.completed || len(issuer.requests) != 1 ||
 		issuer.requests[0].ID != claim.ID || !issuer.requests[0].IssuedAt.Equal(startedAt) {
 		t.Fatalf("completed = %d, store = %#v, requests = %#v", completed, store, issuer.requests)
+	}
+}
+
+func TestRecoveryVerifiesEnrolledKeyBeforeIssuing(t *testing.T) {
+	key, certificatePEM := recoveryIdentity(t)
+	completed := Certificate{ChainPEM: "existing", SerialNumber: "02"}
+	store := &recordingStore{
+		recoveryChallenge: RecoveryChallenge{CertificatePEM: certificatePEM},
+		recoveryClaim: Claim{
+			ID: "renewal-1", DeviceID: "device-1", PublicKeyFingerprint: "fingerprint",
+			Completed: &completed,
+		},
+	}
+	service := NewService(store, &recordingIssuer{})
+	challenge, err := service.CreateRecoveryChallenge(
+		context.Background(), enrollment.Principal{Issuer: "issuer", Subject: "user"},
+		"device-1", "01", signedCSR(t),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(RecoveryMessage(store.recoveryChallenge))
+	proof, err := ecdsa.SignASN1(rand.Reader, key, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := service.Recover(
+		context.Background(), enrollment.Principal{Issuer: "issuer", Subject: "user"},
+		challenge.ChallengeID, base64.RawURLEncoding.EncodeToString(proof),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.RenewalID != "renewal-1" || response.Certificate.ChainPEM != "existing" {
+		t.Fatalf("response = %#v", response)
 	}
 }
 

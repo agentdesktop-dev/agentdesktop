@@ -2,7 +2,7 @@
 
 This Go module is the production backend boundary for managed Agent Desktop enrollment. It validates a standard OAuth bearer token, derives the user from validated `iss` and `sub` claims, validates a signed P-256 CSR, and transactionally persists a pending enrollment in PostgreSQL. A separately scoped administrator token can claim one pending enrollment and issue a short-lived client certificate with authority-controlled SPIFFE identity.
 
-The runtime currently uses a protected local CA key through a narrow issuer interface. This is suitable for development and single-instance deployment, not the final production key boundary; production should replace it with KMS, HSM, `step-ca`, Vault PKI, or a cloud private CA adapter. The service renews valid active device certificates but does not yet recover expired certificates or expose its persisted revocation state to Agent Gateway. Device private keys are generated and retained by Agent Desktop and must never be submitted to this service or stored in PostgreSQL.
+The runtime currently uses a protected local CA key through a narrow issuer interface. This is suitable for development and single-instance deployment, not the final production key boundary; production should replace it with KMS, HSM, `step-ca`, Vault PKI, or a cloud private CA adapter. The service renews valid active device certificates and recovers the latest certificate for seven days after expiry using OAuth plus enrolled-key proof of possession. It does not yet expose persisted revocation state to Agent Gateway. Device private keys are generated and retained by Agent Desktop and must never be submitted to this service or stored in PostgreSQL.
 
 ## Local development
 

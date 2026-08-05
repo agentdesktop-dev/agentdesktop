@@ -1,5 +1,8 @@
 use anyhow::{Context, Result, bail};
 use base64::Engine;
+use p256::ecdsa::signature::Signer;
+use p256::ecdsa::{Signature, SigningKey};
+use p256::pkcs8::DecodePrivateKey;
 use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256, PublicKeyData};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -78,10 +81,21 @@ struct AuthorityRenewal {
     certificate: IssuedCertificate,
 }
 
+#[derive(Debug, Deserialize)]
+struct AuthorityRecoveryChallenge {
+    challenge_id: String,
+    device_id: String,
+    public_key_fingerprint: String,
+    nonce: String,
+    expires_at: String,
+}
+
 pub struct EnrollmentClient {
     client: Client,
     endpoint: Url,
     renewal_endpoint: Url,
+    recovery_challenge_endpoint: Url,
+    recovery_endpoint: Url,
 }
 
 impl EnrollmentClient {
@@ -98,6 +112,8 @@ impl EnrollmentClient {
             client: Client::new(),
             endpoint: service_url.join("v1/enrollments")?,
             renewal_endpoint: service_url.join("v1/renewals")?,
+            recovery_challenge_endpoint: service_url.join("v1/recovery/challenges")?,
+            recovery_endpoint: service_url.join("v1/recovery")?,
         })
     }
 
@@ -107,6 +123,8 @@ impl EnrollmentClient {
             client: Client::new(),
             endpoint: service_url.join("v1/enrollments")?,
             renewal_endpoint: service_url.join("v1/renewals")?,
+            recovery_challenge_endpoint: service_url.join("v1/recovery/challenges")?,
+            recovery_endpoint: service_url.join("v1/recovery")?,
         })
     }
 
@@ -220,6 +238,120 @@ impl EnrollmentClient {
         save_enrollment_for(issuer, gateway_origin, store, &renewed)?;
         store.delete_if_exists(&renewal_record_name(issuer, gateway_origin))?;
         Ok(renewed)
+    }
+
+    pub async fn recover_and_save(
+        &self,
+        identity: &ManagedIdentity,
+        issuer: &Url,
+        gateway_origin: &Url,
+        store: &CredentialStore,
+    ) -> Result<EnrollmentRecord> {
+        let enrollment = load_enrollment_for(issuer, gateway_origin, store)?;
+        validate_persisted_record(&enrollment)?;
+        if enrollment.status != EnrollmentStatus::Approved {
+            bail!("only an approved device enrollment can be recovered");
+        }
+        let device_id = enrollment
+            .device_id
+            .as_deref()
+            .context("approved enrollment is missing its device ID")?;
+        let serial = enrollment
+            .certificate
+            .as_ref()
+            .context("approved enrollment is missing its certificate")?
+            .serial_number
+            .as_str();
+        let draft = load_or_create_renewal_draft(issuer, gateway_origin, store, device_id)?;
+        let replacement_der = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&draft.private_key_pkcs8)
+            .context("decode recovery private key")?;
+        let replacement_key =
+            KeyPair::try_from(replacement_der.as_slice()).context("parse recovery private key")?;
+        let csr = CertificateParams::default()
+            .serialize_request(&replacement_key)?
+            .pem()?;
+        let bearer = identity.bearer_token().await?;
+        let response = self
+            .client
+            .post(self.recovery_challenge_endpoint.clone())
+            .bearer_auth(&bearer)
+            .json(&serde_json::json!({
+                "device_id": device_id,
+                "presented_serial_number": serial,
+                "csr": csr,
+            }))
+            .send()
+            .await?;
+        if response.status() != StatusCode::CREATED {
+            bail!(
+                "certificate recovery challenge failed with status {}",
+                response.status()
+            );
+        }
+        let challenge: AuthorityRecoveryChallenge = response.json().await?;
+        if challenge.challenge_id.is_empty()
+            || challenge.device_id != device_id
+            || challenge.public_key_fingerprint != draft.public_key_fingerprint
+            || challenge.expires_at.is_empty()
+        {
+            bail!("recovery authority returned an incomplete or mismatched challenge");
+        }
+        let nonce = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&challenge.nonce)
+            .context("decode recovery nonce")?;
+        if nonce.len() != 32 {
+            bail!("recovery authority returned an invalid nonce");
+        }
+        let enrolled_der = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&enrollment.private_key_pkcs8)
+            .context("decode enrolled private key")?;
+        let signing_key =
+            SigningKey::from_pkcs8_der(&enrolled_der).context("parse enrolled private key")?;
+        let message = format!(
+            "agentdesktop-device-recovery-v1\n{}\n{}\n{}",
+            challenge.challenge_id, challenge.nonce, challenge.public_key_fingerprint
+        );
+        let signature: Signature = signing_key.sign(message.as_bytes());
+        let proof =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.to_der().as_bytes());
+        let response = self
+            .client
+            .post(self.recovery_endpoint.clone())
+            .bearer_auth(bearer)
+            .json(&serde_json::json!({
+                "challenge_id": challenge.challenge_id,
+                "proof": proof,
+            }))
+            .send()
+            .await?;
+        if response.status() != StatusCode::OK {
+            bail!(
+                "certificate recovery failed with status {}",
+                response.status()
+            );
+        }
+        let authority: AuthorityRenewal = response.json().await?;
+        if authority.renewal_id.is_empty()
+            || authority.status != EnrollmentStatus::Approved
+            || authority.device_id != device_id
+            || authority.public_key_fingerprint != draft.public_key_fingerprint
+        {
+            bail!("recovery authority returned an incomplete or mismatched record");
+        }
+        let recovered = EnrollmentRecord {
+            enrollment_id: enrollment.enrollment_id.clone(),
+            status: EnrollmentStatus::Approved,
+            public_key_fingerprint: draft.public_key_fingerprint,
+            created_at: enrollment.created_at.clone(),
+            device_id: Some(authority.device_id),
+            certificate: Some(authority.certificate),
+            private_key_pkcs8: draft.private_key_pkcs8,
+        };
+        validate_persisted_record(&recovered)?;
+        save_enrollment_for(issuer, gateway_origin, store, &recovered)?;
+        store.delete_if_exists(&renewal_record_name(issuer, gateway_origin))?;
+        Ok(recovered)
     }
 }
 
@@ -356,6 +488,17 @@ pub fn certificate_renewal_due(
     now: SystemTime,
     renew_before: Duration,
 ) -> Result<bool> {
+    let not_after = certificate_not_after(record)?;
+    Ok(not_after
+        .duration_since(now)
+        .map_or(true, |remaining| remaining <= renew_before))
+}
+
+pub fn certificate_expired(record: &EnrollmentRecord, now: SystemTime) -> Result<bool> {
+    Ok(certificate_not_after(record)? <= now)
+}
+
+fn certificate_not_after(record: &EnrollmentRecord) -> Result<SystemTime> {
     validate_persisted_record(record)?;
     let certificate = record
         .certificate
@@ -367,12 +510,9 @@ pub fn certificate_renewal_due(
         .map_err(|_| anyhow::anyhow!("issued leaf certificate is invalid"))?;
     let timestamp = u64::try_from(leaf.validity().not_after.timestamp())
         .context("issued certificate expiration precedes the Unix epoch")?;
-    let not_after = UNIX_EPOCH
+    UNIX_EPOCH
         .checked_add(Duration::from_secs(timestamp))
-        .context("issued certificate expiration is out of range")?;
-    Ok(not_after
-        .duration_since(now)
-        .map_or(true, |remaining| remaining <= renew_before))
+        .context("issued certificate expiration is out of range")
 }
 
 fn device_identity(record: &EnrollmentRecord) -> Result<reqwest::Identity> {
@@ -453,6 +593,8 @@ mod tests {
     use axum::routing::{get, post};
     use axum::{Json, Router};
     use base64::Engine;
+    use p256::ecdsa::signature::Verifier;
+    use p256::ecdsa::{Signature as P256Signature, VerifyingKey};
     use rcgen::{
         BasicConstraints, CertificateParams, CertificateSigningRequestParams, CertifiedIssuer,
         IsCa, KeyPair, PKCS_ECDSA_P256_SHA256, PublicKeyData,
@@ -461,6 +603,8 @@ mod tests {
     use sha2::{Digest, Sha256};
     use tokio::net::TcpListener;
     use url::Url;
+    use x509_parser::parse_x509_certificate;
+    use x509_parser::pem::parse_x509_pem;
 
     use super::{
         EnrollmentClient, EnrollmentStatus, load_device_identity_for, load_enrollment_for,
@@ -473,6 +617,8 @@ mod tests {
     struct AuthorityState {
         fingerprint: tokio::sync::Mutex<String>,
         certificate: tokio::sync::Mutex<String>,
+        recovery_fingerprint: tokio::sync::Mutex<String>,
+        recovery_certificate: tokio::sync::Mutex<String>,
     }
 
     #[tokio::test]
@@ -483,11 +629,15 @@ mod tests {
         let state = Arc::new(AuthorityState {
             fingerprint: tokio::sync::Mutex::new(String::new()),
             certificate: tokio::sync::Mutex::new(String::new()),
+            recovery_fingerprint: tokio::sync::Mutex::new(String::new()),
+            recovery_certificate: tokio::sync::Mutex::new(String::new()),
         });
         let app = Router::new()
             .route("/v1/enrollments", post(request_enrollment))
             .route("/v1/enrollments/{id}", get(enrollment_status))
             .route("/v1/renewals", post(renew_certificate))
+            .route("/v1/recovery/challenges", post(recovery_challenge))
+            .route("/v1/recovery", post(recover_certificate))
             .with_state(state);
         let server = tokio::spawn(axum::serve(listener, app).into_future());
         let temporary = tempfile::tempdir().unwrap();
@@ -536,6 +686,22 @@ mod tests {
             &store,
         )
         .unwrap();
+
+        let recovered = client
+            .recover_and_save(
+                &identity,
+                &Url::parse("https://issuer.example/").unwrap(),
+                &Url::parse("https://gateway.example/").unwrap(),
+                &store,
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovered.status, EnrollmentStatus::Approved);
+        assert_eq!(recovered.device_id.as_deref(), Some("device-1"));
+        assert_ne!(
+            recovered.public_key_fingerprint,
+            approved.public_key_fingerprint
+        );
 
         let renewed = client
             .renew_and_save(
@@ -676,6 +842,72 @@ mod tests {
             "public_key_fingerprint": fingerprint,
             "certificate": {
                 "certificate_chain_pem": issue_for_csr(&request),
+                "serial_number": "02",
+                "not_before": "2026-08-05T00:00:00Z",
+                "not_after": "2026-08-06T00:00:00Z"
+            }
+        }))
+    }
+
+    async fn recovery_challenge(
+        State(state): State<Arc<AuthorityState>>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> (StatusCode, Json<Value>) {
+        assert_eq!(headers["authorization"], "Bearer access-token");
+        assert_eq!(body["device_id"], "device-1");
+        assert_eq!(body["presented_serial_number"], "01");
+        let request =
+            CertificateSigningRequestParams::from_pem(body["csr"].as_str().unwrap()).unwrap();
+        let fingerprint = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(Sha256::digest(request.public_key.subject_public_key_info()));
+        *state.recovery_fingerprint.lock().await = fingerprint.clone();
+        *state.recovery_certificate.lock().await = issue_for_csr(&request);
+        (
+            StatusCode::CREATED,
+            Json(json!({
+                "challenge_id": "challenge-1",
+                "device_id": "device-1",
+                "public_key_fingerprint": fingerprint,
+                "nonce": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8; 32]),
+                "expires_at": "2026-08-05T00:05:00Z"
+            })),
+        )
+    }
+
+    async fn recover_certificate(
+        State(state): State<Arc<AuthorityState>>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(headers["authorization"], "Bearer access-token");
+        assert_eq!(body["challenge_id"], "challenge-1");
+        let certificate = state.certificate.lock().await.clone();
+        let (_, pem) = parse_x509_pem(certificate.as_bytes()).unwrap();
+        let (_, leaf) = parse_x509_certificate(&pem.contents).unwrap();
+        let verifying_key =
+            VerifyingKey::from_sec1_bytes(leaf.public_key().subject_public_key.data.as_ref())
+                .unwrap();
+        let proof = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(body["proof"].as_str().unwrap())
+            .unwrap();
+        let signature = P256Signature::from_der(&proof).unwrap();
+        let fingerprint = state.recovery_fingerprint.lock().await.clone();
+        let nonce = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8; 32]);
+        let message =
+            format!("agentdesktop-device-recovery-v1\nchallenge-1\n{nonce}\n{fingerprint}");
+        verifying_key
+            .verify(message.as_bytes(), &signature)
+            .unwrap();
+        let certificate = state.recovery_certificate.lock().await.clone();
+        *state.certificate.lock().await = certificate.clone();
+        Json(json!({
+            "renewal_id": "recovery-renewal-1",
+            "status": "approved",
+            "device_id": "device-1",
+            "public_key_fingerprint": fingerprint,
+            "certificate": {
+                "certificate_chain_pem": certificate,
                 "serial_number": "02",
                 "not_before": "2026-08-05T00:00:00Z",
                 "not_after": "2026-08-06T00:00:00Z"

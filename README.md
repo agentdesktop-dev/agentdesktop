@@ -13,7 +13,7 @@ Tested platform behavior is listed in [Platform Compatibility](docs/compatibilit
 The Linux cgroup v2/nftables implementation is documented in [Linux Transparent Capture](docs/deployment/linux-capture.md).
 Manual desktop journeys and future headless E2E tests use the [QEMU desktop test environment](tests/vm/README.md).
 
-The selected production trust boundary is documented in [Managed mTLS identity contract v1](docs/architecture/managed-mtls-v1.md). The initial [Go enrollment control plane](control-plane/README.md) validates ordinary OAuth bearer tokens and P-256 CSRs and persists pending enrollment in PostgreSQL. Browser PKCE login and the older DPoP connector path remain experimental; administrator approval, CA issuance, renewal, recovery, revocation enforcement, and Agent Gateway mTLS work are pending.
+The selected production trust boundary is documented in [Managed mTLS identity contract v1](docs/architecture/managed-mtls-v1.md). The [Go enrollment control plane](control-plane/README.md) validates ordinary OAuth bearer tokens and P-256 CSRs, persists enrollment and certificate lifecycle state in PostgreSQL, and supports administrator approval, issuance, renewal, bounded expired-certificate recovery, and revocation. Browser PKCE login and the older DPoP connector path remain experimental; production CA integration, Agent Gateway revocation consumption, and Agent Gateway mTLS enforcement are pending.
 
 ## Managed identity storage preflight
 

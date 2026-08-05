@@ -145,6 +145,36 @@ func (store *renewalStore) Begin(
 	}, nil
 }
 
+func (store *renewalStore) CreateRecoveryChallenge(
+	context.Context,
+	enrollment.Principal,
+	string,
+	string,
+	certificate.Request,
+	string,
+	[]byte,
+	time.Time,
+) (renewal.RecoveryChallenge, error) {
+	return renewal.RecoveryChallenge{}, errors.New("unexpected recovery challenge")
+}
+
+func (store *renewalStore) GetRecoveryChallenge(
+	context.Context,
+	enrollment.Principal,
+	string,
+) (renewal.RecoveryChallenge, error) {
+	return renewal.RecoveryChallenge{}, errors.New("unexpected recovery challenge")
+}
+
+func (store *renewalStore) BeginRecovery(
+	context.Context,
+	enrollment.Principal,
+	renewal.RecoveryChallenge,
+	string,
+) (renewal.Claim, error) {
+	return renewal.Claim{}, errors.New("unexpected recovery")
+}
+
 func (store *renewalStore) Complete(
 	_ context.Context,
 	_ enrollment.Principal,

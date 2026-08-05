@@ -29,7 +29,105 @@ func WithRenewal(authenticator Authenticator, renewals *renewal.Service, trustDo
 		mux.HandleFunc("POST /v1/renewals", func(response http.ResponseWriter, request *http.Request) {
 			server.renewCertificate(response, request, authenticator, renewals, trustDomain)
 		})
+		mux.HandleFunc("POST /v1/recovery/challenges", func(response http.ResponseWriter, request *http.Request) {
+			server.createRecoveryChallenge(response, request, authenticator, renewals)
+		})
+		mux.HandleFunc("POST /v1/recovery", func(response http.ResponseWriter, request *http.Request) {
+			server.recoverCertificate(response, request, authenticator, renewals)
+		})
 	}
+}
+
+func (server *Server) createRecoveryChallenge(
+	response http.ResponseWriter,
+	request *http.Request,
+	authenticator Authenticator,
+	renewals *renewal.Service,
+) {
+	principal, err := authenticator.Authenticate(request)
+	if err != nil {
+		writeError(response, http.StatusUnauthorized, "invalid_token")
+		return
+	}
+	var body struct {
+		DeviceID              string `json:"device_id"`
+		PresentedSerialNumber string `json:"presented_serial_number"`
+		CSR                   string `json:"csr"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(response, request.Body, 64<<10))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&body) != nil {
+		writeError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	challenge, err := renewals.CreateRecoveryChallenge(
+		request.Context(), principal, body.DeviceID, body.PresentedSerialNumber, body.CSR,
+	)
+	switch {
+	case errors.Is(err, certificate.ErrInvalidCSR), errors.Is(err, renewal.ErrInvalidRequest):
+		writeError(response, http.StatusBadRequest, "invalid_csr")
+		return
+	case errors.Is(err, renewal.ErrNotActive):
+		writeError(response, http.StatusForbidden, "device_not_active")
+		return
+	case err != nil:
+		writeError(response, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	response.Header().Set("content-type", "application/json")
+	response.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(response).Encode(challenge)
+}
+
+func (server *Server) recoverCertificate(
+	response http.ResponseWriter,
+	request *http.Request,
+	authenticator Authenticator,
+	renewals *renewal.Service,
+) {
+	principal, err := authenticator.Authenticate(request)
+	if err != nil {
+		writeError(response, http.StatusUnauthorized, "invalid_token")
+		return
+	}
+	var body struct {
+		ChallengeID string `json:"challenge_id"`
+		Proof       string `json:"proof"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(response, request.Body, 64<<10))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&body) != nil {
+		writeError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	recovered, err := renewals.Recover(request.Context(), principal, body.ChallengeID, body.Proof)
+	switch {
+	case errors.Is(err, renewal.ErrInvalidRequest):
+		writeError(response, http.StatusBadRequest, "invalid_request")
+		return
+	case errors.Is(err, renewal.ErrInvalidRecoveryProof):
+		writeError(response, http.StatusUnauthorized, "invalid_recovery_proof")
+		return
+	case errors.Is(err, renewal.ErrNotActive):
+		writeError(response, http.StatusForbidden, "device_not_active")
+		return
+	case errors.Is(err, renewal.ErrIssuanceFailed):
+		writeError(response, http.StatusBadGateway, "certificate_issuance_failed")
+		return
+	case err != nil:
+		writeError(response, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	response.Header().Set("content-type", "application/json")
+	_ = json.NewEncoder(response).Encode(recovered)
 }
 
 func NewServer(
