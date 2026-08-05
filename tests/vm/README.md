@@ -55,9 +55,22 @@ Prepare a complete managed user walkthrough from the immutable Fedora base:
 scripts/vm-managed-walkthrough.sh prepare --reset
 ```
 
-The harness generates a short-lived test CA, starts a TLS authorization/enrollment authority with delayed automatic approval, starts a TLS managed-gateway relay to the `SMOKE_OK` provider, builds an organization-specific installer, and uses SSH to simulate MDM trust and software installation. It leaves browser sign-in, service activation, separate Claude consent, and the final plain `claude` request for the interactive desktop walkthrough. Run `scripts/vm-managed-walkthrough.sh stop` afterward.
+The harness starts the real rootless Podman walkthrough stack, builds an organization-specific installer, and copies only that installer to Fedora's Downloads directory. It does not install software or trust on the user's behalf.
 
-These are test fixtures, not production identity or Agent Gateway implementations. The gateway fixture validates issuer-pinned token signatures and DPoP proof binding and replay, then strips connector credentials; it does not enforce approved device state. The selected production path uses mTLS device identity and remains blocked until certificate lifecycle and Agent Gateway mTLS enforcement are complete.
+Perform the user journey in the Fedora desktop:
+
+1. Run `~/Downloads/agentdesktop-installer install` in Terminal.
+2. Review the organization, gateway, enrollment, and inspection summary.
+3. Choose whether to install the organization's public CA. This consent is separate and is not implied by noninteractive installer acceptance.
+4. Approve the normal desktop privilege prompt when installing software or trust.
+5. Run `agentdesktop connect-agents`, complete browser sign-in, and approve the separate Claude Code settings change.
+6. After an administrator approves the pending enrollment, launch `claude` normally and ask it to reply with exactly `SMOKE_OK`.
+
+Perform the administrator journey in the host browser at `http://localhost:8091/admin/`: sign in, inspect the pending device, and approve, reject, or revoke it. This cleartext endpoint is a walkthrough-only adapter bound to host loopback. The VM-facing identity, enrollment, and Gateway endpoints remain HTTPS with the canonical `host.test` issuer. Production administrators use organization-trusted HTTPS.
+
+Run `scripts/vm-managed-walkthrough.sh stop` afterward. Omit `--reset` to refresh the server stack and installer while preserving the running Fedora VM.
+
+The mock identity provider and Anthropic service are deterministic test fixtures. Enrollment uses the repository control plane, and the real Agent Gateway enforces the issued mTLS device identity before forwarding to the mock provider.
 
 The test-only `agentdesktop` account has passwordless sudo. SSH password authentication is exposed only through the QEMU user-network forward on host loopback. Do not publish the VM's SSH port on a non-loopback host address.
 
@@ -85,8 +98,9 @@ The default `host.test` mappings are:
 | Guest endpoint | Host endpoint | Intended service |
 | --- | --- | --- |
 | `host.test:8000` | `127.0.0.1:8000` | Checked-in mock Anthropic API |
-| `host.test:18080` | `127.0.0.1:18080` | Mock Anthropic/LLM API |
-| `host.test:4000` | `127.0.0.1:4000` | Agent Gateway LLM listener |
+| `host.test:18080` | `127.0.0.1:18080` | HTTPS mock identity provider |
+| `host.test:8090` | `127.0.0.1:8090` | HTTPS enrollment API |
+| `host.test:4000` | `127.0.0.1:8443` | HTTPS Agent Gateway listener |
 | `host.test:15008` | `127.0.0.1:15008` | Agent Gateway HBONE listener |
 | `host.test:15021` | `127.0.0.1:15021` | Agent Gateway readiness endpoint |
 

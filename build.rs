@@ -14,9 +14,10 @@ const STANDALONE_PAYLOADS: [(&str, &str); 5] = [
     ("config", "AGENTDESKTOP_PAYLOAD_CONFIG"),
 ];
 
-const MANAGED_PAYLOADS: [(&str, &str); 2] = [
+const MANAGED_PAYLOADS: [(&str, &str); 3] = [
     ("installer", "AGENTDESKTOP_PAYLOAD_INSTALLER"),
     ("connector", "AGENTDESKTOP_PAYLOAD_CONNECTOR"),
+    ("capture-setup", "AGENTDESKTOP_PAYLOAD_CAPTURE_SETUP"),
 ];
 
 fn main() {

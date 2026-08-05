@@ -13,7 +13,7 @@ Tested platform behavior is listed in [Platform Compatibility](docs/compatibilit
 The Linux cgroup v2/nftables implementation is documented in [Linux Transparent Capture](docs/deployment/linux-capture.md).
 Manual desktop journeys and future headless E2E tests use the [QEMU desktop test environment](tests/vm/README.md).
 
-The selected production trust boundary is documented in [Managed mTLS identity contract v1](docs/architecture/managed-mtls-v1.md). The [Go enrollment control plane](control-plane/README.md) validates ordinary OAuth bearer tokens and P-256 CSRs, persists enrollment and certificate lifecycle state in PostgreSQL, and supports administrator approval, renewal, bounded expired-certificate recovery, revocation, and current-device authorization for Agent Gateway.
+The selected production trust boundary is documented in [Managed mTLS identity contract v1](docs/architecture/managed-mtls-v1.md). The [Go enrollment control plane](control-plane/README.md) validates ordinary OAuth bearer tokens and P-256 CSRs, persists enrollment and certificate lifecycle state in PostgreSQL, and supports administrator approval, renewal, bounded expired-certificate recovery, and revocation.
 
 ## Managed identity storage preflight
 
@@ -415,4 +415,4 @@ Send a simple prompt and verify:
 3. Stopping Agent Gateway causes the connector to return `502 Bad Gateway` with `x-agentdesktop-error: upstream-unavailable`.
 4. The connector never attempts a direct connection to Anthropic.
 
-The native managed equivalent, including Gateway mTLS, bearer JWT validation and removal, current-device authorization, and immediate revocation, is covered by the [managed walkthrough](examples/managed-walkthrough/README.md).
+The native managed equivalent, including Gateway mTLS plus bearer JWT validation and removal, is covered by the [managed walkthrough](examples/managed-walkthrough/README.md).

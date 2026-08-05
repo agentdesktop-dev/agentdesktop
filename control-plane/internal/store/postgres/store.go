@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/certificate"
-	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/deviceauthorization"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/deviceidentity"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/enrollment"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/identifier"
@@ -811,41 +810,6 @@ func (store *Store) RevokeDevice(
 		return enrollment.DeviceRevocation{}, err
 	}
 	return revocation, nil
-}
-
-func (store *Store) AuthorizeDevice(
-	ctx context.Context,
-	principal enrollment.Principal,
-	device deviceidentity.Identity,
-) error {
-	var authorized bool
-	err := store.pool.QueryRow(ctx, `
-		SELECT true
-		FROM organizations
-		JOIN users ON users.organization_id = organizations.id
-		JOIN enrollments ON enrollments.user_id = users.id
-		JOIN devices ON devices.id = enrollments.device_id
-		JOIN certificates ON certificates.serial_number = devices.current_certificate_serial_number
-		WHERE organizations.issuer = $1 AND organizations.id = $2
-		  AND users.subject = $3 AND enrollments.status = 'approved'
-		  AND devices.id = $4 AND devices.status = 'active' AND devices.revoked_at IS NULL
-		  AND certificates.serial_number = $5
-		  AND certificates.organization_id = organizations.id
-		  AND certificates.device_id = devices.id
-		  AND certificates.revoked_at IS NULL
-		  AND certificates.not_before <= now() AND certificates.not_after > now()
-		LIMIT 1
-	`, principal.Issuer, device.OrganizationID, principal.Subject, device.DeviceID, device.SerialNumber).Scan(&authorized)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return deviceauthorization.ErrDenied
-	}
-	if err != nil {
-		return err
-	}
-	if !authorized {
-		return deviceauthorization.ErrDenied
-	}
-	return nil
 }
 
 func (store *Store) Reject(

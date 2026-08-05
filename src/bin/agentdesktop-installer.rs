@@ -55,6 +55,11 @@ struct InstallArgs {
     connect_agents: bool,
     #[arg(long, help = "Trust the local inspection CA without prompting")]
     trust_inspection: bool,
+    #[arg(
+        long,
+        help = "Trust the organization's managed Gateway CA without prompting"
+    )]
+    trust_organization_ca: bool,
 }
 
 const SUPPORT_URL: &str = "https://github.com/agentdesktop-dev/agentdesktop/issues/new";
@@ -100,6 +105,7 @@ fn run() -> Result<()> {
             no_start: false,
             connect_agents: false,
             trust_inspection: false,
+            trust_organization_ca: false,
         },
     };
     install(args)
@@ -116,6 +122,9 @@ fn install(args: InstallArgs) -> Result<()> {
 fn install_standalone(args: InstallArgs) -> Result<()> {
     if args.organization.is_some() {
         bail!("--organization is only available for managed installers");
+    }
+    if args.trust_organization_ca {
+        bail!("--trust-organization-ca is only available for managed installers");
     }
     if args.no_start && args.connect_agents {
         bail!("--connect-agents requires the service to start");
@@ -142,7 +151,6 @@ fn install_standalone(args: InstallArgs) -> Result<()> {
         .tempdir_in(parent)
         .context("failed to create temporary extraction directory")?;
     extract_payload(payload.path())?;
-    install_privileged_helper(&payload.path().join("capture-setup"))?;
     let ca_directory = config
         .parent()
         .context("Agent Gateway config has no parent")?
@@ -218,8 +226,14 @@ fn install_standalone(args: InstallArgs) -> Result<()> {
         && (args.trust_inspection || (!args.yes && confirm_inspection_trust(&ca_directory)?));
     if args.trust_inspection && !capture_enabled {
         bail!("inspection trust requires an installer-created capture configuration");
-    } else if trust_inspection {
-        install_inspection_trust(&ca_directory.join("ca.crt"))?;
+    }
+    install_system_integration(
+        &payload.path().join("capture-setup"),
+        trust_inspection
+            .then(|| ca_directory.join("ca.crt"))
+            .as_deref(),
+    )?;
+    if trust_inspection {
         println!("  Trust:   local inspection CA installed");
     } else if capture_enabled {
         println!("  Trust:   not installed; transparent capture remains unavailable");
@@ -259,12 +273,18 @@ fn install_managed(args: InstallArgs) -> Result<()> {
     if args.config.is_some() || args.no_start || args.connect_agents {
         bail!("managed installation does not accept standalone service or agent setup options");
     }
+    if args.trust_inspection {
+        bail!("--trust-inspection is only available for standalone installers");
+    }
     let root = args.root.map_or_else(default_root, Ok)?;
     let command_link = default_command_link()?;
     if !root.is_absolute() {
         bail!("install root must be absolute");
     }
     let bootstrap = load_organization(args.organization.as_deref())?;
+    if args.trust_organization_ca && bootstrap.trust.is_none() {
+        bail!("this organization installer does not include a managed Gateway CA");
+    }
     print_managed_summary(&root, &bootstrap);
     if !args.yes && !confirm()? {
         println!("Installation cancelled; no files were changed.");
@@ -306,10 +326,33 @@ fn install_managed(args: InstallArgs) -> Result<()> {
         ],
     )?;
 
+    let trust_organization_ca = match bootstrap.trust.as_ref() {
+        Some(_) if args.trust_organization_ca => true,
+        Some(trust) if !args.yes => confirm_organization_trust(&bootstrap, trust)?,
+        _ => false,
+    };
+    if trust_organization_ca {
+        let trust = bootstrap
+            .trust
+            .as_ref()
+            .expect("managed trust was checked before installation");
+        let certificate = payload.path().join("organization-ca.crt");
+        fs::write(&certificate, &trust.certificate_pem)?;
+        set_mode(&certificate, 0o600)?;
+        install_system_integration(&payload.path().join("capture-setup"), Some(&certificate))?;
+    }
+
     println!("\nInstallation complete");
     println!("  Organization: {}", bootstrap.organization.display_name);
     println!("  Files:        {}", root.display());
     println!("  Service:      installed, awaiting user sign-in");
+    if trust_organization_ca {
+        println!("  Trust:        organization Gateway CA installed");
+    } else if bootstrap.trust.is_some() {
+        println!("  Trust:        unchanged; organization CA was not installed");
+    } else {
+        println!("  Trust:        organization CA expected to be preinstalled");
+    }
     println!("\nNo AI agent settings were changed.");
     println!("To sign in and connect your AI agents, run:\n  agentdesktop connect-agents");
     print_command_path_warning(&command_link);
@@ -560,16 +603,13 @@ fn initialize_inspection_ca(agentgateway: &Path, state_directory: &Path) -> Resu
     Ok(())
 }
 
-fn install_privileged_helper(source: &Path) -> Result<()> {
-    let status = ProcessCommand::new("pkexec")
-        .args([
-            "/usr/bin/install",
-            "--owner=root",
-            "--group=root",
-            "--mode=0755",
-        ])
-        .arg(source)
-        .arg("/usr/libexec/agentdesktop-capture-setup")
+fn install_system_integration(source: &Path, certificate: Option<&Path>) -> Result<()> {
+    let mut command = ProcessCommand::new("pkexec");
+    command.arg(source).arg("system-install");
+    if let Some(certificate) = certificate {
+        command.arg("--certificate").arg(certificate);
+    }
+    let status = command
         .status()
         .context("authorize Agent Desktop system integration")?;
     if !status.success() {
@@ -592,18 +632,24 @@ fn confirm_inspection_trust(ca_directory: &Path) -> Result<bool> {
     Ok(bytes_read > 0 && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 
-fn install_inspection_trust(certificate: &Path) -> Result<()> {
-    let status = ProcessCommand::new("pkexec")
-        .arg("/usr/libexec/agentdesktop-capture-setup")
-        .arg("trust-install")
-        .arg("--certificate")
-        .arg(certificate)
-        .status()
-        .context("authorize local inspection CA trust")?;
-    if !status.success() {
-        bail!("local inspection CA trust failed with {status}");
-    }
-    Ok(())
+fn confirm_organization_trust(
+    bootstrap: &OrganizationBootstrap,
+    trust: &agentdesktop::organization::TrustBootstrap,
+) -> Result<bool> {
+    let fingerprint = Sha256::digest(trust.certificate_pem.as_bytes());
+    println!("\nOptional organization trust");
+    println!(
+        "{} can install its managed Agent Gateway CA on this device.",
+        bootstrap.organization.display_name
+    );
+    println!("Inspection scope: {}", trust.inspection_scope);
+    println!("This changes the system trust store and requires administrator approval.");
+    println!("CA SHA-256: {}", hex_digest(&fingerprint));
+    print!("Install this organization CA? [y/N] ");
+    io::stdout().flush()?;
+    let mut answer = String::new();
+    let bytes_read = io::stdin().read_line(&mut answer)?;
+    Ok(bytes_read > 0 && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 
 fn hex_digest(digest: &[u8]) -> String {
@@ -705,6 +751,16 @@ mod tests {
         };
         assert!(defaults.yes);
         assert!(!defaults.connect_agents);
+        assert!(!defaults.trust_organization_ca);
+
+        let Cli {
+            command: Some(Command::Install(trusted)),
+        } = Cli::try_parse_from(["installer", "install", "--yes", "--trust-organization-ca"])
+            .unwrap()
+        else {
+            panic!("install command was not parsed");
+        };
+        assert!(trusted.trust_organization_ca);
 
         let Cli {
             command: Some(Command::Install(automatic)),

@@ -1,6 +1,6 @@
 # Managed native walkthrough
 
-This walkthrough exercises ordinary OAuth user identity and authority-issued mTLS device identity through Agent Desktop and Agent Gateway. It covers browser login, administrator approval, a Claude request, immediate device revocation, and denial of the next request. Agent Gateway uses the checked-in configuration only; it needs no source changes. All infrastructure runs in one disposable Podman pod. Agent Desktop and Claude remain host processes, but trust the generated CAs through a process-local bundle; the walkthrough never changes the host trust store or uses `sudo`.
+This walkthrough exercises ordinary OAuth user identity and authority-issued mTLS device identity through Agent Desktop and Agent Gateway. It covers browser login, administrator approval, a Claude request, and administrative device revocation. Agent Gateway uses the checked-in configuration only; it needs no source changes. All infrastructure runs in one disposable Podman pod. Agent Desktop and Claude remain host processes, but trust the generated CAs through a process-local bundle; the walkthrough never changes the host trust store or uses `sudo`.
 
 The walkthrough uses the repository's mock OIDC and Anthropic servers. It expects:
 
@@ -10,7 +10,7 @@ The walkthrough uses the repository's mock OIDC and Anthropic servers. It expect
 Use these fixed local values:
 
 ```bash
-export OIDC_ISSUER=http://127.0.0.1:18080/
+export OIDC_ISSUER=https://localhost:18080/
 export OIDC_AUDIENCE=agentdesktop
 export OIDC_JWKS_URL=http://127.0.0.1:18080/jwks
 export OIDC_CLIENT_ID=agentdesktop-test
@@ -29,7 +29,7 @@ Start OIDC, mock Anthropic, PostgreSQL 17, the enrollment service, and Agent Gat
 scripts/managed-walkthrough.sh start
 ```
 
-The launcher binds every published port to `127.0.0.1`, creates fresh certificates, builds the enrollment image, and waits for every service to become ready. The mock OIDC server performs a deterministic test-user login when the browser opens. Its `/admin-token` endpoint issues a signed, one-hour administrator JWT for this local walkthrough. An arbitrary token will not pass control-plane signature, issuer, audience, expiry, subject, and scope validation.
+The launcher binds every published port to `127.0.0.1`, creates fresh certificates, builds the enrollment image, and waits for every service to become ready. The mock OIDC server performs deterministic test-user and test-admin login when the browser opens. The VM walkthrough exposes its administrator experience on loopback-only `http://localhost:8091/admin/`; production deployments serve this UI over organization-trusted HTTPS.
 
 The mock Anthropic API accepts the fake Gateway-owned API key and returns `SMOKE_OK`; it never contacts Anthropic.
 
@@ -95,7 +95,7 @@ ANTHROPIC_AUTH_TOKEN=connector-placeholder \
 claude
 ```
 
-## Revoke and verify denial
+## Revoke the device
 
 Read `device_id` from the approval or enrollment-status response and revoke it:
 
@@ -106,7 +106,7 @@ curl --fail-with-body -X POST \
   "https://localhost:8090/v1/admin/devices/$DEVICE_ID/revoke" | jq
 ```
 
-The first request returns `SMOKE_OK`. After revocation, the next Claude request must fail with authorization denied. Agent Gateway does not cache device authorization, so revocation takes effect on the next request without restarting either process.
+The first request returns `SMOKE_OK`. Revocation prevents certificate renewal and records the certificate revocation time for CRL generation. The walkthrough does not yet publish a CRL or configure Agent Gateway to load one, so an already-issued certificate remains usable until its short lifetime expires. There is no per-request control-plane authorization callback.
 
 Delete the pod, database, and generated runtime state when finished:
 

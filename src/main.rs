@@ -424,7 +424,7 @@ async fn prepare_managed_connection(
                     gateway_origin: gateway_origin.clone(),
                 },
                 &store,
-                |authorization_url| open::that(authorization_url.as_str()).map_err(Into::into),
+                agentdesktop::identity::oauth::open_authorization_url,
             )
             .await?
         }

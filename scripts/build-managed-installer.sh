@@ -24,11 +24,13 @@ cd "$root"
 cargo build --release \
   --bin agentdesktop-install \
   --bin agentdesktop \
+  --bin agentdesktop-capture-setup \
   --bin agentdesktop-customize
 
 AGENTDESKTOP_INSTALLER_MODE=managed \
 AGENTDESKTOP_PAYLOAD_INSTALLER=$root/target/release/agentdesktop-install \
 AGENTDESKTOP_PAYLOAD_CONNECTOR=$root/target/release/agentdesktop \
+AGENTDESKTOP_PAYLOAD_CAPTURE_SETUP=$root/target/release/agentdesktop-capture-setup \
   cargo build --release --features embedded-installer --bin agentdesktop-installer
 
 cp "$root/target/release/agentdesktop-installer" "$template"

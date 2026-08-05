@@ -6,16 +6,15 @@ import (
 	"flag"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/adminui"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/api"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/auth"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/ca"
-	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/deviceauthorization"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/enrollment"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/renewal"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/store/postgres"
@@ -39,11 +38,6 @@ func main() {
 	serverCertificatePath := required("SERVER_TLS_CERTIFICATE_PATH")
 	serverKeyPath := required("SERVER_TLS_PRIVATE_KEY_PATH")
 	trustDomain := required("MTLS_TRUST_DOMAIN")
-	gatewayIdentity, err := url.Parse(required("GATEWAY_CLIENT_SPIFFE_ID"))
-	if err != nil || gatewayIdentity.Scheme != "spiffe" || gatewayIdentity.Host == "" ||
-		gatewayIdentity.User != nil || gatewayIdentity.RawQuery != "" || gatewayIdentity.Fragment != "" {
-		log.Fatal("GATEWAY_CLIENT_SPIFFE_ID must be an absolute SPIFFE URI")
-	}
 	listenAddress := value("LISTEN_ADDRESS", "127.0.0.1:8090")
 	certificateLifetime, err := time.ParseDuration(value("CLIENT_CERTIFICATE_LIFETIME", "24h"))
 	if err != nil {
@@ -97,21 +91,26 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	deviceRoots, err := transport.LoadCertificatePool(caCertificatePath)
-	if err != nil {
-		log.Fatal(err)
-	}
 	enrollmentService := enrollment.NewService(store, certificateIssuer)
 	renewalService := renewal.NewService(store, certificateIssuer)
-	deviceAuthorizationService := deviceauthorization.NewService(store)
+	options := []api.Option{
+		api.WithRenewal(validator, renewalService, trustDomain),
+	}
+	if clientID := os.Getenv("ADMIN_UI_OAUTH_CLIENT_ID"); clientID != "" {
+		options = append(options, api.WithAdminUI(adminui.Config{
+			OrganizationName:      organizationName,
+			AuthorizationEndpoint: required("ADMIN_UI_AUTHORIZATION_ENDPOINT"),
+			TokenEndpoint:         required("ADMIN_UI_TOKEN_ENDPOINT"),
+			ClientID:              clientID,
+			Audience:              audience,
+			Scope:                 administratorScope,
+		}))
+	}
 	handler := api.NewServer(
 		validator,
 		administratorValidator,
 		enrollmentService,
-		api.WithRenewal(validator, renewalService, trustDomain),
-		api.WithDeviceAuthorization(
-			deviceAuthorizationService, trustDomain, deviceRoots, gatewayIdentity,
-		),
+		options...,
 	)
 	server := &http.Server{
 		Addr:              listenAddress,
@@ -122,6 +121,24 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 		TLSConfig:         tlsConfig,
 	}
+	var adminServer *http.Server
+	if adminListenAddress := os.Getenv("ADMIN_UI_LISTEN_ADDRESS"); adminListenAddress != "" {
+		adminServer = &http.Server{
+			Addr:              adminListenAddress,
+			Handler:           handler,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       15 * time.Second,
+			WriteTimeout:      15 * time.Second,
+			IdleTimeout:       60 * time.Second,
+		}
+		go func() {
+			log.Printf("administrator UI listening on %s", adminListenAddress)
+			if err := adminServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("administrator UI failed: %v", err)
+				stop()
+			}
+		}()
+	}
 
 	go func() {
 		<-ctx.Done()
@@ -129,6 +146,11 @@ func main() {
 		defer cancel()
 		if err := server.Shutdown(shutdownContext); err != nil {
 			log.Printf("server shutdown failed: %v", err)
+		}
+		if adminServer != nil {
+			if err := adminServer.Shutdown(shutdownContext); err != nil {
+				log.Printf("administrator UI shutdown failed: %v", err)
+			}
 		}
 	}()
 	go reconcileIssuance(ctx, enrollmentService, reconciliationInterval, reconciliationGrace)

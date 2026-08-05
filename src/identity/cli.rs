@@ -6,7 +6,10 @@ use url::Url;
 use super::enrollment::{
     EnrollmentClient, delete_enrollment_for, load_enrollment_for, save_enrollment_for,
 };
-use super::oauth::{LoginConfig, ManagedIdentity, delete_session_for, load_session_for, login};
+use super::oauth::{
+    LoginConfig, ManagedIdentity, delete_session_for, load_session_for, login,
+    open_authorization_url,
+};
 use super::storage::{self, CredentialStorageMode, CredentialStore, default_storage_root};
 
 #[derive(Debug, Subcommand)]
@@ -122,7 +125,7 @@ pub async fn run(command: IdentityCommand) -> anyhow::Result<()> {
                         println!("authorization URL: {authorization_url}");
                         Ok(())
                     } else {
-                        open::that(authorization_url.as_str()).map_err(Into::into)
+                        open_authorization_url(authorization_url)
                     }
                 },
             )

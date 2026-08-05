@@ -7,7 +7,13 @@ runtime=$state/runtime
 vm=$root/tests/vm/vm.sh
 issuer=https://host.test:18080/
 gateway=https://host.test:4000/
+enrollment=https://host.test:8090/
+vm_forwards=18080:18080,8090:8090,4000:8443,15021:15021
 install_root=/home/agentdesktop/.local/lib/agentdesktop
+
+run_vm() {
+  VM_HOST_FORWARDS=$vm_forwards "$vm" "$@"
+}
 
 usage() {
   cat <<'EOF'
@@ -28,150 +34,54 @@ require() {
   }
 }
 
-stop_service() {
-  name=$1
-  pid_file=$runtime/$name.pid
-  test -f "$pid_file" || return 0
-  pid=$(cat "$pid_file")
-  kill "$pid" 2>/dev/null || true
-  rm -f "$pid_file"
-}
-
 stop_services() {
-  stop_service gateway
-  stop_service authority
-  stop_service provider
-}
-
-start_service() {
-  name=$1
-  shift
-  nohup "$@" >"$runtime/$name.log" 2>&1 &
-  pid=$!
-  printf '%s\n' "$pid" >"$runtime/$name.pid"
-}
-
-wait_for_url() {
-  attempts=0
-  while test "$attempts" -lt 200; do
-    if "$@" >/dev/null 2>&1; then
-      return 0
-    fi
-    attempts=$((attempts + 1))
-  done
-  return 1
-}
-
-create_certificates() {
-  mkdir -p "$runtime"
-  openssl req -x509 -newkey rsa:2048 -nodes \
-    -subj '/CN=Agent Desktop Walkthrough CA' \
-    -keyout "$runtime/ca.key" \
-    -out "$runtime/ca.crt" \
-    -days 2 >/dev/null 2>&1
-  openssl req -newkey rsa:2048 -nodes \
-    -subj '/CN=host.test' \
-    -keyout "$runtime/host.test.key" \
-    -out "$runtime/host.test.csr" >/dev/null 2>&1
-  cat >"$runtime/host.test.ext" <<'EOF'
-subjectAltName=DNS:host.test
-extendedKeyUsage=serverAuth
-keyUsage=digitalSignature,keyEncipherment
-EOF
-  openssl x509 -req \
-    -in "$runtime/host.test.csr" \
-    -CA "$runtime/ca.crt" \
-    -CAkey "$runtime/ca.key" \
-    -CAcreateserial \
-    -extfile "$runtime/host.test.ext" \
-    -out "$runtime/host.test.crt" \
-    -days 2 >/dev/null 2>&1
+  "$root/scripts/managed-walkthrough.sh" stop
 }
 
 start_services() {
-  stop_services
-  create_certificates
-  start_service provider env \
-    MOCK_ANTHROPIC_HOST=127.0.0.1 \
-    MOCK_ANTHROPIC_PORT=18081 \
-    node "$root/container/mock-anthropic.mjs"
-  start_service authority env \
-    AGENTDESKTOP_FAKE_ISSUER="$issuer" \
-    AGENTDESKTOP_FAKE_LISTEN_HOST=127.0.0.1 \
-    AGENTDESKTOP_FAKE_PORT=18080 \
-    AGENTDESKTOP_FAKE_TLS_KEY="$runtime/host.test.key" \
-    AGENTDESKTOP_FAKE_TLS_CERTIFICATE="$runtime/host.test.crt" \
-    AGENTDESKTOP_FAKE_AUTO_APPROVE=1 \
-    node "$root/tests/fixtures/fake-authorization-server.mjs"
-  start_service gateway env \
-    NODE_EXTRA_CA_CERTS="$runtime/ca.crt" \
-    AGENTDESKTOP_FAKE_LISTEN_HOST=127.0.0.1 \
-    AGENTDESKTOP_FAKE_PORT=4000 \
-    AGENTDESKTOP_FAKE_ISSUER="$issuer" \
-    AGENTDESKTOP_FAKE_AUDIENCE=agentdesktop \
-    AGENTDESKTOP_FAKE_SCOPE=agentgateway.invoke \
-    AGENTDESKTOP_FAKE_GATEWAY_ORIGIN="$gateway" \
-    AGENTDESKTOP_FAKE_TLS_KEY="$runtime/host.test.key" \
-    AGENTDESKTOP_FAKE_TLS_CERTIFICATE="$runtime/host.test.crt" \
-    AGENTDESKTOP_FAKE_PROVIDER=http://127.0.0.1:18081/ \
-    node "$root/tests/fixtures/fake-managed-gateway.mjs"
-
-  wait_for_url curl --silent --fail \
-    --cacert "$runtime/ca.crt" \
-    --resolve host.test:18080:127.0.0.1 \
-    "${issuer}.well-known/oauth-authorization-server" || {
-      printf 'walkthrough authority did not start; see %s\n' "$runtime/authority.log" >&2
-      exit 1
-    }
-  wait_for_url curl --silent --output /dev/null --write-out '%{http_code}' \
-    --cacert "$runtime/ca.crt" \
-    --resolve host.test:4000:127.0.0.1 \
-    "$gateway" || {
-      printf 'walkthrough gateway did not start; see %s\n' "$runtime/gateway.log" >&2
-      exit 1
-    }
-  wait_for_url curl --silent --fail \
-    --request POST \
-    --header 'content-type: application/json' \
-    --data '{"model":"walkthrough","max_tokens":1,"messages":[]}' \
-    http://127.0.0.1:18081/v1/messages || {
-      printf 'walkthrough provider did not start; see %s\n' "$runtime/provider.log" >&2
-      exit 1
-    }
+  AGENTDESKTOP_WALKTHROUGH_SERVER_DNS=host.test \
+  AGENTDESKTOP_WALKTHROUGH_ADMIN_OAUTH_ORIGIN=http://localhost:18082/ \
+    "$root/scripts/managed-walkthrough.sh" start
 }
 
 write_organization() {
-  cat >"$state/organization.json" <<EOF
-{
-  "format_version": 1,
-  "organization": {
-    "id": "walkthrough",
-    "display_name": "Walkthrough Organization",
-    "support_url": "https://host.test:18080/support"
+  node - "$root/examples/managed-walkthrough/certs/gateway-server-ca.crt" "$state/organization.json" <<'EOF'
+const fs = require("node:fs");
+const certificate = fs.readFileSync(process.argv[2], "utf8");
+const organization = {
+  format_version: 1,
+  organization: {
+    id: "walkthrough",
+    display_name: "Walkthrough Organization",
+    support_url: "https://host.test:18080/support",
   },
-  "identity": {
-    "issuer": "$issuer",
-    "client_id": "agentdesktop-test",
-    "audience": "agentdesktop",
-    "scope": "agentgateway.invoke"
+  identity: {
+    issuer: "https://host.test:18080/",
+    enrollment_url: "https://host.test:8090/",
+    client_id: "agentdesktop-test",
+    audience: "agentdesktop",
+    scope: "agentgateway.invoke",
   },
-  "gateway": {
-    "url": "$gateway"
-  }
-}
+  gateway: { url: "https://host.test:4000/" },
+  trust: {
+    certificate_pem: certificate,
+    inspection_scope: "AI application traffic routed through Walkthrough Organization's managed Agent Gateway",
+  },
+};
+fs.writeFileSync(process.argv[3], `${JSON.stringify(organization, null, 2)}\n`);
 EOF
 }
 
 prepare_vm() {
-  "$vm" status | grep -q '^running ' || {
+  run_vm status | grep -q '^running ' || {
     printf 'VM is not running; use prepare --reset\n' >&2
     exit 1
   }
-  "$vm" ssh "command -v claude >/dev/null" || {
+  run_vm ssh "command -v claude >/dev/null" || {
     printf 'VM base does not contain Claude Code; rebuild it with tests/vm/vm.sh build\n' >&2
     exit 1
   }
-  "$vm" ssh "test ! -e '$install_root' && test ! -e /home/agentdesktop/.config/agentdesktop/identity" || {
+  run_vm ssh "test ! -e '$install_root' && test ! -e /home/agentdesktop/.config/agentdesktop/identity" || {
     printf 'VM contains prior connector state; use prepare --reset for a clean walkthrough\n' >&2
     exit 1
   }
@@ -180,11 +90,9 @@ prepare_vm() {
   "$root/scripts/build-managed-installer.sh" \
     "$state/organization.json" \
     "$state/agentdesktop-installer"
-  "$vm" ssh install -d -m 0755 /home/agentdesktop/Downloads
-  "$vm" copy "$runtime/ca.crt" /home/agentdesktop/Downloads/agentdesktop-walkthrough-ca.crt
-  "$vm" copy "$state/agentdesktop-installer" /home/agentdesktop/Downloads/agentdesktop-installer
-  "$vm" ssh \
-    "sudo install -m 0644 /home/agentdesktop/Downloads/agentdesktop-walkthrough-ca.crt /etc/pki/ca-trust/source/anchors/agentdesktop-walkthrough-ca.crt && sudo update-ca-trust && chmod +x /home/agentdesktop/Downloads/agentdesktop-installer && /home/agentdesktop/Downloads/agentdesktop-installer install --yes"
+  run_vm ssh install -d -m 0755 /home/agentdesktop/Downloads
+  run_vm copy "$state/agentdesktop-installer" /home/agentdesktop/Downloads/agentdesktop-installer
+  run_vm ssh chmod +x /home/agentdesktop/Downloads/agentdesktop-installer
 
   cat <<'EOF'
 
@@ -193,26 +101,21 @@ Managed walkthrough is ready.
 In the Fedora desktop:
   1. Open Terminal.
   2. Run:
-      agentdesktop connect-agents
-  3. Complete the browser sign-in and return to Terminal.
-  4. Approve the separate Claude Code settings prompt.
-  5. Launch `claude` normally and ask it to reply with exactly SMOKE_OK.
+      ~/Downloads/agentdesktop-installer install
+  3. Review the installation summary.
+  4. Choose whether to install the organization CA and approve the desktop privilege prompt.
+  5. Run `agentdesktop connect-agents`.
+  6. Complete browser sign-in and approve the separate Claude Code settings prompt.
+  7. Launch `claude` normally and ask it to reply with exactly SMOKE_OK.
 
-The identity authority auto-approves this test device after sign-in.
+Approve the pending device at http://localhost:8091/admin/ on the host.
 Run `scripts/vm-managed-walkthrough.sh stop` when finished.
 EOF
 }
 
 status() {
-  "$vm" status
-  for name in provider authority gateway; do
-    pid_file=$runtime/$name.pid
-    if test -f "$pid_file" && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
-      printf '%s: running pid=%s\n' "$name" "$(cat "$pid_file")"
-    else
-      printf '%s: stopped\n' "$name"
-    fi
-  done
+  run_vm status
+  "$root/scripts/managed-walkthrough.sh" status
 }
 
 command=${1:-}
@@ -227,9 +130,9 @@ case "$command" in
     require openssl
     mkdir -p "$runtime"
     if test "${2:-}" = --reset; then
-      "$vm" reset
-      "$vm" start --display
-      "$vm" wait
+      run_vm reset
+      run_vm start --display
+      run_vm wait
     elif test "$#" -ne 1; then
       usage >&2
       exit 2

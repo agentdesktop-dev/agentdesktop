@@ -198,6 +198,21 @@ where
     Ok(session)
 }
 
+pub fn open_authorization_url(authorization_url: &Url) -> Result<()> {
+    open_authorization_url_with(authorization_url, |url| open::that(url).map_err(Into::into))
+}
+
+fn open_authorization_url_with<F>(authorization_url: &Url, open_url: F) -> Result<()>
+where
+    F: FnOnce(&str) -> Result<()>,
+{
+    if let Err(error) = open_url(authorization_url.as_str()) {
+        eprintln!("Could not open a browser automatically: {error}");
+        println!("Open this URL in a browser on this device to continue:\n{authorization_url}");
+    }
+    Ok(())
+}
+
 fn validate_granted_scopes(requested: &str, granted: &str) -> Result<()> {
     let granted_scopes: std::collections::HashSet<_> = granted.split_whitespace().collect();
     if requested
@@ -460,7 +475,8 @@ fn random_secret() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{LoginConfig, validate_issuer};
+    use super::{LoginConfig, open_authorization_url_with, validate_issuer};
+    use anyhow::bail;
     use url::Url;
 
     #[test]
@@ -472,6 +488,12 @@ mod tests {
     fn rejects_remote_http_issuer() {
         let error = validate_issuer(&Url::parse("http://identity.example").unwrap()).unwrap_err();
         assert!(error.to_string().contains("must use HTTPS"));
+    }
+
+    #[test]
+    fn browser_launch_failure_uses_manual_fallback() {
+        let authorization_url = Url::parse("https://identity.example/authorize").unwrap();
+        open_authorization_url_with(&authorization_url, |_| bail!("no desktop session")).unwrap();
     }
 
     #[allow(dead_code)]

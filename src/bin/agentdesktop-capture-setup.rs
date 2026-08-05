@@ -22,6 +22,7 @@ mod linux {
     const CAPTURE_STATE_DIRECTORY: &str = "/run/agentdesktop";
     const CAPTURE_LOCK: &str = "/run/agentdesktop/capture.lock";
     const CAPTURE_STATE: &str = "/run/agentdesktop/capture-state.json";
+    const SYSTEM_HELPER: &str = "/usr/libexec/agentdesktop-capture-setup";
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     #[serde(deny_unknown_fields)]
@@ -48,6 +49,18 @@ mod linux {
 
     #[derive(Debug, Subcommand)]
     enum CaptureCommand {
+        SystemInstall {
+            #[arg(long)]
+            certificate: Option<PathBuf>,
+            #[arg(long, default_value = SYSTEM_HELPER, hide = true)]
+            destination: PathBuf,
+            #[arg(long, default_value = "/usr/bin/install", hide = true)]
+            install_command: PathBuf,
+            #[arg(long, default_value = "/etc/pki/ca-trust/source/anchors", hide = true)]
+            anchor_directory: PathBuf,
+            #[arg(long, default_value = "update-ca-trust", hide = true)]
+            update_command: PathBuf,
+        },
         Preflight {
             #[arg(long)]
             cgroup: PathBuf,
@@ -98,6 +111,22 @@ mod linux {
 
     pub fn run() -> Result<()> {
         match Cli::parse().command {
+            CaptureCommand::SystemInstall {
+                certificate,
+                destination,
+                install_command,
+                anchor_directory,
+                update_command,
+            } => {
+                require_root()?;
+                install_system_integration(
+                    &destination,
+                    &install_command,
+                    certificate.as_deref(),
+                    &anchor_directory,
+                    &update_command,
+                )
+            }
             CaptureCommand::Preflight {
                 cgroup,
                 redirect_port,
@@ -177,6 +206,29 @@ mod linux {
                 remove_trust(&certificate, &anchor_directory, &update_command)
             }
         }
+    }
+
+    pub(super) fn install_system_integration(
+        destination: &Path,
+        install_command: &Path,
+        certificate: Option<&Path>,
+        anchor_directory: &Path,
+        update_command: &Path,
+    ) -> Result<()> {
+        let source = format!("/proc/{}/exe", std::process::id());
+        let status = Command::new(install_command)
+            .args(["--owner=root", "--group=root", "--mode=0755"])
+            .arg(source)
+            .arg(destination)
+            .status()
+            .context("install Agent Desktop system integration")?;
+        if !status.success() {
+            bail!("Agent Desktop system integration installation failed with {status}");
+        }
+        if let Some(certificate) = certificate {
+            install_trust(certificate, anchor_directory, update_command)?;
+        }
+        Ok(())
     }
 
     pub(super) fn install_trust(
@@ -528,7 +580,45 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
-    use super::linux::{install_trust, remove_trust};
+    use super::linux::{install_system_integration, install_trust, remove_trust};
+
+    #[test]
+    fn system_install_combines_helper_and_trust() {
+        let temporary = tempfile::tempdir().unwrap();
+        let certificate = temporary.path().join("ca.crt");
+        let destination = temporary.path().join("agentdesktop-capture-setup");
+        let anchors = temporary.path().join("anchors");
+        let install = temporary.path().join("install");
+        let update = temporary.path().join("update-ca-trust");
+        fs::write(
+            &certificate,
+            "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        fs::write(
+            &install,
+            "#!/bin/sh\nsource=$4\nfor last do :; done\ncp \"$source\" \"$last\"\n",
+        )
+        .unwrap();
+        fs::write(&update, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&install, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&update, fs::Permissions::from_mode(0o700)).unwrap();
+
+        install_system_integration(
+            &destination,
+            &install,
+            Some(&certificate),
+            &anchors,
+            &update,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read(destination).unwrap(),
+            fs::read(std::env::current_exe().unwrap()).unwrap()
+        );
+        assert_eq!(fs::read_dir(anchors).unwrap().count(), 1);
+    }
 
     #[test]
     fn trust_lifecycle_is_idempotent_and_refuses_modified_anchor() {

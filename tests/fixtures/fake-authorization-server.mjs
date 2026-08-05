@@ -83,7 +83,10 @@ function verifyDpop(proof, method, targetUrl, accessToken) {
 }
 
 function json(response, status, body) {
-  response.writeHead(status, { "content-type": "application/json" });
+  response.writeHead(status, {
+    "content-type": "application/json",
+    "access-control-allow-origin": "*",
+  });
   response.end(JSON.stringify(body));
 }
 
@@ -99,6 +102,7 @@ export async function startFakeAuthorizationServer({
   issuer: configuredIssuer,
   listenHost = "127.0.0.1",
   port = 0,
+  secondaryHttpPort,
   tls,
   autoApprove = false,
   administratorScope = "agentdesktop.enrollment.admin",
@@ -135,6 +139,14 @@ export async function startFakeAuthorizationServer({
   };
   const handleRequest = async (request, response) => {
     const url = new URL(request.url, issuer);
+    if (request.method === "OPTIONS") {
+      response.writeHead(204, {
+        "access-control-allow-origin": "*",
+        "access-control-allow-methods": "POST, OPTIONS",
+        "access-control-allow-headers": "content-type",
+      });
+      return response.end();
+    }
     if (request.method === "GET" && url.pathname === "/.well-known/oauth-authorization-server") {
       return json(response, 200, {
         issuer,
@@ -162,7 +174,7 @@ export async function startFakeAuthorizationServer({
       if (
         url.searchParams.get("response_type") !== "code" ||
         url.searchParams.get("client_id") !== clientId ||
-        url.searchParams.get("scope") !== scope ||
+        ![scope, administratorScope].includes(url.searchParams.get("scope")) ||
         url.searchParams.get("code_challenge_method") !== "S256"
       ) {
         return json(response, 400, { error: "invalid_request" });
@@ -174,7 +186,11 @@ export async function startFakeAuthorizationServer({
         return json(response, 400, { error: "invalid_request" });
       }
       const code = randomUUID();
-      codes.set(code, { redirectUri, challenge });
+      codes.set(code, {
+        redirectUri,
+        challenge,
+        scope: url.searchParams.get("scope"),
+      });
       const redirect = new URL(redirectUri);
       redirect.searchParams.set("code", code);
       redirect.searchParams.set("state", state);
@@ -201,6 +217,7 @@ export async function startFakeAuthorizationServer({
             return json(response, 400, { error: "invalid_grant" });
           }
           codes.delete(code);
+          var tokenScope = authorization.scope;
         } else if (form.get("grant_type") === "refresh_token") {
           const refreshToken = form.get("refresh_token");
           if (!refreshTokens.delete(refreshToken)) {
@@ -211,16 +228,18 @@ export async function startFakeAuthorizationServer({
         }
         const refreshToken = randomUUID();
         refreshTokens.add(refreshToken);
-        const accessToken = issueAccessToken(scope, subject, proofJwk);
+        tokenScope ??= scope;
+        const tokenSubject = tokenScope === administratorScope ? "test-admin" : subject;
+        const accessToken = issueAccessToken(tokenScope, tokenSubject, proofJwk);
         accessTokens.set(accessToken, {
-          sub: subject,
+          sub: tokenSubject,
           jkt: proofJwk ? jwkThumbprint(proofJwk) : undefined,
         });
         return json(response, 200, {
           access_token: accessToken,
           token_type: proofJwk ? "DPoP" : "Bearer",
           expires_in: 300,
-          scope,
+          scope: tokenScope,
           refresh_token: refreshToken,
         });
       } catch {
@@ -305,6 +324,12 @@ export async function startFakeAuthorizationServer({
   await new Promise((resolve) => server.listen(port, listenHost, resolve));
   const address = server.address();
   issuer ??= `${tls ? "https" : "http"}://127.0.0.1:${address.port}/`;
+  const secondaryServer = secondaryHttpPort
+    ? createHttpServer(handleRequest)
+    : undefined;
+  if (secondaryServer) {
+    await new Promise((resolve) => secondaryServer.listen(secondaryHttpPort, listenHost, resolve));
+  }
 
   return {
     issuer,
@@ -329,7 +354,14 @@ export async function startFakeAuthorizationServer({
       devices.set(deviceId, "revoked");
       return true;
     },
-    close: () => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
+    close: async () => {
+      await Promise.all([
+        new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
+        ...(secondaryServer
+          ? [new Promise((resolve, reject) => secondaryServer.close((error) => error ? reject(error) : resolve()))]
+          : []),
+      ]);
+    },
   };
 }
 
@@ -356,6 +388,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     issuer: process.env.AGENTDESKTOP_FAKE_ISSUER,
     listenHost: process.env.AGENTDESKTOP_FAKE_LISTEN_HOST ?? "127.0.0.1",
     port: Number(process.env.AGENTDESKTOP_FAKE_PORT ?? "0"),
+    secondaryHttpPort: Number(process.env.AGENTDESKTOP_FAKE_SECONDARY_HTTP_PORT ?? "0") || undefined,
     tls,
     autoApprove: process.env.AGENTDESKTOP_FAKE_AUTO_APPROVE === "1",
     administratorScope: process.env.AGENTDESKTOP_FAKE_ADMIN_SCOPE,

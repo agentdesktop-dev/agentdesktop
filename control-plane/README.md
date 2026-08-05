@@ -28,7 +28,6 @@ export CA_PRIVATE_KEY_PATH="$PWD/development-ca.key"
 export MTLS_TRUST_DOMAIN=devices.example.com
 export SERVER_TLS_CERTIFICATE_PATH="$PWD/development-server.crt"
 export SERVER_TLS_PRIVATE_KEY_PATH="$PWD/development-server.key"
-export GATEWAY_CLIENT_SPIFFE_ID=spiffe://devices.example.com/service/agentgateway
 go run ./cmd/enrollment-server -migrate
 ```
 
@@ -120,18 +119,9 @@ POST /v1/admin/devices/{device_id}/revoke
 Authorization: Bearer <administrator-access-token>
 ```
 
-Revocation atomically marks the active device and all its unrevoked certificates with the same revocation time and records a `device.revoked` audit event. Unknown, foreign-organization, and already-revoked device IDs return the same `409 device_not_active` response. The next uncached Agent Gateway authorization check is denied.
+Revocation atomically marks the active device and all its unrevoked certificates with the same revocation time and records a `device.revoked` audit event. Unknown, foreign-organization, and already-revoked device IDs return the same `409 device_not_active` response. Revocation immediately blocks renewal. Existing certificates remain valid until expiry unless the deployment publishes this state as a CRL and configures Agent Gateway to consume it; CRL publication is not implemented yet.
 
-Agent Gateway authorizes an OAuth user and its independently verified downstream device certificate through a service-mTLS request:
-
-```http
-POST /v1/gateway/device-authorizations
-Content-Type: application/json
-
-{"certificate_pem":"-----BEGIN CERTIFICATE-----\n...","issuer":"https://issuer.example/","subject":"user-id"}
-```
-
-The caller certificate must have the exact `GATEWAY_CLIENT_SPIFFE_ID`. The service independently verifies the submitted leaf against `CA_CERTIFICATE_PATH` and requires the issuer's organization, OAuth owner, active device, current certificate serial, certificate validity, and revocation state to match. It returns `200` only for the current authorized combination and `403` otherwise. See the [managed native walkthrough](../examples/managed-walkthrough/README.md) for the fail-closed Agent Gateway configuration.
+Agent Gateway independently validates the OAuth JWT and downstream device certificate. It does not call the enrollment service for each request.
 
 An authenticated owner can renew an active device certificate by presenting its current valid certificate and a fresh P-256 CSR:
 

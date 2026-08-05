@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use url::Url;
+use x509_parser::parse_x509_certificate;
+use x509_parser::pem::parse_x509_pem;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -9,6 +11,8 @@ pub struct OrganizationBootstrap {
     pub organization: Organization,
     pub identity: IdentityBootstrap,
     pub gateway: GatewayBootstrap,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust: Option<TrustBootstrap>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -33,6 +37,13 @@ pub struct IdentityBootstrap {
 #[serde(deny_unknown_fields)]
 pub struct GatewayBootstrap {
     pub url: Url,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustBootstrap {
+    pub certificate_pem: String,
+    pub inspection_scope: String,
 }
 
 impl OrganizationBootstrap {
@@ -67,8 +78,30 @@ impl OrganizationBootstrap {
         if self.gateway.url.path() != "/" {
             bail!("Agent Gateway URL must be an origin without a path");
         }
+        if let Some(trust) = &self.trust {
+            validate_text("inspection scope", &trust.inspection_scope)?;
+            validate_ca_certificate(&trust.certificate_pem)?;
+        }
         Ok(())
     }
+}
+
+fn validate_ca_certificate(pem_text: &str) -> Result<()> {
+    let (remaining, pem) = parse_x509_pem(pem_text.as_bytes())
+        .map_err(|_| anyhow::anyhow!("organization trust certificate is not valid PEM"))?;
+    if !remaining.iter().all(u8::is_ascii_whitespace) || pem.label != "CERTIFICATE" {
+        bail!("organization trust must contain exactly one PEM certificate");
+    }
+    let (_, certificate) = parse_x509_certificate(&pem.contents)
+        .map_err(|_| anyhow::anyhow!("organization trust certificate is not valid X.509"))?;
+    if !certificate
+        .basic_constraints()
+        .context("read organization trust CA constraints")?
+        .is_some_and(|constraints| constraints.value.ca)
+    {
+        bail!("organization trust certificate must be a CA certificate");
+    }
+    Ok(())
 }
 
 fn validate_identifier(name: &str, value: &str) -> Result<()> {
@@ -116,6 +149,7 @@ fn validate_https_url(name: &str, url: &Url, allow_path: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::OrganizationBootstrap;
+    use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
 
     fn valid() -> Vec<u8> {
         br#"{
@@ -145,6 +179,29 @@ mod tests {
             bootstrap.gateway.url.as_str(),
             "https://gateway.acme.example/"
         );
+    }
+
+    #[test]
+    fn accepts_only_ca_certificates_for_optional_organization_trust() {
+        let key = KeyPair::generate().unwrap();
+        let mut parameters = CertificateParams::new(Vec::<String>::new()).unwrap();
+        parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca = parameters.self_signed(&key).unwrap();
+        let mut bootstrap: serde_json::Value = serde_json::from_slice(&valid()).unwrap();
+        bootstrap["trust"] = serde_json::json!({
+            "certificate_pem": ca.pem(),
+            "inspection_scope": "AI application traffic routed through the managed Gateway"
+        });
+        assert!(OrganizationBootstrap::parse(&serde_json::to_vec(&bootstrap).unwrap()).is_ok());
+
+        let leaf = CertificateParams::new(vec!["gateway.example".to_owned()])
+            .unwrap()
+            .self_signed(&KeyPair::generate().unwrap())
+            .unwrap();
+        bootstrap["trust"]["certificate_pem"] = serde_json::Value::String(leaf.pem());
+        let error =
+            OrganizationBootstrap::parse(&serde_json::to_vec(&bootstrap).unwrap()).unwrap_err();
+        assert!(error.to_string().contains("must be a CA certificate"));
     }
 
     #[test]
