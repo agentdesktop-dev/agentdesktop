@@ -21,13 +21,9 @@ func LoadServerTLSConfig(certificatePath, keyPath, clientCAPath string) (*tls.Co
 	if err != nil {
 		return nil, fmt.Errorf("load server TLS identity: %w", err)
 	}
-	clientCAPEM, err := os.ReadFile(filepath.Clean(clientCAPath))
+	clientCAs, err := LoadCertificatePool(clientCAPath)
 	if err != nil {
-		return nil, fmt.Errorf("read client certificate authority: %w", err)
-	}
-	clientCAs := x509.NewCertPool()
-	if !clientCAs.AppendCertsFromPEM(clientCAPEM) {
-		return nil, errors.New("client certificate authority file contains no certificates")
+		return nil, err
 	}
 	return &tls.Config{
 		Certificates: []tls.Certificate{certificate},
@@ -35,4 +31,16 @@ func LoadServerTLSConfig(certificatePath, keyPath, clientCAPath string) (*tls.Co
 		ClientCAs:    clientCAs,
 		MinVersion:   tls.VersionTLS13,
 	}, nil
+}
+
+func LoadCertificatePool(path string) (*x509.CertPool, error) {
+	clientCAPEM, err := os.ReadFile(filepath.Clean(path))
+	if err != nil {
+		return nil, fmt.Errorf("read client certificate authority: %w", err)
+	}
+	clientCAs := x509.NewCertPool()
+	if !clientCAs.AppendCertsFromPEM(clientCAPEM) {
+		return nil, errors.New("client certificate authority file contains no certificates")
+	}
+	return clientCAs, nil
 }

@@ -161,7 +161,9 @@ export async function startFakeAuthorizationServer({
         if (form.get("client_id") !== clientId) {
           return json(response, 400, { error: "invalid_grant" });
         }
-        const proofJwk = verifyDpop(request.headers.dpop, "POST", `${issuer}token`).jwk;
+        const proofJwk = request.headers.dpop
+          ? verifyDpop(request.headers.dpop, "POST", `${issuer}token`).jwk
+          : undefined;
         if (form.get("grant_type") === "authorization_code") {
           const code = form.get("code");
           const authorization = codes.get(code);
@@ -194,17 +196,17 @@ export async function startFakeAuthorizationServer({
             exp: now + 300,
             jti: randomUUID(),
             scope,
-            cnf: { jkt: jwkThumbprint(proofJwk) },
+            ...(proofJwk ? { cnf: { jkt: jwkThumbprint(proofJwk) } } : {}),
           },
           signingKeys.privateKey,
         );
         accessTokens.set(accessToken, {
           sub: subject,
-          jkt: jwkThumbprint(proofJwk),
+          jkt: proofJwk ? jwkThumbprint(proofJwk) : undefined,
         });
         return json(response, 200, {
           access_token: accessToken,
-          token_type: "DPoP",
+          token_type: proofJwk ? "DPoP" : "Bearer",
           expires_in: 300,
           scope,
           refresh_token: refreshToken,

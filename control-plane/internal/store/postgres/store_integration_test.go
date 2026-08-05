@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/certificate"
+	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/deviceauthorization"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/deviceidentity"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/enrollment"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/identifier"
@@ -346,6 +347,18 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 	if auditCount != 2 {
 		t.Fatalf("recovery audit event count = %d, want 2", auditCount)
 	}
+	currentDevice := deviceidentity.Identity{
+		OrganizationID: organizationID, DeviceID: deviceID,
+		SerialNumber: recoveredCertificate.SerialNumber,
+	}
+	if err := store.AuthorizeDevice(ctx, owner, currentDevice); err != nil {
+		t.Fatalf("current device authorization failed: %v", err)
+	}
+	if err := store.AuthorizeDevice(
+		ctx, enrollment.Principal{Issuer: issuer, Subject: "user-2"}, currentDevice,
+	); !errors.Is(err, deviceauthorization.ErrDenied) {
+		t.Fatalf("foreign owner authorization error = %v, want ErrDenied", err)
+	}
 
 	rejectRequest := validRequest(t)
 	rejectEnrollmentID, err := identifier.New()
@@ -399,6 +412,9 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 	}
 	if _, err := store.Begin(ctx, owner, presentedDevice, validRequest(t), retryRenewalID); !errors.Is(err, renewal.ErrNotActive) {
 		t.Fatalf("revoked device renewal error = %v, want ErrNotActive", err)
+	}
+	if err := store.AuthorizeDevice(ctx, owner, currentDevice); !errors.Is(err, deviceauthorization.ErrDenied) {
+		t.Fatalf("revoked device authorization error = %v, want ErrDenied", err)
 	}
 	var deviceStatus string
 	var deviceRevokedAt, certificateRevokedAt time.Time

@@ -6,6 +6,7 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,6 +15,7 @@ import (
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/api"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/auth"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/ca"
+	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/deviceauthorization"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/enrollment"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/renewal"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/store/postgres"
@@ -33,10 +35,15 @@ func main() {
 	organizationID := required("ORGANIZATION_ID")
 	organizationName := required("ORGANIZATION_NAME")
 	caCertificatePath := required("CA_CERTIFICATE_PATH")
-	caKeyPath := required("CA_PRIVATE_KEY_PATH")
+	caSignerBackend := required("CA_SIGNER_BACKEND")
 	serverCertificatePath := required("SERVER_TLS_CERTIFICATE_PATH")
 	serverKeyPath := required("SERVER_TLS_PRIVATE_KEY_PATH")
 	trustDomain := required("MTLS_TRUST_DOMAIN")
+	gatewayIdentity, err := url.Parse(required("GATEWAY_CLIENT_SPIFFE_ID"))
+	if err != nil || gatewayIdentity.Scheme != "spiffe" || gatewayIdentity.Host == "" ||
+		gatewayIdentity.User != nil || gatewayIdentity.RawQuery != "" || gatewayIdentity.Fragment != "" {
+		log.Fatal("GATEWAY_CLIENT_SPIFFE_ID must be an absolute SPIFFE URI")
+	}
 	listenAddress := value("LISTEN_ADDRESS", "127.0.0.1:8090")
 	certificateLifetime, err := time.ParseDuration(value("CLIENT_CERTIFICATE_LIFETIME", "24h"))
 	if err != nil {
@@ -75,15 +82,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	certificateIssuer, err := ca.LoadX509Issuer(
-		caCertificatePath,
-		caKeyPath,
-		trustDomain,
-		certificateLifetime,
+	certificateIssuer, closeSigner, err := loadCertificateIssuer(
+		caSignerBackend, caCertificatePath, trustDomain, certificateLifetime,
 	)
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer closeSigner()
 	tlsConfig, err := transport.LoadServerTLSConfig(
 		serverCertificatePath,
 		serverKeyPath,
@@ -92,13 +97,21 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	deviceRoots, err := transport.LoadCertificatePool(caCertificatePath)
+	if err != nil {
+		log.Fatal(err)
+	}
 	enrollmentService := enrollment.NewService(store, certificateIssuer)
 	renewalService := renewal.NewService(store, certificateIssuer)
+	deviceAuthorizationService := deviceauthorization.NewService(store)
 	handler := api.NewServer(
 		validator,
 		administratorValidator,
 		enrollmentService,
 		api.WithRenewal(validator, renewalService, trustDomain),
+		api.WithDeviceAuthorization(
+			deviceAuthorizationService, trustDomain, deviceRoots, gatewayIdentity,
+		),
 	)
 	server := &http.Server{
 		Addr:              listenAddress,
@@ -123,6 +136,40 @@ func main() {
 	log.Printf("enrollment server listening on %s", listenAddress)
 	if err := server.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
+	}
+}
+
+func loadCertificateIssuer(
+	backend string,
+	certificatePath string,
+	trustDomain string,
+	lifetime time.Duration,
+) (*ca.X509Issuer, func(), error) {
+	switch backend {
+	case "file":
+		issuer, err := ca.LoadX509Issuer(
+			certificatePath, required("CA_PRIVATE_KEY_PATH"), trustDomain, lifetime,
+		)
+		return issuer, func() {}, err
+	case "pkcs11":
+		signer, err := ca.LoadPKCS11Signer(
+			required("CA_PKCS11_CONFIG_PATH"), required("CA_PKCS11_KEY_ID"),
+		)
+		if err != nil {
+			return nil, func() {}, err
+		}
+		issuer, err := ca.LoadX509IssuerWithSigner(certificatePath, signer, trustDomain, lifetime)
+		if err != nil {
+			signer.Close()
+			return nil, func() {}, err
+		}
+		return issuer, func() {
+			if err := signer.Close(); err != nil {
+				log.Printf("PKCS#11 signer shutdown failed: %v", err)
+			}
+		}, nil
+	default:
+		return nil, func() {}, errors.New("CA_SIGNER_BACKEND must be file or pkcs11")
 	}
 }
 

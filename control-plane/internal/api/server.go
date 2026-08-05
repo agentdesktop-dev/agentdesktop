@@ -1,12 +1,15 @@
 package api
 
 import (
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/certificate"
+	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/deviceauthorization"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/deviceidentity"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/enrollment"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/renewal"
@@ -23,6 +26,80 @@ type Server struct {
 }
 
 type Option func(*http.ServeMux, *Server)
+
+func WithDeviceAuthorization(
+	authorizations *deviceauthorization.Service,
+	deviceTrustDomain string,
+	deviceRoots *x509.CertPool,
+	gatewayIdentity *url.URL,
+) Option {
+	return func(mux *http.ServeMux, server *Server) {
+		mux.HandleFunc("POST /v1/gateway/device-authorizations", func(response http.ResponseWriter, request *http.Request) {
+			server.authorizeDevice(
+				response, request, authorizations, deviceTrustDomain, deviceRoots, gatewayIdentity,
+			)
+		})
+	}
+}
+
+func (server *Server) authorizeDevice(
+	response http.ResponseWriter,
+	request *http.Request,
+	authorizations *deviceauthorization.Service,
+	deviceTrustDomain string,
+	deviceRoots *x509.CertPool,
+	gatewayIdentity *url.URL,
+) {
+	if !hasVerifiedServiceIdentity(request, gatewayIdentity) {
+		writeError(response, http.StatusUnauthorized, "invalid_gateway_identity")
+		return
+	}
+	var body struct {
+		CertificatePEM string `json:"certificate_pem"`
+		Issuer         string `json:"issuer"`
+		Subject        string `json:"subject"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(response, request.Body, 64<<10))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&body) != nil {
+		writeError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	device, err := deviceidentity.FromPEM(body.CertificatePEM, deviceTrustDomain, deviceRoots)
+	if err != nil {
+		writeError(response, http.StatusForbidden, "device_not_authorized")
+		return
+	}
+	err = authorizations.Authorize(
+		request.Context(), enrollment.Principal{Issuer: body.Issuer, Subject: body.Subject}, device,
+	)
+	switch {
+	case errors.Is(err, deviceauthorization.ErrInvalidRequest):
+		writeError(response, http.StatusBadRequest, "invalid_request")
+		return
+	case errors.Is(err, deviceauthorization.ErrDenied):
+		writeError(response, http.StatusForbidden, "device_not_authorized")
+		return
+	case err != nil:
+		writeError(response, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	response.Header().Set("content-type", "application/json")
+	_ = json.NewEncoder(response).Encode(map[string]bool{"authorized": true})
+}
+
+func hasVerifiedServiceIdentity(request *http.Request, expected *url.URL) bool {
+	if request == nil || expected == nil || request.TLS == nil || len(request.TLS.VerifiedChains) != 1 ||
+		len(request.TLS.VerifiedChains[0]) == 0 {
+		return false
+	}
+	leaf := request.TLS.VerifiedChains[0][0]
+	return len(leaf.URIs) == 1 && leaf.URIs[0].String() == expected.String()
+}
 
 func WithRenewal(authenticator Authenticator, renewals *renewal.Service, trustDomain string) Option {
 	return func(mux *http.ServeMux, server *Server) {

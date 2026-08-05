@@ -1,0 +1,41 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+config:
+  readinessAddr: 127.0.0.1:15021
+
+llm:
+  port: 8443
+  tls:
+    cert: certs/gateway-server.crt
+    key: certs/gateway-server.key
+    root: certs/enrollment-ca.crt
+  policies:
+    jwtAuth:
+      mode: strict
+      location:
+        header:
+          name: proxy-authorization
+          prefix: 'Bearer '
+      issuer: $OIDC_ISSUER
+      audiences: [$OIDC_AUDIENCE]
+      jwks:
+        url: $OIDC_JWKS_URL
+      jwtValidationOptions:
+        requiredClaims: [exp, aud, iss, sub]
+    extAuthz:
+      host: 127.0.0.1:8090
+      policies:
+        backendTLS:
+          cert: certs/gateway-authorizer.crt
+          key: certs/gateway-authorizer.key
+          root: certs/enrollment-ca.crt
+          hostname: enrollment.agentdesktop.test
+      failureMode: deny
+      protocol:
+        http:
+          path: '"/v1/gateway/device-authorizations"'
+          body: '{"certificate_pem": source.certificate, "issuer": jwt.iss, "subject": jwt.sub}'
+  models:
+  - name: '*'
+    provider: anthropic
+    params:
+      apiKey: $ANTHROPIC_API_KEY

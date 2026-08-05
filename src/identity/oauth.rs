@@ -11,7 +11,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use url::Url;
 
-use super::dpop::{DpopKey, Es256VerificationJwk, verify_es256_jwt};
+use super::dpop::{Es256VerificationJwk, verify_es256_jwt};
 use super::storage::CredentialStore;
 
 #[derive(Clone, Debug)]
@@ -30,7 +30,6 @@ struct AuthorizationServerMetadata {
     token_endpoint: Url,
     jwks_uri: Url,
     code_challenge_methods_supported: Vec<String>,
-    dpop_signing_alg_values_supported: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,7 +56,6 @@ pub struct StoredSession {
     pub expires_at: u64,
     pub scope: String,
     pub refresh_token: String,
-    pub dpop_private_key: String,
     #[serde(default)]
     pub generation: u64,
 }
@@ -70,17 +68,10 @@ pub struct ManagedIdentity {
 
 pub struct ManagedCredentials {
     pub access_token: String,
-    pub proof: String,
     pub generation: u64,
 }
 
 impl StoredSession {
-    pub fn dpop_key(&self) -> Result<DpopKey> {
-        let der =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&self.dpop_private_key)?;
-        DpopKey::from_pkcs8_der(&der)
-    }
-
     pub fn is_expired(&self) -> Result<bool> {
         Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() >= self.expires_at)
     }
@@ -94,14 +85,10 @@ impl ManagedIdentity {
         }
     }
 
-    pub async fn credentials(&self, method: &str, target_uri: &str) -> Result<ManagedCredentials> {
+    pub async fn credentials(&self) -> Result<ManagedCredentials> {
         let session = self.refreshed_session().await?;
-        let proof = session
-            .dpop_key()?
-            .proof(method, target_uri, Some(&session.access_token))?;
         Ok(ManagedCredentials {
             access_token: session.access_token.clone(),
-            proof,
             generation: session.generation,
         })
     }
@@ -126,10 +113,6 @@ impl ManagedIdentity {
         } else {
             Ok("ready")
         }
-    }
-
-    pub async fn dpop_thumbprint(&self) -> Result<String> {
-        self.session.lock().await.dpop_key()?.thumbprint()
     }
 }
 
@@ -168,11 +151,8 @@ where
     authorize(&authorization_url)?;
     let code = receive_callback(&listener, &state).await?;
 
-    let dpop_key = DpopKey::generate();
-    let proof = dpop_key.proof("POST", metadata.token_endpoint.as_str(), None)?;
     let token: TokenResponse = client
         .post(metadata.token_endpoint.clone())
-        .header("dpop", proof)
         .form(&[
             ("grant_type", "authorization_code"),
             ("client_id", config.client_id.as_str()),
@@ -185,8 +165,8 @@ where
         .error_for_status()?
         .json()
         .await?;
-    if !token.token_type.eq_ignore_ascii_case("dpop") {
-        bail!("authorization server returned token_type other than DPoP");
+    if !token.token_type.eq_ignore_ascii_case("bearer") {
+        bail!("authorization server returned token_type other than Bearer");
     }
     let key_set: JsonWebKeySet = client
         .get(metadata.jwks_uri)
@@ -196,8 +176,7 @@ where
         .json()
         .await?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let token_expiry =
-        validate_access_token(config, &token.access_token, &dpop_key, &key_set, now)?;
+    let token_expiry = validate_access_token(config, &token.access_token, &key_set, now)?;
     validate_granted_scopes(&config.scope, &token.scope)?;
     let session = StoredSession {
         issuer: config.issuer.clone(),
@@ -210,8 +189,6 @@ where
         refresh_token: token
             .refresh_token
             .context("authorization server did not issue a refresh token")?,
-        dpop_private_key: base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(dpop_key.to_pkcs8_der()?),
         generation: 1,
     };
     store.put(
@@ -253,11 +230,8 @@ async fn refresh_session(session: &mut StoredSession, store: &CredentialStore) -
         .json()
         .await?;
     validate_metadata(&config, &metadata)?;
-    let dpop_key = session.dpop_key()?;
-    let proof = dpop_key.proof("POST", metadata.token_endpoint.as_str(), None)?;
     let token: TokenResponse = client
         .post(metadata.token_endpoint)
-        .header("dpop", proof)
         .form(&[
             ("grant_type", "refresh_token"),
             ("client_id", session.client_id.as_str()),
@@ -268,8 +242,8 @@ async fn refresh_session(session: &mut StoredSession, store: &CredentialStore) -
         .error_for_status()?
         .json()
         .await?;
-    if !token.token_type.eq_ignore_ascii_case("dpop") {
-        bail!("authorization server returned token_type other than DPoP");
+    if !token.token_type.eq_ignore_ascii_case("bearer") {
+        bail!("authorization server returned token_type other than Bearer");
     }
     let key_set: JsonWebKeySet = client
         .get(metadata.jwks_uri)
@@ -279,8 +253,7 @@ async fn refresh_session(session: &mut StoredSession, store: &CredentialStore) -
         .json()
         .await?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let token_expiry =
-        validate_access_token(&config, &token.access_token, &dpop_key, &key_set, now)?;
+    let token_expiry = validate_access_token(&config, &token.access_token, &key_set, now)?;
     validate_granted_scopes(&config.scope, &token.scope)?;
     let refresh_token = token
         .refresh_token
@@ -368,13 +341,6 @@ fn validate_metadata(config: &LoginConfig, metadata: &AuthorizationServerMetadat
     {
         bail!("authorization server does not advertise S256 PKCE");
     }
-    if !metadata
-        .dpop_signing_alg_values_supported
-        .iter()
-        .any(|algorithm| algorithm == "ES256")
-    {
-        bail!("authorization server does not advertise ES256 DPoP");
-    }
     Ok(())
 }
 
@@ -454,7 +420,6 @@ async fn receive_callback(listener: &TcpListener, expected_state: &str) -> Resul
 fn validate_access_token(
     config: &LoginConfig,
     token: &str,
-    dpop_key: &DpopKey,
     key_set: &JsonWebKeySet,
     now: u64,
 ) -> Result<u64> {
@@ -470,9 +435,6 @@ fn validate_access_token(
         });
     if !audience_matches {
         bail!("access token audience does not contain configured gateway audience");
-    }
-    if claims["cnf"]["jkt"] != dpop_key.thumbprint()? {
-        bail!("access token is not bound to the connector DPoP key");
     }
     if claims["sub"].as_str().is_none_or(str::is_empty) {
         bail!("access token has no subject");

@@ -610,7 +610,6 @@ mod tests {
         EnrollmentClient, EnrollmentStatus, load_device_identity_for, load_enrollment_for,
         save_enrollment_for,
     };
-    use crate::identity::dpop::DpopKey;
     use crate::identity::oauth::{ManagedIdentity, StoredSession};
     use crate::identity::storage::{CredentialStorageMode, CredentialStore};
 
@@ -924,7 +923,6 @@ mod tests {
     }
 
     fn test_identity(store: &CredentialStore) -> ManagedIdentity {
-        let dpop_key = DpopKey::generate();
         ManagedIdentity::new(
             StoredSession {
                 issuer: Url::parse("https://issuer.example/").unwrap(),
@@ -939,8 +937,6 @@ mod tests {
                     + 300,
                 scope: "agentgateway.invoke".into(),
                 refresh_token: "refresh-token".into(),
-                dpop_private_key: base64::engine::general_purpose::URL_SAFE_NO_PAD
-                    .encode(dpop_key.to_pkcs8_der().unwrap()),
                 generation: 1,
             },
             store.clone(),

@@ -1,4 +1,5 @@
 /target
 /tests/vm/.artifacts/
 /tests/vm/.state/
+/examples/managed-walkthrough/certs/
 .vscode/settings.json

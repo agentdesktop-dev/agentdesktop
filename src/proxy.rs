@@ -473,18 +473,10 @@ async fn forward_request(state: &ProxyState, request: Request<Body>) -> Result<R
     }
     let mut credential_generation = 0;
     if let Some(identity) = &state.identity {
-        let credentials = identity
-            .credentials(parts.method.as_str(), url.as_str())
-            .await
-            .map_err(identity_error)?;
+        let credentials = identity.credentials().await.map_err(identity_error)?;
         headers.insert(
             "proxy-authorization",
-            HeaderValue::from_str(&format!("DPoP {}", credentials.access_token))
-                .map_err(|error| identity_error(error.into()))?,
-        );
-        headers.insert(
-            "dpop",
-            HeaderValue::from_str(&credentials.proof)
+            HeaderValue::from_str(&format!("Bearer {}", credentials.access_token))
                 .map_err(|error| identity_error(error.into()))?,
         );
         credential_generation = credentials.generation;
@@ -596,7 +588,6 @@ mod tests {
     use axum::extract::State;
     use axum::http::{HeaderMap, Method, Uri};
     use axum::routing::any;
-    use base64::Engine;
     use futures_util::StreamExt;
     use http_body_util::BodyExt;
     use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
@@ -605,7 +596,6 @@ mod tests {
     use tokio_stream::wrappers::ReceiverStream;
 
     use super::*;
-    use crate::identity::dpop::{DpopKey, decode_jwt_claims};
     use crate::identity::oauth::StoredSession;
     use crate::identity::storage::{CredentialStorageMode, CredentialStore};
 
@@ -913,7 +903,6 @@ mod tests {
             axum::serve(fake_listener, fake_app).await.unwrap();
         });
 
-        let key = DpopKey::generate();
         let session = StoredSession {
             issuer: Url::parse("https://identity.example/").unwrap(),
             gateway_origin: Url::parse(&format!("http://{fake_address}/")).unwrap(),
@@ -923,8 +912,6 @@ mod tests {
             expires_at: u64::MAX,
             scope: "agentgateway.invoke".into(),
             refresh_token: "refresh-token".into(),
-            dpop_private_key: base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .encode(key.to_pkcs8_der().unwrap()),
             generation: 1,
         };
         let temporary = tempfile::tempdir().unwrap();
@@ -963,11 +950,8 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         let headers = captured.lock().await.take().unwrap();
         assert_eq!(headers["authorization"], "Bearer application-token");
-        assert_eq!(headers["proxy-authorization"], "DPoP managed-token");
-        let proof = decode_jwt_claims(headers["dpop"].to_str().unwrap()).unwrap();
-        assert_eq!(proof["htm"], "POST");
-        assert_eq!(proof["htu"], format!("http://{fake_address}/v1/messages"));
-        assert!(proof["ath"].is_string());
+        assert_eq!(headers["proxy-authorization"], "Bearer managed-token");
+        assert!(!headers.contains_key("dpop"));
         shutdown_tx.send(()).unwrap();
     }
 
@@ -989,7 +973,6 @@ mod tests {
                 expires_at: 0,
                 scope: "agentgateway.invoke".into(),
                 refresh_token: "expired-refresh-token".into(),
-                dpop_private_key: String::new(),
                 generation: 1,
             },
             store,

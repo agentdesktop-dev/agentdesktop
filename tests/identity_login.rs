@@ -16,7 +16,7 @@ impl Drop for FakeIssuer {
 }
 
 #[tokio::test]
-async fn browser_pkce_login_persists_dpop_bound_session() {
+async fn browser_pkce_login_persists_bearer_session() {
     let mut issuer = FakeIssuer(
         Command::new("node")
             .arg("tests/fixtures/fake-authorization-server.mjs")
@@ -94,19 +94,13 @@ async fn browser_pkce_login_persists_dpop_bound_session() {
     assert!(!session.is_expired().unwrap());
     let claims = decode_jwt_claims(&session.access_token).unwrap();
     assert_eq!(claims["iss"], issuer_url);
-    assert_eq!(
-        claims["cnf"]["jkt"],
-        session.dpop_key().unwrap().thumbprint().unwrap()
-    );
+    assert_eq!(claims["sub"], "test-user");
 
     let original_refresh_token = session.refresh_token.clone();
     let original_generation = session.generation;
     session.expires_at = 0;
     let identity = ManagedIdentity::new(session, store.clone());
-    let (first, second) = tokio::join!(
-        identity.credentials("POST", "https://gateway.example/v1/messages"),
-        identity.credentials("POST", "https://gateway.example/v1/messages"),
-    );
+    let (first, second) = tokio::join!(identity.credentials(), identity.credentials(),);
     assert!(!first.unwrap().access_token.is_empty());
     assert!(!second.unwrap().access_token.is_empty());
     let restored = load_session(&config, &store).unwrap();

@@ -4,7 +4,7 @@ An early, policy-free edge connector that forwards Claude Code HTTP traffic from
 
 Source: [github.com/agentdesktop-dev/agentdesktop](https://github.com/agentdesktop-dev/agentdesktop)
 
-The current development build includes experimental managed browser login and DPoP forwarding, the first Go/PostgreSQL production enrollment backend slice, opt-in OTLP trace export, and supported standalone Linux transparent capture. The selected managed identity direction uses ordinary OAuth for users and short-lived mTLS certificates for devices. Managed transparent capture remains unavailable until certificate lifecycle and Agent Gateway mTLS enforcement are complete. See [AGENTS.md](AGENTS.md) for the architecture and incremental delivery plan.
+The current development build includes managed browser login and bearer-token forwarding, a Go/PostgreSQL enrollment backend, opt-in OTLP trace export, and supported standalone Linux transparent capture. Managed identity uses ordinary OAuth for users and short-lived mTLS certificates for devices. Managed transparent capture remains unavailable; the native managed path is ready for the [manual walkthrough](examples/managed-walkthrough/README.md). See [AGENTS.md](AGENTS.md) for the architecture and incremental delivery plan.
 
 For a local installation, including credential ownership, file permissions, logs, retention, and removal, see [Standalone Operations](docs/deployment/standalone.md).
 
@@ -13,7 +13,7 @@ Tested platform behavior is listed in [Platform Compatibility](docs/compatibilit
 The Linux cgroup v2/nftables implementation is documented in [Linux Transparent Capture](docs/deployment/linux-capture.md).
 Manual desktop journeys and future headless E2E tests use the [QEMU desktop test environment](tests/vm/README.md).
 
-The selected production trust boundary is documented in [Managed mTLS identity contract v1](docs/architecture/managed-mtls-v1.md). The [Go enrollment control plane](control-plane/README.md) validates ordinary OAuth bearer tokens and P-256 CSRs, persists enrollment and certificate lifecycle state in PostgreSQL, and supports administrator approval, issuance, renewal, bounded expired-certificate recovery, and revocation. Browser PKCE login and the older DPoP connector path remain experimental; production CA integration, Agent Gateway revocation consumption, and Agent Gateway mTLS enforcement are pending.
+The selected production trust boundary is documented in [Managed mTLS identity contract v1](docs/architecture/managed-mtls-v1.md). The [Go enrollment control plane](control-plane/README.md) validates ordinary OAuth bearer tokens and P-256 CSRs, persists enrollment and certificate lifecycle state in PostgreSQL, and supports administrator approval, renewal, bounded expired-certificate recovery, revocation, and current-device authorization for Agent Gateway.
 
 ## Managed identity storage preflight
 
@@ -33,7 +33,7 @@ Select the protected file explicitly with `--credential-storage file`. The selec
 
 ## Experimental managed login
 
-Run browser Authorization Code login against an issuer that advertises PKCE `S256`, DPoP `ES256`, and an ES256 JWT signing key through discovery:
+Run browser Authorization Code login against an issuer that advertises PKCE `S256` and an ES256 JWT signing key through discovery:
 
 ```bash
 cargo run -- identity login \
@@ -44,7 +44,7 @@ cargo run -- identity login \
   --gateway-origin https://gateway.example
 ```
 
-The command validates credential storage before opening the browser, listens on an ephemeral loopback callback, verifies the access-token signature and issuer, audience, expiry, scope, and DPoP binding, then persists the token and DPoP key. `--gateway-origin` must be the upstream origin without a path. `--no-open` prints the authorization URL for non-desktop testing.
+The command validates credential storage before opening the browser, listens on an ephemeral loopback callback, verifies the access-token signature, issuer, audience, expiry, scope, and subject, then persists the access and refresh tokens. `--gateway-origin` must be the upstream origin without a path. `--no-open` prints the authorization URL for non-desktop testing.
 
 Attach the persisted session to managed forwarding by supplying the same issuer:
 
@@ -56,7 +56,7 @@ cargo run -- serve \
   --enrollment-url https://enrollment.example/
 ```
 
-The connector fails at startup if storage, the matching session, or the approved device certificate is unavailable. It renews the device certificate within six hours of expiry using a protected retry-stable draft key, persists and reloads the validated replacement, then rotates the managed upstream connection pool. Renewal failure retains the current identity and retries without direct fallback. OAuth refresh independently serializes, verifies and persists rotated tokens, and rotates the same pool generation boundary. For each request the connector removes application-supplied connector identity headers, preserves the application `Authorization` header, and adds its connector authorization credentials. Agent Gateway still needs the contract's mTLS validation and credential-stripping changes before this is a trusted end-to-end managed identity path.
+The connector fails at startup if storage, the matching session, or the approved device certificate is unavailable. It renews the device certificate within six hours of expiry using a protected retry-stable draft key, persists and reloads the validated replacement, then rotates the managed upstream connection pool. Renewal failure retains the current identity and retries without direct fallback. OAuth refresh independently serializes, verifies and persists rotated tokens, and rotates the same pool generation boundary. For each request the connector replaces `Proxy-Authorization` with its bearer token and preserves the application's `Authorization` header. Agent Gateway validates and removes the connector token, authorizes the current mTLS certificate against the control plane, and owns provider credentials.
 
 Delete only the matching local session with:
 
@@ -68,11 +68,12 @@ cargo run -- identity logout \
 
 This removes the local session and any locally persisted enrollment record. It does not invoke an issuer token-revocation endpoint or revoke an authority-side device approval.
 
-Request authority approval for the current session's DPoP key when the issuer advertises the draft enrollment endpoint:
+Generate a protected device key and request authority approval:
 
 ```bash
 cargo run -- identity enroll-request \
   --issuer https://identity.example/ \
+  --enrollment-url https://enrollment.example/ \
   --gateway-origin https://gateway.example
 ```
 
@@ -81,10 +82,11 @@ The command prints a non-secret pending record containing the authority-generate
 ```bash
 cargo run -- identity enroll-status \
   --issuer https://identity.example/ \
+  --enrollment-url https://enrollment.example/ \
   --gateway-origin https://gateway.example
 ```
 
-Both operations load the existing issuer/gateway-scoped session, refresh it when needed, and send fresh access-token-bound DPoP proofs. Responses are rejected unless their issuer and DPoP thumbprint match the current session. Request and status responses replace the protected issuer/gateway-scoped enrollment record; status uses its enrollment ID by default and accepts `--enrollment-id` for explicit recovery. A stale record from a rotated key is rejected. Agent Gateway does not yet enforce device status.
+Both operations load the existing issuer/gateway-scoped session and refresh it when needed. The enrollment request submits only a signed CSR; the private key remains in protected Agent Desktop storage. Request and status responses replace the protected issuer/gateway-scoped enrollment record, and status uses its enrollment ID by default. Agent Gateway checks OAuth ownership, active device state, current certificate generation, certificate validity, and revocation on every request.
 
 ## Run
 
@@ -413,4 +415,4 @@ Send a simple prompt and verify:
 3. Stopping Agent Gateway causes the connector to return `502 Bad Gateway` with `x-agentdesktop-error: upstream-unavailable`.
 4. The connector never attempts a direct connection to Anthropic.
 
-Gateway-side DPoP validation and credential stripping, plus production enforcement of enrolled device identity, remain later increments.
+The native managed equivalent, including Gateway mTLS, bearer JWT validation and removal, current-device authorization, and immediate revocation, is covered by the [managed walkthrough](examples/managed-walkthrough/README.md).

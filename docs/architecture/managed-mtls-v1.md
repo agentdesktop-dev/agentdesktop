@@ -1,6 +1,6 @@
 # Managed mTLS identity contract v1
 
-Status: selected production direction; enrollment request persistence, administrator-scoped listing, approval and rejection, retry-stable local protected-key issuance, interrupted issuance and renewal reconciliation, owner-scoped certificate retrieval, valid-certificate renewal, expired-certificate recovery, Agent Desktop key/certificate persistence, proactive renewal and credential rotation, connector-side mTLS activation, and atomic device/certificate revocation persistence are implemented. Production CA integration, revocation consumption, and Agent Gateway enforcement remain incomplete.
+Status: selected production direction; enrollment request persistence, administrator-scoped listing, approval and rejection, PKCS#11 protected-key issuance, interrupted issuance and renewal reconciliation, owner-scoped certificate retrieval, valid-certificate renewal, expired-certificate recovery, Agent Desktop key/certificate persistence, proactive renewal and credential rotation, connector-side mTLS activation, and atomic device/certificate revocation persistence are implemented. Revocation consumption and Agent Gateway enforcement remain incomplete.
 
 ## Trust model
 
@@ -46,12 +46,11 @@ The service persists a renewal claim before CA I/O and keys it by device plus th
 
 An expired certificate cannot authenticate ordinary mTLS renewal. Recovery uses a valid OAuth session and a one-use challenge containing a random 32-byte nonce bound to the device and replacement CSR fingerprint. Agent Desktop signs `agentdesktop-device-recovery-v1`, the challenge ID, base64url nonce, and replacement fingerprint with the enrolled private key. The service verifies that signature against the persisted leaf certificate, never a client-supplied key. Only the active device's latest, unrevoked certificate is eligible, from expiry until seven days after expiry. The challenge expires after five minutes and atomically resolves to one existing or new durable renewal claim, so retries cannot create another issuance. Agent Desktop reuses its protected replacement-key draft and applies the same validate, persist, reload, and publish ordering as ordinary renewal. Outside this window, full re-enrollment and administrator approval are required.
 
-The current Go issuer adapter uses a protected local CA key and Go's X.509 implementation. It is a concrete development and single-instance boundary, not a final production key-management decision. The narrow issuer interface is intended to be replaced by KMS, HSM, `step-ca`, Vault PKI, or a cloud private CA without moving approval policy into the CA adapter.
+The Go issuer keeps certificate identity, validity, serial derivation, and CSR policy in the service. Development may load an owner-only local CA key. Production loads an existing P-256 CA key by hexadecimal CKA_ID through an owner-only PKCS#11 token configuration; private-key bytes never enter the service. The token signer uses the same deterministic request ID, serial, validity, and authority-controlled SPIFFE identity as the file signer. A real SoftHSM integration test covers token lookup, signing, chain verification, and retry-stable certificate semantics.
 
 Approval claims a pending enrollment as `issuing` before calling the CA, preventing concurrent duplicate approval without holding a database transaction across CA I/O. The claim fixes the enrollment ID, device ID, CSR, and issuance time. CA failures remain `issuing` because timeout errors cannot prove that no certificate was created. A bounded background worker retries stale claims with those same values, while transactional completion permits only one worker to persist and approve the result. External CA adapters must pass the enrollment ID through as an idempotency key.
 
 ## Remaining implementation
 
-- Replace the local-key issuer with a production protected-key CA adapter.
 - Add fail-closed Agent Gateway consumption of persisted device and certificate revocation state.
 - Add Agent Gateway mTLS validation and immutable outer-to-inner identity propagation.

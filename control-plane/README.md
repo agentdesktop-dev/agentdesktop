@@ -2,7 +2,7 @@
 
 This Go module is the production backend boundary for managed Agent Desktop enrollment. It validates a standard OAuth bearer token, derives the user from validated `iss` and `sub` claims, validates a signed P-256 CSR, and transactionally persists a pending enrollment in PostgreSQL. A separately scoped administrator token can claim one pending enrollment and issue a short-lived client certificate with authority-controlled SPIFFE identity.
 
-The runtime currently uses a protected local CA key through a narrow issuer interface. This is suitable for development and single-instance deployment, not the final production key boundary; production should replace it with KMS, HSM, `step-ca`, Vault PKI, or a cloud private CA adapter. The service renews valid active device certificates and recovers the latest certificate for seven days after expiry using OAuth plus enrolled-key proof of possession. It does not yet expose persisted revocation state to Agent Gateway. Device private keys are generated and retained by Agent Desktop and must never be submitted to this service or stored in PostgreSQL.
+The service supports a development file signer and a production PKCS#11 signer. The PKCS#11 path keeps the enrollment CA private key inside an HSM and uses its P-256 `crypto.Signer` for authority-controlled certificate issuance. The service renews valid active device certificates and recovers the latest certificate for seven days after expiry using OAuth plus enrolled-key proof of possession. Its service-mTLS authorization endpoint exposes current certificate and revocation state to Agent Gateway without trusting forwarded certificate headers. Device private keys are generated and retained by Agent Desktop and must never be submitted to this service or stored in PostgreSQL.
 
 ## Local development
 
@@ -23,10 +23,12 @@ export ADMIN_OAUTH_SCOPE=agentdesktop.enrollment.admin
 export ORGANIZATION_ID=3fdba0e6-8c2f-47a8-8202-78d38a32ad9f
 export ORGANIZATION_NAME='Example Organization'
 export CA_CERTIFICATE_PATH="$PWD/development-ca.crt"
+export CA_SIGNER_BACKEND=file
 export CA_PRIVATE_KEY_PATH="$PWD/development-ca.key"
 export MTLS_TRUST_DOMAIN=devices.example.com
 export SERVER_TLS_CERTIFICATE_PATH="$PWD/development-server.crt"
 export SERVER_TLS_PRIVATE_KEY_PATH="$PWD/development-server.key"
+export GATEWAY_CLIENT_SPIFFE_ID=spiffe://devices.example.com/service/agentgateway
 go run ./cmd/enrollment-server -migrate
 ```
 
@@ -51,6 +53,29 @@ openssl x509 -req -in development-server.csr \
 	-out development-server.crt -days 7 -copy_extensions copy
 chmod 0600 development-server.key
 rm development-server.csr
+```
+
+## Production CA signer
+
+Set `CA_SIGNER_BACKEND=pkcs11`, `CA_PKCS11_CONFIG_PATH`, and `CA_PKCS11_KEY_ID`. The key ID is the non-empty hexadecimal CKA_ID of an existing P-256 CA key pair. The JSON configuration selects exactly one token and contains its user PIN, so it must be a regular file with no group or world permissions:
+
+```json
+{
+	"Path": "/opt/vendor/lib/libpkcs11.so",
+	"TokenLabel": "agentdesktop-enrollment",
+	"Pin": "<token-user-pin>",
+	"MaxSessions": 8
+}
+```
+
+The enrollment CA certificate at `CA_CERTIFICATE_PATH` must match that token key. The service fails startup if configuration permissions are broad, the CKA_ID is malformed or absent, the token cannot be opened, or the certificate and token public keys differ. The container is CGO-enabled and must receive the vendor PKCS#11 module and any required runtime libraries through the deployment image or a read-only mount.
+
+The opt-in SoftHSM test exercises the same loader and issuance path:
+
+```bash
+TEST_PKCS11_CONFIG_PATH=/path/to/pkcs11.json \
+TEST_PKCS11_KEY_ID=01 \
+go test -run TestPKCS11SignerIssuesAuthorityControlledCertificate -v ./internal/ca
 ```
 
 The listener defaults to `https://127.0.0.1:8090` and requires direct TLS 1.3 configuration. Connections may omit a client certificate for initial OAuth enrollment. When a client presents a certificate, the service verifies it against `CA_CERTIFICATE_PATH`; untrusted presented certificates fail during the TLS handshake. This optional verified certificate is the authentication boundary for renewal and does not replace OAuth user identity.
@@ -95,7 +120,18 @@ POST /v1/admin/devices/{device_id}/revoke
 Authorization: Bearer <administrator-access-token>
 ```
 
-Revocation atomically marks the active device and all its unrevoked certificates with the same revocation time and records a `device.revoked` audit event. Unknown, foreign-organization, and already-revoked device IDs return the same `409 device_not_active` response. Agent Gateway consumption of this state is not yet implemented.
+Revocation atomically marks the active device and all its unrevoked certificates with the same revocation time and records a `device.revoked` audit event. Unknown, foreign-organization, and already-revoked device IDs return the same `409 device_not_active` response. The next uncached Agent Gateway authorization check is denied.
+
+Agent Gateway authorizes an OAuth user and its independently verified downstream device certificate through a service-mTLS request:
+
+```http
+POST /v1/gateway/device-authorizations
+Content-Type: application/json
+
+{"certificate_pem":"-----BEGIN CERTIFICATE-----\n...","issuer":"https://issuer.example/","subject":"user-id"}
+```
+
+The caller certificate must have the exact `GATEWAY_CLIENT_SPIFFE_ID`. The service independently verifies the submitted leaf against `CA_CERTIFICATE_PATH` and requires the issuer's organization, OAuth owner, active device, current certificate serial, certificate validity, and revocation state to match. It returns `200` only for the current authorized combination and `403` otherwise. See the [managed native walkthrough](../examples/managed-walkthrough/README.md) for the fail-closed Agent Gateway configuration.
 
 An authenticated owner can renew an active device certificate by presenting its current valid certificate and a fresh P-256 CSR:
 
