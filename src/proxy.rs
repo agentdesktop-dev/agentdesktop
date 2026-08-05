@@ -99,6 +99,7 @@ impl OperationalMetrics {
 }
 
 struct ClientPool {
+    // A reqwest client owns its connection pool, so credential changes require a new client.
     credential_generation: u64,
     device_generation: u64,
     client: Client,
@@ -288,6 +289,7 @@ pub async fn serve_with_rotating_managed_identity(
         .fallback(any(forward))
         .with_state(state);
 
+    // One signal drives graceful shutdown and the independent hard deadline.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     tokio::spawn(async move {
         shutdown.await;
@@ -380,6 +382,7 @@ async fn forward(State(state): State<ProxyState>, mut request: Request<Body>) ->
     );
     let _ = span.set_parent(trace_context.parent());
     let mut response = async {
+        // Keep transport errors private and expose only stable application-facing failures.
         match forward_request(&state, request).await {
             Ok(response) => {
                 state
@@ -495,6 +498,7 @@ async fn forward_request(state: &ProxyState, request: Request<Body>) -> Result<R
     let status = upstream_response.status();
     let mut headers = upstream_response.headers().clone();
     remove_hop_by_hop_headers(&mut headers);
+    // Hold the concurrency permit until the downstream client finishes consuming the stream.
     let body = Body::from_stream(upstream_response.bytes_stream().map(move |chunk| {
         let _permit = &permit;
         chunk
@@ -518,6 +522,7 @@ fn client_for_generation(state: &ProxyState, generation: u64) -> Result<Client> 
         .clients
         .lock()
         .map_err(|_| anyhow::anyhow!("upstream client pool lock poisoned"))?;
+    // New bearer or device credentials must never reuse connections authenticated earlier.
     if pool.credential_generation != generation || pool.device_generation != device_generation {
         pool.client = build_client(state.connect_timeout, device_identity)?;
         pool.credential_generation = generation;
@@ -553,6 +558,7 @@ fn upstream_url(upstream: &Url, uri: &axum::http::Uri) -> Result<Url> {
 }
 
 fn remove_hop_by_hop_headers(headers: &mut HeaderMap) {
+    // Connection may nominate additional per-hop headers beyond the standard fixed set.
     let connection_headers: HashSet<HeaderName> = headers
         .get_all(CONNECTION)
         .iter()
@@ -564,6 +570,7 @@ fn remove_hop_by_hop_headers(headers: &mut HeaderMap) {
     for name in connection_headers {
         headers.remove(name);
     }
+    // Connector-only authorization is consumed locally and must not cross either boundary.
     for name in [
         "connection",
         "keep-alive",
