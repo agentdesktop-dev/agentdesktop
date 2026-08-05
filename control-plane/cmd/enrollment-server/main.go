@@ -16,6 +16,7 @@ import (
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/ca"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/enrollment"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/store/postgres"
+	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/transport"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/migrations"
 )
 
@@ -32,6 +33,8 @@ func main() {
 	organizationName := required("ORGANIZATION_NAME")
 	caCertificatePath := required("CA_CERTIFICATE_PATH")
 	caKeyPath := required("CA_PRIVATE_KEY_PATH")
+	serverCertificatePath := required("SERVER_TLS_CERTIFICATE_PATH")
+	serverKeyPath := required("SERVER_TLS_PRIVATE_KEY_PATH")
 	trustDomain := required("MTLS_TRUST_DOMAIN")
 	listenAddress := value("LISTEN_ADDRESS", "127.0.0.1:8090")
 	certificateLifetime, err := time.ParseDuration(value("CLIENT_CERTIFICATE_LIFETIME", "24h"))
@@ -80,6 +83,14 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	tlsConfig, err := transport.LoadServerTLSConfig(
+		serverCertificatePath,
+		serverKeyPath,
+		caCertificatePath,
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
 	enrollmentService := enrollment.NewService(store, certificateIssuer)
 	handler := api.NewServer(
 		validator,
@@ -93,6 +104,7 @@ func main() {
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		TLSConfig:         tlsConfig,
 	}
 
 	go func() {
@@ -105,7 +117,7 @@ func main() {
 	}()
 	go reconcileIssuance(ctx, enrollmentService, reconciliationInterval, reconciliationGrace)
 	log.Printf("enrollment server listening on %s", listenAddress)
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := server.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
 }

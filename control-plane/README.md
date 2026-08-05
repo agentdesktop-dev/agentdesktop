@@ -25,6 +25,8 @@ export ORGANIZATION_NAME='Example Organization'
 export CA_CERTIFICATE_PATH="$PWD/development-ca.crt"
 export CA_PRIVATE_KEY_PATH="$PWD/development-ca.key"
 export MTLS_TRUST_DOMAIN=devices.example.com
+export SERVER_TLS_CERTIFICATE_PATH="$PWD/development-server.crt"
+export SERVER_TLS_PRIVATE_KEY_PATH="$PWD/development-server.key"
 go run ./cmd/enrollment-server -migrate
 ```
 
@@ -39,9 +41,19 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
 	-addext 'basicConstraints=critical,CA:TRUE' \
 	-addext 'keyUsage=critical,keyCertSign,cRLSign'
 chmod 0600 development-ca.key
+
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+	-keyout development-server.key -out development-server.csr \
+	-subj '/CN=localhost' \
+	-addext 'subjectAltName=DNS:localhost,IP:127.0.0.1'
+openssl x509 -req -in development-server.csr \
+	-CA development-ca.crt -CAkey development-ca.key -CAcreateserial \
+	-out development-server.crt -days 7 -copy_extensions copy
+chmod 0600 development-server.key
+rm development-server.csr
 ```
 
-The listener defaults to `127.0.0.1:8090`. Production deployment must place it behind authenticated TLS ingress or add direct TLS configuration before exposing it beyond loopback.
+The listener defaults to `https://127.0.0.1:8090` and requires direct TLS 1.3 configuration. Connections may omit a client certificate for initial OAuth enrollment. When a client presents a certificate, the service verifies it against `CA_CERTIFICATE_PATH`; untrusted presented certificates fail during the TLS handshake. This optional verified certificate is the authentication boundary for renewal and does not replace OAuth user identity.
 
 Submit a validated OAuth bearer token and PEM CSR:
 
