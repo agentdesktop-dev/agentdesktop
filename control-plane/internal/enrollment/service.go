@@ -16,6 +16,7 @@ var (
 	ErrIssuanceFailed   = errors.New("certificate issuance failed")
 	ErrNotFound         = errors.New("enrollment not found")
 	ErrNotPending       = errors.New("enrollment is not pending")
+	ErrNotActive        = errors.New("device is not active")
 )
 
 type Store interface {
@@ -26,6 +27,7 @@ type Store interface {
 	List(context.Context, Principal, string, int) ([]AdministrativeRecord, error)
 	ListIssuing(context.Context, time.Time, int) ([]Issuance, error)
 	Reject(context.Context, Principal, string) (AdministrativeRecord, error)
+	RevokeDevice(context.Context, Principal, string) (DeviceRevocation, error)
 }
 
 type Service struct {
@@ -81,6 +83,17 @@ func (service *Service) Reject(
 		return AdministrativeRecord{}, ErrInvalidPrincipal
 	}
 	return service.store.Reject(ctx, administrator, enrollmentID)
+}
+
+func (service *Service) RevokeDevice(
+	ctx context.Context,
+	administrator Principal,
+	deviceID string,
+) (DeviceRevocation, error) {
+	if administrator.Issuer == "" || administrator.Subject == "" || deviceID == "" {
+		return DeviceRevocation{}, ErrInvalidPrincipal
+	}
+	return service.store.RevokeDevice(ctx, administrator, deviceID)
 }
 
 func validAdministrativeStatus(status string) bool {

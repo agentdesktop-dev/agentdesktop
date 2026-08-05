@@ -1,6 +1,6 @@
 # Managed mTLS identity contract v1
 
-Status: selected production direction; enrollment request persistence, administrator-scoped listing, approval and rejection, retry-stable local protected-key issuance, interrupted-issuance reconciliation, owner-scoped certificate retrieval, Agent Desktop key/certificate persistence, and connector-side mTLS activation are implemented. Production CA integration, renewal, expired-certificate recovery, revocation, and Agent Gateway enforcement remain incomplete.
+Status: selected production direction; enrollment request persistence, administrator-scoped listing, approval and rejection, retry-stable local protected-key issuance, interrupted-issuance reconciliation, owner-scoped certificate retrieval, Agent Desktop key/certificate persistence, connector-side mTLS activation, and atomic device/certificate revocation persistence are implemented. Production CA integration, renewal, expired-certificate recovery, revocation consumption, and Agent Gateway enforcement remain incomplete.
 
 ## Trust model
 
@@ -48,5 +48,5 @@ Approval claims a pending enrollment as `issuing` before calling the CA, prevent
 
 - Replace the local-key issuer with a production protected-key CA adapter.
 - Add proactive renewal, expired-certificate recovery, and coordinated key/certificate pool rotation.
-- Add device and certificate revocation with fail-closed status consumption by Agent Gateway.
+- Add fail-closed Agent Gateway consumption of persisted device and certificate revocation state.
 - Add Agent Gateway mTLS validation and immutable outer-to-inner identity propagation.

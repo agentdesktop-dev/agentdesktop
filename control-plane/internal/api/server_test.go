@@ -58,6 +58,10 @@ func (store *recordingStore) Reject(_ context.Context, _ enrollment.Principal, i
 	return enrollment.AdministrativeRecord{EnrollmentID: id, Status: "rejected"}, nil
 }
 
+func (store *recordingStore) RevokeDevice(_ context.Context, _ enrollment.Principal, id string) (enrollment.DeviceRevocation, error) {
+	return enrollment.DeviceRevocation{DeviceID: id, Status: "revoked"}, nil
+}
+
 func (store *recordingStore) CreatePending(
 	_ context.Context,
 	principal enrollment.Principal,
@@ -229,6 +233,12 @@ func TestAdministratorListsAndRejectsPendingEnrollment(t *testing.T) {
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/admin/enrollments/enrollment-1/reject", nil))
 	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"status":"rejected"`)) {
 		t.Fatalf("reject status = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/admin/devices/device-1/revoke", nil))
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"status":"revoked"`)) {
+		t.Fatalf("revoke device status = %d, body = %s", response.Code, response.Body.String())
 	}
 
 	response = httptest.NewRecorder()

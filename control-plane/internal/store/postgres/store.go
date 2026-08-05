@@ -260,7 +260,7 @@ func (store *Store) List(
 	rows, err := store.pool.Query(ctx, `
 		SELECT enrollments.id, enrollments.status, users.subject,
 		       enrollments.public_key_fingerprint, enrollments.created_at,
-		       enrollments.updated_at
+		       enrollments.updated_at, enrollments.device_id
 		FROM enrollments
 		JOIN organizations ON organizations.id = enrollments.organization_id
 		JOIN users ON users.id = enrollments.user_id
@@ -275,6 +275,7 @@ func (store *Store) List(
 	records := make([]enrollment.AdministrativeRecord, 0)
 	for rows.Next() {
 		var record enrollment.AdministrativeRecord
+		var deviceID *string
 		if err := rows.Scan(
 			&record.EnrollmentID,
 			&record.Status,
@@ -282,12 +283,69 @@ func (store *Store) List(
 			&record.PublicKeyFingerprint,
 			&record.CreatedAt,
 			&record.UpdatedAt,
+			&deviceID,
 		); err != nil {
 			return nil, err
+		}
+		if record.Status == "approved" && deviceID != nil {
+			record.DeviceID = *deviceID
 		}
 		records = append(records, record)
 	}
 	return records, rows.Err()
+}
+
+func (store *Store) RevokeDevice(
+	ctx context.Context,
+	administrator enrollment.Principal,
+	deviceID string,
+) (enrollment.DeviceRevocation, error) {
+	transaction, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return enrollment.DeviceRevocation{}, err
+	}
+	defer transaction.Rollback(ctx)
+	organizationID, err := findOrganization(ctx, transaction, administrator.Issuer)
+	if err != nil {
+		return enrollment.DeviceRevocation{}, err
+	}
+	var revocation enrollment.DeviceRevocation
+	err = transaction.QueryRow(ctx, `
+		UPDATE devices
+		SET status = 'revoked', revoked_at = now()
+		WHERE id = $1 AND organization_id = $2 AND status = 'active'
+		  AND EXISTS (
+			SELECT 1 FROM enrollments
+			WHERE enrollments.device_id = devices.id
+			  AND enrollments.organization_id = devices.organization_id
+			  AND enrollments.status = 'approved'
+		  )
+		RETURNING id, status, revoked_at
+	`, deviceID, organizationID).Scan(
+		&revocation.DeviceID,
+		&revocation.Status,
+		&revocation.RevokedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return enrollment.DeviceRevocation{}, enrollment.ErrNotActive
+	}
+	if err != nil {
+		return enrollment.DeviceRevocation{}, err
+	}
+	if _, err := transaction.Exec(ctx, `
+		UPDATE certificates
+		SET revoked_at = $1
+		WHERE organization_id = $2 AND device_id = $3 AND revoked_at IS NULL
+	`, revocation.RevokedAt, organizationID, deviceID); err != nil {
+		return enrollment.DeviceRevocation{}, err
+	}
+	if err := insertAudit(ctx, transaction, organizationID, administrator.Subject, "device.revoked", deviceID); err != nil {
+		return enrollment.DeviceRevocation{}, err
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return enrollment.DeviceRevocation{}, err
+	}
+	return revocation, nil
 }
 
 func (store *Store) Reject(

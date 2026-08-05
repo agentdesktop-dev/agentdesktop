@@ -36,10 +36,37 @@ func NewServer(
 	mux.HandleFunc("GET /v1/admin/enrollments", server.listEnrollments)
 	mux.HandleFunc("POST /v1/admin/enrollments/{enrollmentID}/approve", server.approveEnrollment)
 	mux.HandleFunc("POST /v1/admin/enrollments/{enrollmentID}/reject", server.rejectEnrollment)
+	mux.HandleFunc("POST /v1/admin/devices/{deviceID}/revoke", server.revokeDevice)
 	mux.HandleFunc("GET /healthz", func(response http.ResponseWriter, _ *http.Request) {
 		response.WriteHeader(http.StatusOK)
 	})
 	return mux
+}
+
+func (server *Server) revokeDevice(response http.ResponseWriter, request *http.Request) {
+	administrator, err := server.administratorAuthenticator.Authenticate(request)
+	if err != nil {
+		writeError(response, http.StatusUnauthorized, "invalid_admin_token")
+		return
+	}
+	revocation, err := server.enrollments.RevokeDevice(
+		request.Context(),
+		administrator,
+		request.PathValue("deviceID"),
+	)
+	switch {
+	case errors.Is(err, enrollment.ErrNotActive):
+		writeError(response, http.StatusConflict, "device_not_active")
+		return
+	case errors.Is(err, enrollment.ErrInvalidPrincipal):
+		writeError(response, http.StatusBadRequest, "invalid_request")
+		return
+	case err != nil:
+		writeError(response, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	response.Header().Set("content-type", "application/json")
+	_ = json.NewEncoder(response).Encode(revocation)
 }
 
 func (server *Server) listEnrollments(response http.ResponseWriter, request *http.Request) {

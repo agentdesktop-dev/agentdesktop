@@ -49,6 +49,13 @@ type AdministrativeRecord struct {
 	PublicKeyFingerprint string    `json:"public_key_fingerprint"`
 	CreatedAt            time.Time `json:"created_at"`
 	UpdatedAt            time.Time `json:"updated_at"`
+	DeviceID             string    `json:"device_id,omitempty"`
+}
+
+type DeviceRevocation struct {
+	DeviceID  string    `json:"device_id"`
+	Status    string    `json:"status"`
+	RevokedAt time.Time `json:"revoked_at"`
 }
 
 type Approval struct {

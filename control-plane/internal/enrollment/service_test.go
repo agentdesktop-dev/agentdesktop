@@ -58,6 +58,10 @@ func (store *approvalStore) Reject(context.Context, Principal, string) (Administ
 	return AdministrativeRecord{}, nil
 }
 
+func (store *approvalStore) RevokeDevice(context.Context, Principal, string) (DeviceRevocation, error) {
+	return DeviceRevocation{}, nil
+}
+
 type testIssuer struct {
 	err error
 }

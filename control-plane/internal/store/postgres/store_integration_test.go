@@ -146,6 +146,16 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 	if issuing.Status != "issuing" || issuing.DeviceID != "" || issuing.Certificate != nil {
 		t.Fatalf("issuing status exposed provisional credential = %#v", issuing)
 	}
+	issuingRecords, err := store.List(ctx, administrator, "issuing", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issuingRecords) != 1 || issuingRecords[0].DeviceID != "" {
+		t.Fatalf("administrator list exposed provisional device = %#v", issuingRecords)
+	}
+	if _, err := store.RevokeDevice(ctx, administrator, deviceID); !errors.Is(err, enrollment.ErrNotActive) {
+		t.Fatalf("provisional device revocation error = %v, want ErrNotActive", err)
+	}
 	duplicateDeviceID, err := identifier.New()
 	if err != nil {
 		t.Fatal(err)
@@ -226,6 +236,49 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 		t.Fatal(err)
 	}
 	foreignAdministrator := enrollment.Principal{Issuer: foreignIssuer, Subject: "foreign-admin"}
+	approvedRecords, err := store.List(ctx, administrator, "approved", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(approvedRecords) != 1 || approvedRecords[0].DeviceID != deviceID {
+		t.Fatalf("approved administrator records = %#v", approvedRecords)
+	}
+	if _, err := store.RevokeDevice(ctx, foreignAdministrator, deviceID); !errors.Is(err, enrollment.ErrNotActive) {
+		t.Fatalf("foreign device revocation error = %v, want ErrNotActive", err)
+	}
+	revocation, err := store.RevokeDevice(ctx, administrator, deviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revocation.Status != "revoked" || revocation.DeviceID != deviceID || revocation.RevokedAt.IsZero() {
+		t.Fatalf("device revocation = %#v", revocation)
+	}
+	if _, err := store.RevokeDevice(ctx, administrator, deviceID); !errors.Is(err, enrollment.ErrNotActive) {
+		t.Fatalf("repeat device revocation error = %v, want ErrNotActive", err)
+	}
+	var deviceStatus string
+	var deviceRevokedAt, certificateRevokedAt time.Time
+	if err := pool.QueryRow(ctx, `
+		SELECT devices.status, devices.revoked_at, certificates.revoked_at
+		FROM devices
+		JOIN certificates ON certificates.device_id = devices.id
+		WHERE devices.id = $1
+	`, deviceID).Scan(&deviceStatus, &deviceRevokedAt, &certificateRevokedAt); err != nil {
+		t.Fatal(err)
+	}
+	if deviceStatus != "revoked" || !deviceRevokedAt.Equal(revocation.RevokedAt) ||
+		!certificateRevokedAt.Equal(revocation.RevokedAt) {
+		t.Fatal("device and certificate revocation were not persisted atomically")
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM audit_events
+		WHERE target_id = $1 AND action = 'device.revoked' AND actor_subject = 'admin-1'
+	`, deviceID).Scan(&auditCount); err != nil {
+		t.Fatal(err)
+	}
+	if auditCount != 1 {
+		t.Fatalf("device revocation audit event count = %d, want 1", auditCount)
+	}
 	foreignRecords, err := store.List(ctx, foreignAdministrator, "pending", 100)
 	if err != nil {
 		t.Fatal(err)
