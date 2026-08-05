@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/certificate"
+	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/deviceidentity"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/enrollment"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/identifier"
+	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/renewal"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/store/postgres"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/migrations"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -166,8 +168,8 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 	issued := enrollment.IssuedCertificate{
 		ChainPEM:     "certificate-chain",
 		SerialNumber: "01",
-		NotBefore:    time.Unix(1_000, 0),
-		NotAfter:     time.Unix(2_000, 0),
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Hour),
 	}
 	approval, err := store.CompleteIssuance(ctx, administrator, issuance, issued)
 	if err != nil {
@@ -204,6 +206,81 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 	}
 	if auditCount != 2 {
 		t.Fatalf("approval audit event count = %d, want 2", auditCount)
+	}
+
+	renewalRequest := validRequest(t)
+	renewalID, err := identifier.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	presentedDevice := deviceidentity.Identity{
+		OrganizationID: organizationID,
+		DeviceID:       deviceID,
+		SerialNumber:   issued.SerialNumber,
+	}
+	owner := enrollment.Principal{Issuer: issuer, Subject: "user-1"}
+	renewalClaim, err := store.Begin(ctx, owner, presentedDevice, renewalRequest, renewalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renewalClaim.ID != renewalID || renewalClaim.DeviceID != deviceID ||
+		renewalClaim.PublicKeyFingerprint != renewalRequest.PublicKeyFingerprint || renewalClaim.Completed != nil {
+		t.Fatalf("renewal claim = %#v", renewalClaim)
+	}
+	retryRenewalID, err := identifier.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	retriedClaim, err := store.Begin(ctx, owner, presentedDevice, renewalRequest, retryRenewalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retriedClaim.ID != renewalClaim.ID || !retriedClaim.StartedAt.Equal(renewalClaim.StartedAt) {
+		t.Fatalf("retried renewal claim = %#v, want %#v", retriedClaim, renewalClaim)
+	}
+	if _, err := store.Begin(
+		ctx,
+		enrollment.Principal{Issuer: issuer, Subject: "user-2"},
+		presentedDevice,
+		validRequest(t),
+		retryRenewalID,
+	); !errors.Is(err, renewal.ErrNotActive) {
+		t.Fatalf("foreign owner renewal error = %v, want ErrNotActive", err)
+	}
+	renewedCertificate := renewal.Certificate{
+		ChainPEM: "renewed-certificate-chain", SerialNumber: "02",
+		NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(2 * time.Hour),
+	}
+	renewed, err := store.Complete(ctx, owner, renewalClaim, renewedCertificate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renewed.Status != "approved" || renewed.DeviceID != deviceID ||
+		renewed.Certificate.SerialNumber != renewedCertificate.SerialNumber {
+		t.Fatalf("renewal response = %#v", renewed)
+	}
+	repeatedCompletion, err := store.Complete(ctx, owner, renewalClaim, renewedCertificate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeatedCompletion.Certificate.SerialNumber != renewedCertificate.SerialNumber {
+		t.Fatalf("repeated renewal completion = %#v", repeatedCompletion)
+	}
+	completedRetry, err := store.Begin(ctx, owner, presentedDevice, renewalRequest, retryRenewalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completedRetry.Completed == nil || completedRetry.Completed.SerialNumber != renewedCertificate.SerialNumber {
+		t.Fatalf("completed renewal retry = %#v", completedRetry)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM audit_events
+		WHERE target_id = $1 AND action IN ('certificate.renewal_started', 'certificate.renewed')
+	`, renewalClaim.ID).Scan(&auditCount); err != nil {
+		t.Fatal(err)
+	}
+	if auditCount != 2 {
+		t.Fatalf("renewal audit event count = %d, want 2", auditCount)
 	}
 
 	rejectRequest := validRequest(t)
@@ -255,6 +332,9 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 	}
 	if _, err := store.RevokeDevice(ctx, administrator, deviceID); !errors.Is(err, enrollment.ErrNotActive) {
 		t.Fatalf("repeat device revocation error = %v, want ErrNotActive", err)
+	}
+	if _, err := store.Begin(ctx, owner, presentedDevice, validRequest(t), retryRenewalID); !errors.Is(err, renewal.ErrNotActive) {
+		t.Fatalf("revoked device renewal error = %v, want ErrNotActive", err)
 	}
 	var deviceStatus string
 	var deviceRevokedAt, certificateRevokedAt time.Time

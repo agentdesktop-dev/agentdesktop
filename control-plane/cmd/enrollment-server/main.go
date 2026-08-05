@@ -15,6 +15,7 @@ import (
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/auth"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/ca"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/enrollment"
+	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/renewal"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/store/postgres"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/transport"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/migrations"
@@ -92,10 +93,12 @@ func main() {
 		log.Fatal(err)
 	}
 	enrollmentService := enrollment.NewService(store, certificateIssuer)
+	renewalService := renewal.NewService(store, certificateIssuer)
 	handler := api.NewServer(
 		validator,
 		administratorValidator,
 		enrollmentService,
+		api.WithRenewal(validator, renewalService, trustDomain),
 	)
 	server := &http.Server{
 		Addr:              listenAddress,
@@ -116,9 +119,38 @@ func main() {
 		}
 	}()
 	go reconcileIssuance(ctx, enrollmentService, reconciliationInterval, reconciliationGrace)
+	go reconcileRenewals(ctx, renewalService, reconciliationInterval, reconciliationGrace)
 	log.Printf("enrollment server listening on %s", listenAddress)
 	if err := server.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
+	}
+}
+
+func reconcileRenewals(
+	ctx context.Context,
+	service *renewal.Service,
+	interval time.Duration,
+	grace time.Duration,
+) {
+	reconcile := func() {
+		completed, err := service.Reconcile(ctx, time.Now().UTC().Add(-grace), 100)
+		if err != nil && ctx.Err() == nil {
+			log.Printf("renewal reconciliation failed: %v", err)
+		}
+		if completed > 0 {
+			log.Printf("reconciled %d interrupted certificate renewals", completed)
+		}
+	}
+	reconcile()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			reconcile()
+		}
 	}
 }
 

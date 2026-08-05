@@ -6,8 +6,10 @@ import (
 	"time"
 
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/certificate"
+	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/deviceidentity"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/enrollment"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/identifier"
+	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/renewal"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -211,6 +213,231 @@ func (store *Store) CompleteIssuance(
 		NotBefore:      certificate.NotBefore,
 		NotAfter:       certificate.NotAfter,
 	}, nil
+}
+
+func (store *Store) Begin(
+	ctx context.Context,
+	principal enrollment.Principal,
+	device deviceidentity.Identity,
+	request certificate.Request,
+	renewalID string,
+) (renewal.Claim, error) {
+	transaction, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return renewal.Claim{}, err
+	}
+	defer transaction.Rollback(ctx)
+	organizationID, err := findOrganization(ctx, transaction, principal.Issuer)
+	if err != nil {
+		return renewal.Claim{}, err
+	}
+	if organizationID != device.OrganizationID {
+		return renewal.Claim{}, renewal.ErrNotActive
+	}
+	var userID string
+	err = transaction.QueryRow(ctx, `
+		SELECT users.id
+		FROM users
+		JOIN enrollments ON enrollments.user_id = users.id
+		JOIN devices ON devices.id = enrollments.device_id
+		JOIN certificates ON certificates.device_id = devices.id
+		WHERE users.organization_id = $1 AND users.subject = $2
+		  AND enrollments.status = 'approved' AND devices.id = $3
+		  AND devices.organization_id = $1 AND devices.status = 'active'
+		  AND certificates.serial_number = $4
+		  AND certificates.organization_id = $1
+		  AND certificates.revoked_at IS NULL AND certificates.not_after > now()
+		LIMIT 1
+	`, organizationID, principal.Subject, device.DeviceID, device.SerialNumber).Scan(&userID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return renewal.Claim{}, renewal.ErrNotActive
+	}
+	if err != nil {
+		return renewal.Claim{}, err
+	}
+	createdAt := time.Now().UTC()
+	claim := renewal.Claim{
+		ID: renewalID, OrganizationID: organizationID, OrganizationIssuer: principal.Issuer,
+		DeviceID: device.DeviceID, CSRDER: request.DER,
+		PublicKeyFingerprint: request.PublicKeyFingerprint, StartedAt: createdAt,
+	}
+	var insertedID string
+	err = transaction.QueryRow(ctx, `
+		INSERT INTO certificate_renewals (
+			id, organization_id, user_id, device_id, presented_serial_number,
+			status, csr_der, public_key_fingerprint, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, 'issuing', $6, $7, $8, $8)
+		ON CONFLICT (device_id, public_key_fingerprint) DO NOTHING
+		RETURNING id
+	`, renewalID, organizationID, userID, device.DeviceID, device.SerialNumber,
+		request.DER, request.PublicKeyFingerprint, createdAt).Scan(&insertedID)
+	inserted := err == nil
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return renewal.Claim{}, err
+	}
+	var status string
+	var certificateSerial *string
+	err = transaction.QueryRow(ctx, `
+		SELECT id, csr_der, public_key_fingerprint, created_at, status, certificate_serial_number
+		FROM certificate_renewals
+		WHERE device_id = $1 AND public_key_fingerprint = $2
+	`, device.DeviceID, request.PublicKeyFingerprint).Scan(
+		&claim.ID, &claim.CSRDER, &claim.PublicKeyFingerprint, &claim.StartedAt,
+		&status, &certificateSerial,
+	)
+	if err != nil {
+		return renewal.Claim{}, err
+	}
+	if certificateSerial != nil {
+		var completed renewal.Certificate
+		err = transaction.QueryRow(ctx, `
+			SELECT certificate_pem, not_before, not_after, serial_number
+			FROM certificates WHERE serial_number = $1
+		`, *certificateSerial).Scan(
+			&completed.ChainPEM, &completed.NotBefore, &completed.NotAfter, &completed.SerialNumber,
+		)
+		if err != nil {
+			return renewal.Claim{}, err
+		}
+		claim.Completed = &completed
+	}
+	if inserted {
+		if err := insertAudit(ctx, transaction, organizationID, principal.Subject, "certificate.renewal_started", claim.ID); err != nil {
+			return renewal.Claim{}, err
+		}
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return renewal.Claim{}, err
+	}
+	return claim, nil
+}
+
+func (store *Store) Complete(
+	ctx context.Context,
+	principal enrollment.Principal,
+	claim renewal.Claim,
+	certificate renewal.Certificate,
+) (renewal.Response, error) {
+	transaction, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return renewal.Response{}, err
+	}
+	defer transaction.Rollback(ctx)
+	organizationID, err := findOrganization(ctx, transaction, principal.Issuer)
+	if err != nil {
+		return renewal.Response{}, err
+	}
+	if organizationID != claim.OrganizationID {
+		return renewal.Response{}, renewal.ErrNotActive
+	}
+	var active bool
+	err = transaction.QueryRow(ctx, `
+		SELECT status = 'active' FROM devices
+		WHERE id = $1 AND organization_id = $2
+		FOR UPDATE
+	`, claim.DeviceID, organizationID).Scan(&active)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !active) {
+		return renewal.Response{}, renewal.ErrNotActive
+	}
+	if err != nil {
+		return renewal.Response{}, err
+	}
+	var renewalStatus string
+	err = transaction.QueryRow(ctx, `
+		SELECT status FROM certificate_renewals
+		WHERE id = $1 AND organization_id = $2 AND device_id = $3
+		  AND public_key_fingerprint = $4
+		FOR UPDATE
+	`, claim.ID, organizationID, claim.DeviceID, claim.PublicKeyFingerprint).Scan(&renewalStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return renewal.Response{}, renewal.ErrNotActive
+	}
+	if err != nil {
+		return renewal.Response{}, err
+	}
+	if renewalStatus == "issuing" {
+		if _, err := transaction.Exec(ctx, `
+		INSERT INTO certificates (
+			serial_number, organization_id, device_id, public_key_fingerprint,
+			certificate_pem, not_before, not_after
+		) VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`, certificate.SerialNumber, organizationID, claim.DeviceID,
+			claim.PublicKeyFingerprint, certificate.ChainPEM,
+			certificate.NotBefore, certificate.NotAfter); err != nil {
+			return renewal.Response{}, err
+		}
+		result, err := transaction.Exec(ctx, `
+		UPDATE certificate_renewals
+		SET status = 'approved', certificate_serial_number = $1, updated_at = now()
+		WHERE id = $2 AND organization_id = $3 AND device_id = $4 AND status = 'issuing'
+	`, certificate.SerialNumber, claim.ID, organizationID, claim.DeviceID)
+		if err != nil {
+			return renewal.Response{}, err
+		}
+		if result.RowsAffected() != 1 {
+			return renewal.Response{}, renewal.ErrNotActive
+		}
+		if err := insertAudit(ctx, transaction, organizationID, principal.Subject, "certificate.renewed", claim.ID); err != nil {
+			return renewal.Response{}, err
+		}
+	}
+	var response renewal.Response
+	response.Certificate = renewal.Certificate{}
+	err = transaction.QueryRow(ctx, `
+		SELECT renewals.id, renewals.status, renewals.device_id,
+		       renewals.public_key_fingerprint, certificates.certificate_pem,
+		       certificates.not_before, certificates.not_after, certificates.serial_number
+		FROM certificate_renewals AS renewals
+		JOIN certificates ON certificates.serial_number = renewals.certificate_serial_number
+		WHERE renewals.id = $1 AND renewals.organization_id = $2 AND renewals.device_id = $3
+	`, claim.ID, organizationID, claim.DeviceID).Scan(
+		&response.RenewalID, &response.Status, &response.DeviceID,
+		&response.PublicKeyFingerprint, &response.Certificate.ChainPEM,
+		&response.Certificate.NotBefore, &response.Certificate.NotAfter,
+		&response.Certificate.SerialNumber,
+	)
+	if err != nil {
+		return renewal.Response{}, err
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return renewal.Response{}, err
+	}
+	return response, nil
+}
+
+func (store *Store) ListIssuingRenewals(
+	ctx context.Context,
+	startedBefore time.Time,
+	limit int,
+) ([]renewal.Claim, error) {
+	rows, err := store.pool.Query(ctx, `
+		SELECT renewals.id, renewals.organization_id, organizations.issuer,
+		       renewals.device_id, renewals.csr_der,
+		       renewals.public_key_fingerprint, renewals.created_at
+		FROM certificate_renewals AS renewals
+		JOIN organizations ON organizations.id = renewals.organization_id
+		JOIN devices ON devices.id = renewals.device_id
+		WHERE renewals.status = 'issuing' AND renewals.updated_at <= $1
+		  AND devices.status = 'active'
+		ORDER BY renewals.updated_at, renewals.id
+		LIMIT $2
+	`, startedBefore, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	claims := make([]renewal.Claim, 0)
+	for rows.Next() {
+		var claim renewal.Claim
+		if err := rows.Scan(
+			&claim.ID, &claim.OrganizationID, &claim.OrganizationIssuer,
+			&claim.DeviceID, &claim.CSRDER, &claim.PublicKeyFingerprint, &claim.StartedAt,
+		); err != nil {
+			return nil, err
+		}
+		claims = append(claims, claim)
+	}
+	return claims, rows.Err()
 }
 
 func (store *Store) ListIssuing(

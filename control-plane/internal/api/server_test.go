@@ -6,18 +6,23 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/ca"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/certificate"
+	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/deviceidentity"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/enrollment"
+	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/renewal"
 )
 
 type testAuthenticator struct {
@@ -114,6 +119,48 @@ func (apiIssuer) Issue(context.Context, ca.IssuanceRequest) (ca.Certificate, err
 	}, nil
 }
 
+type renewalStore struct {
+	principal enrollment.Principal
+	device    deviceidentity.Identity
+	request   certificate.Request
+}
+
+func (store *renewalStore) Begin(
+	_ context.Context,
+	principal enrollment.Principal,
+	device deviceidentity.Identity,
+	request certificate.Request,
+	_ string,
+) (renewal.Claim, error) {
+	store.principal = principal
+	store.device = device
+	store.request = request
+	return renewal.Claim{
+		ID:                   "33333333-3333-4333-8333-333333333333",
+		OrganizationID:       device.OrganizationID,
+		DeviceID:             device.DeviceID,
+		CSRDER:               request.DER,
+		PublicKeyFingerprint: request.PublicKeyFingerprint,
+		StartedAt:            time.Unix(1_000, 0),
+	}, nil
+}
+
+func (store *renewalStore) Complete(
+	_ context.Context,
+	_ enrollment.Principal,
+	claim renewal.Claim,
+	issued renewal.Certificate,
+) (renewal.Response, error) {
+	return renewal.Response{
+		RenewalID: claim.ID, Status: "approved", DeviceID: claim.DeviceID,
+		PublicKeyFingerprint: claim.PublicKeyFingerprint, Certificate: issued,
+	}, nil
+}
+
+func (store *renewalStore) ListIssuingRenewals(context.Context, time.Time, int) ([]renewal.Claim, error) {
+	return nil, nil
+}
+
 func TestEnrollmentUsesAuthenticatedPrincipal(t *testing.T) {
 	store := &recordingStore{}
 	handler := NewServer(
@@ -134,6 +181,53 @@ func TestEnrollmentUsesAuthenticatedPrincipal(t *testing.T) {
 	}
 	if store.principal.Subject != "user-1" || store.principal.Issuer != "https://issuer.example/" {
 		t.Fatalf("stored principal = %#v", store.principal)
+	}
+}
+
+func TestRenewalRequiresOAuthAndVerifiedDeviceCertificate(t *testing.T) {
+	const (
+		organizationID = "11111111-1111-4111-8111-111111111111"
+		deviceID       = "22222222-2222-4222-8222-222222222222"
+		trustDomain    = "devices.example.com"
+	)
+	owner := enrollment.Principal{Issuer: "https://issuer.example/", Subject: "user-1"}
+	store := &renewalStore{}
+	handler := NewServer(
+		testAuthenticator{principal: owner},
+		testAuthenticator{},
+		enrollment.NewService(&recordingStore{}, apiIssuer{}),
+		WithRenewal(testAuthenticator{principal: owner}, renewal.NewService(store, apiIssuer{}), trustDomain),
+	)
+	body, err := json.Marshal(map[string]string{"csr": signedCSR(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/renewals", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("renewal without device certificate status = %d", response.Code)
+	}
+
+	identityURI, err := url.Parse("spiffe://" + trustDomain + "/organization/" + organizationID + "/device/" + deviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf := &x509.Certificate{SerialNumber: big.NewInt(1), URIs: []*url.URL{identityURI}}
+	request = httptest.NewRequest(http.MethodPost, "/v1/renewals", bytes.NewReader(body))
+	request.TLS = &tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{leaf},
+		VerifiedChains:   [][]*x509.Certificate{{leaf}},
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("renewal status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if store.principal != owner || store.device.OrganizationID != organizationID ||
+		store.device.DeviceID != deviceID || store.device.SerialNumber != "1" ||
+		store.request.PublicKeyFingerprint == "" {
+		t.Fatalf("renewal identity = %#v, principal = %#v", store.device, store.principal)
 	}
 }
 

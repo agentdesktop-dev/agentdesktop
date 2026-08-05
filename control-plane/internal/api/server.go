@@ -7,7 +7,9 @@ import (
 	"net/http"
 
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/certificate"
+	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/deviceidentity"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/enrollment"
+	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/renewal"
 )
 
 type Authenticator interface {
@@ -20,10 +22,21 @@ type Server struct {
 	enrollments                *enrollment.Service
 }
 
+type Option func(*http.ServeMux, *Server)
+
+func WithRenewal(authenticator Authenticator, renewals *renewal.Service, trustDomain string) Option {
+	return func(mux *http.ServeMux, server *Server) {
+		mux.HandleFunc("POST /v1/renewals", func(response http.ResponseWriter, request *http.Request) {
+			server.renewCertificate(response, request, authenticator, renewals, trustDomain)
+		})
+	}
+}
+
 func NewServer(
 	authenticator Authenticator,
 	administratorAuthenticator Authenticator,
 	enrollments *enrollment.Service,
+	options ...Option,
 ) http.Handler {
 	server := &Server{
 		authenticator:              authenticator,
@@ -40,7 +53,59 @@ func NewServer(
 	mux.HandleFunc("GET /healthz", func(response http.ResponseWriter, _ *http.Request) {
 		response.WriteHeader(http.StatusOK)
 	})
+	for _, option := range options {
+		option(mux, server)
+	}
 	return mux
+}
+
+func (server *Server) renewCertificate(
+	response http.ResponseWriter,
+	request *http.Request,
+	authenticator Authenticator,
+	renewals *renewal.Service,
+	trustDomain string,
+) {
+	principal, err := authenticator.Authenticate(request)
+	if err != nil {
+		writeError(response, http.StatusUnauthorized, "invalid_token")
+		return
+	}
+	device, err := deviceidentity.FromRequest(request, trustDomain)
+	if err != nil {
+		writeError(response, http.StatusUnauthorized, "invalid_device_certificate")
+		return
+	}
+	var body struct {
+		CSR string `json:"csr"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(response, request.Body, 64<<10))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&body) != nil {
+		writeError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	renewed, err := renewals.Renew(request.Context(), principal, device, body.CSR)
+	switch {
+	case errors.Is(err, certificate.ErrInvalidCSR), errors.Is(err, renewal.ErrInvalidRequest):
+		writeError(response, http.StatusBadRequest, "invalid_csr")
+		return
+	case errors.Is(err, renewal.ErrNotActive):
+		writeError(response, http.StatusForbidden, "device_not_active")
+		return
+	case errors.Is(err, renewal.ErrIssuanceFailed):
+		writeError(response, http.StatusBadGateway, "certificate_issuance_failed")
+		return
+	case err != nil:
+		writeError(response, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	response.Header().Set("content-type", "application/json")
+	_ = json.NewEncoder(response).Encode(renewed)
 }
 
 func (server *Server) revokeDevice(response http.ResponseWriter, request *http.Request) {

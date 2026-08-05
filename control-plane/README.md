@@ -2,7 +2,7 @@
 
 This Go module is the production backend boundary for managed Agent Desktop enrollment. It validates a standard OAuth bearer token, derives the user from validated `iss` and `sub` claims, validates a signed P-256 CSR, and transactionally persists a pending enrollment in PostgreSQL. A separately scoped administrator token can claim one pending enrollment and issue a short-lived client certificate with authority-controlled SPIFFE identity.
 
-The runtime currently uses a protected local CA key through a narrow issuer interface. This is suitable for development and single-instance deployment, not the final production key boundary; production should replace it with KMS, HSM, `step-ca`, Vault PKI, or a cloud private CA adapter. The service does not yet renew certificates, recover expired certificates, or expose its persisted revocation state to Agent Gateway. Device private keys are generated and retained by Agent Desktop and must never be submitted to this service or stored in PostgreSQL.
+The runtime currently uses a protected local CA key through a narrow issuer interface. This is suitable for development and single-instance deployment, not the final production key boundary; production should replace it with KMS, HSM, `step-ca`, Vault PKI, or a cloud private CA adapter. The service renews valid active device certificates but does not yet recover expired certificates or expose its persisted revocation state to Agent Gateway. Device private keys are generated and retained by Agent Desktop and must never be submitted to this service or stored in PostgreSQL.
 
 ## Local development
 
@@ -96,6 +96,18 @@ Authorization: Bearer <administrator-access-token>
 ```
 
 Revocation atomically marks the active device and all its unrevoked certificates with the same revocation time and records a `device.revoked` audit event. Unknown, foreign-organization, and already-revoked device IDs return the same `409 device_not_active` response. Agent Gateway consumption of this state is not yet implemented.
+
+An authenticated owner can renew an active device certificate by presenting its current valid certificate and a fresh P-256 CSR:
+
+```http
+POST /v1/renewals
+Authorization: Bearer <access-token>
+Content-Type: application/json
+
+{"csr":"-----BEGIN CERTIFICATE REQUEST-----\n..."}
+```
+
+The service requires both OAuth ownership and a TLS-verified authority-controlled device identity. It persists an `issuing` claim before calling the CA, uses the renewal ID as the CA idempotency key, and reconciles interrupted issuance with the original device, CSR, and issuance time. Repeating the same device and public-key fingerprint returns the same claim or completed certificate. Revoked devices, expired or revoked presented certificates, foreign users, and foreign organizations receive `403 device_not_active`.
 
 The authenticated user that created the enrollment can poll it and retrieve the public certificate chain after approval:
 

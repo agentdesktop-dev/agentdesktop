@@ -1,6 +1,6 @@
 # Managed mTLS identity contract v1
 
-Status: selected production direction; enrollment request persistence, administrator-scoped listing, approval and rejection, retry-stable local protected-key issuance, interrupted-issuance reconciliation, owner-scoped certificate retrieval, Agent Desktop key/certificate persistence, connector-side mTLS activation, and atomic device/certificate revocation persistence are implemented. Production CA integration, renewal, expired-certificate recovery, revocation consumption, and Agent Gateway enforcement remain incomplete.
+Status: selected production direction; enrollment request persistence, administrator-scoped listing, approval and rejection, retry-stable local protected-key issuance, interrupted issuance and renewal reconciliation, owner-scoped certificate retrieval and valid-certificate renewal, Agent Desktop key/certificate persistence, connector-side mTLS activation, and atomic device/certificate revocation persistence are implemented. Production CA integration, connector renewal scheduling and credential rotation, expired-certificate recovery, revocation consumption, and Agent Gateway enforcement remain incomplete.
 
 ## Trust model
 
@@ -40,6 +40,8 @@ For HBONE, one mTLS HTTP/2 connection may carry multiple CONNECT streams only fo
 
 Before expiry, Agent Desktop generates a new local key and CSR and renews over mTLS using its current certificate. The enrollment service verifies that the device remains active, issues a replacement, and records the new certificate serial and validity. Agent Desktop atomically activates the new key and certificate, opens new Gateway connections, and drains old connections.
 
+The service persists a renewal claim before CA I/O and keys it by device plus the new public-key fingerprint. The claim fixes the renewal ID, organization, device, CSR, and issuance time. Ambiguous CA failures remain `issuing`; a bounded worker retries them with the renewal ID as the external CA idempotency key. Completion locks the active device and claim, inserts the certificate, transitions the claim, and records audit in one transaction. Device revocation serializes on the same device row, so either renewal completes before revocation and the new certificate is revoked with the device, or renewal fails closed.
+
 An expired certificate cannot authenticate ordinary mTLS renewal. Recovery uses a valid OAuth session plus proof of possession of the enrolled private key, such as a signature over a server nonce bound to the new CSR. The service may use the expired certificate only as identifying evidence. Recovery is allowed only within configured policy and for an approved, non-revoked device; otherwise full re-enrollment and administrator approval are required.
 
 The current Go issuer adapter uses a protected local CA key and Go's X.509 implementation. It is a concrete development and single-instance boundary, not a final production key-management decision. The narrow issuer interface is intended to be replaced by KMS, HSM, `step-ca`, Vault PKI, or a cloud private CA without moving approval policy into the CA adapter.
@@ -49,6 +51,6 @@ Approval claims a pending enrollment as `issuing` before calling the CA, prevent
 ## Remaining implementation
 
 - Replace the local-key issuer with a production protected-key CA adapter.
-- Add proactive renewal, expired-certificate recovery, and coordinated key/certificate pool rotation.
+- Add connector-side proactive renewal scheduling, expired-certificate recovery, and coordinated key/certificate pool rotation.
 - Add fail-closed Agent Gateway consumption of persisted device and certificate revocation state.
 - Add Agent Gateway mTLS validation and immutable outer-to-inner identity propagation.
