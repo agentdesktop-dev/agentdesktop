@@ -101,6 +101,7 @@ export async function startFakeAuthorizationServer({
   port = 0,
   tls,
   autoApprove = false,
+  administratorScope = "agentdesktop.enrollment.admin",
 } = {}) {
   const codes = new Map();
   const refreshTokens = new Set();
@@ -115,6 +116,23 @@ export async function startFakeAuthorizationServer({
   publicJwk.kid = "fake-signing-key";
 
   let issuer = configuredIssuer;
+  const issueAccessToken = (tokenScope, tokenSubject, proofJwk) => {
+    const now = Math.floor(Date.now() / 1000);
+    return signJwt(
+      { typ: "at+jwt", alg: "ES256", kid: publicJwk.kid },
+      {
+        iss: issuer,
+        aud: audience,
+        sub: tokenSubject,
+        iat: now,
+        exp: now + 3600,
+        jti: randomUUID(),
+        scope: tokenScope,
+        ...(proofJwk ? { cnf: { jkt: jwkThumbprint(proofJwk) } } : {}),
+      },
+      signingKeys.privateKey,
+    );
+  };
   const handleRequest = async (request, response) => {
     const url = new URL(request.url, issuer);
     if (request.method === "GET" && url.pathname === "/.well-known/oauth-authorization-server") {
@@ -131,6 +149,14 @@ export async function startFakeAuthorizationServer({
     }
     if (request.method === "GET" && url.pathname === "/jwks") {
       return json(response, 200, { keys: [publicJwk] });
+    }
+    if (request.method === "GET" && url.pathname === "/admin-token") {
+      return json(response, 200, {
+        access_token: issueAccessToken(administratorScope, "test-admin"),
+        token_type: "Bearer",
+        expires_in: 3600,
+        scope: administratorScope,
+      });
     }
     if (request.method === "GET" && url.pathname === "/authorize") {
       if (
@@ -183,23 +209,9 @@ export async function startFakeAuthorizationServer({
         } else {
           return json(response, 400, { error: "unsupported_grant_type" });
         }
-        const now = Math.floor(Date.now() / 1000);
         const refreshToken = randomUUID();
         refreshTokens.add(refreshToken);
-        const accessToken = signJwt(
-          { typ: "at+jwt", alg: "ES256", kid: publicJwk.kid },
-          {
-            iss: issuer,
-            aud: audience,
-            sub: subject,
-            iat: now,
-            exp: now + 300,
-            jti: randomUUID(),
-            scope,
-            ...(proofJwk ? { cnf: { jkt: jwkThumbprint(proofJwk) } } : {}),
-          },
-          signingKeys.privateKey,
-        );
+        const accessToken = issueAccessToken(scope, subject, proofJwk);
         accessTokens.set(accessToken, {
           sub: subject,
           jkt: proofJwk ? jwkThumbprint(proofJwk) : undefined,
@@ -299,6 +311,7 @@ export async function startFakeAuthorizationServer({
     clientId,
     audience,
     scope,
+    administratorScope,
     approveEnrollment(enrollmentId, deviceId = randomUUID()) {
       const enrollment = enrollments.get(enrollmentId);
       if (!enrollment || enrollment.status !== "pending") {
@@ -345,6 +358,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     port: Number(process.env.AGENTDESKTOP_FAKE_PORT ?? "0"),
     tls,
     autoApprove: process.env.AGENTDESKTOP_FAKE_AUTO_APPROVE === "1",
+    administratorScope: process.env.AGENTDESKTOP_FAKE_ADMIN_SCOPE,
   });
   console.log(server.issuer);
   const close = async () => {

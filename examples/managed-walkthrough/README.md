@@ -2,25 +2,46 @@
 
 This walkthrough exercises ordinary OAuth user identity and authority-issued mTLS device identity through Agent Desktop and Agent Gateway. It covers browser login, administrator approval, a Claude request, immediate device revocation, and denial of the next request. Agent Gateway uses the checked-in configuration only; it needs no source changes.
 
-The walkthrough expects:
+The walkthrough uses the repository's mock OIDC and Anthropic servers. It expects:
 
 - Fedora with `openssl`, `curl`, `jq`, Rust, Go, PostgreSQL 17, Claude Code, and Agent Gateway built at `../agentgateway/target/debug/agentgateway`.
-- An OIDC provider with Authorization Code plus PKCE, an ES256-signed JWT access token, rotating refresh tokens, and separate user and administrator scopes.
-- An Anthropic provider credential in `ANTHROPIC_API_KEY`.
 - Repository root as the current directory unless a command says otherwise.
 
-Use one issuer, audience, and user scope consistently:
+Use these fixed local values:
 
 ```bash
-export OIDC_ISSUER=https://identity.example/
-export OIDC_AUDIENCE=https://gateway.agentdesktop.test
-export OIDC_JWKS_URL=https://identity.example/.well-known/jwks.json
-export OIDC_CLIENT_ID=agentdesktop
+export OIDC_ISSUER=http://127.0.0.1:18080/
+export OIDC_AUDIENCE=agentdesktop
+export OIDC_JWKS_URL=http://127.0.0.1:18080/jwks
+export OIDC_CLIENT_ID=agentdesktop-test
 export USER_SCOPE=agentgateway.invoke
 export ADMIN_SCOPE=agentdesktop.enrollment.admin
 export ORGANIZATION_ID=11111111-1111-4111-8111-111111111111
-export ADMIN_TOKEN='<administrator access token>'
+export ANTHROPIC_BASE_URL=http://127.0.0.1:18081
+export ANTHROPIC_API_KEY=mock-provider-key
 ```
+
+## Start local dependencies
+
+Start the mock OIDC server in terminal 1:
+
+```bash
+AGENTDESKTOP_FAKE_PORT=18080 \
+AGENTDESKTOP_FAKE_ADMIN_SCOPE="$ADMIN_SCOPE" \
+node tests/fixtures/fake-authorization-server.mjs
+```
+
+The server performs a deterministic test-user login when the browser opens. Its `/admin-token` endpoint issues a signed, one-hour administrator JWT for this local walkthrough. An arbitrary token will not pass control-plane signature, issuer, audience, expiry, subject, and scope validation.
+
+Start the mock Anthropic API in terminal 2:
+
+```bash
+MOCK_ANTHROPIC_HOST=127.0.0.1 \
+MOCK_ANTHROPIC_PORT=18081 \
+node container/mock-anthropic.mjs
+```
+
+It accepts the fake Gateway-owned API key and returns `SMOKE_OK`; it never contacts Anthropic.
 
 ## Prepare trust
 
@@ -42,7 +63,7 @@ sudo update-ca-trust
 
 ## Start the enrollment service
 
-Create an empty PostgreSQL database, then start the service in terminal 1:
+Create an empty PostgreSQL database, then start the service in terminal 3:
 
 ```bash
 cd control-plane
@@ -65,7 +86,7 @@ go run ./cmd/enrollment-server -migrate
 
 ## Log in and enroll
 
-In terminal 2, log in and create the device enrollment:
+In terminal 4, log in and create the device enrollment:
 
 ```bash
 cargo run -- identity login \
@@ -84,6 +105,7 @@ cargo run -- identity enroll-request \
 Copy the printed enrollment ID, then approve it as the administrator:
 
 ```bash
+export ADMIN_TOKEN="$(curl --fail --silent "${OIDC_ISSUER}admin-token" | jq -r .access_token)"
 export ENROLLMENT_ID='<printed enrollment ID>'
 curl --fail-with-body -X POST \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -101,15 +123,16 @@ cargo run -- identity enroll-status \
 
 ## Start the data path
 
-Start Agent Gateway from its configuration directory in terminal 3 so relative certificate paths resolve correctly:
+Start Agent Gateway from its configuration directory in terminal 5 so relative certificate paths resolve correctly:
 
 ```bash
 cd examples/managed-walkthrough
-export OIDC_ISSUER OIDC_AUDIENCE OIDC_JWKS_URL ANTHROPIC_API_KEY
+export OIDC_ISSUER OIDC_AUDIENCE OIDC_JWKS_URL
+export ANTHROPIC_BASE_URL ANTHROPIC_API_KEY
 ../../../agentgateway/target/debug/agentgateway -f agentgateway.yaml
 ```
 
-Start Agent Desktop in terminal 4:
+Start Agent Desktop in terminal 6:
 
 ```bash
 cargo run -- serve \
@@ -138,7 +161,7 @@ curl --fail-with-body -X POST \
   "https://localhost:8090/v1/admin/devices/$DEVICE_ID/revoke" | jq
 ```
 
-The next Claude request must fail with authorization denied. Agent Gateway does not cache device authorization, so revocation takes effect on the next request without restarting either process.
+The first request returns `SMOKE_OK`. After revocation, the next Claude request must fail with authorization denied. Agent Gateway does not cache device authorization, so revocation takes effect on the next request without restarting either process.
 
 Remove only the walkthrough trust anchors when finished:
 

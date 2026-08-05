@@ -168,6 +168,24 @@ test("issues a DPoP-bound token for an S256 authorization code", async (context)
   assert.equal((await refreshReplay.json()).error, "invalid_grant");
 });
 
+test("issues a separately scoped administrator token", async (context) => {
+  const server = await startFakeAuthorizationServer();
+  context.after(() => server.close());
+
+  const response = await fetch(new URL("admin-token", server.issuer));
+  assert.equal(response.status, 200);
+  const token = await response.json();
+  assert.equal(token.token_type, "Bearer");
+  assert.equal(token.scope, server.administratorScope);
+
+  const [header, claims] = token.access_token.split(".").slice(0, 2).map(decodeJson);
+  assert.equal(header.alg, "ES256");
+  assert.equal(claims.iss, server.issuer);
+  assert.equal(claims.aud, server.audience);
+  assert.equal(claims.sub, "test-admin");
+  assert.equal(claims.scope, server.administratorScope);
+});
+
 test("rejects a wrong PKCE verifier", async (context) => {
   const server = await startFakeAuthorizationServer();
   context.after(() => server.close());

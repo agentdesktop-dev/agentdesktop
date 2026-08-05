@@ -39,3 +39,4 @@ llm:
     provider: anthropic
     params:
       apiKey: $ANTHROPIC_API_KEY
+      baseUrl: $ANTHROPIC_BASE_URL
