@@ -1,3 +1,9 @@
+#[cfg(target_os = "linux")]
+use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
+use std::os::linux::net::SocketAddrExt;
+#[cfg(target_os = "linux")]
+use std::os::unix::net::{SocketAddr as UnixSocketAddr, UnixListener};
 use std::process::Command;
 #[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
@@ -57,13 +63,18 @@ fn launch_requires_a_command() {
 fn launch_child_waits_for_explicit_release() {
     let temporary = tempfile::tempdir().unwrap();
     let marker = temporary.path().join("executed");
+    let gate_name = format!(
+        "agentdesktop-cli-test-{}-{}",
+        std::process::id(),
+        temporary.path().file_name().unwrap().to_string_lossy()
+    );
+    let address = UnixSocketAddr::from_abstract_name(gate_name.as_bytes()).unwrap();
+    let listener = UnixListener::bind_addr(&address).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_agentdesktop"))
         .args([
             "_launch-child",
-            "--gate-directory",
-            temporary.path().to_str().unwrap(),
-            "--controller-pid",
-            &std::process::id().to_string(),
+            "--gate-socket",
+            &gate_name,
             "--",
             "/usr/bin/touch",
             marker.to_str().unwrap(),
@@ -71,14 +82,27 @@ fn launch_child_waits_for_explicit_release() {
         .spawn()
         .unwrap();
 
+    listener
+        .set_nonblocking(true)
+        .expect("configure test launch gate");
     let deadline = Instant::now() + Duration::from_secs(1);
-    while !temporary.path().join("ready").is_file() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert!(temporary.path().join("ready").is_file());
+    let mut gate = loop {
+        match listener.accept() {
+            Ok((gate, _)) => break gate,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("accept launch gate: {error}"),
+        }
+    };
+    let mut ready = [0_u8; 1];
+    gate.read_exact(&mut ready).unwrap();
+    assert_eq!(ready, [1]);
     assert!(!marker.exists());
 
-    std::fs::write(temporary.path().join("release"), "").unwrap();
+    gate.write_all(&[2]).unwrap();
     assert!(child.wait().unwrap().success());
     assert!(marker.is_file());
 }

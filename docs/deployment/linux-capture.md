@@ -75,7 +75,7 @@ The public launch boundary can already place a command and all descendants in an
 agentdesktop launch --profile custom -- command --args
 ```
 
-The scope starts an internal gated child, validates the exact systemd `ControlGroup` against the cgroup v2 filesystem, and releases the child only afterward. The helper watches its controller process and exits without launching the application if the controller disappears before release. The default `custom` profile supplies no integration environment.
+The scope starts an internal gated child, validates the exact systemd `ControlGroup` against the cgroup v2 filesystem, and releases the child only afterward. A random Linux abstract Unix socket carries the readiness and release handshake; the child exits without launching the application if the controller disconnects before release. Readiness and gate writes time out after two seconds, while the child allows up to five minutes for capture setup and interactive authorization before release. The default `custom` profile supplies no integration environment.
 
 The `claude` profile is reserved for transparent capture, injects no connector-routing environment, and rejects inherited or persistent `ANTHROPIC_BASE_URL` routing before creating a scope. It verifies the exact installed inspection root and ready relay, registers the scope while the child remains gated, releases the application only after success, and unregisters it after the complete scope exits. Claude configured with the native or connector-assisted path runs normally without `agentdesktop launch`; enabling both paths would risk duplicate routing or loops.
 

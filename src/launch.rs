@@ -1,8 +1,8 @@
 use std::ffi::OsString;
-use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::linux::net::SocketAddrExt;
+use std::os::unix::net::{SocketAddr as UnixSocketAddr, UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
@@ -13,6 +13,12 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use sha2::{Digest, Sha256};
+
+const GATE_READY: u8 = 1;
+const GATE_RELEASE: u8 = 2;
+const GATE_READY_TIMEOUT: Duration = Duration::from_secs(2);
+const GATE_RELEASE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const GATE_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Eq, PartialEq)]
 struct EnvironmentVariable {
@@ -70,10 +76,7 @@ pub struct LaunchArgs {
 #[derive(Debug, Args)]
 pub struct LaunchChildArgs {
     #[arg(long)]
-    gate_directory: PathBuf,
-
-    #[arg(long)]
-    controller_pid: u32,
+    gate_socket: String,
 
     #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
     command: Vec<OsString>,
@@ -148,24 +151,32 @@ fn run_capture_helper(helper: &Path, action: &str, cgroup: Option<&Path>) -> Res
 }
 
 pub fn run_child(args: LaunchChildArgs) -> Result<()> {
-    let ready = args.gate_directory.join("ready");
-    let release = args.gate_directory.join("release");
-    create_gate_file(&ready)?;
-    while !release.is_file() {
-        if !Path::new("/proc")
-            .join(args.controller_pid.to_string())
-            .is_dir()
-        {
-            bail!("launch controller exited before releasing the application");
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
+    let address = UnixSocketAddr::from_abstract_name(args.gate_socket.as_bytes())
+        .context("create abstract launch gate address")?;
+    let mut gate = UnixStream::connect_addr(&address).context("connect to launch controller")?;
+    gate.set_write_timeout(Some(GATE_WRITE_TIMEOUT))
+        .context("configure launch gate write timeout")?;
+    gate.write_all(&[GATE_READY])
+        .context("signal launch gate readiness")?;
+    wait_for_release(&mut gate, GATE_RELEASE_TIMEOUT)?;
     let (program, arguments) = args
         .command
         .split_first()
         .context("launch child requires a command")?;
     Err(Command::new(program).args(arguments).exec())
         .with_context(|| format!("failed to execute {}", program.to_string_lossy()))
+}
+
+fn wait_for_release(gate: &mut UnixStream, timeout: Duration) -> Result<()> {
+    gate.set_read_timeout(Some(timeout))
+        .context("configure launch gate release timeout")?;
+    let mut release = [0_u8; 1];
+    gate.read_exact(&mut release)
+        .context("wait for the launch controller to release the application")?;
+    if release[0] != GATE_RELEASE {
+        bail!("launch controller sent an invalid release signal");
+    }
+    Ok(())
 }
 
 fn run_with_systemd(
@@ -192,10 +203,12 @@ fn run_with_systemd(
         .context("launch requires a command")?;
     let unit = scope_name()?;
     let description = format!("Agent Desktop {} execution scope", profile.name);
-    let gate = tempfile::Builder::new()
-        .prefix("agentdesktop-launch-")
-        .tempdir()
-        .context("create the application launch gate")?;
+    let gate_name = gate_name()?;
+    let gate_address = UnixSocketAddr::from_abstract_name(gate_name.as_bytes())
+        .context("create abstract launch gate address")?;
+    let gate = UnixListener::bind_addr(&gate_address).context("bind abstract launch gate")?;
+    gate.set_nonblocking(true)
+        .context("configure abstract launch gate")?;
 
     let mut command = Command::new(systemd_run);
     command
@@ -214,10 +227,8 @@ fn run_with_systemd(
         .arg("--")
         .arg(executable)
         .arg("_launch-child")
-        .arg("--gate-directory")
-        .arg(gate.path())
-        .arg("--controller-pid")
-        .arg(std::process::id().to_string())
+        .arg("--gate-socket")
+        .arg(&gate_name)
         .arg("--")
         .arg(program)
         .args(arguments)
@@ -229,13 +240,15 @@ fn run_with_systemd(
             )
         })
         .and_then(|mut child| {
-            wait_for_gate(&mut child, &gate.path().join("ready"))?;
+            let mut gate = wait_for_gate(&mut child, &gate)?;
             let cgroup = scope_control_group(systemctl, cgroup_root, &unit)
                 .inspect_err(|_| terminate_child(&mut child))?;
             if profile.transparent_capture {
                 prepare_capture(&cgroup).inspect_err(|_| terminate_child(&mut child))?;
             }
-            let result = create_gate_file(&gate.path().join("release"))
+            let result = gate
+                .write_all(&[GATE_RELEASE])
+                .context("release application launch gate")
                 .inspect_err(|_| terminate_child(&mut child))
                 .and_then(|()| child.wait().context("wait for the Linux execution scope"));
             if profile.transparent_capture {
@@ -291,21 +304,36 @@ fn scope_control_group(systemctl: &Path, cgroup_root: &Path, unit: &str) -> Resu
     Ok(cgroup)
 }
 
-fn create_gate_file(path: &Path) -> Result<()> {
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-        .with_context(|| format!("create launch gate file {}", path.display()))?;
-    Ok(())
-}
-
-fn wait_for_gate(child: &mut Child, ready: &Path) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(2);
+fn wait_for_gate(child: &mut Child, listener: &UnixListener) -> Result<UnixStream> {
+    let deadline = Instant::now() + GATE_READY_TIMEOUT;
     loop {
-        if ready.is_file() {
-            return Ok(());
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                let credentials = rustix::net::sockopt::socket_peercred(&stream)
+                    .context("read launch gate peer credentials")?;
+                if credentials.uid != rustix::process::geteuid() {
+                    continue;
+                }
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .context("application scope did not reach its launch gate")?;
+                stream
+                    .set_read_timeout(Some(remaining))
+                    .context("configure launch gate timeout")?;
+                let mut ready = [0_u8; 1];
+                stream
+                    .read_exact(&mut ready)
+                    .context("read launch gate readiness")?;
+                if ready[0] != GATE_READY {
+                    bail!("application scope sent an invalid readiness signal");
+                }
+                stream
+                    .set_write_timeout(Some(GATE_WRITE_TIMEOUT))
+                    .context("configure launch gate release timeout")?;
+                return Ok(stream);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error).context("accept application launch gate"),
         }
         if let Some(status) = child.try_wait()? {
             bail!("application scope exited before its launch gate was ready: {status}");
@@ -385,28 +413,59 @@ fn resolve_profile(name: &str) -> Result<&'static Profile> {
 }
 
 fn scope_name() -> Result<String> {
-    let mut random = [0_u8; 8];
-    getrandom::fill(&mut random).context("failed to generate an execution scope ID")?;
-    let identifier = random
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
     Ok(format!(
-        "agentdesktop-launch-{}-{identifier}.scope",
-        std::process::id()
+        "agentdesktop-launch-{}-{}.scope",
+        std::process::id(),
+        random_identifier()?
     ))
+}
+
+fn gate_name() -> Result<String> {
+    Ok(format!("agentdesktop-launch-gate-{}", random_identifier()?))
+}
+
+fn random_identifier() -> Result<String> {
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random).context("failed to generate a launch identifier")?;
+    Ok(random.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{LaunchArgs, Preflight, check_preflight, resolve_profile, run_with_systemd};
+    use super::{
+        LaunchArgs, Preflight, check_preflight, resolve_profile, run_with_systemd, wait_for_release,
+    };
     use std::ffi::OsString;
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixStream;
     use std::path::Path;
     use std::thread;
+    use std::time::Duration;
+
+    fn launch_child_script(marker: &Path, exit_code: i32) -> String {
+        format!(
+            r#"#!/usr/bin/env python3
+import socket
+import sys
+
+arguments = sys.argv[1:]
+gate = arguments[arguments.index("--gate-socket") + 1]
+command = arguments[arguments.index("--") + 1:]
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as channel:
+    channel.connect("\0" + gate)
+    channel.sendall(b"\x01")
+    if channel.recv(1) != b"\x02":
+        sys.exit(24)
+with open({marker:?}, "w", encoding="utf-8") as output:
+    output.write("\n".join(command) + "\n")
+sys.exit({exit_code})
+"#,
+            marker = marker.display().to_string()
+        )
+    }
 
     #[test]
     fn preserves_command_arguments_and_exit_status() {
@@ -427,14 +486,7 @@ mod tests {
         .unwrap();
         fs::create_dir_all(cgroup_root.join("user.slice/user-1000.slice/app.slice/test.scope"))
             .unwrap();
-        fs::write(
-            &launcher,
-            format!(
-                "#!/bin/sh\nshift\nwhile [ \"$1\" != -- ]; do if [ \"$1\" = --gate-directory ]; then shift; gate=$1; fi; shift; done\nshift\n: > \"$gate/ready\"\nwhile [ ! -f \"$gate/release\" ]; do :; done\nprintf '%s\\n' \"$@\" > '{}'\nexit 23\n",
-                command_arguments.display()
-            ),
-        )
-        .unwrap();
+        fs::write(&launcher, launch_child_script(&command_arguments, 23)).unwrap();
         fs::write(
             &systemctl,
             "#!/bin/sh\nprintf '/user.slice/user-1000.slice/app.slice/test.scope\\n'\n",
@@ -504,14 +556,7 @@ mod tests {
             "#!/bin/sh\nprintf '/user.slice/claude.scope\\n'\n",
         )
         .unwrap();
-        fs::write(
-            &launcher,
-            format!(
-                "#!/bin/sh\nshift\nwhile [ \"$1\" != -- ]; do if [ \"$1\" = --gate-directory ]; then shift; gate=$1; fi; shift; done\nshift\n: > \"$gate/ready\"\nwhile [ ! -f \"$gate/release\" ]; do :; done\n: > '{}'\n",
-                marker.display()
-            ),
-        )
-        .unwrap();
+        fs::write(&launcher, launch_child_script(&marker, 0)).unwrap();
         for executable in [&runner, &systemctl, &launcher] {
             fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
         }
@@ -557,14 +602,7 @@ mod tests {
         )
         .unwrap();
         fs::write(&systemctl, "#!/bin/sh\nprintf '/missing.scope\\n'\n").unwrap();
-        fs::write(
-            &launcher,
-            format!(
-                "#!/bin/sh\nshift\nwhile [ \"$1\" != -- ]; do if [ \"$1\" = --gate-directory ]; then shift; gate=$1; fi; shift; done\nshift\n: > \"$gate/ready\"\nwhile [ ! -f \"$gate/release\" ]; do :; done\n: > '{}'\n",
-                marker.display()
-            ),
-        )
-        .unwrap();
+        fs::write(&launcher, launch_child_script(&marker, 0)).unwrap();
         for executable in [&runner, &systemctl, &launcher] {
             fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
         }
@@ -587,6 +625,17 @@ mod tests {
 
         assert!(error.contains("cgroup /missing.scope does not exist"));
         assert!(!marker.exists());
+    }
+
+    #[test]
+    fn launch_child_times_out_when_controller_does_not_release_it() {
+        let (mut child_gate, _controller_gate) = UnixStream::pair().unwrap();
+
+        let error = wait_for_release(&mut child_gate, Duration::from_millis(20))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("wait for the launch controller to release the application"));
     }
 
     #[test]
