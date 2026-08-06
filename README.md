@@ -165,7 +165,7 @@ The command preserves the launched argv and working environment, creates a gated
 
 The `claude` launch profile enables standalone Linux transparent capture. It requires installer-created Agent Gateway capture configuration and explicit inspection trust. Claude configured through `connect-agents` should continue to run normally without `agentdesktop launch`; the two routing paths are mutually exclusive.
 
-Profiles that depend on Agent Desktop check local readiness before starting the application. If the connector is stopped or Agent Gateway is unavailable, `launch` fails immediately with recovery steps instead of letting the application retry until it times out. `--skip-preflight` bypasses only that readiness check; it does not enable incomplete transparent capture.
+Profiles that depend on Agent Desktop check local readiness before starting the application. If the connector is stopped or Agent Gateway is unavailable, `launch` fails immediately with recovery steps instead of letting the application retry until it times out. `--skip-preflight` bypasses only that readiness check; it does not bypass capture trust, relay, or network-rule setup.
 
 ```bash
 cargo run -- launch --skip-preflight --profile custom -- command --args
@@ -217,7 +217,7 @@ chmod +x agentdesktop-installer
 ./agentdesktop-installer
 ```
 
-The guided installer shows the components, per-user destination, service behavior, and network ownership boundary before changing files. The connector listener is loopback-only. The current Agent Gateway `llm.port` configuration binds a wildcard address and cannot express a loopback address, so the installer explicitly tells users to review Agent Gateway exposure. A public standalone package remains blocked on an address-capable Agent Gateway listener or equivalent local-only transport. The default root is `$HOME/.local/lib/agentdesktop`; after confirmation the installer verifies and extracts every embedded component, atomically activates the bundle, enables the user systemd service, and waits until the product is ready before reporting success. Agent Gateway remains a separate executable and process after extraction.
+The guided installer shows the components, per-user destination, service behavior, and network ownership boundary before changing files. Connector listeners and the Agent Gateway CONNECT listener are loopback-only; the LLM bind is an internal socketless target. The default root is `$HOME/.local/lib/agentdesktop`; after confirmation the installer verifies and extracts every embedded component, initializes capture configuration when creating a new Gateway config, atomically activates the bundle, enables the user systemd service, and waits until the product is ready. Agent Gateway remains a separate executable and process after extraction. Inspection trust requires separate informed consent and the normal platform authorization prompt.
 
 If setup fails, the installer creates an owner-only support report under `$XDG_STATE_HOME/agentdesktop`, or `$HOME/.local/state/agentdesktop` by default. It gives the user the report path and directs them to [open an issue](https://github.com/agentdesktop-dev/agentdesktop/issues/new) and attach it. Users are not asked to understand or run a health check.
 
@@ -303,7 +303,7 @@ Tests use local fake Agent Gateway and authorization server processes. They do n
 
 ## Container kick-the-tires environment
 
-The container environment runs Agent Gateway and the connector as separate containers on a private network. The connector remains bound to `127.0.0.1` inside its container and is not published to the host. The scripts use Podman when it is installed and fall back to Docker otherwise. Set `CONTAINER_ENGINE=podman` or `CONTAINER_ENGINE=docker` to override automatic selection.
+The container environment runs Agent Gateway as a separate process supervised by Agent Desktop in one container on a private network. The optional mock provider runs in another container. The connector remains bound to `127.0.0.1` and is not published to the host. The scripts use Podman when installed and fall back to Docker otherwise. Set `CONTAINER_ENGINE=podman` or `CONTAINER_ENGINE=docker` to override automatic selection.
 
 Requirements:
 
@@ -342,7 +342,6 @@ Inspect the running environment:
 container_engine="$(command -v podman || command -v docker)"
 "$container_engine" ps --filter name=agentdesktop
 "$container_engine" logs agentdesktop
-"$container_engine" logs agentdesktop-gateway
 "$container_engine" exec -it agentdesktop /bin/sh
 ```
 
@@ -362,7 +361,7 @@ export ANTHROPIC_API_KEY=your-provider-key
 ./scripts/container-smoke.sh
 ```
 
-The API key is passed only to the Agent Gateway container. The connector receives the placeholder `x-api-key` header from the test client but never receives the provider credential from the environment.
+The API key is expanded only by Agent Gateway configuration, but the supervised development topology places it in the shared parent/child process environment. Connector code does not read it. Production deployments should use an Agent Gateway-supported secret source rather than this smoke-test convenience.
 
 Override the published Agent Gateway image when testing another version:
 
@@ -416,7 +415,7 @@ Send a simple prompt and verify:
 
 1. Claude receives a streamed response.
 2. Agent Gateway records the request and applies its configured route and policies.
-3. Stopping Agent Gateway causes the connector to return `502 Bad Gateway` with `x-agentdesktop-error: upstream-unavailable`.
+3. Stopping Agent Gateway closes the application flow without opening a direct provider connection.
 4. The connector never attempts a direct connection to Anthropic.
 
-The native managed equivalent, including Gateway mTLS plus bearer JWT validation and removal, is covered by the [managed walkthrough](examples/managed-walkthrough/README.md).
+The native managed equivalent, including certificate-authenticated mTLS CONNECT forwarding, is covered by the [managed walkthrough](examples/managed-walkthrough/README.md).

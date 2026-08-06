@@ -42,7 +42,7 @@ sudo agentdesktop-capture-setup remove \
 
 Do not place the connector or Agent Gateway in the selected application scope. Doing so can redirect the tunnel transport back into the capture listener.
 
-Start the prototype relay outside the selected scope after an HBONE listener is ready:
+Start the diagnostic relay outside the selected scope after an HBONE listener is ready:
 
 ```bash
 cargo run --bin agentdesktop -- capture \
@@ -53,7 +53,7 @@ cargo run --bin agentdesktop -- capture \
 
 The `capture` subcommand is a diagnostic boundary rather than a separate product binary. Its token file is required, must be a regular file owned by the current user with mode `0600`, and must contain a non-empty HTTP header value. Supported standalone operation does not use this file: Agent Desktop generates one token in memory for each connector-owned Agent Gateway process, injects it through the Gateway startup environment, and retains the same value for the in-process relay. Agent Gateway authorizes the re-entered route with `source.connectHeaders["x-agentdesktop-token"]`. The smoke config demonstrates this policy without creating a second policy format.
 
-Both endpoints are restricted to loopback. The relay uses Linux `SO_ORIGINAL_DST`, preserves raw bytes, bounds concurrent tunnels, and closes failed or overloaded flows without direct fallback. Its cleartext HBONE pool reconnects lazily for later flows after observed transport loss; it never retries a failed CONNECT or replays inner bytes. Relay startup has an in-process readiness boundary that completes only after endpoint validation, token loading, HBONE handshake, and listener bind. The 256-bit in-memory token rotates with the connector-owned Gateway process rather than with each application session, so concurrent capture sessions do not require Gateway restarts or token files. Managed use additionally requires TLS and DPoP-bound organizational identity.
+Both endpoints are restricted to loopback. The relay uses Linux `SO_ORIGINAL_DST`, preserves raw bytes, bounds concurrent tunnels, and closes failed or overloaded flows without direct fallback. Its cleartext HBONE pool reconnects lazily for later flows after observed transport loss; it never retries a failed CONNECT or replays inner bytes. Relay startup has an in-process readiness boundary that completes only after endpoint validation, token loading, HBONE handshake, and listener bind. The 256-bit in-memory token rotates with the connector-owned Gateway process rather than with each application session, so concurrent capture sessions do not require Gateway restarts or token files. Managed capture will instead require mTLS with immutable certificate-derived user/device context.
 
 ## Isolated validation
 
@@ -98,4 +98,4 @@ This smoke path generates an ephemeral token, proves that Agent Gateway returns 
 
 ## eBPF strengthening path
 
-An eBPF cgroup `connect4`/`connect6` implementation can improve the production design by selecting sockets at connect time, preserving destination metadata without conntrack lookup, reducing interaction with unrelated nftables policy, and attaching directly to the delegated application cgroup. It still needs a privileged loader, pinned-program lifecycle, kernel compatibility checks, UDP/443 denial, and equivalent fail-closed tests. The nftables prototype remains useful as a simple baseline and fallback; eBPF must not introduce different routing or policy semantics.
+An eBPF cgroup `connect4`/`connect6` implementation can improve the production design by selecting sockets at connect time, preserving destination metadata without conntrack lookup, reducing interaction with unrelated nftables policy, and attaching directly to the delegated application cgroup. It still needs a privileged loader, pinned-program lifecycle, kernel compatibility checks, UDP/443 denial, and equivalent fail-closed tests. The nftables implementation remains the supported Linux baseline; eBPF must not introduce different routing or policy semantics.

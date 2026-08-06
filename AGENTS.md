@@ -28,19 +28,18 @@ The edge connector is intentionally thin. It integrates gateway-aware applicatio
 - Supporting transparent QUIC interception in the first release.
 - Providing policy simulation in this repository; that belongs in Agent Gateway.
 
-## Current milestone: Self-managed standalone mode
+## Current milestone: Managed revocation enforcement
 
-The Claude forwarding pre-pre-MVP established the shared forwarding core. The current milestone makes self-managed local operation an explicit standalone product mode before adding managed identity or transparent capture.
+Standalone native forwarding and Linux transparent capture, managed enrollment and renewal, certificate-authenticated native CONNECT forwarding, and the manual managed walkthrough are implemented. The current milestone closes the remaining managed certificate lifecycle gap.
 
 Include only:
 
-- An explicit standalone deployment mode whose Agent Gateway upstream is local-only.
-- A separate local Agent Gateway process using user-owned configuration and policy.
-- Native Claude Code configuration for direct or connector-assisted local use.
-- Local lifecycle and health reporting needed for a usable standalone workflow.
-- Deterministic tests and a real-Agent-Gateway smoke path for supported behavior.
+- A versioned way to publish current device and certificate revocation state from the enrollment authority.
+- Fail-closed Agent Gateway consumption that rejects revoked certificates before their natural expiry.
+- Deterministic tests and a real-Gateway walkthrough proving revocation propagation and outage behavior.
+- Documentation of freshness, maximum enforcement delay, and operational recovery.
 
-Do not include OAuth, device identity, MDM integration, transparent capture, HBONE, a control plane, or OpenTelemetry export in this milestone. Agent Gateway remains a separate process and owns provider credentials, policy, and any future TLS inspection. Do not create placeholder abstractions for later phases.
+Do not combine this milestone with managed transparent capture, macOS or Windows capture, a new policy control plane, or broad telemetry work. Agent Gateway remains the policy and content-inspection boundary.
 
 ## Architecture
 
@@ -60,15 +59,15 @@ Do not include OAuth, device identity, MDM integration, transparent capture, HBO
 - The user owns Agent Gateway's local configuration, policies, provider credentials, and data retention choices.
 - No MDM, organizational identity, enrollment service, connector-management service, or control plane is required.
 - The connector redirects traffic from selected applications to the local Agent Gateway and may provide application adapters, lifecycle integration, and local health reporting.
-- Gateway-aware applications may connect directly to the local Agent Gateway. The connector must not capture an application that is already configured for a direct path, which would risk loops or duplicate routing.
+- Gateway-aware applications use the connector's loopback listener in the standard installation. A separately configured direct Gateway listener is outside the bundled topology and must never be combined with connector capture for the same application.
 - Agent Gateway always evaluates policy and performs content inspection in every deployment mode. Do not duplicate its configuration schema or policy engine in the connector.
 - Keep connector and Agent Gateway processes separate. Do not embed Agent Gateway as a library or fork its policy implementation.
 
-The standard self-managed installation may include both Agent Gateway and the connector. Users can mix two paths per application: **native**, where a gateway-aware application connects directly to Agent Gateway, and **captured**, where the connector redirects a selected application without modifying it.
+The standard self-managed installation includes both Agent Gateway and the connector as separate processes. Applications use one connector path at a time: **native**, where a gateway-aware application targets the connector loopback listener, or **captured**, where the connector redirects a selected process scope without modifying application settings.
 
 ### Components
 
-1. **AI application** connects directly to Agent Gateway through native gateway configuration or is redirected by a connector-owned OS integration.
+1. **AI application** targets the connector loopback listener through native gateway configuration or is redirected by a connector-owned OS integration.
 2. **Edge connector** selects applications, redirects their traffic, preserves the original destination, and forwards it to the local or remote Agent Gateway. In managed remote mode it also identifies the local user and proves device identity.
 3. **Agent Gateway** evaluates policy, optionally performs TLS MITM, supplies provider credentials, and routes to the AI provider. In managed remote mode it also authenticates user and device context.
 4. **MDM**, managed remote mode only, installs the connector, enrolls the device, distributes trust roots, and configures supported applications or capture rules.
@@ -102,25 +101,24 @@ In self-managed local mode, the user owns Agent Gateway configuration and policy
 
 The identity design in this section applies to managed remote mode. Self-managed local mode does not require organizational user or device identity by default because the user and Agent Gateway share the same device and administrative boundary. Local process isolation and access to the loopback listener still require explicit security review.
 
-The proposed wire-level user/device trust boundary is specified in [Managed Identity Contract v1](docs/architecture/managed-identity-v1.md). The contract records required Agent Gateway work and must be agreed before OAuth implementation begins.
+The selected wire-level user/device trust boundary is specified in [Managed mTLS identity contract v1](docs/architecture/managed-mtls-v1.md). The older DPoP contract is retained only as an explicitly superseded fixture design.
 
 ### User identity
 
 MDM enrollment identity and local usernames are not sufficiently portable or trustworthy as the identity of the current user. Use browser-based OAuth 2.0 Authorization Code with PKCE for the normal laptop flow. Use Device Authorization Flow only as a fallback for headless devices or environments where browser callbacks cannot work.
 
-- Perform login once and silently refresh short-lived credentials afterward.
+- Perform login for enrollment and bounded expired-certificate recovery, refreshing the OAuth session when those control-plane operations require it.
 - Use the system browser to benefit from existing enterprise SSO sessions.
 - Prefer the platform credential store. On Linux, an explicitly configured protected-file fallback is allowed; strict mode requires Secret Service and fails during setup when it is unavailable.
 - Run the application-facing endpoint in the user session so identity is not ambiguous on shared machines.
 
-### Device identity
+### Managed forwarding identity
 
-- Bind short-lived user tokens to a connector-held DPoP key so proof survives ordinary TLS-terminating gateways.
-- Treat the initial DPoP key as connector-instance proof, not verified organizational device identity.
-- MDM-managed and unmanaged devices need enrollment that associates an approved device with the DPoP key or a platform-backed replacement key before managed mode is public.
-- Agent Gateway must derive device identity from verified cryptographic material. It must not trust a connector-supplied device ID header by itself.
-- Include both stable user and device identifiers in the verified policy context so Agent Gateway can authorize or revoke either one.
-- A revoked device or user returns a stable `403` response and a machine-readable reason. The connector translates this into an actionable application-facing error.
+- Enrollment binds the OAuth-verified organizational user and authority-approved device to a connector-held P-256 key.
+- The authority issues one short-lived client certificate with an Agent Gateway-compatible SPIFFE URI containing the organization, user, and device identifiers.
+- Managed forwarding authenticates the outer HTTP/2 connection with that certificate only. OAuth credentials are never attached to CONNECT requests or inserted into application traffic.
+- Agent Gateway derives identity only from the validated certificate chain and authority-controlled SPIFFE URI. It must not trust connector-supplied user or device headers.
+- Publish and consume revocation state before claiming immediate rejection of an already-issued certificate; current revocation blocks renewal but existing certificates remain valid until expiry.
 
 Different users must not share an identity-bearing tunnel. A privileged system service may own OS capture, but forwarding pools and credentials must remain isolated by user session.
 
@@ -131,12 +129,11 @@ Different users must not share an identity-bearing tunnel. A privileged system s
 This is the preferred path. Its first increment is the pre-pre-MVP.
 
 - In managed mode, start with Claude Code configured to send Anthropic API traffic to a per-user connector loopback endpoint.
-- In self-managed local mode, Claude Code may connect directly to Agent Gateway. Use the connector only when it provides required application integration.
-- The pre-pre-MVP forwards normal Anthropic-shaped HTTP traffic to Agent Gateway without parsing it or performing a second login flow.
-- Preserve methods, paths, query strings, end-to-end headers, status codes, and streaming bodies. Handle hop-by-hop headers according to HTTP proxy semantics.
-- Claude may use a deployment-specific placeholder or gateway credential during this milestone. User OAuth, connector-issued local credentials, provider-credential removal, and device proof are later increments.
-- In managed mode, once identity is implemented, the connector authenticates upstream with short-lived user credentials and device proof. Agent Gateway validates identity, strips connector-only credentials, applies its normal LLM policies, and supplies the provider credential.
-- Preserve request and response bodies byte-for-byte except for protocol changes required to proxy HTTP. Do not parse or transform AI content at the edge.
+- In self-managed local mode, Claude Code normally targets the connector loopback listener through `connect-agents`; the Linux capture profile is the mutually exclusive transparent path.
+- The connector forwards the application's complete TCP stream through an HTTP/2 CONNECT stream to a configured internal Agent Gateway authority.
+- Preserve bidirectional bytes, ordering, streaming, and half-close semantics. The connector does not parse HTTP, remove hop-by-hop headers, or synthesize application responses.
+- Claude may use a deployment-specific placeholder or gateway credential. Agent Gateway validates application credentials, parses HTTP, applies policy, and supplies the provider credential.
+- Standalone mode authenticates the outer CONNECT with a connector-owned local capability. Managed mode authenticates the pooled HTTP/2 connection with the enrolled client certificate.
 
 Additional gateway-aware tools should be implemented as named, tested adapters. An adapter may manage base URL, local placeholder credential, CA trust settings, and application reload behavior.
 
@@ -148,9 +145,9 @@ Implement this immediately after the Claude pre-MVP and include it in the initia
 - Support both local and managed destinations with the same capture semantics: local Agent Gateway over a loopback or local-only transport, and remote Agent Gateway over an authenticated tunnel.
 - Preserve the original destination and send the original TLS stream unchanged to Agent Gateway.
 - Prefer Agent Gateway's existing HTTP/2 CONNECT/HBONE support rather than designing a custom destination-header protocol. Validate and harden the laptop-client authentication boundary before committing to the wire contract.
-- In managed mode, authenticate each outer CONNECT with a DPoP-bound user token and proof. Agent Gateway must turn validated credentials into immutable trusted tunnel context before evaluating policy on inspected inner requests.
+- In managed mode, authenticate the outer HTTP/2 connection with the enrolled client certificate. Agent Gateway must propagate certificate-derived identity into immutable trusted tunnel context before evaluating policy on inspected inner requests.
 - In self-managed local mode, secure connector-to-gateway communication with loopback or local IPC access controls. Do not require organizational OAuth or device enrollment.
-- Use one CONNECT stream per captured TCP flow while pooling underlying HTTP/2 connections per user identity.
+- Use one CONNECT stream per captured TCP flow while pooling underlying HTTP/2 connections per certificate generation.
 - Agent Gateway performs TLS MITM according to policy, remotely in managed mode or on-device in local mode. The connector never possesses the issuing CA private key.
 - Block selected applications' UDP/443 traffic initially so HTTP/3-capable clients fall back to TLS over TCP. Do not silently allow QUIC to bypass capture.
 
@@ -162,7 +159,7 @@ Preferred process selectors:
 
 Executable names and paths are useful rollout selectors but are not security identities. Define whether capture follows child and helper processes for every application profile; a managed cgroup, job, or session is preferable to repeated PID attribution.
 
-`agentdesktop launch [--profile NAME] -- COMMAND [ARGS...]` is the stable application-launch boundary. Its first Linux implementation creates an owned transient systemd user scope, starts a gated child, and validates the exact cgroup v2 path before release; it is not yet a sandbox or a supported capture path. The capture controller must activate trust, relay, and network rules at that pre-release boundary. Later concrete requirements may add stronger execution backends such as a Linux namespace sandbox or a VM, but profiles must request explicit guarantees, unavailable backends must fail closed rather than downgrade, and the repository must not add speculative sandbox abstractions before implementing one.
+`agentdesktop launch [--profile NAME] -- COMMAND [ARGS...]` is the stable application-launch boundary. The Linux `claude` profile creates an owned transient systemd user scope, starts a gated child, validates its exact cgroup v2 path, and activates trust, relay, and nftables rules before release. It provides routed process-tree capture, not a filesystem sandbox or anti-bypass boundary against local administrators. Later concrete requirements may add stronger execution backends, but unavailable guarantees must fail closed rather than downgrade.
 
 ## TLS and trust
 
@@ -178,20 +175,19 @@ Executable names and paths are useful rollout selectors but are not security ide
 
 The initial failure policy is fail closed.
 
-- If Agent Gateway is unavailable, authentication expires, enrollment is revoked, or the secure route cannot be established, do not connect directly to the provider.
-- Return stable local errors that distinguish connectivity, authentication, authorization, revocation, and TLS failures.
+- If Agent Gateway is unavailable, the managed certificate is invalid, or the secure route cannot be established, do not connect directly to the provider.
+- Record stable privacy-safe failure reasons locally and close the opaque application flow. Agent Gateway owns HTTP-shaped policy and authorization errors.
 - Native gateway configuration provides routed behavior, but does not prevent a user from changing application settings.
-- Transparent capture must deny the origintion after redirecting it.
+- Transparent capture must deny the original destination after redirecting it.
 - Strong anti-bypass guarantees may additionally require MDM firewall or egress rules. Document whether a deployment is **routed** or **enforced**.
 
-In local mode, applications connected directly to Agent Gateway fail when it is unavailable. For captured applications, the connector denies the original connection and never bypasses directly to the provider. Smarter fail-open or offline policy may be added later, but the connector must not grow an independent copy of the Agent Gateway policy engine.
+In local mode, native connector flows close when Agent Gateway is unavailable. For captured applications, the connector denies the original connection and never bypasses directly to the provider. Smarter fail-open or offline policy may be added later, but the connector must not grow an independent copy of the Agent Gateway policy engine.
 
 ## Telemetry
 
-Use OpenTelemetry for traces, metrics, and structured logs. Agent Gateway already supports W3C `traceparent` propagation and OTLP export, so connector and gateway spans should form one distributed trace.
+Use OpenTelemetry for lifecycle and tunnel traces, metrics, and structured logs. Agent Gateway owns application-request tracing because the connector does not parse tunneled HTTP.
 
-- Create a client/root span when the application does not provide trace context.
-- Propagate `traceparent` and `tracestate` to Agent Gateway.
+- Do not inspect or modify application headers to create or propagate trace context.
 - Emit metrics for authentication failures, token refresh, gateway latency, active/rejected tunnels, capture errors, fail-closed events, CA/TLS failures, bytes forwarded, and connector/config versions.
 - Use stable resource attributes for connector version, OS, tenant, and a pseudonymous device identifier.
 - Use sampling and bounded local buffering.
@@ -226,18 +222,16 @@ Cargo.toml
 src/
   main.rs               connector entry point and lifecycle
   config.rs             bootstrap and runtime configuration
-  error.rs              stable internal and application-facing errors
   launch.rs             application execution-scope lifecycle
-  identity/             OAuth, enrollment, token storage, and device proof
-  proxy/                loopback HTTP and Agent Gateway transport
-  telemetry/            OpenTelemetry setup and semantic conventions
+  identity/             OAuth, enrollment, certificate, and credential storage
+  service.rs            connector service orchestration
+  service/              HBONE, forwarding, capture, renewal, and status
+  telemetry.rs          OpenTelemetry setup and semantic conventions
   apps/
     claude.rs            Claude Code configuration and compatibility
-  platform/
-    linux/               Linux capture and platform integration
-    macos/               macOS capture and platform integration
-    windows/             Windows capture and platform integration
-  bin/                   additional same-package binaries, only when required
+  platform.rs           platform capability surface
+  platform/linux.rs     Linux capture rule generation and socket integration
+  bin/                   installer, customizer, and privileged capture helper
 control-plane/          optional Go service; create only when justified
 docs/
   architecture/         protocols, threat model, and identity design
@@ -267,18 +261,18 @@ Verified progress, active blockers, and deferred user-journey findings are maint
 
 1. Create one Rust package and binary with minimal dependencies.
 2. Parse and validate the loopback listen address and Agent Gateway upstream URL.
-3. Forward Claude HTTP requests to Agent Gateway and stream responses back without buffering AI content.
-4. Preserve HTTP behavior, including methods, paths, query strings, end-to-end headers, status codes, error responses, and cancellation.
-5. Fail closed with a stable local gateway error when Agent Gateway cannot be reached. Never fall back to Anthropic directly.
-6. Add unit tests for configuration and URI/header handling.
-7. Add integration tests with a local fake Agent Gateway covering request fidelity, response fidelity, streaming, upstream failure, cancellation, and graceful shutdown.
+3. Forward Claude TCP streams to Agent Gateway over HTTP/2 CONNECT without buffering AI content.
+4. Preserve bidirectional bytes, streaming, flow control, half-close, cancellation, and tunnel status semantics.
+5. Fail closed by closing the application flow when Agent Gateway cannot be reached. Never fall back to Anthropic directly.
+6. Add unit tests for configuration and CONNECT authority handling.
+7. Add integration tests with a local fake Gateway covering byte fidelity, streaming, upstream failure, cancellation, and graceful shutdown.
 8. Add a manual smoke-test recipe for Claude Code against a real Agent Gateway.
 
 ### Phase 1: Self-managed standalone Agent Gateway
 
 1. Add explicit **standalone** and **managed** deployment modes with mode-specific configuration validation.
 2. Keep local Agent Gateway and the connector as separate processes using user-owned Agent Gateway configuration and policy.
-3. Configure native applications, beginning with Claude Code, to connect directly to local Agent Gateway or use the connector when integration requires it.
+3. Configure native applications, beginning with Claude Code, to use the connector loopback listener or the mutually exclusive captured path.
 4. Add local lifecycle management and health reporting without embedding Agent Gateway or duplicating its configuration schema.
 5. Add example Agent Gateway policy for securing personal agents without creating a connector-specific policy format.
 6. Add end-to-end tests against a real local Agent Gateway for policy allow and deny, streaming, gateway restart, and fail-closed behavior.
@@ -288,8 +282,8 @@ Verified progress, active blockers, and deferred user-journey findings are maint
 ### Phase 2: User and device identity for managed mode
 
 1. Document trust boundaries and define the versioned user/device identity contract with Agent Gateway.
-2. Add OAuth Authorization Code with PKCE, DPoP-bound access tokens, and secure token storage with an explicit protected-file fallback on Linux.
-3. Add refresh rotation and restart restoration, then device enrollment that upgrades connector-instance proof to verified device identity. Both are managed-release requirements.
+2. Add OAuth Authorization Code with PKCE for enrollment and secure token storage with an explicit protected-file fallback on Linux.
+3. Add refresh rotation and restart restoration, then authority-approved device enrollment that issues a short-lived certificate binding the verified user and device.
 4. Make Agent Gateway construct policy context only from verified identity.
 5. Add tests for login, refresh, expiry, logout, token/device binding, concurrent users, and user or device revocation.
 6. Verify that identity credentials are stripped before provider forwarding and never appear in logs.
@@ -321,7 +315,7 @@ Verified progress, active blockers, and deferred user-journey findings are maint
 
 ### Phase 6: Forwarder reliability
 
-1. Add explicit connection, request, and shutdown timeouts, each with deterministic tests.
+1. Add explicit tunnel-establishment and shutdown timeouts, each with deterministic tests.
 2. Add bounded concurrency and resource limits with overload tests.
 3. Add retry behavior only if an Agent Gateway request can be proven replay-safe; test that streaming or non-idempotent requests are never duplicated.
 4. Test long-lived streams, slow clients, slow upstreams, disconnects, malformed requests, and repeated startup/shutdown.
@@ -346,10 +340,10 @@ Verified progress, active blockers, and deferred user-journey findings are maint
 ## Pre-pre-MVP acceptance criteria
 
 - Claude Code can target the loopback connector and complete a request through either a local or remote Agent Gateway.
-- No connector OAuth, device enrollment, MDM, transparent capture, HBONE, or control-plane service is required.
-- Requests and responses preserve the tested HTTP semantics and stream without full-body buffering.
-- Agent Gateway failure returns a stable local error and never causes direct provider fallback.
-- Automated tests cover configuration, forwarding fidelity, streaming, failure, cancellation, and shutdown.
+- No connector OAuth, device enrollment, MDM, transparent capture, or control-plane service is required in standalone mode.
+- Bidirectional application bytes stream without full-body buffering or HTTP parsing at the connector.
+- Agent Gateway failure closes the application flow and never causes direct provider fallback.
+- Automated tests cover configuration, CONNECT forwarding fidelity, streaming, failure, cancellation, and shutdown.
 - The test suite is deterministic and does not require Claude Code, Anthropic, or a remote Agent Gateway.
 - A separate manual smoke test documents validation with real Claude Code and Agent Gateway.
 
@@ -357,7 +351,7 @@ Verified progress, active blockers, and deferred user-journey findings are maint
 
 - An OSS user can run Agent Gateway and the connector on one machine without MDM, OAuth, enrollment, or a control plane.
 - The user configures policy through Agent Gateway's supported local configuration, not through a connector-specific policy layer.
-- Gateway-aware applications can use the native direct path, while selected applications without gateway support can use connector-managed capture.
+- Gateway-aware applications can use the connector's native loopback path, while selected applications can use connector-managed capture.
 - The connector prevents native and captured paths from being enabled simultaneously for the same application.
 - Captured traffic preserves the original destination and TLS bytes until Agent Gateway performs policy-driven inspection.
 - Stopping or restarting the local Agent Gateway never causes direct provider fallback for captured applications.
@@ -383,8 +377,8 @@ Verified progress, active blockers, and deferred user-journey findings are maint
 - Whether the connector is enabled by default or activated when the user first selects an application for capture.
 - How Agent Gateway versions are discovered and compatibility-checked in local mode.
 - Initial transparent-capture platform and the exact Linux capture mechanism.
-- The standard used to bind OAuth user tokens to device keys.
-- Agent Gateway changes required to authenticate laptop-originated HTTP and HBONE traffic and expose only verified identity to CEL.
+- The revocation publication format and maximum enforcement delay for already-issued certificates.
+- Agent Gateway changes required to propagate certificate-derived identity from managed CONNECT connections into immutable inner policy context.
 - MDM products and identity providers used for the first supported deployment recipes.
 - Required no-breakage SLO and performance budgets.
 - Retention, sampling, and pseudonymization defaults for edge telemetry.

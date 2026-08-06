@@ -17,7 +17,7 @@ Use `install --yes` for non-interactive installation; it does not change AI agen
 
 If setup cannot finish, the installer saves an owner-only support report at `$XDG_STATE_HOME/agentdesktop/install-support.txt`, or `$HOME/.local/state/agentdesktop/install-support.txt` when `XDG_STATE_HOME` is unset. The error screen directs the user to [open an issue](https://github.com/agentdesktop-dev/agentdesktop/issues/new) and attach that report. The report contains the installer error, service status, and recent service startup log; it does not include Agent Gateway configuration contents.
 
-The connector listener is restricted to loopback. The current Agent Gateway `llm.port` schema accepts only a port and binds a wildcard address; it cannot yet express a loopback address. The QEMU journey is isolated behind QEMU user-mode NAT, but a public host installation requires an address-capable Agent Gateway listener or equivalent local-only transport before this package can claim local-only exposure. Host firewall policy is not a substitute for making that default explicit in the product.
+The connector application and status listeners and Agent Gateway CONNECT listener are restricted to loopback. Agent Gateway's LLM bind is `mode: internal`, so port `4000` is a socketless CONNECT target rather than an exposed OS listener. Readiness and administration listeners must also be reviewed for local-only host deployment.
 
 Embedded components are compressed independently and verified while extracting. Installation uses a sibling staging tree and atomic activation; upgrades validate the existing manifest and restore the prior bundle if activation fails. This payload integrity check does not replace publisher signing, which remains required before public distribution.
 
@@ -33,9 +33,9 @@ Agent Gateway owns:
 The connector owns:
 
 - Its per-user loopback listener.
-- Forwarding application HTTP traffic to Agent Gateway without interpreting AI bodies.
+- Forwarding opaque application byte streams to Agent Gateway over HTTP/2 CONNECT.
 - Optional lifecycle management for a separately installed Agent Gateway executable.
-- Connector health and fail-closed application errors.
+- Connector health and fail-closed flow termination.
 
 The connector has no policy format, provider credential store, request database, or content log.
 
@@ -54,7 +54,7 @@ The connector reads only its own command-line or environment configuration. When
 
 ## Provider credentials
 
-Supply provider credentials only to Agent Gateway using an Agent Gateway-supported secret source. The repository's real-provider container example expands `ANTHROPIC_API_KEY` inside Agent Gateway configuration and passes that environment variable only to the Agent Gateway container.
+Supply provider credentials only through an Agent Gateway-supported secret source. The repository's development container example expands `ANTHROPIC_API_KEY` inside Agent Gateway configuration; because Agent Desktop supervises Gateway in that container, the parent process environment also contains the variable even though connector code does not read it. Do not treat this smoke setup as a production secret boundary.
 
 Do not put a provider key in:
 
@@ -92,9 +92,9 @@ agentdesktop connect-agents
 
 The installer owns `~/.local/bin/agentdesktop` as a stable link to the private bundle. It does not edit shell startup files or add directories to `PATH`; environments that do not already include `~/.local/bin` receive an installer warning. The command can be rerun at any time without reinstalling Agent Desktop. Matching settings are reported as already connected; conflicting provider or gateway settings are left unchanged. After connection, launch `claude` normally. Claude Code applies the user settings to terminal and IDE sessions, so Agent Desktop does not install or require a Claude-specific launcher. Requests fail when Agent Gateway is unavailable and do not fall back to Anthropic directly.
 
-Application configuration is routed rather than enforced: a user who can change application settings can bypass it. Enforced routing requires later transparent capture and, where necessary, host firewall or MDM controls.
+Application configuration is routed rather than enforced: a user who can change application settings can bypass it. The standalone Linux `claude` profile provides process-scoped transparent routing; stronger enforcement against local administrators still requires an explicit host or MDM boundary.
 
-Do not configure the same application for both a native route and future transparent capture. The current milestone does not implement transparent capture.
+Do not configure the same application through `connect-agents` and transparent capture simultaneously. Run normally for connector-assisted native routing, or use `agentdesktop launch --profile claude -- claude` for standalone Linux capture.
 
 ## Process lifecycle
 
@@ -148,16 +148,17 @@ For a single-user installation:
 
 The connector does not create a persistent data directory. Removing its binary and service definition removes connector-owned state. Remove only configuration and logs that belong to this installation; do not delete user-owned Agent Gateway policy or audit data without explicit confirmation.
 
-The current standalone milestone does not install a CA certificate or modify system or application trust. There is therefore no connector-installed trust material to remove. Future transparent inspection must add informed, idempotent trust installation and scoped removal before it is supported.
+When the user explicitly enables inspection trust, the installer adds only the generated local Agent Gateway CA under its SHA-256 fingerprint. `agentdesktop trust remove` and uninstall-related flows remove only matching product-owned trust material and refuse modified anchors or active capture.
 
 Before uninstalling:
 
 1. Stop Claude Code and other configured applications.
 2. Disable the installed user service, or stop independently managed connector and Agent Gateway processes.
-3. Remove application base-URL configuration that points to either loopback endpoint.
-4. Remove connector service definitions and binaries.
-5. Decide separately whether to retain or delete Agent Gateway configuration, credentials, policy, logs, and audit records.
-6. Confirm that no application still depends on the local gateway before removing Agent Gateway.
+3. Stop captured application scopes and remove inspection trust if it was installed.
+4. Remove application base-URL configuration that points to the connector loopback endpoint.
+5. Remove connector service definitions and binaries.
+6. Decide separately whether to retain or delete Agent Gateway configuration, credentials, policy, logs, and audit records.
+7. Confirm that no application still depends on the local gateway before removing Agent Gateway.
 
 ## Verification checklist
 
@@ -168,4 +169,4 @@ Before uninstalling:
 - Claude Code launched normally completes a request through the connector.
 - Stopping Agent Gateway causes requests to fail without direct provider fallback.
 - Log destinations and retention periods are known.
-- No CA or trust-store changes are expected for this milestone.
+- Inspection trust is absent unless explicitly approved; when present, its fingerprint and removal path are known.

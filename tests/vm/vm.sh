@@ -14,7 +14,7 @@ monitor=$state/qmp.sock
 ssh_port=${VM_SSH_PORT:-2222}
 memory=${VM_MEMORY_MB:-8192}
 cpus=${VM_CPUS:-4}
-host_forwards=${VM_HOST_FORWARDS:-8000:8000,18080:18080,4000:4000,15008:15008,15021:15021}
+host_forwards=${VM_HOST_FORWARDS:-8000:8000,18080:18080,8090:8090,8443:8443,15008:15008,15021:15021}
 
 usage() {
   cat <<'EOF'

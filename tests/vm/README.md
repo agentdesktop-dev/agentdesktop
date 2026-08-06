@@ -100,14 +100,14 @@ The default `host.test` mappings are:
 | `host.test:8000` | `127.0.0.1:8000` | Checked-in mock Anthropic API |
 | `host.test:18080` | `127.0.0.1:18080` | HTTPS mock identity provider |
 | `host.test:8090` | `127.0.0.1:8090` | HTTPS enrollment API |
-| `host.test:4000` | `127.0.0.1:8443` | HTTPS Agent Gateway listener |
-| `host.test:15008` | `127.0.0.1:15008` | Agent Gateway HBONE listener |
+| `host.test:8443` | `127.0.0.1:8443` | Managed HTTPS/mTLS CONNECT listener |
+| `host.test:15008` | `127.0.0.1:15008` | Standalone loopback CONNECT listener |
 | `host.test:15021` | `127.0.0.1:15021` | Agent Gateway readiness endpoint |
 
 Override or extend the mappings per run without changing the guest image:
 
 ```bash
-VM_HOST_FORWARDS=18080:18080,4000:4000,8443:8443 \
+VM_HOST_FORWARDS=18080:18080,8090:8090,8443:8443 \
   tests/vm/vm.sh start --display
 ```
 
