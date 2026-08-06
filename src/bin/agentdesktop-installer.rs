@@ -501,7 +501,7 @@ fn health_check(address: SocketAddr) -> bool {
         stream.set_read_timeout(Some(Duration::from_secs(1)))?;
         stream.set_write_timeout(Some(Duration::from_secs(1)))?;
         stream.write_all(
-            b"GET /_agentdesktop/healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            b"GET /_agentdesktop/healthz HTTP/1.1\r\nHost: 127.0.0.1:8081\r\nConnection: close\r\n\r\n",
         )?;
         let mut response = String::new();
         stream.read_to_string(&mut response)?;

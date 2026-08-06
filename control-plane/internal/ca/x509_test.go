@@ -43,6 +43,7 @@ func TestX509IssuerUsesAuthorityControlledClientIdentity(t *testing.T) {
 		IssuedAt: time.Unix(2_000_000_000, 0),
 		Identity: Identity{
 			OrganizationID: "organization-1",
+			UserID:         "user-1",
 			DeviceID:       "device-1",
 		},
 	}
@@ -58,7 +59,7 @@ func TestX509IssuerUsesAuthorityControlledClientIdentity(t *testing.T) {
 	if certificate.Subject.CommonName != "" || len(certificate.DNSNames) != 0 {
 		t.Fatal("client-controlled CSR identity was copied into certificate")
 	}
-	if len(certificate.URIs) != 1 || certificate.URIs[0].String() != "spiffe://devices.example.com/organization/organization-1/device/device-1" {
+	if len(certificate.URIs) != 1 || certificate.URIs[0].String() != "spiffe://devices.example.com/ns/organization-1/sa/user.user-1.device.device-1" {
 		t.Fatalf("certificate identity = %v", certificate.URIs)
 	}
 	if len(certificate.ExtKeyUsage) != 1 || certificate.ExtKeyUsage[0] != x509.ExtKeyUsageClientAuth {

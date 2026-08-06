@@ -98,7 +98,7 @@ POST /v1/admin/enrollments/{enrollment_id}/approve
 Authorization: Bearer <administrator-access-token>
 ```
 
-The response contains the authority-assigned device ID and public certificate chain. The issued leaf has only client-auth extended usage and one SPIFFE URI in the form `spiffe://<trust-domain>/organization/<organization-id>/device/<device-id>`. A second approval returns `409 enrollment_not_pending`. If the CA call fails or the process exits after claiming the enrollment, the claim remains `issuing` for reconciliation; it is not reset to `pending` because CA failure can be ambiguous.
+The response contains the authority-assigned device ID and public certificate chain. The issued leaf has only client-auth extended usage and one Agent Gateway-compatible SPIFFE URI in the form `spiffe://<trust-domain>/ns/<organization-id>/sa/user.<user-id>.device.<device-id>`. A second approval returns `409 enrollment_not_pending`. If the CA call fails or the process exits after claiming the enrollment, the claim remains `issuing` for reconciliation; it is not reset to `pending` because CA failure can be ambiguous.
 
 Administrators can list bounded organization-scoped enrollment metadata and reject a pending request without reading CSR or certificate bytes:
 
@@ -121,7 +121,7 @@ Authorization: Bearer <administrator-access-token>
 
 Revocation atomically marks the active device and all its unrevoked certificates with the same revocation time and records a `device.revoked` audit event. Unknown, foreign-organization, and already-revoked device IDs return the same `409 device_not_active` response. Revocation immediately blocks renewal. Existing certificates remain valid until expiry unless the deployment publishes this state as a CRL and configures Agent Gateway to consume it; CRL publication is not implemented yet.
 
-Agent Gateway independently validates the OAuth JWT and downstream device certificate. It does not call the enrollment service for each request.
+Agent Gateway independently validates the issued client certificate and derives its bound organizational user and device identity. Managed forwarding carries no OAuth JWT and does not call the enrollment service per request.
 
 An authenticated owner can renew an active device certificate by presenting its current valid certificate and a fresh P-256 CSR:
 

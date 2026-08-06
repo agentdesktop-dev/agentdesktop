@@ -9,7 +9,7 @@ use tokio::time::{Instant, sleep};
 use url::Url;
 
 #[cfg(target_os = "linux")]
-use crate::capture::{CaptureToken, TUNNEL_TOKEN_ENV};
+use crate::service::capture::{CaptureToken, TUNNEL_TOKEN_ENV};
 
 pub struct LocalGateway {
     child: Child,

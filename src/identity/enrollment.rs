@@ -33,6 +33,12 @@ pub struct IssuedCertificate {
     pub not_after: String,
 }
 
+#[derive(Clone)]
+pub struct ClientIdentity {
+    pub certificate_chain_pem: String,
+    pub private_key_pem: String,
+}
+
 #[derive(Clone, Deserialize, Eq, PartialEq)]
 pub struct EnrollmentRecord {
     pub enrollment_id: String,
@@ -483,6 +489,15 @@ pub fn load_device_identity_for(
     device_identity(&record)
 }
 
+pub fn load_client_identity_for(
+    issuer: &Url,
+    gateway_origin: &Url,
+    store: &CredentialStore,
+) -> Result<ClientIdentity> {
+    let record = load_enrollment_for(issuer, gateway_origin, store)?;
+    client_identity(&record)
+}
+
 pub fn certificate_renewal_due(
     record: &EnrollmentRecord,
     now: SystemTime,
@@ -516,6 +531,15 @@ fn certificate_not_after(record: &EnrollmentRecord) -> Result<SystemTime> {
 }
 
 fn device_identity(record: &EnrollmentRecord) -> Result<reqwest::Identity> {
+    let identity = client_identity(record)?;
+    let identity_pem = format!(
+        "{}{}",
+        identity.certificate_chain_pem, identity.private_key_pem
+    );
+    Ok(reqwest::Identity::from_pem(identity_pem.as_bytes())?)
+}
+
+fn client_identity(record: &EnrollmentRecord) -> Result<ClientIdentity> {
     if record.status != EnrollmentStatus::Approved {
         bail!("managed device enrollment is not approved");
     }
@@ -527,12 +551,10 @@ fn device_identity(record: &EnrollmentRecord) -> Result<reqwest::Identity> {
         .decode(&record.private_key_pkcs8)
         .context("decode enrollment private key")?;
     let key = KeyPair::try_from(private_key.as_slice()).context("parse enrollment private key")?;
-    let identity_pem = format!(
-        "{}{}",
-        certificate.certificate_chain_pem,
-        key.serialize_pem()
-    );
-    Ok(reqwest::Identity::from_pem(identity_pem.as_bytes())?)
+    Ok(ClientIdentity {
+        certificate_chain_pem: certificate.certificate_chain_pem.clone(),
+        private_key_pem: key.serialize_pem(),
+    })
 }
 
 pub fn delete_enrollment_for(

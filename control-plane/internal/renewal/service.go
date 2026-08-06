@@ -162,7 +162,11 @@ func (service *Service) Reconcile(ctx context.Context, startedBefore time.Time, 
 func (service *Service) issue(ctx context.Context, principal enrollment.Principal, claim Claim) (Response, error) {
 	issued, err := service.issuer.Issue(ctx, ca.IssuanceRequest{
 		ID: claim.ID, CSRDER: claim.CSRDER, IssuedAt: claim.StartedAt,
-		Identity: ca.Identity{OrganizationID: claim.OrganizationID, DeviceID: claim.DeviceID},
+		Identity: ca.Identity{
+			OrganizationID: claim.OrganizationID,
+			UserID: claim.UserID,
+			DeviceID: claim.DeviceID,
+		},
 	})
 	if err != nil {
 		return Response{}, errors.Join(ErrIssuanceFailed, err)

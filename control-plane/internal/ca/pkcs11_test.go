@@ -69,7 +69,7 @@ func TestPKCS11SignerIssuesAuthorityControlledCertificate(t *testing.T) {
 	}
 	request := IssuanceRequest{
 		ID: "pkcs11-issuance", CSRDER: csrDER, IssuedAt: now,
-		Identity: Identity{OrganizationID: "organization", DeviceID: "device"},
+		Identity: Identity{OrganizationID: "organization", UserID: "user", DeviceID: "device"},
 	}
 	first, err := issuer.Issue(t.Context(), request)
 	if err != nil {
@@ -90,7 +90,7 @@ func TestPKCS11SignerIssuesAuthorityControlledCertificate(t *testing.T) {
 	if err := leaf.CheckSignatureFrom(certificate); err != nil {
 		t.Fatalf("leaf was not signed by PKCS11 CA: %v", err)
 	}
-	if len(leaf.URIs) != 1 || leaf.URIs[0].String() != "spiffe://devices.example/organization/organization/device/device" {
+	if len(leaf.URIs) != 1 || leaf.URIs[0].String() != "spiffe://devices.example/ns/organization/sa/user.user.device.device" {
 		t.Fatalf("leaf URI = %v", leaf.URIs)
 	}
 }

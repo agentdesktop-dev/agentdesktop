@@ -7,6 +7,7 @@ import (
 
 type Identity struct {
 	OrganizationID string
+	UserID         string
 	DeviceID       string
 }
 

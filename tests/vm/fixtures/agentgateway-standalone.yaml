@@ -2,18 +2,6 @@
 config:
   readinessAddr: 127.0.0.1:15021
 
-llm:
-  port: 4000
-  models:
-  - name: "*"
-    provider: anthropic
-    authorization:
-      rules:
-      - 'request.headers["x-api-key"] == "local-gateway-placeholder"'
-    params:
-      apiKey: mock-provider-key
-      baseUrl: http://host.test:8000/v1
-
 binds:
 - port: 15008
   tunnelProtocol: connect
@@ -25,6 +13,27 @@ binds:
       policies:
         directResponse:
           status: 405
+- port: 4000
+  mode: internal
+  listeners:
+  - name: native-llm
+    protocol: HTTP
+    routes:
+    - policies:
+        authorization:
+          rules:
+          - 'source.connectHeaders["x-agentdesktop-token"] == "${AGENTDESKTOP_CAPTURE_TOKEN}"'
+      backends:
+      - ai:
+          groups:
+          - providers:
+            - name: anthropic
+              hostOverride: host.test:8000
+              provider:
+                anthropic: {}
+              policies:
+                backendAuth:
+                  key: mock-provider-key
 - port: 443
   mode: internal
   listeners:

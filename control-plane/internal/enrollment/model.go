@@ -20,6 +20,7 @@ type Issuance struct {
 	EnrollmentID         string
 	OrganizationID       string
 	OrganizationIssuer   string
+	UserID               string
 	DeviceID             string
 	CSRDER               []byte
 	PublicKeyFingerprint string

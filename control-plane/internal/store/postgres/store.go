@@ -139,8 +139,9 @@ func (store *Store) BeginIssuance(
 		UPDATE enrollments
 		SET status = 'issuing', device_id = $1, updated_at = now()
 		WHERE id = $2 AND organization_id = $3 AND status = 'pending'
-		RETURNING csr_der, public_key_fingerprint, updated_at
+		RETURNING user_id, csr_der, public_key_fingerprint, updated_at
 	`, deviceID, enrollmentID, organizationID).Scan(
+		&issuance.UserID,
 		&issuance.CSRDER,
 		&issuance.PublicKeyFingerprint,
 		&issuance.StartedAt,
@@ -274,7 +275,7 @@ func (store *Store) Begin(
 	createdAt := time.Now().UTC()
 	claim := renewal.Claim{
 		ID: renewalID, OrganizationID: organizationID, OrganizationIssuer: principal.Issuer,
-		DeviceID: device.DeviceID, CSRDER: request.DER,
+		UserID: userID, DeviceID: device.DeviceID, CSRDER: request.DER,
 		PublicKeyFingerprint: request.PublicKeyFingerprint, StartedAt: createdAt,
 	}
 	var insertedID string
@@ -515,10 +516,10 @@ func (store *Store) BeginRecovery(
 	claim := renewal.Claim{OrganizationID: organizationID, OrganizationIssuer: principal.Issuer}
 	var certificateSerial *string
 	err = transaction.QueryRow(ctx, `
-		SELECT id, device_id, csr_der, public_key_fingerprint, created_at, certificate_serial_number
+		SELECT id, user_id, device_id, csr_der, public_key_fingerprint, created_at, certificate_serial_number
 		FROM certificate_renewals WHERE id = $1 AND organization_id = $2
 	`, claimID, organizationID).Scan(
-		&claim.ID, &claim.DeviceID, &claim.CSRDER, &claim.PublicKeyFingerprint,
+		&claim.ID, &claim.UserID, &claim.DeviceID, &claim.CSRDER, &claim.PublicKeyFingerprint,
 		&claim.StartedAt, &certificateSerial,
 	)
 	if err != nil {
@@ -649,7 +650,7 @@ func (store *Store) ListIssuingRenewals(
 ) ([]renewal.Claim, error) {
 	rows, err := store.pool.Query(ctx, `
 		SELECT renewals.id, renewals.organization_id, organizations.issuer,
-		       renewals.device_id, renewals.csr_der,
+		       renewals.user_id, renewals.device_id, renewals.csr_der,
 		       renewals.public_key_fingerprint, renewals.created_at
 		FROM certificate_renewals AS renewals
 		JOIN organizations ON organizations.id = renewals.organization_id
@@ -668,7 +669,7 @@ func (store *Store) ListIssuingRenewals(
 		var claim renewal.Claim
 		if err := rows.Scan(
 			&claim.ID, &claim.OrganizationID, &claim.OrganizationIssuer,
-			&claim.DeviceID, &claim.CSRDER, &claim.PublicKeyFingerprint, &claim.StartedAt,
+			&claim.UserID, &claim.DeviceID, &claim.CSRDER, &claim.PublicKeyFingerprint, &claim.StartedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -684,7 +685,7 @@ func (store *Store) ListIssuing(
 ) ([]enrollment.Issuance, error) {
 	rows, err := store.pool.Query(ctx, `
 		SELECT enrollments.id, enrollments.organization_id, organizations.issuer,
-		       enrollments.device_id, enrollments.csr_der,
+		       enrollments.user_id, enrollments.device_id, enrollments.csr_der,
 		       enrollments.public_key_fingerprint, enrollments.updated_at
 		FROM enrollments
 		JOIN organizations ON organizations.id = enrollments.organization_id
@@ -703,6 +704,7 @@ func (store *Store) ListIssuing(
 			&issuance.EnrollmentID,
 			&issuance.OrganizationID,
 			&issuance.OrganizationIssuer,
+			&issuance.UserID,
 			&issuance.DeviceID,
 			&issuance.CSRDER,
 			&issuance.PublicKeyFingerprint,

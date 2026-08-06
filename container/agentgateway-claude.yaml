@@ -2,14 +2,22 @@
 config:
   readinessAddr: 0.0.0.0:15021
 
-llm:
-  port: 4000
-  models:
-  - name: "*"
-    provider: anthropic
-    authorization:
-      rules:
-      - 'request.headers["x-api-key"] == "local-gateway-placeholder"'
-    params:
-      apiKey: mock-provider-key
-      baseUrl: http://anthropic-mock:8000/v1
+binds:
+- port: 15008
+  tunnelProtocol: connect
+  listeners:
+  - name: local-connect
+    protocol: HTTP
+    routes: []
+- port: 4000
+  mode: internal
+  listeners:
+  - name: native-llm
+    protocol: HTTP
+    routes:
+    - policies:
+        authorization:
+          rules:
+          - 'source.connectHeaders["x-agentdesktop-token"] == "${AGENTDESKTOP_CAPTURE_TOKEN}" && request.headers["x-api-key"] == "local-gateway-placeholder"'
+      backends:
+      - host: anthropic-mock:8000

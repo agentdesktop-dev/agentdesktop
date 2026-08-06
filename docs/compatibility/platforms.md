@@ -17,7 +17,7 @@ Last updated: 2026-08-03
 | Transactional bundle installer | Supported | Build not validated | Build not validated |
 | User service integration | Generated systemd unit | Unavailable | Unavailable |
 
-The local `/_agentdesktop/status` response exposes the current binary's capability flags. The Linux `agentdesktop launch` command owns a gated transient systemd user scope and validates its exact cgroup before release, but does not yet provide network capture or sandbox isolation. Native HTTP forwarding is unprivileged. Transparent capture and trust installation remain false until their platform implementations satisfy process identity, fail-closed routing, scoped removal, and privileged integration tests.
+The local `/_agentdesktop/status` response exposes the current binary's capability flags. The Linux `agentdesktop launch` command owns a gated transient systemd user scope and validates its exact cgroup before release, but does not yet provide sandbox isolation. Native opaque forwarding is unprivileged. Transparent capture and trust installation remain false until their platform implementations satisfy process identity, fail-closed routing, scoped removal, and privileged integration tests.
 
 ## Required validation environments
 

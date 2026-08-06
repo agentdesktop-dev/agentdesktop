@@ -4,22 +4,10 @@ set -euo pipefail
 readonly root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly connector_container="agentdesktop"
 readonly claude_image="localhost/agentdesktop-claude:2.1.212"
-readonly path="${1:-connector}"
 
 source "$root_dir/scripts/container-engine.sh"
 
-case "$path" in
-  connector)
-    base_url=http://127.0.0.1:8080
-    ;;
-  native)
-    base_url=http://127.0.0.1:4000
-    ;;
-  *)
-    echo "usage: $0 [connector|native]" >&2
-    exit 2
-    ;;
-esac
+readonly base_url=http://127.0.0.1:8080
 
 "$root_dir/scripts/container-up.sh" claude
 "$container_engine" build \

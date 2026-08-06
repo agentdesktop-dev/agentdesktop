@@ -83,6 +83,7 @@ SSL_CERT_FILE="$PWD/examples/managed-walkthrough/certs/process-ca-bundle.crt" \
 cargo run -- serve \
   --mode managed \
   --upstream https://localhost:8443 \
+  --native-target native.agentdesktop.internal:18443 \
   --identity-issuer "$OIDC_ISSUER" \
   --enrollment-url https://localhost:8090
 ```

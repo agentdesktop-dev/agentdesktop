@@ -217,6 +217,7 @@ func TestEnrollmentUsesAuthenticatedPrincipal(t *testing.T) {
 func TestRenewalRequiresOAuthAndVerifiedDeviceCertificate(t *testing.T) {
 	const (
 		organizationID = "11111111-1111-4111-8111-111111111111"
+		userID         = "33333333-3333-4333-8333-333333333333"
 		deviceID       = "22222222-2222-4222-8222-222222222222"
 		trustDomain    = "devices.example.com"
 	)
@@ -239,7 +240,7 @@ func TestRenewalRequiresOAuthAndVerifiedDeviceCertificate(t *testing.T) {
 		t.Fatalf("renewal without device certificate status = %d", response.Code)
 	}
 
-	identityURI, err := url.Parse("spiffe://" + trustDomain + "/organization/" + organizationID + "/device/" + deviceID)
+	identityURI, err := url.Parse("spiffe://" + trustDomain + "/ns/" + organizationID + "/sa/user." + userID + ".device." + deviceID)
 	if err != nil {
 		t.Fatal(err)
 	}

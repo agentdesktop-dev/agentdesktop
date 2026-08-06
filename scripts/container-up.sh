@@ -3,11 +3,9 @@ set -euo pipefail
 
 readonly root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly network="agentdesktop-smoke"
-readonly gateway_container="agentdesktop-gateway"
 readonly connector_container="agentdesktop"
 readonly mock_container="agentdesktop-anthropic-mock"
 readonly connector_image="localhost/agentdesktop:dev"
-readonly gateway_image="${AGENTGATEWAY_IMAGE:-ghcr.io/agentgateway/agentgateway:latest}"
 readonly mock_image="localhost/agentdesktop-anthropic-mock:dev"
 readonly mode="${1:-smoke}"
 
@@ -48,47 +46,25 @@ if [[ "$mode" == "claude" ]]; then
     --network "$network" \
     --network-alias anthropic-mock \
     "$mock_image" >/dev/null
-
-  "$container_engine" run --detach \
-    --name "$connector_container" \
-    --network "$network" \
-    --env AGENTDESKTOP_MODE=standalone \
-    --env AGENTDESKTOP_LISTEN=127.0.0.1:8080 \
-    --env AGENTDESKTOP_UPSTREAM=http://127.0.0.1:4000 \
-    "$connector_image" serve >/dev/null
 fi
 
-gateway_args=(
+connector_args=(
   run --detach
-  --name "$gateway_container"
+  --name "$connector_container"
+  --network "$network"
   --volume "$root_dir/container/$gateway_config:/etc/agentgateway/config.yaml:ro,Z"
+  --env AGENTDESKTOP_MODE=standalone
+  --env AGENTDESKTOP_LISTEN=127.0.0.1:8080
+  --env AGENTDESKTOP_UPSTREAM=http://127.0.0.1:15008
+  --env AGENTDESKTOP_NATIVE_TARGET=native.agentdesktop.internal:4000
 )
-if [[ "$mode" == "claude" ]]; then
-  gateway_args+=(--network "container:$connector_container")
-else
-  gateway_args+=(--network "$network" --network-alias agentgateway)
-fi
 if [[ "$mode" == "anthropic" ]]; then
-  gateway_args+=(--env ANTHROPIC_API_KEY)
+  connector_args+=(--env ANTHROPIC_API_KEY)
 fi
-gateway_args+=("$gateway_image" -f /etc/agentgateway/config.yaml)
-"$container_engine" "${gateway_args[@]}" >/dev/null
+connector_args+=("$connector_image" serve --gateway-binary /usr/local/bin/agentgateway --gateway-config /etc/agentgateway/config.yaml)
+"$container_engine" "${connector_args[@]}" >/dev/null
 
-if [[ "$mode" != "claude" ]]; then
-  "$container_engine" run --detach \
-    --name "$connector_container" \
-    --network "$network" \
-    --env AGENTDESKTOP_MODE=managed \
-    --env AGENTDESKTOP_LISTEN=127.0.0.1:8080 \
-    --env AGENTDESKTOP_UPSTREAM=http://agentgateway:4000 \
-    "$connector_image" serve >/dev/null
-fi
-
-if [[ "$mode" == "claude" ]]; then
-  readiness_url=http://127.0.0.1:15021/healthz/ready
-else
-  readiness_url=http://agentgateway:15021/healthz/ready
-fi
+readiness_url=http://127.0.0.1:15021/healthz/ready
 
 if "$container_engine" exec "$connector_container" \
   curl --fail --silent --output /dev/null \
@@ -103,9 +79,6 @@ Run the smoke request:
 
 Run the real Claude Code smoke path:
   ./scripts/container-claude-smoke.sh
-
-Run Claude Code directly against local Agent Gateway:
-  ./scripts/container-claude-smoke.sh native
 
 Exercise Agent Gateway policy allow and deny:
   ./scripts/container-policy-smoke.sh

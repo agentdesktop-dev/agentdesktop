@@ -9,6 +9,7 @@ import (
 
 type Identity struct {
 	OrganizationID string
+	UserID         string
 	DeviceID       string
 	SerialNumber   string
 }
@@ -28,17 +29,21 @@ func FromRequest(request *http.Request, trustDomain string) (Identity, error) {
 		return Identity{}, errors.New("client certificate identity is outside the configured trust domain")
 	}
 	segments := strings.Split(strings.TrimPrefix(identityURI.EscapedPath(), "/"), "/")
-	if len(segments) != 4 || segments[0] != "organization" || segments[2] != "device" {
+	if len(segments) != 4 || segments[0] != "ns" || segments[2] != "sa" {
 		return Identity{}, errors.New("client certificate identity path is invalid")
 	}
 	organizationID, organizationErr := url.PathUnescape(segments[1])
-	deviceID, deviceErr := url.PathUnescape(segments[3])
-	if organizationErr != nil || deviceErr != nil || !validUUID(organizationID) || !validUUID(deviceID) {
+	serviceAccount, serviceAccountErr := url.PathUnescape(segments[3])
+	identityParts := strings.Split(serviceAccount, ".")
+	if organizationErr != nil || serviceAccountErr != nil || len(identityParts) != 4 ||
+		identityParts[0] != "user" || identityParts[2] != "device" ||
+		!validUUID(organizationID) || !validUUID(identityParts[1]) || !validUUID(identityParts[3]) {
 		return Identity{}, errors.New("client certificate identity contains an invalid identifier")
 	}
 	return Identity{
 		OrganizationID: organizationID,
-		DeviceID:       deviceID,
+		UserID:         identityParts[1],
+		DeviceID:       identityParts[3],
 		SerialNumber:   strings.ToLower(leaf.SerialNumber.Text(16)),
 	}, nil
 }

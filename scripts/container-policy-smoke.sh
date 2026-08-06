@@ -35,4 +35,4 @@ denied_body="${denied_response%$'\n'*}"
 printf 'HTTP %s\n%s\n' "$denied_status" "$denied_body"
 
 [[ "$denied_status" == 403 ]]
-grep --quiet '"code":"model_authorization_denied"' <<<"$denied_body"
+grep --quiet '^authorization failed$' <<<"$denied_body"

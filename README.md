@@ -1,10 +1,10 @@
 # Agent Desktop
 
-An early, policy-free edge connector that forwards Claude Code HTTP traffic from a loopback listener to an independently running Agent Gateway.
+An early, policy-free edge connector that forwards opaque application streams from loopback listeners to Agent Gateway over HTTP/2 CONNECT.
 
 Source: [github.com/agentdesktop-dev/agentdesktop](https://github.com/agentdesktop-dev/agentdesktop)
 
-The current development build includes managed browser login and bearer-token forwarding, a Go/PostgreSQL enrollment backend, opt-in OTLP trace export, and supported standalone Linux transparent capture. Managed identity uses ordinary OAuth for users and short-lived mTLS certificates for devices. Managed transparent capture remains unavailable; the native managed path is ready for the [manual walkthrough](examples/managed-walkthrough/README.md). See [AGENTS.md](AGENTS.md) for the architecture and incremental delivery plan.
+The current development build includes browser-authenticated managed enrollment, a Go/PostgreSQL enrollment backend, certificate-authenticated managed CONNECT forwarding, opt-in OTLP lifecycle export, and supported standalone Linux transparent capture. Managed forwarding uses one short-lived mTLS certificate that binds the verified organizational user and device. Managed transparent capture remains unavailable; the native managed path is ready for the [manual walkthrough](examples/managed-walkthrough/README.md). See [AGENTS.md](AGENTS.md) for the architecture and incremental delivery plan.
 
 For a local installation, including credential ownership, file permissions, logs, retention, and removal, see [Standalone Operations](docs/deployment/standalone.md).
 
@@ -56,7 +56,7 @@ cargo run -- serve \
   --enrollment-url https://enrollment.example/
 ```
 
-The connector fails at startup if storage, the matching session, or the approved device certificate is unavailable. It renews the device certificate within six hours of expiry using a protected retry-stable draft key, persists and reloads the validated replacement, then rotates the managed upstream connection pool. Renewal failure retains the current identity and retries without direct fallback. OAuth refresh independently serializes, verifies and persists rotated tokens, and rotates the same pool generation boundary. For each request the connector replaces `X-AgentDesktop-Authorization` with its bearer token and preserves the application's `Authorization` header. Agent Gateway validates and removes the connector token, authorizes the current mTLS certificate against the control plane, and owns provider credentials.
+The connector fails at startup if storage, the matching session, or the approved device certificate is unavailable. It renews the certificate within six hours of expiry using a protected retry-stable draft key, persists and reloads the validated replacement, then rotates the managed HBONE pool. Renewal failure retains the current identity and retries without direct fallback. OAuth is used for enrollment and bounded expired-certificate recovery, not forwarding. Agent Gateway authenticates the mTLS certificate on the outer CONNECT connection, derives user and device identity from its authority-issued SPIFFE URI, and owns provider credentials.
 
 Delete only the matching local session with:
 
@@ -86,16 +86,19 @@ cargo run -- identity enroll-status \
   --gateway-origin https://gateway.example
 ```
 
-Both operations load the existing issuer/gateway-scoped session and refresh it when needed. The enrollment request submits only a signed CSR; the private key remains in protected Agent Desktop storage. Request and status responses replace the protected issuer/gateway-scoped enrollment record, and status uses its enrollment ID by default. Agent Gateway checks OAuth ownership, active device state, current certificate generation, certificate validity, and revocation on every request.
+Both operations load the existing issuer/gateway-scoped session and refresh it when needed. The enrollment request submits only a signed CSR; the private key remains in protected Agent Desktop storage. Request and status responses replace the protected issuer/gateway-scoped enrollment record, and status uses its enrollment ID by default. Agent Gateway validates the issued certificate on managed connections. Published revocation consumption remains pending, so a revoked certificate is not yet rejected before its short lifetime expires.
 
 ## Run
 
-Start Agent Gateway with a route that accepts Anthropic-compatible requests at `/v1/messages`, then run:
+Start Agent Gateway with a CONNECT listener on `127.0.0.1:15008` and a plaintext internal LLM bind on port `4000`, then let Agent Desktop supervise it:
 
 ```bash
 cargo run -- serve \
   --mode standalone \
-  --upstream http://127.0.0.1:4000
+  --upstream http://127.0.0.1:15008 \
+  --native-target native.agentdesktop.internal:4000 \
+  --gateway-binary /usr/local/bin/agentgateway \
+  --gateway-config "$HOME/.config/agentgateway/config.yaml"
 ```
 
 The connector listens on `127.0.0.1:8080` by default. Override either setting with flags:
@@ -104,7 +107,10 @@ The connector listens on `127.0.0.1:8080` by default. Override either setting wi
 cargo run -- serve \
   --mode managed \
   --listen 127.0.0.1:8081 \
-  --upstream https://agentgateway.example.internal
+  --status-listen 127.0.0.1:8082 \
+  --upstream https://agentgateway.example.internal \
+  --identity-issuer https://identity.example/ \
+  --enrollment-url https://enrollment.example/
 ```
 
 Or use environment variables:
@@ -112,19 +118,22 @@ Or use environment variables:
 ```bash
 export AGENTDESKTOP_MODE=managed
 export AGENTDESKTOP_LISTEN=127.0.0.1:8081
+export AGENTDESKTOP_STATUS_LISTEN=127.0.0.1:8082
 export AGENTDESKTOP_UPSTREAM=https://agentgateway.example.internal
+export AGENTDESKTOP_IDENTITY_ISSUER=https://identity.example/
+export AGENTDESKTOP_ENROLLMENT_URL=https://enrollment.example/
 cargo run -- serve
 ```
 
-The deployment mode is required. `standalone` accepts only a local Agent Gateway at `localhost` or a loopback IP; `managed` permits a remote upstream. The listen address must always be loopback. The upstream URL must use HTTP or HTTPS and may contain a path prefix, but not a query string or fragment.
+The deployment mode is required. `standalone` requires a connector-owned local Agent Gateway on loopback; `managed` requires prior enrollment and permits a remote upstream. Application and status listeners must be distinct loopback addresses. The upstream URL must be an HTTP or HTTPS origin without credentials, path, query, or fragment.
 
-Forwarding defaults to a 5-second connection timeout, 30-second response-header timeout, 10-second graceful-shutdown deadline, and 128 in-flight requests. Override them with `--connect-timeout-ms`, `--request-timeout-ms`, `--shutdown-timeout-ms`, and `--max-in-flight`. Concurrency permits remain held until streamed response bodies finish or are dropped. Overload returns `503` with `x-agentdesktop-error: overloaded`; an upstream response-header timeout returns `504` with `x-agentdesktop-error: upstream-timeout`.
+Forwarding defaults to a 5-second tunnel-establishment timeout, 10-second graceful-shutdown deadline, and 128 concurrent tunnels. Override them with `--connect-timeout-ms`, `--shutdown-timeout-ms`, and `--max-in-flight`. The connector holds a concurrency permit for each complete byte stream. When overloaded it closes newly accepted connections without bypassing Agent Gateway.
 
 The connector does not retry forwarded requests. In particular, non-idempotent and streaming requests are never replayed after an upstream disconnect.
 
-The connector emits JSON structured logs to standard error. Runtime events use fixed event and reason values and omit upstream URLs, paths, queries, request and response bodies, and authorization headers. Valid W3C `traceparent` and `tracestate` headers are propagated to Agent Gateway; when `traceparent` is absent or malformed, the connector generates a new context and removes untrusted `tracestate`. The active `traceparent` is returned on success and stable local error responses.
+The connector emits JSON structured logs to standard error. Runtime events use fixed event and reason values and omit destinations, request and response bytes, and authentication material. Native and captured application streams are forwarded opaquely; Agent Desktop does not parse, rewrite, or inject HTTP headers.
 
-Set `OTEL_EXPORTER_OTLP_ENDPOINT` to an HTTP(S) OTLP/gRPC collector endpoint, such as `http://127.0.0.1:4317`, to export forwarding spans. Export uses the OpenTelemetry SDK's bounded batch processor, shares the propagated W3C trace ID with Agent Gateway, and flushes on orderly connector shutdown. Spans contain fixed service metadata, deployment mode, and response status only; they omit URLs, process details, identities, headers, and application content. When the variable is absent, no exporter or background export task is created. Metric export and automated collector-correlation coverage are not implemented yet.
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` to an HTTP(S) OTLP/gRPC collector endpoint, such as `http://127.0.0.1:4317`, to export connector lifecycle telemetry. Application-level trace propagation belongs to Agent Gateway because the connector does not inspect tunneled traffic. Metric export and automated collector-correlation coverage are not implemented yet.
 
 ## Configure Claude Code
 
@@ -169,17 +178,18 @@ In standalone mode, the connector can optionally own the lifecycle of a separate
 ```bash
 cargo run -- serve \
   --mode standalone \
-  --upstream http://127.0.0.1:4000 \
+  --upstream http://127.0.0.1:15008 \
+  --native-target native.agentdesktop.internal:4000 \
   --gateway-binary /usr/local/bin/agentgateway \
   --gateway-config "$HOME/.config/agentgateway/config.yaml"
 ```
 
 The binary and config options must be provided together. The connector starts `agentgateway -f <config>`, waits up to 10 seconds for its configured loopback upstream to accept TCP connections, and only then opens the application listener. It stops Agent Gateway during connector shutdown and exits if the local process exits unexpectedly. Agent Gateway remains a separate process and retains ownership of policy and provider credentials.
 
-Query connector and gateway reachability on the same loopback listener:
+Query connector and gateway reachability on the separate status listener:
 
 ```bash
-curl http://127.0.0.1:8080/_agentdesktop/healthz
+curl http://127.0.0.1:8081/_agentdesktop/healthz
 ```
 
 A reachable gateway returns `200 OK`:
@@ -193,10 +203,10 @@ An unreachable gateway returns `503 Service Unavailable` with `status` set to `d
 Read the local operational status API:
 
 ```bash
-curl http://127.0.0.1:8080/_agentdesktop/status
+curl http://127.0.0.1:8081/_agentdesktop/status
 ```
 
-The response contains connector version, deployment mode, gateway reachability, identity readiness, active/maximum forwarding count, configured timeout values, and fixed counters for request attempts, upstream responses, identity failures, overload rejections, upstream timeouts, and upstream failures. Counters have no request-, destination-, process-, or identity-derived labels. The API does not expose gateway addresses, identity claims, credentials, application traffic, or policy. This API is the backend for a future local UI and telemetry exporter; no graphical UI is implemented yet.
+The response contains connector version, deployment mode, gateway reachability, identity readiness, and fixed platform capability flags. It does not expose gateway addresses, identity claims, credentials, application traffic, or policy.
 
 ## Install a standalone bundle
 
@@ -381,13 +391,7 @@ This exercises the complete manual path without a provider credential:
 Claude Code -> connector loopback listener -> Agent Gateway -> mock Anthropic API
 ```
 
-In this mode, the connector and Agent Gateway share a container network namespace. The connector runs in `standalone` mode and reaches Agent Gateway at `127.0.0.1:4000`; Agent Gateway remains a separate container and process. The mock supports Anthropic streaming messages, non-streaming messages, and token counting. The environment remains running for inspection; stop it with `./scripts/container-down.sh`.
-
-Gateway-aware applications can bypass the connector and use the native local Agent Gateway path. Exercise that path with the same real Claude Code client:
-
-```bash
-./scripts/container-claude-smoke.sh native
-```
+In this mode, Agent Desktop runs Agent Gateway as a separate supervised process in the same container. The connector sends opaque Claude streams over HTTP/2 CONNECT at `127.0.0.1:15008` to a socketless internal LLM bind. The mock supports Anthropic streaming messages, non-streaming messages, and token counting. The environment remains running for inspection; stop it with `./scripts/container-down.sh`.
 
 The standalone smoke configuration also contains an Agent Gateway authorization rule requiring the local placeholder credential. Display one allowed response and one native Agent Gateway `403` denial through the connector:
 
@@ -399,7 +403,7 @@ The connector does not evaluate this rule or rewrite either response. Users own 
 
 ## Host Claude Code smoke test
 
-In standalone forwarding, Agent Desktop preserves Claude's end-to-end application authentication headers while removing hop-by-hop headers required by HTTP proxy semantics. Configure Agent Gateway to accept the chosen placeholder or gateway credential and to provide the real Anthropic credential upstream.
+In standalone forwarding, Agent Desktop preserves Claude's complete byte stream. Configure Agent Gateway to validate the chosen placeholder or gateway credential and provide the real Anthropic credential upstream.
 
 With Agent Gateway and the connector running directly on the host:
 

@@ -332,7 +332,7 @@ fn standalone_systemd_unit(
         ""
     };
     format!(
-        "[Unit]\nDescription=Agent Desktop\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={connector} serve --mode standalone --upstream http://127.0.0.1:4000 --gateway-binary {agentgateway} --gateway-config {config}{capture}\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=read-only\n\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription=Agent Desktop\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={connector} serve --mode standalone --upstream http://127.0.0.1:15008 --native-target native.agentdesktop.internal:4000 --gateway-binary {agentgateway} --gateway-config {config}{capture}\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=read-only\n\n[Install]\nWantedBy=default.target\n"
     )
 }
 

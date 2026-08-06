@@ -46,7 +46,7 @@ const CLAUDE_PROFILE: Profile = Profile {
     preflight: Some(Preflight {
         address: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080)),
         request:
-            b"GET /_agentdesktop/healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            b"GET /_agentdesktop/healthz HTTP/1.1\r\nHost: 127.0.0.1:8081\r\nConnection: close\r\n\r\n",
     }),
     transparent_capture: true,
 };
@@ -650,7 +650,7 @@ mod tests {
         (
             Preflight {
                 address,
-                request: b"GET /_agentdesktop/healthz HTTP/1.1\r\n\r\n",
+                request: b"GET /_agentdesktop/healthz HTTP/1.1\r\nHost: 127.0.0.1:8081\r\n\r\n",
             },
             server,
         )

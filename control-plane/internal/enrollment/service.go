@@ -152,6 +152,7 @@ func (service *Service) issue(
 		IssuedAt: issuance.StartedAt,
 		Identity: ca.Identity{
 			OrganizationID: issuance.OrganizationID,
+			UserID:         issuance.UserID,
 			DeviceID:       issuance.DeviceID,
 		},
 	})

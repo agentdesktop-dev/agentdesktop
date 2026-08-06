@@ -68,10 +68,13 @@ Environment variables can be visible to the process owner and privileged diagnos
 
 ## Local endpoints
 
-Run both application-facing endpoints on loopback:
+Run connector endpoints and the Gateway tunnel listener on loopback:
 
-- Agent Gateway native path: `127.0.0.1:4000` by default.
-- Connector-assisted path: `127.0.0.1:8080` by default.
+- Connector application path: `127.0.0.1:8080` by default.
+- Connector status path: `127.0.0.1:8081` by default.
+- Agent Gateway CONNECT path: `127.0.0.1:15008` in the example configuration.
+
+The Agent Gateway LLM bind on port `4000` is internal-only and does not open an OS socket.
 
 Standalone connector validation rejects a non-loopback Agent Gateway upstream and always rejects a non-loopback connector listener. Configure Agent Gateway's listener and administrative or readiness endpoints as local-only for a host installation. Container-only examples may bind readiness endpoints more broadly inside an isolated container network; do not copy that exposure to a host without an explicit access-control decision.
 
@@ -95,13 +98,14 @@ Do not configure the same application for both a native route and future transpa
 
 ## Process lifecycle
 
-Agent Gateway may be started independently, or the connector may supervise a separately installed executable:
+The connector supervises a separately installed Agent Gateway executable in standalone mode:
 
 ```bash
 agentdesktop \
   serve \
   --mode standalone \
-  --upstream http://127.0.0.1:4000 \
+  --upstream http://127.0.0.1:15008 \
+  --native-target native.agentdesktop.internal:4000 \
   --gateway-binary /usr/local/bin/agentgateway \
   --gateway-config "$HOME/.config/agentgateway/config.yaml"
 ```
@@ -122,7 +126,7 @@ Enable validates the complete bundle integrity manifest before asking `systemctl
 Check connector and upstream reachability with:
 
 ```bash
-curl --fail http://127.0.0.1:8080/_agentdesktop/healthz
+curl --fail http://127.0.0.1:8081/_agentdesktop/healthz
 ```
 
 This health endpoint checks TCP reachability. It does not verify provider credentials, policy correctness, or provider availability.

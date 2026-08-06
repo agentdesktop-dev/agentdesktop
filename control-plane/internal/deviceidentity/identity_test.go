@@ -11,23 +11,24 @@ import (
 
 const (
 	organizationID = "11111111-1111-4111-8111-111111111111"
+	userID         = "33333333-3333-4333-8333-333333333333"
 	deviceID       = "22222222-2222-4222-8222-222222222222"
 	trustDomain    = "devices.example.com"
 )
 
 func TestFromRequestExtractsVerifiedSPIFFEIdentity(t *testing.T) {
-	request := verifiedRequest(t, "spiffe://"+trustDomain+"/organization/"+organizationID+"/device/"+deviceID)
+	request := verifiedRequest(t, "spiffe://"+trustDomain+"/ns/"+organizationID+"/sa/user."+userID+".device."+deviceID)
 	identity, err := FromRequest(request, trustDomain)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if identity.OrganizationID != organizationID || identity.DeviceID != deviceID || identity.SerialNumber != "2a" {
+	if identity.OrganizationID != organizationID || identity.UserID != userID || identity.DeviceID != deviceID || identity.SerialNumber != "2a" {
 		t.Fatalf("identity = %#v", identity)
 	}
 }
 
 func TestFromRequestRejectsUnverifiedOrAmbiguousIdentity(t *testing.T) {
-	identityURI, err := url.Parse("spiffe://" + trustDomain + "/organization/" + organizationID + "/device/" + deviceID)
+	identityURI, err := url.Parse("spiffe://" + trustDomain + "/ns/" + organizationID + "/sa/user." + userID + ".device." + deviceID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,11 +45,11 @@ func TestFromRequestRejectsUnverifiedOrAmbiguousIdentity(t *testing.T) {
 }
 
 func TestFromRequestRejectsWrongDomainAndMalformedIdentifiers(t *testing.T) {
-	request := verifiedRequest(t, "spiffe://other.example.com/organization/"+organizationID+"/device/"+deviceID)
+	request := verifiedRequest(t, "spiffe://other.example.com/ns/"+organizationID+"/sa/user."+userID+".device."+deviceID)
 	if _, err := FromRequest(request, trustDomain); err == nil {
 		t.Fatal("foreign trust domain was accepted")
 	}
-	request = verifiedRequest(t, "spiffe://"+trustDomain+"/organization/not-a-uuid/device/"+deviceID)
+	request = verifiedRequest(t, "spiffe://"+trustDomain+"/ns/not-a-uuid/sa/user."+userID+".device."+deviceID)
 	if _, err := FromRequest(request, trustDomain); err == nil {
 		t.Fatal("malformed organization identifier was accepted")
 	}

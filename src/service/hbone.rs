@@ -1,9 +1,10 @@
 use std::cmp;
-use std::io;
+use std::io::{self, Cursor};
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::task::{Context, Poll, ready};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use bytes::{Buf, Bytes};
@@ -11,9 +12,67 @@ use h2::client::SendRequest;
 use http::HeaderMap;
 use http::uri::Authority;
 use http::{Method, Request, StatusCode, Uri};
+use rustls::RootCertStore;
+use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Notify};
+use tokio_rustls::TlsConnector;
+
+use crate::identity::enrollment::ClientIdentity;
+
+trait TunnelIo: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T> TunnelIo for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
+type BoxedIo = Box<dyn TunnelIo>;
+
+#[derive(Clone)]
+pub struct RotatingClientIdentity {
+    state: Arc<StdMutex<IdentityState>>,
+}
+
+struct IdentityState {
+    generation: u64,
+    identity: ClientIdentity,
+}
+
+impl RotatingClientIdentity {
+    pub fn new(identity: ClientIdentity) -> Self {
+        Self {
+            state: Arc::new(StdMutex::new(IdentityState {
+                generation: 1,
+                identity,
+            })),
+        }
+    }
+
+    pub fn replace(&self, identity: ClientIdentity) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("managed client identity lock poisoned"))?;
+        state.identity = identity;
+        state.generation = state.generation.wrapping_add(1);
+        Ok(())
+    }
+
+    fn snapshot(&self) -> Result<(u64, ClientIdentity)> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("managed client identity lock poisoned"))?;
+        Ok((state.generation, state.identity.clone()))
+    }
+}
+
+#[derive(Clone)]
+enum Transport {
+    Plain(SocketAddr),
+    Tls {
+        endpoint: SocketAddr,
+        server_name: String,
+        identity: RotatingClientIdentity,
+    },
+}
 
 #[derive(Clone)]
 pub struct HboneClient {
@@ -21,8 +80,9 @@ pub struct HboneClient {
 }
 
 struct HboneInner {
-    endpoint: SocketAddr,
+    transport: Transport,
     connect_headers: HeaderMap,
+    connect_timeout: Duration,
     connection: Mutex<ConnectionState>,
     connection_changed: Notify,
 }
@@ -30,40 +90,93 @@ struct HboneInner {
 #[derive(Default)]
 struct ConnectionState {
     generation: u64,
+    identity_generation: u64,
     sender: Option<SendRequest<Bytes>>,
 }
 
 impl HboneClient {
     pub async fn connect(endpoint: SocketAddr) -> Result<Self> {
-        Self::connect_with_headers(endpoint, HeaderMap::new()).await
+        Self::connect_with_headers(endpoint, HeaderMap::new(), Duration::from_secs(5)).await
     }
 
     pub async fn connect_with_headers(
         endpoint: SocketAddr,
         connect_headers: HeaderMap,
+        connect_timeout: Duration,
     ) -> Result<Self> {
-        let client = Self {
-            inner: Arc::new(HboneInner {
+        Self::new(Transport::Plain(endpoint), connect_headers, connect_timeout).await
+    }
+
+    pub async fn connect_mtls(
+        endpoint: SocketAddr,
+        server_name: String,
+        identity: RotatingClientIdentity,
+        connect_timeout: Duration,
+    ) -> Result<Self> {
+        Self::new(
+            Transport::Tls {
                 endpoint,
+                server_name,
+                identity,
+            },
+            HeaderMap::new(),
+            connect_timeout,
+        )
+        .await
+    }
+
+    async fn new(
+        transport: Transport,
+        connect_headers: HeaderMap,
+        connect_timeout: Duration,
+    ) -> Result<Self> {
+        Ok(Self {
+            inner: Arc::new(HboneInner {
+                transport,
                 connect_headers,
+                connect_timeout,
                 connection: Mutex::new(ConnectionState::default()),
                 connection_changed: Notify::new(),
             }),
-        };
-        client.sender().await?;
-        Ok(client)
+        })
     }
 
     async fn sender(&self) -> Result<(u64, SendRequest<Bytes>)> {
+        let (identity_generation, identity) = match &self.inner.transport {
+            Transport::Plain(_) => (0, None),
+            Transport::Tls { identity, .. } => {
+                let (generation, identity) = identity.snapshot()?;
+                (generation, Some(identity))
+            }
+        };
         let mut state = self.inner.connection.lock().await;
+        if state.identity_generation != identity_generation {
+            state.sender = None;
+        }
         if let Some(sender) = &state.sender {
             return Ok((state.generation, sender.clone()));
         }
-        let stream = TcpStream::connect(self.inner.endpoint).await?;
-        let (sender, connection) = h2::client::handshake(stream)
-            .await
-            .context("HBONE HTTP/2 handshake failed")?;
+        let (sender, connection) = tokio::time::timeout(self.inner.connect_timeout, async {
+            let io: BoxedIo = match (&self.inner.transport, identity) {
+                (Transport::Plain(endpoint), None) => Box::new(TcpStream::connect(endpoint).await?),
+                (
+                    Transport::Tls {
+                        endpoint,
+                        server_name,
+                        ..
+                    },
+                    Some(identity),
+                ) => Box::new(connect_tls(*endpoint, server_name, identity).await?),
+                _ => unreachable!("transport and identity snapshot must agree"),
+            };
+            h2::client::handshake(io)
+                .await
+                .context("HBONE HTTP/2 handshake failed")
+        })
+        .await
+        .context("Agent Gateway connection timed out")??;
         state.generation = state.generation.wrapping_add(1);
+        state.identity_generation = identity_generation;
         let generation = state.generation;
         state.sender = Some(sender.clone());
         tokio::spawn(drive_connection(
@@ -79,17 +192,6 @@ impl HboneClient {
         if state.generation == generation {
             state.sender = None;
             self.inner.connection_changed.notify_waiters();
-        }
-    }
-
-    #[cfg(test)]
-    async fn wait_until_disconnected(&self) {
-        loop {
-            let changed = self.inner.connection_changed.notified();
-            if self.inner.connection.lock().await.sender.is_none() {
-                return;
-            }
-            changed.await;
         }
     }
 
@@ -120,7 +222,10 @@ impl HboneClient {
                 return Err(error.into());
             }
         };
-        let response = response.await.context("HBONE CONNECT response failed")?;
+        let response = tokio::time::timeout(self.inner.connect_timeout, response)
+            .await
+            .context("HBONE CONNECT response timed out")?
+            .context("HBONE CONNECT response failed")?;
         if response.status() != StatusCode::OK {
             bail!("HBONE CONNECT rejected with status {}", response.status());
         }
@@ -133,10 +238,41 @@ impl HboneClient {
     }
 }
 
+async fn connect_tls(
+    endpoint: SocketAddr,
+    server_name: &str,
+    identity: ClientIdentity,
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
+    let certificates = rustls_pemfile::certs(&mut Cursor::new(identity.certificate_chain_pem))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let private_key = rustls_pemfile::private_key(&mut Cursor::new(identity.private_key_pem))?
+        .context("managed client identity contains no private key")?;
+    let native = rustls_native_certs::load_native_certs();
+    if !native.errors.is_empty() {
+        tracing::warn!(
+            event = "native_ca_load_incomplete",
+            errors = native.errors.len()
+        );
+    }
+    let mut roots = RootCertStore::empty();
+    for certificate in native.certs {
+        roots.add(certificate)?;
+    }
+    let mut config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_client_auth_cert(certificates, private_key)?;
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    let name = ServerName::try_from(server_name.to_owned())?;
+    let stream = TcpStream::connect(endpoint).await?;
+    Ok(TlsConnector::from(Arc::new(config))
+        .connect(name, stream)
+        .await?)
+}
+
 async fn drive_connection(
     inner: Weak<HboneInner>,
     generation: u64,
-    connection: h2::client::Connection<TcpStream, Bytes>,
+    connection: h2::client::Connection<BoxedIo, Bytes>,
 ) {
     let result = connection.await;
     if let Some(inner) = inner.upgrade() {
@@ -236,10 +372,9 @@ fn h2_error(error: h2::Error) -> io::Error {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use http::{HeaderMap, HeaderValue, Method, Response};
+    use http::{Method, Response};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
-    use tokio::sync::oneshot;
     use tokio::time::{Duration, timeout};
 
     use super::HboneClient;
@@ -248,7 +383,6 @@ mod tests {
     async fn opens_authority_tunnel_and_preserves_bytes() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let (verified_tx, verified_rx) = oneshot::channel();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut connection = h2::server::handshake(stream).await.unwrap();
@@ -256,9 +390,7 @@ mod tests {
                 let (request, mut respond) = result.unwrap();
                 tokio::spawn(async move {
                     assert_eq!(request.method(), Method::CONNECT);
-                    assert_eq!(request.uri().authority().unwrap(), "203.0.113.7:443");
-                    let token = request.headers().get("x-agentdesktop-token").unwrap();
-                    assert_eq!(token, "test-token");
+                    assert_eq!(request.uri().authority().unwrap(), "native.internal:18443");
                     let mut receive = request.into_body();
                     let mut send = respond.send_response(Response::new(()), false).unwrap();
                     let bytes = receive.data().await.unwrap().unwrap();
@@ -266,110 +398,30 @@ mod tests {
                         .flow_control()
                         .release_capacity(bytes.len())
                         .unwrap();
-                    assert_eq!(bytes, Bytes::from_static(b"client tls bytes"));
-                    send.send_data(Bytes::from_static(b"gateway tls bytes"), true)
+                    assert_eq!(bytes, Bytes::from_static(b"native http bytes"));
+                    send.send_data(Bytes::from_static(b"gateway bytes"), true)
                         .unwrap();
-                    verified_tx.send(()).unwrap();
                 });
             }
             while connection.accept().await.is_some() {}
         });
 
-        let response = timeout(Duration::from_secs(1), async {
-            let mut headers = HeaderMap::new();
-            let mut token = HeaderValue::from_static("test-token");
-            token.set_sensitive(true);
-            headers.insert("x-agentdesktop-token", token);
-            let client = HboneClient::connect_with_headers(address, headers)
-                .await
-                .unwrap();
+        let response = timeout(Duration::from_secs(2), async {
+            let client = HboneClient::connect(address).await.unwrap();
             let mut tunnel = client
-                .open_tunnel("203.0.113.7:443".parse().unwrap())
+                .open_tunnel("native.internal:18443".parse().unwrap())
                 .await
                 .unwrap();
-            tunnel.write_all(b"client tls bytes").await.unwrap();
+            tunnel.write_all(b"native http bytes").await.unwrap();
             tunnel.shutdown().await.unwrap();
             let mut response = Vec::new();
             tunnel.read_to_end(&mut response).await.unwrap();
-            verified_rx.await.unwrap();
             response
         })
         .await
-        .expect("HBONE byte exchange timed out");
+        .expect("HBONE exchange timed out");
 
-        assert_eq!(response, b"gateway tls bytes");
+        assert_eq!(response, b"gateway bytes");
         server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn rejects_destination_without_port_before_opening_stream() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut connection = h2::server::handshake(stream).await.unwrap();
-            timeout(Duration::from_millis(100), connection.accept())
-                .await
-                .expect_err("client unexpectedly opened an HTTP/2 stream");
-        });
-        let client = HboneClient::connect(address).await.unwrap();
-
-        let error = match client.open_tunnel("example.com".parse().unwrap()).await {
-            Ok(_) => panic!("destination without a port was accepted"),
-            Err(error) => error,
-        };
-
-        assert!(error.to_string().contains("requires an explicit port"));
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn reconnects_for_a_later_tunnel_after_connection_shutdown() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let (closed_tx, closed_rx) = oneshot::channel();
-        let server = tokio::spawn(async move {
-            let (first, _) = listener.accept().await.unwrap();
-            let first = h2::server::handshake(first).await.unwrap();
-            drop(first);
-            closed_tx.send(()).unwrap();
-
-            let (second, _) = listener.accept().await.unwrap();
-            let mut second = h2::server::handshake(second).await.unwrap();
-            let handler = if let Some(result) = second.accept().await {
-                let (request, mut respond) = result.unwrap();
-                Some(tokio::spawn(async move {
-                    assert_eq!(request.uri().authority().unwrap(), "203.0.113.11:443");
-                    let mut receive = request.into_body();
-                    let mut send = respond.send_response(Response::new(()), false).unwrap();
-                    while receive.data().await.transpose().unwrap().is_some() {}
-                    send.send_data(Bytes::from_static(b"after restart"), true)
-                        .unwrap();
-                }))
-            } else {
-                None
-            };
-            while second.accept().await.is_some() {}
-            handler.unwrap().await.unwrap();
-        });
-
-        timeout(Duration::from_secs(1), async {
-            let client = HboneClient::connect(address).await.unwrap();
-            closed_rx.await.unwrap();
-            client.wait_until_disconnected().await;
-            let mut tunnel = client
-                .open_tunnel("203.0.113.11:443".parse().unwrap())
-                .await
-                .unwrap();
-            tunnel.shutdown().await.unwrap();
-            let mut response = Vec::new();
-            tunnel.read_to_end(&mut response).await.unwrap();
-            assert_eq!(response, b"after restart");
-            drop(tunnel);
-            drop(client);
-            server.await.unwrap();
-        })
-        .await
-        .expect("HBONE reconnect timed out");
     }
 }

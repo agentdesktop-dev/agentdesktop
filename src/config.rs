@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use clap::{Args, ValueEnum};
+use http::uri::Authority;
 use url::Url;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -21,9 +22,25 @@ pub struct Config {
     #[arg(long, env = "AGENTDESKTOP_LISTEN", default_value = "127.0.0.1:8080")]
     pub listen: SocketAddr,
 
-    /// Base URL of the Agent Gateway upstream.
+    /// Agent Gateway CONNECT listener origin.
     #[arg(long, env = "AGENTDESKTOP_UPSTREAM")]
     pub upstream: Url,
+
+    /// Internal Agent Gateway authority used for native application traffic.
+    #[arg(
+        long,
+        env = "AGENTDESKTOP_NATIVE_TARGET",
+        default_value = "native.agentdesktop.internal:18443"
+    )]
+    pub native_target: Authority,
+
+    /// Loopback address for connector health and status endpoints.
+    #[arg(
+        long,
+        env = "AGENTDESKTOP_STATUS_LISTEN",
+        default_value = "127.0.0.1:8081"
+    )]
+    pub status_listen: SocketAddr,
 
     /// Agent Gateway executable to manage in standalone mode.
     #[arg(long, env = "AGENTDESKTOP_GATEWAY_BINARY")]
@@ -49,15 +66,7 @@ pub struct Config {
     #[arg(long, env = "AGENTDESKTOP_CONNECT_TIMEOUT_MS", default_value_t = 5_000)]
     pub connect_timeout_ms: u64,
 
-    /// Maximum time to receive upstream response headers.
-    #[arg(
-        long,
-        env = "AGENTDESKTOP_REQUEST_TIMEOUT_MS",
-        default_value_t = 30_000
-    )]
-    pub request_timeout_ms: u64,
-
-    /// Maximum time to drain requests after shutdown begins.
+    /// Maximum time to drain tunnels after shutdown begins.
     #[arg(
         long,
         env = "AGENTDESKTOP_SHUTDOWN_TIMEOUT_MS",
@@ -65,7 +74,7 @@ pub struct Config {
     )]
     pub shutdown_timeout_ms: u64,
 
-    /// Maximum number of requests forwarding or streaming concurrently.
+    /// Maximum number of concurrent tunnels.
     #[arg(long, env = "AGENTDESKTOP_MAX_IN_FLIGHT", default_value_t = 128)]
     pub max_in_flight: usize,
 
@@ -79,6 +88,18 @@ impl Config {
     pub fn validate(self) -> Result<Self> {
         if !self.listen.ip().is_loopback() {
             bail!("listen address must be loopback, got {}", self.listen);
+        }
+        if !self.status_listen.ip().is_loopback() {
+            bail!(
+                "status listen address must be loopback, got {}",
+                self.status_listen
+            );
+        }
+        if self.status_listen == self.listen {
+            bail!("status listen address must differ from the application listener");
+        }
+        if self.native_target.port_u16().is_none() {
+            bail!("native target authority requires an explicit port");
         }
 
         if !matches!(self.upstream.scheme(), "http" | "https") {
@@ -94,6 +115,9 @@ impl Config {
 
         if self.upstream.query().is_some() || self.upstream.fragment().is_some() {
             bail!("upstream URL must not contain a query string or fragment");
+        }
+        if self.upstream.path() != "/" {
+            bail!("upstream URL must be an origin without a path");
         }
 
         if self.mode == DeploymentMode::Standalone && !is_local_host(&self.upstream) {
@@ -124,10 +148,7 @@ impl Config {
         if self.identity_dir.is_some() && self.identity_issuer.is_none() {
             bail!("identity directory requires an identity issuer");
         }
-        if self.connect_timeout_ms == 0
-            || self.request_timeout_ms == 0
-            || self.shutdown_timeout_ms == 0
-            || self.max_in_flight == 0
+        if self.connect_timeout_ms == 0 || self.shutdown_timeout_ms == 0 || self.max_in_flight == 0
         {
             bail!("timeouts and max in-flight requests must be greater than zero");
         }
@@ -147,6 +168,10 @@ impl Config {
             && (self.mode != DeploymentMode::Standalone || self.gateway_binary.is_none())
         {
             bail!("transparent capture requires an owned standalone Agent Gateway");
+        }
+
+        if self.mode == DeploymentMode::Managed && self.identity_issuer.is_none() {
+            bail!("managed mode requires an identity issuer and enrollment URL");
         }
 
         Ok(self)
@@ -200,12 +225,16 @@ mod tests {
             "--listen",
             "[::1]:9000",
             "--upstream",
-            "https://gateway.example/base/",
+            "https://gateway.example/",
+            "--identity-issuer",
+            "https://identity.example/",
+            "--enrollment-url",
+            "https://enrollment.example/",
         ])
         .unwrap();
 
         assert_eq!(config.listen.to_string(), "[::1]:9000");
-        assert_eq!(config.upstream.as_str(), "https://gateway.example/base/");
+        assert_eq!(config.upstream.as_str(), "https://gateway.example/");
         assert_eq!(config.mode, DeploymentMode::Managed);
     }
 
@@ -379,7 +408,7 @@ mod tests {
             "--mode",
             "managed",
             "--upstream",
-            "https://gateway.example/base/",
+            "https://gateway.example/",
             "--identity-issuer",
             "https://identity.example/",
             "--enrollment-url",
@@ -430,7 +459,6 @@ mod tests {
     fn rejects_zero_resource_limits() {
         for argument in [
             "--connect-timeout-ms",
-            "--request-timeout-ms",
             "--shutdown-timeout-ms",
             "--max-in-flight",
         ] {

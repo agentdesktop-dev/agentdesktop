@@ -43,7 +43,12 @@ func NewX509Issuer(
 	if lifetime <= 0 || lifetime > 7*24*time.Hour {
 		return nil, errors.New("client certificate lifetime must be between zero and seven days")
 	}
-	identity, err := spiffeURI(trustDomain, "00000000-0000-0000-0000-000000000000", "00000000-0000-0000-0000-000000000000")
+	identity, err := spiffeURI(
+		trustDomain,
+		"00000000-0000-0000-0000-000000000000",
+		"00000000-0000-0000-0000-000000000000",
+		"00000000-0000-0000-0000-000000000000",
+	)
 	if err != nil || identity.Host != trustDomain {
 		return nil, errors.New("invalid SPIFFE trust domain")
 	}
@@ -130,7 +135,12 @@ func (issuer *X509Issuer) Issue(ctx context.Context, request IssuanceRequest) (C
 	if !ok || publicKey.Curve.Params().Name != "P-256" {
 		return Certificate{}, errors.New("client certificate key must use P-256")
 	}
-	identityURI, err := spiffeURI(issuer.trustDomain, request.Identity.OrganizationID, request.Identity.DeviceID)
+	identityURI, err := spiffeURI(
+		issuer.trustDomain,
+		request.Identity.OrganizationID,
+		request.Identity.UserID,
+		request.Identity.DeviceID,
+	)
 	if err != nil {
 		return Certificate{}, err
 	}
@@ -175,13 +185,15 @@ func (issuer *X509Issuer) Issue(ctx context.Context, request IssuanceRequest) (C
 	}, nil
 }
 
-func spiffeURI(trustDomain, organizationID, deviceID string) (*url.URL, error) {
+func spiffeURI(trustDomain, organizationID, userID, deviceID string) (*url.URL, error) {
 	if trustDomain == "" || strings.ContainsAny(trustDomain, "/?#@:") ||
 		organizationID == "" || strings.Contains(organizationID, "/") ||
+		userID == "" || strings.Contains(userID, "/") ||
 		deviceID == "" || strings.Contains(deviceID, "/") {
 		return nil, errors.New("invalid certificate identity")
 	}
-	return url.Parse("spiffe://" + trustDomain + "/organization/" + url.PathEscape(organizationID) + "/device/" + url.PathEscape(deviceID))
+	serviceAccount := "user." + userID + ".device." + deviceID
+	return url.Parse("spiffe://" + trustDomain + "/ns/" + url.PathEscape(organizationID) + "/sa/" + url.PathEscape(serviceAccount))
 }
 
 func parseSigner(der []byte) (crypto.Signer, error) {

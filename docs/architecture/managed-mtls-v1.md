@@ -4,7 +4,7 @@ Status: selected production direction; enrollment request persistence, administr
 
 ## Trust model
 
-Managed mode uses ordinary OAuth access tokens for organizational user identity and a short-lived client certificate for device identity. The OAuth provider does not need DPoP support. Agent Desktop generates and retains the device private key; neither the enrollment service, PostgreSQL, nor Agent Gateway receives private-key bytes.
+Managed enrollment uses ordinary OAuth access tokens to verify organizational user identity. The authority then issues one short-lived client certificate whose SPIFFE URI binds that user and the approved device. Managed forwarding authenticates only with this certificate; the OAuth provider does not need DPoP support. Agent Desktop generates and retains the private key; neither the enrollment service, PostgreSQL, nor Agent Gateway receives private-key bytes.
 
 The enrollment service validates the OAuth token against configured issuer metadata and JWKS, derives the canonical user from validated `(iss, sub)`, validates a signed P-256 CSR, and records a pending enrollment. It must ignore client-controlled CSR subject and SAN values when issuing a certificate. Administrator approval assigns the device ID, and a CA adapter issues an authority-controlled certificate that binds the approved organization and device IDs to the submitted public key.
 
@@ -28,13 +28,13 @@ The service returns `202 Accepted` with a server-generated enrollment ID, pendin
 
 The organization bootstrap supplies a distinct HTTPS `enrollment_url`; Agent Desktop does not expect an external OAuth provider to advertise connector-specific enrollment metadata. Agent Desktop generates a P-256 key, stores its PKCS#8 private key through the selected protected credential backend, and verifies that the service fingerprint matches the CSR public key. It polls with ordinary bearer authentication and accepts an approved record only when the returned leaf certificate's SubjectPublicKeyInfo exactly matches the retained private key. The private key is never printed by enrollment commands.
 
-Managed connector startup fails closed unless it can load an approved, key-matching certificate from protected storage. The reqwest/rustls upstream client presents that identity. OAuth and device credentials have independent generations on one upstream pool boundary, so rotating either rebuilds future Gateway connections without downgrading the other identity.
+Managed connector startup fails closed unless it can load an approved, key-matching certificate from protected storage. The rustls upstream client presents that identity, and certificate rotation rebuilds future Gateway connections without downgrading authentication.
 
 ## Gateway authentication
 
-Agent Gateway requires a client certificate chaining to the configured enrollment CA. It validates the chain, validity, client-auth usage, organization scope, and revocation status before constructing immutable device context. Agent Desktop replaces any caller-supplied `X-AgentDesktop-Authorization` value with the ordinary OAuth bearer token while preserving the application's `Authorization` header. Agent Gateway validates and removes that dedicated end-to-end header, then constructs user context from verified claims. The authenticated connection is isolated by organization, user, device, and certificate generation; inspected inner headers cannot override this context.
+Agent Gateway requires a client certificate chaining to the configured enrollment CA. It validates the chain, validity, client-auth usage, and authority-issued SPIFFE URI before constructing immutable organization, user, and device context. Revocation consumption remains pending. The authenticated connection is isolated by organization, user, device, and certificate generation; inner headers cannot supply or override this context.
 
-For HBONE, one mTLS HTTP/2 connection may carry multiple CONNECT streams only for that same immutable context. OAuth credentials are carried on the outer request and stripped before inner traffic, policy extensions, logs, traces, mirrors, or provider forwarding.
+For HBONE, one mTLS HTTP/2 connection may carry multiple CONNECT streams only for that same immutable context. No OAuth credential is carried on the outer request or inserted into the inner byte stream.
 
 ## Renewal and recovery
 
@@ -53,4 +53,4 @@ Approval claims a pending enrollment as `issuing` before calling the CA, prevent
 ## Remaining implementation
 
 - Add fail-closed Agent Gateway consumption of persisted device and certificate revocation state.
-- Add Agent Gateway mTLS validation and immutable outer-to-inner identity propagation.
+- Verify immutable certificate-derived outer-to-inner identity propagation for managed capture.

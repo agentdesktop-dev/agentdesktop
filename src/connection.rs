@@ -165,7 +165,7 @@ async fn wait_for_health() -> anyhow::Result<()> {
     let client = reqwest::Client::new();
     while Instant::now() < deadline {
         if client
-            .get("http://127.0.0.1:8080/_agentdesktop/healthz")
+            .get("http://127.0.0.1:8081/_agentdesktop/healthz")
             .send()
             .await
             .is_ok_and(|response| response.status().is_success())

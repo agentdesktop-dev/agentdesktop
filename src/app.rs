@@ -28,7 +28,7 @@ enum Command {
     },
     /// Relay redirected Linux TCP flows over HBONE.
     #[cfg(target_os = "linux")]
-    Capture(crate::capture::CaptureArgs),
+    Capture(crate::service::capture::CaptureArgs),
     /// Run a command tree in an Agent Desktop execution scope.
     #[cfg(target_os = "linux")]
     Launch(crate::launch::LaunchArgs),
@@ -60,7 +60,7 @@ pub async fn run() -> anyhow::Result<ExitCode> {
         #[cfg(target_os = "linux")]
         Command::Capture(args) => {
             let _telemetry = crate::telemetry::init()?;
-            crate::capture::run(args).await?;
+            crate::service::capture::run(args).await?;
             None
         }
         #[cfg(target_os = "linux")]

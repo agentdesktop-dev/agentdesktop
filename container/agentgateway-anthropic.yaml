@@ -2,12 +2,30 @@
 config:
   readinessAddr: 0.0.0.0:15021
 
-llm:
-  port: 4000
-  models:
-  - name: anthropic/*
-    provider: anthropic
-    params:
-      apiKey: $ANTHROPIC_API_KEY
-    transformation:
-      model: llmRequest.model.stripPrefix("anthropic/")
+binds:
+- port: 15008
+  tunnelProtocol: connect
+  listeners:
+  - name: local-connect
+    protocol: HTTP
+    routes: []
+- port: 4000
+  mode: internal
+  listeners:
+  - name: native-llm
+    protocol: HTTP
+    routes:
+    - policies:
+        authorization:
+          rules:
+          - 'source.connectHeaders["x-agentdesktop-token"] == "${AGENTDESKTOP_CAPTURE_TOKEN}"'
+      backends:
+      - ai:
+          groups:
+          - providers:
+            - name: anthropic
+              provider:
+                anthropic: {}
+              policies:
+                backendAuth:
+                  key: $ANTHROPIC_API_KEY
