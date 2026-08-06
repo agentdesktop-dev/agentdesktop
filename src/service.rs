@@ -1,45 +1,33 @@
 use std::net::SocketAddr;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use anyhow::{Context, bail};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
-#[cfg(target_os = "linux")]
-use crate::config::{Config, upstream_origin};
-use crate::identity::enrollment::{
-    EnrollmentClient, certificate_expired, certificate_renewal_due, load_client_identity_for,
-    load_enrollment_for,
-};
-use crate::identity::oauth::{ManagedIdentity, load_session_for};
-use crate::identity::storage::{CredentialStore, default_storage_root};
+use crate::config::Config;
 use crate::local_gateway::LocalGateway;
 
 #[cfg(target_os = "linux")]
 pub mod capture;
 mod forwarder;
 mod hbone;
+mod renewal;
 mod status;
 
-use hbone::{HboneClient, RotatingClientIdentity};
+use hbone::HboneClient;
 
 const LOCAL_GATEWAY_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
-const CERTIFICATE_RENEW_BEFORE: Duration = Duration::from_secs(6 * 60 * 60);
-const CERTIFICATE_RENEWAL_CHECK_INTERVAL: Duration = Duration::from_secs(15 * 60);
-const CERTIFICATE_RENEWAL_RETRY_INTERVAL: Duration = Duration::from_secs(60);
-
-struct RenewalContext {
-    enrollment_url: url::Url,
-    gateway_origin: url::Url,
-    identity: ManagedIdentity,
-    issuer: url::Url,
-    tunnel_identity: RotatingClientIdentity,
-    store: CredentialStore,
-}
 
 pub async fn run(config: Config) -> anyhow::Result<()> {
     let _telemetry = crate::telemetry::init()?;
-    let (identity, client_identity, renewal_context) = managed_identity(&config)?;
+    let managed_identity = renewal::load(&config)?;
+    let identity = managed_identity
+        .as_ref()
+        .map(|context| context.identity.clone());
+    let client_identity = managed_identity
+        .as_ref()
+        .map(|context| context.client_identity.clone());
     let mut local_gateway = match (&config.gateway_binary, &config.gateway_config) {
         (Some(binary), Some(gateway_config)) => {
             tracing::info!(event = "local_gateway_starting");
@@ -133,7 +121,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     } else {
         None
     };
-    let renewal_task = renewal_context.map(|context| tokio::spawn(renew_certificate(context)));
+    let renewal_task = managed_identity.map(renewal::spawn);
     let result = if let Some(gateway) = &mut local_gateway {
         tokio::select! {
             result = join_service(native_task) => {
@@ -162,92 +150,6 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         task.abort();
     }
     result
-}
-
-fn managed_identity(
-    config: &Config,
-) -> anyhow::Result<(
-    Option<ManagedIdentity>,
-    Option<RotatingClientIdentity>,
-    Option<RenewalContext>,
-)> {
-    let Some(issuer) = &config.identity_issuer else {
-        return Ok((None, None, None));
-    };
-    let identity_dir = config
-        .identity_dir
-        .clone()
-        .map_or_else(default_storage_root, Ok)?;
-    let store = CredentialStore::load(&identity_dir)?;
-    let gateway_origin = upstream_origin(&config.upstream)?;
-    let session = load_session_for(issuer, &gateway_origin, &store)?;
-    let identity = ManagedIdentity::new(session, store.clone());
-    let client_identity =
-        RotatingClientIdentity::new(load_client_identity_for(issuer, &gateway_origin, &store)?);
-    let enrollment_url = config
-        .enrollment_url
-        .clone()
-        .context("managed identity requires an enrollment URL")?;
-    Ok((
-        Some(identity.clone()),
-        Some(client_identity.clone()),
-        Some(RenewalContext {
-            enrollment_url,
-            gateway_origin,
-            identity,
-            issuer: issuer.clone(),
-            tunnel_identity: client_identity,
-            store,
-        }),
-    ))
-}
-
-async fn renew_certificate(context: RenewalContext) {
-    loop {
-        let delay = match renew_certificate_once(&context).await {
-            Ok(true) => {
-                tracing::info!(event = "device_certificate_renewed");
-                CERTIFICATE_RENEWAL_CHECK_INTERVAL
-            }
-            Ok(false) => CERTIFICATE_RENEWAL_CHECK_INTERVAL,
-            Err(_) => {
-                tracing::warn!(event = "device_certificate_renewal_failed");
-                CERTIFICATE_RENEWAL_RETRY_INTERVAL
-            }
-        };
-        tokio::time::sleep(delay).await;
-    }
-}
-
-async fn renew_certificate_once(context: &RenewalContext) -> anyhow::Result<bool> {
-    let enrollment = load_enrollment_for(&context.issuer, &context.gateway_origin, &context.store)?;
-    if !certificate_renewal_due(&enrollment, SystemTime::now(), CERTIFICATE_RENEW_BEFORE)? {
-        return Ok(false);
-    }
-    let client = EnrollmentClient::new(&context.enrollment_url)?;
-    if certificate_expired(&enrollment, SystemTime::now())? {
-        client
-            .recover_and_save(
-                &context.identity,
-                &context.issuer,
-                &context.gateway_origin,
-                &context.store,
-            )
-            .await?;
-    } else {
-        client
-            .renew_and_save(
-                &context.identity,
-                &context.issuer,
-                &context.gateway_origin,
-                &context.store,
-            )
-            .await?;
-    }
-    let replacement =
-        load_client_identity_for(&context.issuer, &context.gateway_origin, &context.store)?;
-    context.tunnel_identity.replace(replacement)?;
-    Ok(true)
 }
 
 async fn signal_shutdown(shutdown: watch::Sender<bool>) {
