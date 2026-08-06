@@ -1,421 +1,113 @@
 # Agent Desktop
 
-An early, policy-free edge connector that forwards opaque application streams from loopback listeners to Agent Gateway over HTTP/2 CONNECT.
+Agent Desktop connects AI applications on a laptop to [Agent Gateway](https://github.com/agentgateway/agentgateway). It gives individuals and organizations one place to route AI traffic through Gateway policy without putting policy, provider credentials, or content inspection in a desktop agent.
 
 Source: [github.com/agentdesktop-dev/agentdesktop](https://github.com/agentdesktop-dev/agentdesktop)
 
-The current development build includes browser-authenticated managed enrollment, a Go/PostgreSQL enrollment backend, certificate-authenticated managed CONNECT forwarding, opt-in OTLP lifecycle export, and supported standalone Linux transparent capture. Managed forwarding uses one short-lived mTLS certificate that binds the verified organizational user and device. Managed transparent capture remains unavailable; the native managed path is ready for the [manual walkthrough](examples/managed-walkthrough/README.md). See [AGENTS.md](AGENTS.md) for the architecture and incremental delivery plan.
+> Agent Desktop is under active development. Standalone Linux and the native managed path are usable development milestones, not a signed production release. See [Phase Status](docs/development/phase-status.md) for verified behavior and known gaps.
 
-For a local installation, including credential ownership, file permissions, logs, retention, and removal, see [Standalone Operations](docs/deployment/standalone.md).
+## Choose a deployment model
 
-Verified progress and environment-dependent blockers are tracked in [Phase Status](docs/development/phase-status.md).
-Tested platform behavior is listed in [Platform Compatibility](docs/compatibility/platforms.md).
-The Linux cgroup v2/nftables implementation is documented in [Linux Transparent Capture](docs/deployment/linux-capture.md).
-Manual desktop journeys and future headless E2E tests use the [QEMU desktop test environment](tests/vm/README.md).
+Agent Desktop supports two deployment models. They use the same thin connector, but differ in where Agent Gateway runs and who owns it.
 
-The selected production trust boundary is documented in [Managed mTLS identity contract v1](docs/architecture/managed-mtls-v1.md). The [Go enrollment control plane](control-plane/README.md) validates ordinary OAuth bearer tokens and P-256 CSRs, persists enrollment and certificate lifecycle state in PostgreSQL, and supports administrator approval, renewal, bounded expired-certificate recovery, and revocation.
+| Model | Target audience | Where Agent Gateway runs | Who owns configuration and identity |
+| --- | --- | --- | --- |
+| **Self-managed local** (`standalone` in the CLI) | Individual developers, independent AI users, and OSS users protecting agents on their own machine | On the user's laptop, as a separate process beside Agent Desktop | The user owns Gateway policy, provider credentials, trust, and data retention. No organization, OAuth login, enrollment service, MDM, or remote control plane is required. |
+| **Remote managed** (`managed` in the CLI) | Companies, security teams, and IT administrators managing employee laptops | Remotely in the organization's network | The organization owns Gateway policy and provider credentials. The employee signs in with organizational OAuth, an administrator approves the device, and a short-lived mTLS certificate identifies the organization, user, and device. MDM may install and configure the connector. |
 
-## Managed identity storage preflight
+Use **self-managed local** when one person owns both the laptop and its AI policy. Use **remote managed** when an organization needs centrally administered policy and cryptographically verified employee and device identity across a fleet.
 
-Managed identity is experimental. Validate credential persistence before login or installation:
+## Why this project exists
 
-```bash
-cargo run -- identity storage-check
+AI tools do not all connect to models in the same way. Some support a custom gateway URL; others connect directly to provider endpoints. Organizations also need user and device identity, while an individual running locally should not need an enterprise control plane.
+
+Agent Desktop provides the laptop-side integration layer. It:
+
+- Gives gateway-aware applications a stable loopback endpoint.
+- Can capture selected Linux application processes that cannot be configured with a gateway.
+- Preserves application streams as opaque bytes and forwards them over HTTP/2 CONNECT.
+- Proves organizational user and device identity in managed deployments.
+- Fails closed instead of bypassing Agent Gateway when the secure route is unavailable.
+- Emits operational telemetry without collecting prompts or responses.
+
+Agent Desktop intentionally does **not** evaluate AI policy, inspect content, store provider credentials, or perform TLS interception. Those responsibilities remain in Agent Gateway.
+
+## How the pieces fit
+
+```text
+AI application -> Agent Desktop -> Agent Gateway -> AI provider
+                      |                 |
+             routing and identity   policy, inspection,
+                                    credentials, routing
 ```
 
-The default `auto` mode uses Linux Secret Service when a write/read/delete preflight succeeds and otherwise persists an owner-only protected-file backend. Require Secret Service with no fallback using:
+Agent Desktop and Agent Gateway remain separate processes in every mode. The connector is designed to stay small, deterministic, and policy-free.
 
-```bash
-cargo run -- identity storage-check --credential-storage secret-service
-```
+## Traffic paths
 
-Select the protected file explicitly with `--credential-storage file`. The selected backend is persisted and revalidated on later startup; runtime does not silently switch stores. Override the XDG-based identity directory with `AGENTDESKTOP_IDENTITY_DIR`.
+Traffic path answers **how an application reaches Agent Desktop**. It is independent of deployment mode.
 
-## Experimental managed login
+| Path | How it works | Current support |
+| --- | --- | --- |
+| **Native** | A gateway-aware application, currently Claude Code, is configured to use the connector's loopback listener. | Standalone Linux and managed remote mode. This is the preferred path. |
+| **Captured** | Agent Desktop launches an application in an owned process scope and redirects its TCP/443 traffic without changing application settings. | Standalone Linux only. Managed capture, macOS, and Windows are not implemented. |
 
-Run browser Authorization Code login against an issuer that advertises PKCE `S256` and an ES256 JWT signing key through discovery:
+An application must use only one path at a time. Configuring both native routing and capture can create duplicate routing or loops.
 
-```bash
-cargo run -- identity login \
-  --issuer https://identity.example/ \
-  --client-id agentdesktop \
-  --audience https://gateway.example \
-  --scope agentgateway.invoke \
-  --gateway-origin https://gateway.example
-```
+## Current capabilities
 
-The command validates credential storage before opening the browser, listens on an ephemeral loopback callback, verifies the access-token signature, issuer, audience, expiry, scope, and subject, then persists the access and refresh tokens. `--gateway-origin` must be the upstream origin without a path. `--no-open` prints the authorization URL for non-desktop testing.
+The development build includes:
 
-Attach the persisted session to managed forwarding by supplying the same issuer:
+- Opaque, streaming HTTP/2 CONNECT forwarding with bounded concurrency and fail-closed behavior.
+- A separately supervised local Agent Gateway for standalone use.
+- Persistent Claude Code configuration through `connect-agents`.
+- Standalone Linux process-scoped capture using systemd scopes, cgroup v2, and nftables.
+- Browser-authenticated managed enrollment backed by Go and PostgreSQL.
+- Authority-issued short-lived mTLS identity, automatic renewal, and bounded expired-certificate recovery.
+- Deterministic managed E2E coverage and an interactive Fedora VM user/admin walkthrough.
+- Privacy-safe structured logs and opt-in OTLP lifecycle traces.
 
-```bash
-cargo run -- serve \
-  --mode managed \
-  --upstream https://gateway.example \
-  --identity-issuer https://identity.example/ \
-  --enrollment-url https://enrollment.example/
-```
+The current milestone is managed revocation enforcement. Revocation blocks renewal today, but an already-issued certificate is not rejected before expiry until revocation state is published to and consumed by Agent Gateway.
 
-The connector fails at startup if storage, the matching session, or the approved device certificate is unavailable. It renews the certificate within six hours of expiry using a protected retry-stable draft key, persists and reloads the validated replacement, then rotates the managed HBONE pool. Renewal failure retains the current identity and retries without direct fallback. OAuth is used for enrollment and bounded expired-certificate recovery, not forwarding. Agent Gateway authenticates the mTLS certificate on the outer CONNECT connection, derives user and device identity from its authority-issued SPIFFE URI, and owns provider credentials.
+## Choose your next step
 
-Delete only the matching local session with:
+- **Self-managed user:** Read [Standalone Operations](docs/deployment/standalone.md), then connect Claude Code or explore Linux capture.
+- **Enterprise user or administrator:** Read [Managed Remote Operations](docs/deployment/managed.md) or run the [Managed Walkthrough](examples/managed-walkthrough/README.md).
+- **Contributor:** Read [CONTRIBUTE.md](CONTRIBUTE.md) for architecture diagrams, lifecycle sequences, repository layout, tests, and walkthroughs.
+- **Platform or security engineer:** Read the [Managed mTLS Contract](docs/architecture/managed-mtls-v1.md), [HBONE Contract](docs/architecture/hbone-connect-v1.md), and [Linux Transparent Capture](docs/deployment/linux-capture.md).
 
-```bash
-cargo run -- identity logout \
-  --issuer https://identity.example/ \
-  --gateway-origin https://gateway.example
-```
+## Try it
 
-This removes the local session and any locally persisted enrollment record. It does not invoke an issuer token-revocation endpoint or revoke an authority-side device approval.
-
-Generate a protected device key and request authority approval:
-
-```bash
-cargo run -- identity enroll-request \
-  --issuer https://identity.example/ \
-  --enrollment-url https://enrollment.example/ \
-  --gateway-origin https://gateway.example
-```
-
-The command prints a non-secret pending record containing the authority-generated enrollment ID. After administrator approval, read device and revocation status with:
-
-```bash
-cargo run -- identity enroll-status \
-  --issuer https://identity.example/ \
-  --enrollment-url https://enrollment.example/ \
-  --gateway-origin https://gateway.example
-```
-
-Both operations load the existing issuer/gateway-scoped session and refresh it when needed. The enrollment request submits only a signed CSR; the private key remains in protected Agent Desktop storage. Request and status responses replace the protected issuer/gateway-scoped enrollment record, and status uses its enrollment ID by default. Agent Gateway validates the issued certificate on managed connections. Published revocation consumption remains pending, so a revoked certificate is not yet rejected before its short lifetime expires.
-
-## Run
-
-Start Agent Gateway with a CONNECT listener on `127.0.0.1:15008` and a plaintext internal LLM bind on port `4000`, then let Agent Desktop supervise it:
-
-```bash
-cargo run -- serve \
-  --mode standalone \
-  --upstream http://127.0.0.1:15008 \
-  --native-target native.agentdesktop.internal:4000 \
-  --gateway-binary /usr/local/bin/agentgateway \
-  --gateway-config "$HOME/.config/agentgateway/config.yaml"
-```
-
-The connector listens on `127.0.0.1:8080` by default. Override either setting with flags:
-
-```bash
-cargo run -- serve \
-  --mode managed \
-  --listen 127.0.0.1:8081 \
-  --status-listen 127.0.0.1:8082 \
-  --upstream https://agentgateway.example.internal \
-  --identity-issuer https://identity.example/ \
-  --enrollment-url https://enrollment.example/
-```
-
-Or use environment variables:
-
-```bash
-export AGENTDESKTOP_MODE=managed
-export AGENTDESKTOP_LISTEN=127.0.0.1:8081
-export AGENTDESKTOP_STATUS_LISTEN=127.0.0.1:8082
-export AGENTDESKTOP_UPSTREAM=https://agentgateway.example.internal
-export AGENTDESKTOP_IDENTITY_ISSUER=https://identity.example/
-export AGENTDESKTOP_ENROLLMENT_URL=https://enrollment.example/
-cargo run -- serve
-```
-
-The deployment mode is required. `standalone` requires a connector-owned local Agent Gateway on loopback; `managed` requires prior enrollment and permits a remote upstream. Application and status listeners must be distinct loopback addresses. The upstream URL must be an HTTP or HTTPS origin without credentials, path, query, or fragment.
-
-Forwarding defaults to a 5-second tunnel-establishment timeout, 10-second graceful-shutdown deadline, and 128 concurrent tunnels. Override them with `--connect-timeout-ms`, `--shutdown-timeout-ms`, and `--max-in-flight`. The connector holds a concurrency permit for each complete byte stream. When overloaded it closes newly accepted connections without bypassing Agent Gateway.
-
-The connector does not retry forwarded requests. In particular, non-idempotent and streaming requests are never replayed after an upstream disconnect.
-
-The connector emits JSON structured logs to standard error. Runtime events use fixed event and reason values and omit destinations, request and response bytes, and authentication material. Native and captured application streams are forwarded opaquely; Agent Desktop does not parse, rewrite, or inject HTTP headers.
-
-Set `OTEL_EXPORTER_OTLP_ENDPOINT` to an HTTP(S) OTLP/gRPC collector endpoint, such as `http://127.0.0.1:4317`, to export connector lifecycle telemetry. Application-level trace propagation belongs to Agent Gateway because the connector does not inspect tunneled traffic. Metric export and automated collector-correlation coverage are not implemented yet.
-
-## Configure Claude Code
-
-Connect Claude Code when it is already installed for the current user:
-
-```bash
-cargo run -- connect-agents
-```
-
-After consent, Agent Desktop detects Claude Code and adds the local connector endpoint and placeholder credential to the `env` object in `~/.claude/settings.json`. It preserves unrelated settings, treats matching values as already connected, and refuses to replace an existing provider or gateway configuration. The interactive installer asks for this consent separately after the service is ready.
-
-Launch Claude Code normally after it is connected:
-
-```bash
-claude
-```
-
-Claude Code reads these user settings for ordinary terminal and IDE launches, so no Claude wrapper is installed. A bundle installation provides the stable `agentdesktop` command through `~/.local/bin`; run `agentdesktop connect-agents` at any time to connect newly installed supported agents or restore matching settings without reinstalling the product. The placeholder is sent to Agent Gateway, not the AI provider. Agent Gateway remains responsible for replacing or removing application credentials before provider forwarding.
-
-## Launch an application scope
-
-On Linux, run an arbitrary command and its descendants in a uniquely owned transient systemd user scope:
-
-```bash
-cargo run -- launch --profile custom -- command --args
-```
-
-The command preserves the launched argv and working environment, creates a gated child in the scope, resolves and validates its exact cgroup v2 path before release, waits for the complete scope, requests control-group cleanup from systemd, and returns the launched command's exit status. The default `custom` profile adds no environment variables. Unknown profiles fail and list the available names.
-
-The `claude` launch profile enables standalone Linux transparent capture. It requires installer-created Agent Gateway capture configuration and explicit inspection trust. Claude configured through `connect-agents` should continue to run normally without `agentdesktop launch`; the two routing paths are mutually exclusive.
-
-Profiles that depend on Agent Desktop check local readiness before starting the application. If the connector is stopped or Agent Gateway is unavailable, `launch` fails immediately with recovery steps instead of letting the application retry until it times out. `--skip-preflight` bypasses only that readiness check; it does not bypass capture trust, relay, or network-rule setup.
-
-```bash
-cargo run -- launch --skip-preflight --profile custom -- command --args
-```
-
-The `custom` profile provides process grouping only. The `claude` profile keeps the command stopped until trust, relay, and fail-closed network rules are active, then captures TCP/443 and rejects UDP/443 for the scope and descendants. This is routed capture, not a filesystem sandbox or an anti-bypass boundary against local administrators. A future profile may request stronger isolation, but Agent Desktop must report the guarantees actually active and must never silently fall back to weaker isolation.
-
-In standalone mode, the connector can optionally own the lifecycle of a separately installed Agent Gateway process:
-
-```bash
-cargo run -- serve \
-  --mode standalone \
-  --upstream http://127.0.0.1:15008 \
-  --native-target native.agentdesktop.internal:4000 \
-  --gateway-binary /usr/local/bin/agentgateway \
-  --gateway-config "$HOME/.config/agentgateway/config.yaml"
-```
-
-The binary and config options must be provided together. The connector starts `agentgateway -f <config>`, waits up to 10 seconds for its configured loopback upstream to accept TCP connections, and only then opens the application listener. It stops Agent Gateway during connector shutdown and exits if the local process exits unexpectedly. Agent Gateway remains a separate process and retains ownership of policy and provider credentials.
-
-Query connector and gateway reachability on the separate status listener:
-
-```bash
-curl http://127.0.0.1:8081/_agentdesktop/healthz
-```
-
-A reachable gateway returns `200 OK`:
-
-```json
-{"status":"ok","mode":"standalone","gateway":"reachable"}
-```
-
-An unreachable gateway returns `503 Service Unavailable` with `status` set to `degraded`. The check establishes a fresh TCP connection to the configured upstream. It reports connector liveness and gateway reachability; it does not interpret Agent Gateway configuration or policy health.
-
-Read the local operational status API:
-
-```bash
-curl http://127.0.0.1:8081/_agentdesktop/status
-```
-
-The response contains connector version, deployment mode, gateway reachability, identity readiness, and fixed platform capability flags. It does not expose gateway addresses, identity claims, credentials, application traffic, or policy.
-
-## Install a standalone bundle
-
-The current installer is a self-contained Linux development executable containing a tested Agent Gateway and Agent Desktop version set. Public downloads and non-Linux packages are not available yet; build it with `scripts/build-embedded-installer.sh` as shown below, then run:
-
-```bash
-chmod +x agentdesktop-installer
-./agentdesktop-installer
-```
-
-The guided installer shows the components, per-user destination, service behavior, and network ownership boundary before changing files. Connector listeners and the Agent Gateway CONNECT listener are loopback-only; the LLM bind is an internal socketless target. The default root is `$HOME/.local/lib/agentdesktop`; after confirmation the installer verifies and extracts every embedded component, initializes capture configuration when creating a new Gateway config, atomically activates the bundle, enables the user systemd service, and waits until the product is ready. Agent Gateway remains a separate executable and process after extraction. Inspection trust requires separate informed consent and the normal platform authorization prompt.
-
-If setup fails, the installer creates an owner-only support report under `$XDG_STATE_HOME/agentdesktop`, or `$HOME/.local/state/agentdesktop` by default. It gives the user the report path and directs them to [open an issue](https://github.com/agentdesktop-dev/agentdesktop/issues/new) and attach it. Users are not asked to understand or run a health check.
-
-For unattended installation or installation without starting the service:
-
-```bash
-./agentdesktop-installer install --yes
-./agentdesktop-installer install --yes --no-start
-./agentdesktop-installer install --yes --connect-agents
-```
-
-`--yes` accepts installation only and leaves AI agent settings unchanged. `--connect-agents` explicitly permits automatic configuration for scripted setup and requires the service to start.
-
-Use `--root` to override the installation root. Re-running the installer upgrades a manifest-owned bundle and restores the prior tree if activation fails. The starter configuration remains Agent Gateway configuration; the connector does not interpret it.
-
-Verify every manifest-owned file before use or removal:
-
-```bash
-"$HOME/.local/lib/agentdesktop/bin/agentdesktop-install" verify \
-  --root "$HOME/.local/lib/agentdesktop"
-```
-
-The manifest records SHA-256 hashes. Verification, upgrade, and uninstall reject missing, modified, non-regular, symlinked, or path-traversing entries.
-
-The guided installer enables and starts the generated hardened user-systemd unit by default. If installation used `--no-start`, enable it later with the installed control command:
-
-```bash
-"$HOME/.local/lib/agentdesktop/bin/agentdesktop-install" \
-  service enable \
-  --root "$HOME/.local/lib/agentdesktop"
-```
-
-The unit starts the connector and its separately packaged Agent Gateway process in standalone mode. Before uninstalling, stop and unlink it:
-
-```bash
-"$HOME/.local/lib/agentdesktop/bin/agentdesktop-install" \
-  service disable \
-  --root "$HOME/.local/lib/agentdesktop"
-```
-
-The self-contained installer installs its control command with the bundle. Remove only a manifest-owned bundle:
-
-```bash
-"$HOME/.local/lib/agentdesktop/bin/agentdesktop-install" uninstall \
-  --root "$HOME/.local/lib/agentdesktop"
-```
-
-The installer refuses to remove directories without its manifest or bundles whose owned files were modified. It does not alter CA trust, create application profiles, cryptographically verify a publisher signature, or download/update components at runtime.
-
-Build a development artifact from local release binaries and a compatible Agent Gateway checkout with:
-
-```bash
-scripts/build-embedded-installer.sh \
-  ../agentgateway/target/ci/agentgateway \
-  container/agentgateway-smoke.yaml
-```
-
-The resulting `target/release/agentdesktop-installer` is the only file delivered to the user. A build with no embedded payload remains available for repository-wide compilation and reports an actionable error if run.
-
-## Build a managed development installer
-
-Build a generic managed template and customizer, or create an organization-specific one-file executable from the strict non-secret bootstrap example:
-
-```bash
-scripts/build-managed-installer.sh
-scripts/build-managed-installer.sh \
-  examples/managed-organization.json \
-  target/release/example-agentdesktop-installer
-```
-
-The generic template also accepts `--organization <file>` for two-file development. Managed installation leaves the service inactive and does not open a browser or change AI agent settings. The installed `agentdesktop connect-agents` command owns browser login, enrollment approval, service readiness, and separate Claude consent. Customize the executable before applying a publisher signature. See [Managed installer development](docs/deployment/managed-installer.md) for the schema, MDM ownership boundary, and current security limitations.
-
-## Test
+Run the Rust unit and integration tests:
 
 ```bash
 cargo test
-cargo clippy --all-targets --all-features -- -D warnings
-cargo fmt --check
-node --test tests/fixtures/fake-authorization-server.test.mjs
 ```
 
-Tests use local fake Agent Gateway and authorization server processes. They do not contact Claude, Anthropic, an identity provider, or a remote service.
-
-## Container kick-the-tires environment
-
-The container environment runs Agent Gateway as a separate process supervised by Agent Desktop in one container on a private network. The optional mock provider runs in another container. The connector remains bound to `127.0.0.1` and is not published to the host. The scripts use Podman when installed and fall back to Docker otherwise. Set `CONTAINER_ENGINE=podman` or `CONTAINER_ENGINE=docker` to override automatic selection.
-
-Requirements:
-
-- Podman 5 or newer, or Docker
-- Network access on the first run to pull images and build dependencies
-
-Start the credential-free environment:
+Run a local standalone connector plus Agent Gateway smoke environment with Podman 5+ or Docker:
 
 ```bash
 ./scripts/container-up.sh smoke
-```
-
-Send an Anthropic-shaped request through the connector to Agent Gateway:
-
-```bash
 ./scripts/container-smoke.sh
-```
-
-The response should contain:
-
-```json
-{"id":"msg_smoke","type":"message","role":"assistant","content":[{"type":"text","text":"hello through Agent Desktop"}]}
-```
-
-The smoke gateway returns a deterministic direct response, so this path requires no provider credential. It is a manual environment for exploring:
-
-```text
-curl in connector container -> connector loopback listener -> Agent Gateway
-```
-
-The container scripts manage the environment and send manual requests; they are not test runners. Product behavior such as fail-closed handling is covered by the Rust integration tests under `tests/`.
-
-Inspect the running environment:
-
-```bash
-container_engine="$(command -v podman || command -v docker)"
-"$container_engine" ps --filter name=agentdesktop
-"$container_engine" logs agentdesktop
-"$container_engine" exec -it agentdesktop /bin/sh
-```
-
-Stop and remove the containers and network:
-
-```bash
 ./scripts/container-down.sh
 ```
 
-### Real Anthropic request
-
-To replace the deterministic response with Agent Gateway's Anthropic provider:
+Run the zero-input managed enrollment, approval, mTLS forwarding, and revocation-bookkeeping journey with Podman 5+, `curl`, and `jq`:
 
 ```bash
-export ANTHROPIC_API_KEY=your-provider-key
-./scripts/container-up.sh anthropic
-./scripts/container-smoke.sh
+scripts/managed-e2e.sh
 ```
 
-The API key is expanded only by Agent Gateway configuration, but the supervised development topology places it in the shared parent/child process environment. Connector code does not read it. Production deployments should use an Agent Gateway-supported secret source rather than this smoke-test convenience.
+These paths use deterministic local fixtures and do not contact Anthropic. See [CONTRIBUTE.md](CONTRIBUTE.md#walkthroughs) for prerequisites, expected behavior, and the interactive Fedora journey.
 
-Override the published Agent Gateway image when testing another version:
+## Documentation
 
-```bash
-AGENTGATEWAY_IMAGE=ghcr.io/agentgateway/agentgateway:latest \
-  ./scripts/container-up.sh smoke
-```
-
-### Claude Code with a mock provider
-
-Run an actual pinned Claude Code CLI through the connector and Agent Gateway to a local mock Anthropic API:
-
-```bash
-./scripts/container-claude-smoke.sh
-```
-
-The command builds `@anthropic-ai/claude-code@2.1.212`, starts the container environment in `claude` mode, and prints:
-
-```text
-SMOKE_OK
-```
-
-This exercises the complete manual path without a provider credential:
-
-```text
-Claude Code -> connector loopback listener -> Agent Gateway -> mock Anthropic API
-```
-
-In this mode, Agent Desktop runs Agent Gateway as a separate supervised process in the same container. The connector sends opaque Claude streams over HTTP/2 CONNECT at `127.0.0.1:15008` to a socketless internal LLM bind. The mock supports Anthropic streaming messages, non-streaming messages, and token counting. The environment remains running for inspection; stop it with `./scripts/container-down.sh`.
-
-The standalone smoke configuration also contains an Agent Gateway authorization rule requiring the local placeholder credential. Display one allowed response and one native Agent Gateway `403` denial through the connector:
-
-```bash
-./scripts/container-policy-smoke.sh
-```
-
-The connector does not evaluate this rule or rewrite either response. Users own equivalent authorization and provider configuration in Agent Gateway.
-
-## Host Claude Code smoke test
-
-In standalone forwarding, Agent Desktop preserves Claude's complete byte stream. Configure Agent Gateway to validate the chosen placeholder or gateway credential and provide the real Anthropic credential upstream.
-
-With Agent Gateway and the connector running directly on the host:
-
-```bash
-cargo run -- connect-agents --yes
-claude
-```
-
-Send a simple prompt and verify:
-
-1. Claude receives a streamed response.
-2. Agent Gateway records the request and applies its configured route and policies.
-3. Stopping Agent Gateway closes the application flow without opening a direct provider connection.
-4. The connector never attempts a direct connection to Anthropic.
-
-The native managed equivalent, including certificate-authenticated mTLS CONNECT forwarding, is covered by the [managed walkthrough](examples/managed-walkthrough/README.md).
+- [Contributor Guide](CONTRIBUTE.md): architecture, flows, code map, development setup, and walkthroughs.
+- [Standalone Operations](docs/deployment/standalone.md): local installation, ownership, credentials, lifecycle, logs, and removal.
+- [Managed Remote Operations](docs/deployment/managed.md): login, enrollment, certificate lifecycle, runtime, and logout.
+- [Managed Installer Development](docs/deployment/managed-installer.md): organization bootstrap and packaging.
+- [Linux Transparent Capture](docs/deployment/linux-capture.md): systemd scopes, cgroup v2, nftables, trust, and testing.
+- [Control Plane](control-plane/README.md): enrollment API, administrator operations, PostgreSQL, and CA configuration.
+- [Platform Compatibility](docs/compatibility/platforms.md): tested and unavailable platform behavior.
+- [Phase Status](docs/development/phase-status.md): verified progress, active blockers, and the next milestone.
+- [Architecture and Delivery Plan](AGENTS.md): project boundaries, design decisions, and phased roadmap.
