@@ -13,20 +13,11 @@ binds:
       key: certs/gateway-server.key
       root: certs/enrollment-ca.crt
     routes: []
-- port: 18443
+- port: 4000
   mode: internal
   listeners:
   - name: native-llm
     protocol: HTTP
     routes:
     - backends:
-      - ai:
-          groups:
-          - providers:
-            - name: anthropic
-              hostOverride: agentdesktop-walkthrough-anthropic:8080
-              provider:
-                anthropic: {}
-              policies:
-                backendAuth:
-                  key: $ANTHROPIC_API_KEY
+      - host: 127.0.0.1:18081

@@ -55,6 +55,8 @@ Prepare a complete managed user walkthrough from the immutable Fedora base:
 scripts/vm-managed-walkthrough.sh prepare --reset
 ```
 
+The VM walkthrough remains intentionally interactive. For a faster no-input check of the current connector against the same real control plane and Agent Gateway stack, run `scripts/managed-e2e.sh`; it drives user login and administrator actions through deterministic fixture APIs and reports success through its exit code.
+
 The harness starts the real rootless Podman walkthrough stack, builds an organization-specific installer, and copies only that installer to Fedora's Downloads directory. It does not install software or trust on the user's behalf.
 
 Perform the user journey in the Fedora desktop:

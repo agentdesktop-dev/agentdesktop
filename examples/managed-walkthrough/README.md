@@ -7,6 +7,14 @@ The walkthrough uses the repository's mock OIDC and Anthropic servers. It expect
 - Fedora with Podman, `openssl`, `curl`, `jq`, Rust, and Claude Code.
 - Repository root as the current directory unless a command says otherwise.
 
+For a zero-input API-driven verification of the same enrollment, approval, mTLS forwarding, and revocation path, run:
+
+```bash
+scripts/managed-e2e.sh
+```
+
+The script incrementally rebuilds the current connector, uses cached Podman image layers, exits nonzero on failure, and removes its containers and generated identity state. The manual steps below and `scripts/vm-managed-walkthrough.sh` remain available for the desktop user and administrator journeys.
+
 Use these fixed local values:
 
 ```bash
@@ -47,12 +55,12 @@ cargo run -- identity login \
   --client-id "$OIDC_CLIENT_ID" \
   --audience "$OIDC_AUDIENCE" \
   --scope "$USER_SCOPE" \
-  --gateway-origin https://localhost:8443
+  --gateway-origin https://127.0.0.1:8443
 
 cargo run -- identity enroll-request \
   --issuer "$OIDC_ISSUER" \
   --enrollment-url https://localhost:8090 \
-  --gateway-origin https://localhost:8443
+  --gateway-origin https://127.0.0.1:8443
 ```
 
 Copy the printed enrollment ID, then approve it as the administrator:
@@ -71,7 +79,7 @@ Retrieve and persist the approved certificate:
 cargo run -- identity enroll-status \
   --issuer "$OIDC_ISSUER" \
   --enrollment-url https://localhost:8090 \
-  --gateway-origin https://localhost:8443
+  --gateway-origin https://127.0.0.1:8443
 ```
 
 ## Start Agent Desktop
@@ -82,8 +90,8 @@ Start Agent Desktop with the same process-local CA bundle:
 SSL_CERT_FILE="$PWD/examples/managed-walkthrough/certs/process-ca-bundle.crt" \
 cargo run -- serve \
   --mode managed \
-  --upstream https://localhost:8443 \
-  --native-target native.agentdesktop.internal:18443 \
+  --upstream https://127.0.0.1:8443 \
+  --native-target native.agentdesktop.internal:4000 \
   --identity-issuer "$OIDC_ISSUER" \
   --enrollment-url https://localhost:8090
 ```
