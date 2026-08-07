@@ -39,6 +39,8 @@ The connector owns:
 
 The connector has no policy format, provider credential store, request database, or content log.
 
+For a new starter configuration, the standalone installer generates the local inspection CA once in the user-owned Agent Gateway configuration directory. It writes the private key as `0600`, refuses to replace existing CA material, and passes only the resulting file paths to Agent Gateway configuration. Agent Gateway alone uses the key at runtime; the connector service never reads it.
+
 ## Files and permissions
 
 Keep the Agent Gateway configuration in a directory accessible only to the user running Agent Gateway. On Unix-like systems, a suitable baseline is:

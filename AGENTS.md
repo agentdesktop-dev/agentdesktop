@@ -148,7 +148,7 @@ Implement this immediately after the Claude pre-MVP and include it in the initia
 - In managed mode, authenticate the outer HTTP/2 connection with the enrolled client certificate. Agent Gateway must propagate certificate-derived identity into immutable trusted tunnel context before evaluating policy on inspected inner requests.
 - In self-managed local mode, secure connector-to-gateway communication with loopback or local IPC access controls. Do not require organizational OAuth or device enrollment.
 - Use one CONNECT stream per captured TCP flow while pooling underlying HTTP/2 connections per certificate generation.
-- Agent Gateway performs TLS MITM according to policy, remotely in managed mode or on-device in local mode. The connector never possesses the issuing CA private key.
+- Agent Gateway performs TLS MITM according to policy, remotely in managed mode or on-device in local mode. The standalone installer may provision an owner-only local issuing CA, but the runtime connector never reads its private key.
 - Block selected applications' UDP/443 traffic initially so HTTP/3-capable clients fall back to TLS over TCP. Do not silently allow QUIC to bypass capture.
 
 Preferred process selectors:

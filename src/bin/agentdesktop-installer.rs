@@ -11,6 +11,7 @@ use agentdesktop::customization::read_customized_bootstrap;
 use agentdesktop::organization::OrganizationBootstrap;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose};
 use sha2::{Digest, Sha256};
 
 struct EmbeddedPayload {
@@ -65,6 +66,7 @@ struct InstallArgs {
 const SUPPORT_URL: &str = "https://github.com/agentdesktop-dev/agentdesktop/issues/new";
 const CA_CERT_PLACEHOLDER: &str = "__AGENTDESKTOP_INSPECTION_CA_CERT__";
 const CA_KEY_PLACEHOLDER: &str = "__AGENTDESKTOP_INSPECTION_CA_KEY__";
+const INSPECTION_CA_COMMON_NAME: &str = "Agent Gateway Local Inspection CA";
 
 fn main() -> ExitCode {
     match run() {
@@ -158,7 +160,7 @@ fn install_standalone(args: InstallArgs) -> Result<()> {
     let config_created = if config.exists() {
         seed_config(&payload.path().join("config"), &config, None)?
     } else {
-        initialize_inspection_ca(&payload.path().join("agentgateway"), &ca_directory)?;
+        initialize_inspection_ca(&ca_directory)?;
         seed_config(&payload.path().join("config"), &config, Some(&ca_directory))?
     };
 
@@ -590,16 +592,56 @@ fn seed_config(starter: &Path, destination: &Path, ca_directory: Option<&Path>) 
     Ok(true)
 }
 
-fn initialize_inspection_ca(agentgateway: &Path, state_directory: &Path) -> Result<()> {
-    let status = ProcessCommand::new(agentgateway)
-        .arg("init-ca")
-        .arg("--state-directory")
-        .arg(state_directory)
-        .status()
-        .context("failed to initialize Agent Gateway inspection CA")?;
-    if !status.success() {
-        bail!("Agent Gateway inspection CA initialization failed with {status}");
+fn initialize_inspection_ca(state_directory: &Path) -> Result<()> {
+    fs::create_dir_all(state_directory).with_context(|| {
+        format!(
+            "create inspection CA state directory {}",
+            state_directory.display()
+        )
+    })?;
+    set_mode(state_directory, 0o700)?;
+
+    let certificate_path = state_directory.join("ca.crt");
+    let private_key_path = state_directory.join("ca.key");
+    if certificate_path.exists() || private_key_path.exists() {
+        bail!(
+            "refusing to replace existing inspection CA material in {}",
+            state_directory.display()
+        );
     }
+
+    let key = KeyPair::generate().context("generate inspection CA private key")?;
+    let mut parameters = CertificateParams::default();
+    parameters
+        .distinguished_name
+        .push(DnType::CommonName, INSPECTION_CA_COMMON_NAME);
+    parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    parameters.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    let certificate = parameters
+        .self_signed(&key)
+        .context("generate inspection CA certificate")?;
+
+    write_exclusive(&private_key_path, key.serialize_pem().as_bytes(), 0o600)?;
+    if let Err(error) = write_exclusive(&certificate_path, certificate.pem().as_bytes(), 0o644) {
+        let _ = fs::remove_file(&private_key_path);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn write_exclusive(path: &Path, contents: &[u8], mode: u32) -> Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(mode);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("create {}", path.display()))?;
+    file.write_all(contents)?;
+    file.sync_all()?;
     Ok(())
 }
 
@@ -740,6 +782,43 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initializes_owner_only_inspection_ca_without_replacement() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state = temporary.path().join("inspection-ca");
+
+        initialize_inspection_ca(&state).unwrap();
+
+        assert!(
+            fs::read_to_string(state.join("ca.crt"))
+                .unwrap()
+                .contains("BEGIN CERTIFICATE")
+        );
+        assert!(
+            fs::read_to_string(state.join("ca.key"))
+                .unwrap()
+                .contains("BEGIN PRIVATE KEY")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                fs::metadata(&state).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                fs::metadata(state.join("ca.key"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        assert!(initialize_inspection_ca(&state).is_err());
+    }
 
     #[test]
     fn agent_connection_requires_an_explicit_install_flag() {
