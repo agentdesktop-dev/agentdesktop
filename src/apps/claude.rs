@@ -51,7 +51,7 @@ fn ensure_capture_routing_is_clear_for(
         bail!(
             "Claude capture cannot start while ANTHROPIC_BASE_URL is set; run Claude normally for configured routing, or unset it before using transparent capture"
         );
-    }
+    } 
     if !settings_path.exists() {
         return Ok(());
     }

@@ -1,0 +1,26 @@
+[package]
+name = "agentdesktop-ui"
+version = "0.1.0"
+description = "Agent Desktop tray and settings application"
+edition = "2024"
+default-run = "agentdesktop-ui"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+agentdesktop = { path = "../.." }
+anyhow = "1"
+clap = { version = "4.5", features = ["derive", "env"] }
+keyring = { version = "4.1.6", default-features = false, features = ["v1", "apple-native-keyring-store", "windows-native-keyring-store", "zbus-secret-service-keyring-store"] }
+open = "5.4.0"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+tokio = { version = "1", features = ["process", "time"] }
+zeroize = "1"
+
+[dev-dependencies]
+tempfile = "3"
