@@ -278,6 +278,17 @@ node --test tests/fixtures/fake-authorization-server.test.mjs
 (cd control-plane && go test ./...)
 ```
 
+Windows uses the MSVC ABI. From Linux, install `clang`, the pinned cross tool, and its Rust LLVM support, then run the repository check:
+
+```bash
+rustup target add x86_64-pc-windows-msvc
+rustup component add llvm-tools
+cargo install --locked cargo-xwin --version 0.23.0
+./scripts/check-windows-msvc.sh
+```
+
+`cargo-xwin` downloads the Microsoft CRT and Windows SDK and therefore requires acceptance of the [Microsoft software license](https://go.microsoft.com/fwlink/?LinkId=2086102). The check compiles every library, binary, and test target for `x86_64-pc-windows-msvc` with warnings denied. It does not execute Windows binaries; runtime validation belongs in the disposable Windows VM.
+
 PostgreSQL integration tests require `TEST_DATABASE_URL`; see [control-plane/README.md](control-plane/README.md).
 
 Keep changes within the owning component. In particular:

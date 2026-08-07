@@ -629,13 +629,13 @@ fn initialize_inspection_ca(state_directory: &Path) -> Result<()> {
     Ok(())
 }
 
-fn write_exclusive(path: &Path, contents: &[u8], mode: u32) -> Result<()> {
+fn write_exclusive(path: &Path, contents: &[u8], _mode: u32) -> Result<()> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(mode);
+        options.mode(_mode);
     }
     let mut file = options
         .open(path)

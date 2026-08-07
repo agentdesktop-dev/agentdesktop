@@ -354,9 +354,9 @@ fn validate_secure_file(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CredentialStorageMode, CredentialStore, SelectedBackend, record_name, select_backend,
-    };
+    use super::{CredentialStorageMode, SelectedBackend, select_backend};
+    #[cfg(unix)]
+    use super::{CredentialStore, record_name};
 
     #[test]
     fn selects_explicit_and_fallback_backends() {

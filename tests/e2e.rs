@@ -1,12 +1,16 @@
+#[cfg(unix)]
 use std::net::{SocketAddr, TcpListener};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::process::{Child, Command, Stdio};
+#[cfg(unix)]
 use std::time::Duration;
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-
 struct Connector(Child);
 
+#[cfg(unix)]
 impl Drop for Connector {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -26,6 +30,7 @@ impl Connector {
     }
 }
 
+#[cfg(unix)]
 fn unused_address() -> SocketAddr {
     TcpListener::bind("127.0.0.1:0")
         .unwrap()

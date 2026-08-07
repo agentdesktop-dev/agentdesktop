@@ -121,6 +121,8 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     } else {
         None
     };
+    #[cfg(not(target_os = "linux"))]
+    let capture_task = None;
     let renewal_task = managed_identity.map(renewal::spawn);
     let result = if let Some(gateway) = &mut local_gateway {
         tokio::select! {
@@ -167,7 +169,6 @@ async fn join_service(task: tokio::task::JoinHandle<anyhow::Result<()>>) -> anyh
     task.await.context("service task failed")?
 }
 
-#[cfg(target_os = "linux")]
 async fn wait_capture(
     task: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
 ) -> anyhow::Result<()> {
