@@ -39,7 +39,7 @@ tests/vm/windows/vm.sh start --display
 tests/vm/windows/vm.sh wait
 ```
 
-The base build enables OpenSSH and Windows test-signing mode, then shuts the guest down. The local development account is `agentdesktop` with password `agentdesktop`. SSH is exposed only on host loopback, port 2223 by default.
+The base build installs the Microsoft Visual C++ x64 runtime, enables OpenSSH and Windows test-signing mode, then shuts the guest down. The local development account is `agentdesktop` with password `agentdesktop`. SSH is exposed only on host loopback, port 2223 by default.
 
 Open a PowerShell-capable SSH session or run a command directly:
 
@@ -54,6 +54,32 @@ Copy an MSVC build or driver package into the guest:
 tests/vm/windows/vm.sh copy target/x86_64-pc-windows-msvc/release/agentdesktop.exe
 tests/vm/windows/vm.sh copy /path/to/driver-package 'C:/Users/agentdesktop/'
 ```
+
+## Native forwarding smoke test
+
+Build both binaries for MSVC, then copy them and the deterministic Gateway fixture into the guest:
+
+```bash
+RUSTFLAGS='-D warnings' cargo xwin build --release \
+  --target x86_64-pc-windows-msvc --bin agentdesktop
+cargo xwin build --release --target x86_64-pc-windows-msvc \
+  -p agentgateway-app --manifest-path ../agentgateway/Cargo.toml
+
+tests/vm/windows/vm.sh ssh powershell.exe -NoProfile -Command \
+  'New-Item C:\agentdesktop -ItemType Directory -Force | Out-Null'
+tests/vm/windows/vm.sh copy \
+  target/x86_64-pc-windows-msvc/release/agentdesktop.exe C:/agentdesktop/
+tests/vm/windows/vm.sh copy \
+  ../agentgateway/target/x86_64-pc-windows-msvc/release/agentgateway.exe C:/agentdesktop/
+tests/vm/windows/vm.sh copy \
+  tests/vm/windows/fixtures/agentgateway-native.yaml C:/agentdesktop/
+tests/vm/windows/vm.sh copy \
+  tests/vm/windows/native-smoke.ps1 C:/agentdesktop/
+tests/vm/windows/vm.sh ssh powershell.exe -NoProfile -NonInteractive \
+  -ExecutionPolicy Bypass -File C:\agentdesktop\native-smoke.ps1
+```
+
+The smoke test requires a real Agent Gateway response through the connector, a healthy status endpoint, and closed native, status, and HBONE listeners after the supervised Gateway is killed. Agent Desktop exits when its owned Gateway exits; it does not remain running in a degraded state.
 
 ## Clean-slate lifecycle
 

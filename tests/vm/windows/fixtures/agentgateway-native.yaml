@@ -1,0 +1,22 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+config:
+  readinessAddr: 127.0.0.1:15021
+
+binds:
+- port: 15008
+  tunnelProtocol: connect
+  listeners:
+  - name: local-connect
+    protocol: HTTP
+    routes: []
+- port: 4000
+  mode: internal
+  listeners:
+  - name: native-smoke
+    protocol: HTTP
+    routes:
+    - name: smoke
+      policies:
+        directResponse:
+          status: 200
+          body: WINDOWS_NATIVE_OK
