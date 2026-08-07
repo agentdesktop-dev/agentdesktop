@@ -1,6 +1,8 @@
 /target
 /tests/vm/.artifacts/
 /tests/vm/.state/
+/tests/vm/windows/.artifacts/
+/tests/vm/windows/.state/
 /examples/managed-walkthrough/certs/
 .vscode/settings.json
 REVIEW.md

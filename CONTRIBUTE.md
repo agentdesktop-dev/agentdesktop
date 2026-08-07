@@ -367,6 +367,10 @@ scripts/vm-managed-walkthrough.sh stop
 
 The Fedora VM harness is also the authoritative environment for systemd, cgroup v2, nftables, Polkit, and trust-store behavior. Build the embedded installer and follow the installation journey in [tests/vm/README.md](tests/vm/README.md). Lower-level capture commands and isolated tests are documented in [docs/deployment/linux-capture.md](docs/deployment/linux-capture.md).
 
+### Windows development VM
+
+Use the disposable Windows 11 QEMU environment for native forwarding and WFP driver development. It requires a locally downloaded official Windows 11 Enterprise Evaluation ISO. See [tests/vm/windows/README.md](tests/vm/windows/README.md) for host setup and lifecycle commands.
+
 ## Where to go deeper
 
 - Complete product direction and constraints: [AGENTS.md](AGENTS.md)
