@@ -4,6 +4,7 @@ pub mod config;
 pub mod database;
 pub mod discovery;
 pub mod identity;
+pub mod reconcile;
 pub mod remote;
 
 pub mod fleet {
