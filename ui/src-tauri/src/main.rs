@@ -20,6 +20,20 @@ struct Health {
 struct TrayItems {
     daemon: MenuItem<tauri::Wry>,
     codex: MenuItem<tauri::Wry>,
+    opencode: MenuItem<tauri::Wry>,
+    claude_code: MenuItem<tauri::Wry>,
+    vscode: MenuItem<tauri::Wry>,
+}
+
+impl TrayItems {
+    fn discoveries(&self) -> [(&str, &str, &MenuItem<tauri::Wry>); 4] {
+        [
+            ("codex", "Codex", &self.codex),
+            ("opencode", "OpenCode", &self.opencode),
+            ("claude-code", "Claude Code", &self.claude_code),
+            ("vscode", "VS Code", &self.vscode),
+        ]
+    }
 }
 
 fn main() {
@@ -34,17 +48,32 @@ fn main() {
             let codex = MenuItemBuilder::new("Codex: checking…")
                 .enabled(false)
                 .build(app)?;
+            let opencode = MenuItemBuilder::new("OpenCode: checking…")
+                .enabled(false)
+                .build(app)?;
+            let claude_code = MenuItemBuilder::new("Claude Code: checking…")
+                .enabled(false)
+                .build(app)?;
+            let vscode = MenuItemBuilder::new("VS Code: checking…")
+                .enabled(false)
+                .build(app)?;
             let refresh_item = MenuItemBuilder::with_id(REFRESH_ID, "Refresh").build(app)?;
             let quit = MenuItemBuilder::with_id(QUIT_ID, "Quit Agentplane").build(app)?;
             let menu = MenuBuilder::new(app)
-                .items(&[&daemon, &codex])
+                .items(&[&daemon, &codex, &opencode, &claude_code, &vscode])
                 .separator()
                 .item(&refresh_item)
                 .separator()
                 .item(&quit)
                 .build()?;
 
-            let items = TrayItems { daemon, codex };
+            let items = TrayItems {
+                daemon,
+                codex,
+                opencode,
+                claude_code,
+                vscode,
+            };
             let refresh_items = items.clone();
             TrayIconBuilder::new()
                 .icon(tray_icon())
@@ -90,30 +119,28 @@ async fn refresh(items: &TrayItems) {
         }
         Err(_) => {
             let _ = items.daemon.set_text("Daemon: unavailable");
-            let _ = items.codex.set_text("Codex: unknown");
+            set_discovery_status(items, None, "unknown");
             return;
         }
     }
 
     match client::get::<Discovery>(&socket, "/v1/discovery").await {
         Ok(discovery) => {
-            let text = discovery
-                .agents
-                .iter()
-                .find(|agent| agent.kind == "codex")
-                .map(|agent| {
-                    agent
-                        .version
-                        .as_deref()
-                        .map(|version| format!("Codex: {version}"))
-                        .unwrap_or_else(|| "Codex: discovered".to_owned())
-                })
-                .unwrap_or_else(|| "Codex: not found".to_owned());
-            let _ = items.codex.set_text(text);
+            set_discovery_status(items, Some(&discovery), "not found");
         }
         Err(_) => {
-            let _ = items.codex.set_text("Codex: unavailable");
+            set_discovery_status(items, None, "unavailable");
         }
+    }
+}
+
+fn set_discovery_status(items: &TrayItems, discovery: Option<&Discovery>, missing: &str) {
+    for (kind, label, item) in items.discoveries() {
+        let status = discovery
+            .and_then(|discovery| discovery.agents.iter().find(|agent| agent.kind == kind))
+            .map(|agent| agent.version.as_deref().unwrap_or("discovered"))
+            .unwrap_or(missing);
+        let _ = item.set_text(format!("{label}: {status}"));
     }
 }
 

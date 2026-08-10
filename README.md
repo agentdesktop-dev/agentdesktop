@@ -1,6 +1,6 @@
 # Agentplane
 
-Agentplane currently consists of a small Linux daemon and a CLI client. At startup, the daemon reads a YAML configuration and discovers installed coding agents. It exposes its state through an HTTP API over a Unix domain socket.
+Agentplane currently consists of a small Linux daemon and a CLI client. At startup, the daemon reads a YAML configuration and discovers Codex, OpenCode, Claude Code, and VS Code installations available on its `PATH`. It exposes its state through an HTTP API over a Unix domain socket.
 
 Build it:
 
