@@ -6,6 +6,7 @@ service FleetAgent {
   rpc Enroll(EnrollRequest) returns (EnrollResponse);
   rpc BeginEnrollment(BeginEnrollmentRequest) returns (BeginEnrollmentResponse);
   rpc CompleteEnrollment(CompleteEnrollmentRequest) returns (EnrollResponse);
+  rpc GetInferenceGatewayCredential(InferenceGatewayCredentialRequest) returns (InferenceGatewayCredentialResponse);
   rpc Connect(stream AgentMessage) returns (stream ControllerMessage);
 }
 
@@ -35,6 +36,15 @@ message CompleteEnrollmentRequest {
   string enrollment_id = 1;
   string authorization_code = 2;
   string code_verifier = 3;
+}
+
+message InferenceGatewayCredentialRequest {
+  string gateway = 1;
+}
+
+message InferenceGatewayCredentialResponse {
+  string credential = 1;
+  uint64 expires_at_unix_seconds = 2;
 }
 
 message AgentMessage {

@@ -27,3 +27,10 @@ pub struct EnrollmentStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization_url: Option<String>,
 }
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InferenceGatewayCredential {
+    pub credential: String,
+    pub expires_at_unix_seconds: u64,
+}

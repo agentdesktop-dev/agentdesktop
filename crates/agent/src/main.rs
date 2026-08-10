@@ -39,6 +39,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let _log_flush = telemetry::setup_logging("info", false);
     let config = config::load(&args.config)?;
+    let controller_config = config.controller.clone();
     let enrollment = EnrollmentState::new(config.controller.is_some());
     let discovery = discovery::discover().await;
     for agent in &discovery.agents {
@@ -55,7 +56,10 @@ async fn main() -> anyhow::Result<()> {
             .or_else(|| std::env::var("AGENTPLANE_ENROLLMENT_TOKEN").ok());
         let remote_discovery = discovery.clone();
         let state_dir = args.state_dir.clone();
-        let reconciler = reconcile::Reconciler::new(args.claude_code_managed_settings_dir.clone());
+        let reconciler = reconcile::Reconciler::new(
+            args.claude_code_managed_settings_dir.clone(),
+            credential_helper_command(&args.socket)?,
+        );
         let remote_enrollment = enrollment.clone();
         tokio::spawn(async move {
             if let Err(error) = remote::run(
@@ -78,6 +82,8 @@ async fn main() -> anyhow::Result<()> {
         config,
         discovery,
         enrollment,
+        controller: controller_config,
+        state_dir: args.state_dir,
     });
 
     tracing::info!(socket = %args.socket.display(), "agent daemon listening");
@@ -106,6 +112,21 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!(%error, socket = %args.socket.display(), "failed to remove socket");
     }
     Ok(())
+}
+
+fn credential_helper_command(socket: &Path) -> anyhow::Result<String> {
+    let executable = std::env::current_exe()
+        .context("locate agentplaned executable")?
+        .with_file_name(format!("agentplane{}", std::env::consts::EXE_SUFFIX));
+    Ok(format!(
+        "{} --socket {} credential",
+        shell_quote(&executable.to_string_lossy()),
+        shell_quote(&socket.to_string_lossy())
+    ))
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn bind(path: &PathBuf) -> anyhow::Result<UnixListener> {
