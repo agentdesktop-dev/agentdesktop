@@ -4,7 +4,7 @@ use agentplane_client as client;
 use agentplane_core::{
     DEFAULT_SOCKET_PATH,
     config::Config,
-    model::{Discovery, Health},
+    model::{Discovery, Health, InferenceGatewayCredential},
 };
 use clap::{Parser, Subcommand};
 
@@ -26,6 +26,11 @@ enum Command {
     Discover,
     /// Print the daemon's active configuration.
     Config,
+    /// Print a short-lived credential for an inference gateway.
+    Credential {
+        /// Name of the inference gateway in desired configuration.
+        gateway: String,
+    },
 }
 
 #[tokio::main]
@@ -57,6 +62,18 @@ async fn main() -> anyhow::Result<()> {
                 "{}",
                 agentplane_core::serdes::yamlviajson::to_string(&config)?
             );
+        }
+        Command::Credential { gateway } => {
+            if gateway.is_empty()
+                || !gateway
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            {
+                anyhow::bail!("gateway name must contain only letters, numbers, '.', '-', or '_'");
+            }
+            let path = format!("/v1/inference-gateways/{gateway}/credential");
+            let response: InferenceGatewayCredential = client::get(&args.socket, &path).await?;
+            println!("{}", response.credential);
         }
     }
 

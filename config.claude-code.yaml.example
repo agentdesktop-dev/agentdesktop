@@ -1,9 +1,10 @@
+inferenceGateways:
+  corporate:
+    url: https://gateway.example.com
+    authentication:
+      type: controllerJwt
+      audience: agentgateway
+
 programs:
   claudeCode:
-    managedSettings:
-      companyAnnouncements:
-        - This Claude Code installation is managed by Agentplane.
-      permissions:
-        deny:
-          - Read(./.env)
-          - Read(./.env.*)
+    inferenceGateway: corporate

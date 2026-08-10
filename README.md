@@ -98,13 +98,42 @@ For TLS, give the controller `--tls-certificate` and `--tls-key`, use an `https:
 
 ### Claude Code managed settings
 
-`config.claude-code.yaml.example` demonstrates centrally managed Claude Code settings. Start the controller with it as desired state:
+Inference gateways are named, top-level resources so multiple application integrations can reference the same endpoint. `config.claude-code.yaml.example` defines a `corporate` gateway and assigns Claude Code to it:
+
+```yaml
+inferenceGateways:
+  corporate:
+    url: https://gateway.example.com
+    authentication:
+      type: controllerJwt
+      audience: agentgateway
+
+programs:
+  claudeCode:
+    inferenceGateway: corporate
+```
+
+The Claude Code adapter translates this to `ANTHROPIC_BASE_URL` plus an `apiKeyHelper` command that calls the local Agentplane CLI. The CLI asks the daemon for a credential, the daemon authenticates to the controller with its device credential, and the controller returns a short-lived RS256 JWT. Claude caches the result for one minute; the JWT lifetime defaults to five minutes. No gateway credential is stored in YAML or managed settings.
+
+Generate a controller signing key for development:
+
+```console
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+  -out /tmp/agentplane-gateway-jwt.pem
+```
+
+Start the controller with the example as desired state and enable JWT issuance:
 
 ```console
 cargo run --bin agentplane-controller -- \
   --enrollment-token development \
-  --desired-config ./config.claude-code.yaml.example
+  --desired-config ./config.claude-code.yaml.example \
+  --gateway-jwt-private-key /tmp/agentplane-gateway-jwt.pem \
+  --gateway-jwt-issuer agentplane-controller \
+  --gateway-jwt-key-id agentplane
 ```
+
+Agentgateway must trust the corresponding RSA public key and require issuer `agentplane-controller` and audience `agentgateway`. For OIDC-enrolled devices, the gateway JWT subject is the verified OIDC subject; token-enrolled devices use their device ID. The JWT also carries `device_id` and `gateway` claims. In production, keep the private key outside the database with restrictive permissions and distribute only its public JWK to Agentgateway.
 
 On Linux, the daemon atomically reconciles Agentplane's dedicated drop-in at `/etc/claude-code/managed-settings.d/50-agentplane.json`. For an unprivileged development run, redirect that exact directory:
 
@@ -118,6 +147,16 @@ cargo run --bin agentplaned -- \
 ```
 
 Inspect the result with `jq . /tmp/claude-code-managed-settings.d/50-agentplane.json`. When `programs.claudeCode` is absent from a later desired revision, the daemon removes only its own drop-in file.
+
+The generated helper can also be exercised directly:
+
+```console
+cargo run --bin agentplane -- \
+  --socket /tmp/agentplane.sock \
+  credential corporate
+```
+
+It writes only the JWT to stdout, which is the interface Claude Code expects.
 
 To exercise the real privileged path during development, build as your user and elevate only the resulting daemon binary with the wrapper:
 

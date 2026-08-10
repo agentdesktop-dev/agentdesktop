@@ -94,6 +94,7 @@ dependencies = [
  "serde_yaml",
  "tracing-appender",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

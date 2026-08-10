@@ -8,6 +8,11 @@ pub struct Database {
     pool: AnyPool,
 }
 
+pub struct DevicePrincipal {
+    pub issuer: String,
+    pub subject: String,
+}
+
 impl Database {
     pub async fn connect(url: &str) -> anyhow::Result<Self> {
         sqlx::any::install_default_drivers();
@@ -62,6 +67,17 @@ impl Database {
             .fetch_optional(&self.pool)
             .await
             .context("authenticate device credential")
+    }
+
+    pub async fn device_principal(&self, device_id: &str) -> anyhow::Result<DevicePrincipal> {
+        let (issuer, subject) = sqlx::query_as(
+            "SELECT enrolled_by_issuer, enrolled_by_subject FROM devices WHERE id = $1",
+        )
+        .bind(device_id)
+        .fetch_one(&self.pool)
+        .await
+        .context("load device enrollment principal")?;
+        Ok(DevicePrincipal { issuer, subject })
     }
 
     pub async fn update_hello(&self, device_id: &str, hello: &Hello) -> anyhow::Result<()> {

@@ -15,3 +15,4 @@ serde-transcode.workspace = true
 serde_yaml.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
+url.workspace = true

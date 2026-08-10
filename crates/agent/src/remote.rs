@@ -18,8 +18,9 @@ use agentplane_core::{
     model::Discovery as AgentDiscovery,
 };
 use agentplane_proto::fleet::{
-    AgentMessage, ConfigState, ConfigStatus, Discovery, EnrollRequest, Heartbeat, Hello, Inventory,
-    agent_message, controller_message, fleet_agent_client::FleetAgentClient,
+    AgentMessage, ConfigState, ConfigStatus, Discovery, EnrollRequest, Heartbeat, Hello,
+    InferenceGatewayCredentialRequest, Inventory, agent_message, controller_message,
+    fleet_agent_client::FleetAgentClient,
 };
 
 use crate::{
@@ -68,6 +69,32 @@ pub async fn run(
         time::sleep(delay).await;
         delay = (delay * 2).min(Duration::from_secs(60));
     }
+}
+
+pub async fn inference_gateway_credential(
+    controller: &ControllerConfig,
+    state_dir: &Path,
+    gateway: String,
+) -> anyhow::Result<agentplane_core::model::InferenceGatewayCredential> {
+    let identity =
+        identity::load(&state_dir.join("identity.json"))?.context("device is not enrolled")?;
+    let mut client = client(controller).await?;
+    let mut request = Request::new(InferenceGatewayCredentialRequest { gateway });
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", identity.credential)
+            .parse()
+            .context("encode device credential")?,
+    );
+    let response = client
+        .get_inference_gateway_credential(request)
+        .await
+        .context("request inference gateway credential")?
+        .into_inner();
+    Ok(agentplane_core::model::InferenceGatewayCredential {
+        credential: response.credential,
+        expires_at_unix_seconds: response.expires_at_unix_seconds,
+    })
 }
 
 async fn enroll_with_token(

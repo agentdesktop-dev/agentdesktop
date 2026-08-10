@@ -7,19 +7,26 @@ use agentplane_core::config::Config;
 #[derive(Clone)]
 pub struct Reconciler {
     claude_code_managed_settings_dir: PathBuf,
+    credential_helper: String,
 }
 
 impl Reconciler {
-    pub fn new(claude_code_managed_settings_dir: PathBuf) -> Self {
+    pub fn new(claude_code_managed_settings_dir: PathBuf, credential_helper: String) -> Self {
         Self {
             claude_code_managed_settings_dir,
+            credential_helper,
         }
     }
 
     pub fn apply(&self, config: &Config) -> anyhow::Result<()> {
+        let claude_code = config.programs.claude_code.as_ref().map(|claude_code| {
+            let gateway = &config.inference_gateways[&claude_code.inference_gateway];
+            (claude_code, gateway)
+        });
         claude_code::apply(
             &self.claude_code_managed_settings_dir,
-            config.programs.claude_code.as_ref(),
+            &self.credential_helper,
+            claude_code,
         )
     }
 }

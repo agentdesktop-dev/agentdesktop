@@ -2,7 +2,8 @@ use std::{path::Path, pin::Pin};
 
 use agentplane_proto::fleet::{
     AgentMessage, BeginEnrollmentRequest, BeginEnrollmentResponse, CompleteEnrollmentRequest,
-    ControllerMessage, DesiredConfig, EnrollRequest, EnrollResponse, agent_message,
+    ControllerMessage, DesiredConfig, EnrollRequest, EnrollResponse,
+    InferenceGatewayCredentialRequest, InferenceGatewayCredentialResponse, agent_message,
     controller_message, fleet_agent_server::FleetAgent,
 };
 use anyhow::Context;
@@ -16,7 +17,9 @@ use tonic::{Request, Response, Status};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::{database::Database, oidc::OidcProvider};
+use agentplane_core::config::InferenceGatewayAuthentication;
+
+use crate::{database::Database, gateway_jwt::GatewayJwtIssuer, oidc::OidcProvider};
 
 #[derive(Clone)]
 pub struct FleetAgentService {
@@ -24,6 +27,7 @@ pub struct FleetAgentService {
     oidc: Option<OidcProvider>,
     database: Database,
     desired_config: Option<DesiredConfig>,
+    gateway_jwt_issuer: Option<GatewayJwtIssuer>,
 }
 
 impl FleetAgentService {
@@ -32,12 +36,14 @@ impl FleetAgentService {
         oidc: Option<OidcProvider>,
         database: Database,
         desired_config: Option<DesiredConfig>,
+        gateway_jwt_issuer: Option<GatewayJwtIssuer>,
     ) -> Self {
         Self {
             enrollment_token,
             oidc,
             database,
             desired_config,
+            gateway_jwt_issuer,
         }
     }
 }
@@ -93,17 +99,68 @@ impl FleetAgent for FleetAgentService {
             .await
     }
 
+    async fn get_inference_gateway_credential(
+        &self,
+        request: Request<InferenceGatewayCredentialRequest>,
+    ) -> Result<Response<InferenceGatewayCredentialResponse>, Status> {
+        let device_id = self.authenticate_device(request.metadata()).await?;
+        let gateway_name = request.get_ref().gateway.trim();
+        if gateway_name.is_empty() {
+            return Err(Status::invalid_argument("gateway is required"));
+        }
+        let desired = self
+            .desired_config
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("no desired configuration is active"))?;
+        let yaml = std::str::from_utf8(&desired.yaml)
+            .map_err(|_| Status::internal("desired configuration is not UTF-8"))?;
+        let config = agentplane_core::config::parse(yaml).map_err(internal)?;
+        let gateway = config
+            .inference_gateways
+            .get(gateway_name)
+            .ok_or_else(|| Status::not_found("unknown inference gateway"))?;
+        let audience = match gateway.authentication.as_ref() {
+            Some(InferenceGatewayAuthentication::ControllerJwt { audience }) => audience,
+            None => {
+                return Err(Status::failed_precondition(
+                    "inference gateway does not use controller JWT authentication",
+                ));
+            }
+        };
+        let issuer = self.gateway_jwt_issuer.as_ref().ok_or_else(|| {
+            Status::failed_precondition("controller gateway JWT issuer is not configured")
+        })?;
+        let principal = self
+            .database
+            .device_principal(&device_id)
+            .await
+            .map_err(internal)?;
+        let subject = if principal.subject.is_empty() {
+            device_id.as_str()
+        } else {
+            principal.subject.as_str()
+        };
+        let (credential, expires_at_unix_seconds) = issuer
+            .issue(subject, &device_id, gateway_name, audience)
+            .map_err(internal)?;
+        info!(
+            device_id,
+            gateway = gateway_name,
+            expires_at_unix_seconds,
+            enrolled_by_issuer = principal.issuer,
+            "issued inference gateway credential"
+        );
+        Ok(Response::new(InferenceGatewayCredentialResponse {
+            credential,
+            expires_at_unix_seconds,
+        }))
+    }
+
     async fn connect(
         &self,
         request: Request<tonic::Streaming<AgentMessage>>,
     ) -> Result<Response<Self::ConnectStream>, Status> {
-        let credential = bearer_credential(request.metadata())?;
-        let authenticated_device_id = self
-            .database
-            .authenticate(&credential_hash(credential))
-            .await
-            .map_err(internal)?
-            .ok_or_else(|| Status::unauthenticated("unknown device credential"))?;
+        let authenticated_device_id = self.authenticate_device(request.metadata()).await?;
 
         let mut inbound = request.into_inner();
         let (sender, receiver) = mpsc::channel(8);
@@ -158,6 +215,18 @@ impl FleetAgent for FleetAgentService {
 }
 
 impl FleetAgentService {
+    async fn authenticate_device(
+        &self,
+        metadata: &tonic::metadata::MetadataMap,
+    ) -> Result<String, Status> {
+        let credential = bearer_credential(metadata)?;
+        self.database
+            .authenticate(&credential_hash(credential))
+            .await
+            .map_err(internal)?
+            .ok_or_else(|| Status::unauthenticated("unknown device credential"))
+    }
+
     async fn enroll_device(
         &self,
         hostname: &str,

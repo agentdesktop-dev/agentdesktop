@@ -1,7 +1,9 @@
+use std::time::Duration;
 use std::{net::SocketAddr, path::PathBuf};
 
 use agentplane_controller::{
     database::Database,
+    gateway_jwt::GatewayJwtIssuer,
     oidc::OidcProvider,
     service::{FleetAgentService, load_desired_config},
 };
@@ -38,6 +40,18 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     desired_config_revision: u64,
 
+    #[arg(long)]
+    gateway_jwt_private_key: Option<PathBuf>,
+
+    #[arg(long, default_value = "agentplane-controller")]
+    gateway_jwt_issuer: String,
+
+    #[arg(long, default_value = "agentplane")]
+    gateway_jwt_key_id: String,
+
+    #[arg(long, default_value_t = 300)]
+    gateway_jwt_lifetime_seconds: u64,
+
     #[arg(long, requires = "tls_key")]
     tls_certificate: Option<PathBuf>,
 
@@ -66,7 +80,29 @@ async fn main() -> anyhow::Result<()> {
         (None, None) => None,
         _ => unreachable!("clap enforces paired OIDC arguments"),
     };
-    let service = FleetAgentService::new(args.enrollment_token, oidc, database, desired_config);
+    let gateway_jwt_issuer = args
+        .gateway_jwt_private_key
+        .as_deref()
+        .map(|path| {
+            GatewayJwtIssuer::from_rsa_pem(
+                path,
+                args.gateway_jwt_issuer,
+                args.gateway_jwt_key_id,
+                Duration::from_secs(args.gateway_jwt_lifetime_seconds),
+            )
+        })
+        .transpose()
+        .context("initialize inference gateway JWT issuer")?;
+    if gateway_jwt_issuer.is_some() {
+        tracing::info!("inference gateway JWT issuance enabled");
+    }
+    let service = FleetAgentService::new(
+        args.enrollment_token,
+        oidc,
+        database,
+        desired_config,
+        gateway_jwt_issuer,
+    );
 
     let mut server = Server::builder();
     if let (Some(certificate), Some(key)) = (args.tls_certificate, args.tls_key) {

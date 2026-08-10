@@ -1,18 +1,27 @@
-use axum::{Json, Router, extract::State, routing::get};
+use std::path::PathBuf;
+
+use axum::{
+    Json, Router,
+    extract::{Path, State},
+    http::StatusCode,
+    routing::get,
+};
 use serde::Serialize;
 
 use agentplane_core::{
-    config::Config,
-    model::{Discovery, EnrollmentStatus},
+    config::{Config, ControllerConfig},
+    model::{Discovery, EnrollmentStatus, InferenceGatewayCredential},
 };
 
-use crate::enrollment::EnrollmentState;
+use crate::{enrollment::EnrollmentState, remote};
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: Config,
     pub discovery: Discovery,
     pub enrollment: EnrollmentState,
+    pub controller: Option<ControllerConfig>,
+    pub state_dir: PathBuf,
 }
 
 #[derive(Serialize)]
@@ -26,6 +35,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/config", get(config))
         .route("/v1/discovery", get(discover))
         .route("/v1/enrollment", get(enrollment))
+        .route(
+            "/v1/inference-gateways/{gateway}/credential",
+            get(inference_gateway_credential),
+        )
         .with_state(state)
 }
 
@@ -43,4 +56,20 @@ async fn discover(State(state): State<AppState>) -> Json<Discovery> {
 
 async fn enrollment(State(state): State<AppState>) -> Json<EnrollmentStatus> {
     Json(state.enrollment.get().await)
+}
+
+async fn inference_gateway_credential(
+    State(state): State<AppState>,
+    Path(gateway): Path<String>,
+) -> Result<Json<InferenceGatewayCredential>, (StatusCode, String)> {
+    let controller = state.controller.as_ref().ok_or_else(|| {
+        (
+            StatusCode::FAILED_DEPENDENCY,
+            "daemon has no controller configured".to_string(),
+        )
+    })?;
+    remote::inference_gateway_credential(controller, &state.state_dir, gateway)
+        .await
+        .map(Json)
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("{error:#}")))
 }
