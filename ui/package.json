@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tauri dev",
     "build": "tauri build",
+    "build:mac": "tauri build --bundles app,dmg",
     "frontend:dev": "vite --host 127.0.0.1 --port 1420",
     "frontend:build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
