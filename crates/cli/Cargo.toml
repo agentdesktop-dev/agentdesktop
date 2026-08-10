@@ -9,7 +9,6 @@ name = "agentplane"
 path = "src/main.rs"
 
 [dependencies]
-agent-core.workspace = true
 agentplane-client.workspace = true
 agentplane-core.workspace = true
 anyhow.workspace = true

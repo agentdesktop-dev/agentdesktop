@@ -52,10 +52,10 @@ pub struct ClaudeCodeConfig {
 pub fn load(path: &Path) -> anyhow::Result<Config> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("read configuration from {}", path.display()))?;
-    agent_core::serdes::yamlviajson::from_str(&contents)
+    crate::serdes::yamlviajson::from_str(&contents)
         .with_context(|| format!("parse configuration from {}", path.display()))
 }
 
 pub fn parse(contents: &str) -> anyhow::Result<Config> {
-    agent_core::serdes::yamlviajson::from_str(contents).context("parse configuration")
+    crate::serdes::yamlviajson::from_str(contents).context("parse configuration")
 }

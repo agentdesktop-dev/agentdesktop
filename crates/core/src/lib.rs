@@ -1,5 +1,6 @@
 pub mod config;
 pub mod model;
+pub mod serdes;
 pub mod telemetry;
 
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/agentplane/config.yaml";

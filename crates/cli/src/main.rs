@@ -53,7 +53,10 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Config => {
             let config: Config = client::get(&args.socket, "/v1/config").await?;
-            print!("{}", agent_core::serdes::yamlviajson::to_string(&config)?);
+            print!(
+                "{}",
+                agentplane_core::serdes::yamlviajson::to_string(&config)?
+            );
         }
     }
 
