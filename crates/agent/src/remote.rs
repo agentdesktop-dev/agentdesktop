@@ -23,7 +23,9 @@ use agentplane_proto::fleet::{
 };
 
 use crate::{
+    enrollment::EnrollmentState,
     identity::{self, Identity},
+    oidc,
     reconcile::Reconciler,
 };
 
@@ -33,16 +35,24 @@ pub async fn run(
     state_dir: PathBuf,
     enrollment_token: Option<String>,
     reconciler: Reconciler,
+    enrollment: EnrollmentState,
 ) -> anyhow::Result<()> {
     let identity_path = state_dir.join("identity.json");
     let identity = match identity::load(&identity_path)? {
-        Some(identity) => identity,
+        Some(identity) => {
+            enrollment.set("enrolled").await;
+            identity
+        }
         None => {
-            let token = enrollment_token.context(
-                "device is not enrolled; pass --enrollment-token or set AGENTPLANE_ENROLLMENT_TOKEN",
-            )?;
-            let identity = enroll(&controller, token).await?;
+            let identity = match enrollment_token {
+                Some(token) => {
+                    enrollment.set("enrolling").await;
+                    enroll_with_token(&controller, token).await?
+                }
+                None => oidc::enroll(&controller, &enrollment).await?,
+            };
             identity::save(&identity_path, &identity)?;
+            enrollment.set("enrolled").await;
             info!(device_id = %identity.device_id, "enrolled device");
             identity
         }
@@ -60,7 +70,10 @@ pub async fn run(
     }
 }
 
-async fn enroll(controller: &ControllerConfig, token: String) -> anyhow::Result<Identity> {
+async fn enroll_with_token(
+    controller: &ControllerConfig,
+    token: String,
+) -> anyhow::Result<Identity> {
     let mut client = client(controller).await?;
     let response = client
         .enroll(EnrollRequest {
@@ -232,7 +245,9 @@ async fn send(
         .context("controller stream closed")
 }
 
-async fn client(controller: &ControllerConfig) -> anyhow::Result<FleetAgentClient<Channel>> {
+pub(crate) async fn client(
+    controller: &ControllerConfig,
+) -> anyhow::Result<FleetAgentClient<Channel>> {
     let mut endpoint = Endpoint::from_shared(controller.address.clone())?;
     if let Some(path) = &controller.ca_certificate_path {
         let pem = std::fs::read(path)
@@ -244,7 +259,7 @@ async fn client(controller: &ControllerConfig) -> anyhow::Result<FleetAgentClien
     Ok(FleetAgentClient::new(channel))
 }
 
-fn hostname() -> String {
+pub(crate) fn hostname() -> String {
     std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
         .or_else(|_| std::fs::read_to_string("/etc/hostname").map(|value| value.trim().to_string()))

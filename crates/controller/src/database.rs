@@ -28,15 +28,20 @@ impl Database {
         device_id: &str,
         hostname: &str,
         credential_hash: &str,
+        enrolled_by_issuer: &str,
+        enrolled_by_subject: &str,
     ) -> anyhow::Result<()> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query(
-            "INSERT INTO devices (id, hostname, created_at, last_seen_at)
-             VALUES ($1, $2, $3, $3)",
+            "INSERT INTO devices
+                (id, hostname, created_at, last_seen_at, enrolled_by_issuer, enrolled_by_subject)
+             VALUES ($1, $2, $3, $3, $4, $5)",
         )
         .bind(device_id)
         .bind(hostname)
         .bind(unix_time_seconds())
+        .bind(enrolled_by_issuer)
+        .bind(enrolled_by_subject)
         .execute(&mut *transaction)
         .await?;
         sqlx::query(

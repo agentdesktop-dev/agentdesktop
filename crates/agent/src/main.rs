@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use agentplane_agent::{api, discovery, reconcile, remote};
+use agentplane_agent::{api, discovery, enrollment::EnrollmentState, reconcile, remote};
 use agentplane_core::{
     DEFAULT_CONFIG_PATH, DEFAULT_SOCKET_PATH, DEFAULT_STATE_DIR, config, telemetry,
 };
@@ -39,6 +39,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let _log_flush = telemetry::setup_logging("info", false);
     let config = config::load(&args.config)?;
+    let enrollment = EnrollmentState::new(config.controller.is_some());
     let discovery = discovery::discover().await;
     for agent in &discovery.agents {
         tracing::info!(
@@ -55,6 +56,7 @@ async fn main() -> anyhow::Result<()> {
         let remote_discovery = discovery.clone();
         let state_dir = args.state_dir.clone();
         let reconciler = reconcile::Reconciler::new(args.claude_code_managed_settings_dir.clone());
+        let remote_enrollment = enrollment.clone();
         tokio::spawn(async move {
             if let Err(error) = remote::run(
                 controller,
@@ -62,15 +64,21 @@ async fn main() -> anyhow::Result<()> {
                 state_dir,
                 enrollment_token,
                 reconciler,
+                remote_enrollment.clone(),
             )
             .await
             {
+                remote_enrollment.set("failed").await;
                 tracing::error!(error = %error, "controller integration disabled");
             }
         });
     }
     let listener = bind(&args.socket)?;
-    let app = api::router(api::AppState { config, discovery });
+    let app = api::router(api::AppState {
+        config,
+        discovery,
+        enrollment,
+    });
 
     tracing::info!(socket = %args.socket.display(), "agent daemon listening");
     loop {

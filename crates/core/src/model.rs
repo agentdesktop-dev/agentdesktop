@@ -19,3 +19,11 @@ pub struct Agent {
 pub struct Health {
     pub status: String,
 }
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnrollmentStatus {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_url: Option<String>,
+}

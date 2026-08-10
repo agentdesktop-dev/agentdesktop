@@ -1,5 +1,6 @@
 [package]
 name = "agentplane-controller"
+description = "Central fleet controller for enrollment, inventory, and desired configuration."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -11,11 +12,15 @@ anyhow.workspace = true
 base64.workspace = true
 clap.workspace = true
 futures-core.workspace = true
+jsonwebtoken.workspace = true
 rand.workspace = true
+reqwest.workspace = true
+serde.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true
 tracing.workspace = true
+url.workspace = true
 uuid.workspace = true

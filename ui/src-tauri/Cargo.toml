@@ -1,5 +1,6 @@
 [package]
 name = "agentplane-ui"
+description = "Cross-platform desktop and tray client for Agentplane."
 version = "0.1.0"
 edition = "2024"
 publish = false
@@ -10,6 +11,7 @@ tauri-build = { version = "2.6.3", features = [] }
 [dependencies]
 agentplane-client.workspace = true
 agentplane-core.workspace = true
+open.workspace = true
 serde = { version = "1", features = ["derive"] }
 tauri = { version = "2.11.5", features = ["tray-icon"] }
 tokio = { version = "1", features = ["time"] }

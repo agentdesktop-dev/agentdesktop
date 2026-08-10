@@ -4,6 +4,8 @@ package agentplane.fleet.v1;
 
 service FleetAgent {
   rpc Enroll(EnrollRequest) returns (EnrollResponse);
+  rpc BeginEnrollment(BeginEnrollmentRequest) returns (BeginEnrollmentResponse);
+  rpc CompleteEnrollment(CompleteEnrollmentRequest) returns (EnrollResponse);
   rpc Connect(stream AgentMessage) returns (stream ControllerMessage);
 }
 
@@ -15,6 +17,24 @@ message EnrollRequest {
 message EnrollResponse {
   string device_id = 1;
   string credential = 2;
+}
+
+message BeginEnrollmentRequest {
+  string hostname = 1;
+  string code_challenge = 2;
+}
+
+message BeginEnrollmentResponse {
+  string enrollment_id = 1;
+  string authorization_url = 2;
+  string state = 3;
+  string redirect_uri = 4;
+}
+
+message CompleteEnrollmentRequest {
+  string enrollment_id = 1;
+  string authorization_code = 2;
+  string code_verifier = 3;
 }
 
 message AgentMessage {

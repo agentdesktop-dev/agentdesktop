@@ -2,6 +2,7 @@ use std::{net::SocketAddr, path::PathBuf};
 
 use agentplane_controller::{
     database::Database,
+    oidc::OidcProvider,
     service::{FleetAgentService, load_desired_config},
 };
 use agentplane_core::telemetry;
@@ -18,6 +19,15 @@ struct Args {
 
     #[arg(long)]
     enrollment_token: Option<String>,
+
+    #[arg(long, requires = "oidc_client_id")]
+    oidc_issuer: Option<String>,
+
+    #[arg(long, requires = "oidc_issuer")]
+    oidc_client_id: Option<String>,
+
+    #[arg(long, default_value = "http://127.0.0.1:5555/callback")]
+    oidc_redirect_uri: String,
 
     #[arg(long, default_value = "sqlite://agentplane-controller.db?mode=rwc")]
     database_url: String,
@@ -42,7 +52,21 @@ async fn main() -> anyhow::Result<()> {
     let desired_config =
         load_desired_config(args.desired_config.as_deref(), args.desired_config_revision)?;
     let database = Database::connect(&args.database_url).await?;
-    let service = FleetAgentService::new(args.enrollment_token, database, desired_config);
+    let oidc = match (args.oidc_issuer, args.oidc_client_id) {
+        (Some(issuer), Some(client_id)) => {
+            if issuer.starts_with("http://") {
+                tracing::warn!(%issuer, "OIDC issuer does not use TLS");
+            }
+            let provider = OidcProvider::discover(issuer, client_id, args.oidc_redirect_uri)
+                .await
+                .context("initialize OIDC enrollment")?;
+            tracing::info!("OIDC enrollment enabled");
+            Some(provider)
+        }
+        (None, None) => None,
+        _ => unreachable!("clap enforces paired OIDC arguments"),
+    };
+    let service = FleetAgentService::new(args.enrollment_token, oidc, database, desired_config);
 
     let mut server = Server::builder();
     if let (Some(certificate), Some(key)) = (args.tls_certificate, args.tls_key) {

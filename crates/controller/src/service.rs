@@ -1,7 +1,8 @@
 use std::{path::Path, pin::Pin};
 
 use agentplane_proto::fleet::{
-    AgentMessage, ControllerMessage, DesiredConfig, EnrollRequest, EnrollResponse, agent_message,
+    AgentMessage, BeginEnrollmentRequest, BeginEnrollmentResponse, CompleteEnrollmentRequest,
+    ControllerMessage, DesiredConfig, EnrollRequest, EnrollResponse, agent_message,
     controller_message, fleet_agent_server::FleetAgent,
 };
 use anyhow::Context;
@@ -15,11 +16,12 @@ use tonic::{Request, Response, Status};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::database::Database;
+use crate::{database::Database, oidc::OidcProvider};
 
 #[derive(Clone)]
 pub struct FleetAgentService {
     enrollment_token: Option<String>,
+    oidc: Option<OidcProvider>,
     database: Database,
     desired_config: Option<DesiredConfig>,
 }
@@ -27,11 +29,13 @@ pub struct FleetAgentService {
 impl FleetAgentService {
     pub fn new(
         enrollment_token: Option<String>,
+        oidc: Option<OidcProvider>,
         database: Database,
         desired_config: Option<DesiredConfig>,
     ) -> Self {
         Self {
             enrollment_token,
+            oidc,
             database,
             desired_config,
         }
@@ -54,18 +58,39 @@ impl FleetAgent for FleetAgentService {
             return Err(Status::unauthenticated("invalid enrollment token"));
         }
 
-        let device_id = Uuid::new_v4().to_string();
-        let credential = new_credential();
-        self.database
-            .enroll_device(&device_id, &request.hostname, &credential_hash(&credential))
-            .await
-            .map_err(internal)?;
-        info!(%device_id, hostname = %request.hostname, "enrolled device");
+        self.enroll_device(&request.hostname, "", "").await
+    }
 
-        Ok(Response::new(EnrollResponse {
-            device_id,
-            credential,
-        }))
+    async fn begin_enrollment(
+        &self,
+        request: Request<BeginEnrollmentRequest>,
+    ) -> Result<Response<BeginEnrollmentResponse>, Status> {
+        let oidc = self
+            .oidc
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("OIDC enrollment is disabled"))?;
+        let request = request.into_inner();
+        let response = oidc
+            .begin(request.hostname, &request.code_challenge)
+            .await
+            .map_err(invalid_enrollment)?;
+        Ok(Response::new(response))
+    }
+
+    async fn complete_enrollment(
+        &self,
+        request: Request<CompleteEnrollmentRequest>,
+    ) -> Result<Response<EnrollResponse>, Status> {
+        let oidc = self
+            .oidc
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("OIDC enrollment is disabled"))?;
+        let completed = oidc
+            .complete(request.into_inner())
+            .await
+            .map_err(invalid_enrollment)?;
+        self.enroll_device(&completed.hostname, &completed.issuer, &completed.subject)
+            .await
     }
 
     async fn connect(
@@ -129,6 +154,40 @@ impl FleetAgent for FleetAgentService {
         });
 
         Ok(Response::new(Box::pin(ReceiverStream::new(receiver))))
+    }
+}
+
+impl FleetAgentService {
+    async fn enroll_device(
+        &self,
+        hostname: &str,
+        enrolled_by_issuer: &str,
+        enrolled_by_subject: &str,
+    ) -> Result<Response<EnrollResponse>, Status> {
+        let device_id = Uuid::new_v4().to_string();
+        let credential = new_credential();
+        self.database
+            .enroll_device(
+                &device_id,
+                hostname,
+                &credential_hash(&credential),
+                enrolled_by_issuer,
+                enrolled_by_subject,
+            )
+            .await
+            .map_err(internal)?;
+        info!(
+            %device_id,
+            hostname,
+            enrolled_by_issuer,
+            enrolled_by_subject,
+            "enrolled device"
+        );
+
+        Ok(Response::new(EnrollResponse {
+            device_id,
+            credential,
+        }))
     }
 }
 
@@ -217,4 +276,9 @@ fn credential_hash(credential: &str) -> String {
 fn internal(err: anyhow::Error) -> Status {
     error!(error = %err, "controller state operation failed");
     Status::internal("controller state error")
+}
+
+fn invalid_enrollment(err: anyhow::Error) -> Status {
+    warn!(error = %err, "OIDC enrollment failed");
+    Status::unauthenticated("OIDC enrollment failed")
 }

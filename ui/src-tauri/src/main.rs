@@ -1,9 +1,14 @@
-use std::{env, path::PathBuf, time::Duration};
+use std::{
+    env,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use agentplane_client as client;
 use agentplane_core::{
     DEFAULT_SOCKET_PATH,
-    model::{Discovery, Health},
+    model::{Discovery, EnrollmentStatus, Health},
 };
 use tauri::{
     Manager,
@@ -13,11 +18,15 @@ use tauri::{
 };
 
 const REFRESH_ID: &str = "refresh";
+const ENROLL_ID: &str = "enroll";
 const QUIT_ID: &str = "quit";
+
+type AuthorizationUrl = Arc<Mutex<Option<String>>>;
 
 #[derive(Clone)]
 struct TrayItems {
     daemon: MenuItem<tauri::Wry>,
+    enrollment: MenuItem<tauri::Wry>,
     codex: MenuItem<tauri::Wry>,
     opencode: MenuItem<tauri::Wry>,
     claude_code: MenuItem<tauri::Wry>,
@@ -44,6 +53,9 @@ fn main() {
             let daemon = MenuItemBuilder::new("Daemon: connecting…")
                 .enabled(false)
                 .build(app)?;
+            let enrollment = MenuItemBuilder::with_id(ENROLL_ID, "Enrollment: checking…")
+                .enabled(false)
+                .build(app)?;
             let codex = MenuItemBuilder::new("Codex: checking…")
                 .enabled(false)
                 .build(app)?;
@@ -59,7 +71,14 @@ fn main() {
             let refresh_item = MenuItemBuilder::with_id(REFRESH_ID, "Refresh").build(app)?;
             let quit = MenuItemBuilder::with_id(QUIT_ID, "Quit Agentplane").build(app)?;
             let menu = MenuBuilder::new(app)
-                .items(&[&daemon, &codex, &opencode, &claude_code, &vscode])
+                .items(&[
+                    &daemon,
+                    &enrollment,
+                    &codex,
+                    &opencode,
+                    &claude_code,
+                    &vscode,
+                ])
                 .separator()
                 .item(&refresh_item)
                 .separator()
@@ -68,12 +87,15 @@ fn main() {
 
             let items = TrayItems {
                 daemon,
+                enrollment,
                 codex,
                 opencode,
                 claude_code,
                 vscode,
             };
+            let authorization_url: AuthorizationUrl = Arc::new(Mutex::new(None));
             let refresh_items = items.clone();
+            let menu_authorization_url = authorization_url.clone();
             let tray = TrayIconBuilder::new()
                 .icon(tray_icon())
                 .icon_as_template(cfg!(target_os = "macos"))
@@ -81,20 +103,33 @@ fn main() {
                 .menu(&menu)
                 .show_menu_on_left_click(true)
                 .on_menu_event(move |app, event| match event.id().as_ref() {
-                    REFRESH_ID => spawn_refresh(refresh_items.clone()),
+                    REFRESH_ID => {
+                        spawn_refresh(refresh_items.clone(), menu_authorization_url.clone())
+                    }
+                    ENROLL_ID => {
+                        let url = menu_authorization_url
+                            .lock()
+                            .ok()
+                            .and_then(|url| url.clone());
+                        if let Some(url) = url
+                            && let Err(error) = open::that(url)
+                        {
+                            eprintln!("failed to open enrollment URL: {error}");
+                        }
+                    }
                     QUIT_ID => app.exit(0),
                     _ => {}
                 })
                 .build(app)?;
             app.manage(tray);
 
-            spawn_refresh(items.clone());
+            spawn_refresh(items.clone(), authorization_url.clone());
             tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(5));
                 interval.tick().await;
                 loop {
                     interval.tick().await;
-                    refresh(&items).await;
+                    refresh(&items, &authorization_url).await;
                 }
             });
 
@@ -104,13 +139,13 @@ fn main() {
         .expect("run Agentplane tray application");
 }
 
-fn spawn_refresh(items: TrayItems) {
+fn spawn_refresh(items: TrayItems, authorization_url: AuthorizationUrl) {
     tauri::async_runtime::spawn(async move {
-        refresh(&items).await;
+        refresh(&items, &authorization_url).await;
     });
 }
 
-async fn refresh(items: &TrayItems) {
+async fn refresh(items: &TrayItems, authorization_url: &AuthorizationUrl) {
     let socket = socket_path();
     let health = client::get::<Health>(&socket, "/v1/health").await;
     match health {
@@ -119,10 +154,16 @@ async fn refresh(items: &TrayItems) {
         }
         Err(_) => {
             let _ = items.daemon.set_text("Daemon: unavailable");
+            set_enrollment_status(items, authorization_url, None);
             set_discovery_status(items, None, "daemon unavailable");
             return;
         }
     }
+
+    let enrollment = client::get::<EnrollmentStatus>(&socket, "/v1/enrollment")
+        .await
+        .ok();
+    set_enrollment_status(items, authorization_url, enrollment.as_ref());
 
     match client::get::<Discovery>(&socket, "/v1/discovery").await {
         Ok(discovery) => {
@@ -132,6 +173,29 @@ async fn refresh(items: &TrayItems) {
             set_discovery_status(items, None, "unavailable");
         }
     }
+}
+
+fn set_enrollment_status(
+    items: &TrayItems,
+    authorization_url: &AuthorizationUrl,
+    enrollment: Option<&EnrollmentStatus>,
+) {
+    let url = enrollment.and_then(|status| status.authorization_url.clone());
+    if let Ok(mut current) = authorization_url.lock() {
+        *current = url.clone();
+    }
+
+    let (text, enabled) = match enrollment.map(|status| status.status.as_str()) {
+        Some("awaitingAuthentication") => ("Enroll with SSO…", url.is_some()),
+        Some("enrolled") => ("Enrollment: complete", false),
+        Some("enrolling") => ("Enrollment: completing…", false),
+        Some("starting") => ("Enrollment: starting…", false),
+        Some("notConfigured") => ("Enrollment: not configured", false),
+        Some("failed") => ("Enrollment: failed", false),
+        _ => ("Enrollment: unavailable", false),
+    };
+    let _ = items.enrollment.set_text(text);
+    let _ = items.enrollment.set_enabled(enabled);
 }
 
 fn set_discovery_status(items: &TrayItems, discovery: Option<&Discovery>, missing: &str) {

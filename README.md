@@ -8,7 +8,15 @@ Build it:
 cargo build
 ```
 
-The Rust code is a virtual Cargo workspace under `crates/`: `core` owns shared configuration and models, `proto` owns the FleetAgent contract, `agent` builds `agentplaned`, `controller` builds `agentplane-controller`, `client` is the reusable local UDS client, and `cli` builds `agentplane`. The Tauri Rust crate remains under `ui/src-tauri` as another workspace member.
+## Crates
+
+- `agentplane-agent`: privileged device daemon for discovery, reconciliation, and fleet connectivity; builds `agentplaned`.
+- `agentplane-controller`: central service for enrollment, inventory, and desired configuration; builds `agentplane-controller`.
+- `agentplane-cli`: command-line interface to the local daemon; builds `agentplane`.
+- `agentplane-client`: reusable client for the daemon's local API transport.
+- `agentplane-core`: shared configuration, data models, serialization, and telemetry utilities.
+- `agentplane-proto`: generated FleetAgent gRPC contracts shared by the daemon and controller.
+- `agentplane-ui`: cross-platform Tauri desktop and tray client under `ui/src-tauri`.
 
 The daemon and controller use structured `tracing` output. Set `RUST_LOG=debug` for verbose events or `LOG_FORMAT=json` for JSON logs.
 
@@ -60,6 +68,30 @@ cargo run --bin agentplaned -- \
 
 The daemon writes `identity.json` and any accepted `remote-config.yaml` under its state directory. To have the controller offer desired configuration when a device connects, pass `--desired-config <path>` and optionally `--desired-config-revision <number>`.
 
+### OIDC enrollment
+
+OIDC enrollment is available for interactive device setup. The agent uses an authorization-code flow with PKCE, receives the browser callback on loopback, and sends the code to the controller for exchange and ID-token validation. The resulting OIDC issuer and subject are recorded on the device; subsequent connections continue to use the device's own credential.
+
+With the local Dex `local-public` client, start the controller with:
+
+```console
+cargo run --bin agentplane-controller -- \
+  --oidc-issuer http://dex.local \
+  --oidc-client-id local-public \
+  --database-url 'sqlite://agentplane-controller.db?mode=rwc'
+```
+
+Use a fresh state directory and omit the enrollment token:
+
+```console
+cargo run --bin agentplaned -- \
+  --config ./config.controller.yaml.example \
+  --socket /tmp/agentplane.sock \
+  --state-dir /tmp/agentplane-oidc-state
+```
+
+Open the authorization URL printed by the daemon, or choose **Enroll with SSO…** from the tray menu. Dex redirects the browser to `http://127.0.0.1:5555/callback`, where the daemon completes enrollment. The callback must remain registered on the OIDC client. For production, use an HTTPS issuer; the plaintext issuer above is only suitable for local development.
+
 The controller uses SQLite by default and runs embedded migrations at startup. Point the same binary at Postgres with `--database-url 'postgres://user:password@host/database'`. Enrollment, device metadata, heartbeats, discoveries, and configuration status are persisted through one portable SQLx `AnyPool` query set.
 
 For TLS, give the controller `--tls-certificate` and `--tls-key`, use an `https://` controller address, and set `caCertificatePath` in daemon YAML when using a private CA. Device identity and credentials never belong in YAML.
@@ -99,7 +131,7 @@ This uses the production defaults for state, the local socket, and Claude Code's
 
 ## Tray client
 
-The tray client is a Tauri application under `ui/`. It polls the daemon for health and Codex discovery state and does not manage the privileged daemon's lifecycle.
+The tray client is a Tauri application under `ui/`. It polls the daemon for health, enrollment, and discovery state and does not manage the privileged daemon's lifecycle. While OIDC enrollment is waiting, the tray exposes an **Enroll with SSO…** action that opens the authorization URL in the user's browser.
 
 ```console
 cd ui
