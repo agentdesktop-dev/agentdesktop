@@ -108,3 +108,13 @@ AGENTPLANE_SOCKET=/tmp/agentplane.sock pnpm dev
 ```
 
 On Linux, Tauri's tray support requires either AppIndicator or Ayatana AppIndicator development libraries. The application has no visible window yet; use its tray menu to inspect status, refresh, or quit.
+
+On macOS, build a simple menu bar app bundle from a Mac:
+
+```console
+cd ui
+pnpm install
+pnpm build:mac
+```
+
+The build uses the existing `.icns` app icon and the in-app template tray icon. Tauri writes the `.app` and `.dmg` outputs under `target/release/bundle/macos/` and `target/release/bundle/dmg/`.

@@ -6,6 +6,7 @@ use agentplane_core::{
     model::{Discovery, Health},
 };
 use tauri::{
+    Manager,
     image::Image,
     menu::{MenuBuilder, MenuItem, MenuItemBuilder},
     tray::TrayIconBuilder,
@@ -73,7 +74,7 @@ fn main() {
                 vscode,
             };
             let refresh_items = items.clone();
-            TrayIconBuilder::new()
+            let tray = TrayIconBuilder::new()
                 .icon(tray_icon())
                 .icon_as_template(cfg!(target_os = "macos"))
                 .tooltip("Agentplane")
@@ -85,6 +86,7 @@ fn main() {
                     _ => {}
                 })
                 .build(app)?;
+            app.manage(tray);
 
             spawn_refresh(items.clone());
             tauri::async_runtime::spawn(async move {
