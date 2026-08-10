@@ -1,0 +1,16 @@
+# Rust build output
+/target/
+
+# Local environment and overrides
+.env
+.env.*
+*.local
+
+# Editor and OS files
+.idea/
+.vscode/
+.DS_Store
+
+# Local agent tooling
+/.agents/
+/.codex/
