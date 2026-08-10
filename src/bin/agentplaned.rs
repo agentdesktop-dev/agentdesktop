@@ -1,6 +1,8 @@
 use std::{os::unix::fs::FileTypeExt, path::PathBuf};
 
-use agentplane::{DEFAULT_CONFIG_PATH, DEFAULT_SOCKET_PATH, api, config, discovery};
+use agentplane::{
+    DEFAULT_CONFIG_PATH, DEFAULT_SOCKET_PATH, DEFAULT_STATE_DIR, api, config, discovery, remote,
+};
 use anyhow::{Context, bail};
 use clap::Parser;
 use hyper_util::{rt::TokioIo, service::TowerToHyperService};
@@ -14,6 +16,12 @@ struct Args {
 
     #[arg(long, default_value = DEFAULT_SOCKET_PATH)]
     socket: PathBuf,
+
+    #[arg(long, default_value = DEFAULT_STATE_DIR)]
+    state_dir: PathBuf,
+
+    #[arg(long)]
+    enrollment_token: Option<String>,
 }
 
 #[tokio::main]
@@ -28,6 +36,20 @@ async fn main() -> anyhow::Result<()> {
             agent.executable.display(),
             agent.version.as_deref().unwrap_or("unknown version")
         );
+    }
+    if let Some(controller) = config.controller.clone() {
+        let enrollment_token = args
+            .enrollment_token
+            .or_else(|| std::env::var("AGENTPLANE_ENROLLMENT_TOKEN").ok());
+        let remote_discovery = discovery.clone();
+        let state_dir = args.state_dir.clone();
+        tokio::spawn(async move {
+            if let Err(error) =
+                remote::run(controller, remote_discovery, state_dir, enrollment_token).await
+            {
+                eprintln!("controller integration disabled: {error:#}");
+            }
+        });
     }
     let listener = bind(&args.socket)?;
     let app = api::router(api::AppState { config, discovery });

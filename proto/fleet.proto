@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package agentplane.fleet.v1;
+
+service FleetAgent {
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+  rpc Connect(stream AgentMessage) returns (stream ControllerMessage);
+}
+
+message EnrollRequest {
+  string token = 1;
+  string hostname = 2;
+}
+
+message EnrollResponse {
+  string device_id = 1;
+  string credential = 2;
+}
+
+message AgentMessage {
+  oneof message {
+    Hello hello = 1;
+    Heartbeat heartbeat = 2;
+    Inventory inventory = 3;
+    ConfigStatus config_status = 4;
+  }
+}
+
+message ControllerMessage {
+  oneof message {
+    DesiredConfig desired_config = 1;
+  }
+}
+
+message Hello {
+  string device_id = 1;
+  string hostname = 2;
+  string os = 3;
+  string architecture = 4;
+  string agent_version = 5;
+}
+
+message Heartbeat {
+  uint64 unix_time_seconds = 1;
+}
+
+message Inventory {
+  repeated Discovery discoveries = 1;
+}
+
+message Discovery {
+  string kind = 1;
+  string version = 2;
+  string path = 3;
+}
+
+message DesiredConfig {
+  uint64 revision = 1;
+  bytes yaml = 2;
+  bytes sha256 = 3;
+}
+
+message ConfigStatus {
+  uint64 revision = 1;
+  ConfigState state = 2;
+  string error = 3;
+}
+
+enum ConfigState {
+  CONFIG_STATE_UNSPECIFIED = 0;
+  CONFIG_STATE_APPLIED = 1;
+  CONFIG_STATE_FAILED = 2;
+}
