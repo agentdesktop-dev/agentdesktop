@@ -28,7 +28,7 @@ The production-oriented defaults are `/etc/agentplane/config.yaml` and `/run/age
 
 The optional `agentplane-controller` binary exposes the `FleetAgent` gRPC API. The daemon enrolls once, stores its generated identity outside the human-authored YAML, and then maintains an outbound stream for inventory, heartbeats, and desired configuration.
 
-For a local plaintext development run, update `config.yaml`:
+For a local plaintext development run, use `config.controller.yaml.example` or add:
 
 ```yaml
 controller:
@@ -40,20 +40,23 @@ Start the controller with a one-time enrollment token:
 
 ```console
 cargo run --bin agentplane-controller -- \
-  --enrollment-token development
+  --enrollment-token development \
+  --database-url 'sqlite://agentplane-controller.db?mode=rwc'
 ```
 
 Then start the daemon with a writable development state directory:
 
 ```console
 cargo run --bin agentplaned -- \
-  --config ./config.yaml \
+  --config ./config.controller.yaml.example \
   --socket /tmp/agentplane.sock \
   --state-dir /tmp/agentplane-state \
   --enrollment-token development
 ```
 
 The daemon writes `identity.json` and any accepted `remote-config.yaml` under its state directory. To have the controller offer desired configuration when a device connects, pass `--desired-config <path>` and optionally `--desired-config-revision <number>`.
+
+The controller uses SQLite by default and runs embedded migrations at startup. Point the same binary at Postgres with `--database-url 'postgres://user:password@host/database'`. Enrollment, device metadata, heartbeats, discoveries, and configuration status are persisted through one portable SQLx `AnyPool` query set.
 
 For TLS, give the controller `--tls-certificate` and `--tls-key`, use an `https://` controller address, and set `caCertificatePath` in daemon YAML when using a private CA. Device identity and credentials never belong in YAML.
 
