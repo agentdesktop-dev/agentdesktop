@@ -1,4 +1,7 @@
-use std::{os::unix::fs::FileTypeExt, path::PathBuf};
+use std::{
+    os::unix::fs::{FileTypeExt, PermissionsExt, chown},
+    path::{Path, PathBuf},
+};
 
 use agentplane_agent::{api, discovery, reconcile, remote};
 use agentplane_core::{
@@ -115,5 +118,21 @@ fn bind(path: &PathBuf) -> anyhow::Result<UnixListener> {
         }
     }
 
-    UnixListener::bind(path).with_context(|| format!("bind socket {}", path.display()))
+    let listener =
+        UnixListener::bind(path).with_context(|| format!("bind socket {}", path.display()))?;
+    configure_socket_access(path)?;
+    Ok(listener)
+}
+
+fn configure_socket_access(path: &Path) -> anyhow::Result<()> {
+    if let Some(gid) = std::env::var("SUDO_GID")
+        .ok()
+        .and_then(|gid| gid.parse::<u32>().ok())
+    {
+        chown(path, None, Some(gid))
+            .with_context(|| format!("set socket group on {}", path.display()))?;
+    }
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
+        .with_context(|| format!("set socket permissions on {}", path.display()))
 }

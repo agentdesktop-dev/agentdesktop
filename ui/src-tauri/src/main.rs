@@ -117,7 +117,7 @@ async fn refresh(items: &TrayItems) {
         }
         Err(_) => {
             let _ = items.daemon.set_text("Daemon: unavailable");
-            set_discovery_status(items, None, "unknown");
+            set_discovery_status(items, None, "daemon unavailable");
             return;
         }
     }

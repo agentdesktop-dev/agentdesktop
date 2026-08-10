@@ -16,7 +16,6 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
-agent-core = { path = "../agentgateway/crates/core" }
 agentplane-agent = { path = "crates/agent" }
 agentplane-client = { path = "crates/client" }
 agentplane-core = { path = "crates/core" }
@@ -35,6 +34,9 @@ prost = "0.14"
 rand = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_json_path_to_error = "0.1"
+serde-transcode = "1.1"
+serde_yaml = "0.9"
 sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["any", "macros", "migrate", "postgres", "runtime-tokio", "sqlite", "tls-rustls-ring-webpki"] }
 tauri = { version = "2.11.5", features = ["tray-icon"] }
@@ -44,4 +46,6 @@ tonic = { version = "0.14", features = ["transport", "tls-ring"] }
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4"] }
