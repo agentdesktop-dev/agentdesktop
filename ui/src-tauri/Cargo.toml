@@ -8,7 +8,8 @@ publish = false
 tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
-agentplane = { path = "../.." }
+agentplane-client.workspace = true
+agentplane-core.workspace = true
 serde = { version = "1", features = ["derive"] }
 tauri = { version = "2.11.5", features = ["tray-icon"] }
 tokio = { version = "1", features = ["time"] }

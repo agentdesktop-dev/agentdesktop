@@ -8,6 +8,10 @@ Build it:
 cargo build
 ```
 
+The Rust code is a virtual Cargo workspace under `crates/`: `core` owns shared configuration and models, `proto` owns the FleetAgent contract, `agent` builds `agentplaned`, `controller` builds `agentplane-controller`, `client` is the reusable local UDS client, and `cli` builds `agentplane`. The Tauri Rust crate remains under `ui/src-tauri` as another workspace member.
+
+The daemon and controller use structured `tracing` output. Set `RUST_LOG=debug` for verbose events or `LOG_FORMAT=json` for JSON logs.
+
 Run it as your user while developing:
 
 ```console

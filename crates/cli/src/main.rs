@@ -1,8 +1,12 @@
 use std::path::PathBuf;
 
-use agentplane::{DEFAULT_SOCKET_PATH, client, config::Config, discovery::Discovery};
+use agentplane_client as client;
+use agentplane_core::{
+    DEFAULT_SOCKET_PATH,
+    config::Config,
+    model::{Discovery, Health},
+};
 use clap::{Parser, Subcommand};
-use serde::Deserialize;
 
 #[derive(Parser)]
 #[command(about = "Client for the Agentplane daemon")]
@@ -22,11 +26,6 @@ enum Command {
     Discover,
     /// Print the daemon's active configuration.
     Config,
-}
-
-#[derive(Deserialize)]
-struct Health {
-    status: String,
 }
 
 #[tokio::main]

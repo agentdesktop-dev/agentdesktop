@@ -1,16 +1,26 @@
-[package]
-name = "agentplane"
+[workspace]
+resolver = "2"
+members = [
+    "crates/agent",
+    "crates/cli",
+    "crates/client",
+    "crates/controller",
+    "crates/core",
+    "crates/proto",
+    "ui/src-tauri",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 publish = false
-build = "build.rs"
 
-[workspace]
-members = ["ui/src-tauri"]
-resolver = "2"
-
-[dependencies]
+[workspace.dependencies]
 agent-core = { path = "../agentgateway/crates/core" }
+agentplane-agent = { path = "crates/agent" }
+agentplane-client = { path = "crates/client" }
+agentplane-core = { path = "crates/core" }
+agentplane-proto = { path = "crates/proto" }
 anyhow = "1"
 axum = "0.8"
 base64 = "0.22"
@@ -27,11 +37,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["any", "macros", "migrate", "postgres", "runtime-tokio", "sqlite", "tls-rustls-ring-webpki"] }
+tauri = { version = "2.11.5", features = ["tray-icon"] }
 tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream = "0.1"
 tonic = { version = "0.14", features = ["transport", "tls-ring"] }
 tonic-prost = "0.14"
-uuid = { version = "1", features = ["v4"] }
-
-[build-dependencies]
 tonic-prost-build = "0.14"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }

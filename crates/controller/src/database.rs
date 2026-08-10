@@ -1,7 +1,7 @@
 use anyhow::Context;
 use sqlx::{AnyPool, any::AnyPoolOptions};
 
-use crate::fleet::{ConfigStatus, Hello, Inventory};
+use agentplane_proto::fleet::{ConfigStatus, Hello, Inventory};
 
 #[derive(Clone)]
 pub struct Database {

@@ -1,95 +1,45 @@
-use std::{
-    net::SocketAddr,
-    path::{Path, PathBuf},
-    pin::Pin,
-};
+use std::{path::Path, pin::Pin};
 
-use agentplane::{
-    database::Database,
-    fleet::{
-        AgentMessage, ControllerMessage, DesiredConfig, EnrollRequest, EnrollResponse,
-        agent_message, controller_message,
-        fleet_agent_server::{FleetAgent, FleetAgentServer},
-    },
+use agentplane_proto::fleet::{
+    AgentMessage, ControllerMessage, DesiredConfig, EnrollRequest, EnrollResponse, agent_message,
+    controller_message, fleet_agent_server::FleetAgent,
 };
 use anyhow::Context;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use clap::Parser;
 use futures_core::Stream;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::{
-    Request, Response, Status,
-    transport::{Identity, Server, ServerTlsConfig},
-};
+use tonic::{Request, Response, Status};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
-#[derive(Parser)]
-#[command(about = "Agentplane fleet controller")]
-struct Args {
-    #[arg(long, default_value = "127.0.0.1:8443")]
-    listen: SocketAddr,
-
-    #[arg(long)]
-    enrollment_token: Option<String>,
-
-    #[arg(long, default_value = "sqlite://agentplane-controller.db?mode=rwc")]
-    database_url: String,
-
-    #[arg(long)]
-    desired_config: Option<PathBuf>,
-
-    #[arg(long, default_value_t = 1)]
-    desired_config_revision: u64,
-
-    #[arg(long, requires = "tls_key")]
-    tls_certificate: Option<PathBuf>,
-
-    #[arg(long, requires = "tls_certificate")]
-    tls_key: Option<PathBuf>,
-}
+use crate::database::Database;
 
 #[derive(Clone)]
-struct Service {
+pub struct FleetAgentService {
     enrollment_token: Option<String>,
     database: Database,
     desired_config: Option<DesiredConfig>,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
-    let desired_config =
-        load_desired_config(args.desired_config.as_deref(), args.desired_config_revision)?;
-    let database = Database::connect(&args.database_url).await?;
-    let service = Service {
-        enrollment_token: args.enrollment_token,
-        database,
-        desired_config,
-    };
-
-    let mut server = Server::builder();
-    if let (Some(certificate), Some(key)) = (args.tls_certificate, args.tls_key) {
-        let certificate = std::fs::read(&certificate)
-            .with_context(|| format!("read TLS certificate from {}", certificate.display()))?;
-        let key =
-            std::fs::read(&key).with_context(|| format!("read TLS key from {}", key.display()))?;
-        server = server
-            .tls_config(ServerTlsConfig::new().identity(Identity::from_pem(certificate, key)))?;
+impl FleetAgentService {
+    pub fn new(
+        enrollment_token: Option<String>,
+        database: Database,
+        desired_config: Option<DesiredConfig>,
+    ) -> Self {
+        Self {
+            enrollment_token,
+            database,
+            desired_config,
+        }
     }
-
-    eprintln!("agentplane-controller listening on {}", args.listen);
-    server
-        .add_service(FleetAgentServer::new(service))
-        .serve(args.listen)
-        .await
-        .context("serve fleet gRPC API")
 }
 
 #[tonic::async_trait]
-impl FleetAgent for Service {
+impl FleetAgent for FleetAgentService {
     type ConnectStream = Pin<Box<dyn Stream<Item = Result<ControllerMessage, Status>> + Send>>;
 
     async fn enroll(
@@ -110,7 +60,7 @@ impl FleetAgent for Service {
             .enroll_device(&device_id, &request.hostname, &credential_hash(&credential))
             .await
             .map_err(internal)?;
-        eprintln!("enrolled {} ({})", device_id, request.hostname);
+        info!(%device_id, hostname = %request.hostname, "enrolled device");
 
         Ok(Response::new(EnrollResponse {
             device_id,
@@ -151,19 +101,27 @@ impl FleetAgent for Service {
                         if let Some(agent_message::Message::Hello(hello)) = &message.message
                             && hello.device_id != authenticated_device_id
                         {
-                            eprintln!("device credential and hello identity do not match");
+                            warn!(
+                                authenticated_device_id,
+                                claimed_device_id = %hello.device_id,
+                                "device credential and hello identity do not match"
+                            );
                             break;
                         }
-                        if let Err(error) =
+                        if let Err(err) =
                             handle_agent_message(&database, &authenticated_device_id, message).await
                         {
-                            eprintln!("store device state: {error:#}");
+                            error!(
+                                error = %err,
+                                device_id = %authenticated_device_id,
+                                "failed to store device state"
+                            );
                             break;
                         }
                     }
                     Ok(None) => break,
-                    Err(error) => {
-                        eprintln!("device stream: {error}");
+                    Err(err) => {
+                        warn!(error = %err, device_id = %authenticated_device_id, "device stream failed");
                         break;
                     }
                 }
@@ -182,7 +140,7 @@ async fn handle_agent_message(
     match message.message {
         Some(agent_message::Message::Hello(hello)) => {
             database.update_hello(device_id, &hello).await?;
-            eprintln!("device {device_id} connected");
+            info!(device_id, hostname = %hello.hostname, "device connected");
         }
         Some(agent_message::Message::Heartbeat(heartbeat)) => {
             database
@@ -190,12 +148,25 @@ async fn handle_agent_message(
                 .await?;
         }
         Some(agent_message::Message::Inventory(inventory)) => {
+            let discoveries = inventory.discoveries.len();
             database.replace_inventory(device_id, &inventory).await?;
+            info!(device_id, discoveries, "stored device inventory");
         }
         Some(agent_message::Message::ConfigStatus(status)) => {
             database.update_config_status(device_id, &status).await?;
-            if !status.error.is_empty() {
-                eprintln!("device configuration failed: {}", status.error);
+            if status.error.is_empty() {
+                info!(
+                    device_id,
+                    revision = status.revision,
+                    "device applied configuration"
+                );
+            } else {
+                warn!(
+                    device_id,
+                    revision = status.revision,
+                    error = %status.error,
+                    "device configuration failed"
+                );
             }
         }
         None => {}
@@ -203,7 +174,7 @@ async fn handle_agent_message(
     Ok(())
 }
 
-fn load_desired_config(
+pub fn load_desired_config(
     path: Option<&Path>,
     revision: u64,
 ) -> anyhow::Result<Option<DesiredConfig>> {
@@ -213,7 +184,7 @@ fn load_desired_config(
     let yaml = std::fs::read(path)
         .with_context(|| format!("read desired configuration from {}", path.display()))?;
     let text = std::str::from_utf8(&yaml).context("desired configuration is not UTF-8")?;
-    agentplane::config::parse(text).context("validate desired configuration")?;
+    agentplane_core::config::parse(text).context("validate desired configuration")?;
     let sha256 = Sha256::digest(&yaml).to_vec();
     Ok(Some(DesiredConfig {
         revision,
@@ -243,7 +214,7 @@ fn credential_hash(credential: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(credential.as_bytes()))
 }
 
-fn internal(error: anyhow::Error) -> Status {
-    eprintln!("controller state: {error:#}");
+fn internal(err: anyhow::Error) -> Status {
+    error!(error = %err, "controller state operation failed");
     Status::internal("controller state error")
 }
