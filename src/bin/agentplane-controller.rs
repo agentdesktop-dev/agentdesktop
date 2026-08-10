@@ -1,21 +1,22 @@
 use std::{
-    collections::HashMap,
-    io::Write,
     net::SocketAddr,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, Mutex, RwLock},
 };
 
-use agentplane::fleet::{
-    AgentMessage, ControllerMessage, DesiredConfig, EnrollRequest, EnrollResponse, agent_message,
-    controller_message,
-    fleet_agent_server::{FleetAgent, FleetAgentServer},
+use agentplane::{
+    database::Database,
+    fleet::{
+        AgentMessage, ControllerMessage, DesiredConfig, EnrollRequest, EnrollResponse,
+        agent_message, controller_message,
+        fleet_agent_server::{FleetAgent, FleetAgentServer},
+    },
 };
 use anyhow::Context;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use clap::Parser;
 use futures_core::Stream;
-use serde::{Deserialize, Serialize};
+use rand::RngCore;
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -34,8 +35,8 @@ struct Args {
     #[arg(long)]
     enrollment_token: Option<String>,
 
-    #[arg(long, default_value = "./controller-state.json")]
-    state: PathBuf,
+    #[arg(long, default_value = "sqlite://agentplane-controller.db?mode=rwc")]
+    database_url: String,
 
     #[arg(long)]
     desired_config: Option<PathBuf>,
@@ -53,28 +54,8 @@ struct Args {
 #[derive(Clone)]
 struct Service {
     enrollment_token: Option<String>,
-    store: Arc<Store>,
-    devices: Arc<RwLock<HashMap<String, DeviceSnapshot>>>,
+    database: Database,
     desired_config: Option<DesiredConfig>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct DeviceSnapshot {
-    hostname: String,
-    last_heartbeat: u64,
-    discovery_count: usize,
-    applied_config_revision: u64,
-}
-
-#[derive(Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct StoredState {
-    credentials: HashMap<String, String>,
-}
-
-struct Store {
-    path: PathBuf,
-    state: Mutex<StoredState>,
 }
 
 #[tokio::main]
@@ -82,10 +63,10 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let desired_config =
         load_desired_config(args.desired_config.as_deref(), args.desired_config_revision)?;
+    let database = Database::connect(&args.database_url).await?;
     let service = Service {
         enrollment_token: args.enrollment_token,
-        store: Arc::new(Store::load(args.state)?),
-        devices: Arc::new(RwLock::new(HashMap::new())),
+        database,
         desired_config,
     };
 
@@ -124,9 +105,10 @@ impl FleetAgent for Service {
         }
 
         let device_id = Uuid::new_v4().to_string();
-        let credential = Uuid::new_v4().to_string();
-        self.store
-            .insert(device_id.clone(), credential.clone())
+        let credential = new_credential();
+        self.database
+            .enroll_device(&device_id, &request.hostname, &credential_hash(&credential))
+            .await
             .map_err(internal)?;
         eprintln!("enrolled {} ({})", device_id, request.hostname);
 
@@ -142,8 +124,9 @@ impl FleetAgent for Service {
     ) -> Result<Response<Self::ConnectStream>, Status> {
         let credential = bearer_credential(request.metadata())?;
         let authenticated_device_id = self
-            .store
-            .device_id(credential)
+            .database
+            .authenticate(&credential_hash(credential))
+            .await
             .map_err(internal)?
             .ok_or_else(|| Status::unauthenticated("unknown device credential"))?;
 
@@ -158,11 +141,10 @@ impl FleetAgent for Service {
                 .map_err(|_| Status::unavailable("stream closed"))?;
         }
 
-        let devices = self.devices.clone();
+        let database = self.database.clone();
         let response_sender = sender.clone();
         tokio::spawn(async move {
             let _response_sender = response_sender;
-            let mut device_id = None;
             loop {
                 match inbound.message().await {
                     Ok(Some(message)) => {
@@ -172,7 +154,12 @@ impl FleetAgent for Service {
                             eprintln!("device credential and hello identity do not match");
                             break;
                         }
-                        handle_agent_message(&devices, &mut device_id, message);
+                        if let Err(error) =
+                            handle_agent_message(&database, &authenticated_device_id, message).await
+                        {
+                            eprintln!("store device state: {error:#}");
+                            break;
+                        }
                     }
                     Ok(None) => break,
                     Err(error) => {
@@ -187,99 +174,32 @@ impl FleetAgent for Service {
     }
 }
 
-fn handle_agent_message(
-    devices: &RwLock<HashMap<String, DeviceSnapshot>>,
-    device_id: &mut Option<String>,
+async fn handle_agent_message(
+    database: &Database,
+    device_id: &str,
     message: AgentMessage,
-) {
-    let Ok(mut devices) = devices.write() else {
-        return;
-    };
+) -> anyhow::Result<()> {
     match message.message {
         Some(agent_message::Message::Hello(hello)) => {
-            *device_id = Some(hello.device_id.clone());
-            devices.entry(hello.device_id.clone()).or_default().hostname = hello.hostname;
-            eprintln!("device {} connected", hello.device_id);
+            database.update_hello(device_id, &hello).await?;
+            eprintln!("device {device_id} connected");
         }
         Some(agent_message::Message::Heartbeat(heartbeat)) => {
-            if let Some(device) = device_id.as_ref().and_then(|id| devices.get_mut(id)) {
-                device.last_heartbeat = heartbeat.unix_time_seconds;
-            }
+            database
+                .update_heartbeat(device_id, heartbeat.unix_time_seconds)
+                .await?;
         }
         Some(agent_message::Message::Inventory(inventory)) => {
-            if let Some(device) = device_id.as_ref().and_then(|id| devices.get_mut(id)) {
-                device.discovery_count = inventory.discoveries.len();
-            }
+            database.replace_inventory(device_id, &inventory).await?;
         }
         Some(agent_message::Message::ConfigStatus(status)) => {
-            if let Some(device) = device_id.as_ref().and_then(|id| devices.get_mut(id)) {
-                if status.error.is_empty() {
-                    device.applied_config_revision = status.revision;
-                } else {
-                    eprintln!("device configuration failed: {}", status.error);
-                }
+            database.update_config_status(device_id, &status).await?;
+            if !status.error.is_empty() {
+                eprintln!("device configuration failed: {}", status.error);
             }
         }
         None => {}
     }
-}
-
-impl Store {
-    fn load(path: PathBuf) -> anyhow::Result<Self> {
-        let state = match std::fs::read(&path) {
-            Ok(contents) => serde_json::from_slice(&contents)
-                .with_context(|| format!("parse controller state from {}", path.display()))?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => StoredState::default(),
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("read controller state from {}", path.display()));
-            }
-        };
-        Ok(Self {
-            path,
-            state: Mutex::new(state),
-        })
-    }
-
-    fn insert(&self, device_id: String, credential: String) -> anyhow::Result<()> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
-        state.credentials.insert(device_id, credential);
-        save_json_atomically(&self.path, &*state)
-    }
-
-    fn device_id(&self, credential: &str) -> anyhow::Result<Option<String>> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
-        Ok(state
-            .credentials
-            .iter()
-            .find_map(|(device_id, stored)| (stored == credential).then(|| device_id.clone())))
-    }
-}
-
-fn save_json_atomically(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        std::fs::create_dir_all(parent)?;
-    }
-    let temporary = path.with_extension("json.tmp");
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&temporary)?;
-    file.write_all(&serde_json::to_vec_pretty(value)?)?;
-    std::fs::rename(temporary, path)?;
     Ok(())
 }
 
@@ -311,6 +231,16 @@ fn bearer_credential(metadata: &tonic::metadata::MetadataMap) -> Result<&str, St
     value
         .strip_prefix("Bearer ")
         .ok_or_else(|| Status::unauthenticated("invalid device credential"))
+}
+
+fn new_credential() -> String {
+    let mut bytes = [0_u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn credential_hash(credential: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(credential.as_bytes()))
 }
 
 fn internal(error: anyhow::Error) -> Status {

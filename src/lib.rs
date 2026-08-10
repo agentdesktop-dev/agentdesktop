@@ -1,6 +1,7 @@
 pub mod api;
 pub mod client;
 pub mod config;
+pub mod database;
 pub mod discovery;
 pub mod identity;
 pub mod remote;

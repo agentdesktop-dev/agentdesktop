@@ -13,6 +13,7 @@ resolver = "2"
 agent-core = { path = "../agentgateway/crates/core" }
 anyhow = "1"
 axum = "0.8"
+base64 = "0.22"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 futures-core = "0.3"
@@ -21,9 +22,11 @@ humantime-serde = "1"
 hyper = { version = "1", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1", features = ["service", "tokio"] }
 prost = "0.14"
+rand = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["any", "macros", "migrate", "postgres", "runtime-tokio", "sqlite", "tls-rustls-ring-webpki"] }
 tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream = "0.1"
 tonic = { version = "0.14", features = ["transport", "tls-ring"] }
