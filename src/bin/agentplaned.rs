@@ -1,7 +1,8 @@
 use std::{os::unix::fs::FileTypeExt, path::PathBuf};
 
 use agentplane::{
-    DEFAULT_CONFIG_PATH, DEFAULT_SOCKET_PATH, DEFAULT_STATE_DIR, api, config, discovery, remote,
+    DEFAULT_CONFIG_PATH, DEFAULT_SOCKET_PATH, DEFAULT_STATE_DIR, api, config, discovery, reconcile,
+    remote,
 };
 use anyhow::{Context, bail};
 use clap::Parser;
@@ -22,6 +23,12 @@ struct Args {
 
     #[arg(long)]
     enrollment_token: Option<String>,
+
+    #[arg(
+        long,
+        default_value_os_t = reconcile::default_claude_code_managed_settings_dir()
+    )]
+    claude_code_managed_settings_dir: PathBuf,
 }
 
 #[tokio::main]
@@ -43,9 +50,16 @@ async fn main() -> anyhow::Result<()> {
             .or_else(|| std::env::var("AGENTPLANE_ENROLLMENT_TOKEN").ok());
         let remote_discovery = discovery.clone();
         let state_dir = args.state_dir.clone();
+        let reconciler = reconcile::Reconciler::new(args.claude_code_managed_settings_dir.clone());
         tokio::spawn(async move {
-            if let Err(error) =
-                remote::run(controller, remote_discovery, state_dir, enrollment_token).await
+            if let Err(error) = remote::run(
+                controller,
+                remote_discovery,
+                state_dir,
+                enrollment_token,
+                reconciler,
+            )
+            .await
             {
                 eprintln!("controller integration disabled: {error:#}");
             }

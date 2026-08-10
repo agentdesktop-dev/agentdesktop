@@ -60,6 +60,29 @@ The controller uses SQLite by default and runs embedded migrations at startup. P
 
 For TLS, give the controller `--tls-certificate` and `--tls-key`, use an `https://` controller address, and set `caCertificatePath` in daemon YAML when using a private CA. Device identity and credentials never belong in YAML.
 
+### Claude Code managed settings
+
+`config.claude-code.yaml.example` demonstrates centrally managed Claude Code settings. Start the controller with it as desired state:
+
+```console
+cargo run --bin agentplane-controller -- \
+  --enrollment-token development \
+  --desired-config ./config.claude-code.yaml.example
+```
+
+On Linux, the daemon atomically reconciles Agentplane's dedicated drop-in at `/etc/claude-code/managed-settings.d/50-agentplane.json`. For an unprivileged development run, redirect that exact directory:
+
+```console
+cargo run --bin agentplaned -- \
+  --config ./config.controller.yaml.example \
+  --socket /tmp/agentplane.sock \
+  --state-dir /tmp/agentplane-state \
+  --claude-code-managed-settings-dir /tmp/claude-code-managed-settings.d \
+  --enrollment-token development
+```
+
+Inspect the result with `jq . /tmp/claude-code-managed-settings.d/50-agentplane.json`. When `programs.claudeCode` is absent from a later desired revision, the daemon removes only its own drop-in file.
+
 ## Tray client
 
 The tray client is a Tauri application under `ui/`. It polls the daemon for health and Codex discovery state and does not manage the privileged daemon's lifecycle.
