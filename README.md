@@ -23,3 +23,15 @@ cargo run --bin agentplane -- --socket /tmp/agentplane.sock config
 ```
 
 The production-oriented defaults are `/etc/agentplane/config.yaml` and `/run/agentplane/agentplane.sock`.
+
+## Tray client
+
+The tray client is a Tauri application under `ui/`. It polls the daemon for health and Codex discovery state and does not manage the privileged daemon's lifecycle.
+
+```console
+cd ui
+pnpm install
+AGENTPLANE_SOCKET=/tmp/agentplane.sock pnpm dev
+```
+
+On Linux, Tauri's tray support requires either AppIndicator or Ayatana AppIndicator development libraries. The application has no visible window yet; use its tray menu to inspect status, refresh, or quit.

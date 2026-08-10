@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <title>Agentplane</title>
+  <rect width="512" height="512" rx="112" fill="#111827" />
+  <circle cx="256" cy="256" r="142" fill="none" stroke="#3b82f6" stroke-width="64" />
+  <circle cx="256" cy="256" r="28" fill="#3b82f6" />
+</svg>
