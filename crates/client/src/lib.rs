@@ -28,7 +28,7 @@ where
 
     tokio::spawn(async move {
         if let Err(error) = connection.await {
-            eprintln!("HTTP connection failed: {error}");
+            tracing::debug!(%error, "local HTTP connection failed");
         }
     });
 

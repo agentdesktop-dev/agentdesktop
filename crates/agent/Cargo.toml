@@ -1,0 +1,25 @@
+[package]
+name = "agentplane-agent"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "agentplaned"
+path = "src/main.rs"
+
+[dependencies]
+agentplane-core.workspace = true
+agentplane-proto.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
+tracing.workspace = true

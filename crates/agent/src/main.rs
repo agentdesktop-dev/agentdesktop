@@ -1,8 +1,8 @@
 use std::{os::unix::fs::FileTypeExt, path::PathBuf};
 
-use agentplane::{
-    DEFAULT_CONFIG_PATH, DEFAULT_SOCKET_PATH, DEFAULT_STATE_DIR, api, config, discovery, reconcile,
-    remote,
+use agentplane_agent::{api, discovery, reconcile, remote};
+use agentplane_core::{
+    DEFAULT_CONFIG_PATH, DEFAULT_SOCKET_PATH, DEFAULT_STATE_DIR, config, telemetry,
 };
 use anyhow::{Context, bail};
 use clap::Parser;
@@ -34,14 +34,15 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    let _log_flush = telemetry::setup_logging("info", false);
     let config = config::load(&args.config)?;
     let discovery = discovery::discover().await;
     for agent in &discovery.agents {
-        eprintln!(
-            "discovered {} at {} ({})",
-            agent.kind,
-            agent.executable.display(),
-            agent.version.as_deref().unwrap_or("unknown version")
+        tracing::info!(
+            kind = %agent.kind,
+            executable = %agent.executable.display(),
+            version = agent.version.as_deref().unwrap_or("unknown"),
+            "discovered program"
         );
     }
     if let Some(controller) = config.controller.clone() {
@@ -61,14 +62,14 @@ async fn main() -> anyhow::Result<()> {
             )
             .await
             {
-                eprintln!("controller integration disabled: {error:#}");
+                tracing::error!(error = %error, "controller integration disabled");
             }
         });
     }
     let listener = bind(&args.socket)?;
     let app = api::router(api::AppState { config, discovery });
 
-    eprintln!("agentplaned listening on {}", args.socket.display());
+    tracing::info!(socket = %args.socket.display(), "agent daemon listening");
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -79,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
                         .serve_connection(TokioIo::new(stream), service)
                         .await
                     {
-                        eprintln!("serve connection: {error}");
+                        tracing::warn!(%error, "failed to serve local API connection");
                     }
                 });
             }
@@ -91,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let Err(error) = std::fs::remove_file(&args.socket) {
-        eprintln!("remove socket {}: {error}", args.socket.display());
+        tracing::warn!(%error, socket = %args.socket.display(), "failed to remove socket");
     }
     Ok(())
 }

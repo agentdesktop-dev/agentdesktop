@@ -2,7 +2,8 @@ use std::{fs, io::Write, path::Path};
 
 use anyhow::Context;
 
-use crate::config::ClaudeCodeConfig;
+use agentplane_core::config::ClaudeCodeConfig;
+use tracing::info;
 
 const FILE_NAME: &str = "50-agentplane.json";
 
@@ -17,9 +18,11 @@ pub fn apply(directory: &Path, config: Option<&ClaudeCodeConfig>) -> anyhow::Res
     contents.push(b'\n');
     let action = match fs::read(&path) {
         Ok(existing) if existing == contents => {
-            eprintln!(
-                "claude-code: managed settings already current at {}",
-                path.display()
+            info!(
+                program = "claude-code",
+                action = "unchanged",
+                path = %path.display(),
+                "managed settings already current"
             );
             return Ok(());
         }
@@ -42,9 +45,11 @@ pub fn apply(directory: &Path, config: Option<&ClaudeCodeConfig>) -> anyhow::Res
     write_file(&temporary, &contents)?;
     fs::rename(&temporary, &path)
         .with_context(|| format!("install Claude Code managed settings at {}", path.display()))?;
-    eprintln!(
-        "claude-code: {action} managed settings at {}",
-        path.display()
+    info!(
+        program = "claude-code",
+        action,
+        path = %path.display(),
+        "reconciled managed settings"
     );
     Ok(())
 }
@@ -52,13 +57,20 @@ pub fn apply(directory: &Path, config: Option<&ClaudeCodeConfig>) -> anyhow::Res
 fn remove(path: &Path) -> anyhow::Result<()> {
     match fs::remove_file(path) {
         Ok(()) => {
-            eprintln!("claude-code: remove managed settings at {}", path.display());
+            info!(
+                program = "claude-code",
+                action = "remove",
+                path = %path.display(),
+                "reconciled managed settings"
+            );
             Ok(())
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!(
-                "claude-code: managed settings already absent at {}",
-                path.display()
+            info!(
+                program = "claude-code",
+                action = "unchanged",
+                path = %path.display(),
+                "managed settings already absent"
             );
             Ok(())
         }

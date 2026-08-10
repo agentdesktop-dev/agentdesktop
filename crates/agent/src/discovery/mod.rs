@@ -4,22 +4,7 @@ mod command;
 mod opencode;
 mod vscode;
 
-use std::path::PathBuf;
-
-use serde::{Deserialize, Serialize};
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct Discovery {
-    pub agents: Vec<Agent>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Agent {
-    pub kind: String,
-    pub executable: PathBuf,
-    pub version: Option<String>,
-}
+use agentplane_core::model::Discovery;
 
 pub async fn discover() -> Discovery {
     let (codex, opencode, claude_code, vscode) = tokio::join!(

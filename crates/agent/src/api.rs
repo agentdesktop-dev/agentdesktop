@@ -1,7 +1,7 @@
 use axum::{Json, Router, extract::State, routing::get};
 use serde::Serialize;
 
-use crate::{config::Config, discovery::Discovery};
+use agentplane_core::{config::Config, model::Discovery};
 
 #[derive(Clone)]
 pub struct AppState {

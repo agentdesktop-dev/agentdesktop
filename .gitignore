@@ -4,6 +4,9 @@
 /ui/node_modules/
 /ui/src-tauri/gen/
 *.tsbuildinfo
+*.db
+*.db-shm
+*.db-wal
 
 # Local environment and overrides
 .env

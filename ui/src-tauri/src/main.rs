@@ -1,7 +1,10 @@
 use std::{env, path::PathBuf, time::Duration};
 
-use agentplane::{DEFAULT_SOCKET_PATH, client, discovery::Discovery};
-use serde::Deserialize;
+use agentplane_client as client;
+use agentplane_core::{
+    DEFAULT_SOCKET_PATH,
+    model::{Discovery, Health},
+};
 use tauri::{
     image::Image,
     menu::{MenuBuilder, MenuItem, MenuItemBuilder},
@@ -10,11 +13,6 @@ use tauri::{
 
 const REFRESH_ID: &str = "refresh";
 const QUIT_ID: &str = "quit";
-
-#[derive(Deserialize)]
-struct Health {
-    status: String,
-}
 
 #[derive(Clone)]
 struct TrayItems {

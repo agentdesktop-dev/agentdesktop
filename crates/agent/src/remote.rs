@@ -11,21 +11,25 @@ use tonic::{
     Request,
     transport::{Certificate, Channel, ClientTlsConfig, Endpoint},
 };
+use tracing::{debug, info, warn};
+
+use agentplane_core::{
+    config::{self, ControllerConfig},
+    model::Discovery as AgentDiscovery,
+};
+use agentplane_proto::fleet::{
+    AgentMessage, ConfigState, ConfigStatus, Discovery, EnrollRequest, Heartbeat, Hello, Inventory,
+    agent_message, controller_message, fleet_agent_client::FleetAgentClient,
+};
 
 use crate::{
-    config::{self, ControllerConfig},
-    discovery,
-    fleet::{
-        AgentMessage, ConfigState, ConfigStatus, Discovery, EnrollRequest, Heartbeat, Hello,
-        Inventory, agent_message, controller_message, fleet_agent_client::FleetAgentClient,
-    },
     identity::{self, Identity},
     reconcile::Reconciler,
 };
 
 pub async fn run(
     controller: ControllerConfig,
-    discovered: discovery::Discovery,
+    discovered: AgentDiscovery,
     state_dir: PathBuf,
     enrollment_token: Option<String>,
     reconciler: Reconciler,
@@ -39,7 +43,7 @@ pub async fn run(
             )?;
             let identity = enroll(&controller, token).await?;
             identity::save(&identity_path, &identity)?;
-            eprintln!("enrolled device {}", identity.device_id);
+            info!(device_id = %identity.device_id, "enrolled device");
             identity
         }
     };
@@ -47,8 +51,8 @@ pub async fn run(
     let mut delay = Duration::from_secs(1);
     loop {
         match connect(&controller, &identity, &discovered, &state_dir, &reconciler).await {
-            Ok(()) => eprintln!("controller stream closed"),
-            Err(error) => eprintln!("controller connection: {error:#}"),
+            Ok(()) => warn!("controller stream closed"),
+            Err(error) => warn!(error = %error, "controller connection failed"),
         }
 
         time::sleep(delay).await;
@@ -76,7 +80,7 @@ async fn enroll(controller: &ControllerConfig, token: String) -> anyhow::Result<
 async fn connect(
     controller: &ControllerConfig,
     identity: &Identity,
-    discovered: &discovery::Discovery,
+    discovered: &AgentDiscovery,
     state_dir: &Path,
     reconciler: &Reconciler,
 ) -> anyhow::Result<()> {
@@ -123,12 +127,12 @@ async fn connect(
         }),
     )
     .await?;
-    eprintln!(
-        "controller: reported inventory with {} discoveries",
-        discovered.agents.len()
+    info!(
+        discoveries = discovered.agents.len(),
+        "reported inventory to controller"
     );
 
-    eprintln!("connected to controller at {}", controller.address);
+    info!(address = %controller.address, "connected to controller");
     let mut heartbeat = time::interval(controller.heartbeat_interval);
     loop {
         tokio::select! {
@@ -145,22 +149,19 @@ async fn connect(
                     return Ok(());
                 };
                 if let Some(controller_message::Message::DesiredConfig(desired)) = message.message {
-                    eprintln!(
-                        "controller: received desired configuration revision {} ({} bytes)",
-                        desired.revision,
-                        desired.yaml.len()
+                    info!(
+                        revision = desired.revision,
+                        bytes = desired.yaml.len(),
+                        "received desired configuration"
                     );
                     let status = apply_desired_config(state_dir, desired, reconciler);
                     if status.error.is_empty() {
-                        eprintln!(
-                            "controller: applied desired configuration revision {}",
-                            status.revision
-                        );
+                        info!(revision = status.revision, "applied desired configuration");
                     } else {
-                        eprintln!(
-                            "controller: failed desired configuration revision {}: {}",
-                            status.revision,
-                            status.error
+                        warn!(
+                            revision = status.revision,
+                            error = %status.error,
+                            "failed desired configuration"
                         );
                     }
                     send(&sender, agent_message::Message::ConfigStatus(status)).await?;
@@ -172,7 +173,7 @@ async fn connect(
 
 fn apply_desired_config(
     state_dir: &Path,
-    desired: crate::fleet::DesiredConfig,
+    desired: agentplane_proto::fleet::DesiredConfig,
     reconciler: &Reconciler,
 ) -> ConfigStatus {
     let result = (|| -> anyhow::Result<()> {
@@ -180,17 +181,14 @@ fn apply_desired_config(
         if actual_hash.as_slice() != desired.sha256 {
             bail!("configuration hash does not match payload");
         }
-        eprintln!(
-            "controller: verified desired configuration revision {} hash",
-            desired.revision
+        debug!(
+            revision = desired.revision,
+            "verified desired configuration hash"
         );
 
         let yaml = std::str::from_utf8(&desired.yaml).context("configuration is not UTF-8")?;
         let config = config::parse(yaml)?;
-        eprintln!(
-            "controller: parsed desired configuration revision {}",
-            desired.revision
-        );
+        debug!(revision = desired.revision, "parsed desired configuration");
         reconciler.apply(&config)?;
         std::fs::create_dir_all(state_dir)
             .with_context(|| format!("create state directory {}", state_dir.display()))?;
@@ -200,10 +198,10 @@ fn apply_desired_config(
             .with_context(|| format!("write remote configuration to {}", temporary.display()))?;
         std::fs::rename(&temporary, &path)
             .with_context(|| format!("install remote configuration at {}", path.display()))?;
-        eprintln!(
-            "controller: persisted desired configuration revision {} at {}",
-            desired.revision,
-            path.display()
+        info!(
+            revision = desired.revision,
+            path = %path.display(),
+            "persisted desired configuration"
         );
         Ok(())
     })();
