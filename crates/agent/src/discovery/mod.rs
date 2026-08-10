@@ -1,13 +1,13 @@
 mod claude_code;
 mod codex;
-mod command;
+mod metadata;
 mod opencode;
 mod vscode;
 
 use agentplane_core::model::Discovery;
 
 pub async fn discover() -> Discovery {
-    let (codex, opencode, claude_code, vscode) = tokio::join!(
+    let (codex, opencode, claude_code, vscode) = (
         codex::discover(),
         opencode::discover(),
         claude_code::discover(),

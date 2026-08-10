@@ -1,12 +1,17 @@
 use agentplane_core::model::Agent;
 
-use super::command;
+use std::path::Path;
 
-pub(super) async fn discover() -> Option<Agent> {
-    let executable = command::find_in_path("code")?;
-    let version = command::version(&executable)
-        .await
-        .and_then(|output| output.lines().next().map(str::to_owned));
+use super::metadata;
+
+pub(super) fn discover() -> Option<Agent> {
+    let executable = metadata::find_in_path("code")?;
+    let version = [
+        "/usr/share/code/resources/app/package.json",
+        "/usr/lib/code/resources/app/package.json",
+    ]
+    .into_iter()
+    .find_map(|path| metadata::json_version(Path::new(path)));
     Some(Agent {
         version,
         executable,
