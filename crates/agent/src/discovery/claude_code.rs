@@ -1,11 +1,11 @@
 use agentplane_core::model::Agent;
 
-use super::command;
+use super::metadata;
 
-pub(super) async fn discover() -> Option<Agent> {
-    let executable = command::find_in_path("claude")?;
+pub(super) fn discover() -> Option<Agent> {
+    let executable = metadata::find_in_path("claude")?;
     Some(Agent {
-        version: command::version(&executable).await,
+        version: metadata::version_after_component(&executable, "versions"),
         executable,
         kind: "claude-code".to_owned(),
     })

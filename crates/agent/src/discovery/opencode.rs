@@ -1,11 +1,11 @@
 use agentplane_core::model::Agent;
 
-use super::command;
+use super::metadata;
 
-pub(super) async fn discover() -> Option<Agent> {
-    let executable = command::find_in_path("opencode")?;
+pub(super) fn discover() -> Option<Agent> {
+    let executable = metadata::find_in_path("opencode")?;
     Some(Agent {
-        version: command::version(&executable).await,
+        version: metadata::pacman_version_for_file(&executable),
         executable,
         kind: "opencode".to_owned(),
     })

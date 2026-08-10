@@ -87,6 +87,16 @@ cargo run --bin agentplaned -- \
 
 Inspect the result with `jq . /tmp/claude-code-managed-settings.d/50-agentplane.json`. When `programs.claudeCode` is absent from a later desired revision, the daemon removes only its own drop-in file.
 
+To exercise the real privileged path during development, build as your user and elevate only the resulting daemon binary with the wrapper:
+
+```console
+AGENTPLANE_ENROLLMENT_TOKEN=development \
+  ./scripts/run-agentplaned-root \
+  --config ./config.controller.yaml.example
+```
+
+This uses the production defaults for state, the local socket, and Claude Code's `/etc/claude-code/managed-settings.d` directory. Additional daemon arguments are forwarded unchanged. Cargo runs as your user, then its target runner starts only the built daemon with `sudo`. The runner preserves your development `PATH` so discovery can still see user-installed programs. Discovery reads install and package metadata; it never executes discovered programs.
+
 ## Tray client
 
 The tray client is a Tauri application under `ui/`. It polls the daemon for health and Codex discovery state and does not manage the privileged daemon's lifecycle.
