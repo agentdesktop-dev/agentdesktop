@@ -1,0 +1,3 @@
+controller:
+  address: http://127.0.0.1:8443
+  heartbeatInterval: 5s
