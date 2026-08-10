@@ -1,5 +1,9 @@
 # Rust build output
 /target/
+/ui/dist/
+/ui/node_modules/
+/ui/src-tauri/gen/
+*.tsbuildinfo
 
 # Local environment and overrides
 .env

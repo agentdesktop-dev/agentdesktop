@@ -1,13 +1,20 @@
 use std::path::Path;
 
+#[cfg(unix)]
 use anyhow::{Context, bail};
+#[cfg(unix)]
 use bytes::Bytes;
+#[cfg(unix)]
 use http_body_util::{BodyExt, Empty};
+#[cfg(unix)]
 use hyper::{Request, client::conn::http1};
+#[cfg(unix)]
 use hyper_util::rt::TokioIo;
 use serde::de::DeserializeOwned;
+#[cfg(unix)]
 use tokio::net::UnixStream;
 
+#[cfg(unix)]
 pub async fn get<T>(socket: &Path, path: &str) -> anyhow::Result<T>
 where
     T: DeserializeOwned,
@@ -47,4 +54,12 @@ where
     }
 
     serde_json::from_slice(&body).context("decode daemon response")
+}
+
+#[cfg(not(unix))]
+pub async fn get<T>(_endpoint: &Path, _path: &str) -> anyhow::Result<T>
+where
+    T: DeserializeOwned,
+{
+    anyhow::bail!("local daemon transport is not implemented on this platform")
 }

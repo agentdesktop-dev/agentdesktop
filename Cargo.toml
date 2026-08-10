@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[workspace]
+members = ["ui/src-tauri"]
+resolver = "2"
+
 [dependencies]
 agent-core = { path = "../agentgateway/crates/core" }
 anyhow = "1"
@@ -16,4 +20,3 @@ hyper-util = { version = "0.1", features = ["service", "tokio"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "signal"] }
-
