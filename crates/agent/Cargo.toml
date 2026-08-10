@@ -1,5 +1,6 @@
 [package]
 name = "agentplane-agent"
+description = "Privileged device daemon for discovery, reconciliation, and fleet connectivity."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -13,9 +14,11 @@ agentplane-core.workspace = true
 agentplane-proto.workspace = true
 anyhow.workspace = true
 axum.workspace = true
+base64.workspace = true
 clap.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -23,3 +26,4 @@ tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true
 tracing.workspace = true
+url.workspace = true

@@ -1,5 +1,6 @@
 [package]
 name = "agentplane-proto"
+description = "Generated gRPC contracts shared by agents and the fleet controller."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
