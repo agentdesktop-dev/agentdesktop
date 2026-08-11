@@ -63,7 +63,28 @@ pub async fn run(
     loop {
         match connect(&controller, &identity, &discovered, &state_dir, &reconciler).await {
             Ok(()) => warn!("controller stream closed"),
-            Err(error) => warn!(error = %error, "controller connection failed"),
+            Err(error) => {
+                let error_chain = format!("{error:#}");
+                if error
+                    .downcast_ref::<tonic::Status>()
+                    .is_some_and(|status| status.code() == tonic::Code::Unauthenticated)
+                {
+                    warn!(
+                        controller = %controller.address,
+                        retry_in_seconds = delay.as_secs(),
+                        identity_path = %identity_path.display(),
+                        error = %error_chain,
+                        "controller rejected the device credential; remove the identity file and restart the agent to re-enroll"
+                    );
+                } else {
+                    warn!(
+                        controller = %controller.address,
+                        retry_in_seconds = delay.as_secs(),
+                        error = %error_chain,
+                        "controller connection failed"
+                    );
+                }
+            }
         }
 
         time::sleep(delay).await;
@@ -275,14 +296,18 @@ async fn send(
 pub(crate) async fn client(
     controller: &ControllerConfig,
 ) -> anyhow::Result<FleetAgentClient<Channel>> {
-    let mut endpoint = Endpoint::from_shared(controller.address.clone())?;
+    let mut endpoint = Endpoint::from_shared(controller.address.clone())
+        .with_context(|| format!("parse controller address {}", controller.address))?;
     if let Some(path) = &controller.ca_certificate_path {
         let pem = std::fs::read(path)
             .with_context(|| format!("read controller CA certificate from {}", path.display()))?;
         endpoint = endpoint
             .tls_config(ClientTlsConfig::new().ca_certificate(Certificate::from_pem(pem)))?;
     }
-    let channel = endpoint.connect().await.context("connect to controller")?;
+    let channel = endpoint
+        .connect()
+        .await
+        .with_context(|| format!("connect to controller at {}", controller.address))?;
     Ok(FleetAgentClient::new(channel))
 }
 

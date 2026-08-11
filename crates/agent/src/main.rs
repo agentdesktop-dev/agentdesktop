@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
             .await
             {
                 remote_enrollment.set("failed").await;
-                tracing::error!(error = %error, "controller integration disabled");
+                tracing::error!(error = %format!("{error:#}"), "controller integration disabled");
             }
         });
     }

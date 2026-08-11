@@ -56,6 +56,12 @@ cargo run --bin agentplane-controller -- \
   --database-url 'sqlite://agentplane-controller.db?mode=rwc'
 ```
 
+The controller also serves its embedded management UI at
+`http://127.0.0.1:8080`. The first version is read-only and shows fleet health,
+device inventory, desired configuration, and runtime settings. The admin
+listener is restricted to loopback addresses; use `--admin-listen` to select a
+different local port.
+
 Then start the daemon with a writable development state directory:
 
 ```console

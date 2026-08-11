@@ -7,6 +7,7 @@
     "dev": "tauri dev",
     "build": "tauri build",
     "build:mac": "tauri build --bundles app,dmg",
+    "controller:dev": "vite --host 127.0.0.1 --port 1421",
     "frontend:dev": "vite --host 127.0.0.1 --port 1420",
     "frontend:build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
@@ -15,6 +16,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.0",
+    "lucide-react": "^1.31.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },
