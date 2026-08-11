@@ -23,7 +23,9 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     let _telemetry = crate::telemetry::init()?;
     #[cfg(target_os = "linux")]
     let central_session_mode = config.session_socket.is_some();
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(target_os = "windows", target_env = "msvc"))]
+    let central_session_mode = config.session_pipe.is_some();
+    #[cfg(not(any(target_os = "linux", all(target_os = "windows", target_env = "msvc"))))]
     let central_session_mode = false;
     let managed_identity = if central_session_mode {
         None
@@ -108,6 +110,22 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         None
     };
 
+    #[cfg(all(target_os = "windows", target_env = "msvc"))]
+    let session_state = if let Some(path) = &config.session_pipe {
+        let registry = crate::session::windows::SessionRegistry::new(
+            gateway_endpoint,
+            config
+                .upstream
+                .host_str()
+                .context("managed Gateway upstream has no hostname")?
+                .to_owned(),
+            Duration::from_millis(config.connect_timeout_ms),
+        );
+        Some((path.clone(), registry))
+    } else {
+        None
+    };
+
     let native_listener = TcpListener::bind(config.listen).await?;
     let status_listener = TcpListener::bind(config.status_listen).await?;
     tracing::info!(
@@ -142,7 +160,26 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             wait_for_shutdown(native_shutdown),
         ))
     };
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(target_os = "windows", target_env = "msvc"))]
+    let native_task = if session_state.is_some() {
+        tokio::spawn(forwarder::serve_native_without_attribution(
+            native_listener,
+            config.max_in_flight,
+            wait_for_shutdown(native_shutdown),
+        ))
+    } else {
+        tokio::spawn(forwarder::serve_native(
+            native_listener,
+            hbone
+                .clone()
+                .context("forwarding identity is unavailable")?,
+            config.native_target.clone(),
+            config.max_in_flight,
+            Duration::from_millis(config.shutdown_timeout_ms),
+            wait_for_shutdown(native_shutdown),
+        ))
+    };
+    #[cfg(not(any(target_os = "linux", all(target_os = "windows", target_env = "msvc"))))]
     let native_task = tokio::spawn(forwarder::serve_native(
         native_listener,
         hbone
@@ -198,7 +235,16 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             shutdown_rx.clone(),
         ))
     });
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(target_os = "windows", target_env = "msvc"))]
+    let session_task = session_state.as_ref().map(|(path, registry)| {
+        tokio::spawn(crate::session::windows::serve_registrations(
+            path.clone(),
+            registry.clone(),
+            Duration::from_millis(config.connect_timeout_ms),
+            shutdown_rx.clone(),
+        ))
+    });
+    #[cfg(not(any(target_os = "linux", all(target_os = "windows", target_env = "msvc"))))]
     let session_task = None;
     let renewal_task = managed_identity.map(renewal::spawn);
     let result = if let Some(gateway) = &mut local_gateway {

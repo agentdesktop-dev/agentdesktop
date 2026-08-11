@@ -80,6 +80,50 @@ pub async fn serve_native_sessions(
     drain_tunnels(&mut tunnels, shutdown_timeout).await
 }
 
+#[cfg(all(target_os = "windows", target_env = "msvc"))]
+pub async fn serve_native_without_attribution(
+    listener: TcpListener,
+    max_tunnels: usize,
+    shutdown: impl Future<Output = ()>,
+) -> Result<()> {
+    if max_tunnels == 0 {
+        bail!("max tunnels must be greater than zero");
+    }
+    let permits = Arc::new(Semaphore::new(max_tunnels));
+    let mut rejections = JoinSet::new();
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            Some(result) = rejections.join_next(), if !rejections.is_empty() => {
+                if let Err(error) = result {
+                    tracing::warn!(event = "tunnel_task_failed", reason = %error);
+                }
+            }
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                let Ok(permit) = permits.clone().try_acquire_owned() else {
+                    tracing::warn!(event = "tunnel_rejected", reason = "overloaded");
+                    continue;
+                };
+                rejections.spawn(async move {
+                    if let Err(error) = reject(
+                        stream,
+                        anyhow::anyhow!("Windows WFP user attribution is unavailable"),
+                    )
+                    .await
+                    {
+                        tracing::warn!(event = "tunnel_failed", reason = %error);
+                    }
+                    drop(permit);
+                });
+            }
+        }
+    }
+    rejections.abort_all();
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 pub async fn serve_capture(
     listener: TcpListener,
@@ -221,7 +265,7 @@ async fn drain_tunnels(tunnels: &mut JoinSet<()>, shutdown_timeout: Duration) ->
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "windows", target_env = "msvc")))]
 async fn reject(mut stream: TcpStream, error: anyhow::Error) -> Result<()> {
     let _ = stream.write_all(GATEWAY_UNAVAILABLE).await;
     stream.shutdown().await?;
@@ -256,6 +300,8 @@ mod tests {
     use tokio::sync::oneshot;
     use tokio::time::{Duration, timeout};
 
+    #[cfg(all(target_os = "windows", target_env = "msvc"))]
+    use super::serve_native_without_attribution;
     use super::{HboneClient, serve_native};
 
     #[tokio::test]
@@ -354,5 +400,24 @@ mod tests {
         assert!(response.ends_with(b"agent gateway unavailable\n"));
         let _ = shutdown_tx.send(());
         relay.await.unwrap().unwrap();
+    }
+
+    #[cfg(all(target_os = "windows", target_env = "msvc"))]
+    #[tokio::test]
+    async fn windows_native_listener_fails_closed_without_wfp_attribution() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (shutdown, stopping) = oneshot::channel();
+        let service = tokio::spawn(serve_native_without_attribution(listener, 8, async move {
+            let _ = stopping.await;
+        }));
+        let mut client = TcpStream::connect(address).await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+
+        assert!(response.starts_with(b"HTTP/1.1 502 Bad Gateway\r\n"));
+        assert!(response.ends_with(b"agent gateway unavailable\n"));
+        shutdown.send(()).unwrap();
+        service.await.unwrap().unwrap();
     }
 }

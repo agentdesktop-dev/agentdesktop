@@ -184,7 +184,10 @@ impl Config {
         #[cfg(target_os = "linux")]
         let central_managed_service =
             self.mode == DeploymentMode::Managed && self.session_socket.is_some();
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(all(target_os = "windows", target_env = "msvc"))]
+        let central_managed_service =
+            self.mode == DeploymentMode::Managed && self.session_pipe.is_some();
+        #[cfg(not(any(target_os = "linux", all(target_os = "windows", target_env = "msvc"))))]
         let central_managed_service = false;
         if self.mode == DeploymentMode::Managed
             && self.identity_issuer.is_none()
@@ -479,6 +482,27 @@ mod tests {
         assert_eq!(
             config.session_socket.as_deref(),
             Some(std::path::Path::new("/run/agentdesktop/sessions.sock"))
+        );
+        assert!(config.identity_issuer.is_none());
+    }
+
+    #[cfg(all(target_os = "windows", target_env = "msvc"))]
+    #[test]
+    fn accepts_managed_central_service_with_session_pipe() {
+        let config = parse(&[
+            "connector",
+            "--mode",
+            "managed",
+            "--upstream",
+            "https://gateway.example/",
+            "--session-pipe",
+            r"\\.\pipe\agentdesktop-sessions",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            config.session_pipe.as_deref(),
+            Some(r"\\.\pipe\agentdesktop-sessions")
         );
         assert!(config.identity_issuer.is_none());
     }

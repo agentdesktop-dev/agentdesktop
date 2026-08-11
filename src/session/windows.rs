@@ -20,6 +20,8 @@ use tokio::net::windows::named_pipe::{
 };
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+use tokio::sync::watch;
+use tokio::task::JoinSet;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -283,6 +285,41 @@ impl SessionRegistry {
             clients.remove(sid);
         }
     }
+}
+
+pub async fn serve_registrations(
+    path: String,
+    registry: SessionRegistry,
+    registration_timeout: Duration,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<()> {
+    let mut registrations = JoinSet::new();
+    'serving: loop {
+        let accepted = accept(create_server(&path)?);
+        tokio::pin!(accepted);
+        let connection = loop {
+            tokio::select! {
+                _ = shutdown.wait_for(|stopping| *stopping) => break 'serving,
+                Some(result) = registrations.join_next(), if !registrations.is_empty() => {
+                    match result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => tracing::warn!(event = "session_registration_failed", reason = %error),
+                        Err(error) => tracing::warn!(event = "session_registration_task_failed", reason = %error),
+                    }
+                }
+                accepted = &mut accepted => break accepted?,
+            }
+        };
+        let registry = registry.clone();
+        registrations.spawn(async move {
+            tokio::time::timeout(registration_timeout, registry.register(connection))
+                .await
+                .context("user session registration timed out")??;
+            Ok::<_, anyhow::Error>(())
+        });
+    }
+    registrations.abort_all();
+    Ok(())
 }
 
 impl SessionConnection {

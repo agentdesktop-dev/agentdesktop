@@ -1,6 +1,6 @@
 # Session forwarding contract v1
 
-Status: Linux implementation complete; Windows and macOS transports remain pending.
+Status: Linux implementation complete. Windows named-pipe SID authentication, external signing, and SID-keyed registration are implemented; WFP flow attribution remains pending. macOS transport remains pending.
 
 Agent Desktop uses one machine-owned forwarder and one control agent in each active user session. The machine forwarder owns native listeners, transparent capture, original-destination recovery, connection attribution, HBONE pools, and fail-closed behavior. It never persists OAuth tokens or private-key bytes. A user agent owns OAuth login and refresh, enrollment and certificate renewal, and access to the user's credential store.
 
