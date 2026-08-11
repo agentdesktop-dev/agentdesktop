@@ -426,7 +426,13 @@ mod tests {
         let unavailable = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = unavailable.local_addr().unwrap();
         drop(unavailable);
-        let hbone = HboneClient::connect(endpoint).await.unwrap();
+        let hbone = HboneClient::connect_with_headers(
+            endpoint,
+            http::HeaderMap::new(),
+            Duration::from_millis(250),
+        )
+        .await
+        .unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();

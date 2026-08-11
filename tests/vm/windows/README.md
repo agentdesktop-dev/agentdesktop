@@ -81,6 +81,26 @@ tests/vm/windows/vm.sh ssh powershell.exe -NoProfile -NonInteractive \
 
 The smoke test requires a real Agent Gateway response through the connector, a healthy status endpoint, and closed native, status, and HBONE listeners after the supervised Gateway is killed. Agent Desktop exits when its owned Gateway exits; it does not remain running in a degraded state.
 
+## WFP driver smoke test
+
+Provision the supported Visual Studio Community and WDK toolchain once inside the disposable guest, then copy and build the driver:
+
+```bash
+tests/vm/windows/vm.sh copy tests/vm/windows/install-wdk.ps1 C:/agentdesktop/
+tests/vm/windows/vm.sh ssh powershell.exe -NoProfile -NonInteractive \
+  -ExecutionPolicy Bypass -File C:/agentdesktop/install-wdk.ps1
+tests/vm/windows/vm.sh copy windows/wfp C:/agentdesktop-wfp
+tests/vm/windows/vm.sh copy tests/vm/windows/wfp-smoke.ps1 C:/agentdesktop-wfp/
+tests/vm/windows/vm.sh ssh powershell.exe -NoProfile -NonInteractive \
+  -ExecutionPolicy Bypass -File C:/agentdesktop-wfp/build.ps1 -Configuration Release
+tests/vm/windows/vm.sh ssh powershell.exe -NoProfile -NonInteractive \
+  -ExecutionPolicy Bypass -File C:/agentdesktop-wfp/install.ps1 -Configuration Release
+tests/vm/windows/vm.sh ssh powershell.exe -NoProfile -NonInteractive \
+  -ExecutionPolicy Bypass -File C:/agentdesktop-wfp/wfp-smoke.ps1
+```
+
+The driver build is pinned to WDK `10.0.26100.0`, enables warnings-as-errors and Universal API validation, and SHA-256 test-signs `agwfp.sys`. The smoke test requires one-shot configuration, redirects a real public loopback connection to the hidden proxy listener, and validates the exact original destination and initiating account SID returned by Winsock.
+
 ## Clean-slate lifecycle
 
 ```bash

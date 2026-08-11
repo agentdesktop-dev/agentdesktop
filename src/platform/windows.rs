@@ -7,6 +7,10 @@ use windows_sys::Win32::Networking::WinSock::{
     AF_INET, AF_INET6, SIO_QUERY_WFP_CONNECTION_REDIRECT_CONTEXT, SOCKET_ERROR, WSAGetLastError,
     WSAIoctl,
 };
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_SHARE_NONE, OPEN_EXISTING,
+};
+use windows_sys::Win32::System::IO::DeviceIoControl;
 
 use crate::session::windows::UserSid;
 
@@ -18,6 +22,26 @@ const SOCKADDR_IN_LEN: usize = 16;
 const SOCKADDR_IN6_LEN: usize = 28;
 const FLOW_NATIVE: u16 = 1;
 const FLOW_CAPTURED: u16 = 2;
+const AGWFP_IOCTL_SET_CONFIGURATION: u32 = (0x12 << 16) | (2 << 14) | ((0x800 + 1) << 2);
+
+#[repr(C)]
+struct WfpEndpoint {
+    family: u16,
+    port: u16,
+    address: [u8; 16],
+    scope_id: u32,
+    reserved: [u8; 8],
+}
+
+#[repr(C)]
+struct WfpConfiguration {
+    version: u32,
+    size: u32,
+    live_service_pid: u32,
+    flags: u32,
+    public_destination: WfpEndpoint,
+    proxy_destination: WfpEndpoint,
+}
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum FlowKind {
@@ -30,6 +54,89 @@ pub struct RedirectContext {
     pub flow_kind: FlowKind,
     pub original_destination: SocketAddr,
     pub user_sid: UserSid,
+}
+
+pub fn configure_native_redirect(
+    public_destination: SocketAddr,
+    proxy_destination: SocketAddr,
+) -> Result<()> {
+    let config = WfpConfiguration {
+        version: VERSION.into(),
+        size: size_of::<WfpConfiguration>() as u32,
+        live_service_pid: std::process::id(),
+        flags: 0,
+        public_destination: WfpEndpoint::from_socket_addr(public_destination),
+        proxy_destination: WfpEndpoint::from_socket_addr(proxy_destination),
+    };
+    if config.public_destination.family != config.proxy_destination.family {
+        bail!("public and WFP proxy listeners must use the same address family");
+    }
+    let path = r"\\.\AGWfp"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            FILE_GENERIC_WRITE,
+            FILE_SHARE_NONE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error()).context("open Agent Desktop WFP driver");
+    }
+    let handle = DriverHandle(handle);
+    let mut returned = 0_u32;
+    let result = unsafe {
+        DeviceIoControl(
+            handle.0,
+            AGWFP_IOCTL_SET_CONFIGURATION,
+            (&config as *const WfpConfiguration).cast(),
+            size_of::<WfpConfiguration>() as u32,
+            std::ptr::null_mut(),
+            0,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error()).context("configure Agent Desktop WFP driver");
+    }
+    Ok(())
+}
+
+impl WfpEndpoint {
+    fn from_socket_addr(address: SocketAddr) -> Self {
+        let (family, bytes, scope_id) = match address {
+            SocketAddr::V4(address) => {
+                let mut bytes = [0_u8; 16];
+                bytes[..4].copy_from_slice(&u32::from(*address.ip()).to_ne_bytes());
+                (AF_INET, bytes, 0)
+            }
+            SocketAddr::V6(address) => (AF_INET6, address.ip().octets(), address.scope_id()),
+        };
+        Self {
+            family,
+            port: address.port(),
+            address: bytes,
+            scope_id,
+            reserved: [0; 8],
+        }
+    }
+}
+
+struct DriverHandle(windows_sys::Win32::Foundation::HANDLE);
+
+impl Drop for DriverHandle {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
 }
 
 pub fn redirect_context(stream: &TcpStream) -> Result<RedirectContext> {
@@ -116,7 +223,33 @@ fn parse_sockaddr(bytes: &[u8]) -> Result<SocketAddr> {
 
 #[cfg(test)]
 mod tests {
-    use super::{HEADER_LEN, MAGIC, VERSION, parse_redirect_context};
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+
+    use super::{
+        AGWFP_IOCTL_SET_CONFIGURATION, HEADER_LEN, MAGIC, VERSION, WfpConfiguration, WfpEndpoint,
+        parse_redirect_context,
+    };
+
+    #[test]
+    fn controller_abi_matches_driver_layout() {
+        assert_eq!(AGWFP_IOCTL_SET_CONFIGURATION, 0x0012_a004);
+        assert_eq!(size_of::<WfpEndpoint>(), 32);
+        assert_eq!(size_of::<WfpConfiguration>(), 80);
+
+        let endpoint = WfpEndpoint::from_socket_addr(SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::LOCALHOST,
+            8080,
+        )));
+        assert_eq!(
+            endpoint.family,
+            windows_sys::Win32::Networking::WinSock::AF_INET
+        );
+        assert_eq!(endpoint.port, 8080);
+        assert_eq!(
+            u32::from_ne_bytes(endpoint.address[..4].try_into().unwrap()),
+            0x7f00_0001
+        );
+    }
 
     #[test]
     fn parses_ipv4_context_with_binary_sid() {

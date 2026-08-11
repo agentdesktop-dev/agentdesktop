@@ -131,6 +131,13 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     #[cfg(not(all(target_os = "windows", target_env = "msvc")))]
     let native_bind = config.listen;
     let native_listener = TcpListener::bind(native_bind).await?;
+    #[cfg(all(target_os = "windows", target_env = "msvc"))]
+    if config.wfp_proxy_listen.is_some() {
+        crate::platform::windows::configure_native_redirect(
+            config.listen,
+            native_listener.local_addr()?,
+        )?;
+    }
     let status_listener = TcpListener::bind(config.status_listen).await?;
     tracing::info!(
         event = "connector_started",

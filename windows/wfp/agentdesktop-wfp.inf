@@ -1,0 +1,46 @@
+[Version]
+Signature="$WINDOWS NT$"
+Class=System
+ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider=%ProviderName%
+DriverVer=08/11/2026,1.0.0.0
+CatalogFile=agentdesktop-wfp.cat
+PnpLockdown=1
+
+[DestinationDirs]
+DefaultDestDir=12
+
+[DefaultInstall.NTamd64]
+CopyFiles=DriverCopyFiles
+
+[DefaultInstall.NTamd64.Services]
+AddService=AGWfp,0x00000002,ServiceInstall
+
+[DefaultUninstall.NTamd64]
+DelFiles=DriverCopyFiles
+
+[DefaultUninstall.NTamd64.Services]
+DelService=AGWfp,0x00000200
+
+[DriverCopyFiles]
+agwfp.sys
+
+[ServiceInstall]
+DisplayName=%ServiceDisplayName%
+Description=%ServiceDescription%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%12%\agwfp.sys
+
+[SourceDisksNames]
+1=%DiskName%,,,
+
+[SourceDisksFiles]
+agwfp.sys=1
+
+[Strings]
+ProviderName="Solo.io"
+DiskName="Agent Desktop WFP Driver Disk"
+ServiceDisplayName="Agent Desktop WFP Redirect Driver"
+ServiceDescription="Windows WFP native connect-redirect driver for Agent Desktop"
