@@ -91,7 +91,7 @@ impl RotatingClientIdentity {
         Ok((state.generation, state.identity.clone()))
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", all(target_os = "windows", target_env = "msvc")))]
     pub(crate) fn pem_snapshot(&self) -> Result<(u64, ClientIdentity)> {
         let (generation, identity) = self.snapshot()?;
         match identity {

@@ -87,6 +87,11 @@ pub struct Config {
     #[cfg(target_os = "linux")]
     #[arg(long, env = "AGENTDESKTOP_SESSION_SOCKET")]
     pub session_socket: Option<PathBuf>,
+
+    /// Machine-service named pipe for per-user credential registration.
+    #[cfg(all(target_os = "windows", target_env = "msvc"))]
+    #[arg(long, env = "AGENTDESKTOP_SESSION_PIPE")]
+    pub session_pipe: Option<String>,
 }
 
 impl Config {
@@ -186,6 +191,15 @@ impl Config {
             && !central_managed_service
         {
             bail!("managed mode requires an identity issuer and enrollment URL");
+        }
+
+        #[cfg(all(target_os = "windows", target_env = "msvc"))]
+        if self
+            .session_pipe
+            .as_deref()
+            .is_some_and(|pipe| !pipe.starts_with(r"\\.\pipe\") || pipe.len() <= 9)
+        {
+            bail!("session pipe must be a local Windows named-pipe path");
         }
 
         Ok(self)

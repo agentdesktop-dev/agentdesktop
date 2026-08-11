@@ -283,6 +283,24 @@ pub async fn run_session_agent(config: Config) -> anyhow::Result<()> {
     }
 }
 
+#[cfg(all(target_os = "windows", target_env = "msvc"))]
+pub async fn run_session_agent(config: Config) -> anyhow::Result<()> {
+    if config.mode != crate::config::DeploymentMode::Managed {
+        bail!("Windows session agent is only available in managed mode");
+    }
+    let pipe = config
+        .session_pipe
+        .as_deref()
+        .context("session agent requires --session-pipe")?;
+    let context = renewal::load(&config)?.context("session agent requires managed identity")?;
+    let identity = context.client_identity.clone();
+    let renewal = renewal::spawn(context);
+    let result =
+        crate::session::windows::run_user_agent(pipe, identity, Duration::from_secs(1)).await;
+    renewal.abort();
+    result
+}
+
 async fn signal_shutdown(shutdown: watch::Sender<bool>) {
     if tokio::signal::ctrl_c().await.is_err() {
         tracing::error!(event = "shutdown_signal_failed");

@@ -9,10 +9,15 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use base64::Engine;
+use p256::ecdsa::signature::Signer as _;
+use p256::ecdsa::{Signature, SigningKey as P256SigningKey};
+use p256::pkcs8::DecodePrivateKey;
 use rustls::pki_types::CertificateDer;
 use rustls::sign::{Signer, SigningKey};
 use rustls::{Error as TlsError, SignatureAlgorithm, SignatureScheme as TlsSignatureScheme};
-use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+use tokio::net::windows::named_pipe::{
+    ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
+};
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
@@ -74,6 +79,92 @@ pub async fn accept(mut pipe: NamedPipeServer) -> Result<SessionConnection> {
         registration,
         pipe,
     })
+}
+
+pub async fn run_user_agent(
+    path: &str,
+    identity: RotatingClientIdentity,
+    reconnect_delay: Duration,
+) -> Result<()> {
+    loop {
+        let result: Result<()> = async {
+            let mut pipe = ClientOptions::new()
+                .open(path)
+                .context("connect to machine forwarder session pipe")?;
+            let (generation, client_identity) = identity.pem_snapshot()?;
+            let certificates = rustls_pemfile::certs(&mut std::io::Cursor::new(
+                &client_identity.certificate_chain_pem,
+            ))
+            .map(|certificate| {
+                certificate
+                    .map(|certificate| {
+                        base64::engine::general_purpose::STANDARD.encode(certificate.as_ref())
+                    })
+                    .context("parse user certificate chain")
+            })
+            .collect::<Result<Vec<_>>>()?;
+            write_frame(
+                &mut pipe,
+                &Registration {
+                    version: crate::session_protocol::VERSION,
+                    certificate_generation: generation,
+                    certificate_chain_der_base64: certificates,
+                    local_gateway: None,
+                },
+            )
+            .await
+            .context("register user certificate")?;
+            let signing_key = P256SigningKey::from_pkcs8_pem(&client_identity.private_key_pem)
+                .context("parse user signing key")?;
+            serve_signing_requests(&mut pipe, &identity, generation, &signing_key).await
+        }
+        .await;
+        if let Err(error) = result {
+            tracing::warn!(event = "session_agent_disconnected", reason = %error);
+        }
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => return Ok(()),
+            _ = tokio::time::sleep(reconnect_delay) => {}
+        }
+    }
+}
+
+async fn serve_signing_requests(
+    pipe: &mut NamedPipeClient,
+    identity: &RotatingClientIdentity,
+    generation: u64,
+    signing_key: &P256SigningKey,
+) -> Result<()> {
+    let mut generation_check = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        tokio::select! {
+            _ = generation_check.tick() => {
+                if identity.pem_snapshot()?.0 != generation {
+                    return Ok(());
+                }
+            }
+            request = read_frame::<ForwarderRequest, _>(&mut *pipe) => {
+                let request = request.context("read signing request")?;
+                let ForwarderRequest::Sign { request_id, scheme, message_base64 } = request;
+                let response = match scheme {
+                    SignatureScheme::EcdsaP256Sha256 => {
+                        let message = base64::engine::general_purpose::STANDARD
+                            .decode(message_base64)
+                            .context("decode signing input")?;
+                        let signature: Signature = signing_key.sign(&message);
+                        AgentResponse::Signature {
+                            request_id,
+                            signature_base64: base64::engine::general_purpose::STANDARD
+                                .encode(signature.to_der().as_bytes()),
+                        }
+                    }
+                };
+                write_frame(&mut *pipe, &response)
+                    .await
+                    .context("write signing response")?;
+            }
+        }
+    }
 }
 
 impl SessionRegistry {
@@ -361,6 +452,8 @@ impl Drop for OwnedHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::enrollment::ClientIdentity;
+    use p256::ecdsa::signature::Verifier as _;
     use rcgen::{CertifiedKey, generate_simple_self_signed};
     use tokio::net::windows::named_pipe::ClientOptions;
 
@@ -439,5 +532,59 @@ mod tests {
         assert_eq!(signature, b"DER signature");
         client_task.await.unwrap();
         worker.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn user_agent_registers_and_signs_on_named_pipe() {
+        let name = pipe_name("user-agent");
+        let server = create_server(&name).unwrap();
+        let CertifiedKey { cert, signing_key } =
+            generate_simple_self_signed(["agentdesktop.test".to_owned()]).unwrap();
+        let private_key_pem = signing_key.serialize_pem();
+        let expected_key = P256SigningKey::from_pkcs8_pem(&private_key_pem).unwrap();
+        let identity = RotatingClientIdentity::new(ClientIdentity {
+            certificate_chain_pem: cert.pem(),
+            private_key_pem,
+        });
+        let agent_name = name.clone();
+        let agent = tokio::spawn(async move {
+            run_user_agent(&agent_name, identity, Duration::from_millis(10))
+                .await
+                .unwrap();
+        });
+        let connection = accept(server).await.unwrap();
+        assert_eq!(connection.registration().certificate_generation, 1);
+        let mut pipe = connection.into_pipe();
+        write_frame(
+            &mut pipe,
+            &ForwarderRequest::Sign {
+                request_id: 42,
+                scheme: SignatureScheme::EcdsaP256Sha256,
+                message_base64: base64::engine::general_purpose::STANDARD
+                    .encode(b"certificate verify"),
+            },
+        )
+        .await
+        .unwrap();
+        let response: AgentResponse = read_frame(&mut pipe).await.unwrap();
+        let AgentResponse::Signature {
+            request_id,
+            signature_base64,
+        } = response
+        else {
+            panic!("user agent rejected signing request");
+        };
+        assert_eq!(request_id, 42);
+        let signature = Signature::from_der(
+            &base64::engine::general_purpose::STANDARD
+                .decode(signature_base64)
+                .unwrap(),
+        )
+        .unwrap();
+        expected_key
+            .verifying_key()
+            .verify(b"certificate verify", &signature)
+            .unwrap();
+        agent.abort();
     }
 }
