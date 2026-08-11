@@ -469,6 +469,25 @@ mod tests {
         assert!(config.identity_issuer.is_none());
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn accepts_managed_central_capture_with_session_socket() {
+        let config = parse(&[
+            "connector",
+            "--mode",
+            "managed",
+            "--upstream",
+            "https://gateway.example/",
+            "--session-socket",
+            "/run/agentdesktop/sessions.sock",
+            "--capture-enabled",
+        ])
+        .unwrap();
+
+        assert!(config.capture_enabled);
+        assert!(config.identity_issuer.is_none());
+    }
+
     #[test]
     fn rejects_partial_or_insecure_enrollment_configuration() {
         let missing = parse(&[

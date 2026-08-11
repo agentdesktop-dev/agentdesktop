@@ -239,9 +239,17 @@ fn installs_managed_bundle_without_local_gateway() {
     assert!(!root.join("bin/agentgateway").exists());
     assert!(!root.join("share/examples/agentgateway.yaml").exists());
     let service = fs::read_to_string(root.join("share/systemd/user/agentdesktop.service")).unwrap();
-    assert!(service.contains("serve --mode managed"));
+    assert!(service.contains("session-agent --mode managed"));
     assert!(service.contains("--upstream \"https://gateway.acme.example/\""));
     assert!(service.contains("--identity-issuer \"https://login.acme.example/\""));
     assert!(service.contains("--enrollment-url \"https://enrollment.acme.example/\""));
+    assert!(service.contains("--session-socket /run/agentdesktop/sessions.sock"));
     assert!(!service.contains("--gateway-binary"));
+    let forwarder =
+        fs::read_to_string(root.join("share/systemd/system/agentdesktop-forwarder.service"))
+            .unwrap();
+    assert!(forwarder.contains("serve --mode managed"));
+    assert!(forwarder.contains("--session-socket /run/agentdesktop/sessions.sock"));
+    assert!(!forwarder.contains("--identity-issuer"));
+    assert!(forwarder.contains("RuntimeDirectory=agentdesktop"));
 }

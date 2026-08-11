@@ -347,7 +347,8 @@ fn install_managed(args: InstallArgs) -> Result<()> {
     println!("\nInstallation complete");
     println!("  Organization: {}", bootstrap.organization.display_name);
     println!("  Files:        {}", root.display());
-    println!("  Service:      installed, awaiting user sign-in");
+    println!("  User service: installed, awaiting user sign-in");
+    println!("  Forwarder:    template installed; MDM activation required");
     if trust_organization_ca {
         println!("  Trust:        organization Gateway CA installed");
     } else if bootstrap.trust.is_some() {
@@ -399,7 +400,8 @@ fn print_managed_summary(root: &Path, bootstrap: &OrganizationBootstrap) {
     println!("  - Agent Desktop");
     println!("\nLocation:     {}", root.display());
     println!("Agent Gateway: {}", bootstrap.gateway.url);
-    println!("Service:      installed but not started");
+    println!("User service: installed but not started");
+    println!("Forwarder:    requires root-owned MDM deployment");
     println!("\nSign-in and AI agent settings are left to the user.");
 }
 

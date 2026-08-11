@@ -10,6 +10,8 @@ use sha2::{Digest, Sha256};
 
 const MANIFEST: &str = "agentdesktop-install.json";
 const SYSTEMD_UNIT: &str = "share/systemd/user/agentdesktop.service";
+const MACHINE_SYSTEMD_UNIT: &str = "share/systemd/system/agentdesktop-forwarder.service";
+const SESSION_SOCKET: &str = "/run/agentdesktop/sessions.sock";
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Install or remove an Agent Desktop bundle")]
@@ -133,6 +135,7 @@ fn main() -> Result<()> {
                 &root,
                 &files,
                 &standalone_systemd_unit(&root, gateway_config.as_deref(), capture_enabled),
+                None,
                 "standalone",
                 &command_link,
             )
@@ -155,7 +158,11 @@ fn main() -> Result<()> {
             install(
                 &root,
                 &files,
-                &managed_systemd_unit(&root, &bootstrap),
+                &managed_user_systemd_unit(&root, &bootstrap),
+                Some((
+                    MACHINE_SYSTEMD_UNIT,
+                    managed_machine_systemd_unit(&root, &bootstrap),
+                )),
                 "managed",
                 &command_link,
             )
@@ -224,6 +231,7 @@ fn install(
     root: &Path,
     files: &[(&Path, &str, bool)],
     systemd_unit: &str,
+    machine_systemd_unit: Option<(&str, String)>,
     deployment: &str,
     command_link: &Path,
 ) -> Result<()> {
@@ -263,11 +271,23 @@ fn install(
         fs::create_dir_all(unit.parent().expect("systemd unit has parent"))?;
         fs::write(&unit, systemd_unit)?;
         set_mode(&unit, 0o644)?;
+        if let Some((relative, contents)) = &machine_systemd_unit {
+            let unit = staging.join(relative);
+            fs::create_dir_all(unit.parent().expect("systemd unit has parent"))?;
+            fs::write(&unit, contents)?;
+            set_mode(&unit, 0o644)?;
+        }
 
-        let files = files
+        let mut installed_files = files
             .iter()
             .map(|(_, relative, _)| *relative)
             .chain(std::iter::once(SYSTEMD_UNIT))
+            .collect::<Vec<_>>();
+        if let Some((relative, _)) = &machine_systemd_unit {
+            installed_files.push(relative);
+        }
+        let files = installed_files
+            .into_iter()
             .map(|relative| {
                 let destination = staging.join(relative);
                 Ok(InstalledFile {
@@ -336,13 +356,21 @@ fn standalone_systemd_unit(
     )
 }
 
-fn managed_systemd_unit(root: &Path, bootstrap: &OrganizationBootstrap) -> String {
+fn managed_user_systemd_unit(root: &Path, bootstrap: &OrganizationBootstrap) -> String {
     let connector = quote_systemd_arg(&root.join("bin/agentdesktop"));
     let upstream = quote_systemd_value(bootstrap.gateway.url.as_str());
     let issuer = quote_systemd_value(bootstrap.identity.issuer.as_str());
     let enrollment_url = quote_systemd_value(bootstrap.identity.enrollment_url.as_str());
     format!(
-        "[Unit]\nDescription=Agent Desktop\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={connector} serve --mode managed --upstream {upstream} --identity-issuer {issuer} --enrollment-url {enrollment_url}\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\n\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription=Agent Desktop user session agent\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={connector} session-agent --mode managed --upstream {upstream} --identity-issuer {issuer} --enrollment-url {enrollment_url} --session-socket {SESSION_SOCKET}\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\n\n[Install]\nWantedBy=default.target\n"
+    )
+}
+
+fn managed_machine_systemd_unit(root: &Path, bootstrap: &OrganizationBootstrap) -> String {
+    let connector = quote_systemd_arg(&root.join("bin/agentdesktop"));
+    let upstream = quote_systemd_value(bootstrap.gateway.url.as_str());
+    format!(
+        "[Unit]\nDescription=Agent Desktop machine forwarder\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={connector} serve --mode managed --upstream {upstream} --session-socket {SESSION_SOCKET}\nRestart=on-failure\nRestartSec=2\nRuntimeDirectory=agentdesktop\nRuntimeDirectoryMode=0755\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=read-only\n\n[Install]\nWantedBy=multi-user.target\n"
     )
 }
 
