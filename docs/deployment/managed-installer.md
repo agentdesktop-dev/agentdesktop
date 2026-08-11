@@ -1,5 +1,7 @@
 # Managed installer development
 
+This guide describes the current Linux/systemd development artifact. It is not a Windows service package or a macOS installer.
+
 The managed development artifact contains the connector, installation engine, and an organization bootstrap. Managed identity commands are part of the connector. The artifact does not contain Agent Gateway, provider credentials, policy, client secrets, access tokens, or refresh tokens.
 
 Build a generic managed template and the customizer:

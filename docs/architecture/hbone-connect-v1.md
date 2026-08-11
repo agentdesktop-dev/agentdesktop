@@ -31,7 +31,7 @@ The connector never retries a CONNECT, replays inner bytes, or opens the origina
 
 The connector implements and deterministically tests pooled plain and mTLS HTTP/2 connections, CONNECT streams, explicit destination-port validation, bidirectional byte fidelity, flow-control release, half-close signaling, generation-safe lazy reconnect for later flows after observed transport loss, Linux original-destination recovery, bounded relay concurrency, and standalone token lifecycle. Private-container coverage validates cgroup v2/nftables redirection and UDP denial through the real relay. Real Gateway smoke paths prove local token rejection/acceptance, native Claude forwarding, policy allow/deny, and dynamic captured forwarding.
 
-The following remain required before captured mode can be enabled:
+The following remain required before managed captured mode can be enabled and before capture is production-ready across platforms:
 
 - Immutable certificate-derived outer-to-inner identity propagation for managed capture.
 - Published certificate revocation consumption and fail-closed rejection before certificate expiry.

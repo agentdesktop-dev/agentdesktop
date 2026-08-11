@@ -16,6 +16,8 @@ Out of scope in this drop:
 - Process-scoped transparent capture.
 - Production signing and package distribution.
 
+This driver currently supports native loopback attribution, not process-scoped transparent capture. The machine service configures it only after binding the hidden proxy listener, and matching flows fail closed when the retained configuring process exits. See [the Windows VM guide](../../tests/vm/windows/README.md) for the reproducible build and smoke boundary.
+
 ## Files
 
 - `agwfp_abi.h`: shared IOCTL and redirect-context ABI.
@@ -89,4 +91,4 @@ The INF is included for packaging/signing workflows, but the helper script does 
 
 ## Validation status
 
-The Windows 11 QEMU environment builds this project with WDK `10.0.26100.0`, warnings-as-errors, Universal API validation, and SHA-256 test signing. `tests/vm/windows/wfp-smoke.ps1` validates the 80-byte configuration ABI, machine control device, one-shot configuration, real loopback connect redirect, original destination, and initiating account SID. A separate post-process check verifies that matching connections remain blocked after the configuring process exits.
+The Windows 11 QEMU environment builds this project with WDK `10.0.26100.0`, warnings-as-errors, Universal API validation, and SHA-256 test signing. `tests/vm/windows/wfp-smoke.ps1` validates the 80-byte configuration ABI, machine control device, one-shot configuration, real loopback connect redirect, original destination, and initiating account SID. Run it against a fresh driver with `-ServiceDeath` to configure from a child process and verify that matching connections remain blocked after that process exits.

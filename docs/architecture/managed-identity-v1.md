@@ -2,6 +2,8 @@
 
 Status: superseded as the production direction by [Managed mTLS identity contract v1](managed-mtls-v1.md). The DPoP implementation and fixtures remain experimental compatibility work; external OAuth-provider DPoP support is no longer a production prerequisite.
 
+New contributors should not use this document as the implementation roadmap. Start with [CONTRIBUTING.md](../../CONTRIBUTING.md), then use the mTLS and session-forwarding contracts for current managed work. Change this file only when maintaining the retained DPoP fixtures or recording why the superseded design differs.
+
 This contract defines managed user identity and proof that requests originate from the connector instance that obtained the token. It applies to managed remote mode only. Standalone mode does not use organizational identity.
 
 The first increment provides verified user identity plus connector-instance proof. It must not claim verified organizational device identity. Device enrollment that associates the proof key with an approved device is a managed-release requirement and a fast follow to the first DPoP request. The executable draft enrollment API is specified in [Device enrollment API v1 draft](device-enrollment-v1.md).

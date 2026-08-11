@@ -4,7 +4,7 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 
 command -v cargo-xwin >/dev/null 2>&1 || {
-  printf '%s\n' 'cargo-xwin is required; see CONTRIBUTE.md' >&2
+  printf '%s\n' 'cargo-xwin is required; see CONTRIBUTING.md' >&2
   exit 1
 }
 

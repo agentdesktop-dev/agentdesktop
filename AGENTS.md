@@ -1,5 +1,7 @@
 # Agent Desktop
 
+AI agents and human contributors should begin with [CONTRIBUTING.md](CONTRIBUTING.md). It contains the current code map, trust-boundary reading order, validation commands, and reproducible walkthroughs. This file remains the authoritative product boundary and delivery plan; [Phase Status](docs/development/phase-status.md) is authoritative for verified implementation status.
+
 ## Purpose
 
 This repository contains an open source edge connector for routing AI application traffic from laptops to [Agent Gateway](https://github.com/agentgateway/agentgateway). In managed mode, Agent Gateway runs remotely in the organization's network. In self-managed mode, Agent Gateway runs on the user's device alongside the connector.
@@ -28,18 +30,19 @@ The edge connector is intentionally thin. It integrates gateway-aware applicatio
 - Supporting transparent QUIC interception in the first release.
 - Providing policy simulation in this repository; that belongs in Agent Gateway.
 
-## Current milestone: Managed revocation enforcement
+## Current milestone: Cross-platform native forwarding and capture foundations
 
-Standalone native forwarding and Linux transparent capture, managed enrollment and renewal, certificate-authenticated native CONNECT forwarding, and the manual managed walkthrough are implemented. The current milestone closes the remaining managed certificate lifecycle gap.
+Standalone native forwarding and Linux transparent capture, managed enrollment and renewal, certificate-authenticated native CONNECT forwarding, and the Fedora walkthroughs are implemented. Linux machine/user privilege separation and exact socket attribution are validated. Windows named-pipe sessions, external user-key signing, SID-keyed forwarding pools, native WFP redirection, and flow-bound SID/original-destination context are implemented and validated as separate Windows VM boundaries.
 
 Include only:
 
-- A versioned way to publish current device and certificate revocation state from the enrollment authority.
-- Fail-closed Agent Gateway consumption that rejects revoked certificates before their natural expiry.
-- Deterministic tests and a real-Gateway walkthrough proving revocation propagation and outage behavior.
-- Documentation of freshness, maximum enforcement delay, and operational recovery.
+- Production packaging and signing for the Windows native WFP path.
+- Windows process-scoped launch gating, descendant semantics, and UDP/443 denial without PID or TCP-table attribution.
+- Reproducible combined Windows lifecycle tests for user isolation, Gateway or service loss, upgrade, rollback, and removal.
+- Apple-hardware preparation for signed macOS System Extension and Network Extension development.
+- Managed revocation publication and fail-closed Agent Gateway consumption as a parallel release blocker.
 
-Do not combine this milestone with managed transparent capture, macOS or Windows capture, a new policy control plane, or broad telemetry work. Agent Gateway remains the policy and content-inspection boundary.
+Do not add a new policy control plane, move user credentials into a machine service, inspect application content in the connector, or claim a platform journey from isolated component tests. Agent Gateway remains the policy and content-inspection boundary.
 
 ## Architecture
 
@@ -376,7 +379,6 @@ Verified progress, active blockers, and deferred user-journey findings are maint
 - Which repository owns the self-managed installer that packages Agent Gateway, the connector, trust setup, and starter policy.
 - Whether the connector is enabled by default or activated when the user first selects an application for capture.
 - How Agent Gateway versions are discovered and compatibility-checked in local mode.
-- Initial transparent-capture platform and the exact Linux capture mechanism.
 - The revocation publication format and maximum enforcement delay for already-issued certificates.
 - Agent Gateway changes required to propagate certificate-derived identity from managed CONNECT connections into immutable inner policy context.
 - MDM products and identity providers used for the first supported deployment recipes.

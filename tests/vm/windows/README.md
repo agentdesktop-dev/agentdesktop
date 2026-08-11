@@ -57,6 +57,8 @@ tests/vm/windows/vm.sh copy /path/to/driver-package 'C:/Users/agentdesktop/'
 
 ## Native forwarding smoke test
 
+This smoke covers standalone Agent Gateway supervision and opaque native forwarding. It does not start the per-user managed session agent or the WFP driver.
+
 Build both binaries for MSVC, then copy them and the deterministic Gateway fixture into the guest:
 
 ```bash
@@ -83,6 +85,8 @@ The smoke test requires a real Agent Gateway response through the connector, a h
 
 ## WFP driver smoke test
 
+This smoke covers the kernel producer and redirect-context ABI in isolation. It does not start Agent Gateway or prove a complete managed forwarding journey.
+
 Provision the supported Visual Studio Community and WDK toolchain once inside the disposable guest, then copy and build the driver:
 
 ```bash
@@ -99,7 +103,9 @@ tests/vm/windows/vm.sh ssh powershell.exe -NoProfile -NonInteractive \
   -ExecutionPolicy Bypass -File C:/agentdesktop-wfp/wfp-smoke.ps1
 ```
 
-The driver build is pinned to WDK `10.0.26100.0`, enables warnings-as-errors and Universal API validation, and SHA-256 test-signs `agwfp.sys`. The smoke test requires one-shot configuration, redirects a real public loopback connection to the hidden proxy listener, and validates the exact original destination and initiating account SID returned by Winsock.
+The driver build is pinned to WDK `10.0.26100.0`, enables warnings-as-errors and Universal API validation, and SHA-256 test-signs `agwfp.sys`. The smoke test requires one-shot configuration, redirects a real public loopback connection to the hidden proxy listener, and validates the exact original destination and initiating account SID returned by Winsock. Reload a fresh driver and add `-ServiceDeath` to verify that matching connections fail closed after the configuring process exits.
+
+A combined managed session/WFP walkthrough is still pending. Do not interpret these two independent smokes as production installation, managed certificate flow, process-scoped capture, or UDP-denial coverage.
 
 ## Clean-slate lifecycle
 

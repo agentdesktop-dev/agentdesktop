@@ -8,6 +8,8 @@ Managed enrollment uses ordinary OAuth access tokens to verify organizational us
 
 The enrollment service validates the OAuth token against configured issuer metadata and JWKS, derives the canonical user from validated `(iss, sub)`, validates a signed P-256 CSR, and records a pending enrollment. It must ignore client-controlled CSR subject and SAN values when issuing a certificate. Administrator approval assigns the device ID, and a CA adapter issues an authority-controlled certificate that binds the approved organization and device IDs to the submitted public key.
 
+In the privilege-separated desktop topology, the per-user session agent retains that private key and performs timeout-bounded signing. The machine forwarder receives the public certificate chain and signatures needed by rustls but never private-key bytes or OAuth credentials. Pools are isolated by operating-system user and certificate generation. See [Session forwarding contract v1](session-forwarding-v1.md).
+
 The enrollment service terminates TLS 1.3 directly. Initial enrollment may connect without a client certificate and relies on OAuth. Any presented client certificate must chain to the configured enrollment CA; renewal routes additionally require a verified certificate and derive device identity only from its authority-controlled SPIFFE URI. Reverse-proxy headers are never accepted as device identity.
 
 PostgreSQL stores organizations, users, enrollment state, devices, certificate serials and validity, revocation state, and audit events. CA signing keys do not belong in PostgreSQL. Production issuance must use a separate CA implementation backed by protected signing keys such as `step-ca`, Vault PKI, a cloud private CA, KMS, or an HSM.

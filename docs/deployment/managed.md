@@ -21,6 +21,8 @@ Agent Desktop owns:
 - Certificate renewal, bounded expired-certificate recovery, and managed tunnel rotation.
 - Fail-closed forwarding to the configured remote Agent Gateway.
 
+The production topology separates these duties across processes. A privileged machine forwarder owns listeners, capture, OS-derived source attribution, and user-keyed tunnel pools. One session agent per logged-in user owns OAuth, enrollment records, and private-key signing. The machine process receives public certificate chains and signing results through authenticated local IPC; it never loads OAuth tokens or private-key bytes. The direct `serve` commands below remain the simplest development topology and do not by themselves exercise that installed split.
+
 OAuth tokens are never attached to CONNECT requests or application traffic. Managed forwarding authenticates the outer HTTP/2 connection with the authority-issued mTLS certificate only.
 
 ## Prerequisites
@@ -93,7 +95,7 @@ cargo run -- identity enroll-status \
 
 Both commands load the issuer/Gateway-scoped OAuth session and refresh it when needed. Agent Desktop validates that the issued certificate matches its retained private key before replacing the protected enrollment record.
 
-The complete enrollment sequence and code map are in [CONTRIBUTE.md](../../CONTRIBUTE.md#enrollment). The authority API and administrator operations are documented in [the control-plane guide](../../control-plane/README.md).
+The complete enrollment sequence and code map are in [CONTRIBUTING.md](../../CONTRIBUTING.md#enrollment). The authority API and administrator operations are documented in [the control-plane guide](../../control-plane/README.md).
 
 ## Start managed forwarding
 
@@ -143,7 +145,7 @@ The connector checks certificate lifetime every 15 minutes and renews within six
 
 If the certificate has expired, the connector uses bounded recovery instead of normal mTLS renewal. Recovery requires OAuth plus a signature from the previously enrolled private key over a five-minute challenge and is available for seven days after expiry.
 
-Renewal or recovery failure retains the last persisted identity and retries after one minute. An expired identity cannot forward traffic. Detailed renewal and recovery sequences are in [CONTRIBUTE.md](../../CONTRIBUTE.md#certificate-renewal).
+Renewal or recovery failure retains the last persisted identity and retries after one minute. An expired identity cannot forward traffic. Detailed renewal and recovery sequences are in [CONTRIBUTING.md](../../CONTRIBUTING.md#certificate-renewal).
 
 ## Status and telemetry
 
@@ -185,3 +187,5 @@ Revocation currently prevents renewal and records the certificate revocation tim
 - Managed installer packaging: [Managed Installer Development](managed-installer.md)
 
 The walkthroughs use deterministic local identity and provider fixtures and do not contact Anthropic.
+
+Linux has the complete interactive managed walkthrough. Windows session transport, external signing, WFP source attribution, and standalone native forwarding are implemented and tested as separate boundaries, but there is not yet one reproducible managed Windows installation walkthrough. macOS runtime validation remains pending.

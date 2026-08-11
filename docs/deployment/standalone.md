@@ -148,7 +148,7 @@ For a single-user installation:
 
 ## Data and removal
 
-The connector does not create a persistent data directory. Removing its binary and service definition removes connector-owned state. Remove only configuration and logs that belong to this installation; do not delete user-owned Agent Gateway policy or audit data without explicit confirmation.
+The installer owns its activated bundle, integrity manifest, generated service unit, stable command link, and optional support report. Capture registry and rule state are ephemeral. A new starter installation may also create user-owned Agent Gateway configuration and CA material; upgrades preserve them, and removal must not delete them as though they were disposable connector state. Remove only files recorded in the installation manifest or explicitly identified by fingerprint. Do not delete user-owned Agent Gateway policy, credentials, CA material, logs, or audit data without explicit confirmation.
 
 When the user explicitly enables inspection trust, the installer adds only the generated local Agent Gateway CA under its SHA-256 fingerprint. `agentdesktop trust remove` and uninstall-related flows remove only matching product-owned trust material and refuse modified anchors or active capture.
 

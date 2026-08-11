@@ -13,7 +13,7 @@ For a zero-input API-driven verification of the same enrollment, approval, mTLS 
 scripts/managed-e2e.sh
 ```
 
-The script incrementally rebuilds the current connector, uses cached Podman image layers, exits nonzero on failure, and removes its containers and generated identity state. The manual steps below and `scripts/vm-managed-walkthrough.sh` remain available for the desktop user and administrator journeys.
+The script incrementally rebuilds the current connector, uses cached Podman image layers, exits nonzero on failure, and removes its containers and generated identity state. It is the recommended first managed walkthrough. It proves the direct development topology on the host; it does not exercise Windows WFP, the installed machine/session split, managed transparent capture, or pre-expiry revocation enforcement. The manual steps below and `scripts/vm-managed-walkthrough.sh` remain available for the desktop user and administrator journeys.
 
 Use these fixed local values:
 
@@ -115,7 +115,7 @@ curl --fail-with-body -X POST \
   "https://localhost:8090/v1/admin/devices/$DEVICE_ID/revoke" | jq
 ```
 
-The first request returns `SMOKE_OK`. Revocation prevents certificate renewal and records the certificate revocation time for CRL generation. The walkthrough does not yet publish a CRL or configure Agent Gateway to load one, so an already-issued certificate remains usable until its short lifetime expires. There is no per-request control-plane authorization callback.
+The first request returns `SMOKE_OK`. Revocation prevents certificate renewal and records the certificate revocation time. The walkthrough does not publish versioned revocation state or configure Agent Gateway to consume it, so an already-issued certificate remains usable until its short lifetime expires. There is no per-request control-plane authorization callback.
 
 Delete the pod, database, and generated runtime state when finished:
 

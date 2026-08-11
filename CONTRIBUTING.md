@@ -4,6 +4,27 @@ This guide is the technical starting point for contributors. It explains the sys
 
 Before changing architecture, read [AGENTS.md](AGENTS.md). It defines the project goals, non-goals, trust boundaries, and current milestone. [Phase Status](docs/development/phase-status.md) records what has actually been validated.
 
+## Your first hour
+
+Start with a small, deterministic path before setting up a VM or real identity provider:
+
+1. Read [README.md](README.md) for the product model, then the **Mental model** and **Ownership boundaries** below. The most important rule is that Agent Desktop routes and proves identity; Agent Gateway owns policy, inspection, and provider credentials.
+2. Install the Rust toolchain selected by [rust-toolchain.toml](rust-toolchain.toml), then run `cargo test --all-targets`. This exercises the connector, CLI, installers, session protocol, and integration fixtures without contacting an AI provider.
+3. Run `cargo run -- --help`, then trace one native flow through `src/app.rs` -> `src/service.rs` -> `src/service/forwarder.rs` -> `src/service/hbone.rs`.
+4. Run the standalone container smoke test below. It is the fastest real Agent Desktop plus Agent Gateway walkthrough and returns deterministic fixture data.
+5. Pick one ownership area from the repository map. Read its nearest test before changing it, and use [Phase Status](docs/development/phase-status.md) to avoid treating an implemented component as a completed end-to-end platform journey.
+
+Good first changes are focused tests, error handling, documentation, or one platform-owned behavior. Avoid combining identity, capture, telemetry, installer, and control-plane work in one change.
+
+### What runs where
+
+The development topology now has two connector process roles:
+
+- The **machine forwarder** owns application listeners, OS attribution, capture, and user-keyed HBONE pools. It must not load OAuth tokens or private keys.
+- A **per-user session agent** owns OAuth, enrollment state, private-key signing, and standalone Agent Gateway registration. Linux authenticates it over a Unix socket; Windows authenticates it over a named pipe using the peer SID.
+
+Linux native attribution uses an exact `NETLINK_SOCK_DIAG` tuple. Windows native attribution is produced by the WFP callout from flow-bound token metadata and consumed from Winsock redirect context. Missing, stale, or ambiguous attribution fails closed; do not add PID, executable-name, or TCP-table fallback.
+
 ## Mental model
 
 Agent Desktop is a thin edge connector. It gets selected application traffic to Agent Gateway and, in managed mode, proves who the user and device are. Agent Gateway remains the only policy and content-inspection boundary.
@@ -79,6 +100,9 @@ Relevant code:
 - HTTP/2 CONNECT pool: [src/service/hbone.rs](src/service/hbone.rs)
 - Opaque byte relay: [src/service/forwarder.rs](src/service/forwarder.rs)
 - Claude adapter: [src/apps/claude.rs](src/apps/claude.rs)
+- Per-user registration protocol: [src/session_protocol.rs](src/session_protocol.rs)
+- Linux and Windows session transports: [src/session](src/session)
+- Linux and Windows source attribution: [src/platform](src/platform)
 
 ### Standalone Linux capture
 
@@ -237,15 +261,19 @@ Relevant code:
 
 ```text
 src/
+  app.rs                     CLI dispatch and platform-visible subcommands
   main.rs                    CLI entry point
   config.rs                  Mode-specific configuration validation
   launch.rs                  Linux application scopes and launch gate
   service.rs                 Connector lifecycle orchestration
   service/                   HBONE, forwarding, capture, renewal, status
+  session/                   Authenticated Linux and Windows user sessions
+  session_protocol.rs        Bounded registration and external-signing frames
   identity/                  OAuth, enrollment, keys, credential storage
   apps/                      Application adapters, currently Claude Code
-  platform/                  OS-specific capture and trust integration
+  platform/                  OS-native source attribution, capture, and trust
   bin/                       Installer and privileged helper binaries
+windows/wfp/                 WDM/WFP native-flow producer and shared ABI
 control-plane/
   internal/api/              Enrollment HTTP API
   internal/auth/             OAuth token validation
@@ -288,6 +316,8 @@ cargo install --locked cargo-xwin --version 0.23.0
 ```
 
 `cargo-xwin` downloads the Microsoft CRT and Windows SDK and therefore requires acceptance of the [Microsoft software license](https://go.microsoft.com/fwlink/?LinkId=2086102). The check compiles every library, binary, and test target for `x86_64-pc-windows-msvc` with warnings denied. It does not execute Windows binaries; runtime validation belongs in the disposable Windows VM.
+
+The project deliberately does not support MinGW. Windows changes must compile for `x86_64-pc-windows-msvc`; driver changes additionally require the WDK environment described in [windows/wfp/README.md](windows/wfp/README.md).
 
 PostgreSQL integration tests require `TEST_DATABASE_URL`; see [control-plane/README.md](control-plane/README.md).
 
@@ -370,6 +400,22 @@ The Fedora VM harness is also the authoritative environment for systemd, cgroup 
 ### Windows development VM
 
 Use the disposable Windows 11 QEMU environment for native forwarding and WFP driver development. It requires a locally downloaded official Windows 11 Enterprise Evaluation ISO. See [tests/vm/windows/README.md](tests/vm/windows/README.md) for host setup and lifecycle commands.
+
+The two checked-in Windows smokes cover different boundaries: `native-smoke.ps1` validates standalone supervision and opaque forwarding, while `wfp-smoke.ps1` validates the kernel redirect producer, exact original destination, initiating SID, one-shot configuration, and service-death fail-closed behavior. They do not yet form a complete managed Windows user journey.
+
+## Before opening a change
+
+Run the narrowest test for the component first, then the core checks when practical:
+
+```bash
+cargo fmt --all -- --check
+cargo test --all-targets
+cargo clippy --all-targets --all-features -- -D warnings
+(cd control-plane && go test ./... && go vet ./...)
+git diff --check
+```
+
+For Windows-facing Rust, also run `./scripts/check-windows-msvc.sh`. For kernel changes, record the WDK build, Universal validation, and relevant runtime smoke result. Document any environment-dependent test you could not run.
 
 ## Where to go deeper
 

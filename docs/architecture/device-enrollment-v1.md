@@ -2,6 +2,8 @@
 
 Status: superseded DPoP-based fixture contract. Production enrollment follows [Managed mTLS identity contract v1](managed-mtls-v1.md). This document describes only the retained JavaScript authorization-server and gateway fixtures; the Rust connector no longer implements this enrollment protocol.
 
+The production code reading order and enrollment sequence are maintained in [CONTRIBUTING.md](../../CONTRIBUTING.md#enrollment). Keep this draft aligned only with `tests/fixtures/fake-authorization-server.mjs` and its tests.
+
 ## Scope
 
 This draft defines the executable mock authority used to develop managed device enrollment. It upgrades a DPoP thumbprint from connector-instance proof to an authority-approved device association. It does not make a local device name, connector-supplied ID, or unapproved key into verified device identity.

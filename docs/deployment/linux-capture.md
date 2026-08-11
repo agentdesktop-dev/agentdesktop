@@ -2,6 +2,8 @@
 
 The supported standalone Linux path uses an Agent Desktop-owned systemd user scope and nftables. The connector's unprivileged in-process relay recovers the original destination and opens one authenticated HTTP/2 CONNECT stream per redirected TCP flow.
 
+For a first end-to-end evaluation, use the embedded installer journey in [the Fedora VM guide](../../tests/vm/README.md). The lower-level commands below are for capture development and diagnosis; they assume the caller understands the privileged helper and trust boundaries described here.
+
 ## Behavior
 
 The privileged setup binary owns one `inet agentdesktop` table and one named `captured_cgroups` set. Two stable rules look up the socket's cgroup in that set at the systemd scope hierarchy depth. Each set member selects one scope and its descendant cgroups, so child and helper processes remain in the application profile without executable-name matching. Concurrent captured applications share the rules and have independent set members.

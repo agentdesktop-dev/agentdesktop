@@ -49,7 +49,7 @@ Traffic path answers **how an application reaches Agent Desktop**. It is indepen
 
 | Path | How it works | Current support |
 | --- | --- | --- |
-| **Native** | A gateway-aware application, currently Claude Code, is configured to use the connector's loopback listener. | Standalone Linux and managed remote mode. This is the preferred path. |
+| **Native** | A gateway-aware application, currently Claude Code, is configured to use the connector's loopback listener. | Validated on Linux. The Windows 11 VM validates standalone native forwarding plus the session and WFP boundaries separately; a complete managed Windows walkthrough remains pending. This is the preferred path. |
 | **Captured** | Agent Desktop launches an application in an owned process scope and redirects its TCP/443 traffic without changing application settings. | Standalone Linux only. Managed capture, macOS, and Windows are not implemented. |
 
 An application must use only one path at a time. Configuring both native routing and capture can create duplicate routing or loops.
@@ -64,16 +64,18 @@ The development build includes:
 - Standalone Linux process-scoped capture using systemd scopes, cgroup v2, and nftables.
 - Browser-authenticated managed enrollment backed by Go and PostgreSQL.
 - Authority-issued short-lived mTLS identity, automatic renewal, and bounded expired-certificate recovery.
+- Privilege-separated per-user sessions: user agents retain OAuth and private keys while a machine service owns listeners and routes by OS-derived identity.
+- Windows named-pipe session authentication and native WFP flow attribution using the initiating token SID, with no PID or TCP-table fallback.
 - Deterministic managed E2E coverage and an interactive Fedora VM user/admin walkthrough.
 - Privacy-safe structured logs and opt-in OTLP lifecycle traces.
 
-The current milestone is managed revocation enforcement. Revocation blocks renewal today, but an already-issued certificate is not rejected before expiry until revocation state is published to and consumed by Agent Gateway.
+The current milestone is the cross-platform desktop path. The Windows native vertical slice is validated in a disposable Windows 11 VM; production driver packaging/signing, process-scoped launch gating, and UDP denial remain. macOS capture still requires Apple hardware, signing, and Network Extension lifecycle validation. Managed revocation enforcement also remains a release blocker: revocation blocks renewal today, but an already-issued certificate is not rejected before expiry until revocation state is published to and consumed by Agent Gateway.
 
 ## Choose your next step
 
 - **Self-managed user:** Read [Standalone Operations](docs/deployment/standalone.md), then connect Claude Code or explore Linux capture.
 - **Enterprise user or administrator:** Read [Managed Remote Operations](docs/deployment/managed.md) or run the [Managed Walkthrough](examples/managed-walkthrough/README.md).
-- **Contributor:** Read [CONTRIBUTE.md](CONTRIBUTE.md) for architecture diagrams, lifecycle sequences, repository layout, tests, and walkthroughs.
+- **Contributor:** Read [CONTRIBUTING.md](CONTRIBUTING.md) for architecture diagrams, lifecycle sequences, repository layout, tests, and walkthroughs.
 - **Platform or security engineer:** Read the [Managed mTLS Contract](docs/architecture/managed-mtls-v1.md), [HBONE Contract](docs/architecture/hbone-connect-v1.md), and [Linux Transparent Capture](docs/deployment/linux-capture.md).
 
 ## Try it
@@ -98,11 +100,11 @@ Run the zero-input managed enrollment, approval, mTLS forwarding, and revocation
 scripts/managed-e2e.sh
 ```
 
-These paths use deterministic local fixtures and do not contact Anthropic. See [CONTRIBUTE.md](CONTRIBUTE.md#walkthroughs) for prerequisites, expected behavior, and the interactive Fedora journey.
+These paths use deterministic local fixtures and do not contact Anthropic. See [CONTRIBUTING.md](CONTRIBUTING.md#walkthroughs) for prerequisites, expected behavior, and the interactive Fedora journey.
 
 ## Documentation
 
-- [Contributor Guide](CONTRIBUTE.md): architecture, flows, code map, development setup, and walkthroughs.
+- [Contributor Guide](CONTRIBUTING.md): architecture, flows, code map, development setup, and walkthroughs.
 - [Standalone Operations](docs/deployment/standalone.md): local installation, ownership, credentials, lifecycle, logs, and removal.
 - [Managed Remote Operations](docs/deployment/managed.md): login, enrollment, certificate lifecycle, runtime, and logout.
 - [Managed Installer Development](docs/deployment/managed-installer.md): organization bootstrap and packaging.

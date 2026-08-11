@@ -2,6 +2,8 @@
 
 This harness builds a Fedora Workstation base image and runs each manual or automated journey on a disposable qcow2 overlay. Resetting the VM removes all connector, Agent Gateway, policy, credential, capture, and trust state without rebuilding the base.
 
+This is the authoritative environment for kicking the tires on the complete Linux desktop journey: installer behavior, user service, browser enrollment, administrator approval, Claude configuration, inspection trust consent, process-scoped capture, and clean removal. New contributors should run the faster container or managed E2E checks in [CONTRIBUTING.md](../../CONTRIBUTING.md#walkthroughs) before downloading the VM image.
+
 ## Host requirements
 
 - `qemu-system-x86_64` and `qemu-img`

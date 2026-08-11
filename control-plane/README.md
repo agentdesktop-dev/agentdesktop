@@ -2,7 +2,7 @@
 
 This Go module is the production backend boundary for managed Agent Desktop enrollment. It validates a standard OAuth bearer token, derives the user from validated `iss` and `sub` claims, validates a signed P-256 CSR, and transactionally persists a pending enrollment in PostgreSQL. A separately scoped administrator token can claim one pending enrollment and issue a short-lived client certificate with authority-controlled SPIFFE identity.
 
-The service supports a development file signer and a production PKCS#11 signer. The PKCS#11 path keeps the enrollment CA private key inside an HSM and uses its P-256 `crypto.Signer` for authority-controlled certificate issuance. The service renews valid active device certificates and recovers the latest certificate for seven days after expiry using OAuth plus enrolled-key proof of possession. Its service-mTLS authorization endpoint exposes current certificate and revocation state without trusting forwarded certificate headers; current Agent Gateway configuration does not yet consume it. Device private keys are generated and retained by Agent Desktop and must never be submitted to this service or stored in PostgreSQL.
+The service supports a development file signer and a production PKCS#11 signer. The PKCS#11 path keeps the enrollment CA private key inside an HSM and uses its P-256 `crypto.Signer` for authority-controlled certificate issuance. The service renews valid active device certificates and recovers the latest certificate for seven days after expiry using OAuth plus enrolled-key proof of possession. It persists device and certificate revocation state, but no versioned publication endpoint or Agent Gateway consumer exists yet. Device private keys are generated and retained by Agent Desktop and must never be submitted to this service or stored in PostgreSQL.
 
 ## Local development
 
@@ -119,7 +119,7 @@ POST /v1/admin/devices/{device_id}/revoke
 Authorization: Bearer <administrator-access-token>
 ```
 
-Revocation atomically marks the active device and all its unrevoked certificates with the same revocation time and records a `device.revoked` audit event. Unknown, foreign-organization, and already-revoked device IDs return the same `409 device_not_active` response. Revocation immediately blocks renewal. Existing certificates remain valid until expiry unless the deployment publishes this state as a CRL and configures Agent Gateway to consume it; CRL publication is not implemented yet.
+Revocation atomically marks the active device and all its unrevoked certificates with the same revocation time and records a `device.revoked` audit event. Unknown, foreign-organization, and already-revoked device IDs return the same `409 device_not_active` response. Revocation immediately blocks renewal. Existing certificates remain valid until expiry because authenticated versioned publication and fail-closed Agent Gateway consumption are not implemented yet. The publication format, freshness contract, and recovery behavior remain explicit design work; do not infer a CRL endpoint from the persisted schema.
 
 Agent Gateway independently validates the issued client certificate and derives its bound organizational user and device identity. Managed forwarding carries no OAuth JWT and does not call the enrollment service per request.
 

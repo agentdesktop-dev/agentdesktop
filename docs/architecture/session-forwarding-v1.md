@@ -2,6 +2,8 @@
 
 Status: Linux implementation complete. Windows named-pipe SID authentication, external signing, SID-keyed registration, and native WFP flow attribution are implemented. macOS transport remains pending.
 
+For an implementation-oriented reading order, start with [CONTRIBUTING.md](../../CONTRIBUTING.md#what-runs-where). Reproduce Windows behavior with the independent native and WFP procedures in [the Windows VM guide](../../tests/vm/windows/README.md); they are not yet a combined managed installation walkthrough. The kernel producer and ABI are documented in [the WFP driver guide](../../windows/wfp/README.md).
+
 Agent Desktop uses one machine-owned forwarder and one control agent in each active user session. The machine forwarder owns native listeners, transparent capture, original-destination recovery, connection attribution, HBONE pools, and fail-closed behavior. It never persists OAuth tokens or private-key bytes. A user agent owns OAuth login and refresh, enrollment and certificate renewal, and access to the user's credential store.
 
 Native applications use one machine loopback listener. The forwarder derives the connecting operating-system user without parsing application bytes. Linux uses an exact client/server tuple query through `NETLINK_SOCK_DIAG`; Windows uses WFP connection metadata; macOS uses Network Extension flow metadata. Missing, stale, or ambiguous attribution closes the connection. Transparent capture uses the same platform-derived identity and never accepts a user identifier from application traffic.
