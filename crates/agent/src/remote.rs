@@ -250,7 +250,7 @@ fn apply_desired_config(
         );
 
         let yaml = std::str::from_utf8(&desired.yaml).context("configuration is not UTF-8")?;
-        let config = config::parse(yaml)?;
+        let config = config::parse_desired(yaml)?;
         debug!(revision = desired.revision, "parsed desired configuration");
         reconciler.apply(&config)?;
         std::fs::create_dir_all(state_dir)

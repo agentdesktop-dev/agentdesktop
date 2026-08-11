@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use agentdesktop_client as client;
 use agentdesktop_core::{
     DEFAULT_SOCKET_PATH,
-    config::Config,
+    config::DaemonConfig,
     model::{Discovery, Health, InferenceGatewayCredential},
 };
 use clap::{Parser, Subcommand};
@@ -11,9 +11,11 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(about = "Client for the AgentDesktop daemon")]
 struct Args {
+    /// Unix socket exposed by the local AgentDesktop daemon.
     #[arg(long, default_value = DEFAULT_SOCKET_PATH, global = true)]
     socket: PathBuf,
 
+    /// Operation to perform against the local daemon.
     #[command(subcommand)]
     command: Command,
 }
@@ -24,7 +26,7 @@ enum Command {
     Status,
     /// Discover locally installed agents.
     Discover,
-    /// Print the daemon's active configuration.
+    /// Print the daemon's local startup configuration.
     Config,
     /// Print a short-lived credential for an inference gateway.
     Credential {
@@ -57,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Config => {
-            let config: Config = client::get(&args.socket, "/v1/config").await?;
+            let config: DaemonConfig = client::get(&args.socket, "/v1/config").await?;
             print!(
                 "{}",
                 agentdesktop_core::serdes::yamlviajson::to_string(&config)?

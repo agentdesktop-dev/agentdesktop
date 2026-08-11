@@ -16,15 +16,21 @@ use tokio::net::UnixListener;
 #[derive(Parser)]
 #[command(about = "AgentDesktop privileged daemon")]
 struct Args {
+    /// Path to the local YAML configuration file.
     #[arg(long, default_value = DEFAULT_CONFIG_PATH)]
     config: PathBuf,
 
+    /// Unix socket used by local AgentDesktop clients.
     #[arg(long, default_value = DEFAULT_SOCKET_PATH)]
     socket: PathBuf,
 
+    /// Directory used for the device identity and other persistent daemon state.
     #[arg(long, default_value = DEFAULT_STATE_DIR)]
     state_dir: PathBuf,
 
+    /// Shared bootstrap token used to enroll a device that has no saved identity.
+    ///
+    /// The `AGENTDESKTOP_ENROLLMENT_TOKEN` environment variable is used when this option is absent.
     #[arg(long)]
     enrollment_token: Option<String>,
 
@@ -32,6 +38,7 @@ struct Args {
     #[arg(long)]
     oidc_callback_listen: Option<SocketAddr>,
 
+    /// Directory containing Claude Code managed-settings drop-in files.
     #[arg(
         long,
         default_value_os_t = reconcile::default_claude_code_managed_settings_dir()
@@ -43,9 +50,16 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let _log_flush = telemetry::setup_logging("info", false);
-    let config = config::load(&args.config)?;
+    let config = config::load_daemon(&args.config)?;
     let controller_config = config.controller.clone();
     let enrollment = EnrollmentState::new(config.controller.is_some());
+    let reconciler = reconcile::Reconciler::new(
+        args.claude_code_managed_settings_dir.clone(),
+        credential_helper_command(&args.socket)?,
+    );
+    reconciler
+        .apply(&config.desired_config())
+        .context("apply local desired configuration")?;
     let discovery = discovery::discover().await;
     for agent in &discovery.agents {
         tracing::info!(
@@ -62,10 +76,6 @@ async fn main() -> anyhow::Result<()> {
         let remote_discovery = discovery.clone();
         let state_dir = args.state_dir.clone();
         let oidc_callback_listen = args.oidc_callback_listen;
-        let reconciler = reconcile::Reconciler::new(
-            args.claude_code_managed_settings_dir.clone(),
-            credential_helper_command(&args.socket)?,
-        );
         let remote_enrollment = enrollment.clone();
         tokio::spawn(async move {
             if let Err(error) = remote::run(

@@ -2,6 +2,10 @@ use std::{env, io};
 
 use tracing_subscriber::EnvFilter;
 
+/// Initializes process logging.
+///
+/// `RUST_LOG` overrides `default_level`. Setting `LOG_FORMAT=json` selects JSON
+/// output; otherwise the `json` argument supplies the default format.
 pub fn setup_logging(
     default_level: &str,
     json: bool,

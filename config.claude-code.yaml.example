@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=./schema/desired-config.json
 inferenceGateways:
   corporate:
     url: https://gateway.example.com

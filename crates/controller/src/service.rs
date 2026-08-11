@@ -114,7 +114,7 @@ impl FleetAgent for FleetAgentService {
             .ok_or_else(|| Status::failed_precondition("no desired configuration is active"))?;
         let yaml = std::str::from_utf8(&desired.yaml)
             .map_err(|_| Status::internal("desired configuration is not UTF-8"))?;
-        let config = agentdesktop_core::config::parse(yaml).map_err(internal)?;
+        let config = agentdesktop_core::config::parse_desired(yaml).map_err(internal)?;
         let gateway = config
             .inference_gateways
             .get(gateway_name)
@@ -312,7 +312,7 @@ pub fn load_desired_config(
     let yaml = std::fs::read(path)
         .with_context(|| format!("read desired configuration from {}", path.display()))?;
     let text = std::str::from_utf8(&yaml).context("desired configuration is not UTF-8")?;
-    agentdesktop_core::config::parse(text).context("validate desired configuration")?;
+    agentdesktop_core::config::parse_desired(text).context("validate desired configuration")?;
     let sha256 = Sha256::digest(&yaml).to_vec();
     Ok(Some(DesiredConfig {
         revision,

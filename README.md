@@ -36,6 +36,28 @@ cargo run --bin agentdesktop -- --socket /tmp/agentdesktop.sock config
 
 The production-oriented defaults are `/etc/agentdesktop/config.yaml` and `/run/agentdesktop/agentdesktop.sock`.
 
+## Configuration schema
+
+The checked-in [daemon JSON Schema](schema/daemon-config.json) describes local
+daemon startup configuration. It is a superset of the controller-managed
+[desired configuration schema](schema/desired-config.json). Generated field
+references for the [daemon](schema/daemon-config.md) and
+[desired configuration](schema/desired-config.md) contain the same Rust doc
+comments in compact tables.
+
+The daemon applies the desired-state fields in its local configuration at
+startup. If it connects to a controller, the controller-delivered desired
+configuration subsequently replaces that local baseline.
+
+Regenerate both files after changing configuration types or their documentation:
+
+```console
+cargo xtask schema
+```
+
+The Markdown generator requires `jq` and `sed`. `make gen` regenerates the
+schema and then formats the Rust workspace.
+
 ## Fleet controller
 
 The optional `agentdesktop-controller` binary exposes the `FleetAgent` gRPC API. The daemon enrolls once, stores its generated identity outside the human-authored YAML, and then maintains an outbound stream for inventory, heartbeats, and desired configuration.
