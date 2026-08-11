@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use agentplane_core::config::ControllerConfig;
 use agentplane_proto::fleet::{BeginEnrollmentRequest, CompleteEnrollmentRequest};
@@ -38,6 +38,7 @@ struct CallbackQuery {
 pub async fn enroll(
     controller: &ControllerConfig,
     enrollment: &EnrollmentState,
+    callback_listen: Option<SocketAddr>,
 ) -> anyhow::Result<Identity> {
     let verifier = random_secret();
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
@@ -52,7 +53,7 @@ pub async fn enroll(
         .into_inner();
 
     let redirect_uri = Url::parse(&begin.redirect_uri).context("parse OIDC redirect URI")?;
-    let listener = bind_callback(&redirect_uri).await?;
+    let listener = bind_callback(&redirect_uri, callback_listen).await?;
     let (result_sender, result_receiver) = oneshot::channel();
     let state = CallbackState {
         expected_state: begin.state,
@@ -108,7 +109,10 @@ pub async fn enroll(
     })
 }
 
-async fn bind_callback(redirect_uri: &Url) -> anyhow::Result<tokio::net::TcpListener> {
+async fn bind_callback(
+    redirect_uri: &Url,
+    callback_listen: Option<SocketAddr>,
+) -> anyhow::Result<tokio::net::TcpListener> {
     if redirect_uri.scheme() != "http" {
         bail!("OIDC native callback must use HTTP on loopback");
     }
@@ -121,9 +125,29 @@ async fn bind_callback(redirect_uri: &Url) -> anyhow::Result<tokio::net::TcpList
     let port = redirect_uri
         .port_or_known_default()
         .context("OIDC callback has no port")?;
-    tokio::net::TcpListener::bind((host, port))
-        .await
-        .with_context(|| format!("bind OIDC callback at {host}:{port}"))
+    let advertised = format!("{host}:{port}");
+    match callback_listen {
+        Some(listen) => {
+            if !listen.ip().is_loopback() {
+                tracing::warn!(
+                    %listen,
+                    %advertised,
+                    "OIDC callback server is listening beyond loopback; restrict access at the container or host boundary"
+                );
+            } else {
+                tracing::info!(%listen, %advertised, "binding OIDC callback server");
+            }
+            tokio::net::TcpListener::bind(listen)
+                .await
+                .with_context(|| format!("bind OIDC callback at {listen}"))
+        }
+        None => {
+            tracing::info!(listen = %advertised, %advertised, "binding OIDC callback server");
+            tokio::net::TcpListener::bind((host, port))
+                .await
+                .with_context(|| format!("bind OIDC callback at {advertised}"))
+        }
+    }
 }
 
 async fn callback(

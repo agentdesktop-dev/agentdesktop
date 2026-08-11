@@ -1,4 +1,5 @@
 use std::{
+    net::SocketAddr,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -35,6 +36,7 @@ pub async fn run(
     discovered: AgentDiscovery,
     state_dir: PathBuf,
     enrollment_token: Option<String>,
+    oidc_callback_listen: Option<SocketAddr>,
     reconciler: Reconciler,
     enrollment: EnrollmentState,
 ) -> anyhow::Result<()> {
@@ -50,7 +52,7 @@ pub async fn run(
                     enrollment.set("enrolling").await;
                     enroll_with_token(&controller, token).await?
                 }
-                None => oidc::enroll(&controller, &enrollment).await?,
+                None => oidc::enroll(&controller, &enrollment, oidc_callback_listen).await?,
             };
             identity::save(&identity_path, &identity)?;
             enrollment.set("enrolled").await;

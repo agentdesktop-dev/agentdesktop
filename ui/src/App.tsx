@@ -11,8 +11,9 @@ import {
   Search,
   Settings,
   SlidersHorizontal,
+  Trash2,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import agentplaneIcon from "../app-icon.svg";
 import claudeCodeIcon from "./assets/tool-icons/claude-code.svg";
 import codexIcon from "./assets/tool-icons/codex.svg";
@@ -405,6 +406,28 @@ function DevicePage({ id }: { id: string }) {
   const query = useApi<DeviceDetail>(
     `/api/v1/devices/${encodeURIComponent(id)}`,
   );
+  const [showDelete, setShowDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  async function deleteDevice() {
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      const response = await fetch(
+        `/api/v1/devices/${encodeURIComponent(id)}`,
+        {
+          method: "DELETE",
+        },
+      );
+      if (!response.ok) throw new Error(await response.text());
+      navigate("/devices");
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : "Delete failed");
+      setDeleting(false);
+    }
+  }
+
   if (query.loading) return <PageSkeleton />;
   if (query.error || !query.data) return <ErrorState message={query.error} />;
   const device = query.data;
@@ -524,7 +547,96 @@ function DevicePage({ id }: { id: string }) {
           ]}
         />
       </section>
+      <section className="danger-zone">
+        <div>
+          <h3>Delete device</h3>
+          <p>
+            Remove this device, its credential, inventory, and configuration
+            status.
+          </p>
+        </div>
+        <button
+          type="button"
+          className="destructive-button"
+          onClick={() => setShowDelete(true)}
+        >
+          <Trash2 size={14} /> Delete device
+        </button>
+      </section>
+      {showDelete && (
+        <DeleteDeviceDialog
+          hostname={device.hostname}
+          deleting={deleting}
+          error={deleteError}
+          onCancel={() => {
+            if (!deleting) {
+              setShowDelete(false);
+              setDeleteError(null);
+            }
+          }}
+          onConfirm={deleteDevice}
+        />
+      )}
     </div>
+  );
+}
+
+function DeleteDeviceDialog({
+  hostname,
+  deleting,
+  error,
+  onCancel,
+  onConfirm,
+}: {
+  hostname: string;
+  deleting: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    dialog.current?.showModal();
+    return () => dialog.current?.close();
+  }, []);
+  return (
+    <dialog
+      ref={dialog}
+      className="delete-dialog"
+      aria-labelledby="delete-device-title"
+      onCancel={(event) => {
+        event.preventDefault();
+        onCancel();
+      }}
+    >
+      <div className="dialog-body">
+        <h2 id="delete-device-title">Delete {hostname || "this device"}?</h2>
+        <p>
+          This removes the device credential and all controller inventory. A
+          running agent will be rejected the next time it connects and must be
+          re-enrolled.
+        </p>
+        {error && <div className="dialog-error">{error}</div>}
+      </div>
+      <div className="dialog-actions">
+        <button
+          type="button"
+          className="button secondary"
+          disabled={deleting}
+          onClick={onCancel}
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="destructive-button"
+          disabled={deleting}
+          onClick={onConfirm}
+        >
+          {deleting ? "Deleting…" : "Delete device"}
+        </button>
+      </div>
+    </dialog>
   );
 }
 
