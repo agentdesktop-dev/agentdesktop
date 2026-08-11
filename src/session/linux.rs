@@ -1,5 +1,9 @@
+use std::collections::HashMap;
+use std::fs;
 use std::net::SocketAddr;
 use std::os::fd::AsFd;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -13,19 +17,289 @@ use netlink_packet_sock_diag::{
     inet::{ExtensionFlags, InetRequest, SocketId, StateFlags},
 };
 use netlink_sys::{Socket, SocketAddr as NetlinkSocketAddr, protocols::NETLINK_SOCK_DIAG};
+use p256::ecdsa::signature::Signer as _;
+use p256::ecdsa::{Signature, SigningKey as P256SigningKey};
+use p256::pkcs8::DecodePrivateKey;
+use rustls::pki_types::CertificateDer;
 use rustls::sign::{Signer, SigningKey};
 use rustls::{Error as TlsError, SignatureAlgorithm, SignatureScheme as TlsSignatureScheme};
 use tokio::net::{TcpStream, UnixListener, UnixStream};
+use tokio::sync::{RwLock, watch};
+use tokio::task::JoinSet;
 
+use crate::service::hbone::{ExternalClientIdentity, HboneClient, RotatingClientIdentity};
 use crate::session_protocol::{
     AgentResponse, ForwarderRequest, Registration, SignatureScheme, read_frame,
-    read_frame_blocking, write_frame_blocking,
+    read_frame_blocking, write_frame, write_frame_blocking,
 };
 
 pub struct SessionConnection {
     uid: u32,
     registration: Registration,
     stream: UnixStream,
+}
+
+#[derive(Clone)]
+pub struct SessionRegistry {
+    endpoint: SocketAddr,
+    server_name: String,
+    connect_timeout: Duration,
+    clients: Arc<RwLock<HashMap<u32, RegisteredClient>>>,
+}
+
+#[derive(Clone)]
+struct RegisteredClient {
+    certificate_generation: u64,
+    client: HboneClient,
+}
+
+impl SessionRegistry {
+    pub fn new(endpoint: SocketAddr, server_name: String, connect_timeout: Duration) -> Self {
+        Self {
+            endpoint,
+            server_name,
+            connect_timeout,
+            clients: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    pub async fn register(&self, connection: SessionConnection) -> Result<()> {
+        let uid = connection.uid();
+        let generation = connection.registration().certificate_generation;
+        let certificates = connection
+            .registration()
+            .certificate_chain_der_base64
+            .iter()
+            .map(|certificate| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(certificate)
+                    .map(CertificateDer::from)
+                    .context("decode registered certificate")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let (signing_key, monitor) = connection.into_signing_key(self.connect_timeout)?;
+        let identity = RotatingClientIdentity::new_external(
+            ExternalClientIdentity {
+                certificates,
+                signing_key,
+            },
+            generation,
+        );
+        let client = HboneClient::connect_mtls(
+            self.endpoint,
+            self.server_name.clone(),
+            identity,
+            self.connect_timeout,
+        )
+        .await?;
+        let mut clients = self.clients.write().await;
+        if clients
+            .get(&uid)
+            .is_some_and(|current| current.certificate_generation >= generation)
+        {
+            anyhow::bail!("session certificate generation is not newer for uid {uid}");
+        }
+        clients.insert(
+            uid,
+            RegisteredClient {
+                certificate_generation: generation,
+                client,
+            },
+        );
+        let registry = self.clone();
+        tokio::task::spawn_blocking(move || {
+            monitor_disconnect(monitor);
+            tokio::runtime::Handle::current().spawn(async move {
+                registry.remove_generation(uid, generation).await;
+            });
+        });
+        Ok(())
+    }
+
+    pub async fn client_for_uid(&self, uid: u32) -> Result<HboneClient> {
+        self.clients
+            .read()
+            .await
+            .get(&uid)
+            .map(|registered| registered.client.clone())
+            .with_context(|| format!("no registered user session for uid {uid}"))
+    }
+
+    pub async fn client_for_native(&self, stream: &TcpStream) -> Result<HboneClient> {
+        self.client_for_uid(native_peer_uid(stream).await?).await
+    }
+
+    pub async fn remove(&self, uid: u32) {
+        self.clients.write().await.remove(&uid);
+    }
+
+    async fn remove_generation(&self, uid: u32, generation: u64) {
+        let mut clients = self.clients.write().await;
+        if clients
+            .get(&uid)
+            .is_some_and(|registered| registered.certificate_generation == generation)
+        {
+            clients.remove(&uid);
+        }
+    }
+}
+
+pub struct SessionSocket {
+    path: PathBuf,
+    listener: UnixListener,
+}
+
+impl SessionSocket {
+    pub fn bind(path: &Path) -> Result<Self> {
+        if !path.is_absolute() {
+            anyhow::bail!("session socket path must be absolute");
+        }
+        let parent = path.parent().context("session socket has no parent")?;
+        fs::create_dir_all(parent).context("create session socket directory")?;
+        if let Ok(metadata) = fs::symlink_metadata(path) {
+            if !metadata.file_type().is_socket()
+                || metadata.uid() != rustix::process::geteuid().as_raw()
+            {
+                anyhow::bail!("refusing to replace unowned session socket path");
+            }
+            fs::remove_file(path).context("remove stale session socket")?;
+        }
+        let listener = UnixListener::bind(path).context("bind user session socket")?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o666))
+            .context("set user session socket permissions")?;
+        Ok(Self {
+            path: path.to_owned(),
+            listener,
+        })
+    }
+
+    pub fn listener(&self) -> &UnixListener {
+        &self.listener
+    }
+}
+
+impl Drop for SessionSocket {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+pub async fn serve_registrations(
+    socket: Arc<SessionSocket>,
+    registry: SessionRegistry,
+    registration_timeout: Duration,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<()> {
+    let mut registrations = JoinSet::new();
+    loop {
+        tokio::select! {
+            _ = shutdown.wait_for(|stopping| *stopping) => break,
+            Some(result) = registrations.join_next(), if !registrations.is_empty() => {
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => tracing::warn!(event = "session_registration_failed", reason = %error),
+                    Err(error) => tracing::warn!(event = "session_registration_task_failed", reason = %error),
+                }
+            }
+            accepted = accept(socket.listener()) => {
+                let connection = accepted?;
+                let registry = registry.clone();
+                registrations.spawn(async move {
+                    tokio::time::timeout(registration_timeout, registry.register(connection))
+                        .await
+                        .context("user session registration timed out")??;
+                    Ok::<_, anyhow::Error>(())
+                });
+            }
+        }
+    }
+    registrations.abort_all();
+    Ok(())
+}
+
+pub async fn run_user_agent(
+    path: &Path,
+    identity: RotatingClientIdentity,
+    reconnect_delay: Duration,
+) -> Result<()> {
+    loop {
+        let result = async {
+            let (generation, client_identity) = identity.pem_snapshot()?;
+            let mut stream = UnixStream::connect(path)
+                .await
+                .context("connect to machine forwarder session socket")?;
+            let certificates = rustls_pemfile::certs(&mut std::io::Cursor::new(
+                &client_identity.certificate_chain_pem,
+            ))
+            .map(|certificate| {
+                certificate
+                    .map(|certificate| {
+                        base64::engine::general_purpose::STANDARD.encode(certificate.as_ref())
+                    })
+                    .context("parse user certificate chain")
+            })
+            .collect::<Result<Vec<_>>>()?;
+            write_frame(
+                &mut stream,
+                &Registration {
+                    version: crate::session_protocol::VERSION,
+                    certificate_generation: generation,
+                    certificate_chain_der_base64: certificates,
+                },
+            )
+            .await
+            .context("register user certificate")?;
+            let signing_key = P256SigningKey::from_pkcs8_pem(&client_identity.private_key_pem)
+                .context("parse user signing key")?;
+            serve_signing_requests(&mut stream, &identity, generation, &signing_key).await
+        }
+        .await;
+        if let Err(error) = result {
+            tracing::warn!(event = "session_agent_disconnected", reason = %error);
+        }
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => return Ok(()),
+            _ = tokio::time::sleep(reconnect_delay) => {}
+        }
+    }
+}
+
+async fn serve_signing_requests(
+    stream: &mut UnixStream,
+    identity: &RotatingClientIdentity,
+    generation: u64,
+    signing_key: &P256SigningKey,
+) -> Result<()> {
+    let mut generation_check = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        tokio::select! {
+            _ = generation_check.tick() => {
+                if identity.pem_snapshot()?.0 != generation {
+                    return Ok(());
+                }
+            }
+            request = read_frame::<ForwarderRequest, _>(&mut *stream) => {
+                let request = request.context("read signing request")?;
+                let ForwarderRequest::Sign { request_id, scheme, message_base64 } = request;
+                let response = match scheme {
+                    SignatureScheme::EcdsaP256Sha256 => {
+                        let message = base64::engine::general_purpose::STANDARD
+                            .decode(message_base64)
+                            .context("decode signing input")?;
+                        let signature: Signature = signing_key.sign(&message);
+                        AgentResponse::Signature {
+                            request_id,
+                            signature_base64: base64::engine::general_purpose::STANDARD
+                                .encode(signature.to_der().as_bytes()),
+                        }
+                    }
+                };
+                write_frame(&mut *stream, &response)
+                    .await
+                    .context("write signing response")?;
+            }
+        }
+    }
 }
 
 impl SessionConnection {
@@ -41,7 +315,10 @@ impl SessionConnection {
         self.stream
     }
 
-    pub fn into_signing_key(self, timeout: Duration) -> Result<Arc<dyn SigningKey>> {
+    pub fn into_signing_key(
+        self,
+        timeout: Duration,
+    ) -> Result<(Arc<dyn SigningKey>, std::os::unix::net::UnixStream)> {
         let stream = self
             .stream
             .into_std()
@@ -55,10 +332,26 @@ impl SessionConnection {
         stream
             .set_write_timeout(Some(timeout))
             .context("configure user session write timeout")?;
-        Ok(Arc::new(SessionSigningKey {
-            stream: Arc::new(Mutex::new(stream)),
-            next_request_id: Arc::new(AtomicU64::new(1)),
-        }))
+        let monitor = stream
+            .try_clone()
+            .context("clone user session socket for lifecycle monitoring")?;
+        Ok((
+            Arc::new(SessionSigningKey {
+                stream: Arc::new(Mutex::new(stream)),
+                next_request_id: Arc::new(AtomicU64::new(1)),
+            }),
+            monitor,
+        ))
+    }
+}
+
+fn monitor_disconnect(stream: std::os::unix::net::UnixStream) {
+    loop {
+        let mut byte = [0_u8; 1];
+        match rustix::net::recv(&stream, &mut byte, rustix::net::RecvFlags::PEEK) {
+            Ok((_, 0)) | Err(_) => return,
+            Ok(_) => std::thread::sleep(Duration::from_millis(10)),
+        }
     }
 }
 
@@ -243,6 +536,7 @@ mod tests {
     use base64::Engine;
     use rcgen::{CertifiedKey, generate_simple_self_signed};
     use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
 
     #[tokio::test]
     async fn derives_uid_from_peer_credentials() {
@@ -317,7 +611,7 @@ mod tests {
             .unwrap();
         });
         let connection = accept(&listener).await.unwrap();
-        let signing_key = connection.into_signing_key(Duration::from_secs(1)).unwrap();
+        let (signing_key, _monitor) = connection.into_signing_key(Duration::from_secs(1)).unwrap();
 
         let signature = tokio::task::spawn_blocking(move || {
             signing_key
@@ -331,6 +625,50 @@ mod tests {
 
         agent.await.unwrap();
         assert_eq!(signature, b"DER signature");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn registry_evicts_disconnected_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let CertifiedKey { cert, .. } =
+            generate_simple_self_signed(["agentdesktop.test".to_owned()]).unwrap();
+        let certificate = base64::engine::general_purpose::STANDARD.encode(cert.der());
+        let (release, released) = oneshot::channel();
+        let agent = tokio::spawn(async move {
+            let mut stream = UnixStream::connect(path).await.unwrap();
+            write_frame(
+                &mut stream,
+                &Registration {
+                    version: VERSION,
+                    certificate_generation: 1,
+                    certificate_chain_der_base64: vec![certificate],
+                },
+            )
+            .await
+            .unwrap();
+            let _ = released.await;
+        });
+        let connection = accept(&listener).await.unwrap();
+        let uid = connection.uid();
+        let registry = SessionRegistry::new(
+            "127.0.0.1:9".parse().unwrap(),
+            "gateway.test".to_owned(),
+            Duration::from_secs(1),
+        );
+        registry.register(connection).await.unwrap();
+        assert!(registry.client_for_uid(uid).await.is_ok());
+
+        release.send(()).unwrap();
+        agent.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while registry.client_for_uid(uid).await.is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     async fn assert_native_loopback_peer_uid(address: &str) {

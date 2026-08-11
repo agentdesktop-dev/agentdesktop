@@ -13,7 +13,11 @@ use http::HeaderMap;
 use http::uri::Authority;
 use http::{Method, Request, StatusCode, Uri};
 use rustls::RootCertStore;
+#[cfg(target_os = "linux")]
+use rustls::pki_types::CertificateDer;
 use rustls::pki_types::ServerName;
+#[cfg(target_os = "linux")]
+use rustls::sign::{CertifiedKey, SigningKey, SingleCertAndKey};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Notify};
@@ -32,7 +36,21 @@ pub struct RotatingClientIdentity {
 
 struct IdentityState {
     generation: u64,
-    identity: ClientIdentity,
+    identity: ClientIdentitySource,
+}
+
+#[derive(Clone)]
+enum ClientIdentitySource {
+    Pem(ClientIdentity),
+    #[cfg(target_os = "linux")]
+    External(ExternalClientIdentity),
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+pub(crate) struct ExternalClientIdentity {
+    pub certificates: Vec<CertificateDer<'static>>,
+    pub signing_key: Arc<dyn SigningKey>,
 }
 
 impl RotatingClientIdentity {
@@ -40,7 +58,17 @@ impl RotatingClientIdentity {
         Self {
             state: Arc::new(StdMutex::new(IdentityState {
                 generation: 1,
-                identity,
+                identity: ClientIdentitySource::Pem(identity),
+            })),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn new_external(identity: ExternalClientIdentity, generation: u64) -> Self {
+        Self {
+            state: Arc::new(StdMutex::new(IdentityState {
+                generation,
+                identity: ClientIdentitySource::External(identity),
             })),
         }
     }
@@ -50,17 +78,29 @@ impl RotatingClientIdentity {
             .state
             .lock()
             .map_err(|_| anyhow::anyhow!("managed client identity lock poisoned"))?;
-        state.identity = identity;
+        state.identity = ClientIdentitySource::Pem(identity);
         state.generation = state.generation.wrapping_add(1);
         Ok(())
     }
 
-    fn snapshot(&self) -> Result<(u64, ClientIdentity)> {
+    fn snapshot(&self) -> Result<(u64, ClientIdentitySource)> {
         let state = self
             .state
             .lock()
             .map_err(|_| anyhow::anyhow!("managed client identity lock poisoned"))?;
         Ok((state.generation, state.identity.clone()))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn pem_snapshot(&self) -> Result<(u64, ClientIdentity)> {
+        let (generation, identity) = self.snapshot()?;
+        match identity {
+            ClientIdentitySource::Pem(identity) => Ok((generation, identity)),
+            #[cfg(target_os = "linux")]
+            ClientIdentitySource::External(_) => {
+                bail!("external client identity cannot be exported")
+            }
+        }
     }
 }
 
@@ -241,12 +281,8 @@ impl HboneClient {
 async fn connect_tls(
     endpoint: SocketAddr,
     server_name: &str,
-    identity: ClientIdentity,
+    identity: ClientIdentitySource,
 ) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
-    let certificates = rustls_pemfile::certs(&mut Cursor::new(identity.certificate_chain_pem))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let private_key = rustls_pemfile::private_key(&mut Cursor::new(identity.private_key_pem))?
-        .context("managed client identity contains no private key")?;
     let native = rustls_native_certs::load_native_certs();
     if !native.errors.is_empty() {
         tracing::warn!(
@@ -258,9 +294,23 @@ async fn connect_tls(
     for certificate in native.certs {
         roots.add(certificate)?;
     }
-    let mut config = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_client_auth_cert(certificates, private_key)?;
+    let builder = rustls::ClientConfig::builder().with_root_certificates(roots);
+    let mut config = match identity {
+        ClientIdentitySource::Pem(identity) => {
+            let certificates =
+                rustls_pemfile::certs(&mut Cursor::new(identity.certificate_chain_pem))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+            let private_key =
+                rustls_pemfile::private_key(&mut Cursor::new(identity.private_key_pem))?
+                    .context("managed client identity contains no private key")?;
+            builder.with_client_auth_cert(certificates, private_key)?
+        }
+        #[cfg(target_os = "linux")]
+        ClientIdentitySource::External(identity) => {
+            let certified_key = CertifiedKey::new(identity.certificates, identity.signing_key);
+            builder.with_client_cert_resolver(Arc::new(SingleCertAndKey::from(certified_key)))
+        }
+    };
     config.alpn_protocols = vec![b"h2".to_vec()];
     let name = ServerName::try_from(server_name.to_owned())?;
     let stream = TcpStream::connect(endpoint).await?;

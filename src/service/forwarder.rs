@@ -34,6 +34,53 @@ pub async fn serve_native(
 }
 
 #[cfg(target_os = "linux")]
+pub async fn serve_native_sessions(
+    listener: TcpListener,
+    sessions: crate::session::linux::SessionRegistry,
+    destination: Authority,
+    max_tunnels: usize,
+    shutdown_timeout: Duration,
+    shutdown: impl Future<Output = ()>,
+) -> Result<()> {
+    if max_tunnels == 0 {
+        bail!("max tunnels must be greater than zero");
+    }
+    let permits = Arc::new(Semaphore::new(max_tunnels));
+    let mut tunnels = JoinSet::new();
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            Some(result) = tunnels.join_next(), if !tunnels.is_empty() => {
+                if let Err(error) = result {
+                    tracing::warn!(event = "tunnel_task_failed", reason = %error);
+                }
+            }
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                let Ok(permit) = permits.clone().try_acquire_owned() else {
+                    tracing::warn!(event = "tunnel_rejected", reason = "overloaded");
+                    continue;
+                };
+                let sessions = sessions.clone();
+                let destination = destination.clone();
+                tunnels.spawn(async move {
+                    let result = match sessions.client_for_native(&stream).await {
+                        Ok(hbone) => forward(stream, &hbone, Ok(destination)).await,
+                        Err(error) => reject(stream, error).await,
+                    };
+                    drop(permit);
+                    if let Err(error) = result {
+                        tracing::warn!(event = "tunnel_failed", reason = %error);
+                    }
+                });
+            }
+        }
+    }
+    drain_tunnels(&mut tunnels, shutdown_timeout).await
+}
+
+#[cfg(target_os = "linux")]
 pub async fn serve_capture(
     listener: TcpListener,
     hbone: HboneClient,
@@ -100,6 +147,10 @@ where
             }
         }
     }
+    drain_tunnels(&mut tunnels, shutdown_timeout).await
+}
+
+async fn drain_tunnels(tunnels: &mut JoinSet<()>, shutdown_timeout: Duration) -> Result<()> {
     if tokio::time::timeout(shutdown_timeout, async {
         while tunnels.join_next().await.is_some() {}
     })
@@ -110,6 +161,13 @@ where
         bail!("tunnel shutdown exceeded configured timeout");
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+async fn reject(mut stream: TcpStream, error: anyhow::Error) -> Result<()> {
+    let _ = stream.write_all(GATEWAY_UNAVAILABLE).await;
+    stream.shutdown().await?;
+    Err(error)
 }
 
 async fn forward(

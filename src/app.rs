@@ -26,6 +26,9 @@ enum Command {
         #[command(subcommand)]
         command: IdentityCommand,
     },
+    /// Register this user's managed identity with the machine forwarder.
+    #[cfg(target_os = "linux")]
+    SessionAgent(Config),
     /// Relay redirected Linux TCP flows over HBONE.
     #[cfg(target_os = "linux")]
     Capture(crate::service::capture::CaptureArgs),
@@ -55,6 +58,11 @@ pub async fn run() -> anyhow::Result<ExitCode> {
         }
         Command::Identity { command } => {
             crate::identity::cli::run(command).await?;
+            None
+        }
+        #[cfg(target_os = "linux")]
+        Command::SessionAgent(config) => {
+            crate::service::run_session_agent(config.validate()?).await?;
             None
         }
         #[cfg(target_os = "linux")]

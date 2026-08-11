@@ -82,6 +82,11 @@ pub struct Config {
     #[cfg(target_os = "linux")]
     #[arg(long, env = "AGENTDESKTOP_CAPTURE_ENABLED", default_value_t = false)]
     pub capture_enabled: bool,
+
+    /// Machine-service socket for per-user credential registration.
+    #[cfg(target_os = "linux")]
+    #[arg(long, env = "AGENTDESKTOP_SESSION_SOCKET")]
+    pub session_socket: Option<PathBuf>,
 }
 
 impl Config {
@@ -170,7 +175,15 @@ impl Config {
             bail!("transparent capture requires an owned standalone Agent Gateway");
         }
 
-        if self.mode == DeploymentMode::Managed && self.identity_issuer.is_none() {
+        #[cfg(target_os = "linux")]
+        let central_managed_service =
+            self.mode == DeploymentMode::Managed && self.session_socket.is_some();
+        #[cfg(not(target_os = "linux"))]
+        let central_managed_service = false;
+        if self.mode == DeploymentMode::Managed
+            && self.identity_issuer.is_none()
+            && !central_managed_service
+        {
             bail!("managed mode requires an identity issuer and enrollment URL");
         }
 
@@ -424,6 +437,27 @@ mod tests {
             config.enrollment_url.unwrap().as_str(),
             "https://enrollment.example/"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn accepts_managed_central_service_with_session_socket() {
+        let config = parse(&[
+            "agentdesktop",
+            "--mode",
+            "managed",
+            "--upstream",
+            "https://gateway.example:15008",
+            "--session-socket",
+            "/run/agentdesktop/sessions.sock",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            config.session_socket.as_deref(),
+            Some(std::path::Path::new("/run/agentdesktop/sessions.sock"))
+        );
+        assert!(config.identity_issuer.is_none());
     }
 
     #[test]
