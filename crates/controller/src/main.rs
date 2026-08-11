@@ -2,6 +2,7 @@ use std::time::Duration;
 use std::{net::SocketAddr, path::PathBuf};
 
 use agentplane_controller::{
+    admin::{self, AdminState, ControllerSettings},
     database::Database,
     gateway_jwt::GatewayJwtIssuer,
     oidc::OidcProvider,
@@ -18,6 +19,10 @@ use tonic::transport::{Identity, Server, ServerTlsConfig};
 struct Args {
     #[arg(long, default_value = "127.0.0.1:8443")]
     listen: SocketAddr,
+
+    /// Local address for the read-only controller management UI.
+    #[arg(long, default_value = "127.0.0.1:8080")]
+    admin_listen: SocketAddr,
 
     #[arg(long)]
     enrollment_token: Option<String>,
@@ -62,6 +67,9 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if !args.admin_listen.ip().is_loopback() {
+        anyhow::bail!("--admin-listen must use a loopback address");
+    }
     let _log_flush = telemetry::setup_logging("info", false);
     let desired_config =
         load_desired_config(args.desired_config.as_deref(), args.desired_config_revision)?;
@@ -96,6 +104,18 @@ async fn main() -> anyhow::Result<()> {
     if gateway_jwt_issuer.is_some() {
         tracing::info!("inference gateway JWT issuance enabled");
     }
+    let admin_state = AdminState::new(
+        database.clone(),
+        desired_config.clone(),
+        ControllerSettings {
+            fleet_listen: args.listen.to_string(),
+            admin_listen: args.admin_listen.to_string(),
+            enrollment_token_enabled: args.enrollment_token.is_some(),
+            oidc_enabled: oidc.is_some(),
+            tls_enabled: args.tls_certificate.is_some(),
+            gateway_jwt_enabled: gateway_jwt_issuer.is_some(),
+        },
+    );
     let service = FleetAgentService::new(
         args.enrollment_token,
         oidc,
@@ -114,10 +134,17 @@ async fn main() -> anyhow::Result<()> {
             .tls_config(ServerTlsConfig::new().identity(Identity::from_pem(certificate, key)))?;
     }
 
-    tracing::info!(listen = %args.listen, "fleet controller listening");
-    server
-        .add_service(FleetAgentServer::new(service))
-        .serve(args.listen)
-        .await
-        .context("serve fleet gRPC API")
+    let fleet_listen = args.listen;
+    let admin_listen = args.admin_listen;
+    tracing::info!(listen = %fleet_listen, "fleet controller listening");
+    let fleet = async move {
+        server
+            .add_service(FleetAgentServer::new(service))
+            .serve(fleet_listen)
+            .await
+            .context("serve fleet gRPC API")
+    };
+    let admin = admin::serve(admin_listen, admin_state);
+    tokio::try_join!(fleet, admin)?;
+    Ok(())
 }

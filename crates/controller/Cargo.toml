@@ -4,18 +4,23 @@ description = "Central fleet controller for enrollment, inventory, and desired c
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+build = "build.rs"
 
 [dependencies]
 agentplane-core.workspace = true
 agentplane-proto.workspace = true
 anyhow.workspace = true
+axum.workspace = true
 base64.workspace = true
 clap.workspace = true
 futures-core.workspace = true
 jsonwebtoken.workspace = true
+mime_guess = "2"
 rand.workspace = true
 reqwest.workspace = true
+rust-embed = "8"
 serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
