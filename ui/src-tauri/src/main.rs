@@ -215,20 +215,6 @@ fn socket_path() -> PathBuf {
 }
 
 fn tray_icon() -> Image<'static> {
-    const SIZE: u32 = 32;
-    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let dx = x as i32 - 16;
-            let dy = y as i32 - 16;
-            let distance = dx * dx + dy * dy;
-            let alpha = if (64..=196).contains(&distance) || distance <= 12 {
-                255
-            } else {
-                0
-            };
-            rgba.extend_from_slice(&[59, 130, 246, alpha]);
-        }
-    }
-    Image::new_owned(rgba, SIZE, SIZE)
+    Image::from_bytes(include_bytes!("../icons/32x32.png"))
+        .expect("decode embedded Agentplane tray icon")
 }
