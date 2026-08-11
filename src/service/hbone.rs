@@ -13,10 +13,10 @@ use http::HeaderMap;
 use http::uri::Authority;
 use http::{Method, Request, StatusCode, Uri};
 use rustls::RootCertStore;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "windows", target_env = "msvc")))]
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::ServerName;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "windows", target_env = "msvc")))]
 use rustls::sign::{CertifiedKey, SigningKey, SingleCertAndKey};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
@@ -42,11 +42,11 @@ struct IdentityState {
 #[derive(Clone)]
 enum ClientIdentitySource {
     Pem(ClientIdentity),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", all(target_os = "windows", target_env = "msvc")))]
     External(ExternalClientIdentity),
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "windows", target_env = "msvc")))]
 #[derive(Clone)]
 pub(crate) struct ExternalClientIdentity {
     pub certificates: Vec<CertificateDer<'static>>,
@@ -63,7 +63,7 @@ impl RotatingClientIdentity {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", all(target_os = "windows", target_env = "msvc")))]
     pub(crate) fn new_external(identity: ExternalClientIdentity, generation: u64) -> Self {
         Self {
             state: Arc::new(StdMutex::new(IdentityState {
@@ -96,7 +96,7 @@ impl RotatingClientIdentity {
         let (generation, identity) = self.snapshot()?;
         match identity {
             ClientIdentitySource::Pem(identity) => Ok((generation, identity)),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", all(target_os = "windows", target_env = "msvc")))]
             ClientIdentitySource::External(_) => {
                 bail!("external client identity cannot be exported")
             }
@@ -323,7 +323,7 @@ async fn connect_tls(
                     .context("managed client identity contains no private key")?;
             builder.with_client_auth_cert(certificates, private_key)?
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", all(target_os = "windows", target_env = "msvc")))]
         ClientIdentitySource::External(identity) => {
             let certified_key = CertifiedKey::new(identity.certificates, identity.signing_key);
             builder.with_client_cert_resolver(Arc::new(SingleCertAndKey::from(certified_key)))

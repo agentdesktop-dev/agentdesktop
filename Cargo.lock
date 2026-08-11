@@ -54,6 +54,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "url",
+ "windows-sys 0.61.2",
  "x509-parser",
  "zstd",
 ]
