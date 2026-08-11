@@ -170,9 +170,10 @@ impl Config {
 
         #[cfg(target_os = "linux")]
         if self.capture_enabled
+            && self.session_socket.is_none()
             && (self.mode != DeploymentMode::Standalone || self.gateway_binary.is_none())
         {
-            bail!("transparent capture requires an owned standalone Agent Gateway");
+            bail!("transparent capture requires an owned or registered standalone Agent Gateway");
         }
 
         #[cfg(target_os = "linux")]
@@ -391,7 +392,11 @@ mod tests {
             "--capture-enabled",
         ])
         .unwrap_err();
-        assert!(external.to_string().contains("owned standalone"));
+        assert!(
+            external
+                .to_string()
+                .contains("owned or registered standalone")
+        );
 
         let managed = parse(&[
             "connector",
@@ -402,7 +407,11 @@ mod tests {
             "--capture-enabled",
         ])
         .unwrap_err();
-        assert!(managed.to_string().contains("owned standalone"));
+        assert!(
+            managed
+                .to_string()
+                .contains("owned or registered standalone")
+        );
     }
 
     #[test]

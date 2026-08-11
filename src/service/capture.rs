@@ -39,6 +39,12 @@ impl CaptureToken {
         Ok(Self { value })
     }
 
+    pub(crate) fn from_str(value: &str) -> Result<Self> {
+        Self::from_header_value(
+            HeaderValue::from_str(value).context("tunnel token is not a valid header value")?,
+        )
+    }
+
     pub(crate) fn environment_value(&self) -> &str {
         self.value
             .to_str()
@@ -86,6 +92,14 @@ pub async fn local_hbone(
     let mut headers = HeaderMap::new();
     headers.insert(TUNNEL_TOKEN_HEADER, token.header_value());
     HboneClient::connect_with_headers(endpoint, headers, connect_timeout).await
+}
+
+pub async fn local_hbone_with_token(
+    endpoint: SocketAddr,
+    token: &str,
+    connect_timeout: Duration,
+) -> Result<HboneClient> {
+    local_hbone(endpoint, &CaptureToken::from_str(token)?, connect_timeout).await
 }
 
 pub fn original_authority(stream: &TcpStream) -> Result<Authority> {

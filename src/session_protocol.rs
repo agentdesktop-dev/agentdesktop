@@ -1,4 +1,6 @@
+use std::fmt;
 use std::io::{Error, ErrorKind, Read, Write};
+use std::net::SocketAddr;
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -13,7 +15,27 @@ const MAX_FRAME_SIZE: usize = 1024 * 1024;
 pub struct Registration {
     pub version: u16,
     pub certificate_generation: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub certificate_chain_der_base64: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_gateway: Option<LocalGatewayRegistration>,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalGatewayRegistration {
+    pub endpoint: SocketAddr,
+    pub tunnel_token: String,
+}
+
+impl fmt::Debug for LocalGatewayRegistration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LocalGatewayRegistration")
+            .field("endpoint", &self.endpoint)
+            .field("tunnel_token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl Registration {
@@ -24,10 +46,10 @@ impl Registration {
                 format!("unsupported session protocol version {}", self.version),
             ));
         }
-        if self.certificate_chain_der_base64.is_empty() {
+        if self.certificate_chain_der_base64.is_empty() == self.local_gateway.is_none() {
             return Err(Error::new(
                 ErrorKind::InvalidData,
-                "certificate chain must not be empty",
+                "registration must contain exactly one identity type",
             ));
         }
         for certificate in &self.certificate_chain_der_base64 {
@@ -40,6 +62,26 @@ impl Registration {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
                     "certificate DER has trailing data",
+                ));
+            }
+        }
+        if let Some(gateway) = &self.local_gateway {
+            if !gateway.endpoint.ip().is_loopback() {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "local Gateway endpoint must be loopback",
+                ));
+            }
+            if gateway.tunnel_token.is_empty()
+                || gateway.tunnel_token.len() > 256
+                || !gateway
+                    .tunnel_token
+                    .bytes()
+                    .all(|byte| (0x21..=0x7e).contains(&byte))
+            {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "local Gateway tunnel token is invalid",
                 ));
             }
         }
@@ -169,6 +211,7 @@ mod tests {
             version: VERSION,
             certificate_generation: 7,
             certificate_chain_der_base64: vec![certificate_der_base64()],
+            local_gateway: None,
         };
         let (mut writer, mut reader) = tokio::io::duplex(4096);
 
@@ -231,6 +274,7 @@ mod tests {
             version: VERSION + 1,
             certificate_generation: 1,
             certificate_chain_der_base64: vec![certificate_der_base64()],
+            local_gateway: None,
         };
         assert_eq!(
             wrong_version.validate().unwrap_err().kind(),
@@ -241,6 +285,7 @@ mod tests {
             version: VERSION,
             certificate_generation: 1,
             certificate_chain_der_base64: Vec::new(),
+            local_gateway: None,
         };
         assert_eq!(
             empty_chain.validate().unwrap_err().kind(),
@@ -251,10 +296,45 @@ mod tests {
             version: VERSION,
             certificate_generation: 1,
             certificate_chain_der_base64: vec!["not DER".to_owned()],
+            local_gateway: None,
         };
         assert_eq!(
             invalid_certificate.validate().unwrap_err().kind(),
             ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn validates_only_loopback_local_gateway_registration() {
+        let local = Registration {
+            version: VERSION,
+            certificate_generation: 1,
+            certificate_chain_der_base64: Vec::new(),
+            local_gateway: Some(LocalGatewayRegistration {
+                endpoint: "127.0.0.1:15008".parse().unwrap(),
+                tunnel_token: "owner-only-token".to_owned(),
+            }),
+        };
+        local.validate().unwrap();
+
+        let mut remote = local.clone();
+        remote.local_gateway.as_mut().unwrap().endpoint = "192.0.2.1:15008".parse().unwrap();
+        assert_eq!(
+            remote.validate().unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+
+        let mut mixed = local;
+        mixed.certificate_chain_der_base64 = vec![certificate_der_base64()];
+        assert_eq!(mixed.validate().unwrap_err().kind(), ErrorKind::InvalidData);
+
+        let mut invalid_token = mixed;
+        invalid_token.certificate_chain_der_base64.clear();
+        invalid_token.local_gateway.as_mut().unwrap().tunnel_token = "secret\nheader".to_owned();
+        assert_eq!(
+            invalid_token.validate().unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+        assert!(!format!("{invalid_token:?}").contains("secret"));
     }
 }

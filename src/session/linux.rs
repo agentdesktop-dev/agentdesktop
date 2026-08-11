@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
 
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -76,52 +77,64 @@ impl SessionRegistry {
     pub async fn register(&self, connection: SessionConnection) -> Result<()> {
         let uid = connection.uid();
         let generation = connection.registration().certificate_generation;
-        let certificates = connection
-            .registration()
-            .certificate_chain_der_base64
-            .iter()
-            .map(|certificate| {
-                base64::engine::general_purpose::STANDARD
-                    .decode(certificate)
-                    .map(CertificateDer::from)
-                    .context("decode registered certificate")
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let (signing_key, monitor) = connection.into_signing_key(self.connect_timeout)?;
-        let identity = RotatingClientIdentity::new_external(
-            ExternalClientIdentity {
-                certificates,
-                signing_key,
-            },
-            generation,
-        );
-        #[cfg(test)]
-        let client = if let Some(roots) = self.roots.clone() {
-            HboneClient::connect_mtls_with_roots(
-                self.endpoint,
-                self.server_name.clone(),
-                identity,
+        let local_gateway = connection.registration().local_gateway.clone();
+        let (client, monitor) = if let Some(gateway) = local_gateway {
+            let client = crate::service::capture::local_hbone_with_token(
+                gateway.endpoint,
+                &gateway.tunnel_token,
                 self.connect_timeout,
-                roots,
             )
-            .await?
+            .await?;
+            (client, connection.into_monitor()?)
         } else {
-            HboneClient::connect_mtls(
+            let certificates = connection
+                .registration()
+                .certificate_chain_der_base64
+                .iter()
+                .map(|certificate| {
+                    base64::engine::general_purpose::STANDARD
+                        .decode(certificate)
+                        .map(CertificateDer::from)
+                        .context("decode registered certificate")
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let (signing_key, monitor) = connection.into_signing_key(self.connect_timeout)?;
+            let identity = RotatingClientIdentity::new_external(
+                ExternalClientIdentity {
+                    certificates,
+                    signing_key,
+                },
+                generation,
+            );
+            #[cfg(test)]
+            let client = if let Some(roots) = self.roots.clone() {
+                HboneClient::connect_mtls_with_roots(
+                    self.endpoint,
+                    self.server_name.clone(),
+                    identity,
+                    self.connect_timeout,
+                    roots,
+                )
+                .await?
+            } else {
+                HboneClient::connect_mtls(
+                    self.endpoint,
+                    self.server_name.clone(),
+                    identity,
+                    self.connect_timeout,
+                )
+                .await?
+            };
+            #[cfg(not(test))]
+            let client = HboneClient::connect_mtls(
                 self.endpoint,
                 self.server_name.clone(),
                 identity,
                 self.connect_timeout,
             )
-            .await?
+            .await?;
+            (client, monitor)
         };
-        #[cfg(not(test))]
-        let client = HboneClient::connect_mtls(
-            self.endpoint,
-            self.server_name.clone(),
-            identity,
-            self.connect_timeout,
-        )
-        .await?;
         let mut clients = self.clients.write().await;
         if clients
             .get(&uid)
@@ -262,7 +275,7 @@ pub async fn run_user_agent(
     reconnect_delay: Duration,
 ) -> Result<()> {
     loop {
-        let result = async {
+        let result: Result<()> = async {
             let (generation, client_identity) = identity.pem_snapshot()?;
             let mut stream = UnixStream::connect(path)
                 .await
@@ -284,6 +297,7 @@ pub async fn run_user_agent(
                     version: crate::session_protocol::VERSION,
                     certificate_generation: generation,
                     certificate_chain_der_base64: certificates,
+                    local_gateway: None,
                 },
             )
             .await
@@ -381,6 +395,61 @@ impl SessionConnection {
             }),
             monitor,
         ))
+    }
+
+    fn into_monitor(self) -> Result<std::os::unix::net::UnixStream> {
+        let stream = self
+            .stream
+            .into_std()
+            .context("detach local Gateway session socket")?;
+        stream
+            .set_nonblocking(false)
+            .context("configure local Gateway session monitor")?;
+        Ok(stream)
+    }
+}
+
+pub async fn run_local_user_agent(
+    path: &Path,
+    endpoint: SocketAddr,
+    tunnel_token: String,
+    reconnect_delay: Duration,
+) -> Result<()> {
+    let generation = 1;
+    loop {
+        let result: Result<()> = async {
+            let mut stream = UnixStream::connect(path)
+                .await
+                .context("connect to machine forwarder session socket")?;
+            write_frame(
+                &mut stream,
+                &Registration {
+                    version: crate::session_protocol::VERSION,
+                    certificate_generation: generation,
+                    certificate_chain_der_base64: Vec::new(),
+                    local_gateway: Some(crate::session_protocol::LocalGatewayRegistration {
+                        endpoint,
+                        tunnel_token: tunnel_token.clone(),
+                    }),
+                },
+            )
+            .await
+            .context("register local Agent Gateway")?;
+            let mut unexpected = [0_u8; 1];
+            match stream.read(&mut unexpected).await {
+                Ok(0) => anyhow::bail!("machine forwarder closed local Gateway registration"),
+                Ok(_) => anyhow::bail!("machine forwarder sent unexpected registration data"),
+                Err(error) => Err(error).context("monitor local Gateway registration"),
+            }
+        }
+        .await;
+        if let Err(error) = result {
+            tracing::warn!(event = "local_gateway_registration_disconnected", reason = %error);
+        }
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => return Ok(()),
+            _ = tokio::time::sleep(reconnect_delay) => {}
+        }
     }
 }
 
@@ -613,6 +682,7 @@ mod tests {
                     version: VERSION,
                     certificate_generation: 4,
                     certificate_chain_der_base64: vec![certificate],
+                    local_gateway: None,
                 },
             )
             .await
@@ -642,6 +712,7 @@ mod tests {
                     version: VERSION,
                     certificate_generation: 1,
                     certificate_chain_der_base64: vec![certificate],
+                    local_gateway: None,
                 },
             )
             .await
@@ -703,6 +774,7 @@ mod tests {
                     version: VERSION,
                     certificate_generation: 1,
                     certificate_chain_der_base64: vec![certificate],
+                    local_gateway: None,
                 },
             )
             .await
@@ -762,6 +834,7 @@ mod tests {
 
         let gateway = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let gateway_address = gateway.local_addr().unwrap();
+        let (response_read, mut response_was_read) = oneshot::channel();
         let gateway_task = tokio::spawn(async move {
             let (stream, _) = gateway.accept().await.unwrap();
             let tls = TlsAcceptor::from(Arc::new(server_config))
@@ -796,6 +869,17 @@ mod tests {
                     }
                 }
             }
+            loop {
+                tokio::select! {
+                    result = &mut response_was_read => {
+                        result.unwrap();
+                        break;
+                    }
+                    accepted = connection.accept() => {
+                        assert!(accepted.is_some(), "H2 connection closed before response delivery");
+                    }
+                }
+            }
         });
 
         let directory = tempfile::tempdir().unwrap();
@@ -816,6 +900,7 @@ mod tests {
                     certificate_chain_der_base64: vec![
                         base64::engine::general_purpose::STANDARD.encode(client_cert.der()),
                     ],
+                    local_gateway: None,
                 },
             )
             .await
@@ -847,11 +932,69 @@ mod tests {
             .unwrap();
         tunnel.write_all(b"request").await.unwrap();
         tunnel.shutdown().await.unwrap();
-        let mut response = Vec::new();
-        tunnel.read_to_end(&mut response).await.unwrap();
+        let mut response = [0_u8; 8];
+        tunnel.read_exact(&mut response).await.unwrap();
 
-        assert_eq!(response, b"response");
+        assert_eq!(&response, b"response");
+        response_read.send(()).unwrap();
         gateway_task.await.unwrap();
+        agent.abort();
+    }
+
+    #[tokio::test]
+    async fn registry_routes_to_registered_local_gateway_with_capability() {
+        let gateway = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway_address = gateway.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = gateway.accept().await.unwrap();
+            let mut connection = h2::server::handshake(stream).await.unwrap();
+            let (request, mut respond) = connection.accept().await.unwrap().unwrap();
+            assert_eq!(
+                request.headers()[crate::service::capture::TUNNEL_TOKEN_HEADER],
+                "local-secret"
+            );
+            respond.send_response(Response::new(()), true).unwrap();
+            let _ = tokio::time::timeout(Duration::from_millis(20), connection.accept()).await;
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let agent = tokio::spawn(async move {
+            let mut stream = UnixStream::connect(path).await.unwrap();
+            write_frame(
+                &mut stream,
+                &Registration {
+                    version: VERSION,
+                    certificate_generation: 1,
+                    certificate_chain_der_base64: Vec::new(),
+                    local_gateway: Some(crate::session_protocol::LocalGatewayRegistration {
+                        endpoint: gateway_address,
+                        tunnel_token: "local-secret".to_owned(),
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+            std::future::pending::<()>().await;
+        });
+        let connection = accept(&listener).await.unwrap();
+        let uid = connection.uid();
+        let registry = SessionRegistry::new(
+            "127.0.0.1:9".parse().unwrap(),
+            "unused.invalid".to_owned(),
+            Duration::from_secs(1),
+        );
+        registry.register(connection).await.unwrap();
+
+        registry
+            .client_for_uid(uid)
+            .await
+            .unwrap()
+            .open_tunnel("provider.test:443".parse().unwrap())
+            .await
+            .unwrap();
+
+        server.await.unwrap();
         agent.abort();
     }
 

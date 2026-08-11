@@ -234,20 +234,53 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 
 #[cfg(target_os = "linux")]
 pub async fn run_session_agent(config: Config) -> anyhow::Result<()> {
-    if config.mode != crate::config::DeploymentMode::Managed {
-        bail!("session agent is only available in managed mode");
-    }
     let socket = config
         .session_socket
         .as_deref()
         .context("session agent requires --session-socket")?;
-    let context = renewal::load(&config)?.context("session agent requires managed identity")?;
-    let identity = context.client_identity.clone();
-    let renewal = renewal::spawn(context);
-    let result =
-        crate::session::linux::run_user_agent(socket, identity, Duration::from_secs(1)).await;
-    renewal.abort();
-    result
+    match config.mode {
+        crate::config::DeploymentMode::Managed => {
+            let context =
+                renewal::load(&config)?.context("session agent requires managed identity")?;
+            let identity = context.client_identity.clone();
+            let renewal = renewal::spawn(context);
+            let result =
+                crate::session::linux::run_user_agent(socket, identity, Duration::from_secs(1))
+                    .await;
+            renewal.abort();
+            result
+        }
+        crate::config::DeploymentMode::Standalone => {
+            let binary = config
+                .gateway_binary
+                .as_deref()
+                .context("standalone session agent requires --gateway-binary")?;
+            let gateway_config = config
+                .gateway_config
+                .as_deref()
+                .context("standalone session agent requires --gateway-config")?;
+            let mut gateway = LocalGateway::spawn(binary, gateway_config)?;
+            gateway
+                .wait_until_reachable(&config.upstream, LOCAL_GATEWAY_STARTUP_TIMEOUT)
+                .await?;
+            let endpoint = gateway_endpoint(&config).await?;
+            let token = gateway.capture_token().environment_value().to_owned();
+            tokio::select! {
+                result = crate::session::linux::run_local_user_agent(
+                    socket,
+                    endpoint,
+                    token,
+                    Duration::from_secs(1),
+                ) => {
+                    gateway.stop().await?;
+                    result
+                }
+                status = gateway.wait() => {
+                    bail!("local Agent Gateway exited unexpectedly with {}", status?);
+                }
+            }
+        }
+    }
 }
 
 async fn signal_shutdown(shutdown: watch::Sender<bool>) {
