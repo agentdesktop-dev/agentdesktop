@@ -1,4 +1,5 @@
 use std::{
+    net::SocketAddr,
     os::unix::fs::{FileTypeExt, PermissionsExt, chown},
     path::{Path, PathBuf},
 };
@@ -26,6 +27,10 @@ struct Args {
 
     #[arg(long)]
     enrollment_token: Option<String>,
+
+    /// Address for the OIDC callback server to bind instead of the redirect URI's loopback address.
+    #[arg(long)]
+    oidc_callback_listen: Option<SocketAddr>,
 
     #[arg(
         long,
@@ -56,6 +61,7 @@ async fn main() -> anyhow::Result<()> {
             .or_else(|| std::env::var("AGENTPLANE_ENROLLMENT_TOKEN").ok());
         let remote_discovery = discovery.clone();
         let state_dir = args.state_dir.clone();
+        let oidc_callback_listen = args.oidc_callback_listen;
         let reconciler = reconcile::Reconciler::new(
             args.claude_code_managed_settings_dir.clone(),
             credential_helper_command(&args.socket)?,
@@ -67,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
                 remote_discovery,
                 state_dir,
                 enrollment_token,
+                oidc_callback_listen,
                 reconciler,
                 remote_enrollment.clone(),
             )

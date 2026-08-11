@@ -230,6 +230,15 @@ impl Database {
         }))
     }
 
+    pub async fn delete_device(&self, device_id: &str) -> anyhow::Result<bool> {
+        let result = sqlx::query("DELETE FROM devices WHERE id = $1")
+            .bind(device_id)
+            .execute(&self.pool)
+            .await
+            .context("delete device")?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn update_hello(&self, device_id: &str, hello: &Hello) -> anyhow::Result<()> {
         sqlx::query(
             "UPDATE devices

@@ -98,6 +98,22 @@ cargo run --bin agentplaned -- \
 
 Open the authorization URL printed by the daemon, or choose **Enroll with SSO…** from the tray menu. Dex redirects the browser to `http://127.0.0.1:5555/callback`, where the daemon completes enrollment. The callback must remain registered on the OIDC client. For production, use an HTTPS issuer; the plaintext issuer above is only suitable for local development.
 
+When the daemon runs in a Docker container, keep the registered redirect URI on
+host loopback but bind the callback server to the container interface:
+
+```console
+docker run --rm \
+  -p 127.0.0.1:5555:5555 \
+  agentplane-agent \
+  --config /etc/agentplane/config.yaml \
+  --oidc-callback-listen 0.0.0.0:5555
+```
+
+The browser still returns to `http://127.0.0.1:5555/callback`; Docker forwards
+that request to the daemon. Restrict the published host port to loopback as
+shown above. Without `--oidc-callback-listen`, the daemon continues to bind the
+callback directly to the loopback address from the redirect URI.
+
 The controller uses SQLite by default and runs embedded migrations at startup. Point the same binary at Postgres with `--database-url 'postgres://user:password@host/database'`. Enrollment, device metadata, heartbeats, discoveries, and configuration status are persisted through one portable SQLx `AnyPool` query set.
 
 For TLS, give the controller `--tls-certificate` and `--tls-key`, use an `https://` controller address, and set `caCertificatePath` in daemon YAML when using a private CA. Device identity and credentials never belong in YAML.

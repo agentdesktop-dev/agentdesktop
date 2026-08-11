@@ -1,0 +1,3 @@
+controller:
+  address: http://172.17.0.1:8443
+  heartbeatInterval: 5s

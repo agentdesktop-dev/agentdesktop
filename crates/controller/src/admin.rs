@@ -71,7 +71,10 @@ pub async fn serve(address: SocketAddr, state: AdminState) -> anyhow::Result<()>
     let app = Router::new()
         .route("/api/v1/overview", get(overview))
         .route("/api/v1/devices", get(devices))
-        .route("/api/v1/devices/{device_id}", get(device))
+        .route(
+            "/api/v1/devices/{device_id}",
+            get(device).delete(delete_device),
+        )
         .route("/api/v1/configuration", get(configuration))
         .route("/api/v1/settings", get(settings))
         .fallback(get(asset))
@@ -121,6 +124,17 @@ async fn device(
         .await?
         .map(Json)
         .ok_or(AdminError::NotFound)
+}
+
+async fn delete_device(
+    State(state): State<AdminState>,
+    Path(device_id): Path<String>,
+) -> Result<StatusCode, AdminError> {
+    if !state.database.delete_device(&device_id).await? {
+        return Err(AdminError::NotFound);
+    }
+    info!(%device_id, "deleted device from controller");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn configuration(State(state): State<AdminState>) -> Json<Configuration> {
