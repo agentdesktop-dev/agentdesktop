@@ -4,8 +4,9 @@ use std::net::SocketAddr;
 use std::os::fd::AsFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{Sender, channel};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 
@@ -25,13 +26,13 @@ use rustls::pki_types::CertificateDer;
 use rustls::sign::{Signer, SigningKey};
 use rustls::{Error as TlsError, SignatureAlgorithm, SignatureScheme as TlsSignatureScheme};
 use tokio::net::{TcpStream, UnixListener, UnixStream};
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::sync::{RwLock, watch};
 use tokio::task::JoinSet;
 
 use crate::service::hbone::{ExternalClientIdentity, HboneClient, RotatingClientIdentity};
 use crate::session_protocol::{
-    AgentResponse, ForwarderRequest, Registration, SignatureScheme, read_frame,
-    read_frame_blocking, write_frame, write_frame_blocking,
+    AgentResponse, ForwarderRequest, Registration, SignatureScheme, read_frame, write_frame,
 };
 
 pub struct SessionConnection {
@@ -85,7 +86,7 @@ impl SessionRegistry {
                 self.connect_timeout,
             )
             .await?;
-            (client, connection.into_monitor()?)
+            (client, connection.into_monitor())
         } else {
             let certificates = connection
                 .registration()
@@ -98,7 +99,7 @@ impl SessionRegistry {
                         .context("decode registered certificate")
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let (signing_key, monitor) = connection.into_signing_key(self.connect_timeout)?;
+            let (signing_key, monitor) = connection.into_signing_key(self.connect_timeout);
             let identity = RotatingClientIdentity::new_external(
                 ExternalClientIdentity {
                     certificates,
@@ -150,11 +151,9 @@ impl SessionRegistry {
             },
         );
         let registry = self.clone();
-        tokio::task::spawn_blocking(move || {
-            monitor_disconnect(monitor);
-            tokio::runtime::Handle::current().spawn(async move {
-                registry.remove_generation(uid, generation).await;
-            });
+        tokio::spawn(async move {
+            let _ = monitor.await;
+            registry.remove_generation(uid, generation).await;
         });
         Ok(())
     }
@@ -372,41 +371,65 @@ impl SessionConnection {
     pub fn into_signing_key(
         self,
         timeout: Duration,
-    ) -> Result<(Arc<dyn SigningKey>, std::os::unix::net::UnixStream)> {
-        let stream = self
-            .stream
-            .into_std()
-            .context("detach user session socket")?;
-        stream
-            .set_nonblocking(false)
-            .context("configure blocking user session socket")?;
-        stream
-            .set_read_timeout(Some(timeout))
-            .context("configure user session read timeout")?;
-        stream
-            .set_write_timeout(Some(timeout))
-            .context("configure user session write timeout")?;
-        let monitor = stream
-            .try_clone()
-            .context("clone user session socket for lifecycle monitoring")?;
-        Ok((
+    ) -> (Arc<dyn SigningKey>, tokio::task::JoinHandle<Result<()>>) {
+        let (requests, receiver) = unbounded_channel();
+        let worker = tokio::spawn(run_signing_worker(self.stream, receiver, timeout));
+        (
             Arc::new(SessionSigningKey {
-                stream: Arc::new(Mutex::new(stream)),
-                next_request_id: Arc::new(AtomicU64::new(1)),
+                requests,
+                next_request_id: AtomicU64::new(1),
             }),
-            monitor,
-        ))
+            worker,
+        )
     }
 
-    fn into_monitor(self) -> Result<std::os::unix::net::UnixStream> {
-        let stream = self
-            .stream
-            .into_std()
-            .context("detach local Gateway session socket")?;
-        stream
-            .set_nonblocking(false)
-            .context("configure local Gateway session monitor")?;
-        Ok(stream)
+    fn into_monitor(self) -> tokio::task::JoinHandle<Result<()>> {
+        tokio::spawn(monitor_disconnect(self.stream))
+    }
+}
+
+struct SigningWork {
+    request: ForwarderRequest,
+    response: Sender<Result<AgentResponse, String>>,
+}
+
+async fn run_signing_worker(
+    mut stream: UnixStream,
+    mut requests: tokio::sync::mpsc::UnboundedReceiver<SigningWork>,
+    timeout: Duration,
+) -> Result<()> {
+    loop {
+        let work = tokio::select! {
+            work = requests.recv() => match work {
+                Some(work) => work,
+                None => return Ok(()),
+            },
+            incoming = read_frame::<AgentResponse, _>(&mut stream) => {
+                incoming.context("monitor user session socket")?;
+                anyhow::bail!("user session sent an unsolicited signing response");
+            }
+        };
+        let response = tokio::time::timeout(timeout, async {
+            write_frame(&mut stream, &work.request)
+                .await
+                .context("send signing request")?;
+            read_frame(&mut stream)
+                .await
+                .context("read signing response")
+        })
+        .await
+        .context("user session signing timed out")
+        .and_then(|response| response);
+        match response {
+            Ok(response) => {
+                let _ = work.response.send(Ok(response));
+            }
+            Err(error) => {
+                let reason = error.to_string();
+                let _ = work.response.send(Err(reason));
+                return Err(error);
+            }
+        }
     }
 }
 
@@ -454,20 +477,19 @@ pub async fn run_local_user_agent(
     }
 }
 
-fn monitor_disconnect(stream: std::os::unix::net::UnixStream) {
-    loop {
-        let mut byte = [0_u8; 1];
-        match rustix::net::recv(&stream, &mut byte, rustix::net::RecvFlags::PEEK) {
-            Ok((_, 0)) | Err(_) => return,
-            Ok(_) => std::thread::sleep(Duration::from_millis(10)),
-        }
+async fn monitor_disconnect(mut stream: UnixStream) -> Result<()> {
+    let mut byte = [0_u8; 1];
+    match stream.read(&mut byte).await {
+        Ok(0) => Ok(()),
+        Ok(_) => anyhow::bail!("user session sent unexpected registration data"),
+        Err(error) => Err(error).context("monitor user session socket"),
     }
 }
 
 #[derive(Debug)]
 struct SessionSigningKey {
-    stream: Arc<Mutex<std::os::unix::net::UnixStream>>,
-    next_request_id: Arc<AtomicU64>,
+    requests: UnboundedSender<SigningWork>,
+    next_request_id: AtomicU64,
 }
 
 impl SigningKey for SessionSigningKey {
@@ -476,7 +498,7 @@ impl SigningKey for SessionSigningKey {
             .contains(&TlsSignatureScheme::ECDSA_NISTP256_SHA256)
             .then(|| {
                 Box::new(SessionSigner {
-                    stream: Arc::clone(&self.stream),
+                    requests: self.requests.clone(),
                     request_id: self.next_request_id.fetch_add(1, Ordering::Relaxed),
                 }) as Box<dyn Signer>
             })
@@ -489,26 +511,28 @@ impl SigningKey for SessionSigningKey {
 
 #[derive(Debug)]
 struct SessionSigner {
-    stream: Arc<Mutex<std::os::unix::net::UnixStream>>,
+    requests: UnboundedSender<SigningWork>,
     request_id: u64,
 }
 
 impl Signer for SessionSigner {
     fn sign(&self, message: &[u8]) -> std::result::Result<Vec<u8>, TlsError> {
-        let request = ForwarderRequest::Sign {
-            request_id: self.request_id,
-            scheme: SignatureScheme::EcdsaP256Sha256,
-            message_base64: base64::engine::general_purpose::STANDARD.encode(message),
-        };
-        let mut stream = self
-            .stream
-            .lock()
-            .map_err(|_| TlsError::General("user session signer lock poisoned".to_owned()))?;
-        write_frame_blocking(&mut *stream, &request)
-            .map_err(|error| TlsError::General(format!("send signing request: {error}")))?;
-        match read_frame_blocking(&mut *stream)
-            .map_err(|error| TlsError::General(format!("read signing response: {error}")))?
-        {
+        let (response, receiver) = channel();
+        self.requests
+            .send(SigningWork {
+                request: ForwarderRequest::Sign {
+                    request_id: self.request_id,
+                    scheme: SignatureScheme::EcdsaP256Sha256,
+                    message_base64: base64::engine::general_purpose::STANDARD.encode(message),
+                },
+                response,
+            })
+            .map_err(|_| TlsError::General("user session signer is unavailable".to_owned()))?;
+        let response = receiver
+            .recv()
+            .map_err(|error| TlsError::General(format!("wait for user session signer: {error}")))?
+            .map_err(TlsError::General)?;
+        match response {
             AgentResponse::Signature {
                 request_id,
                 signature_base64,
@@ -742,7 +766,7 @@ mod tests {
             .unwrap();
         });
         let connection = accept(&listener).await.unwrap();
-        let (signing_key, _monitor) = connection.into_signing_key(Duration::from_secs(1)).unwrap();
+        let (signing_key, _monitor) = connection.into_signing_key(Duration::from_secs(1));
 
         let signature = tokio::task::spawn_blocking(move || {
             signing_key
@@ -756,6 +780,48 @@ mod tests {
 
         agent.await.unwrap();
         assert_eq!(signature, b"DER signature");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn signing_key_times_out_through_async_worker() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let CertifiedKey { cert, .. } =
+            generate_simple_self_signed(["agentdesktop.test".to_owned()]).unwrap();
+        let certificate = base64::engine::general_purpose::STANDARD.encode(cert.der());
+        let agent = tokio::spawn(async move {
+            let mut stream = UnixStream::connect(path).await.unwrap();
+            write_frame(
+                &mut stream,
+                &Registration {
+                    version: VERSION,
+                    certificate_generation: 1,
+                    certificate_chain_der_base64: vec![certificate],
+                    local_gateway: None,
+                },
+            )
+            .await
+            .unwrap();
+            let _: ForwarderRequest = read_frame(&mut stream).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let connection = accept(&listener).await.unwrap();
+        let (signing_key, worker) = connection.into_signing_key(Duration::from_millis(50));
+
+        let error = tokio::task::spawn_blocking(move || {
+            signing_key
+                .choose_scheme(&[TlsSignatureScheme::ECDSA_NISTP256_SHA256])
+                .unwrap()
+                .sign(b"certificate verify")
+                .unwrap_err()
+        })
+        .await
+        .unwrap();
+
+        assert!(error.to_string().contains("user session signing timed out"));
+        assert!(worker.await.unwrap().is_err());
+        agent.abort();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

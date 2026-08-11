@@ -1,5 +1,5 @@
 use std::fmt;
-use std::io::{Error, ErrorKind, Read, Write};
+use std::io::{Error, ErrorKind};
 use std::net::SocketAddr;
 
 use base64::Engine;
@@ -155,45 +155,6 @@ where
     serde_json::from_slice(&payload).map_err(|error| Error::new(ErrorKind::InvalidData, error))
 }
 
-pub fn write_frame_blocking<T, W>(writer: &mut W, value: &T) -> std::io::Result<()>
-where
-    T: Serialize,
-    W: Write,
-{
-    let payload = serde_json::to_vec(value).map_err(Error::other)?;
-    let length = u32::try_from(payload.len())
-        .ok()
-        .filter(|length| (*length as usize) <= MAX_FRAME_SIZE)
-        .ok_or_else(|| {
-            Error::new(
-                ErrorKind::InvalidInput,
-                "session protocol frame is too large",
-            )
-        })?;
-    writer.write_all(&length.to_be_bytes())?;
-    writer.write_all(&payload)?;
-    writer.flush()
-}
-
-pub fn read_frame_blocking<T, R>(reader: &mut R) -> std::io::Result<T>
-where
-    T: for<'de> Deserialize<'de>,
-    R: Read,
-{
-    let mut length = [0; 4];
-    reader.read_exact(&mut length)?;
-    let length = u32::from_be_bytes(length) as usize;
-    if length > MAX_FRAME_SIZE {
-        return Err(Error::new(
-            ErrorKind::InvalidData,
-            "session protocol frame is too large",
-        ));
-    }
-    let mut payload = vec![0; length];
-    reader.read_exact(&mut payload)?;
-    serde_json::from_slice(&payload).map_err(|error| Error::new(ErrorKind::InvalidData, error))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,18 +215,6 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.kind(), ErrorKind::InvalidData);
-    }
-
-    #[test]
-    fn async_and_blocking_frames_are_compatible() {
-        let expected = AgentResponse::Signature {
-            request_id: 9,
-            signature_base64: "signature".to_owned(),
-        };
-        let mut bytes = Vec::new();
-        write_frame_blocking(&mut bytes, &expected).unwrap();
-        let actual: AgentResponse = read_frame_blocking(&mut bytes.as_slice()).unwrap();
-        assert_eq!(actual, expected);
     }
 
     #[test]
