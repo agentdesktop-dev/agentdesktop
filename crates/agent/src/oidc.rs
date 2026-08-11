@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-use agentplane_core::config::ControllerConfig;
-use agentplane_proto::fleet::{BeginEnrollmentRequest, CompleteEnrollmentRequest};
+use agentdesktop_core::config::ControllerConfig;
+use agentdesktop_proto::fleet::{BeginEnrollmentRequest, CompleteEnrollmentRequest};
 use anyhow::{Context, bail};
 use axum::{
     Router,
@@ -81,7 +81,7 @@ pub async fn enroll(
         "open this URL to enroll the device"
     );
     println!(
-        "Open this URL to enroll Agentplane:\n{}",
+        "Open this URL to enroll AgentDesktop:\n{}",
         begin.authorization_url
     );
 
@@ -172,11 +172,11 @@ async fn callback(
     }
 
     if succeeded {
-        Html("Agentplane enrollment is complete. You can close this window.").into_response()
+        Html("AgentDesktop enrollment is complete. You can close this window.").into_response()
     } else {
         (
             StatusCode::BAD_REQUEST,
-            Html("Agentplane enrollment failed. Return to the daemon logs for details."),
+            Html("AgentDesktop enrollment failed. Return to the daemon logs for details."),
         )
             .into_response()
     }

@@ -9,11 +9,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "agentplane-agent"
+name = "agentdesktop-agent"
 version = "0.1.0"
 dependencies = [
- "agentplane-core",
- "agentplane-proto",
+ "agentdesktop-core",
+ "agentdesktop-proto",
  "anyhow",
  "axum",
  "base64 0.22.1",
@@ -32,18 +32,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentplane-cli"
+name = "agentdesktop-cli"
 version = "0.1.0"
 dependencies = [
- "agentplane-client",
- "agentplane-core",
+ "agentdesktop-client",
+ "agentdesktop-core",
  "anyhow",
  "clap",
  "tokio",
 ]
 
 [[package]]
-name = "agentplane-client"
+name = "agentdesktop-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -58,11 +58,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentplane-controller"
+name = "agentdesktop-controller"
 version = "0.1.0"
 dependencies = [
- "agentplane-core",
- "agentplane-proto",
+ "agentdesktop-core",
+ "agentdesktop-proto",
  "anyhow",
  "axum",
  "base64 0.22.1",
@@ -86,7 +86,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentplane-core"
+name = "agentdesktop-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -102,7 +102,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentplane-proto"
+name = "agentdesktop-proto"
 version = "0.1.0"
 dependencies = [
  "prost",
@@ -112,11 +112,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentplane-ui"
+name = "agentdesktop-ui"
 version = "0.1.0"
 dependencies = [
- "agentplane-client",
- "agentplane-core",
+ "agentdesktop-client",
+ "agentdesktop-core",
  "open",
  "serde",
  "tauri",

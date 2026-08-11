@@ -5,8 +5,8 @@ use std::{
     time::Duration,
 };
 
-use agentplane_client as client;
-use agentplane_core::{
+use agentdesktop_client as client;
+use agentdesktop_core::{
     DEFAULT_SOCKET_PATH,
     model::{Discovery, EnrollmentStatus, Health},
 };
@@ -69,7 +69,7 @@ fn main() {
                 .enabled(false)
                 .build(app)?;
             let refresh_item = MenuItemBuilder::with_id(REFRESH_ID, "Refresh").build(app)?;
-            let quit = MenuItemBuilder::with_id(QUIT_ID, "Quit Agentplane").build(app)?;
+            let quit = MenuItemBuilder::with_id(QUIT_ID, "Quit AgentDesktop").build(app)?;
             let menu = MenuBuilder::new(app)
                 .items(&[
                     &daemon,
@@ -99,7 +99,7 @@ fn main() {
             let tray = TrayIconBuilder::new()
                 .icon(tray_icon())
                 .icon_as_template(cfg!(target_os = "macos"))
-                .tooltip("Agentplane")
+                .tooltip("AgentDesktop")
                 .menu(&menu)
                 .show_menu_on_left_click(true)
                 .on_menu_event(move |app, event| match event.id().as_ref() {
@@ -136,7 +136,7 @@ fn main() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("run Agentplane tray application");
+        .expect("run AgentDesktop tray application");
 }
 
 fn spawn_refresh(items: TrayItems, authorization_url: AuthorizationUrl) {
@@ -209,12 +209,12 @@ fn set_discovery_status(items: &TrayItems, discovery: Option<&Discovery>, missin
 }
 
 fn socket_path() -> PathBuf {
-    env::var_os("AGENTPLANE_SOCKET")
+    env::var_os("AGENTDESKTOP_SOCKET")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET_PATH))
 }
 
 fn tray_icon() -> Image<'static> {
     Image::from_bytes(include_bytes!("../icons/32x32.png"))
-        .expect("decode embedded Agentplane tray icon")
+        .expect("decode embedded AgentDesktop tray icon")
 }

@@ -8,7 +8,7 @@ use axum::{
 };
 use serde::Serialize;
 
-use agentplane_core::{
+use agentdesktop_core::{
     config::{Config, ControllerConfig},
     model::{Discovery, EnrollmentStatus, InferenceGatewayCredential},
 };

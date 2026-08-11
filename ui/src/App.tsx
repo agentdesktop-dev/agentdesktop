@@ -14,7 +14,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import agentplaneIcon from "../app-icon.svg";
+import agentdesktopIcon from "../app-icon.svg";
 import claudeCodeIcon from "./assets/tool-icons/claude-code.svg";
 import codexIcon from "./assets/tool-icons/codex.svg";
 import copilotIcon from "./assets/tool-icons/copilot.svg";
@@ -144,8 +144,8 @@ export function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <img className="brand-mark" src={agentplaneIcon} alt="" />
-          <span>Agentplane</span>
+          <img className="brand-mark" src={agentdesktopIcon} alt="" />
+          <span>AgentDesktop</span>
         </div>
         <nav className="primary-nav" aria-label="Primary navigation">
           {nav.map((item) => {

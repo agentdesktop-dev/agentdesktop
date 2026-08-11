@@ -1,5 +1,5 @@
 [package]
-name = "agentplane-client"
+name = "agentdesktop-client"
 description = "Reusable client for the daemon's local API transport."
 version.workspace = true
 edition.workspace = true

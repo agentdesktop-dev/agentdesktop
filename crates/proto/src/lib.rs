@@ -1,3 +1,3 @@
 pub mod fleet {
-    tonic::include_proto!("agentplane.fleet.v1");
+    tonic::include_proto!("agentdesktop.fleet.v1");
 }

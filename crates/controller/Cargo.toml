@@ -1,5 +1,5 @@
 [package]
-name = "agentplane-controller"
+name = "agentdesktop-controller"
 description = "Central fleet controller for enrollment, inventory, and desired configuration."
 version.workspace = true
 edition.workspace = true
@@ -7,8 +7,8 @@ publish.workspace = true
 build = "build.rs"
 
 [dependencies]
-agentplane-core.workspace = true
-agentplane-proto.workspace = true
+agentdesktop-core.workspace = true
+agentdesktop-proto.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 base64.workspace = true

@@ -4,8 +4,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use agentplane_agent::{api, discovery, enrollment::EnrollmentState, reconcile, remote};
-use agentplane_core::{
+use agentdesktop_agent::{api, discovery, enrollment::EnrollmentState, reconcile, remote};
+use agentdesktop_core::{
     DEFAULT_CONFIG_PATH, DEFAULT_SOCKET_PATH, DEFAULT_STATE_DIR, config, telemetry,
 };
 use anyhow::{Context, bail};
@@ -14,7 +14,7 @@ use hyper_util::{rt::TokioIo, service::TowerToHyperService};
 use tokio::net::UnixListener;
 
 #[derive(Parser)]
-#[command(about = "Agentplane privileged daemon")]
+#[command(about = "AgentDesktop privileged daemon")]
 struct Args {
     #[arg(long, default_value = DEFAULT_CONFIG_PATH)]
     config: PathBuf,
@@ -58,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(controller) = config.controller.clone() {
         let enrollment_token = args
             .enrollment_token
-            .or_else(|| std::env::var("AGENTPLANE_ENROLLMENT_TOKEN").ok());
+            .or_else(|| std::env::var("AGENTDESKTOP_ENROLLMENT_TOKEN").ok());
         let remote_discovery = discovery.clone();
         let state_dir = args.state_dir.clone();
         let oidc_callback_listen = args.oidc_callback_listen;
@@ -123,8 +123,8 @@ async fn main() -> anyhow::Result<()> {
 
 fn credential_helper_command(socket: &Path) -> anyhow::Result<String> {
     let executable = std::env::current_exe()
-        .context("locate agentplaned executable")?
-        .with_file_name(format!("agentplane{}", std::env::consts::EXE_SUFFIX));
+        .context("locate agentdesktopd executable")?
+        .with_file_name(format!("agentdesktop{}", std::env::consts::EXE_SUFFIX));
     Ok(format!(
         "{} --socket {} credential",
         shell_quote(&executable.to_string_lossy()),

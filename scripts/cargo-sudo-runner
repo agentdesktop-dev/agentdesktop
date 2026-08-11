@@ -2,6 +2,6 @@
 set -euo pipefail
 
 exec /usr/bin/sudo \
-  --preserve-env=RUST_LOG,LOG_FORMAT,AGENTPLANE_ENROLLMENT_TOKEN \
+  --preserve-env=RUST_LOG,LOG_FORMAT,AGENTDESKTOP_ENROLLMENT_TOKEN \
   -- /usr/bin/env "PATH=${PATH}" \
   "$@"

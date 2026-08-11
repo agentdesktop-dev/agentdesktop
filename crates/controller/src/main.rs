@@ -1,26 +1,26 @@
 use std::time::Duration;
 use std::{net::SocketAddr, path::PathBuf};
 
-use agentplane_controller::{
+use agentdesktop_controller::{
     admin::{self, AdminState, ControllerSettings},
     database::Database,
     gateway_jwt::GatewayJwtIssuer,
     oidc::OidcProvider,
     service::{FleetAgentService, load_desired_config},
 };
-use agentplane_core::telemetry;
-use agentplane_proto::fleet::fleet_agent_server::FleetAgentServer;
+use agentdesktop_core::telemetry;
+use agentdesktop_proto::fleet::fleet_agent_server::FleetAgentServer;
 use anyhow::Context;
 use clap::Parser;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 
 #[derive(Parser)]
-#[command(about = "Agentplane fleet controller")]
+#[command(about = "AgentDesktop fleet controller")]
 struct Args {
     #[arg(long, default_value = "127.0.0.1:8443")]
     listen: SocketAddr,
 
-    /// Local address for the read-only controller management UI.
+    /// Local address for the controller management UI.
     #[arg(long, default_value = "127.0.0.1:8080")]
     admin_listen: SocketAddr,
 
@@ -36,7 +36,7 @@ struct Args {
     #[arg(long, default_value = "http://127.0.0.1:5555/callback")]
     oidc_redirect_uri: String,
 
-    #[arg(long, default_value = "sqlite://agentplane-controller.db?mode=rwc")]
+    #[arg(long, default_value = "sqlite://agentdesktop-controller.db?mode=rwc")]
     database_url: String,
 
     #[arg(long)]
@@ -48,10 +48,10 @@ struct Args {
     #[arg(long)]
     gateway_jwt_private_key: Option<PathBuf>,
 
-    #[arg(long, default_value = "agentplane-controller")]
+    #[arg(long, default_value = "agentdesktop-controller")]
     gateway_jwt_issuer: String,
 
-    #[arg(long, default_value = "agentplane")]
+    #[arg(long, default_value = "agentdesktop")]
     gateway_jwt_key_id: String,
 
     #[arg(long, default_value_t = 300)]

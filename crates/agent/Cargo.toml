@@ -1,17 +1,17 @@
 [package]
-name = "agentplane-agent"
+name = "agentdesktop-agent"
 description = "Privileged device daemon for discovery, reconciliation, and fleet connectivity."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "agentplaned"
+name = "agentdesktopd"
 path = "src/main.rs"
 
 [dependencies]
-agentplane-core.workspace = true
-agentplane-proto.workspace = true
+agentdesktop-core.workspace = true
+agentdesktop-proto.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 base64.workspace = true

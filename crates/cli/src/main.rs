@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use agentplane_client as client;
-use agentplane_core::{
+use agentdesktop_client as client;
+use agentdesktop_core::{
     DEFAULT_SOCKET_PATH,
     config::Config,
     model::{Discovery, Health, InferenceGatewayCredential},
@@ -9,7 +9,7 @@ use agentplane_core::{
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(about = "Client for the Agentplane daemon")]
+#[command(about = "Client for the AgentDesktop daemon")]
 struct Args {
     #[arg(long, default_value = DEFAULT_SOCKET_PATH, global = true)]
     socket: PathBuf,
@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
             let config: Config = client::get(&args.socket, "/v1/config").await?;
             print!(
                 "{}",
-                agentplane_core::serdes::yamlviajson::to_string(&config)?
+                agentdesktop_core::serdes::yamlviajson::to_string(&config)?
             );
         }
         Command::Credential { gateway } => {

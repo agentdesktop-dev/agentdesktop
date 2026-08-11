@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Agentplane",
+  "productName": "AgentDesktop",
   "version": "0.1.0",
-  "identifier": "dev.agentplane.app",
+  "identifier": "dev.agentdesktop.app",
   "build": {
     "beforeDevCommand": "pnpm frontend:dev",
     "beforeBuildCommand": "pnpm frontend:build",
@@ -23,7 +23,7 @@
       "icons/icon.ico"
     ],
     "category": "DeveloperTool",
-    "shortDescription": "Agentplane tray client",
-    "longDescription": "A lightweight Agentplane tray client for checking daemon and local agent discovery status."
+    "shortDescription": "AgentDesktop tray client",
+    "longDescription": "A lightweight AgentDesktop tray client for checking daemon and local agent discovery status."
   }
 }

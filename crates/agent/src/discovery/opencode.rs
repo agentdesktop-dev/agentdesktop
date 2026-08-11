@@ -1,4 +1,4 @@
-use agentplane_core::model::Agent;
+use agentdesktop_core::model::Agent;
 
 use super::metadata;
 

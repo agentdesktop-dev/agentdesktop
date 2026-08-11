@@ -14,11 +14,11 @@ use tonic::{
 };
 use tracing::{debug, info, warn};
 
-use agentplane_core::{
+use agentdesktop_core::{
     config::{self, ControllerConfig},
     model::Discovery as AgentDiscovery,
 };
-use agentplane_proto::fleet::{
+use agentdesktop_proto::fleet::{
     AgentMessage, ConfigState, ConfigStatus, Discovery, EnrollRequest, Heartbeat, Hello,
     InferenceGatewayCredentialRequest, Inventory, agent_message, controller_message,
     fleet_agent_client::FleetAgentClient,
@@ -98,7 +98,7 @@ pub async fn inference_gateway_credential(
     controller: &ControllerConfig,
     state_dir: &Path,
     gateway: String,
-) -> anyhow::Result<agentplane_core::model::InferenceGatewayCredential> {
+) -> anyhow::Result<agentdesktop_core::model::InferenceGatewayCredential> {
     let identity =
         identity::load(&state_dir.join("identity.json"))?.context("device is not enrolled")?;
     let mut client = client(controller).await?;
@@ -114,7 +114,7 @@ pub async fn inference_gateway_credential(
         .await
         .context("request inference gateway credential")?
         .into_inner();
-    Ok(agentplane_core::model::InferenceGatewayCredential {
+    Ok(agentdesktop_core::model::InferenceGatewayCredential {
         credential: response.credential,
         expires_at_unix_seconds: response.expires_at_unix_seconds,
     })
@@ -236,7 +236,7 @@ async fn connect(
 
 fn apply_desired_config(
     state_dir: &Path,
-    desired: agentplane_proto::fleet::DesiredConfig,
+    desired: agentdesktop_proto::fleet::DesiredConfig,
     reconciler: &Reconciler,
 ) -> ConfigStatus {
     let result = (|| -> anyhow::Result<()> {
