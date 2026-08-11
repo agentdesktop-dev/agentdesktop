@@ -81,6 +81,65 @@ pub async fn serve_native_sessions(
 }
 
 #[cfg(all(target_os = "windows", target_env = "msvc"))]
+pub async fn serve_native_sessions(
+    listener: TcpListener,
+    sessions: crate::session::windows::SessionRegistry,
+    public_destination: std::net::SocketAddr,
+    destination: Authority,
+    max_tunnels: usize,
+    shutdown_timeout: Duration,
+    shutdown: impl Future<Output = ()>,
+) -> Result<()> {
+    if max_tunnels == 0 {
+        bail!("max tunnels must be greater than zero");
+    }
+    let permits = Arc::new(Semaphore::new(max_tunnels));
+    let mut tunnels = JoinSet::new();
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            Some(result) = tunnels.join_next(), if !tunnels.is_empty() => {
+                if let Err(error) = result {
+                    tracing::warn!(event = "tunnel_task_failed", reason = %error);
+                }
+            }
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                let Ok(permit) = permits.clone().try_acquire_owned() else {
+                    tracing::warn!(event = "tunnel_rejected", reason = "overloaded");
+                    continue;
+                };
+                let sessions = sessions.clone();
+                let destination = destination.clone();
+                tunnels.spawn(async move {
+                    let client = async {
+                        let context = crate::platform::windows::redirect_context(&stream)?;
+                        if context.flow_kind != crate::platform::windows::FlowKind::Native {
+                            bail!("captured WFP flow reached the native listener");
+                        }
+                        if context.original_destination != public_destination {
+                            bail!("WFP native flow has an unexpected original destination");
+                        }
+                        sessions.client_for_sid(&context.user_sid).await
+                    }
+                    .await;
+                    let result = match client {
+                        Ok(hbone) => forward(stream, &hbone, Ok(destination)).await,
+                        Err(error) => reject(stream, error).await,
+                    };
+                    drop(permit);
+                    if let Err(error) = result {
+                        tracing::warn!(event = "tunnel_failed", reason = %error);
+                    }
+                });
+            }
+        }
+    }
+    drain_tunnels(&mut tunnels, shutdown_timeout).await
+}
+
+#[cfg(all(target_os = "windows", target_env = "msvc"))]
 pub async fn serve_native_without_attribution(
     listener: TcpListener,
     max_tunnels: usize,
@@ -300,9 +359,9 @@ mod tests {
     use tokio::sync::oneshot;
     use tokio::time::{Duration, timeout};
 
-    #[cfg(all(target_os = "windows", target_env = "msvc"))]
-    use super::serve_native_without_attribution;
     use super::{HboneClient, serve_native};
+    #[cfg(all(target_os = "windows", target_env = "msvc"))]
+    use super::{serve_native_sessions, serve_native_without_attribution};
 
     #[tokio::test]
     async fn native_listener_forwards_opaque_bytes_to_fixed_authority() {
@@ -417,6 +476,37 @@ mod tests {
 
         assert!(response.starts_with(b"HTTP/1.1 502 Bad Gateway\r\n"));
         assert!(response.ends_with(b"agent gateway unavailable\n"));
+        shutdown.send(()).unwrap();
+        service.await.unwrap().unwrap();
+    }
+
+    #[cfg(all(target_os = "windows", target_env = "msvc"))]
+    #[tokio::test]
+    async fn windows_attributed_listener_rejects_direct_connections() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let registry = crate::session::windows::SessionRegistry::new(
+            "127.0.0.1:1".parse().unwrap(),
+            "gateway.example".to_owned(),
+            Duration::from_secs(1),
+        );
+        let (shutdown, stopping) = oneshot::channel();
+        let service = tokio::spawn(serve_native_sessions(
+            listener,
+            registry,
+            "127.0.0.1:8080".parse().unwrap(),
+            "native.agentdesktop.internal:18443".parse().unwrap(),
+            8,
+            Duration::from_secs(1),
+            async move {
+                let _ = stopping.await;
+            },
+        ));
+        let mut client = TcpStream::connect(address).await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+
+        assert!(response.starts_with(b"HTTP/1.1 502 Bad Gateway\r\n"));
         shutdown.send(()).unwrap();
         service.await.unwrap().unwrap();
     }

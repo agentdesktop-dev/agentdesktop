@@ -126,7 +126,11 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         None
     };
 
-    let native_listener = TcpListener::bind(config.listen).await?;
+    #[cfg(all(target_os = "windows", target_env = "msvc"))]
+    let native_bind = config.wfp_proxy_listen.unwrap_or(config.listen);
+    #[cfg(not(all(target_os = "windows", target_env = "msvc")))]
+    let native_bind = config.listen;
+    let native_listener = TcpListener::bind(native_bind).await?;
     let status_listener = TcpListener::bind(config.status_listen).await?;
     tracing::info!(
         event = "connector_started",
@@ -161,24 +165,35 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         ))
     };
     #[cfg(all(target_os = "windows", target_env = "msvc"))]
-    let native_task = if session_state.is_some() {
-        tokio::spawn(forwarder::serve_native_without_attribution(
-            native_listener,
-            config.max_in_flight,
-            wait_for_shutdown(native_shutdown),
-        ))
-    } else {
-        tokio::spawn(forwarder::serve_native(
-            native_listener,
-            hbone
-                .clone()
-                .context("forwarding identity is unavailable")?,
-            config.native_target.clone(),
-            config.max_in_flight,
-            Duration::from_millis(config.shutdown_timeout_ms),
-            wait_for_shutdown(native_shutdown),
-        ))
-    };
+    let native_task =
+        if let (Some((_, registry)), Some(_)) = (&session_state, config.wfp_proxy_listen) {
+            tokio::spawn(forwarder::serve_native_sessions(
+                native_listener,
+                registry.clone(),
+                config.listen,
+                config.native_target.clone(),
+                config.max_in_flight,
+                Duration::from_millis(config.shutdown_timeout_ms),
+                wait_for_shutdown(native_shutdown),
+            ))
+        } else if session_state.is_some() {
+            tokio::spawn(forwarder::serve_native_without_attribution(
+                native_listener,
+                config.max_in_flight,
+                wait_for_shutdown(native_shutdown),
+            ))
+        } else {
+            tokio::spawn(forwarder::serve_native(
+                native_listener,
+                hbone
+                    .clone()
+                    .context("forwarding identity is unavailable")?,
+                config.native_target.clone(),
+                config.max_in_flight,
+                Duration::from_millis(config.shutdown_timeout_ms),
+                wait_for_shutdown(native_shutdown),
+            ))
+        };
     #[cfg(not(any(target_os = "linux", all(target_os = "windows", target_env = "msvc"))))]
     let native_task = tokio::spawn(forwarder::serve_native(
         native_listener,

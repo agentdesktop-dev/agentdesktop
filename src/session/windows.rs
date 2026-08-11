@@ -41,6 +41,22 @@ use crate::session_protocol::{
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct UserSid(Vec<u8>);
 
+impl UserSid {
+    pub(crate) fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
+        let expected_len = bytes
+            .get(1)
+            .map(|sub_authorities| 8 + usize::from(*sub_authorities) * size_of::<u32>());
+        if bytes.first() != Some(&1)
+            || expected_len != Some(bytes.len())
+            || unsafe { windows_sys::Win32::Security::IsValidSid(bytes.as_ptr().cast_mut().cast()) }
+                == 0
+        {
+            anyhow::bail!("WFP redirect context contains an invalid user SID");
+        }
+        Ok(Self(bytes))
+    }
+}
+
 pub struct SessionConnection {
     sid: UserSid,
     registration: Registration,

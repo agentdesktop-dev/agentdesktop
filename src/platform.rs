@@ -2,6 +2,8 @@ use serde::Serialize;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(all(target_os = "windows", target_env = "msvc"))]
+pub mod windows;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct PlatformCapabilities {

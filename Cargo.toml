@@ -51,7 +51,7 @@ netlink-packet-sock-diag = "0.4.2"
 netlink-sys = "0.8.8"
 
 [target.'cfg(all(target_os = "windows", target_env = "msvc"))'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Pipes", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Networking_WinSock", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Pipes", "Win32_System_Threading"] }
 
 [build-dependencies]
 sha2 = "0.10"

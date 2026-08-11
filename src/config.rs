@@ -92,6 +92,11 @@ pub struct Config {
     #[cfg(all(target_os = "windows", target_env = "msvc"))]
     #[arg(long, env = "AGENTDESKTOP_SESSION_PIPE")]
     pub session_pipe: Option<String>,
+
+    /// Hidden loopback listener receiving WFP-redirected native connections.
+    #[cfg(all(target_os = "windows", target_env = "msvc"))]
+    #[arg(long, env = "AGENTDESKTOP_WFP_PROXY_LISTEN")]
+    pub wfp_proxy_listen: Option<SocketAddr>,
 }
 
 impl Config {
@@ -203,6 +208,22 @@ impl Config {
             .is_some_and(|pipe| !pipe.starts_with(r"\\.\pipe\") || pipe.len() <= 9)
         {
             bail!("session pipe must be a local Windows named-pipe path");
+        }
+
+        #[cfg(all(target_os = "windows", target_env = "msvc"))]
+        if let Some(proxy) = self.wfp_proxy_listen {
+            if self.mode != DeploymentMode::Managed {
+                bail!("WFP proxy listener requires managed mode");
+            }
+            if !proxy.ip().is_loopback() {
+                bail!("WFP proxy listen address must be loopback, got {proxy}");
+            }
+            if self.session_pipe.is_none() {
+                bail!("WFP proxy listener requires a Windows session pipe");
+            }
+            if proxy == self.listen || proxy == self.status_listen {
+                bail!("WFP proxy listener must differ from public and status listeners");
+            }
         }
 
         Ok(self)
@@ -505,6 +526,31 @@ mod tests {
             Some(r"\\.\pipe\agentdesktop-sessions")
         );
         assert!(config.identity_issuer.is_none());
+    }
+
+    #[cfg(all(target_os = "windows", target_env = "msvc"))]
+    #[test]
+    fn requires_session_pipe_for_wfp_proxy_listener() {
+        let error = parse(&[
+            "connector",
+            "--mode",
+            "managed",
+            "--upstream",
+            "https://gateway.example/",
+            "--identity-issuer",
+            "https://identity.example/",
+            "--enrollment-url",
+            "https://enrollment.example/",
+            "--wfp-proxy-listen",
+            "127.0.0.1:18080",
+        ])
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("requires a Windows session pipe")
+        );
     }
 
     #[cfg(target_os = "linux")]
