@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package agentplane.fleet.v1;
+package agentdesktop.fleet.v1;
 
 service FleetAgent {
   rpc Enroll(EnrollRequest) returns (EnrollResponse);

@@ -2,7 +2,7 @@ mod claude_code;
 
 use std::path::PathBuf;
 
-use agentplane_core::config::Config;
+use agentdesktop_core::config::Config;
 
 #[derive(Clone)]
 pub struct Reconciler {

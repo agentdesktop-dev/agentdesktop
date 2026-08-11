@@ -2,13 +2,13 @@ use std::{fs, io::Write, path::Path};
 
 use anyhow::Context;
 
-use agentplane_core::config::{
+use agentdesktop_core::config::{
     ClaudeCodeConfig, InferenceGatewayAuthentication, InferenceGatewayConfig,
 };
 use serde::Serialize;
 use tracing::info;
 
-const FILE_NAME: &str = "50-agentplane.json";
+const FILE_NAME: &str = "50-agentdesktop.json";
 
 #[derive(Serialize)]
 struct ManagedSettings<'a> {

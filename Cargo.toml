@@ -16,10 +16,10 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
-agentplane-agent = { path = "crates/agent" }
-agentplane-client = { path = "crates/client" }
-agentplane-core = { path = "crates/core" }
-agentplane-proto = { path = "crates/proto" }
+agentdesktop-agent = { path = "crates/agent" }
+agentdesktop-client = { path = "crates/client" }
+agentdesktop-core = { path = "crates/core" }
+agentdesktop-proto = { path = "crates/proto" }
 anyhow = "1"
 axum = "0.8"
 base64 = "0.22"

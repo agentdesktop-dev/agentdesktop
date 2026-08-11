@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, time::SystemTime};
 
-use agentplane_proto::fleet::DesiredConfig;
+use agentdesktop_proto::fleet::DesiredConfig;
 use axum::{
     Json, Router,
     extract::{Path, State},

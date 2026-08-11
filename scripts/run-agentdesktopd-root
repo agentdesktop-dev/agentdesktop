@@ -8,5 +8,5 @@ export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="${script_dir}/cargo-sudo-ru
 exec cargo run \
   --manifest-path "${workspace_dir}/Cargo.toml" \
   --target x86_64-unknown-linux-gnu \
-  --bin agentplaned \
+  --bin agentdesktopd \
   -- "$@"

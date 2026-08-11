@@ -2,7 +2,7 @@ use anyhow::Context;
 use sqlx::{AnyPool, any::AnyPoolOptions};
 use std::collections::BTreeMap;
 
-use agentplane_proto::fleet::{ConfigStatus, Hello, Inventory};
+use agentdesktop_proto::fleet::{ConfigStatus, Hello, Inventory};
 use serde::Serialize;
 
 #[derive(Clone)]

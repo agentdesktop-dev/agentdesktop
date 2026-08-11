@@ -1,5 +1,5 @@
 [package]
-name = "agentplane-core"
+name = "agentdesktop-core"
 description = "Shared configuration, data models, serialization, and telemetry utilities."
 version.workspace = true
 edition.workspace = true

@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use agentplane_proto::fleet::{BeginEnrollmentResponse, CompleteEnrollmentRequest};
+use agentdesktop_proto::fleet::{BeginEnrollmentResponse, CompleteEnrollmentRequest};
 use anyhow::{Context, bail};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use jsonwebtoken::{DecodingKey, Validation, decode, decode_header, jwk::JwkSet};

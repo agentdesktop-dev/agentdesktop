@@ -1,17 +1,17 @@
 [package]
-name = "agentplane-cli"
-description = "Command-line client for the local Agentplane daemon."
+name = "agentdesktop-cli"
+description = "Command-line client for the local AgentDesktop daemon."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "agentplane"
+name = "agentdesktop"
 path = "src/main.rs"
 
 [dependencies]
-agentplane-client.workspace = true
-agentplane-core.workspace = true
+agentdesktop-client.workspace = true
+agentdesktop-core.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true

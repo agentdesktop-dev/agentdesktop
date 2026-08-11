@@ -4,7 +4,7 @@ mod metadata;
 mod opencode;
 mod vscode;
 
-use agentplane_core::model::Discovery;
+use agentdesktop_core::model::Discovery;
 
 pub async fn discover() -> Discovery {
     let (codex, opencode, claude_code, vscode) = (

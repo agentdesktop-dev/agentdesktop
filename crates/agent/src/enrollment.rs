@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use agentplane_core::model::EnrollmentStatus;
+use agentdesktop_core::model::EnrollmentStatus;
 use tokio::sync::RwLock;
 
 #[derive(Clone)]

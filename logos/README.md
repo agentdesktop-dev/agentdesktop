@@ -1,6 +1,6 @@
-# Agentplane logo
+# AgentDesktop logo
 
-`agentplane.svg` is the canonical Agentplane mark.
+`agentdesktop.svg` is the canonical AgentDesktop mark.
 
 - Primary purple: `#8023C3`
 - Center dot: `#5B168E`
