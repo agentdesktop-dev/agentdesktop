@@ -20,9 +20,13 @@ use tokio::net::windows::named_pipe::{
 };
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
+use windows_sys::Win32::Security::Authorization::{
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+};
 use windows_sys::Win32::Security::{
-    CopySid, GetLengthSid, GetTokenInformation, RevertToSelf, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    CopySid, GetLengthSid, GetTokenInformation, PSECURITY_DESCRIPTOR, RevertToSelf,
+    SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
 use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
@@ -56,10 +60,37 @@ struct RegisteredClient {
 }
 
 pub fn create_server(path: &str) -> Result<NamedPipeServer> {
-    ServerOptions::new()
-        .reject_remote_clients(true)
-        .create(path)
-        .context("create machine session named pipe")
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let sddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error()).context("build machine session pipe ACL");
+    }
+    let descriptor = LocalAllocation(descriptor);
+    let mut attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: 0,
+    };
+    unsafe {
+        ServerOptions::new()
+            .reject_remote_clients(true)
+            .create_with_security_attributes_raw(
+                path,
+                (&mut attributes as *mut SECURITY_ATTRIBUTES).cast(),
+            )
+    }
+    .context("create machine session named pipe")
 }
 
 pub async fn accept(mut pipe: NamedPipeServer) -> Result<SessionConnection> {
@@ -87,38 +118,7 @@ pub async fn run_user_agent(
     reconnect_delay: Duration,
 ) -> Result<()> {
     loop {
-        let result: Result<()> = async {
-            let mut pipe = ClientOptions::new()
-                .open(path)
-                .context("connect to machine forwarder session pipe")?;
-            let (generation, client_identity) = identity.pem_snapshot()?;
-            let certificates = rustls_pemfile::certs(&mut std::io::Cursor::new(
-                &client_identity.certificate_chain_pem,
-            ))
-            .map(|certificate| {
-                certificate
-                    .map(|certificate| {
-                        base64::engine::general_purpose::STANDARD.encode(certificate.as_ref())
-                    })
-                    .context("parse user certificate chain")
-            })
-            .collect::<Result<Vec<_>>>()?;
-            write_frame(
-                &mut pipe,
-                &Registration {
-                    version: crate::session_protocol::VERSION,
-                    certificate_generation: generation,
-                    certificate_chain_der_base64: certificates,
-                    local_gateway: None,
-                },
-            )
-            .await
-            .context("register user certificate")?;
-            let signing_key = P256SigningKey::from_pkcs8_pem(&client_identity.private_key_pem)
-                .context("parse user signing key")?;
-            serve_signing_requests(&mut pipe, &identity, generation, &signing_key).await
-        }
-        .await;
+        let result = run_user_agent_session(path, &identity).await;
         if let Err(error) = result {
             tracing::warn!(event = "session_agent_disconnected", reason = %error);
         }
@@ -129,17 +129,50 @@ pub async fn run_user_agent(
     }
 }
 
+async fn run_user_agent_session(path: &str, identity: &RotatingClientIdentity) -> Result<()> {
+    let mut pipe = ClientOptions::new()
+        .open(path)
+        .context("connect to machine forwarder session pipe")?;
+    let (generation, client_identity) = identity.pem_snapshot()?;
+    let certificates = rustls_pemfile::certs(&mut std::io::Cursor::new(
+        &client_identity.certificate_chain_pem,
+    ))
+    .map(|certificate| {
+        certificate
+            .map(|certificate| {
+                base64::engine::general_purpose::STANDARD.encode(certificate.as_ref())
+            })
+            .context("parse user certificate chain")
+    })
+    .collect::<Result<Vec<_>>>()?;
+    write_frame(
+        &mut pipe,
+        &Registration {
+            version: crate::session_protocol::VERSION,
+            certificate_generation: generation,
+            certificate_chain_der_base64: certificates,
+            local_gateway: None,
+        },
+    )
+    .await
+    .context("register user certificate")?;
+    let signing_key = P256SigningKey::from_pkcs8_pem(&client_identity.private_key_pem)
+        .context("parse user signing key")?;
+    serve_signing_requests(&mut pipe, identity, generation, &signing_key).await
+}
+
 async fn serve_signing_requests(
     pipe: &mut NamedPipeClient,
     identity: &RotatingClientIdentity,
     generation: u64,
     signing_key: &P256SigningKey,
 ) -> Result<()> {
-    let mut generation_check = tokio::time::interval(Duration::from_secs(1));
+    let mut current_generation = identity.subscribe_generation();
     loop {
         tokio::select! {
-            _ = generation_check.tick() => {
-                if identity.pem_snapshot()?.0 != generation {
+            changed = current_generation.changed() => {
+                changed.context("managed identity generation closed")?;
+                if *current_generation.borrow() != generation {
                     return Ok(());
                 }
             }
@@ -449,6 +482,16 @@ impl Drop for OwnedHandle {
     }
 }
 
+struct LocalAllocation(PSECURITY_DESCRIPTOR);
+
+impl Drop for LocalAllocation {
+    fn drop(&mut self) {
+        unsafe {
+            LocalFree(self.0);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,11 +590,8 @@ mod tests {
             private_key_pem,
         });
         let agent_name = name.clone();
-        let agent = tokio::spawn(async move {
-            run_user_agent(&agent_name, identity, Duration::from_millis(10))
-                .await
-                .unwrap();
-        });
+        let mut agent =
+            tokio::spawn(async move { run_user_agent_session(&agent_name, &identity).await });
         let connection = accept(server).await.unwrap();
         assert_eq!(connection.registration().certificate_generation, 1);
         let mut pipe = connection.into_pipe();
@@ -566,7 +606,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let response: AgentResponse = read_frame(&mut pipe).await.unwrap();
+        let response: AgentResponse = match read_frame(&mut pipe).await {
+            Ok(response) => response,
+            Err(error) => panic!(
+                "read signing response: {error}; agent: {:?}",
+                (&mut agent).await
+            ),
+        };
         let AgentResponse::Signature {
             request_id,
             signature_base64,

@@ -20,7 +20,7 @@ use rustls::pki_types::ServerName;
 use rustls::sign::{CertifiedKey, SigningKey, SingleCertAndKey};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, watch};
 use tokio_rustls::TlsConnector;
 
 use crate::identity::enrollment::ClientIdentity;
@@ -32,6 +32,7 @@ type BoxedIo = Box<dyn TunnelIo>;
 #[derive(Clone)]
 pub struct RotatingClientIdentity {
     state: Arc<StdMutex<IdentityState>>,
+    generation: watch::Sender<u64>,
 }
 
 struct IdentityState {
@@ -55,21 +56,25 @@ pub(crate) struct ExternalClientIdentity {
 
 impl RotatingClientIdentity {
     pub fn new(identity: ClientIdentity) -> Self {
+        let (generation, _) = watch::channel(1);
         Self {
             state: Arc::new(StdMutex::new(IdentityState {
                 generation: 1,
                 identity: ClientIdentitySource::Pem(identity),
             })),
+            generation,
         }
     }
 
     #[cfg(any(target_os = "linux", all(target_os = "windows", target_env = "msvc")))]
     pub(crate) fn new_external(identity: ExternalClientIdentity, generation: u64) -> Self {
+        let (generation_tx, _) = watch::channel(generation);
         Self {
             state: Arc::new(StdMutex::new(IdentityState {
                 generation,
                 identity: ClientIdentitySource::External(identity),
             })),
+            generation: generation_tx,
         }
     }
 
@@ -80,6 +85,7 @@ impl RotatingClientIdentity {
             .map_err(|_| anyhow::anyhow!("managed client identity lock poisoned"))?;
         state.identity = ClientIdentitySource::Pem(identity);
         state.generation = state.generation.wrapping_add(1);
+        self.generation.send_replace(state.generation);
         Ok(())
     }
 
@@ -101,6 +107,10 @@ impl RotatingClientIdentity {
                 bail!("external client identity cannot be exported")
             }
         }
+    }
+
+    pub(crate) fn subscribe_generation(&self) -> watch::Receiver<u64> {
+        self.generation.subscribe()
     }
 }
 

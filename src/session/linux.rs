@@ -323,11 +323,12 @@ async fn serve_signing_requests(
     generation: u64,
     signing_key: &P256SigningKey,
 ) -> Result<()> {
-    let mut generation_check = tokio::time::interval(Duration::from_secs(1));
+    let mut current_generation = identity.subscribe_generation();
     loop {
         tokio::select! {
-            _ = generation_check.tick() => {
-                if identity.pem_snapshot()?.0 != generation {
+            changed = current_generation.changed() => {
+                changed.context("managed identity generation closed")?;
+                if *current_generation.borrow() != generation {
                     return Ok(());
                 }
             }
