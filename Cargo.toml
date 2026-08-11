@@ -45,6 +45,11 @@ tempfile = "3"
 rcgen = { version = "0.14.5", default-features = false, features = ["crypto", "pem", "ring", "x509-parser", "zeroize"] }
 x509-parser = "0.18.1"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+netlink-packet-core = "0.7"
+netlink-packet-sock-diag = "0.4.2"
+netlink-sys = "0.8.8"
+
 [build-dependencies]
 sha2 = "0.10"
 zstd = "0.13"

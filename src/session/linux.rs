@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::os::fd::AsFd;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -5,9 +6,16 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use base64::Engine;
+use netlink_packet_core::{NLM_F_REQUEST, NetlinkHeader, NetlinkMessage, NetlinkPayload};
+use netlink_packet_sock_diag::{
+    SockDiagMessage,
+    constants::{AF_INET, AF_INET6, IPPROTO_TCP},
+    inet::{ExtensionFlags, InetRequest, SocketId, StateFlags},
+};
+use netlink_sys::{Socket, SocketAddr as NetlinkSocketAddr, protocols::NETLINK_SOCK_DIAG};
 use rustls::sign::{Signer, SigningKey};
 use rustls::{Error as TlsError, SignatureAlgorithm, SignatureScheme as TlsSignatureScheme};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::{TcpStream, UnixListener, UnixStream};
 
 use crate::session_protocol::{
     AgentResponse, ForwarderRequest, Registration, SignatureScheme, read_frame,
@@ -136,12 +144,105 @@ pub async fn accept(listener: &UnixListener) -> Result<SessionConnection> {
     })
 }
 
+pub async fn native_peer_uid(stream: &TcpStream) -> Result<u32> {
+    let server = stream
+        .local_addr()
+        .context("read native listener address")?;
+    let client = stream.peer_addr().context("read native client address")?;
+    if !server.ip().is_loopback() || !client.ip().is_loopback() {
+        anyhow::bail!("native connection is not loopback");
+    }
+    tokio::task::spawn_blocking(move || query_uid(client, server))
+        .await
+        .context("join native user lookup")?
+}
+
+fn query_uid(client: SocketAddr, server: SocketAddr) -> Result<u32> {
+    let family = match (client, server) {
+        (SocketAddr::V4(_), SocketAddr::V4(_)) => AF_INET,
+        (SocketAddr::V6(_), SocketAddr::V6(_)) => AF_INET6,
+        _ => anyhow::bail!("native connection address families differ"),
+    };
+    let mut socket = Socket::new(NETLINK_SOCK_DIAG).context("open SOCK_DIAG socket")?;
+    socket.bind_auto().context("bind SOCK_DIAG socket")?;
+    socket
+        .connect(&NetlinkSocketAddr::new(0, 0))
+        .context("connect SOCK_DIAG socket")?;
+
+    let mut header = NetlinkHeader::default();
+    header.flags = NLM_F_REQUEST;
+    header.sequence_number = 1;
+    let socket_id = SocketId {
+        source_port: client.port(),
+        destination_port: server.port(),
+        source_address: client.ip(),
+        destination_address: server.ip(),
+        interface_id: 0,
+        cookie: [0xff; 8],
+    };
+    let mut request = NetlinkMessage::new(
+        header,
+        SockDiagMessage::InetRequest(InetRequest {
+            family,
+            protocol: IPPROTO_TCP,
+            extensions: ExtensionFlags::empty(),
+            states: StateFlags::ESTABLISHED,
+            socket_id: socket_id.clone(),
+        })
+        .into(),
+    );
+    request.finalize();
+    let mut outgoing = vec![0; request.buffer_len()];
+    request.serialize(&mut outgoing);
+    socket
+        .send(&outgoing, 0)
+        .context("send SOCK_DIAG request")?;
+
+    let mut incoming = vec![0; 8192];
+    let received = socket
+        .recv(&mut &mut incoming[..], 0)
+        .context("receive SOCK_DIAG response")?;
+    let mut offset = 0;
+    let mut uid = None;
+    while offset < received {
+        let response = NetlinkMessage::<SockDiagMessage>::deserialize(&incoming[offset..received])
+            .context("decode SOCK_DIAG response")?;
+        if response.header.sequence_number != 1 {
+            anyhow::bail!("SOCK_DIAG response sequence does not match request");
+        }
+        match response.payload {
+            NetlinkPayload::InnerMessage(SockDiagMessage::InetResponse(response)) => {
+                let returned = response.header.socket_id;
+                if returned.source_port != socket_id.source_port
+                    || returned.destination_port != socket_id.destination_port
+                    || returned.source_address != socket_id.source_address
+                    || returned.destination_address != socket_id.destination_address
+                {
+                    anyhow::bail!("SOCK_DIAG returned a different connection");
+                }
+                if uid.replace(response.header.uid).is_some() {
+                    anyhow::bail!("SOCK_DIAG returned multiple connection owners");
+                }
+            }
+            NetlinkPayload::Done(_) | NetlinkPayload::Noop => {}
+            payload => anyhow::bail!("SOCK_DIAG lookup failed: {payload:?}"),
+        }
+        let length = response.header.length as usize;
+        if length == 0 {
+            anyhow::bail!("SOCK_DIAG returned an empty message");
+        }
+        offset += (length + 3) & !3;
+    }
+    uid.context("SOCK_DIAG found no matching native connection")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::session_protocol::{VERSION, write_frame};
     use base64::Engine;
     use rcgen::{CertifiedKey, generate_simple_self_signed};
+    use tokio::net::TcpListener;
 
     #[tokio::test]
     async fn derives_uid_from_peer_credentials() {
@@ -230,5 +331,30 @@ mod tests {
 
         agent.await.unwrap();
         assert_eq!(signature, b"DER signature");
+    }
+
+    async fn assert_native_loopback_peer_uid(address: &str) {
+        let listener = TcpListener::bind(address).await.unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+
+        let uid = native_peer_uid(&server).await.unwrap();
+
+        assert_eq!(uid, rustix::process::geteuid().as_raw());
+        drop(client);
+    }
+
+    #[tokio::test]
+    async fn resolves_ipv4_native_loopback_peer_uid() {
+        assert_native_loopback_peer_uid("127.0.0.1:0").await;
+    }
+
+    #[tokio::test]
+    async fn resolves_ipv6_native_loopback_peer_uid_when_available() {
+        if TcpListener::bind("[::1]:0").await.is_ok() {
+            assert_native_loopback_peer_uid("[::1]:0").await;
+        }
     }
 }
