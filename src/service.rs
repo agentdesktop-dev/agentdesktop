@@ -167,13 +167,23 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         let listener = TcpListener::bind("127.0.0.1:15001").await?;
         tracing::info!(event = "capture_relay_ready", listen = %listener.local_addr()?);
         let capture_shutdown = shutdown_rx.clone();
-        Some(tokio::spawn(forwarder::serve_capture(
-            listener,
-            hbone.context("capture forwarding identity is unavailable")?,
-            config.max_in_flight,
-            Duration::from_millis(config.shutdown_timeout_ms),
-            wait_for_shutdown(capture_shutdown),
-        )))
+        if let Some((_, registry)) = &session_state {
+            Some(tokio::spawn(forwarder::serve_capture_sessions(
+                listener,
+                registry.clone(),
+                config.max_in_flight,
+                Duration::from_millis(config.shutdown_timeout_ms),
+                wait_for_shutdown(capture_shutdown),
+            )))
+        } else {
+            Some(tokio::spawn(forwarder::serve_capture(
+                listener,
+                hbone.context("capture forwarding identity is unavailable")?,
+                config.max_in_flight,
+                Duration::from_millis(config.shutdown_timeout_ms),
+                wait_for_shutdown(capture_shutdown),
+            )))
+        }
     } else {
         None
     };

@@ -159,6 +159,15 @@ impl SessionRegistry {
         self.client_for_uid(native_peer_uid(stream).await?).await
     }
 
+    pub async fn client_for_capture(
+        &self,
+        stream: &TcpStream,
+        original_destination: SocketAddr,
+    ) -> Result<HboneClient> {
+        self.client_for_uid(captured_peer_uid(stream, original_destination).await?)
+            .await
+    }
+
     pub async fn remove(&self, uid: u32) {
         self.clients.write().await.remove(&uid);
     }
@@ -478,6 +487,16 @@ pub async fn native_peer_uid(stream: &TcpStream) -> Result<u32> {
     tokio::task::spawn_blocking(move || query_uid(client, server))
         .await
         .context("join native user lookup")?
+}
+
+pub async fn captured_peer_uid(
+    stream: &TcpStream,
+    original_destination: SocketAddr,
+) -> Result<u32> {
+    let client = stream.peer_addr().context("read captured client address")?;
+    tokio::task::spawn_blocking(move || query_uid(client, original_destination))
+        .await
+        .context("join captured user lookup")?
 }
 
 fn query_uid(client: SocketAddr, server: SocketAddr) -> Result<u32> {
@@ -852,6 +871,20 @@ mod tests {
     #[tokio::test]
     async fn resolves_ipv4_native_loopback_peer_uid() {
         assert_native_loopback_peer_uid("127.0.0.1:0").await;
+    }
+
+    #[tokio::test]
+    async fn resolves_captured_peer_uid_from_original_tuple() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let destination = listener.local_addr().unwrap();
+        let client = TcpStream::connect(destination).await.unwrap();
+        let (accepted, _) = listener.accept().await.unwrap();
+
+        assert_eq!(
+            captured_peer_uid(&accepted, destination).await.unwrap(),
+            rustix::process::geteuid().as_raw()
+        );
+        drop(client);
     }
 
     #[tokio::test]

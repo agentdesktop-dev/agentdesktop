@@ -89,7 +89,11 @@ pub async fn local_hbone(
 }
 
 pub fn original_authority(stream: &TcpStream) -> Result<Authority> {
-    Ok(original_destination(stream)?.to_string().parse()?)
+    Ok(original_socket_address(stream)?.to_string().parse()?)
+}
+
+pub fn original_socket_address(stream: &TcpStream) -> Result<SocketAddr> {
+    Ok(original_destination(stream)?)
 }
 
 fn validate_capture_endpoints(listen: SocketAddr, hbone_endpoint: SocketAddr) -> Result<()> {
