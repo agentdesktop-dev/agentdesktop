@@ -111,6 +111,7 @@ enum Transport {
         endpoint: SocketAddr,
         server_name: String,
         identity: RotatingClientIdentity,
+        roots: Option<RootCertStore>,
     },
 }
 
@@ -158,6 +159,28 @@ impl HboneClient {
                 endpoint,
                 server_name,
                 identity,
+                roots: None,
+            },
+            HeaderMap::new(),
+            connect_timeout,
+        )
+        .await
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) async fn connect_mtls_with_roots(
+        endpoint: SocketAddr,
+        server_name: String,
+        identity: RotatingClientIdentity,
+        connect_timeout: Duration,
+        roots: RootCertStore,
+    ) -> Result<Self> {
+        Self::new(
+            Transport::Tls {
+                endpoint,
+                server_name,
+                identity,
+                roots: Some(roots),
             },
             HeaderMap::new(),
             connect_timeout,
@@ -203,10 +226,11 @@ impl HboneClient {
                     Transport::Tls {
                         endpoint,
                         server_name,
+                        roots,
                         ..
                     },
                     Some(identity),
-                ) => Box::new(connect_tls(*endpoint, server_name, identity).await?),
+                ) => Box::new(connect_tls(*endpoint, server_name, identity, roots.clone()).await?),
                 _ => unreachable!("transport and identity snapshot must agree"),
             };
             h2::client::handshake(io)
@@ -282,18 +306,12 @@ async fn connect_tls(
     endpoint: SocketAddr,
     server_name: &str,
     identity: ClientIdentitySource,
+    roots: Option<RootCertStore>,
 ) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
-    let native = rustls_native_certs::load_native_certs();
-    if !native.errors.is_empty() {
-        tracing::warn!(
-            event = "native_ca_load_incomplete",
-            errors = native.errors.len()
-        );
-    }
-    let mut roots = RootCertStore::empty();
-    for certificate in native.certs {
-        roots.add(certificate)?;
-    }
+    let roots = match roots {
+        Some(roots) => roots,
+        None => native_roots()?,
+    };
     let builder = rustls::ClientConfig::builder().with_root_certificates(roots);
     let mut config = match identity {
         ClientIdentitySource::Pem(identity) => {
@@ -317,6 +335,21 @@ async fn connect_tls(
     Ok(TlsConnector::from(Arc::new(config))
         .connect(name, stream)
         .await?)
+}
+
+fn native_roots() -> Result<RootCertStore> {
+    let native = rustls_native_certs::load_native_certs();
+    if !native.errors.is_empty() {
+        tracing::warn!(
+            event = "native_ca_load_incomplete",
+            errors = native.errors.len()
+        );
+    }
+    let mut roots = RootCertStore::empty();
+    for certificate in native.certs {
+        roots.add(certificate)?;
+    }
+    Ok(roots)
 }
 
 async fn drive_connection(

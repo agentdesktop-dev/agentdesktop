@@ -44,6 +44,8 @@ pub struct SessionRegistry {
     endpoint: SocketAddr,
     server_name: String,
     connect_timeout: Duration,
+    #[cfg(test)]
+    roots: Option<rustls::RootCertStore>,
     clients: Arc<RwLock<HashMap<u32, RegisteredClient>>>,
 }
 
@@ -59,8 +61,16 @@ impl SessionRegistry {
             endpoint,
             server_name,
             connect_timeout,
+            #[cfg(test)]
+            roots: None,
             clients: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    #[cfg(test)]
+    fn with_roots(mut self, roots: rustls::RootCertStore) -> Self {
+        self.roots = Some(roots);
+        self
     }
 
     pub async fn register(&self, connection: SessionConnection) -> Result<()> {
@@ -85,6 +95,26 @@ impl SessionRegistry {
             },
             generation,
         );
+        #[cfg(test)]
+        let client = if let Some(roots) = self.roots.clone() {
+            HboneClient::connect_mtls_with_roots(
+                self.endpoint,
+                self.server_name.clone(),
+                identity,
+                self.connect_timeout,
+                roots,
+            )
+            .await?
+        } else {
+            HboneClient::connect_mtls(
+                self.endpoint,
+                self.server_name.clone(),
+                identity,
+                self.connect_timeout,
+            )
+            .await?
+        };
+        #[cfg(not(test))]
         let client = HboneClient::connect_mtls(
             self.endpoint,
             self.server_name.clone(),
@@ -532,11 +562,21 @@ fn query_uid(client: SocketAddr, server: SocketAddr) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::enrollment::ClientIdentity;
     use crate::session_protocol::{VERSION, write_frame};
     use base64::Engine;
-    use rcgen::{CertifiedKey, generate_simple_self_signed};
+    use bytes::Bytes;
+    use http::{Method, Response};
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertifiedIssuer, CertifiedKey, IsCa, KeyPair,
+        PKCS_ECDSA_P256_SHA256, generate_simple_self_signed,
+    };
+    use rustls::pki_types::PrivateKeyDer;
+    use rustls::server::WebPkiClientVerifier;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
+    use tokio_rustls::TlsAcceptor;
 
     #[tokio::test]
     async fn derives_uid_from_peer_credentials() {
@@ -669,6 +709,131 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn registry_client_authenticates_with_user_session_signer() {
+        let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut ca_params = CertificateParams::default();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca = CertifiedIssuer::self_signed(ca_params, ca_key).unwrap();
+
+        let server_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let server_cert = CertificateParams::new(vec!["gateway.test".to_owned()])
+            .unwrap()
+            .signed_by(&server_key, &ca)
+            .unwrap();
+        let client_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let client_cert = CertificateParams::new(vec!["user.test".to_owned()])
+            .unwrap()
+            .signed_by(&client_key, &ca)
+            .unwrap();
+
+        let mut client_roots = rustls::RootCertStore::empty();
+        client_roots.add(ca.der().clone()).unwrap();
+        let verifier = WebPkiClientVerifier::builder(Arc::new(client_roots))
+            .build()
+            .unwrap();
+        let server_key_der = PrivateKeyDer::try_from(server_key.serialize_der()).unwrap();
+        let mut server_config = rustls::ServerConfig::builder()
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(vec![server_cert.der().clone()], server_key_der)
+            .unwrap();
+        server_config.alpn_protocols = vec![b"h2".to_vec()];
+
+        let gateway = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway_address = gateway.local_addr().unwrap();
+        let gateway_task = tokio::spawn(async move {
+            let (stream, _) = gateway.accept().await.unwrap();
+            let tls = TlsAcceptor::from(Arc::new(server_config))
+                .accept(stream)
+                .await
+                .unwrap();
+            assert_eq!(tls.get_ref().1.peer_certificates().unwrap().len(), 1);
+            let mut connection = h2::server::handshake(tls).await.unwrap();
+            let (request, mut respond) = connection.accept().await.unwrap().unwrap();
+            let mut exchange = tokio::spawn(async move {
+                assert_eq!(request.method(), Method::CONNECT);
+                assert_eq!(request.uri().authority().unwrap(), "provider.test:443");
+                let mut receive = request.into_body();
+                let mut send = respond.send_response(Response::new(()), false).unwrap();
+                let bytes = receive.data().await.unwrap().unwrap();
+                receive
+                    .flow_control()
+                    .release_capacity(bytes.len())
+                    .unwrap();
+                assert_eq!(bytes, Bytes::from_static(b"request"));
+                send.send_data(Bytes::from_static(b"response"), true)
+                    .unwrap();
+            });
+            loop {
+                tokio::select! {
+                    result = &mut exchange => {
+                        result.unwrap();
+                        break;
+                    }
+                    accepted = connection.accept() => {
+                        assert!(accepted.is_some(), "H2 connection closed before tunnel exchange");
+                    }
+                }
+            }
+        });
+
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("sessions.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let identity = RotatingClientIdentity::new(ClientIdentity {
+            certificate_chain_pem: client_cert.pem(),
+            private_key_pem: client_key.serialize_pem(),
+        });
+        let agent = tokio::spawn(async move {
+            let mut stream = UnixStream::connect(socket_path).await.unwrap();
+            let (generation, client_identity) = identity.pem_snapshot().unwrap();
+            write_frame(
+                &mut stream,
+                &Registration {
+                    version: VERSION,
+                    certificate_generation: generation,
+                    certificate_chain_der_base64: vec![
+                        base64::engine::general_purpose::STANDARD.encode(client_cert.der()),
+                    ],
+                },
+            )
+            .await
+            .unwrap();
+            let signing_key =
+                P256SigningKey::from_pkcs8_pem(&client_identity.private_key_pem).unwrap();
+            serve_signing_requests(&mut stream, &identity, generation, &signing_key)
+                .await
+                .unwrap();
+        });
+
+        let connection = accept(&listener).await.unwrap();
+        let uid = connection.uid();
+        let mut server_roots = rustls::RootCertStore::empty();
+        server_roots.add(ca.der().clone()).unwrap();
+        let registry = SessionRegistry::new(
+            gateway_address,
+            "gateway.test".to_owned(),
+            Duration::from_secs(2),
+        )
+        .with_roots(server_roots);
+        registry.register(connection).await.unwrap();
+        let mut tunnel = registry
+            .client_for_uid(uid)
+            .await
+            .unwrap()
+            .open_tunnel("provider.test:443".parse().unwrap())
+            .await
+            .unwrap();
+        tunnel.write_all(b"request").await.unwrap();
+        tunnel.shutdown().await.unwrap();
+        let mut response = Vec::new();
+        tunnel.read_to_end(&mut response).await.unwrap();
+
+        assert_eq!(response, b"response");
+        gateway_task.await.unwrap();
+        agent.abort();
     }
 
     async fn assert_native_loopback_peer_uid(address: &str) {
