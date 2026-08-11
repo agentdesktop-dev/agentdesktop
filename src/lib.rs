@@ -10,6 +10,8 @@ pub mod local_gateway;
 pub mod organization;
 pub mod platform;
 pub mod service;
+pub mod session;
+pub mod session_protocol;
 pub mod telemetry;
 #[cfg(target_os = "linux")]
 pub mod trust;
