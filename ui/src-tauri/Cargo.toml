@@ -13,5 +13,5 @@ agentplane-client.workspace = true
 agentplane-core.workspace = true
 open.workspace = true
 serde = { version = "1", features = ["derive"] }
-tauri = { version = "2.11.5", features = ["tray-icon"] }
+tauri = { version = "2.11.5", features = ["tray-icon", "image-png"] }
 tokio = { version = "1", features = ["time"] }

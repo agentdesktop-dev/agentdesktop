@@ -66,15 +66,9 @@ a {
 }
 
 .brand-mark {
-  width: 24px;
-  height: 24px;
-  display: grid;
-  place-items: center;
-  color: #fff;
-  background: #1f2328;
-  border-radius: 4px;
-  font-size: 12px;
-  font-weight: 700;
+  width: 26px;
+  height: 26px;
+  display: block;
 }
 
 .primary-nav {
