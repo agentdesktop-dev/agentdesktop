@@ -2,7 +2,7 @@ mod claude_code;
 
 use std::path::PathBuf;
 
-use agentdesktop_core::config::Config;
+use agentdesktop_core::config::DesiredConfig;
 
 #[derive(Clone)]
 pub struct Reconciler {
@@ -18,7 +18,7 @@ impl Reconciler {
         }
     }
 
-    pub fn apply(&self, config: &Config) -> anyhow::Result<()> {
+    pub fn apply(&self, config: &DesiredConfig) -> anyhow::Result<()> {
         let claude_code = config.programs.claude_code.as_ref().map(|claude_code| {
             let gateway = &config.inference_gateways[&claude_code.inference_gateway];
             (claude_code, gateway)

@@ -17,6 +17,7 @@ use tonic::transport::{Identity, Server, ServerTlsConfig};
 #[derive(Parser)]
 #[command(about = "AgentDesktop fleet controller")]
 struct Args {
+    /// Address on which the device-facing gRPC fleet API listens.
     #[arg(long, default_value = "127.0.0.1:8443")]
     listen: SocketAddr,
 
@@ -24,42 +25,55 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:8080")]
     admin_listen: SocketAddr,
 
+    /// Shared bootstrap token accepted for device enrollment.
     #[arg(long)]
     enrollment_token: Option<String>,
 
+    /// OpenID Connect issuer URL used for interactive device enrollment.
     #[arg(long, requires = "oidc_client_id")]
     oidc_issuer: Option<String>,
 
+    /// OpenID Connect client identifier used for interactive device enrollment.
     #[arg(long, requires = "oidc_issuer")]
     oidc_client_id: Option<String>,
 
+    /// Redirect URI registered with the OpenID Connect provider.
     #[arg(long, default_value = "http://127.0.0.1:5555/callback")]
     oidc_redirect_uri: String,
 
+    /// SQLite or PostgreSQL URL used for controller state.
     #[arg(long, default_value = "sqlite://agentdesktop-controller.db?mode=rwc")]
     database_url: String,
 
+    /// Path to the YAML configuration distributed to enrolled devices.
     #[arg(long)]
     desired_config: Option<PathBuf>,
 
+    /// Monotonically increasing revision assigned to the desired configuration.
     #[arg(long, default_value_t = 1)]
     desired_config_revision: u64,
 
+    /// Path to an RSA private key used to issue inference-gateway JWTs.
     #[arg(long)]
     gateway_jwt_private_key: Option<PathBuf>,
 
+    /// Issuer claim placed in inference-gateway JWTs.
     #[arg(long, default_value = "agentdesktop-controller")]
     gateway_jwt_issuer: String,
 
+    /// Key identifier placed in inference-gateway JWT headers.
     #[arg(long, default_value = "agentdesktop")]
     gateway_jwt_key_id: String,
 
+    /// Lifetime, in seconds, of issued inference-gateway JWTs.
     #[arg(long, default_value_t = 300)]
     gateway_jwt_lifetime_seconds: u64,
 
+    /// Path to the PEM-encoded TLS certificate for the fleet API.
     #[arg(long, requires = "tls_key")]
     tls_certificate: Option<PathBuf>,
 
+    /// Path to the PEM-encoded TLS private key for the fleet API.
     #[arg(long, requires = "tls_certificate")]
     tls_key: Option<PathBuf>,
 }

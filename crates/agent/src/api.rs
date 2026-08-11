@@ -9,7 +9,7 @@ use axum::{
 use serde::Serialize;
 
 use agentdesktop_core::{
-    config::{Config, ControllerConfig},
+    config::{ControllerConfig, DaemonConfig},
     model::{Discovery, EnrollmentStatus, InferenceGatewayCredential},
 };
 
@@ -17,7 +17,7 @@ use crate::{enrollment::EnrollmentState, remote};
 
 #[derive(Clone)]
 pub struct AppState {
-    pub config: Config,
+    pub config: DaemonConfig,
     pub discovery: Discovery,
     pub enrollment: EnrollmentState,
     pub controller: Option<ControllerConfig>,
@@ -46,7 +46,7 @@ async fn health() -> Json<Health> {
     Json(Health { status: "ok" })
 }
 
-async fn config(State(state): State<AppState>) -> Json<Config> {
+async fn config(State(state): State<AppState>) -> Json<DaemonConfig> {
     Json(state.config)
 }
 

@@ -7,6 +7,7 @@ members = [
     "crates/controller",
     "crates/core",
     "crates/proto",
+    "crates/xtask",
     "ui/src-tauri",
 ]
 
@@ -35,6 +36,7 @@ open = "5.4"
 prost = "0.14"
 rand = "0.9"
 reqwest = { version = "0.13", default-features = false, features = ["charset", "http2", "json", "rustls"] }
+schemars = "=1.2.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_json_path_to_error = "0.1"

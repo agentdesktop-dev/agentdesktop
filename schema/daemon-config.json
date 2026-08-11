@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DaemonConfig",
+  "description": "Local startup configuration for an AgentDesktop daemon.",
+  "type": "object",
+  "properties": {
+    "controller": {
+      "description": "Controller connection settings. Omit this field to run without fleet management.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ControllerConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "inferenceGateways": {
+      "description": "Named inference gateways used as the local desired-state baseline.\n\nNames may contain letters, numbers, `.`, `-`, and `_`.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/InferenceGatewayConfig"
+      }
+    },
+    "programs": {
+      "description": "Per-program settings used as the local desired-state baseline.",
+      "$ref": "#/$defs/ProgramsConfig"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "ClaudeCodeConfig": {
+      "description": "Settings reconciled into Claude Code's managed configuration.",
+      "type": "object",
+      "properties": {
+        "inferenceGateway": {
+          "description": "Name of an entry in `inferenceGateways` that Claude Code should use.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "inferenceGateway"
+      ]
+    },
+    "ControllerConfig": {
+      "description": "Connection settings for the fleet controller.",
+      "type": "object",
+      "properties": {
+        "address": {
+          "description": "HTTP or HTTPS address of the controller's fleet API.",
+          "type": "string"
+        },
+        "caCertificatePath": {
+          "description": "Path to a PEM-encoded CA certificate used to verify the controller.\n\nOmit this field to use the operating system's trusted certificate roots.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "heartbeatInterval": {
+          "description": "Interval between device heartbeats. Defaults to `30s`.",
+          "type": "string",
+          "default": "30s"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "address"
+      ]
+    },
+    "InferenceGatewayAuthentication": {
+      "description": "Authentication mechanisms supported by an inference gateway.",
+      "oneOf": [
+        {
+          "description": "Request a short-lived JWT from the controller using the device identity.",
+          "type": "object",
+          "properties": {
+            "audience": {
+              "description": "Audience placed in the issued JWT. This must match the gateway's expected audience.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "controllerJwt"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "audience"
+          ]
+        }
+      ]
+    },
+    "InferenceGatewayConfig": {
+      "description": "Connection and authentication settings for an inference gateway.",
+      "type": "object",
+      "properties": {
+        "authentication": {
+          "description": "Authentication mechanism used when connecting to this gateway.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InferenceGatewayAuthentication"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "url": {
+          "description": "Base HTTP or HTTPS URL of the inference gateway.\n\nThe URL must include a host and cannot include credentials, a query, or a fragment.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "url"
+      ]
+    },
+    "ProgramsConfig": {
+      "description": "Settings for developer tools managed by AgentDesktop.",
+      "type": "object",
+      "properties": {
+        "claudeCode": {
+          "description": "Claude Code managed-settings configuration.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClaudeCodeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

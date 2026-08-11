@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DesiredConfig",
+  "description": "Desired configuration distributed by the controller and reconciled by a daemon.",
+  "type": "object",
+  "properties": {
+    "inferenceGateways": {
+      "description": "Named inference gateways that managed developer tools can use.\n\nNames may contain letters, numbers, `.`, `-`, and `_`.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/InferenceGatewayConfig"
+      }
+    },
+    "programs": {
+      "description": "Per-program settings reconciled on this device.",
+      "$ref": "#/$defs/ProgramsConfig"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "ClaudeCodeConfig": {
+      "description": "Settings reconciled into Claude Code's managed configuration.",
+      "type": "object",
+      "properties": {
+        "inferenceGateway": {
+          "description": "Name of an entry in `inferenceGateways` that Claude Code should use.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "inferenceGateway"
+      ]
+    },
+    "InferenceGatewayAuthentication": {
+      "description": "Authentication mechanisms supported by an inference gateway.",
+      "oneOf": [
+        {
+          "description": "Request a short-lived JWT from the controller using the device identity.",
+          "type": "object",
+          "properties": {
+            "audience": {
+              "description": "Audience placed in the issued JWT. This must match the gateway's expected audience.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "controllerJwt"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "audience"
+          ]
+        }
+      ]
+    },
+    "InferenceGatewayConfig": {
+      "description": "Connection and authentication settings for an inference gateway.",
+      "type": "object",
+      "properties": {
+        "authentication": {
+          "description": "Authentication mechanism used when connecting to this gateway.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InferenceGatewayAuthentication"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "url": {
+          "description": "Base HTTP or HTTPS URL of the inference gateway.\n\nThe URL must include a host and cannot include credentials, a query, or a fragment.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "url"
+      ]
+    },
+    "ProgramsConfig": {
+      "description": "Settings for developer tools managed by AgentDesktop.",
+      "type": "object",
+      "properties": {
+        "claudeCode": {
+          "description": "Claude Code managed-settings configuration.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClaudeCodeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

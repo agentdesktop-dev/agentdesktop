@@ -1,0 +1,11 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+agentdesktop-core = { workspace = true, features = ["schema"] }
+anyhow.workspace = true
+schemars.workspace = true
+serde_json.workspace = true
