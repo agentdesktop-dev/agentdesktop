@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.ref_name) || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CI: true
+
+jobs:
+  check:
+    name: Test and lint
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libwebkit2gtk-4.1-dev \
+            patchelf \
+            protobuf-compiler
+
+      - name: Install Node
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version-file: ui/.nvmrc
+
+      - name: Install UI dependencies
+        run: |
+          corepack enable
+          corepack pnpm --dir ui install --frozen-lockfile
+
+      - name: Set up Rust build cache
+        uses: ./.github/actions/rust-build-cache
+        with:
+          cache-key: ci
+          save: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Test
+        run: make test
+
+      - name: Lint
+        run: make check
+
+      - name: Check generated schemas
+        run: |
+          make generate-schema
+          git diff --exit-code -- schema
+
+  container:
+    name: Container
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Build controller image
+        run: make docker

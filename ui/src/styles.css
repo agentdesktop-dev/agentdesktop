@@ -487,6 +487,12 @@ tbody tr:hover {
   font-size: 10px;
 }
 
+.mono-soft,
+code {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+}
+
 .capability-row code,
 .capability-row small {
   margin-top: 4px;
@@ -578,12 +584,6 @@ tbody tr:hover {
 
 .row-arrow {
   color: #8c959f;
-}
-
-.mono-soft,
-code {
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
 }
 
 .mono-soft {

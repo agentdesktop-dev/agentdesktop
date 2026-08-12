@@ -1,4 +1,8 @@
-use std::{fs, path::PathBuf, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use agentdesktop_core::config::{DaemonConfig, DesiredConfig};
 use anyhow::{Context, Result, bail};
@@ -14,7 +18,7 @@ pub fn generate() -> Result<()> {
     Ok(())
 }
 
-fn write_schema<T: JsonSchema>(root: &PathBuf, stem: &str, title: &str) -> Result<()> {
+fn write_schema<T: JsonSchema>(root: &Path, stem: &str, title: &str) -> Result<()> {
     let schema_dir = root.join("schema");
     fs::write(schema_dir.join(format!("{stem}.json")), make::<T>(false)?)
         .with_context(|| format!("write schema/{stem}.json"))?;

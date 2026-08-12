@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf, process::Command};
+use std::{env, path::PathBuf};
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
@@ -14,14 +14,8 @@ fn main() {
     ] {
         println!("cargo:rerun-if-changed={path}");
     }
-
-    let status = Command::new("pnpm")
-        .args(["frontend:build"])
-        .current_dir(&ui_dir)
-        .status()
-        .expect("pnpm is required to build the embedded controller UI");
     assert!(
-        status.success(),
-        "failed to build the embedded controller UI"
+        ui_dir.join("dist/index.html").is_file(),
+        "controller UI is not built; run `make ui` first"
     );
 }

@@ -1,0 +1,36 @@
+name: Rust build cache
+description: Set up Rust and restore source-aware build artifacts
+
+inputs:
+  cache-key:
+    description: Cache namespace shared by equivalent jobs
+    required: true
+  save:
+    description: Save the cache after a successful job
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
+      with:
+        toolchain: "1.97"
+        components: clippy,rustfmt
+
+    # Cargo relies heavily on mtimes. Restoring source mtimes allows cached
+    # workspace artifacts to remain valid on a fresh checkout.
+    - name: Restore source mtimes
+      shell: bash
+      run: |
+        curl --fail --silent --show-error --location \
+          https://raw.githubusercontent.com/howardjohn/git-restore-mtime-action/b77092831982028ae46f86c64831e6e0dde7ee8f/git-restore-mtime |
+          python3 - --commit-time
+
+    - name: Restore Rust cache
+      uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      with:
+        shared-key: ${{ inputs.cache-key }}
+        cache-workspace-crates: true
+        save-if: ${{ inputs.save }}

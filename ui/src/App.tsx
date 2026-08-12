@@ -616,14 +616,22 @@ function ToolInventory({
             servers
               .slice(visibleServerPage * 5, visibleServerPage * 5 + 5)
               .map((server) => (
-              <div className="capability-row" key={`${server.source}-${server.name}`}>
-                <div>
-                  <strong>{server.name}</strong>
-                  <span>{server.transport}{server.enabled ? "" : " · disabled"}</span>
+                <div
+                  className="capability-row"
+                  key={`${server.source}-${server.name}`}
+                >
+                  <div>
+                    <strong>{server.name}</strong>
+                    <span>
+                      {server.transport}
+                      {server.enabled ? "" : " · disabled"}
+                    </span>
+                  </div>
+                  <code>
+                    {server.url ?? server.command ?? "No endpoint reported"}
+                  </code>
+                  <small>{server.source}</small>
                 </div>
-                <code>{server.url ?? server.command ?? "No endpoint reported"}</code>
-                <small>{server.source}</small>
-              </div>
               ))
           ) : (
             <p className="capability-empty">No MCP servers reported.</p>
@@ -640,15 +648,18 @@ function ToolInventory({
             skills
               .slice(visibleSkillPage * 5, visibleSkillPage * 5 + 5)
               .map((skill) => (
-              <div className="capability-row" key={skill.path}>
-                <div>
-                  <strong>{frontMatterText(skill.frontMatter.name) ?? "Unnamed skill"}</strong>
+                <div className="capability-row" key={skill.path}>
+                  <div>
+                    <strong>
+                      {frontMatterText(skill.frontMatter.name) ??
+                        "Unnamed skill"}
+                    </strong>
+                  </div>
+                  {frontMatterText(skill.frontMatter.description) && (
+                    <p>{frontMatterText(skill.frontMatter.description)}</p>
+                  )}
+                  <small>{skill.path}</small>
                 </div>
-                {frontMatterText(skill.frontMatter.description) && (
-                  <p>{frontMatterText(skill.frontMatter.description)}</p>
-                )}
-                <small>{skill.path}</small>
-              </div>
               ))
           ) : (
             <p className="capability-empty">No skills reported.</p>
@@ -676,9 +687,12 @@ function CapabilitySection({
   return (
     <section className="capability-section">
       <div className="capability-heading">
-        <h4>{icon}{title}</h4>
+        <h4>
+          {icon}
+          {title}
+        </h4>
         {pages > 1 && (
-          <div className="mini-pager" aria-label={`${title} pages`}>
+          <nav className="mini-pager" aria-label={`${title} pages`}>
             <button
               type="button"
               aria-label={`Previous ${title} page`}
@@ -687,7 +701,9 @@ function CapabilitySection({
             >
               <ChevronLeft size={12} />
             </button>
-            <span>{page + 1}/{pages}</span>
+            <span>
+              {page + 1}/{pages}
+            </span>
             <button
               type="button"
               aria-label={`Next ${title} page`}
@@ -696,7 +712,7 @@ function CapabilitySection({
             >
               <ChevronRight size={12} />
             </button>
-          </div>
+          </nav>
         )}
       </div>
       {children}
