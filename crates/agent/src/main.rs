@@ -1,6 +1,6 @@
 use std::{
     net::SocketAddr,
-    os::unix::fs::{FileTypeExt, PermissionsExt, chown},
+    os::unix::fs::{FileTypeExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
@@ -27,12 +27,6 @@ struct Args {
     /// Directory used for the device identity and other persistent daemon state.
     #[arg(long, default_value = DEFAULT_STATE_DIR)]
     state_dir: PathBuf,
-
-    /// Shared bootstrap token used to enroll a device that has no saved identity.
-    ///
-    /// The `AGENTDESKTOP_ENROLLMENT_TOKEN` environment variable is used when this option is absent.
-    #[arg(long)]
-    enrollment_token: Option<String>,
 
     /// Address for the OIDC callback server to bind instead of the redirect URI's loopback address.
     #[arg(long)]
@@ -62,6 +56,7 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let _log_flush = telemetry::setup_logging("info", false);
+    agentdesktop_agent::secure_fs::ensure_private_dir(&args.state_dir)?;
     let config = config::load_daemon(&args.config)?;
     let controller_config = config.controller.clone();
     let enrollment = EnrollmentState::new(config.controller.is_some());
@@ -90,7 +85,11 @@ async fn main() -> anyhow::Result<()> {
                 })?)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                (!local_desired.is_empty()).then_some(local_desired)
+                let manages_program = local_desired.programs.claude_code.is_some()
+                    || local_desired.programs.codex.is_some()
+                    || local_desired.programs.open_code.is_some();
+                (local_desired.inference_gateway.is_some() || manages_program)
+                    .then_some(local_desired)
             }
             Err(error) => {
                 return Err(error).with_context(|| {
@@ -125,9 +124,6 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     if let Some(controller) = config.controller.clone() {
-        let enrollment_token = args
-            .enrollment_token
-            .or_else(|| std::env::var("AGENTDESKTOP_ENROLLMENT_TOKEN").ok());
         let remote_discovery = discovery.clone();
         let state_dir = args.state_dir.clone();
         let oidc_callback_listen = args.oidc_callback_listen;
@@ -137,7 +133,6 @@ async fn main() -> anyhow::Result<()> {
                 controller,
                 remote_discovery,
                 state_dir,
-                enrollment_token,
                 oidc_callback_listen,
                 reconciler,
                 remote_enrollment.clone(),
@@ -224,14 +219,9 @@ fn bind(path: &PathBuf) -> anyhow::Result<UnixListener> {
 }
 
 fn configure_socket_access(path: &Path) -> anyhow::Result<()> {
-    if let Some(gid) = std::env::var("SUDO_GID")
-        .ok()
-        .and_then(|gid| gid.parse::<u32>().ok())
-    {
-        chown(path, None, Some(gid))
-            .with_context(|| format!("set socket group on {}", path.display()))?;
-    }
-
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
+    // The local API intentionally permits arbitrary clients. In particular,
+    // client_id on credential requests is caller-asserted rather than an
+    // authenticated process identity.
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))
         .with_context(|| format!("set socket permissions on {}", path.display()))
 }

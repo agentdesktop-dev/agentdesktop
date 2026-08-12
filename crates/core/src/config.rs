@@ -2,6 +2,7 @@
 
 use std::{
     collections::BTreeMap,
+    net::SocketAddr,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -17,7 +18,7 @@ use url::Url;
 pub struct DaemonConfig {
     /// Controller connection settings. Omit this field to run without fleet management.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub controller: Option<ControllerConfig>,
+    pub controller: Option<ControllerConnectionConfig>,
     /// Inference gateway used as the local desired-state baseline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inference_gateway: Option<InferenceGatewayConfig>,
@@ -66,11 +67,11 @@ pub enum InferenceGatewayAuthentication {
     },
 }
 
-/// Connection settings for the fleet controller.
+/// Connection settings used by a daemon to reach the fleet controller.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ControllerConfig {
+pub struct ControllerConnectionConfig {
     /// HTTP or HTTPS address of the controller's fleet API.
     pub address: String,
     /// Path to a PEM-encoded CA certificate used to verify the controller.
@@ -82,6 +83,156 @@ pub struct ControllerConfig {
     #[serde(default = "default_heartbeat_interval", with = "humantime_serde")]
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub heartbeat_interval: Duration,
+}
+
+/// Startup configuration for the AgentDesktop fleet controller.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerConfig {
+    /// Address on which the device-facing gRPC fleet API listens.
+    #[serde(default = "default_fleet_listen")]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub fleet_listen: SocketAddr,
+    /// Loopback address on which the controller management UI listens.
+    #[serde(default = "default_admin_listen")]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub admin_listen: SocketAddr,
+    /// SQLite or PostgreSQL URL used for controller state.
+    #[serde(default = "default_controller_database_url")]
+    pub database_url: String,
+    /// OpenID Connect enrollment settings. Omit to disable new enrollment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oidc: Option<ControllerOidcConfig>,
+    /// Desired configuration distributed to enrolled devices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired_config: Option<ControllerDesiredConfig>,
+    /// Inference-gateway JWT signing settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_jwt: Option<ControllerGatewayJwtConfig>,
+    /// TLS identity used by the device-facing fleet API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<ControllerTlsConfig>,
+    /// Permit plaintext remote fleet traffic and non-HTTPS OIDC.
+    ///
+    /// This escape hatch is only appropriate for isolated local development.
+    #[serde(default)]
+    pub allow_insecure_dev: bool,
+}
+
+/// OpenID Connect settings used for interactive device enrollment.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerOidcConfig {
+    /// Exact OpenID Connect issuer URL.
+    pub issuer: String,
+    /// Public OpenID Connect client identifier.
+    pub client_id: String,
+    /// Redirect URI registered for the native enrollment client.
+    #[serde(default = "default_oidc_redirect_uri")]
+    pub redirect_uri: String,
+}
+
+/// Controller-owned desired configuration file and its revision.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerDesiredConfig {
+    /// Path to the YAML configuration distributed to enrolled devices.
+    ///
+    /// Relative paths are resolved from the controller configuration directory.
+    pub path: PathBuf,
+    /// Monotonically increasing revision assigned to the desired configuration.
+    #[serde(default = "default_desired_config_revision")]
+    pub revision: u64,
+}
+
+/// Settings for issuing short-lived inference-gateway JWTs.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerGatewayJwtConfig {
+    /// Path to the PEM-encoded RSA private signing key.
+    ///
+    /// Relative paths are resolved from the controller configuration directory.
+    pub private_key: PathBuf,
+    /// Issuer claim placed in generated JWTs.
+    #[serde(default = "default_gateway_jwt_issuer")]
+    pub issuer: String,
+    /// Key identifier placed in generated JWT headers.
+    #[serde(default = "default_gateway_jwt_key_id")]
+    pub key_id: String,
+    /// Lifetime of generated JWTs. Defaults to `5m`.
+    #[serde(default = "default_gateway_jwt_lifetime", with = "humantime_serde")]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub lifetime: Duration,
+}
+
+/// TLS certificate and private key used by the fleet API.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerTlsConfig {
+    /// Path to the PEM-encoded TLS certificate chain.
+    ///
+    /// Relative paths are resolved from the controller configuration directory.
+    pub certificate: PathBuf,
+    /// Path to the PEM-encoded TLS private key.
+    ///
+    /// Relative paths are resolved from the controller configuration directory.
+    pub key: PathBuf,
+}
+
+impl Default for ControllerConfig {
+    fn default() -> Self {
+        Self {
+            fleet_listen: default_fleet_listen(),
+            admin_listen: default_admin_listen(),
+            database_url: default_controller_database_url(),
+            oidc: None,
+            desired_config: None,
+            gateway_jwt: None,
+            tls: None,
+            allow_insecure_dev: false,
+        }
+    }
+}
+
+fn default_fleet_listen() -> SocketAddr {
+    "127.0.0.1:8443"
+        .parse()
+        .expect("valid fleet listen default")
+}
+
+fn default_admin_listen() -> SocketAddr {
+    "127.0.0.1:8080"
+        .parse()
+        .expect("valid admin listen default")
+}
+
+fn default_controller_database_url() -> String {
+    "sqlite://agentdesktop-controller.db?mode=rwc".to_owned()
+}
+
+fn default_oidc_redirect_uri() -> String {
+    "http://127.0.0.1:5555/callback".to_owned()
+}
+
+fn default_desired_config_revision() -> u64 {
+    1
+}
+
+fn default_gateway_jwt_issuer() -> String {
+    "agentdesktop-controller".to_owned()
+}
+
+fn default_gateway_jwt_key_id() -> String {
+    "agentdesktop".to_owned()
+}
+
+fn default_gateway_jwt_lifetime() -> Duration {
+    Duration::from_secs(5 * 60)
 }
 
 fn default_heartbeat_interval() -> Duration {
@@ -172,6 +323,79 @@ pub fn load_daemon(path: &Path) -> anyhow::Result<DaemonConfig> {
     parse_daemon(&contents).with_context(|| format!("parse configuration from {}", path.display()))
 }
 
+/// Loads and validates a controller YAML configuration file from `path`.
+pub fn load_controller(path: &Path) -> anyhow::Result<ControllerConfig> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("read controller configuration from {}", path.display()))?;
+    let mut config = parse_controller(&contents)
+        .with_context(|| format!("parse controller configuration from {}", path.display()))?;
+    let directory = path.parent().unwrap_or_else(|| Path::new("."));
+    if let Some(desired) = &mut config.desired_config {
+        resolve_relative(&mut desired.path, directory);
+    }
+    if let Some(gateway) = &mut config.gateway_jwt {
+        resolve_relative(&mut gateway.private_key, directory);
+    }
+    if let Some(tls) = &mut config.tls {
+        resolve_relative(&mut tls.certificate, directory);
+        resolve_relative(&mut tls.key, directory);
+    }
+    Ok(config)
+}
+
+/// Parses and validates a controller YAML configuration document.
+pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
+    let config: ControllerConfig =
+        crate::serdes::yamlviajson::from_str(contents).context("parse controller configuration")?;
+    if !config.admin_listen.ip().is_loopback() {
+        anyhow::bail!("adminListen must use a loopback address");
+    }
+    if !config.fleet_listen.ip().is_loopback() && config.tls.is_none() && !config.allow_insecure_dev
+    {
+        anyhow::bail!(
+            "a non-loopback fleetListen requires tls; allowInsecureDev is only for isolated development"
+        );
+    }
+    if let Some(oidc) = &config.oidc {
+        if oidc.client_id.trim().is_empty() {
+            anyhow::bail!("oidc.clientId cannot be empty");
+        }
+        let issuer = Url::parse(&oidc.issuer).context("parse oidc.issuer URL")?;
+        match issuer.scheme() {
+            "https" => {}
+            "http" if config.allow_insecure_dev => {}
+            "http" => anyhow::bail!(
+                "oidc.issuer must use HTTPS; allowInsecureDev is only for isolated development"
+            ),
+            scheme => anyhow::bail!("oidc.issuer must use HTTPS, got {scheme}"),
+        }
+        Url::parse(&oidc.redirect_uri).context("parse oidc.redirectUri URL")?;
+    }
+    if let Some(desired) = &config.desired_config
+        && desired.revision == 0
+    {
+        anyhow::bail!("desiredConfig.revision must be greater than zero");
+    }
+    if let Some(gateway) = &config.gateway_jwt {
+        if gateway.issuer.trim().is_empty() {
+            anyhow::bail!("gatewayJwt.issuer cannot be empty");
+        }
+        if gateway.key_id.trim().is_empty() {
+            anyhow::bail!("gatewayJwt.keyId cannot be empty");
+        }
+        if gateway.lifetime.is_zero() {
+            anyhow::bail!("gatewayJwt.lifetime must be greater than zero");
+        }
+    }
+    Ok(config)
+}
+
+fn resolve_relative(path: &mut PathBuf, directory: &Path) {
+    if path.is_relative() {
+        *path = directory.join(&*path);
+    }
+}
+
 /// Parses and validates a daemon YAML configuration document.
 pub fn parse_daemon(contents: &str) -> anyhow::Result<DaemonConfig> {
     let config: DaemonConfig =
@@ -250,7 +474,7 @@ fn validate_desired(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_daemon, parse_desired};
+    use super::{parse_controller, parse_daemon, parse_desired};
 
     #[test]
     fn daemon_options_are_not_valid_desired_configuration() {
@@ -271,6 +495,8 @@ programs:
 
     #[test]
     fn checked_in_examples_use_their_declared_configuration_surface() {
+        parse_controller(include_str!("../../../controller.yaml.example"))
+            .expect("controller example");
         parse_daemon(include_str!("../../../config.yaml")).expect("base daemon example");
         parse_daemon(include_str!("../../../config.controller.yaml.example"))
             .expect("controller-connected daemon example");
@@ -281,6 +507,31 @@ programs:
             .expect("Codex desired configuration example");
         parse_desired(include_str!("../../../config.opencode.yaml.example"))
             .expect("OpenCode desired configuration example");
+    }
+
+    #[test]
+    fn controller_requires_secure_remote_transports() {
+        assert!(
+            parse_controller(
+                r#"
+fleetListen: 0.0.0.0:8443
+oidc:
+  issuer: http://idp.example.com
+  clientId: agentdesktop
+"#,
+            )
+            .is_err()
+        );
+        parse_controller(
+            r#"
+fleetListen: 0.0.0.0:8443
+allowInsecureDev: true
+oidc:
+  issuer: http://idp.example.com
+  clientId: agentdesktop
+"#,
+        )
+        .expect("explicit insecure development configuration");
     }
 
     #[test]

@@ -1,0 +1,15 @@
+# Local controller development configuration.
+fleetListen: 0.0.0.0:8443
+allowInsecureDev: true
+
+databaseUrl: sqlite:///tmp/agentdesktop-controller.db?mode=rwc
+
+oidc:
+  issuer: http://dex.local
+  clientId: local-public
+
+desiredConfig:
+  path: ./config.claude-code.yaml.example
+
+gatewayJwt:
+  privateKey: /tmp/agentdesktop-gateway-jwt.pem

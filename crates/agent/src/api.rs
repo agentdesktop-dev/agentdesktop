@@ -9,7 +9,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use agentdesktop_core::{
-    config::{ControllerConfig, DaemonConfig},
+    config::{ControllerConnectionConfig, DaemonConfig},
     model::{Discovery, EnrollmentStatus, InferenceGatewayCredential},
 };
 
@@ -20,7 +20,7 @@ pub struct AppState {
     pub config: DaemonConfig,
     pub discovery: Discovery,
     pub enrollment: EnrollmentState,
-    pub controller: Option<ControllerConfig>,
+    pub controller: Option<ControllerConnectionConfig>,
     pub state_dir: PathBuf,
 }
 

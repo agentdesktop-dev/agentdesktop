@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ControllerConfig",
+  "description": "Startup configuration for the AgentDesktop fleet controller.",
+  "type": "object",
+  "properties": {
+    "adminListen": {
+      "description": "Loopback address on which the controller management UI listens.",
+      "type": "string",
+      "default": "127.0.0.1:8080"
+    },
+    "allowInsecureDev": {
+      "description": "Permit plaintext remote fleet traffic and non-HTTPS OIDC.\n\nThis escape hatch is only appropriate for isolated local development.",
+      "type": "boolean",
+      "default": false
+    },
+    "databaseUrl": {
+      "description": "SQLite or PostgreSQL URL used for controller state.",
+      "type": "string",
+      "default": "sqlite://agentdesktop-controller.db?mode=rwc"
+    },
+    "desiredConfig": {
+      "description": "Desired configuration distributed to enrolled devices.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ControllerDesiredConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "fleetListen": {
+      "description": "Address on which the device-facing gRPC fleet API listens.",
+      "type": "string",
+      "default": "127.0.0.1:8443"
+    },
+    "gatewayJwt": {
+      "description": "Inference-gateway JWT signing settings.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ControllerGatewayJwtConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "oidc": {
+      "description": "OpenID Connect enrollment settings. Omit to disable new enrollment.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ControllerOidcConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "tls": {
+      "description": "TLS identity used by the device-facing fleet API.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ControllerTlsConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "ControllerDesiredConfig": {
+      "description": "Controller-owned desired configuration file and its revision.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "Path to the YAML configuration distributed to enrolled devices.\n\nRelative paths are resolved from the controller configuration directory.",
+          "type": "string"
+        },
+        "revision": {
+          "description": "Monotonically increasing revision assigned to the desired configuration.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 1,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ]
+    },
+    "ControllerGatewayJwtConfig": {
+      "description": "Settings for issuing short-lived inference-gateway JWTs.",
+      "type": "object",
+      "properties": {
+        "issuer": {
+          "description": "Issuer claim placed in generated JWTs.",
+          "type": "string",
+          "default": "agentdesktop-controller"
+        },
+        "keyId": {
+          "description": "Key identifier placed in generated JWT headers.",
+          "type": "string",
+          "default": "agentdesktop"
+        },
+        "lifetime": {
+          "description": "Lifetime of generated JWTs. Defaults to `5m`.",
+          "type": "string",
+          "default": "5m"
+        },
+        "privateKey": {
+          "description": "Path to the PEM-encoded RSA private signing key.\n\nRelative paths are resolved from the controller configuration directory.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "privateKey"
+      ]
+    },
+    "ControllerOidcConfig": {
+      "description": "OpenID Connect settings used for interactive device enrollment.",
+      "type": "object",
+      "properties": {
+        "clientId": {
+          "description": "Public OpenID Connect client identifier.",
+          "type": "string"
+        },
+        "issuer": {
+          "description": "Exact OpenID Connect issuer URL.",
+          "type": "string"
+        },
+        "redirectUri": {
+          "description": "Redirect URI registered for the native enrollment client.",
+          "type": "string",
+          "default": "http://127.0.0.1:5555/callback"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "issuer",
+        "clientId"
+      ]
+    },
+    "ControllerTlsConfig": {
+      "description": "TLS certificate and private key used by the fleet API.",
+      "type": "object",
+      "properties": {
+        "certificate": {
+          "description": "Path to the PEM-encoded TLS certificate chain.\n\nRelative paths are resolved from the controller configuration directory.",
+          "type": "string"
+        },
+        "key": {
+          "description": "Path to the PEM-encoded TLS private key.\n\nRelative paths are resolved from the controller configuration directory.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "certificate",
+        "key"
+      ]
+    }
+  }
+}

@@ -3,16 +3,10 @@ syntax = "proto3";
 package agentdesktop.fleet.v1;
 
 service FleetAgent {
-  rpc Enroll(EnrollRequest) returns (EnrollResponse);
   rpc BeginEnrollment(BeginEnrollmentRequest) returns (BeginEnrollmentResponse);
   rpc CompleteEnrollment(CompleteEnrollmentRequest) returns (EnrollResponse);
   rpc GetInferenceGatewayCredential(InferenceGatewayCredentialRequest) returns (InferenceGatewayCredentialResponse);
   rpc Connect(stream AgentMessage) returns (stream ControllerMessage);
-}
-
-message EnrollRequest {
-  string token = 1;
-  string hostname = 2;
 }
 
 message EnrollResponse {

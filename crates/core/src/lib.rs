@@ -5,6 +5,8 @@ pub mod telemetry;
 
 /// Default location of the daemon's YAML configuration file.
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/agentdesktop/config.yaml";
+/// Default location of the controller's YAML configuration file.
+pub const DEFAULT_CONTROLLER_CONFIG_PATH: &str = "/etc/agentdesktop/controller.yaml";
 /// Default directory for the device identity and other persistent daemon state.
 pub const DEFAULT_STATE_DIR: &str = "/var/lib/agentdesktop";
 

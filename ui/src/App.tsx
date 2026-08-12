@@ -80,7 +80,6 @@ type Configuration = {
 type ControllerSettings = {
   fleet_listen: string;
   admin_listen: string;
-  enrollment_token_enabled: boolean;
   oidc_enabled: boolean;
   tls_enabled: boolean;
   gateway_jwt_enabled: boolean;
@@ -852,8 +851,8 @@ function ConfigurationPage() {
           <div className="empty-code">
             <h3>No desired configuration</h3>
             <p>
-              Start the controller with <code>--desired-config</code> to make a
-              configuration active.
+              Set <code>desiredConfig.path</code> in the controller YAML to make
+              a configuration active.
             </p>
           </div>
         )}
@@ -891,11 +890,6 @@ function SettingsPage() {
           title="OIDC enrollment"
           description="Interactive SSO-based device enrollment"
           enabled={data.oidc_enabled}
-        />
-        <SettingRow
-          title="Enrollment token"
-          description="Shared bootstrap token enrollment"
-          enabled={data.enrollment_token_enabled}
         />
         <SettingRow
           title="Gateway JWT issuer"
