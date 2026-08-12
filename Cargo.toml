@@ -23,7 +23,7 @@ agentdesktop-proto = { path = "crates/proto" }
 anyhow = "1"
 aws-lc-rs = "1.18"
 axum = "0.8"
-base64 = "0.22"
+base64 = "0.23"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 futures-core = "0.3"
@@ -31,14 +31,15 @@ http-body-util = "0.1"
 humantime-serde = "1"
 hyper = { version = "1", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1", features = ["service", "tokio"] }
-memchr = "2.7"
+memchr = "2.8"
 notify = "8.2"
 notify-debouncer-full = "0.7"
-jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "11.0", features = ["aws_lc_rs"] }
 open = "5.4"
 pem-rfc7468 = { version = "1", features = ["alloc"] }
 prost = "0.14"
-rand = "0.9"
+protox = "0.9"
+rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["charset", "http2", "json", "rustls"] }
 schemars = "=1.2.2"
 serde = { version = "1", features = ["derive"] }
@@ -46,8 +47,8 @@ serde_json = "1"
 serde_json_path_to_error = "0.1"
 serde-transcode = "1.1"
 serde_yaml = "0.9"
-sha2 = "0.10"
-sqlx = { version = "0.8", default-features = false, features = ["any", "macros", "migrate", "postgres", "runtime-tokio", "sqlite", "tls-rustls-ring-webpki"] }
+sha2 = "0.11"
+sqlx = { version = "0.9", default-features = false, features = ["any", "macros", "migrate", "postgres", "runtime-tokio", "sqlite", "tls-rustls-ring-webpki"] }
 tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream = "0.1"
 tonic = { version = "0.14", features = ["transport", "tls-ring"] }
@@ -56,6 +57,6 @@ tonic-prost-build = "0.14"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-toml = "0.9"
+toml = "1.1"
 url = { version = "2.5", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }

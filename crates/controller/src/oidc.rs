@@ -8,7 +8,7 @@ use agentdesktop_proto::fleet::{BeginEnrollmentResponse, CompleteEnrollmentReque
 use anyhow::{Context, bail};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use jsonwebtoken::{DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
-use rand::RngCore;
+use rand::Rng;
 use serde::Deserialize;
 use tokio::sync::Mutex;
 use url::Url;

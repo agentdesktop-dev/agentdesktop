@@ -28,16 +28,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            libappindicator3-dev \
-            librsvg2-dev \
-            libwebkit2gtk-4.1-dev \
-            patchelf \
-            protobuf-compiler
-
       - name: Install Node
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:

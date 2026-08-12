@@ -9,8 +9,7 @@ RUN --mount=type=cache,id=agentdesktop-pnpm,target=/pnpm/store \
 COPY ui/ ./
 RUN pnpm build
 
-FROM docker.io/library/rust:1.97.0-alpine AS builder
-RUN apk add --no-cache cmake make musl-dev perl protobuf
+FROM docker.io/library/rust:1.97.0-trixie AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
@@ -21,6 +20,6 @@ RUN --mount=type=cache,id=agentdesktop-target,target=/app/target \
     cargo build --locked --release --package agentdesktop-controller && \
     cp target/release/agentdesktop-controller /agentdesktop-controller
 
-FROM cgr.dev/chainguard/static:latest
+FROM cgr.dev/chainguard/glibc-dynamic:latest
 COPY --from=builder /agentdesktop-controller /agentdesktop-controller
 ENTRYPOINT ["/agentdesktop-controller"]
