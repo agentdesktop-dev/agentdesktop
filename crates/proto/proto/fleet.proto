@@ -40,6 +40,7 @@ message CompleteEnrollmentRequest {
 
 message InferenceGatewayCredentialRequest {
   reserved 1;
+  string client_id = 2;
 }
 
 message InferenceGatewayCredentialResponse {

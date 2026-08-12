@@ -29,7 +29,11 @@ enum Command {
     /// Print the daemon's local startup configuration.
     Config,
     /// Print a short-lived credential for an inference gateway.
-    Credential,
+    Credential {
+        /// Developer tool requesting the credential.
+        #[arg(long, default_value = "agentdesktop-cli")]
+        client_id: String,
+    },
 }
 
 #[tokio::main]
@@ -62,9 +66,14 @@ async fn main() -> anyhow::Result<()> {
                 agentdesktop_core::serdes::yamlviajson::to_string(&config)?
             );
         }
-        Command::Credential => {
-            let response: InferenceGatewayCredential =
-                client::get(&args.socket, "/v1/inference-gateway/credential").await?;
+        Command::Credential { client_id } => {
+            let client_id: String =
+                url::form_urlencoded::byte_serialize(client_id.as_bytes()).collect();
+            let response: InferenceGatewayCredential = client::get(
+                &args.socket,
+                &format!("/v1/inference-gateway/credential?client_id={client_id}"),
+            )
+            .await?;
             println!("{}", response.credential);
         }
     }

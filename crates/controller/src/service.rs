@@ -64,7 +64,7 @@ impl FleetAgent for FleetAgentService {
             return Err(Status::unauthenticated("invalid enrollment token"));
         }
 
-        self.enroll_device(&request.hostname, "", "").await
+        self.enroll_device(&request.hostname, "", "", None).await
     }
 
     async fn begin_enrollment(
@@ -95,8 +95,13 @@ impl FleetAgent for FleetAgentService {
             .complete(request.into_inner())
             .await
             .map_err(invalid_enrollment)?;
-        self.enroll_device(&completed.hostname, &completed.issuer, &completed.subject)
-            .await
+        self.enroll_device(
+            &completed.hostname,
+            &completed.issuer,
+            &completed.subject,
+            Some(&completed.idp_claims),
+        )
+        .await
     }
 
     async fn get_inference_gateway_credential(
@@ -104,6 +109,15 @@ impl FleetAgent for FleetAgentService {
         request: Request<InferenceGatewayCredentialRequest>,
     ) -> Result<Response<InferenceGatewayCredentialResponse>, Status> {
         let device_id = self.authenticate_device(request.metadata()).await?;
+        let client_id = request.into_inner().client_id;
+        if client_id.is_empty()
+            || client_id.len() > 64
+            || !client_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Err(Status::invalid_argument("invalid client_id"));
+        }
         let desired = self
             .desired_config
             .as_ref()
@@ -137,12 +151,19 @@ impl FleetAgent for FleetAgentService {
             principal.subject.as_str()
         };
         let (credential, expires_at_unix_seconds) = issuer
-            .issue(subject, &device_id, audience)
+            .issue(
+                subject,
+                &device_id,
+                &client_id,
+                audience,
+                principal.idp_claims.as_ref(),
+            )
             .map_err(internal)?;
         info!(
             device_id,
             expires_at_unix_seconds,
             enrolled_by_issuer = principal.issuer,
+            client_id,
             "issued inference gateway credential"
         );
         Ok(Response::new(InferenceGatewayCredentialResponse {
@@ -227,6 +248,7 @@ impl FleetAgentService {
         hostname: &str,
         enrolled_by_issuer: &str,
         enrolled_by_subject: &str,
+        idp_claims: Option<&std::collections::BTreeMap<String, serde_json::Value>>,
     ) -> Result<Response<EnrollResponse>, Status> {
         let device_id = Uuid::new_v4().to_string();
         let credential = new_credential();
@@ -237,6 +259,7 @@ impl FleetAgentService {
                 &credential_hash(&credential),
                 enrolled_by_issuer,
                 enrolled_by_subject,
+                idp_claims,
             )
             .await
             .map_err(internal)?;

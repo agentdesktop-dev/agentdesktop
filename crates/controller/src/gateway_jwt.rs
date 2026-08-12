@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::Path,
     sync::Arc,
@@ -24,7 +25,19 @@ struct Claims<'a> {
     aud: &'a str,
     iat: u64,
     exp: u64,
-    device_id: &'a str,
+    act: Actor<'a>,
+    client_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    email: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    email_verified: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    idp: Option<&'a BTreeMap<String, serde_json::Value>>,
+}
+
+#[derive(Serialize)]
+struct Actor<'a> {
+    sub: &'a str,
 }
 
 impl GatewayJwtIssuer {
@@ -49,7 +62,9 @@ impl GatewayJwtIssuer {
         &self,
         subject: &str,
         device_id: &str,
+        client_id: &str,
         audience: &str,
+        idp: Option<&BTreeMap<String, serde_json::Value>>,
     ) -> anyhow::Result<(String, u64)> {
         let issued_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -66,11 +81,60 @@ impl GatewayJwtIssuer {
                 aud: audience,
                 iat: issued_at,
                 exp: expires_at,
-                device_id,
+                act: Actor { sub: device_id },
+                client_id,
+                email: idp
+                    .and_then(|claims| claims.get("email"))
+                    .and_then(serde_json::Value::as_str),
+                email_verified: idp
+                    .and_then(|claims| claims.get("email_verified"))
+                    .and_then(serde_json::Value::as_bool),
+                idp,
             },
             &self.key,
         )
         .context("sign gateway JWT")?;
         Ok((credential, expires_at))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use serde_json::json;
+
+    use super::{Actor, Claims};
+
+    #[test]
+    fn gateway_claims_include_actor_client_and_idp_identity() {
+        let idp = BTreeMap::from([
+            ("iss".to_owned(), json!("https://idp.example.com")),
+            ("sub".to_owned(), json!("user-123")),
+            ("email".to_owned(), json!("john@example.com")),
+            ("email_verified".to_owned(), json!(true)),
+            ("groups".to_owned(), json!(["engineering"])),
+        ]);
+        let claims = serde_json::to_value(Claims {
+            iss: "agentdesktop-controller",
+            sub: "user-123",
+            aud: "agentgateway",
+            iat: 100,
+            exp: 200,
+            act: Actor { sub: "device-123" },
+            client_id: "codex",
+            email: Some("john@example.com"),
+            email_verified: Some(true),
+            idp: Some(&idp),
+        })
+        .expect("serialize claims");
+
+        assert_eq!(claims["sub"], "user-123");
+        assert_eq!(claims["email"], "john@example.com");
+        assert_eq!(claims["email_verified"], true);
+        assert_eq!(claims["act"]["sub"], "device-123");
+        assert_eq!(claims["client_id"], "codex");
+        assert_eq!(claims["idp"]["groups"][0], "engineering");
+        assert!(claims.get("device_id").is_none());
     }
 }

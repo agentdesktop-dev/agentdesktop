@@ -73,7 +73,7 @@ impl Reconciler {
 
     fn claude_credential_helper_command(&self) -> String {
         format!(
-            "{} --socket {} credential",
+            "{} --socket {} credential --client-id claude-code",
             shell_quote(&self.credential_helper.to_string_lossy()),
             shell_quote(&self.socket.to_string_lossy())
         )

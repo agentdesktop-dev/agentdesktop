@@ -1,7 +1,12 @@
 use std::path::PathBuf;
 
-use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
-use serde::Serialize;
+use axum::{
+    Json, Router,
+    extract::{Query, State},
+    http::StatusCode,
+    routing::get,
+};
+use serde::{Deserialize, Serialize};
 
 use agentdesktop_core::{
     config::{ControllerConfig, DaemonConfig},
@@ -22,6 +27,11 @@ pub struct AppState {
 #[derive(Serialize)]
 struct Health {
     status: &'static str,
+}
+
+#[derive(Deserialize)]
+struct CredentialQuery {
+    client_id: String,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -55,6 +65,7 @@ async fn enrollment(State(state): State<AppState>) -> Json<EnrollmentStatus> {
 
 async fn inference_gateway_credential(
     State(state): State<AppState>,
+    Query(query): Query<CredentialQuery>,
 ) -> Result<Json<InferenceGatewayCredential>, (StatusCode, String)> {
     let controller = state.controller.as_ref().ok_or_else(|| {
         (
@@ -62,7 +73,12 @@ async fn inference_gateway_credential(
             "daemon has no controller configured".to_string(),
         )
     })?;
-    remote::inference_gateway_credential(controller, &state.state_dir)
+    // TODO: The client ID is asserted, not authenticated. On Linux we could use
+    // SO_PEERCRED to obtain the helper's PID and inspect its /proc parent chain
+    // for the expected Codex, Claude Code, or OpenCode executable. Equivalent
+    // peer-PID APIs exist for other local transports. This would provide useful
+    // process evidence, but not a hard boundary against the same user or root.
+    remote::inference_gateway_credential(controller, &state.state_dir, &query.client_id)
         .await
         .map(Json)
         .map_err(|error| (StatusCode::BAD_GATEWAY, format!("{error:#}")))

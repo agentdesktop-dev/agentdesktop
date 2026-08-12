@@ -100,6 +100,8 @@ fn managed_config(
                 "--socket",
                 socket.to_string_lossy(),
                 "credential",
+                "--client-id",
+                "codex",
             ],
             "timeout_ms": 5000,
             "refresh_interval_ms": 60000,
@@ -239,7 +241,9 @@ programs:
         assert_eq!(provider["base_url"], "https://gateway.example.com/proxy/v1");
         assert_eq!(provider["wire_api"], "responses");
         assert_eq!(provider["auth"]["command"], "/usr/local/bin/agentdesktop");
-        assert_eq!(provider["auth"]["args"].as_array().unwrap().len(), 3);
+        assert_eq!(provider["auth"]["args"].as_array().unwrap().len(), 5);
+        assert_eq!(provider["auth"]["args"][3], "--client-id");
+        assert_eq!(provider["auth"]["args"][4], "codex");
         assert_eq!(provider["auth"]["refresh_interval_ms"], 60000);
 
         let serialized = toml::to_string_pretty(&settings).expect("valid TOML");
