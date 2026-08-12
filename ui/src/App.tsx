@@ -59,6 +59,17 @@ type DeviceDetail = Device & {
       frontMatter: Record<string, unknown>;
     }>;
   }>;
+  recent_events: Array<{
+    id: string;
+    timestamp_unix_ms: number;
+    event_type: string;
+    payload: {
+      clientId?: string;
+      toolName?: string;
+      toolUseId?: string;
+      toolInput?: unknown;
+    };
+  }>;
 };
 
 type Overview = {
@@ -75,6 +86,7 @@ type Configuration = {
   revision: number | null;
   sha256: string | null;
   yaml: string | null;
+  reload_error: string | null;
 };
 
 type ControllerSettings = {
@@ -511,6 +523,45 @@ function DevicePage({ id }: { id: string }) {
       </div>
       <section className="card table-card">
         <CardHeader
+          title="Recent activity"
+          description={`${device.recent_events.length} recent telemetry event${device.recent_events.length === 1 ? "" : "s"}`}
+        />
+        {device.recent_events.length ? (
+          <div className="event-list">
+            {device.recent_events.map((event) => (
+              <div className="event-row" key={event.id}>
+                <span className="event-source">
+                  <ToolIcon kind={event.payload.clientId ?? ""} />
+                  <span>
+                    <strong>
+                      {event.payload.toolName ??
+                        friendlyEvent(event.event_type)}
+                    </strong>
+                    <small>
+                      {friendlyTool(event.payload.clientId ?? "Unknown")}
+                    </small>
+                  </span>
+                </span>
+                <code title={telemetryInput(event.payload.toolInput)}>
+                  {telemetryInput(event.payload.toolInput)}
+                </code>
+                <time
+                  dateTime={new Date(event.timestamp_unix_ms).toISOString()}
+                >
+                  {formatTimeMilliseconds(event.timestamp_unix_ms)}
+                </time>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="empty-inline">
+            <Code2 size={20} />
+            <span>No telemetry has been reported by this device.</span>
+          </div>
+        )}
+      </section>
+      <section className="card table-card">
+        <CardHeader
           title="Discovered developer tools"
           description={`${device.discoveries.length} installation${device.discoveries.length === 1 ? "" : "s"} reported`}
         />
@@ -546,8 +597,8 @@ function DevicePage({ id }: { id: string }) {
         <div>
           <h3>Delete device</h3>
           <p>
-            Remove this device, its credential, inventory, and configuration
-            status.
+            Remove this device, its credential, inventory, telemetry, and
+            configuration status.
           </p>
         </div>
         <button
@@ -796,8 +847,14 @@ function ConfigurationPage() {
             The controller-wide configuration sent to agents when they connect.
           </p>
         </div>
-        <span className={`badge ${config.active ? "success" : "neutral"}`}>
-          {config.active ? (
+        <span
+          className={`badge ${config.reload_error ? "danger" : config.active ? "success" : "neutral"}`}
+        >
+          {config.reload_error ? (
+            <>
+              <CircleAlert size={13} /> Reload failed
+            </>
+          ) : config.active ? (
             <>
               <Check size={13} /> Active
             </>
@@ -829,15 +886,20 @@ function ConfigurationPage() {
         </section>
         <section className="card notice-card">
           <div>
-            <h3>Managed at startup</h3>
+            <h3>Watched for changes</h3>
             <p>
-              This first version is intentionally read-only. Update the desired
-              configuration file and restart the controller to publish a
-              revision.
+              Valid changes are published automatically to connected devices.
+              Invalid or partial writes retain the last active configuration.
             </p>
           </div>
         </section>
       </div>
+      {config.reload_error && (
+        <div className="error-callout">
+          <CircleAlert size={16} />
+          <span>{config.reload_error}</span>
+        </div>
+      )}
       <section className="card code-card">
         <CardHeader
           title="Configuration source"
@@ -1065,6 +1127,16 @@ function friendlyTool(kind: string) {
   return names[kind.toLowerCase()] ?? kind;
 }
 
+function friendlyEvent(kind: string) {
+  return kind === "toolUse" ? "Tool use" : kind;
+}
+
+function telemetryInput(value: unknown) {
+  if (value === undefined) return "No input reported";
+  const encoded = JSON.stringify(value);
+  return encoded.length > 180 ? `${encoded.slice(0, 177)}…` : encoded;
+}
+
 const toolIcons: Record<string, string> = {
   codex: codexIcon,
   "claude-code": claudeCodeIcon,
@@ -1109,6 +1181,10 @@ function formatTime(timestamp: number | null) {
   if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
   if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
   return `${Math.floor(delta / 86400)}d ago`;
+}
+
+function formatTimeMilliseconds(timestamp: number) {
+  return formatTime(Math.floor(timestamp / 1000));
 }
 
 function formatDate(timestamp: number) {

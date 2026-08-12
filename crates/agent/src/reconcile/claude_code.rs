@@ -10,6 +10,8 @@ use tracing::info;
 
 use crate::secure_fs;
 
+use super::deep_merge;
+
 const FILE_NAME: &str = "50-agentdesktop.json";
 const OWNER_FILE_NAME: &str = ".50-agentdesktop.json.owner";
 const OWNER_MARKER: &[u8] = b"AgentDesktop\n";
@@ -17,6 +19,7 @@ const OWNER_MARKER: &[u8] = b"AgentDesktop\n";
 pub fn apply(
     directory: &Path,
     credential_helper: &str,
+    hook_command: &str,
     config: Option<(&ClaudeCodeConfig, Option<&InferenceGatewayConfig>)>,
 ) -> anyhow::Result<()> {
     let path = directory.join(FILE_NAME);
@@ -25,7 +28,7 @@ pub fn apply(
         return remove(&path, &owner_path);
     };
 
-    let settings = managed_settings(config, gateway, credential_helper)?;
+    let settings = managed_settings(config, gateway, credential_helper, hook_command)?;
     let mut contents =
         serde_json::to_vec_pretty(&settings).context("serialize Claude Code managed settings")?;
     contents.push(b'\n');
@@ -77,9 +80,11 @@ fn managed_settings(
     config: &ClaudeCodeConfig,
     gateway: Option<&InferenceGatewayConfig>,
     credential_helper: &str,
+    hook_command: &str,
 ) -> anyhow::Result<Value> {
     let mut settings = serde_json::to_value(&config.settings)
         .context("serialize Claude Code pass-through settings")?;
+    append_pre_tool_use_hook(&mut settings, hook_command)?;
     let Some(gateway) = gateway else {
         return Ok(settings);
     };
@@ -96,19 +101,44 @@ fn managed_settings(
         generated["env"]["CLAUDE_CODE_API_KEY_HELPER_TTL_MS"] = json!("60000");
         generated["apiKeyHelper"] = json!(credential_helper);
     }
-    merge(&mut settings, generated);
+    deep_merge(&mut settings, generated);
     Ok(settings)
 }
 
-fn merge(base: &mut Value, overlay: Value) {
-    match (base, overlay) {
-        (Value::Object(base), Value::Object(overlay)) => {
-            for (key, value) in overlay {
-                merge(base.entry(key).or_insert(Value::Null), value);
-            }
-        }
-        (base, overlay) => *base = overlay,
+fn append_pre_tool_use_hook(settings: &mut Value, hook_command: &str) -> anyhow::Result<()> {
+    let settings = settings
+        .as_object_mut()
+        .context("Claude Code managed settings must be an object")?;
+    let hooks = settings
+        .entry("hooks")
+        .or_insert_with(|| Value::Object(Default::default()))
+        .as_object_mut()
+        .context("Claude Code hooks must be an object")?;
+    let pre_tool_use = hooks
+        .entry("PreToolUse")
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .context("Claude Code PreToolUse hooks must be an array")?;
+    let already_present = pre_tool_use.iter().any(|group| {
+        group
+            .get("hooks")
+            .and_then(Value::as_array)
+            .is_some_and(|hooks| {
+                hooks
+                    .iter()
+                    .any(|hook| hook.get("command").and_then(Value::as_str) == Some(hook_command))
+            })
+    });
+    if !already_present {
+        pre_tool_use.push(json!({
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": hook_command,
+            }],
+        }));
     }
+    Ok(())
 }
 
 fn remove(path: &Path, owner_path: &Path) -> anyhow::Result<()> {
@@ -195,8 +225,13 @@ programs:
         let claude = desired.programs.claude_code.as_ref().unwrap();
         let gateway = desired.inference_gateway.as_ref().unwrap();
 
-        let settings = managed_settings(claude, Some(gateway), "agentdesktop credential")
-            .expect("merged settings");
+        let settings = managed_settings(
+            claude,
+            Some(gateway),
+            "agentdesktop credential",
+            "agentdesktop hook claude-pre-tool-use",
+        )
+        .expect("merged settings");
 
         assert_eq!(settings["env"]["COMPANY_ENVIRONMENT"], "production");
         assert_eq!(
@@ -209,5 +244,9 @@ programs:
         );
         assert_eq!(settings["apiKeyHelper"], "agentdesktop credential");
         assert_eq!(settings["permissions"], json!({ "defaultMode": "plan" }));
+        assert_eq!(
+            settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            "agentdesktop hook claude-pre-tool-use"
+        );
     }
 }

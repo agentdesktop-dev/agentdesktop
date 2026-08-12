@@ -3,7 +3,7 @@ use sqlx::{AnyPool, any::AnyPoolOptions};
 use std::{collections::BTreeMap, path::PathBuf};
 
 use agentdesktop_core::model::{McpServer, Skill};
-use agentdesktop_proto::fleet::{ConfigStatus, Hello, Inventory};
+use agentdesktop_proto::fleet::{ConfigStatus, Hello, Inventory, TelemetryEvent, telemetry_event};
 use serde::Serialize;
 
 #[derive(Clone)]
@@ -114,6 +114,36 @@ pub struct DeviceDetail {
     #[serde(flatten)]
     pub device: DeviceSummary,
     pub discoveries: Vec<DeviceDiscovery>,
+    pub recent_events: Vec<TelemetryEventRecord>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TelemetryEventRecord {
+    pub id: String,
+    pub timestamp_unix_ms: i64,
+    pub event_type: String,
+    pub payload: serde_json::Value,
+}
+
+#[derive(sqlx::FromRow)]
+struct TelemetryEventRow {
+    id: String,
+    timestamp_unix_ms: i64,
+    event_type: String,
+    payload_json: String,
+}
+
+impl TryFrom<TelemetryEventRow> for TelemetryEventRecord {
+    type Error = anyhow::Error;
+
+    fn try_from(row: TelemetryEventRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: row.id,
+            timestamp_unix_ms: row.timestamp_unix_ms,
+            event_type: row.event_type,
+            payload: serde_json::from_str(&row.payload_json).context("decode telemetry payload")?,
+        })
+    }
 }
 
 impl Database {
@@ -271,9 +301,11 @@ impl Database {
             .iter()
             .map(|discovery: &DeviceDiscovery| discovery.kind.clone())
             .collect();
+        let recent_events = self.recent_telemetry(device_id, 50).await?;
         Ok(Some(DeviceDetail {
             device,
             discoveries,
+            recent_events,
         }))
     }
 
@@ -393,6 +425,80 @@ impl Database {
         .await?;
         Ok(())
     }
+
+    pub async fn insert_telemetry(
+        &self,
+        device_id: &str,
+        telemetry: &TelemetryEvent,
+    ) -> anyhow::Result<()> {
+        let (event_type, payload) = match telemetry
+            .event
+            .as_ref()
+            .context("telemetry has no event")?
+        {
+            telemetry_event::Event::ToolUse(event) => {
+                if event.client_id.is_empty() || event.client_id.len() > 64 {
+                    anyhow::bail!("invalid telemetry client ID");
+                }
+                if event.tool_name.is_empty() || event.tool_name.len() > 128 {
+                    anyhow::bail!("invalid telemetry tool name");
+                }
+                if event.tool_use_id.len() > 256 {
+                    anyhow::bail!("invalid telemetry tool use ID");
+                }
+                if event.input_json.len() > 256 * 1024 {
+                    anyhow::bail!("telemetry tool input is too large");
+                }
+                let tool_input: serde_json::Value = serde_json::from_slice(&event.input_json)
+                    .context("decode telemetry tool input")?;
+                (
+                    "toolUse",
+                    serde_json::json!({
+                        "clientId": event.client_id,
+                        "toolName": event.tool_name,
+                        "toolUseId": (!event.tool_use_id.is_empty()).then_some(&event.tool_use_id),
+                        "toolInput": tool_input,
+                    }),
+                )
+            }
+        };
+        sqlx::query(
+            "INSERT INTO telemetry_events
+                (id, device_id, timestamp_unix_ms, event_type, payload_json)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(device_id)
+        .bind(i64::try_from(telemetry.timestamp_unix_ms).unwrap_or(i64::MAX))
+        .bind(event_type)
+        .bind(serde_json::to_string(&payload).context("encode telemetry payload")?)
+        .execute(&self.pool)
+        .await
+        .context("store telemetry event")?;
+        Ok(())
+    }
+
+    async fn recent_telemetry(
+        &self,
+        device_id: &str,
+        limit: i64,
+    ) -> anyhow::Result<Vec<TelemetryEventRecord>> {
+        let rows: Vec<TelemetryEventRow> = sqlx::query_as(
+            "SELECT id, timestamp_unix_ms, event_type, payload_json
+             FROM telemetry_events
+             WHERE device_id = $1
+             ORDER BY timestamp_unix_ms DESC
+             LIMIT $2",
+        )
+        .bind(device_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("load recent telemetry")?;
+        rows.into_iter()
+            .map(TelemetryEventRecord::try_from)
+            .collect()
+    }
 }
 
 fn unix_time_seconds() -> i64 {
@@ -408,12 +514,14 @@ fn unix_time_seconds() -> i64 {
 mod tests {
     use std::{collections::BTreeMap, path::PathBuf};
 
-    use agentdesktop_proto::fleet::{Discovery, Inventory, McpServer, Skill};
+    use agentdesktop_proto::fleet::{
+        Discovery, Inventory, McpServer, Skill, TelemetryEvent, ToolUseEvent, telemetry_event,
+    };
 
     use super::Database;
 
     #[tokio::test]
-    async fn persists_discovered_mcp_servers_and_skills() {
+    async fn persists_device_inventory_and_telemetry() {
         let path = std::env::temp_dir().join(format!(
             "agentdesktop-inventory-test-{}.db",
             std::process::id()
@@ -465,6 +573,24 @@ mod tests {
             )
             .await
             .expect("store inventory");
+        database
+            .insert_telemetry(
+                "device",
+                &TelemetryEvent {
+                    timestamp_unix_ms: 1_700_000_000_000,
+                    event: Some(telemetry_event::Event::ToolUse(ToolUseEvent {
+                        client_id: "claude-code".to_owned(),
+                        tool_name: "Bash".to_owned(),
+                        tool_use_id: "tool-1".to_owned(),
+                        input_json: serde_json::to_vec(&serde_json::json!({
+                            "command": "cargo test"
+                        }))
+                        .unwrap(),
+                    })),
+                },
+            )
+            .await
+            .expect("store telemetry");
 
         let device = database
             .get_device("device")
@@ -480,6 +606,9 @@ mod tests {
             device.discoveries[0].skills[0].front_matter["name"],
             "llm-research"
         );
+        assert_eq!(device.recent_events.len(), 1);
+        assert_eq!(device.recent_events[0].event_type, "toolUse");
+        assert_eq!(device.recent_events[0].payload["toolName"], "Bash");
         let principal = database
             .device_principal("device")
             .await

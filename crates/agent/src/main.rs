@@ -12,6 +12,7 @@ use anyhow::{Context, bail};
 use clap::Parser;
 use hyper_util::{rt::TokioIo, service::TowerToHyperService};
 use tokio::net::UnixListener;
+use tokio::sync::mpsc;
 
 #[derive(Parser)]
 #[command(about = "AgentDesktop privileged daemon")]
@@ -58,7 +59,6 @@ async fn main() -> anyhow::Result<()> {
     let _log_flush = telemetry::setup_logging("info", false);
     agentdesktop_agent::secure_fs::ensure_private_dir(&args.state_dir)?;
     let config = config::load_daemon(&args.config)?;
-    let controller_config = config.controller.clone();
     let enrollment = EnrollmentState::new(config.controller.is_some());
     let reconciler = reconcile::Reconciler::new(
         args.claude_code_managed_settings_dir.clone(),
@@ -85,11 +85,7 @@ async fn main() -> anyhow::Result<()> {
                 })?)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let manages_program = local_desired.programs.claude_code.is_some()
-                    || local_desired.programs.codex.is_some()
-                    || local_desired.programs.open_code.is_some();
-                (local_desired.inference_gateway.is_some() || manages_program)
-                    .then_some(local_desired)
+                (!local_desired.is_empty()).then_some(local_desired)
             }
             Err(error) => {
                 return Err(error).with_context(|| {
@@ -123,6 +119,8 @@ async fn main() -> anyhow::Result<()> {
             "discovered program"
         );
     }
+    let (telemetry_sender, telemetry_receiver) = mpsc::channel(256);
+    let telemetry = config.controller.as_ref().map(|_| telemetry_sender.clone());
     if let Some(controller) = config.controller.clone() {
         let remote_discovery = discovery.clone();
         let state_dir = args.state_dir.clone();
@@ -136,6 +134,7 @@ async fn main() -> anyhow::Result<()> {
                 oidc_callback_listen,
                 reconciler,
                 remote_enrollment.clone(),
+                telemetry_receiver,
             )
             .await
             {
@@ -149,8 +148,8 @@ async fn main() -> anyhow::Result<()> {
         config,
         discovery,
         enrollment,
-        controller: controller_config,
         state_dir: args.state_dir,
+        telemetry,
     });
 
     tracing::info!(socket = %args.socket.display(), "agent daemon listening");

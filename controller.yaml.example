@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=./schema/controller-config.json
 # Local controller development configuration.
 fleetListen: 0.0.0.0:8443
 allowInsecureDev: true

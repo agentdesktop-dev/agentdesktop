@@ -139,9 +139,10 @@ pub struct ControllerOidcConfig {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ControllerDesiredConfig {
-    /// Path to the YAML configuration distributed to enrolled devices.
+    /// Path to the watched YAML configuration distributed to enrolled devices.
     ///
     /// Relative paths are resolved from the controller configuration directory.
+    /// Valid file changes are published to connected devices automatically.
     pub path: PathBuf,
     /// Monotonically increasing revision assigned to the desired configuration.
     #[serde(default = "default_desired_config_revision")]

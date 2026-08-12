@@ -1,12 +1,11 @@
-use std::{path::Path, pin::Pin};
+use std::pin::Pin;
 
 use agentdesktop_proto::fleet::{
     AgentMessage, BeginEnrollmentRequest, BeginEnrollmentResponse, CompleteEnrollmentRequest,
-    ControllerMessage, DesiredConfig, EnrollResponse, InferenceGatewayCredentialRequest,
+    ControllerMessage, EnrollResponse, InferenceGatewayCredentialRequest,
     InferenceGatewayCredentialResponse, agent_message, controller_message,
     fleet_agent_server::FleetAgent,
 };
-use anyhow::Context;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_core::Stream;
 use rand::RngCore;
@@ -14,18 +13,21 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use agentdesktop_core::config::InferenceGatewayAuthentication;
 
-use crate::{database::Database, gateway_jwt::GatewayJwtIssuer, oidc::OidcProvider};
+use crate::{
+    database::Database, desired_config::DesiredConfigStore, gateway_jwt::GatewayJwtIssuer,
+    oidc::OidcProvider,
+};
 
 #[derive(Clone)]
 pub struct FleetAgentService {
     oidc: Option<OidcProvider>,
     database: Database,
-    desired_config: Option<DesiredConfig>,
+    desired_config: DesiredConfigStore,
     gateway_jwt_issuer: Option<GatewayJwtIssuer>,
 }
 
@@ -33,7 +35,7 @@ impl FleetAgentService {
     pub fn new(
         oidc: Option<OidcProvider>,
         database: Database,
-        desired_config: Option<DesiredConfig>,
+        desired_config: DesiredConfigStore,
         gateway_jwt_issuer: Option<GatewayJwtIssuer>,
     ) -> Self {
         Self {
@@ -102,7 +104,7 @@ impl FleetAgent for FleetAgentService {
         }
         let desired = self
             .desired_config
-            .as_ref()
+            .current()
             .ok_or_else(|| Status::failed_precondition("no desired configuration is active"))?;
         let yaml = std::str::from_utf8(&desired.yaml)
             .map_err(|_| Status::internal("desired configuration is not UTF-8"))?;
@@ -162,7 +164,9 @@ impl FleetAgent for FleetAgentService {
 
         let mut inbound = request.into_inner();
         let (sender, receiver) = mpsc::channel(8);
-        if let Some(desired_config) = self.desired_config.clone() {
+        let mut desired_updates = self.desired_config.subscribe();
+        let desired_config = desired_updates.borrow().clone();
+        if let Some(desired_config) = desired_config {
             sender
                 .send(Ok(ControllerMessage {
                     message: Some(controller_message::Message::DesiredConfig(desired_config)),
@@ -171,10 +175,27 @@ impl FleetAgent for FleetAgentService {
                 .map_err(|_| Status::unavailable("stream closed"))?;
         }
 
-        let database = self.database.clone();
-        let response_sender = sender.clone();
+        let update_sender = sender.clone();
         tokio::spawn(async move {
-            let _response_sender = response_sender;
+            while desired_updates.changed().await.is_ok() {
+                let desired = desired_updates.borrow().clone();
+                let Some(desired) = desired else {
+                    continue;
+                };
+                if update_sender
+                    .send(Ok(ControllerMessage {
+                        message: Some(controller_message::Message::DesiredConfig(desired)),
+                    }))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        let database = self.database.clone();
+        tokio::spawn(async move {
             loop {
                 match inbound.message().await {
                     Ok(Some(message)) => {
@@ -310,28 +331,13 @@ async fn handle_agent_message(
                 );
             }
         }
+        Some(agent_message::Message::Telemetry(event)) => {
+            database.insert_telemetry(device_id, &event).await?;
+            debug!(device_id, "stored telemetry event");
+        }
         None => {}
     }
     Ok(())
-}
-
-pub fn load_desired_config(
-    path: Option<&Path>,
-    revision: u64,
-) -> anyhow::Result<Option<DesiredConfig>> {
-    let Some(path) = path else {
-        return Ok(None);
-    };
-    let yaml = std::fs::read(path)
-        .with_context(|| format!("read desired configuration from {}", path.display()))?;
-    let text = std::str::from_utf8(&yaml).context("desired configuration is not UTF-8")?;
-    agentdesktop_core::config::parse_desired(text).context("validate desired configuration")?;
-    let sha256 = Sha256::digest(&yaml).to_vec();
-    Ok(Some(DesiredConfig {
-        revision,
-        yaml,
-        sha256,
-    }))
 }
 
 fn bearer_credential(metadata: &tonic::metadata::MetadataMap) -> Result<&str, Status> {

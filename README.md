@@ -5,7 +5,7 @@ AgentDesktop currently consists of a small Linux daemon and a CLI client. At sta
 Build it:
 
 ```console
-cargo build
+make build
 ```
 
 ## Crates
@@ -51,7 +51,8 @@ The daemon applies the desired-state fields in its local configuration at
 startup. If it connects to a controller, the controller-delivered desired
 configuration subsequently replaces that local baseline.
 
-Regenerate both files after changing configuration types or their documentation:
+Regenerate the schemas and field references after changing configuration types
+or their documentation:
 
 ```console
 cargo xtask schema
@@ -96,7 +97,7 @@ cargo run --bin agentdesktopd -- \
   --state-dir /tmp/agentdesktop-state
 ```
 
-The daemon writes `identity.json` and any accepted `remote-config.yaml` under its state directory. On restart it reapplies that last accepted controller configuration before connecting. If no cached or non-empty local desired configuration exists, it preserves managed files until the controller responds rather than temporarily removing them. To have the controller offer desired configuration when a device connects, set `desiredConfig.path` and `desiredConfig.revision` in controller configuration.
+The daemon writes `identity.json` and any accepted `remote-config.yaml` under its state directory. On restart it reapplies that last accepted controller configuration before connecting. If no cached or non-empty local desired configuration exists, it preserves managed files until the controller responds rather than temporarily removing them. To have the controller offer desired configuration, set `desiredConfig.path` and `desiredConfig.revision` in controller configuration. The controller watches that path and pushes successfully validated changes to connected devices after a short debounce. Atomic file replacement and Kubernetes projected-volume symlink rotation are supported; missing or invalid replacements leave the last good configuration active.
 
 ### OIDC enrollment
 
@@ -170,6 +171,22 @@ controller returns a short-lived RS256 JWT. Claude caches the result for one
 minute; the JWT lifetime defaults to five minutes. No gateway credential is
 stored in YAML or managed settings.
 
+The same drop-in appends a Claude Code `PreToolUse` hook for all tools. Its
+command is equivalent to:
+
+```console
+agentdesktop --socket /run/agentdesktop/agentdesktop.sock hook claude-pre-tool-use
+```
+
+Claude supplies the hook event on standard input. AgentDesktop retains only the
+tool name, tool-use ID, and tool-input JSON; session and transcript metadata are
+discarded. Reporting is fail-open so daemon or controller availability never
+prevents tool execution. Events travel over the authenticated device stream,
+are stored as timestamped controller telemetry, and appear under **Recent
+activity** on the device page. Local clients are not process-attested, so this
+telemetry records an assertion by the endpoint rather than a security audit
+boundary.
+
 Generate a controller signing key for development:
 
 ```console
@@ -202,7 +219,7 @@ from the controller YAML directory. Start it with only the configuration path:
 cargo run --bin agentdesktop-controller -- --config ./controller.yaml
 ```
 
-Agentgateway must trust the corresponding RSA public key and require issuer `agentdesktop-controller` and audience `agentgateway`. The gateway JWT subject is the verified OIDC subject, `act.sub` identifies the device, and `client_id` is asserted by the arbitrary local client requesting the credential. In production, keep the private key outside the database with restrictive permissions and distribute only its public JWK to Agentgateway.
+Agentgateway must trust the corresponding RSA public key and require issuer `agentdesktop-controller` and audience `agentgateway`. When JWT issuance is enabled, the controller publishes its public key set at `http://127.0.0.1:8080/.well-known/jwks.json`; [agentgateway.yaml.example](agentgateway.yaml.example) is a minimal matching configuration. The gateway JWT subject is the verified OIDC subject, `act.sub` identifies the device, and `client_id` is asserted by the arbitrary local client requesting the credential. In production, keep the private key outside the database with restrictive permissions; only its public JWK is exposed.
 
 On Linux, the daemon atomically reconciles AgentDesktop's dedicated drop-in at `/etc/claude-code/managed-settings.d/50-agentdesktop.json`. For an unprivileged development run, redirect that exact directory:
 

@@ -1,6 +1,5 @@
 use std::{net::SocketAddr, time::SystemTime};
 
-use agentdesktop_proto::fleet::DesiredConfig;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -12,13 +11,18 @@ use rust_embed::RustEmbed;
 use serde::Serialize;
 use tracing::info;
 
-use crate::database::{Database, DeviceDetail, DeviceSummary};
+use crate::{
+    database::{Database, DeviceDetail, DeviceSummary},
+    desired_config::DesiredConfigStore,
+    gateway_jwt::GatewayJwks,
+};
 
 #[derive(Clone)]
 pub struct AdminState {
     database: Database,
-    desired_config: Option<DesiredConfig>,
+    desired_config: DesiredConfigStore,
     settings: ControllerSettings,
+    gateway_jwks: Option<GatewayJwks>,
 }
 
 #[derive(Clone, Serialize)]
@@ -33,13 +37,15 @@ pub struct ControllerSettings {
 impl AdminState {
     pub fn new(
         database: Database,
-        desired_config: Option<DesiredConfig>,
+        desired_config: DesiredConfigStore,
         settings: ControllerSettings,
+        gateway_jwks: Option<GatewayJwks>,
     ) -> Self {
         Self {
             database,
             desired_config,
             settings,
+            gateway_jwks,
         }
     }
 }
@@ -64,6 +70,7 @@ struct Configuration {
     revision: Option<u64>,
     sha256: Option<String>,
     yaml: Option<String>,
+    reload_error: Option<String>,
 }
 
 pub async fn serve(address: SocketAddr, state: AdminState) -> anyhow::Result<()> {
@@ -76,12 +83,25 @@ pub async fn serve(address: SocketAddr, state: AdminState) -> anyhow::Result<()>
         )
         .route("/api/v1/configuration", get(configuration))
         .route("/api/v1/settings", get(settings))
+        .route("/.well-known/jwks.json", get(jwks))
         .fallback(get(asset))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(address).await?;
     info!(listen = %address, "controller admin UI listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn jwks(State(state): State<AdminState>) -> Result<Response, StatusCode> {
+    let jwks = state.gateway_jwks.ok_or(StatusCode::NOT_FOUND)?;
+    Ok((
+        [
+            (header::CACHE_CONTROL, "public, max-age=300"),
+            (header::CONTENT_TYPE, "application/jwk-set+json"),
+        ],
+        Json(jwks),
+    )
+        .into_response())
 }
 
 async fn overview(State(state): State<AdminState>) -> Result<Json<Overview>, AdminError> {
@@ -104,7 +124,7 @@ async fn overview(State(state): State<AdminState>) -> Result<Json<Overview>, Adm
         online_devices,
         offline_devices: devices.len() - online_devices,
         config_failures,
-        active_revision: state.desired_config.as_ref().map(|config| config.revision),
+        active_revision: state.desired_config.current().map(|config| config.revision),
         recent_devices: devices.into_iter().take(5).collect(),
     }))
 }
@@ -137,18 +157,19 @@ async fn delete_device(
 }
 
 async fn configuration(State(state): State<AdminState>) -> Json<Configuration> {
-    let config = state.desired_config.as_ref();
+    let config = state.desired_config.current();
     Json(Configuration {
         active: config.is_some(),
-        revision: config.map(|config| config.revision),
-        sha256: config.map(|config| {
+        revision: config.as_ref().map(|config| config.revision),
+        sha256: config.as_ref().map(|config| {
             config
                 .sha256
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect()
         }),
-        yaml: config.and_then(|config| String::from_utf8(config.yaml.clone()).ok()),
+        yaml: config.and_then(|config| String::from_utf8(config.yaml).ok()),
+        reload_error: state.desired_config.reload_error(),
     })
 }
 

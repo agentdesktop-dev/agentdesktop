@@ -76,7 +76,7 @@
       "type": "object",
       "properties": {
         "path": {
-          "description": "Path to the YAML configuration distributed to enrolled devices.\n\nRelative paths are resolved from the controller configuration directory.",
+          "description": "Path to the watched YAML configuration distributed to enrolled devices.\n\nRelative paths are resolved from the controller configuration directory.\nValid file changes are published to connected devices automatically.",
           "type": "string"
         },
         "revision": {

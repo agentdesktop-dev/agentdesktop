@@ -4,7 +4,8 @@ mod open_code;
 
 use std::path::PathBuf;
 
-use agentdesktop_core::config::DesiredConfig;
+use agentdesktop_core::config::{DesiredConfig, InferenceGatewayConfig};
+use serde_json::Value;
 
 #[derive(Clone)]
 pub struct Reconciler {
@@ -44,6 +45,7 @@ impl Reconciler {
         claude_code::apply(
             &self.claude_code_managed_settings_dir,
             &self.claude_credential_helper_command(),
+            &self.claude_hook_command(),
             claude_code,
         )?;
         let codex = config
@@ -78,10 +80,38 @@ impl Reconciler {
             shell_quote(&self.socket.to_string_lossy())
         )
     }
+
+    fn claude_hook_command(&self) -> String {
+        format!(
+            "{} --socket {} hook claude-pre-tool-use",
+            shell_quote(&self.credential_helper.to_string_lossy()),
+            shell_quote(&self.socket.to_string_lossy())
+        )
+    }
 }
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn deep_merge(base: &mut Value, overlay: Value) {
+    match (base, overlay) {
+        (Value::Object(base), Value::Object(overlay)) => {
+            for (key, value) in overlay {
+                deep_merge(base.entry(key).or_insert(Value::Null), value);
+            }
+        }
+        (base, overlay) => *base = overlay,
+    }
+}
+
+fn responses_base_url(gateway: &InferenceGatewayConfig) -> String {
+    let mut url = gateway.url.clone();
+    let path = url.path().trim_end_matches('/');
+    if !path.ends_with("/v1") {
+        url.set_path(&format!("{path}/v1"));
+    }
+    url.to_string().trim_end_matches('/').to_owned()
 }
 
 #[cfg(target_os = "linux")]
