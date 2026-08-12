@@ -1,6 +1,9 @@
 # yaml-language-server: $schema=../../schema/daemon-config.json
 inferenceGateway:
   url: http://localhost:4000
+  authentication:
+    type: controllerJwt
+    audience: "agentgateway"
 
 telemetry:
   events:
