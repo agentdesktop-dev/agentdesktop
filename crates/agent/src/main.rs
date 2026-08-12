@@ -73,9 +73,46 @@ async fn main() -> anyhow::Result<()> {
         credential_helper_executable()?,
         args.socket.clone(),
     );
-    reconciler
-        .apply(&config.desired_config())
-        .context("apply local desired configuration")?;
+    let local_desired = config.desired_config();
+    let cached_remote_path = args.state_dir.join("remote-config.yaml");
+    let initial_desired = if config.controller.is_some() {
+        match std::fs::read_to_string(&cached_remote_path) {
+            Ok(contents) => {
+                tracing::info!(
+                    path = %cached_remote_path.display(),
+                    "restoring last accepted controller configuration"
+                );
+                Some(config::parse_desired(&contents).with_context(|| {
+                    format!(
+                        "parse cached controller configuration from {}",
+                        cached_remote_path.display()
+                    )
+                })?)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                (!local_desired.is_empty()).then_some(local_desired)
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "read cached controller configuration from {}",
+                        cached_remote_path.display()
+                    )
+                });
+            }
+        }
+    } else {
+        Some(local_desired)
+    };
+    if let Some(initial_desired) = initial_desired {
+        reconciler
+            .apply(&initial_desired)
+            .context("apply initial desired configuration")?;
+    } else {
+        tracing::info!(
+            "preserving managed files until the controller provides desired configuration"
+        );
+    }
     let discovery = discovery::discover().await;
     for agent in &discovery.agents {
         tracing::info!(
@@ -150,9 +187,16 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn credential_helper_executable() -> anyhow::Result<PathBuf> {
-    Ok(std::env::current_exe()
+    let path = std::env::current_exe()
         .context("locate agentdesktopd executable")?
-        .with_file_name(format!("agentdesktop{}", std::env::consts::EXE_SUFFIX)))
+        .with_file_name(format!("agentdesktop{}", std::env::consts::EXE_SUFFIX));
+    if !path.is_file() {
+        anyhow::bail!(
+            "AgentDesktop credential helper is missing at {}; install or build agentdesktop next to agentdesktopd",
+            path.display()
+        );
+    }
+    Ok(path)
 }
 
 fn bind(path: &PathBuf) -> anyhow::Result<UnixListener> {

@@ -39,7 +39,7 @@ message CompleteEnrollmentRequest {
 }
 
 message InferenceGatewayCredentialRequest {
-  string gateway = 1;
+  reserved 1;
 }
 
 message InferenceGatewayCredentialResponse {

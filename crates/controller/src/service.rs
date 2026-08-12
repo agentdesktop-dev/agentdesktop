@@ -104,10 +104,6 @@ impl FleetAgent for FleetAgentService {
         request: Request<InferenceGatewayCredentialRequest>,
     ) -> Result<Response<InferenceGatewayCredentialResponse>, Status> {
         let device_id = self.authenticate_device(request.metadata()).await?;
-        let gateway_name = request.get_ref().gateway.trim();
-        if gateway_name.is_empty() {
-            return Err(Status::invalid_argument("gateway is required"));
-        }
         let desired = self
             .desired_config
             .as_ref()
@@ -116,9 +112,9 @@ impl FleetAgent for FleetAgentService {
             .map_err(|_| Status::internal("desired configuration is not UTF-8"))?;
         let config = agentdesktop_core::config::parse_desired(yaml).map_err(internal)?;
         let gateway = config
-            .inference_gateways
-            .get(gateway_name)
-            .ok_or_else(|| Status::not_found("unknown inference gateway"))?;
+            .inference_gateway
+            .as_ref()
+            .ok_or_else(|| Status::not_found("inference gateway is not configured"))?;
         let audience = match gateway.authentication.as_ref() {
             Some(InferenceGatewayAuthentication::ControllerJwt { audience }) => audience,
             None => {
@@ -141,11 +137,10 @@ impl FleetAgent for FleetAgentService {
             principal.subject.as_str()
         };
         let (credential, expires_at_unix_seconds) = issuer
-            .issue(subject, &device_id, gateway_name, audience)
+            .issue(subject, &device_id, audience)
             .map_err(internal)?;
         info!(
             device_id,
-            gateway = gateway_name,
             expires_at_unix_seconds,
             enrolled_by_issuer = principal.issuer,
             "issued inference gateway credential"

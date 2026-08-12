@@ -1,6 +1,7 @@
 use std::{collections::BTreeSet, fs::File, io::Read, path::Path};
 
 use agentdesktop_core::model::Agent;
+use memchr::memmem;
 
 use super::metadata;
 
@@ -56,11 +57,7 @@ fn embedded_version_from_reader(mut reader: impl Read, chunk_size: usize) -> Opt
 }
 
 fn collect_versions(bytes: &[u8], finished: bool, versions: &mut BTreeSet<String>) {
-    for start in bytes
-        .windows(VERSION_MARKER.len())
-        .enumerate()
-        .filter_map(|(index, window)| (window == VERSION_MARKER).then_some(index))
-    {
+    for start in memmem::find_iter(bytes, VERSION_MARKER) {
         let value = &bytes[start + VERSION_MARKER.len()..];
         let length = value
             .iter()

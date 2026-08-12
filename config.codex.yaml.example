@@ -1,14 +1,12 @@
 # yaml-language-server: $schema=./schema/desired-config.json
-inferenceGateways:
-  corporate:
-    url: https://gateway.example.com
-    authentication:
-      type: controllerJwt
-      audience: agentgateway
+inferenceGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
 
 programs:
   codex:
-    inferenceGateway: corporate
     managedConfig:
       model_reasoning_effort: high
       approval_policy: on-request

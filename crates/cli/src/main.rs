@@ -29,10 +29,7 @@ enum Command {
     /// Print the daemon's local startup configuration.
     Config,
     /// Print a short-lived credential for an inference gateway.
-    Credential {
-        /// Name of the inference gateway in desired configuration.
-        gateway: String,
-    },
+    Credential,
 }
 
 #[tokio::main]
@@ -65,16 +62,9 @@ async fn main() -> anyhow::Result<()> {
                 agentdesktop_core::serdes::yamlviajson::to_string(&config)?
             );
         }
-        Command::Credential { gateway } => {
-            if gateway.is_empty()
-                || !gateway
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-            {
-                anyhow::bail!("gateway name must contain only letters, numbers, '.', '-', or '_'");
-            }
-            let path = format!("/v1/inference-gateways/{gateway}/credential");
-            let response: InferenceGatewayCredential = client::get(&args.socket, &path).await?;
+        Command::Credential => {
+            let response: InferenceGatewayCredential =
+                client::get(&args.socket, "/v1/inference-gateway/credential").await?;
             println!("{}", response.credential);
         }
     }

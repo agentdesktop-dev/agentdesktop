@@ -36,38 +36,32 @@ impl Reconciler {
     }
 
     pub fn apply(&self, config: &DesiredConfig) -> anyhow::Result<()> {
-        let claude_code = config.programs.claude_code.as_ref().map(|claude_code| {
-            let gateway = claude_code
-                .inference_gateway
-                .as_ref()
-                .map(|name| &config.inference_gateways[name]);
-            (claude_code, gateway)
-        });
+        let claude_code = config
+            .programs
+            .claude_code
+            .as_ref()
+            .map(|claude_code| (claude_code, config.inference_gateway.as_ref()));
         claude_code::apply(
             &self.claude_code_managed_settings_dir,
             &self.claude_credential_helper_command(),
             claude_code,
         )?;
-        let codex = config.programs.codex.as_ref().map(|codex| {
-            let gateway = codex
-                .inference_gateway
-                .as_ref()
-                .map(|name| &config.inference_gateways[name]);
-            (codex, gateway)
-        });
+        let codex = config
+            .programs
+            .codex
+            .as_ref()
+            .map(|codex| (codex, config.inference_gateway.as_ref()));
         codex::apply(
             &self.codex_managed_config_path,
             &self.credential_helper,
             &self.socket,
             codex,
         )?;
-        let open_code = config.programs.open_code.as_ref().map(|open_code| {
-            let gateway = open_code
-                .inference_gateway
-                .as_ref()
-                .map(|name| &config.inference_gateways[name]);
-            (open_code, gateway)
-        });
+        let open_code = config
+            .programs
+            .open_code
+            .as_ref()
+            .map(|open_code| (open_code, config.inference_gateway.as_ref()));
         open_code::apply(
             &self.open_code_managed_config_path,
             &self.open_code_plugin_path,

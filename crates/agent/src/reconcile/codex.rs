@@ -84,13 +84,9 @@ fn managed_config(
         return Ok(settings);
     };
 
-    let gateway_name = config
-        .inference_gateway
-        .as_deref()
-        .context("Codex gateway configuration has no gateway name")?;
-    let provider_name = format!("agentdesktop_{gateway_name}");
+    let provider_name = "agentdesktop";
     let mut provider = json!({
-        "name": format!("{gateway_name} via AgentDesktop"),
+        "name": "AgentDesktop",
         "base_url": responses_base_url(gateway),
         "wire_api": "responses",
     });
@@ -104,14 +100,13 @@ fn managed_config(
                 "--socket",
                 socket.to_string_lossy(),
                 "credential",
-                gateway_name,
             ],
             "timeout_ms": 5000,
             "refresh_interval_ms": 60000,
         });
     }
     let generated = json!({
-        "model_provider": provider_name.clone(),
+        "model_provider": provider_name,
         "model_providers": {
             (provider_name): provider,
         },
@@ -204,15 +199,13 @@ mod tests {
     fn pass_through_settings_are_merged_with_managed_gateway_values() {
         let desired = parse_desired(
             r#"
-inferenceGateways:
-  corporate:
-    url: https://gateway.example.com/proxy
-    authentication:
-      type: controllerJwt
-      audience: agentgateway
+inferenceGateway:
+  url: https://gateway.example.com/proxy
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
 programs:
   codex:
-    inferenceGateway: corporate
     managedConfig:
       model: company-model
       model_provider: ignored
@@ -225,7 +218,7 @@ programs:
         )
         .expect("valid desired configuration");
         let codex = desired.programs.codex.as_ref().unwrap();
-        let gateway = &desired.inference_gateways["corporate"];
+        let gateway = desired.inference_gateway.as_ref().unwrap();
 
         let settings = managed_config(
             codex,
@@ -237,41 +230,36 @@ programs:
 
         assert_eq!(settings["model"], "company-model");
         assert_eq!(settings["otel"]["environment"], "production");
-        assert_eq!(settings["model_provider"], "agentdesktop_corporate");
+        assert_eq!(settings["model_provider"], "agentdesktop");
         assert_eq!(
             settings["model_providers"]["existing"]["base_url"],
             "https://existing.example.com/v1"
         );
-        let provider = &settings["model_providers"]["agentdesktop_corporate"];
+        let provider = &settings["model_providers"]["agentdesktop"];
         assert_eq!(provider["base_url"], "https://gateway.example.com/proxy/v1");
         assert_eq!(provider["wire_api"], "responses");
         assert_eq!(provider["auth"]["command"], "/usr/local/bin/agentdesktop");
-        assert_eq!(provider["auth"]["args"][3], "corporate");
+        assert_eq!(provider["auth"]["args"].as_array().unwrap().len(), 3);
         assert_eq!(provider["auth"]["refresh_interval_ms"], 60000);
 
         let serialized = toml::to_string_pretty(&settings).expect("valid TOML");
         let parsed: toml::Value = toml::from_str(&serialized).expect("parse generated TOML");
-        assert_eq!(
-            parsed["model_provider"].as_str(),
-            Some("agentdesktop_corporate")
-        );
+        assert_eq!(parsed["model_provider"].as_str(), Some("agentdesktop"));
     }
 
     #[test]
     fn does_not_duplicate_an_existing_v1_suffix() {
         let desired = parse_desired(
             r#"
-inferenceGateways:
-  corporate:
-    url: https://gateway.example.com/v1/
+inferenceGateway:
+  url: https://gateway.example.com/v1/
 programs:
-  codex:
-    inferenceGateway: corporate
+  codex: {}
 "#,
         )
         .expect("valid desired configuration");
         let codex = desired.programs.codex.as_ref().unwrap();
-        let gateway = &desired.inference_gateways["corporate"];
+        let gateway = desired.inference_gateway.as_ref().unwrap();
         let settings = managed_config(
             codex,
             Some(gateway),
@@ -281,7 +269,7 @@ programs:
         .expect("managed settings");
 
         assert_eq!(
-            settings["model_providers"]["agentdesktop_corporate"]["base_url"],
+            settings["model_providers"]["agentdesktop"]["base_url"],
             "https://gateway.example.com/v1"
         );
     }

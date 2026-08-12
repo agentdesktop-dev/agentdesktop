@@ -94,7 +94,7 @@ cargo run --bin agentdesktopd -- \
   --enrollment-token development
 ```
 
-The daemon writes `identity.json` and any accepted `remote-config.yaml` under its state directory. To have the controller offer desired configuration when a device connects, pass `--desired-config <path>` and optionally `--desired-config-revision <number>`.
+The daemon writes `identity.json` and any accepted `remote-config.yaml` under its state directory. On restart it reapplies that last accepted controller configuration before connecting. If no cached or non-empty local desired configuration exists, it preserves managed files until the controller responds rather than temporarily removing them. To have the controller offer desired configuration when a device connects, pass `--desired-config <path>` and optionally `--desired-config-revision <number>`.
 
 ### OIDC enrollment
 
@@ -142,27 +142,26 @@ For TLS, give the controller `--tls-certificate` and `--tls-key`, use an `https:
 
 ### Claude Code managed settings
 
-Inference gateways are named, top-level resources so multiple application integrations can reference the same endpoint. `config.claude-code.yaml.example` defines a `corporate` gateway and assigns Claude Code to it:
+AgentDesktop manages one optional top-level inference gateway. Every configured
+developer-tool integration uses that gateway:
 
 ```yaml
-inferenceGateways:
-  corporate:
-    url: https://gateway.example.com
-    authentication:
-      type: controllerJwt
-      audience: agentgateway
+inferenceGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
 
 programs:
   claudeCode:
-    inferenceGateway: corporate
     env:
       COMPANY_ENVIRONMENT: production
     permissions:
       defaultMode: plan
 ```
 
-Keys alongside `inferenceGateway` are passed directly into AgentDesktop's
-Claude Code managed-settings drop-in. Objects are deep-merged with generated
+Keys under `claudeCode` are passed directly into AgentDesktop's managed-settings
+drop-in. Objects are deep-merged with generated
 settings; AgentDesktop-owned gateway values take precedence on conflicts. The
 gateway adapter adds `ANTHROPIC_BASE_URL` plus an `apiKeyHelper` command that
 calls the local AgentDesktop CLI. The CLI asks the daemon for a credential, the
@@ -189,7 +188,7 @@ cargo run --bin agentdesktop-controller -- \
   --gateway-jwt-key-id agentdesktop
 ```
 
-Agentgateway must trust the corresponding RSA public key and require issuer `agentdesktop-controller` and audience `agentgateway`. For OIDC-enrolled devices, the gateway JWT subject is the verified OIDC subject; token-enrolled devices use their device ID. The JWT also carries `device_id` and `gateway` claims. In production, keep the private key outside the database with restrictive permissions and distribute only its public JWK to Agentgateway.
+Agentgateway must trust the corresponding RSA public key and require issuer `agentdesktop-controller` and audience `agentgateway`. For OIDC-enrolled devices, the gateway JWT subject is the verified OIDC subject; token-enrolled devices use their device ID. The JWT also carries the `device_id` claim. In production, keep the private key outside the database with restrictive permissions and distribute only its public JWK to Agentgateway.
 
 On Linux, the daemon atomically reconciles AgentDesktop's dedicated drop-in at `/etc/claude-code/managed-settings.d/50-agentdesktop.json`. For an unprivileged development run, redirect that exact directory:
 
@@ -209,21 +208,20 @@ The generated helper can also be exercised directly:
 ```console
 cargo run --bin agentdesktop -- \
   --socket /tmp/agentdesktop.sock \
-  credential corporate
+  credential
 ```
 
 It writes only the JWT to stdout, which is the interface Claude Code expects.
 
 ### Codex managed configuration
 
-Codex can use the same named inference gateways and rotating controller JWTs.
+Codex can use the configured inference gateway and rotating controller JWTs.
 `config.codex.yaml.example` also shows arbitrary organization-managed Codex
 settings:
 
 ```yaml
 programs:
   codex:
-    inferenceGateway: corporate
     managedConfig:
       model_reasoning_effort: high
       approval_policy: on-request
@@ -261,7 +259,6 @@ models automatically:
 ```yaml
 programs:
   openCode:
-    inferenceGateway: corporate
     model: gpt-5.6-terra
     models:
       gpt-5.6-terra:
@@ -308,7 +305,7 @@ AGENTDESKTOP_ENROLLMENT_TOKEN=development \
   --config ./config.controller.yaml.example
 ```
 
-This uses the production defaults for state, the local socket, and Claude Code's `/etc/claude-code/managed-settings.d` directory. Additional daemon arguments are forwarded unchanged. Cargo runs as your user, then its target runner starts only the built daemon with `sudo`. The runner preserves your development `PATH` so discovery can still see user-installed programs. Discovery reads install and package metadata; it never executes discovered programs.
+This uses the production defaults for state, the local socket, and Claude Code's `/etc/claude-code/managed-settings.d` directory. Additional daemon arguments are forwarded unchanged. The wrapper builds both `agentdesktopd` and its sibling `agentdesktop` credential helper as your user, then starts only the daemon with `sudo`. The runner preserves your development `PATH` so discovery can still see user-installed programs. Discovery reads install and package metadata; it never executes discovered programs.
 
 ## Tray client
 

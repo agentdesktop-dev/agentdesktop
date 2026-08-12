@@ -31,6 +31,7 @@ http-body-util = "0.1"
 humantime-serde = "1"
 hyper = { version = "1", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1", features = ["service", "tokio"] }
+memchr = "2.7"
 jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
 open = "5.4"
 prost = "0.14"
