@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "DaemonConfig",
-  "description": "Local startup configuration for an AgentDesktop daemon.",
+  "description": "Configuration for an AgentDesktop daemon.",
   "type": "object",
   "properties": {
     "controller": {
@@ -16,7 +16,7 @@
       ]
     },
     "inferenceGateway": {
-      "description": "Inference gateway used as the local desired-state baseline.",
+      "description": "Inference gateway used by managed developer tools.",
       "anyOf": [
         {
           "$ref": "#/$defs/InferenceGatewayConfig"
@@ -27,8 +27,12 @@
       ]
     },
     "programs": {
-      "description": "Per-program settings used as the local desired-state baseline.",
+      "description": "Per-program settings reconciled on this device.",
       "$ref": "#/$defs/ProgramsConfig"
+    },
+    "telemetry": {
+      "description": "Telemetry collected from managed developer tools.",
+      "$ref": "#/$defs/TelemetryConfig"
     }
   },
   "additionalProperties": false,
@@ -36,6 +40,12 @@
     "ClaudeCodeConfig": {
       "description": "Settings reconciled into Claude Code's managed configuration.\n\nArbitrary keys are written directly to AgentDesktop's managed-settings\ndrop-in. Generated gateway settings take precedence when values overlap.",
       "type": "object",
+      "properties": {
+        "useInferenceGateway": {
+          "description": "Whether this program uses the top-level inference gateway.",
+          "type": "boolean"
+        }
+      },
       "additionalProperties": true
     },
     "CodexConfig": {
@@ -46,6 +56,10 @@
           "description": "Arbitrary values written to Codex's organization-managed TOML configuration.\n\nUse Codex's native snake_case configuration keys. TOML has no null value,\nso null values cannot be reconciled.",
           "type": "object",
           "additionalProperties": true
+        },
+        "useInferenceGateway": {
+          "description": "Whether this program uses the top-level inference gateway.",
+          "type": "boolean"
         }
       },
       "additionalProperties": false
@@ -145,6 +159,10 @@
           "description": "Models exposed by the managed inference-gateway provider, keyed by model ID.\n\nEach value is an arbitrary OpenCode model configuration object. At least\none model is required when a top-level `inferenceGateway` is configured.",
           "type": "object",
           "additionalProperties": true
+        },
+        "useInferenceGateway": {
+          "description": "Whether this program uses the top-level inference gateway.",
+          "type": "boolean"
         }
       },
       "additionalProperties": false
@@ -188,6 +206,41 @@
         }
       },
       "additionalProperties": false
+    },
+    "TelemetryConfig": {
+      "description": "Telemetry events collected from managed developer tools.",
+      "type": "object",
+      "properties": {
+        "events": {
+          "description": "Event names to collect. `tool.use.input` implies `tool.use` and includes tool arguments.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TelemetryEventName"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "TelemetryEventName": {
+      "description": "A normalized telemetry event name.",
+      "oneOf": [
+        {
+          "description": "A new developer-tool session.",
+          "type": "string",
+          "const": "session.new"
+        },
+        {
+          "description": "Tool invocation metadata.",
+          "type": "string",
+          "const": "tool.use"
+        },
+        {
+          "description": "Tool invocation metadata and input. This implies `tool.use`.",
+          "type": "string",
+          "const": "tool.use.input"
+        }
+      ]
     }
   }
 }

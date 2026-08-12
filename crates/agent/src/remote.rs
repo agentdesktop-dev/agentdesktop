@@ -22,8 +22,8 @@ use agentdesktop_core::{
 };
 use agentdesktop_proto::fleet::{
     AgentMessage, ConfigState, ConfigStatus, Discovery, Heartbeat, Hello,
-    InferenceGatewayCredentialRequest, Inventory, TelemetryEvent, ToolUseEvent, agent_message,
-    controller_message, fleet_agent_client::FleetAgentClient, telemetry_event,
+    InferenceGatewayCredentialRequest, Inventory, SessionNewEvent, TelemetryEvent, ToolUseEvent,
+    agent_message, controller_message, fleet_agent_client::FleetAgentClient, telemetry_event,
 };
 
 use crate::{
@@ -241,20 +241,20 @@ async fn connect(
                 let Some(message) = message.context("read controller stream")? else {
                     return Ok(());
                 };
-                if let Some(controller_message::Message::DesiredConfig(desired)) = message.message {
+                if let Some(controller_message::Message::DaemonConfig(config)) = message.message {
                     info!(
-                        revision = desired.revision,
-                        bytes = desired.yaml.len(),
-                        "received desired configuration"
+                        revision = config.revision,
+                        bytes = config.yaml.len(),
+                        "received daemon configuration"
                     );
-                    let status = apply_desired_config(state_dir, desired, reconciler);
+                    let status = apply_daemon_config(state_dir, config, reconciler);
                     if status.error.is_empty() {
-                        info!(revision = status.revision, "applied desired configuration");
+                        info!(revision = status.revision, "applied daemon configuration");
                     } else {
                         warn!(
                             revision = status.revision,
                             error = %status.error,
-                            "failed desired configuration"
+                            "failed daemon configuration"
                         );
                     }
                     send(&sender, agent_message::Message::ConfigStatus(status)).await?;
@@ -267,6 +267,13 @@ async fn connect(
 fn telemetry_to_proto(event: ModelTelemetryEvent) -> TelemetryEvent {
     let timestamp_unix_ms = event.timestamp_unix_ms;
     let event = match event.event {
+        TelemetryEventKind::SessionNew {
+            client_id,
+            session_id,
+        } => telemetry_event::Event::SessionNew(SessionNewEvent {
+            client_id,
+            session_id,
+        }),
         TelemetryEventKind::ToolUse {
             client_id,
             tool_name,
@@ -276,7 +283,9 @@ fn telemetry_to_proto(event: ModelTelemetryEvent) -> TelemetryEvent {
             client_id,
             tool_name,
             tool_use_id: tool_use_id.unwrap_or_default(),
-            input_json: serde_json::to_vec(&tool_input).expect("tool input is JSON-compatible"),
+            input_json: tool_input
+                .map(|input| serde_json::to_vec(&input).expect("tool input is JSON-compatible"))
+                .unwrap_or_default(),
         }),
     };
     TelemetryEvent {
@@ -285,44 +294,44 @@ fn telemetry_to_proto(event: ModelTelemetryEvent) -> TelemetryEvent {
     }
 }
 
-fn apply_desired_config(
+fn apply_daemon_config(
     state_dir: &Path,
-    desired: agentdesktop_proto::fleet::DesiredConfig,
+    config: agentdesktop_proto::fleet::DaemonConfig,
     reconciler: &Reconciler,
 ) -> ConfigStatus {
     let result = (|| -> anyhow::Result<()> {
-        let actual_hash = Sha256::digest(&desired.yaml);
-        if actual_hash.as_slice() != desired.sha256 {
+        let actual_hash = Sha256::digest(&config.yaml);
+        if actual_hash.as_slice() != config.sha256 {
             bail!("configuration hash does not match payload");
         }
         debug!(
-            revision = desired.revision,
-            "verified desired configuration hash"
+            revision = config.revision,
+            "verified daemon configuration hash"
         );
 
-        let yaml = std::str::from_utf8(&desired.yaml).context("configuration is not UTF-8")?;
-        let config = config::parse_desired(yaml)?;
-        debug!(revision = desired.revision, "parsed desired configuration");
-        reconciler.apply(&config)?;
+        let yaml = std::str::from_utf8(&config.yaml).context("configuration is not UTF-8")?;
+        let daemon_config = config::parse_daemon(yaml)?;
+        debug!(revision = config.revision, "parsed daemon configuration");
+        reconciler.apply(&daemon_config)?;
         secure_fs::ensure_private_dir(state_dir)?;
         let path = state_dir.join("remote-config.yaml");
-        secure_fs::atomic_write(&path, &desired.yaml, 0o600)?;
+        secure_fs::atomic_write(&path, &config.yaml, 0o600)?;
         info!(
-            revision = desired.revision,
+            revision = config.revision,
             path = %path.display(),
-            "persisted desired configuration"
+            "persisted daemon configuration"
         );
         Ok(())
     })();
 
     match result {
         Ok(()) => ConfigStatus {
-            revision: desired.revision,
+            revision: config.revision,
             state: ConfigState::Applied.into(),
             error: String::new(),
         },
         Err(error) => ConfigStatus {
-            revision: desired.revision,
+            revision: config.revision,
             state: ConfigState::Failed.into(),
             error: format!("{error:#}"),
         },

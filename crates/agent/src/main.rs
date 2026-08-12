@@ -68,16 +68,16 @@ async fn main() -> anyhow::Result<()> {
         credential_helper_executable()?,
         args.socket.clone(),
     );
-    let local_desired = config.desired_config();
+    let local_config = config.clone();
     let cached_remote_path = args.state_dir.join("remote-config.yaml");
-    let initial_desired = if config.controller.is_some() {
+    let initial_config = if config.controller.is_some() {
         match std::fs::read_to_string(&cached_remote_path) {
             Ok(contents) => {
                 tracing::info!(
                     path = %cached_remote_path.display(),
                     "restoring last accepted controller configuration"
                 );
-                Some(config::parse_desired(&contents).with_context(|| {
+                Some(config::parse_daemon(&contents).with_context(|| {
                     format!(
                         "parse cached controller configuration from {}",
                         cached_remote_path.display()
@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
                 })?)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                (!local_desired.is_empty()).then_some(local_desired)
+                (!local_config.is_empty()).then_some(local_config)
             }
             Err(error) => {
                 return Err(error).with_context(|| {
@@ -97,15 +97,15 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     } else {
-        Some(local_desired)
+        Some(local_config)
     };
-    if let Some(initial_desired) = initial_desired {
+    if let Some(initial_config) = initial_config {
         reconciler
-            .apply(&initial_desired)
-            .context("apply initial desired configuration")?;
+            .apply(&initial_config)
+            .context("apply initial daemon configuration")?;
     } else {
         tracing::info!(
-            "preserving managed files until the controller provides desired configuration"
+            "preserving managed files until the controller provides daemon configuration"
         );
     }
     let discovery = discovery::discover().await;

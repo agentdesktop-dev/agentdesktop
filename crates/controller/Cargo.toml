@@ -1,6 +1,6 @@
 [package]
 name = "agentdesktop-controller"
-description = "Central fleet controller for enrollment, inventory, and desired configuration."
+description = "Central fleet controller for enrollment, inventory, and daemon configuration."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

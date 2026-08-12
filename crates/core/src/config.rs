@@ -1,7 +1,7 @@
 //! AgentDesktop daemon and controller-managed configuration.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     net::SocketAddr,
     path::{Path, PathBuf},
     time::Duration,
@@ -11,7 +11,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-/// Local startup configuration for an AgentDesktop daemon.
+/// Configuration for an AgentDesktop daemon.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -19,22 +19,12 @@ pub struct DaemonConfig {
     /// Controller connection settings. Omit this field to run without fleet management.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub controller: Option<ControllerConnectionConfig>,
-    /// Inference gateway used as the local desired-state baseline.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inference_gateway: Option<InferenceGatewayConfig>,
-    /// Per-program settings used as the local desired-state baseline.
-    #[serde(default, skip_serializing_if = "ProgramsConfig::is_empty")]
-    pub programs: ProgramsConfig,
-}
-
-/// Desired configuration distributed by the controller and reconciled by a daemon.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DesiredConfig {
     /// Inference gateway used by managed developer tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inference_gateway: Option<InferenceGatewayConfig>,
+    /// Telemetry collected from managed developer tools.
+    #[serde(default, skip_serializing_if = "TelemetryConfig::is_empty")]
+    pub telemetry: TelemetryConfig,
     /// Per-program settings reconciled on this device.
     #[serde(default, skip_serializing_if = "ProgramsConfig::is_empty")]
     pub programs: ProgramsConfig,
@@ -65,6 +55,50 @@ pub enum InferenceGatewayAuthentication {
         /// Audience placed in the issued JWT. This must match the gateway's expected audience.
         audience: String,
     },
+}
+
+/// Telemetry events collected from managed developer tools.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TelemetryConfig {
+    /// Event names to collect. `tool.use.input` implies `tool.use` and includes tool arguments.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub events: BTreeSet<TelemetryEventName>,
+}
+
+impl TelemetryConfig {
+    fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
+    pub fn collects_tool_use(&self) -> bool {
+        self.events.contains(&TelemetryEventName::ToolUse)
+            || self.events.contains(&TelemetryEventName::ToolUseInput)
+    }
+
+    pub fn includes_tool_input(&self) -> bool {
+        self.events.contains(&TelemetryEventName::ToolUseInput)
+    }
+
+    pub fn collects_session_new(&self) -> bool {
+        self.events.contains(&TelemetryEventName::SessionNew)
+    }
+}
+
+/// A normalized telemetry event name.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum TelemetryEventName {
+    /// A new developer-tool session.
+    #[serde(rename = "session.new")]
+    SessionNew,
+    /// Tool invocation metadata.
+    #[serde(rename = "tool.use")]
+    ToolUse,
+    /// Tool invocation metadata and input. This implies `tool.use`.
+    #[serde(rename = "tool.use.input")]
+    ToolUseInput,
 }
 
 /// Connection settings used by a daemon to reach the fleet controller.
@@ -104,9 +138,9 @@ pub struct ControllerConfig {
     /// OpenID Connect enrollment settings. Omit to disable new enrollment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oidc: Option<ControllerOidcConfig>,
-    /// Desired configuration distributed to enrolled devices.
+    /// Daemon configuration distributed to enrolled devices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub desired_config: Option<ControllerDesiredConfig>,
+    pub daemon_config: Option<ControllerDaemonConfig>,
     /// Inference-gateway JWT signing settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_jwt: Option<ControllerGatewayJwtConfig>,
@@ -134,18 +168,18 @@ pub struct ControllerOidcConfig {
     pub redirect_uri: String,
 }
 
-/// Controller-owned desired configuration file and its revision.
+/// Controller-owned daemon configuration file and its revision.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ControllerDesiredConfig {
+pub struct ControllerDaemonConfig {
     /// Path to the watched YAML configuration distributed to enrolled devices.
     ///
     /// Relative paths are resolved from the controller configuration directory.
     /// Valid file changes are published to connected devices automatically.
     pub path: PathBuf,
-    /// Monotonically increasing revision assigned to the desired configuration.
-    #[serde(default = "default_desired_config_revision")]
+    /// Monotonically increasing revision assigned to the daemon configuration.
+    #[serde(default = "default_daemon_config_revision")]
     pub revision: u64,
 }
 
@@ -192,7 +226,7 @@ impl Default for ControllerConfig {
             admin_listen: default_admin_listen(),
             database_url: default_controller_database_url(),
             oidc: None,
-            desired_config: None,
+            daemon_config: None,
             gateway_jwt: None,
             tls: None,
             allow_insecure_dev: false,
@@ -220,7 +254,7 @@ fn default_oidc_redirect_uri() -> String {
     "http://127.0.0.1:5555/callback".to_owned()
 }
 
-fn default_desired_config_revision() -> u64 {
+fn default_daemon_config_revision() -> u64 {
     1
 }
 
@@ -270,6 +304,9 @@ impl ProgramsConfig {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeCodeConfig {
+    /// Whether this program uses the top-level inference gateway.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub use_inference_gateway: bool,
     /// Arbitrary Claude Code managed-settings values, flattened into this object.
     #[serde(default, flatten)]
     pub settings: BTreeMap<String, serde_json::Value>,
@@ -284,6 +321,9 @@ pub struct ClaudeCodeConfig {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CodexConfig {
+    /// Whether this program uses the top-level inference gateway.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub use_inference_gateway: bool,
     /// Arbitrary values written to Codex's organization-managed TOML configuration.
     ///
     /// Use Codex's native snake_case configuration keys. TOML has no null value,
@@ -301,6 +341,9 @@ pub struct CodexConfig {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OpenCodeConfig {
+    /// Whether this program uses the top-level inference gateway.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub use_inference_gateway: bool,
     /// Model ID selected from `models` when using the inference gateway.
     ///
     /// This is required when a top-level `inferenceGateway` is configured.
@@ -331,8 +374,8 @@ pub fn load_controller(path: &Path) -> anyhow::Result<ControllerConfig> {
     let mut config = parse_controller(&contents)
         .with_context(|| format!("parse controller configuration from {}", path.display()))?;
     let directory = path.parent().unwrap_or_else(|| Path::new("."));
-    if let Some(desired) = &mut config.desired_config {
-        resolve_relative(&mut desired.path, directory);
+    if let Some(daemon) = &mut config.daemon_config {
+        resolve_relative(&mut daemon.path, directory);
     }
     if let Some(gateway) = &mut config.gateway_jwt {
         resolve_relative(&mut gateway.private_key, directory);
@@ -372,10 +415,10 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
         }
         Url::parse(&oidc.redirect_uri).context("parse oidc.redirectUri URL")?;
     }
-    if let Some(desired) = &config.desired_config
-        && desired.revision == 0
+    if let Some(daemon) = &config.daemon_config
+        && daemon.revision == 0
     {
-        anyhow::bail!("desiredConfig.revision must be greater than zero");
+        anyhow::bail!("daemonConfig.revision must be greater than zero");
     }
     if let Some(gateway) = &config.gateway_jwt {
         if gateway.issuer.trim().is_empty() {
@@ -401,36 +444,18 @@ fn resolve_relative(path: &mut PathBuf, directory: &Path) {
 pub fn parse_daemon(contents: &str) -> anyhow::Result<DaemonConfig> {
     let config: DaemonConfig =
         crate::serdes::yamlviajson::from_str(contents).context("parse daemon configuration")?;
-    validate_desired(config.inference_gateway.as_ref(), &config.programs)?;
-    Ok(config)
-}
-
-/// Parses and validates a controller-managed desired configuration document.
-pub fn parse_desired(contents: &str) -> anyhow::Result<DesiredConfig> {
-    let config: DesiredConfig =
-        crate::serdes::yamlviajson::from_str(contents).context("parse desired configuration")?;
-    validate_desired(config.inference_gateway.as_ref(), &config.programs)?;
+    validate_daemon(config.inference_gateway.as_ref(), &config.programs)?;
     Ok(config)
 }
 
 impl DaemonConfig {
-    /// Returns the local desired-state portion of this daemon configuration.
-    pub fn desired_config(&self) -> DesiredConfig {
-        DesiredConfig {
-            inference_gateway: self.inference_gateway.clone(),
-            programs: self.programs.clone(),
-        }
-    }
-}
-
-impl DesiredConfig {
     /// Returns whether this configuration manages no gateway or developer tools.
     pub fn is_empty(&self) -> bool {
-        self.inference_gateway.is_none() && self.programs.is_empty()
+        self.inference_gateway.is_none() && self.telemetry.is_empty() && self.programs.is_empty()
     }
 }
 
-fn validate_desired(
+fn validate_daemon(
     inference_gateway: Option<&InferenceGatewayConfig>,
     programs: &ProgramsConfig,
 ) -> anyhow::Result<()> {
@@ -460,6 +485,7 @@ fn validate_desired(
 
     if let Some(open_code) = &programs.open_code
         && inference_gateway.is_some()
+        && open_code.use_inference_gateway
     {
         let model = open_code
             .model
@@ -473,12 +499,20 @@ fn validate_desired(
     Ok(())
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_controller, parse_daemon, parse_desired};
+    use super::{parse_controller, parse_daemon};
 
     #[test]
-    fn daemon_options_are_not_valid_desired_configuration() {
+    fn daemon_configuration_supports_local_and_managed_options() {
         let document = r#"
 controller:
   address: http://127.0.0.1:8443
@@ -490,20 +524,17 @@ programs:
 
         let daemon = parse_daemon(document).expect("valid daemon configuration");
         assert!(daemon.controller.is_some());
-        assert!(daemon.desired_config().inference_gateway.is_some());
-        assert!(parse_desired(document).is_err());
+        assert!(daemon.inference_gateway.is_some());
     }
 
     #[test]
     fn checked_in_examples_use_their_declared_configuration_surface() {
-        parse_controller(include_str!("../../../examples/scenario/controller.yaml"))
+        parse_controller(include_str!("../../../examples/claude/controller.yaml"))
             .expect("controller example");
-        parse_daemon(include_str!(
-            "../../../examples/scenario/agentdesktopd.yaml"
-        ))
-        .expect("controller-connected daemon example");
-        parse_desired(include_str!("../../../examples/scenario/claude-code.yaml"))
-            .expect("Claude Code desired configuration example");
+        parse_daemon(include_str!("../../../examples/claude/agentdesktopd.yaml"))
+            .expect("controller-connected daemon example");
+        parse_daemon(include_str!("../../../examples/claude/claude-code.yaml"))
+            .expect("Claude Code daemon configuration example");
     }
 
     #[test]
@@ -533,7 +564,7 @@ oidc:
 
     #[test]
     fn rejects_an_invalid_inference_gateway_url() {
-        let error = parse_desired(
+        let error = parse_daemon(
             r#"
 inferenceGateway:
   url: ftp://gateway.example.com
@@ -546,7 +577,7 @@ inferenceGateway:
 
     #[test]
     fn open_code_requires_a_declared_gateway_model() {
-        let error = parse_desired(
+        let error = parse_daemon(
             r#"
 inferenceGateway:
   url: https://gateway.example.com

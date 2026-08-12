@@ -4,7 +4,7 @@ mod open_code;
 
 use std::path::PathBuf;
 
-use agentdesktop_core::config::{DesiredConfig, InferenceGatewayConfig};
+use agentdesktop_core::config::{DaemonConfig, InferenceGatewayConfig};
 use serde_json::Value;
 
 #[derive(Clone)]
@@ -36,34 +36,49 @@ impl Reconciler {
         }
     }
 
-    pub fn apply(&self, config: &DesiredConfig) -> anyhow::Result<()> {
-        let claude_code = config
-            .programs
-            .claude_code
-            .as_ref()
-            .map(|claude_code| (claude_code, config.inference_gateway.as_ref()));
+    pub fn apply(&self, config: &DaemonConfig) -> anyhow::Result<()> {
+        let tool_use_hook = config
+            .telemetry
+            .collects_tool_use()
+            .then(|| self.claude_hook_command(config.telemetry.includes_tool_input()));
+        let session_new_hook = config
+            .telemetry
+            .collects_session_new()
+            .then(|| self.claude_session_hook_command());
+        let claude_code = config.programs.claude_code.as_ref().map(|claude_code| {
+            let gateway = config
+                .inference_gateway
+                .as_ref()
+                .filter(|_| claude_code.use_inference_gateway);
+            (claude_code, gateway)
+        });
         claude_code::apply(
             &self.claude_code_managed_settings_dir,
             &self.claude_credential_helper_command(),
-            &self.claude_hook_command(),
+            tool_use_hook.as_deref(),
+            session_new_hook.as_deref(),
             claude_code,
         )?;
-        let codex = config
-            .programs
-            .codex
-            .as_ref()
-            .map(|codex| (codex, config.inference_gateway.as_ref()));
+        let codex = config.programs.codex.as_ref().map(|codex| {
+            let gateway = config
+                .inference_gateway
+                .as_ref()
+                .filter(|_| codex.use_inference_gateway);
+            (codex, gateway)
+        });
         codex::apply(
             &self.codex_managed_config_path,
             &self.credential_helper,
             &self.socket,
             codex,
         )?;
-        let open_code = config
-            .programs
-            .open_code
-            .as_ref()
-            .map(|open_code| (open_code, config.inference_gateway.as_ref()));
+        let open_code = config.programs.open_code.as_ref().map(|open_code| {
+            let gateway = config
+                .inference_gateway
+                .as_ref()
+                .filter(|_| open_code.use_inference_gateway);
+            (open_code, gateway)
+        });
         open_code::apply(
             &self.open_code_managed_config_path,
             &self.open_code_plugin_path,
@@ -81,9 +96,21 @@ impl Reconciler {
         )
     }
 
-    fn claude_hook_command(&self) -> String {
-        format!(
+    fn claude_hook_command(&self, include_input: bool) -> String {
+        let mut command = format!(
             "{} --socket {} hook claude-pre-tool-use",
+            shell_quote(&self.credential_helper.to_string_lossy()),
+            shell_quote(&self.socket.to_string_lossy())
+        );
+        if include_input {
+            command.push_str(" --include-input");
+        }
+        command
+    }
+
+    fn claude_session_hook_command(&self) -> String {
+        format!(
+            "{} --socket {} hook claude-session-start",
             shell_quote(&self.credential_helper.to_string_lossy()),
             shell_quote(&self.socket.to_string_lossy())
         )

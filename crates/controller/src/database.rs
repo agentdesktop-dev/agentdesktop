@@ -431,37 +431,53 @@ impl Database {
         device_id: &str,
         telemetry: &TelemetryEvent,
     ) -> anyhow::Result<()> {
-        let (event_type, payload) = match telemetry
-            .event
-            .as_ref()
-            .context("telemetry has no event")?
-        {
-            telemetry_event::Event::ToolUse(event) => {
-                if event.client_id.is_empty() || event.client_id.len() > 64 {
-                    anyhow::bail!("invalid telemetry client ID");
+        let (event_type, payload) =
+            match telemetry.event.as_ref().context("telemetry has no event")? {
+                telemetry_event::Event::SessionNew(event) => {
+                    if event.client_id.is_empty() || event.client_id.len() > 64 {
+                        anyhow::bail!("invalid telemetry client ID");
+                    }
+                    if event.session_id.is_empty() || event.session_id.len() > 256 {
+                        anyhow::bail!("invalid telemetry session ID");
+                    }
+                    (
+                        "sessionNew",
+                        serde_json::json!({
+                            "clientId": event.client_id,
+                            "sessionId": event.session_id,
+                        }),
+                    )
                 }
-                if event.tool_name.is_empty() || event.tool_name.len() > 128 {
-                    anyhow::bail!("invalid telemetry tool name");
-                }
-                if event.tool_use_id.len() > 256 {
-                    anyhow::bail!("invalid telemetry tool use ID");
-                }
-                if event.input_json.len() > 256 * 1024 {
-                    anyhow::bail!("telemetry tool input is too large");
-                }
-                let tool_input: serde_json::Value = serde_json::from_slice(&event.input_json)
-                    .context("decode telemetry tool input")?;
-                (
-                    "toolUse",
-                    serde_json::json!({
+                telemetry_event::Event::ToolUse(event) => {
+                    if event.client_id.is_empty() || event.client_id.len() > 64 {
+                        anyhow::bail!("invalid telemetry client ID");
+                    }
+                    if event.tool_name.is_empty() || event.tool_name.len() > 128 {
+                        anyhow::bail!("invalid telemetry tool name");
+                    }
+                    if event.tool_use_id.len() > 256 {
+                        anyhow::bail!("invalid telemetry tool use ID");
+                    }
+                    if event.input_json.len() > 256 * 1024 {
+                        anyhow::bail!("telemetry tool input is too large");
+                    }
+                    let tool_input = (!event.input_json.is_empty())
+                        .then(|| {
+                            serde_json::from_slice(&event.input_json)
+                                .context("decode telemetry tool input")
+                        })
+                        .transpose()?;
+                    let mut payload = serde_json::json!({
                         "clientId": event.client_id,
                         "toolName": event.tool_name,
                         "toolUseId": (!event.tool_use_id.is_empty()).then_some(&event.tool_use_id),
-                        "toolInput": tool_input,
-                    }),
-                )
-            }
-        };
+                    });
+                    if let Some(tool_input) = tool_input {
+                        payload["toolInput"] = tool_input;
+                    }
+                    ("toolUse", payload)
+                }
+            };
         sqlx::query(
             "INSERT INTO telemetry_events
                 (id, device_id, timestamp_unix_ms, event_type, payload_json)

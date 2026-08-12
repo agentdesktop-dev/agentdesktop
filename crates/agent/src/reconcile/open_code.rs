@@ -247,13 +247,13 @@ fn remove_owned(path: &Path, description: &str) -> anyhow::Result<()> {
 mod tests {
     use std::path::Path;
 
-    use agentdesktop_core::config::parse_desired;
+    use agentdesktop_core::config::parse_daemon;
 
     use super::{credential_plugin, managed_config};
 
     #[test]
     fn pass_through_settings_are_merged_with_gateway_and_plugin() {
-        let desired = parse_desired(
+        let config = parse_daemon(
             r#"
 inferenceGateway:
   url: https://gateway.example.com/proxy
@@ -278,9 +278,9 @@ programs:
             baseURL: https://existing.example.com/v1
 "#,
         )
-        .expect("valid desired configuration");
-        let open_code = desired.programs.open_code.as_ref().unwrap();
-        let gateway = desired.inference_gateway.as_ref().unwrap();
+        .expect("valid daemon configuration");
+        let open_code = config.programs.open_code.as_ref().unwrap();
+        let gateway = config.inference_gateway.as_ref().unwrap();
         let settings = managed_config(
             open_code,
             Some(gateway),

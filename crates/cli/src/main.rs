@@ -46,8 +46,14 @@ enum Command {
 
 #[derive(Subcommand)]
 enum HookCommand {
+    /// Report a Claude Code SessionStart event as telemetry.
+    ClaudeSessionStart,
     /// Report a Claude Code PreToolUse event as telemetry.
-    ClaudePreToolUse,
+    ClaudePreToolUse {
+        /// Include tool input in the event.
+        #[arg(long)]
+        include_input: bool,
+    },
 }
 
 #[derive(Deserialize)]
@@ -56,6 +62,12 @@ struct ClaudePreToolUseInput {
     tool_name: String,
     tool_use_id: Option<String>,
     tool_input: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct ClaudeSessionStartInput {
+    hook_event_name: Option<String>,
+    session_id: String,
 }
 
 #[tokio::main]
@@ -99,18 +111,58 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", response.credential);
         }
         Command::Hook {
-            hook: HookCommand::ClaudePreToolUse,
+            hook: HookCommand::ClaudePreToolUse { include_input },
         } => {
             // Telemetry is deliberately fail-open: an unavailable daemon must
             // never prevent Claude Code from using a tool.
-            let _ = report_claude_pre_tool_use(&args.socket).await;
+            let _ = report_claude_pre_tool_use(&args.socket, include_input).await;
+        }
+        Command::Hook {
+            hook: HookCommand::ClaudeSessionStart,
+        } => {
+            // Telemetry is deliberately fail-open: an unavailable daemon must
+            // never prevent Claude Code from starting a session.
+            let _ = report_claude_session_start(&args.socket).await;
         }
     }
 
     Ok(())
 }
 
-async fn report_claude_pre_tool_use(socket: &std::path::Path) -> anyhow::Result<()> {
+async fn report_claude_pre_tool_use(
+    socket: &std::path::Path,
+    include_input: bool,
+) -> anyhow::Result<()> {
+    let input = read_hook_input()?;
+    let event = parse_claude_pre_tool_use(&input, include_input)?;
+    client::post_json(socket, "/v1/telemetry", &event).await
+}
+
+async fn report_claude_session_start(socket: &std::path::Path) -> anyhow::Result<()> {
+    let input = read_hook_input()?;
+    let input: ClaudeSessionStartInput = serde_json::from_slice(&input)?;
+    if input
+        .hook_event_name
+        .as_deref()
+        .is_some_and(|name| name != "SessionStart")
+    {
+        anyhow::bail!("expected a Claude Code SessionStart event");
+    }
+    if input.session_id.trim().is_empty() {
+        anyhow::bail!("Claude hook event has no session ID");
+    }
+    client::post_json(
+        socket,
+        "/v1/telemetry",
+        &TelemetryEventKind::SessionNew {
+            client_id: "claude-code".to_owned(),
+            session_id: input.session_id,
+        },
+    )
+    .await
+}
+
+fn read_hook_input() -> anyhow::Result<Vec<u8>> {
     let mut input = Vec::new();
     std::io::stdin()
         .take(MAX_HOOK_INPUT_BYTES + 1)
@@ -118,11 +170,13 @@ async fn report_claude_pre_tool_use(socket: &std::path::Path) -> anyhow::Result<
     if input.len() as u64 > MAX_HOOK_INPUT_BYTES {
         anyhow::bail!("Claude hook input exceeds {MAX_HOOK_INPUT_BYTES} bytes");
     }
-    let event = parse_claude_pre_tool_use(&input)?;
-    client::post_json(socket, "/v1/telemetry", &event).await
+    Ok(input)
 }
 
-fn parse_claude_pre_tool_use(input: &[u8]) -> anyhow::Result<TelemetryEventKind> {
+fn parse_claude_pre_tool_use(
+    input: &[u8],
+    include_input: bool,
+) -> anyhow::Result<TelemetryEventKind> {
     let input: ClaudePreToolUseInput = serde_json::from_slice(input)?;
     if input
         .hook_event_name
@@ -139,7 +193,7 @@ fn parse_claude_pre_tool_use(input: &[u8]) -> anyhow::Result<TelemetryEventKind>
         client_id: "claude-code".to_owned(),
         tool_name: input.tool_name,
         tool_use_id: input.tool_use_id.filter(|id| !id.is_empty()),
-        tool_input: input.tool_input,
+        tool_input: include_input.then_some(input.tool_input),
     })
 }
 
@@ -160,6 +214,7 @@ mod tests {
                 "tool_use_id": "tool-1",
                 "tool_input": {"command": "cargo test"}
             }"#,
+            true,
         )
         .expect("valid Claude hook input");
 
@@ -169,11 +224,14 @@ mod tests {
             tool_name,
             tool_use_id,
             tool_input,
-        } = &event;
+        } = &event
+        else {
+            panic!("expected tool-use telemetry");
+        };
         assert_eq!(client_id, "claude-code");
         assert_eq!(tool_name, "Bash");
         assert_eq!(tool_use_id.as_deref(), Some("tool-1"));
-        assert_eq!(tool_input["command"], "cargo test");
+        assert_eq!(tool_input.as_ref().unwrap()["command"], "cargo test");
         assert!(!serialized.contains("session-secret"));
         assert!(!serialized.contains("transcript"));
     }
