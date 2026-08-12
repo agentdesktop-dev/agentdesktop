@@ -7,7 +7,7 @@ oidc:
   issuer: http://127.0.0.1:5556/dex
   clientId: local-public
 
-desiredConfig:
+daemonConfig:
   path: ./claude-code.yaml
 
 gatewayJwt:

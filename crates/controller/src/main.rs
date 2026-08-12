@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use agentdesktop_controller::{
     admin::{self, AdminState, ControllerSettings},
+    daemon_config::{self, DaemonConfigStore},
     database::Database,
-    desired_config::{self, DesiredConfigStore},
     gateway_jwt::GatewayJwtIssuer,
     oidc::OidcProvider,
     service::FleetAgentService,
@@ -33,17 +33,13 @@ async fn main() -> anyhow::Result<()> {
             "allowing insecure remote fleet listener for development"
         );
     }
-    let desired_config = match &config.desired_config {
-        Some(desired) => Some(desired_config::load(&desired.path, desired.revision)?),
+    let daemon_config = match &config.daemon_config {
+        Some(daemon) => Some(daemon_config::load(&daemon.path, daemon.revision)?),
         None => None,
     };
-    let desired_config = DesiredConfigStore::new(desired_config);
-    if let Some(desired) = &config.desired_config {
-        desired_config::watch(
-            desired.path.clone(),
-            desired.revision,
-            desired_config.clone(),
-        )?;
+    let daemon_config = DaemonConfigStore::new(daemon_config);
+    if let Some(daemon) = &config.daemon_config {
+        daemon_config::watch(daemon.path.clone(), daemon.revision, daemon_config.clone())?;
     }
     let database = Database::connect(&config.database_url).await?;
     let oidc = match &config.oidc {
@@ -82,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
     let gateway_jwks = gateway_jwt_issuer.as_ref().map(GatewayJwtIssuer::jwks);
     let admin_state = AdminState::new(
         database.clone(),
-        desired_config.clone(),
+        daemon_config.clone(),
         ControllerSettings {
             fleet_listen: config.fleet_listen.to_string(),
             admin_listen: config.admin_listen.to_string(),
@@ -92,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
         },
         gateway_jwks,
     );
-    let service = FleetAgentService::new(oidc, database, desired_config, gateway_jwt_issuer);
+    let service = FleetAgentService::new(oidc, database, daemon_config, gateway_jwt_issuer);
 
     let mut server = Server::builder();
     if let Some(tls) = &config.tls {

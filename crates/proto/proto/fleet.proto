@@ -58,7 +58,14 @@ message TelemetryEvent {
 
   oneof event {
     ToolUseEvent tool_use = 2;
+    SessionNewEvent session_new = 3;
   }
+}
+
+// A developer-tool session observed when it starts.
+message SessionNewEvent {
+  string client_id = 1;
+  string session_id = 2;
 }
 
 // A developer tool invocation observed through a managed tool hook.
@@ -71,7 +78,7 @@ message ToolUseEvent {
 
 message ControllerMessage {
   oneof message {
-    DesiredConfig desired_config = 1;
+    DaemonConfig daemon_config = 1;
   }
 }
 
@@ -113,7 +120,7 @@ message Skill {
   bytes front_matter_json = 2;
 }
 
-message DesiredConfig {
+message DaemonConfig {
   uint64 revision = 1;
   bytes yaml = 2;
   bytes sha256 = 3;

@@ -14,21 +14,21 @@
       "type": "boolean",
       "default": false
     },
-    "databaseUrl": {
-      "description": "SQLite or PostgreSQL URL used for controller state.",
-      "type": "string",
-      "default": "sqlite://agentdesktop-controller.db?mode=rwc"
-    },
-    "desiredConfig": {
-      "description": "Desired configuration distributed to enrolled devices.",
+    "daemonConfig": {
+      "description": "Daemon configuration distributed to enrolled devices.",
       "anyOf": [
         {
-          "$ref": "#/$defs/ControllerDesiredConfig"
+          "$ref": "#/$defs/ControllerDaemonConfig"
         },
         {
           "type": "null"
         }
       ]
+    },
+    "databaseUrl": {
+      "description": "SQLite or PostgreSQL URL used for controller state.",
+      "type": "string",
+      "default": "sqlite://agentdesktop-controller.db?mode=rwc"
     },
     "fleetListen": {
       "description": "Address on which the device-facing gRPC fleet API listens.",
@@ -71,8 +71,8 @@
   },
   "additionalProperties": false,
   "$defs": {
-    "ControllerDesiredConfig": {
-      "description": "Controller-owned desired configuration file and its revision.",
+    "ControllerDaemonConfig": {
+      "description": "Controller-owned daemon configuration file and its revision.",
       "type": "object",
       "properties": {
         "path": {
@@ -80,7 +80,7 @@
           "type": "string"
         },
         "revision": {
-          "description": "Monotonically increasing revision assigned to the desired configuration.",
+          "description": "Monotonically increasing revision assigned to the daemon configuration.",
           "type": "integer",
           "format": "uint64",
           "default": 1,

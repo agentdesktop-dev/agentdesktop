@@ -159,13 +159,13 @@ fn remove(path: &Path) -> anyhow::Result<()> {
 mod tests {
     use std::path::Path;
 
-    use agentdesktop_core::config::parse_desired;
+    use agentdesktop_core::config::parse_daemon;
 
     use super::managed_config;
 
     #[test]
     fn pass_through_settings_are_merged_with_managed_gateway_values() {
-        let desired = parse_desired(
+        let config = parse_daemon(
             r#"
 inferenceGateway:
   url: https://gateway.example.com/proxy
@@ -184,9 +184,9 @@ programs:
         environment: production
 "#,
         )
-        .expect("valid desired configuration");
-        let codex = desired.programs.codex.as_ref().unwrap();
-        let gateway = desired.inference_gateway.as_ref().unwrap();
+        .expect("valid daemon configuration");
+        let codex = config.programs.codex.as_ref().unwrap();
+        let gateway = config.inference_gateway.as_ref().unwrap();
 
         let settings = managed_config(
             codex,
@@ -219,7 +219,7 @@ programs:
 
     #[test]
     fn does_not_duplicate_an_existing_v1_suffix() {
-        let desired = parse_desired(
+        let config = parse_daemon(
             r#"
 inferenceGateway:
   url: https://gateway.example.com/v1/
@@ -227,9 +227,9 @@ programs:
   codex: {}
 "#,
         )
-        .expect("valid desired configuration");
-        let codex = desired.programs.codex.as_ref().unwrap();
-        let gateway = desired.inference_gateway.as_ref().unwrap();
+        .expect("valid daemon configuration");
+        let codex = config.programs.codex.as_ref().unwrap();
+        let gateway = config.inference_gateway.as_ref().unwrap();
         let settings = managed_config(
             codex,
             Some(gateway),

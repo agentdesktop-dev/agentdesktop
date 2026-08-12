@@ -19,7 +19,8 @@ const OWNER_MARKER: &[u8] = b"AgentDesktop\n";
 pub fn apply(
     directory: &Path,
     credential_helper: &str,
-    hook_command: &str,
+    tool_use_hook: Option<&str>,
+    session_new_hook: Option<&str>,
     config: Option<(&ClaudeCodeConfig, Option<&InferenceGatewayConfig>)>,
 ) -> anyhow::Result<()> {
     let path = directory.join(FILE_NAME);
@@ -28,7 +29,13 @@ pub fn apply(
         return remove(&path, &owner_path);
     };
 
-    let settings = managed_settings(config, gateway, credential_helper, hook_command)?;
+    let settings = managed_settings(
+        config,
+        gateway,
+        credential_helper,
+        tool_use_hook,
+        session_new_hook,
+    )?;
     let mut contents =
         serde_json::to_vec_pretty(&settings).context("serialize Claude Code managed settings")?;
     contents.push(b'\n');
@@ -80,11 +87,17 @@ fn managed_settings(
     config: &ClaudeCodeConfig,
     gateway: Option<&InferenceGatewayConfig>,
     credential_helper: &str,
-    hook_command: &str,
+    tool_use_hook: Option<&str>,
+    session_new_hook: Option<&str>,
 ) -> anyhow::Result<Value> {
     let mut settings = serde_json::to_value(&config.settings)
         .context("serialize Claude Code pass-through settings")?;
-    append_pre_tool_use_hook(&mut settings, hook_command)?;
+    if let Some(command) = tool_use_hook {
+        append_hook(&mut settings, "PreToolUse", command)?;
+    }
+    if let Some(command) = session_new_hook {
+        append_hook(&mut settings, "SessionStart", command)?;
+    }
     let Some(gateway) = gateway else {
         return Ok(settings);
     };
@@ -105,7 +118,7 @@ fn managed_settings(
     Ok(settings)
 }
 
-fn append_pre_tool_use_hook(settings: &mut Value, hook_command: &str) -> anyhow::Result<()> {
+fn append_hook(settings: &mut Value, event: &str, hook_command: &str) -> anyhow::Result<()> {
     let settings = settings
         .as_object_mut()
         .context("Claude Code managed settings must be an object")?;
@@ -114,12 +127,12 @@ fn append_pre_tool_use_hook(settings: &mut Value, hook_command: &str) -> anyhow:
         .or_insert_with(|| Value::Object(Default::default()))
         .as_object_mut()
         .context("Claude Code hooks must be an object")?;
-    let pre_tool_use = hooks
-        .entry("PreToolUse")
+    let event_hooks = hooks
+        .entry(event)
         .or_insert_with(|| Value::Array(Vec::new()))
         .as_array_mut()
-        .context("Claude Code PreToolUse hooks must be an array")?;
-    let already_present = pre_tool_use.iter().any(|group| {
+        .with_context(|| format!("Claude Code {event} hooks must be an array"))?;
+    let already_present = event_hooks.iter().any(|group| {
         group
             .get("hooks")
             .and_then(Value::as_array)
@@ -130,7 +143,7 @@ fn append_pre_tool_use_hook(settings: &mut Value, hook_command: &str) -> anyhow:
             })
     });
     if !already_present {
-        pre_tool_use.push(json!({
+        event_hooks.push(json!({
             "matcher": "",
             "hooks": [{
                 "type": "command",
@@ -197,14 +210,14 @@ fn remove_owner_marker(owner_path: &Path) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use agentdesktop_core::config::parse_desired;
+    use agentdesktop_core::config::parse_daemon;
     use serde_json::json;
 
     use super::managed_settings;
 
     #[test]
     fn pass_through_settings_are_deep_merged_with_managed_gateway_values() {
-        let desired = parse_desired(
+        let config = parse_daemon(
             r#"
 inferenceGateway:
   url: https://gateway.example.com
@@ -221,15 +234,16 @@ programs:
       defaultMode: plan
 "#,
         )
-        .expect("valid desired configuration");
-        let claude = desired.programs.claude_code.as_ref().unwrap();
-        let gateway = desired.inference_gateway.as_ref().unwrap();
+        .expect("valid daemon configuration");
+        let claude = config.programs.claude_code.as_ref().unwrap();
+        let gateway = config.inference_gateway.as_ref().unwrap();
 
         let settings = managed_settings(
             claude,
             Some(gateway),
             "agentdesktop credential",
-            "agentdesktop hook claude-pre-tool-use",
+            Some("agentdesktop hook claude-pre-tool-use"),
+            None,
         )
         .expect("merged settings");
 

@@ -12,15 +12,15 @@ use serde::Serialize;
 use tracing::info;
 
 use crate::{
+    daemon_config::DaemonConfigStore,
     database::{Database, DeviceDetail, DeviceSummary},
-    desired_config::DesiredConfigStore,
     gateway_jwt::GatewayJwks,
 };
 
 #[derive(Clone)]
 pub struct AdminState {
     database: Database,
-    desired_config: DesiredConfigStore,
+    daemon_config: DaemonConfigStore,
     settings: ControllerSettings,
     gateway_jwks: Option<GatewayJwks>,
 }
@@ -37,13 +37,13 @@ pub struct ControllerSettings {
 impl AdminState {
     pub fn new(
         database: Database,
-        desired_config: DesiredConfigStore,
+        daemon_config: DaemonConfigStore,
         settings: ControllerSettings,
         gateway_jwks: Option<GatewayJwks>,
     ) -> Self {
         Self {
             database,
-            desired_config,
+            daemon_config,
             settings,
             gateway_jwks,
         }
@@ -64,15 +64,6 @@ struct Overview {
     recent_devices: Vec<DeviceSummary>,
 }
 
-#[derive(Serialize)]
-struct Configuration {
-    active: bool,
-    revision: Option<u64>,
-    sha256: Option<String>,
-    yaml: Option<String>,
-    reload_error: Option<String>,
-}
-
 pub async fn serve(address: SocketAddr, state: AdminState) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/api/v1/overview", get(overview))
@@ -81,7 +72,6 @@ pub async fn serve(address: SocketAddr, state: AdminState) -> anyhow::Result<()>
             "/api/v1/devices/{device_id}",
             get(device).delete(delete_device),
         )
-        .route("/api/v1/configuration", get(configuration))
         .route("/api/v1/settings", get(settings))
         .route("/.well-known/jwks.json", get(jwks))
         .fallback(get(asset))
@@ -124,7 +114,7 @@ async fn overview(State(state): State<AdminState>) -> Result<Json<Overview>, Adm
         online_devices,
         offline_devices: devices.len() - online_devices,
         config_failures,
-        active_revision: state.desired_config.current().map(|config| config.revision),
+        active_revision: state.daemon_config.current().map(|config| config.revision),
         recent_devices: devices.into_iter().take(5).collect(),
     }))
 }
@@ -154,23 +144,6 @@ async fn delete_device(
     }
     info!(%device_id, "deleted device from controller");
     Ok(StatusCode::NO_CONTENT)
-}
-
-async fn configuration(State(state): State<AdminState>) -> Json<Configuration> {
-    let config = state.desired_config.current();
-    Json(Configuration {
-        active: config.is_some(),
-        revision: config.as_ref().map(|config| config.revision),
-        sha256: config.as_ref().map(|config| {
-            config
-                .sha256
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect()
-        }),
-        yaml: config.and_then(|config| String::from_utf8(config.yaml).ok()),
-        reload_error: state.desired_config.reload_error(),
-    })
 }
 
 async fn settings(State(state): State<AdminState>) -> Json<ControllerSettings> {
@@ -212,13 +185,13 @@ fn unix_time_seconds() -> i64 {
 }
 
 enum AdminError {
-    Database(anyhow::Error),
+    Internal(anyhow::Error),
     NotFound,
 }
 
 impl From<anyhow::Error> for AdminError {
     fn from(error: anyhow::Error) -> Self {
-        Self::Database(error)
+        Self::Internal(error)
     }
 }
 
@@ -226,8 +199,8 @@ impl IntoResponse for AdminError {
     fn into_response(self) -> Response {
         match self {
             Self::NotFound => (StatusCode::NOT_FOUND, "device not found").into_response(),
-            Self::Database(error) => {
-                tracing::error!(%error, "admin API database operation failed");
+            Self::Internal(error) => {
+                tracing::error!(%error, "admin API operation failed");
                 (StatusCode::INTERNAL_SERVER_ERROR, "controller state error").into_response()
             }
         }

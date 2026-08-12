@@ -19,7 +19,7 @@ use uuid::Uuid;
 use agentdesktop_core::config::InferenceGatewayAuthentication;
 
 use crate::{
-    database::Database, desired_config::DesiredConfigStore, gateway_jwt::GatewayJwtIssuer,
+    daemon_config::DaemonConfigStore, database::Database, gateway_jwt::GatewayJwtIssuer,
     oidc::OidcProvider,
 };
 
@@ -27,7 +27,7 @@ use crate::{
 pub struct FleetAgentService {
     oidc: Option<OidcProvider>,
     database: Database,
-    desired_config: DesiredConfigStore,
+    daemon_config: DaemonConfigStore,
     gateway_jwt_issuer: Option<GatewayJwtIssuer>,
 }
 
@@ -35,13 +35,13 @@ impl FleetAgentService {
     pub fn new(
         oidc: Option<OidcProvider>,
         database: Database,
-        desired_config: DesiredConfigStore,
+        daemon_config: DaemonConfigStore,
         gateway_jwt_issuer: Option<GatewayJwtIssuer>,
     ) -> Self {
         Self {
             oidc,
             database,
-            desired_config,
+            daemon_config,
             gateway_jwt_issuer,
         }
     }
@@ -102,13 +102,13 @@ impl FleetAgent for FleetAgentService {
         {
             return Err(Status::invalid_argument("invalid client_id"));
         }
-        let desired = self
-            .desired_config
+        let daemon = self
+            .daemon_config
             .current()
-            .ok_or_else(|| Status::failed_precondition("no desired configuration is active"))?;
-        let yaml = std::str::from_utf8(&desired.yaml)
-            .map_err(|_| Status::internal("desired configuration is not UTF-8"))?;
-        let config = agentdesktop_core::config::parse_desired(yaml).map_err(internal)?;
+            .ok_or_else(|| Status::failed_precondition("no daemon configuration is active"))?;
+        let yaml = std::str::from_utf8(&daemon.yaml)
+            .map_err(|_| Status::internal("daemon configuration is not UTF-8"))?;
+        let config = agentdesktop_core::config::parse_daemon(yaml).map_err(internal)?;
         let gateway = config
             .inference_gateway
             .as_ref()
@@ -164,12 +164,12 @@ impl FleetAgent for FleetAgentService {
 
         let mut inbound = request.into_inner();
         let (sender, receiver) = mpsc::channel(8);
-        let mut desired_updates = self.desired_config.subscribe();
-        let desired_config = desired_updates.borrow().clone();
-        if let Some(desired_config) = desired_config {
+        let mut daemon_updates = self.daemon_config.subscribe();
+        let daemon_config = daemon_updates.borrow().clone();
+        if let Some(daemon_config) = daemon_config {
             sender
                 .send(Ok(ControllerMessage {
-                    message: Some(controller_message::Message::DesiredConfig(desired_config)),
+                    message: Some(controller_message::Message::DaemonConfig(daemon_config)),
                 }))
                 .await
                 .map_err(|_| Status::unavailable("stream closed"))?;
@@ -177,14 +177,14 @@ impl FleetAgent for FleetAgentService {
 
         let update_sender = sender.clone();
         tokio::spawn(async move {
-            while desired_updates.changed().await.is_ok() {
-                let desired = desired_updates.borrow().clone();
-                let Some(desired) = desired else {
+            while daemon_updates.changed().await.is_ok() {
+                let daemon = daemon_updates.borrow().clone();
+                let Some(daemon) = daemon else {
                     continue;
                 };
                 if update_sender
                     .send(Ok(ControllerMessage {
-                        message: Some(controller_message::Message::DesiredConfig(desired)),
+                        message: Some(controller_message::Message::DaemonConfig(daemon)),
                     }))
                     .await
                     .is_err()

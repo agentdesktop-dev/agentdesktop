@@ -4,22 +4,22 @@ use std::{
     time::Duration,
 };
 
-use agentdesktop_proto::fleet::DesiredConfig;
+use agentdesktop_proto::fleet::DaemonConfig;
 use anyhow::Context;
 use notify::{Event, EventKind, RecursiveMode};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
-/// Live, last-known-good desired configuration shared by controller surfaces.
+/// Live, last-known-good daemon configuration shared by controller surfaces.
 #[derive(Clone)]
-pub struct DesiredConfigStore {
-    sender: watch::Sender<Option<DesiredConfig>>,
+pub struct DaemonConfigStore {
+    sender: watch::Sender<Option<DaemonConfig>>,
     reload_error: Arc<RwLock<Option<String>>>,
 }
 
-impl DesiredConfigStore {
-    pub fn new(initial: Option<DesiredConfig>) -> Self {
+impl DaemonConfigStore {
+    pub fn new(initial: Option<DaemonConfig>) -> Self {
         let (sender, _) = watch::channel(initial);
         Self {
             sender,
@@ -27,29 +27,29 @@ impl DesiredConfigStore {
         }
     }
 
-    pub fn current(&self) -> Option<DesiredConfig> {
+    pub fn current(&self) -> Option<DaemonConfig> {
         self.sender.borrow().clone()
     }
 
-    pub fn subscribe(&self) -> watch::Receiver<Option<DesiredConfig>> {
+    pub fn subscribe(&self) -> watch::Receiver<Option<DaemonConfig>> {
         self.sender.subscribe()
     }
 
     pub fn reload_error(&self) -> Option<String> {
         self.reload_error
             .read()
-            .expect("desired-config reload status lock poisoned")
+            .expect("daemon-config reload status lock poisoned")
             .clone()
     }
 
-    fn publish(&self, next: DesiredConfig) -> bool {
+    fn publish(&self, next: DaemonConfig) -> bool {
         let unchanged = self.sender.borrow().as_ref().is_some_and(|current| {
             current.revision == next.revision && current.sha256 == next.sha256
         });
         *self
             .reload_error
             .write()
-            .expect("desired-config reload status lock poisoned") = None;
+            .expect("daemon-config reload status lock poisoned") = None;
         if unchanged {
             return false;
         }
@@ -61,39 +61,39 @@ impl DesiredConfigStore {
         *self
             .reload_error
             .write()
-            .expect("desired-config reload status lock poisoned") = Some(format!("{error:#}"));
+            .expect("daemon-config reload status lock poisoned") = Some(format!("{error:#}"));
     }
 }
 
-/// Watches a desired-configuration file and publishes validated changes.
+/// Watches a daemon-configuration file and publishes validated changes.
 ///
 /// The parent directory is always watched so atomic replacement continues to
 /// work after an inode watch is invalidated. Each debounced batch also
 /// re-resolves symlinks, covering Kubernetes projected-volume rotations.
-pub fn watch(path: PathBuf, revision: u64, store: DesiredConfigStore) -> anyhow::Result<()> {
+pub fn watch(path: PathBuf, revision: u64, store: DaemonConfigStore) -> anyhow::Result<()> {
     let path = normalize_watch_path(&path)?;
     let parent = path
         .parent()
-        .context("desired configuration path has no parent")?
+        .context("daemon configuration path has no parent")?
         .to_path_buf();
     let (event_sender, mut events) = mpsc::unbounded_channel();
     let mut watcher =
         notify_debouncer_full::new_debouncer(Duration::from_millis(250), None, move |result| {
             let _ = event_sender.send(result);
         })
-        .context("create desired configuration watcher")?;
+        .context("create daemon configuration watcher")?;
 
     watcher
         .watch(&parent, RecursiveMode::NonRecursive)
-        .with_context(|| format!("watch desired configuration directory {}", parent.display()))?;
-    info!(path = %path.display(), "watching desired configuration");
+        .with_context(|| format!("watch daemon configuration directory {}", parent.display()))?;
+    info!(path = %path.display(), "watching daemon configuration");
     tokio::spawn(async move {
         let mut target = resolve_target(&path);
         while let Some(result) = events.recv().await {
             let batch = match result {
                 Ok(batch) => batch,
                 Err(errors) => {
-                    warn!(?errors, "desired configuration watch error");
+                    warn!(?errors, "daemon configuration watch error");
                     continue;
                 }
             };
@@ -119,7 +119,7 @@ pub fn watch(path: PathBuf, revision: u64, store: DesiredConfigStore) -> anyhow:
             match load(&path, revision) {
                 Ok(config) => {
                     if store.publish(config) {
-                        info!(path = %path.display(), revision, "reloaded desired configuration");
+                        info!(path = %path.display(), revision, "reloaded daemon configuration");
                     }
                 }
                 Err(error) => {
@@ -127,7 +127,7 @@ pub fn watch(path: PathBuf, revision: u64, store: DesiredConfigStore) -> anyhow:
                     error!(
                         path = %path.display(),
                         error = %format!("{error:#}"),
-                        "failed to reload desired configuration; retaining last good configuration"
+                        "failed to reload daemon configuration; retaining last good configuration"
                     );
                 }
             }
@@ -137,13 +137,13 @@ pub fn watch(path: PathBuf, revision: u64, store: DesiredConfigStore) -> anyhow:
     Ok(())
 }
 
-pub fn load(path: &Path, revision: u64) -> anyhow::Result<DesiredConfig> {
+pub fn load(path: &Path, revision: u64) -> anyhow::Result<DaemonConfig> {
     let yaml = std::fs::read(path)
-        .with_context(|| format!("read desired configuration from {}", path.display()))?;
-    let text = std::str::from_utf8(&yaml).context("desired configuration is not UTF-8")?;
-    agentdesktop_core::config::parse_desired(text).context("validate desired configuration")?;
+        .with_context(|| format!("read daemon configuration from {}", path.display()))?;
+    let text = std::str::from_utf8(&yaml).context("daemon configuration is not UTF-8")?;
+    agentdesktop_core::config::parse_daemon(text).context("validate daemon configuration")?;
     let sha256 = Sha256::digest(&yaml).to_vec();
-    Ok(DesiredConfig {
+    Ok(DaemonConfig {
         revision,
         yaml,
         sha256,
@@ -169,13 +169,13 @@ fn normalize_watch_path(path: &Path) -> anyhow::Result<PathBuf> {
     };
     let parent = absolute
         .parent()
-        .context("desired configuration path has no parent")?;
+        .context("daemon configuration path has no parent")?;
     let file_name = absolute
         .file_name()
-        .context("desired configuration path has no file name")?;
+        .context("daemon configuration path has no file name")?;
     let parent = std::fs::canonicalize(parent).with_context(|| {
         format!(
-            "resolve desired configuration directory {}",
+            "resolve daemon configuration directory {}",
             parent.display()
         )
     })?;
@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn recognizes_direct_changes_and_atomic_renames() {
-        let path = Path::new("/config/desired.yaml");
+        let path = Path::new("/config/daemon.yaml");
         let direct = Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Any)))
             .add_path(path.to_path_buf());
         assert!(event_triggers_reload(&direct, path, None, None));
@@ -235,7 +235,7 @@ mod tests {
             .add_path(PathBuf::from("/config/other.yaml"));
         assert!(!event_triggers_reload(
             &event,
-            Path::new("/config/desired.yaml"),
+            Path::new("/config/daemon.yaml"),
             None,
             None,
         ));
@@ -249,11 +249,11 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&directory).expect("create test directory");
-        let path = directory.join("desired.yaml");
+        let path = directory.join("daemon.yaml");
         std::fs::write(&path, "programs:\n  claudeCode: {}\n").expect("write initial config");
         let initial = load(&path, 7).expect("load initial config");
         let initial_hash = initial.sha256.clone();
-        let store = DesiredConfigStore::new(Some(initial));
+        let store = DaemonConfigStore::new(Some(initial));
         watch(path.clone(), 7, store.clone()).expect("start watcher");
         sleep(Duration::from_millis(50)).await;
 

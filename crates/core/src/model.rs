@@ -86,6 +86,13 @@ pub struct TelemetryEvent {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum TelemetryEventKind {
+    /// A new developer-tool session.
+    SessionNew {
+        /// Developer client that emitted the event.
+        client_id: String,
+        /// Session identifier supplied by the developer client.
+        session_id: String,
+    },
     /// A tool invocation observed before execution.
     ToolUse {
         /// Developer client that emitted the event.
@@ -95,7 +102,8 @@ pub enum TelemetryEventKind {
         /// Optional invocation identifier supplied by the developer client.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_use_id: Option<String>,
-        /// Tool input exactly as supplied to the hook.
-        tool_input: serde_json::Value,
+        /// Tool input exactly as supplied to the hook, when collection is enabled.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_input: Option<serde_json::Value>,
     },
 }

@@ -4,10 +4,10 @@
 |-|-|-|
 |`adminListen`|string|Loopback address on which the controller management UI listens.|
 |`allowInsecureDev`|boolean|Permit plaintext remote fleet traffic and non-HTTPS OIDC.<br><br>This escape hatch is only appropriate for isolated local development.|
+|`daemonConfig`|object|Daemon configuration distributed to enrolled devices.|
+|`daemonConfig.path`|string|Path to the watched YAML configuration distributed to enrolled devices.<br><br>Relative paths are resolved from the controller configuration directory.<br>Valid file changes are published to connected devices automatically.|
+|`daemonConfig.revision`|integer|Monotonically increasing revision assigned to the daemon configuration.|
 |`databaseUrl`|string|SQLite or PostgreSQL URL used for controller state.|
-|`desiredConfig`|object|Desired configuration distributed to enrolled devices.|
-|`desiredConfig.path`|string|Path to the watched YAML configuration distributed to enrolled devices.<br><br>Relative paths are resolved from the controller configuration directory.<br>Valid file changes are published to connected devices automatically.|
-|`desiredConfig.revision`|integer|Monotonically increasing revision assigned to the desired configuration.|
 |`fleetListen`|string|Address on which the device-facing gRPC fleet API listens.|
 |`gatewayJwt`|object|Inference-gateway JWT signing settings.|
 |`gatewayJwt.issuer`|string|Issuer claim placed in generated JWTs.|

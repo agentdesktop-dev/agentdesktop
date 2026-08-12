@@ -83,6 +83,17 @@ async fn telemetry(
 
 fn validate_telemetry(event: &TelemetryEventKind) -> Result<(), (StatusCode, String)> {
     match event {
+        TelemetryEventKind::SessionNew {
+            client_id,
+            session_id,
+        } => {
+            if client_id.is_empty() || client_id.len() > 64 {
+                return Err((StatusCode::BAD_REQUEST, "invalid client ID".to_owned()));
+            }
+            if session_id.is_empty() || session_id.len() > 256 {
+                return Err((StatusCode::BAD_REQUEST, "invalid session ID".to_owned()));
+            }
+        }
         TelemetryEventKind::ToolUse {
             client_id,
             tool_name,
@@ -98,11 +109,9 @@ fn validate_telemetry(event: &TelemetryEventKind) -> Result<(), (StatusCode, Str
             if tool_use_id.as_ref().is_some_and(|id| id.len() > 256) {
                 return Err((StatusCode::BAD_REQUEST, "invalid tool use ID".to_owned()));
             }
-            if serde_json::to_vec(tool_input)
-                .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?
-                .len()
-                > 256 * 1024
-            {
+            if tool_input.as_ref().is_some_and(|input| {
+                serde_json::to_vec(input).is_ok_and(|encoded| encoded.len() > 256 * 1024)
+            }) {
                 return Err((
                     StatusCode::PAYLOAD_TOO_LARGE,
                     "tool input is too large".to_owned(),

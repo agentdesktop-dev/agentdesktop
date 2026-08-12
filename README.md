@@ -11,7 +11,7 @@ make build
 ## Crates
 
 - `agentdesktop-agent`: privileged device daemon for discovery, reconciliation, and fleet connectivity; builds `agentdesktopd`.
-- `agentdesktop-controller`: central service for enrollment, inventory, and desired configuration; builds `agentdesktop-controller`.
+- `agentdesktop-controller`: central service for enrollment, inventory, and daemon configuration; builds `agentdesktop-controller`.
 - `agentdesktop-cli`: command-line interface to the local daemon; builds `agentdesktop`.
 - `agentdesktop-client`: reusable client for the daemon's local API transport.
 - `agentdesktop-core`: shared configuration, data models, serialization, and telemetry utilities.
@@ -24,7 +24,7 @@ Run it as your user while developing:
 
 ```console
 cargo run --bin agentdesktopd -- \
-  --config ./examples/scenario/agentdesktopd.yaml \
+  --config ./examples/claude/agentdesktopd.yaml \
   --socket /tmp/agentdesktop.sock
 ```
 
@@ -40,18 +40,16 @@ The production-oriented defaults are `/etc/agentdesktop/config.yaml` and `/run/a
 
 ## Configuration schema
 
-The checked-in [daemon JSON Schema](schema/daemon-config.json) describes local
-daemon startup configuration. The [controller schema](schema/controller-config.json)
-describes the fleet controller process, while the
-[desired configuration schema](schema/desired-config.json) describes the state
-it distributes. Generated field references for the
-[daemon](schema/daemon-config.md), [controller](schema/controller-config.md), and
-[desired configuration](schema/desired-config.md) contain the same Rust doc
-comments in compact tables.
+The checked-in [daemon JSON Schema](schema/daemon-config.json) describes daemon
+configuration whether loaded locally or distributed by the controller. The
+[controller schema](schema/controller-config.json) describes the fleet controller
+process. Generated [daemon](schema/daemon-config.md) and
+[controller](schema/controller-config.md) field references contain the same Rust
+doc comments in compact tables.
 
-The daemon applies the desired-state fields in its local configuration at
-startup. If it connects to a controller, the controller-delivered desired
-configuration subsequently replaces that local baseline.
+The daemon applies its local configuration at startup. If it connects to a
+controller, the controller-delivered daemon configuration subsequently replaces
+that local baseline.
 
 Regenerate the schemas and field references after changing configuration types
 or their documentation:
@@ -65,10 +63,10 @@ schema and then formats the Rust workspace.
 
 ## Fleet controller
 
-The optional `agentdesktop-controller` binary exposes the `FleetAgent` gRPC API. The daemon enrolls once, stores its generated identity outside the human-authored YAML, and then maintains an outbound stream for inventory, heartbeats, and desired configuration.
+The optional `agentdesktop-controller` binary exposes the `FleetAgent` gRPC API. The daemon enrolls once, stores its generated identity outside the human-authored YAML, and then maintains an outbound stream for inventory, heartbeats, and daemon configuration.
 
 For a local plaintext development run, use
-`examples/scenario/agentdesktopd.yaml` or add:
+`examples/claude/agentdesktopd.yaml` or add:
 
 ```yaml
 controller:
@@ -80,14 +78,14 @@ Device enrollment is OIDC-only. The local scenario includes Dex and explicitly
 enables insecure local development:
 
 ```console
-docker compose -f examples/scenario/compose.yaml up -d
+docker compose -f examples/claude/compose.yaml up -d
 make ui
 cargo run --bin agentdesktop-controller -- \
-  --config ./examples/scenario/controller.yaml
+  --config ./examples/claude/controller.yaml
 ```
 
 The controller also serves its embedded management UI at
-`http://127.0.0.1:8080`. It shows fleet health, device inventory, desired
+`http://127.0.0.1:8080`. It shows fleet health, device inventory, daemon
 configuration, and runtime settings, and can remove enrolled devices. The admin
 listener is restricted to loopback addresses; set `adminListen` in controller
 configuration to select a different local port.
@@ -96,12 +94,12 @@ Then start the daemon with a writable development state directory:
 
 ```console
 cargo run --bin agentdesktopd -- \
-  --config ./examples/scenario/agentdesktopd.yaml \
+  --config ./examples/claude/agentdesktopd.yaml \
   --socket /tmp/agentdesktop.sock \
   --state-dir /tmp/agentdesktop-state
 ```
 
-The daemon writes `identity.json` and any accepted `remote-config.yaml` under its state directory. On restart it reapplies that last accepted controller configuration before connecting. If no cached or non-empty local desired configuration exists, it preserves managed files until the controller responds rather than temporarily removing them. To have the controller offer desired configuration, set `desiredConfig.path` and `desiredConfig.revision` in controller configuration. The controller watches that path and pushes successfully validated changes to connected devices after a short debounce. Atomic file replacement and Kubernetes projected-volume symlink rotation are supported; missing or invalid replacements leave the last good configuration active.
+The daemon writes `identity.json` and any accepted `remote-config.yaml` under its state directory. On restart it reapplies that last accepted controller configuration before connecting. If no cached or non-empty local daemon configuration exists, it preserves managed files until the controller responds rather than temporarily removing them. To have the controller distribute daemon configuration, set `daemonConfig.path` and `daemonConfig.revision` in controller configuration. The controller watches that path and pushes successfully validated changes to connected devices after a short debounce. Atomic file replacement and Kubernetes projected-volume symlink rotation are supported; missing or invalid replacements leave the last good configuration active.
 
 ### OIDC enrollment
 
@@ -111,16 +109,16 @@ The bundled Dex login is `admin@example.com` / `password`. Start Dex and the
 controller with:
 
 ```console
-docker compose -f examples/scenario/compose.yaml up -d
+docker compose -f examples/claude/compose.yaml up -d
 cargo run --bin agentdesktop-controller -- \
-  --config ./examples/scenario/controller.yaml
+  --config ./examples/claude/controller.yaml
 ```
 
 Use a fresh state directory:
 
 ```console
 cargo run --bin agentdesktopd -- \
-  --config ./examples/scenario/agentdesktopd.yaml \
+  --config ./examples/claude/agentdesktopd.yaml \
   --socket /tmp/agentdesktop.sock \
   --state-dir /tmp/agentdesktop-oidc-state
 ```
@@ -177,21 +175,30 @@ controller returns a short-lived RS256 JWT. Claude caches the result for one
 minute; the JWT lifetime defaults to five minutes. No gateway credential is
 stored in YAML or managed settings.
 
-The same drop-in appends a Claude Code `PreToolUse` hook for all tools. Its
-command is equivalent to:
+Telemetry is opt-in. `session.new` reports new Claude Code sessions, while
+`tool.use` reports the client, tool name, and invocation ID:
+
+```yaml
+telemetry:
+  events:
+  - session.new
+  - tool.use
+```
+
+Use `tool.use.input` instead to also report tool-input JSON. The generated
+hook command is equivalent to:
 
 ```console
 agentdesktop --socket /run/agentdesktop/agentdesktop.sock hook claude-pre-tool-use
 ```
 
-Claude supplies the hook event on standard input. AgentDesktop retains only the
-tool name, tool-use ID, and tool-input JSON; session and transcript metadata are
-discarded. Reporting is fail-open so daemon or controller availability never
-prevents tool execution. Events travel over the authenticated device stream,
-are stored as timestamped controller telemetry, and appear under **Recent
-activity** on the device page. Local clients are not process-attested, so this
-telemetry records an assertion by the endpoint rather than a security audit
-boundary.
+Claude supplies hook events on standard input. Unused hook metadata is
+discarded. Reporting is fail-open so daemon or controller
+availability never prevents tool execution. Events travel over the
+authenticated device stream, are stored as timestamped controller telemetry,
+and appear under **Recent activity** on the device page. Local clients are not
+process-attested, so this telemetry records an assertion by the endpoint rather
+than a security audit boundary.
 
 Generate a controller signing key for development:
 
@@ -200,14 +207,14 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
   -out /tmp/agentdesktop-gateway-jwt.pem
 ```
 
-Configure the controller with the desired state and JWT issuer:
+Configure the controller with the daemon configuration and JWT issuer:
 
 ```yaml
 oidc:
   issuer: https://idp.example.com
   clientId: agentdesktop
 
-desiredConfig:
+daemonConfig:
   path: ./claude-code.yaml
   revision: 1
 
@@ -218,26 +225,26 @@ gatewayJwt:
   lifetime: 5m
 ```
 
-Relative certificate, signing-key, and desired-configuration paths are resolved
+Relative certificate, signing-key, and daemon-configuration paths are resolved
 from the controller YAML directory. Start it with only the configuration path:
 
 ```console
 cargo run --bin agentdesktop-controller -- --config ./controller.yaml
 ```
 
-Agentgateway must trust the corresponding RSA public key and require issuer `agentdesktop-controller` and audience `agentgateway`. When JWT issuance is enabled, the controller publishes its public key set at `http://127.0.0.1:8080/.well-known/jwks.json`; [examples/scenario/agentgateway.yaml](examples/scenario/agentgateway.yaml) is a minimal matching configuration. The gateway JWT subject is the verified OIDC subject, `act.sub` identifies the device, and `client_id` is asserted by the arbitrary local client requesting the credential. In production, keep the private key outside the database with restrictive permissions; only its public JWK is exposed.
+Agentgateway must trust the corresponding RSA public key and require issuer `agentdesktop-controller` and audience `agentgateway`. When JWT issuance is enabled, the controller publishes its public key set at `http://127.0.0.1:8080/.well-known/jwks.json`; [examples/claude/agentgateway.yaml](examples/claude/agentgateway.yaml) is a minimal matching configuration. The gateway JWT subject is the verified OIDC subject, `act.sub` identifies the device, and `client_id` is asserted by the arbitrary local client requesting the credential. In production, keep the private key outside the database with restrictive permissions; only its public JWK is exposed.
 
 On Linux, the daemon atomically reconciles AgentDesktop's dedicated drop-in at `/etc/claude-code/managed-settings.d/50-agentdesktop.json`. For an unprivileged development run, redirect that exact directory:
 
 ```console
 cargo run --bin agentdesktopd -- \
-  --config ./examples/scenario/agentdesktopd.yaml \
+  --config ./examples/claude/agentdesktopd.yaml \
   --socket /tmp/agentdesktop.sock \
   --state-dir /tmp/agentdesktop-state \
   --claude-code-managed-settings-dir /tmp/claude-code-managed-settings.d
 ```
 
-Inspect the result with `jq . /tmp/claude-code-managed-settings.d/50-agentdesktop.json`. When `programs.claudeCode` is absent from a later desired revision, the daemon removes only its own drop-in file.
+Inspect the result with `jq . /tmp/claude-code-managed-settings.d/50-agentdesktop.json`. When `programs.claudeCode` is absent from a later daemon configuration revision, the daemon removes only its own drop-in file.
 
 The generated helper can also be exercised directly:
 
@@ -274,7 +281,7 @@ For an unprivileged development run, redirect the managed file:
 
 ```console
 cargo run --bin agentdesktopd -- \
-  --config ./examples/scenario/agentdesktopd.yaml \
+  --config ./examples/claude/agentdesktopd.yaml \
   --socket /tmp/agentdesktop.sock \
   --state-dir /tmp/agentdesktop-state \
   --claude-code-managed-settings-dir /tmp/claude-code-managed-settings.d \
@@ -320,7 +327,7 @@ For an unprivileged development run, redirect both managed files:
 
 ```console
 cargo run --bin agentdesktopd -- \
-  --config ./examples/scenario/agentdesktopd.yaml \
+  --config ./examples/claude/agentdesktopd.yaml \
   --socket /tmp/agentdesktop.sock \
   --state-dir /tmp/agentdesktop-state \
   --claude-code-managed-settings-dir /tmp/claude-code-managed-settings.d \
@@ -336,7 +343,7 @@ To exercise the real privileged path during development, build as your user and 
 
 ```console
 ./scripts/run-agentdesktopd-root \
-  --config ./examples/scenario/agentdesktopd.yaml
+  --config ./examples/claude/agentdesktopd.yaml
 ```
 
 This uses the production defaults for state, the local socket, and Claude Code's `/etc/claude-code/managed-settings.d` directory. Additional daemon arguments are forwarded unchanged. The wrapper builds both `agentdesktopd` and its sibling `agentdesktop` credential helper as your user, then starts only the daemon with `sudo`. The runner preserves your development `PATH` so discovery can still see user-installed programs. The local socket is intentionally mode `0666`: every local process may inspect daemon state and request gateway credentials, and its requested `client_id` is not process-authenticated. Discovery reads install and package metadata; it never executes discovered programs.
