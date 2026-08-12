@@ -6,10 +6,11 @@ edition.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "agentdesktopd"
+name = "agentdesktop"
 path = "src/main.rs"
 
 [dependencies]
+agentdesktop-client.workspace = true
 agentdesktop-core.workspace = true
 agentdesktop-proto.workspace = true
 anyhow.workspace = true

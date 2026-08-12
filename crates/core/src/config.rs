@@ -553,7 +553,7 @@ programs:
     fn checked_in_examples_use_their_declared_configuration_surface() {
         parse_controller(include_str!("../../../examples/claude/controller.yaml"))
             .expect("controller example");
-        parse_daemon(include_str!("../../../examples/claude/agentdesktopd.yaml"))
+        parse_daemon(include_str!("../../../examples/claude/agentdesktop.yaml"))
             .expect("controller-connected daemon example");
         parse_daemon(include_str!("../../../examples/claude/claude-code.yaml"))
             .expect("Claude Code daemon configuration example");

@@ -6,6 +6,7 @@ version = 4
 name = "agentdesktop-agent"
 version = "0.1.0"
 dependencies = [
+ "agentdesktop-client",
  "agentdesktop-core",
  "agentdesktop-proto",
  "anyhow",
@@ -25,20 +26,6 @@ dependencies = [
  "toml",
  "tonic",
  "tracing",
- "url",
-]
-
-[[package]]
-name = "agentdesktop-cli"
-version = "0.1.0"
-dependencies = [
- "agentdesktop-client",
- "agentdesktop-core",
- "anyhow",
- "clap",
- "serde",
- "serde_json",
- "tokio",
  "url",
 ]
 

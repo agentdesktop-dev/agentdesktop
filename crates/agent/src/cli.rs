@@ -2,29 +2,16 @@ use std::{io::Read, path::PathBuf};
 
 use agentdesktop_client as client;
 use agentdesktop_core::{
-    DEFAULT_SOCKET_PATH,
     config::DaemonConfig,
     model::{Discovery, Health, InferenceGatewayCredential, TelemetryEventKind},
 };
-use clap::{Parser, Subcommand};
+use clap::Subcommand;
 use serde::Deserialize;
 
 const MAX_HOOK_INPUT_BYTES: u64 = 1024 * 1024;
 
-#[derive(Parser)]
-#[command(about = "Client for the Agentdesktop daemon")]
-struct Args {
-    /// Unix socket exposed by the local Agentdesktop daemon.
-    #[arg(long, default_value = DEFAULT_SOCKET_PATH, global = true)]
-    socket: PathBuf,
-
-    /// Operation to perform against the local daemon.
-    #[command(subcommand)]
-    command: Command,
-}
-
 #[derive(Subcommand)]
-enum Command {
+pub enum ClientCommand {
     /// Check whether the daemon is reachable.
     Status,
     /// Discover locally installed agents.
@@ -34,7 +21,7 @@ enum Command {
     /// Print a short-lived credential for an inference gateway.
     Credential {
         /// Developer tool requesting the credential.
-        #[arg(long, default_value = "agentdesktop-cli")]
+        #[arg(long, default_value = "agentdesktop")]
         client_id: String,
     },
     /// Handle an event emitted by a managed developer-tool hook.
@@ -45,7 +32,7 @@ enum Command {
 }
 
 #[derive(Subcommand)]
-enum HookCommand {
+pub enum HookCommand {
     /// Report a Claude Code SessionStart event as telemetry.
     ClaudeSessionStart,
     /// Report a Claude Code PreToolUse event as telemetry.
@@ -70,16 +57,14 @@ struct ClaudeSessionStartInput {
     session_id: String,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
-    match args.command {
-        Command::Status => {
-            let health: Health = client::get(&args.socket, "/v1/health").await?;
+pub async fn run(command: ClientCommand, socket: PathBuf) -> anyhow::Result<()> {
+    match command {
+        ClientCommand::Status => {
+            let health: Health = client::get(&socket, "/v1/health").await?;
             println!("{}", health.status);
         }
-        Command::Discover => {
-            let discovery: Discovery = client::get(&args.socket, "/v1/discovery").await?;
+        ClientCommand::Discover => {
+            let discovery: Discovery = client::get(&socket, "/v1/discovery").await?;
             if discovery.agents.is_empty() {
                 println!("No agents discovered");
             }
@@ -93,36 +78,36 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         }
-        Command::Config => {
-            let config: DaemonConfig = client::get(&args.socket, "/v1/config").await?;
+        ClientCommand::Config => {
+            let config: DaemonConfig = client::get(&socket, "/v1/config").await?;
             print!(
                 "{}",
                 agentdesktop_core::serdes::yamlviajson::to_string(&config)?
             );
         }
-        Command::Credential { client_id } => {
+        ClientCommand::Credential { client_id } => {
             let client_id: String =
                 url::form_urlencoded::byte_serialize(client_id.as_bytes()).collect();
             let response: InferenceGatewayCredential = client::get(
-                &args.socket,
+                &socket,
                 &format!("/v1/inference-gateway/credential?client_id={client_id}"),
             )
             .await?;
             println!("{}", response.credential);
         }
-        Command::Hook {
+        ClientCommand::Hook {
             hook: HookCommand::ClaudePreToolUse { include_input },
         } => {
             // Telemetry is deliberately fail-open: an unavailable daemon must
             // never prevent Claude Code from using a tool.
-            let _ = report_claude_pre_tool_use(&args.socket, include_input).await;
+            let _ = report_claude_pre_tool_use(&socket, include_input).await;
         }
-        Command::Hook {
+        ClientCommand::Hook {
             hook: HookCommand::ClaudeSessionStart,
         } => {
             // Telemetry is deliberately fail-open: an unavailable daemon must
             // never prevent Claude Code from starting a session.
-            let _ = report_claude_session_start(&args.socket).await;
+            let _ = report_claude_session_start(&socket).await;
         }
     }
 

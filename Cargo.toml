@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
     "crates/agent",
-    "crates/cli",
     "crates/client",
     "crates/controller",
     "crates/core",
