@@ -26,10 +26,10 @@ fn write_schema<T: JsonSchema>(root: &Path, stem: &str, title: &str) -> Result<(
     let inline_path = schema_dir.join(format!(".inline-{stem}.json"));
     fs::write(&inline_path, make::<T>(true)?)
         .with_context(|| format!("write temporary inline {stem} schema"))?;
-    let output = Command::new(root.join("tools/schema-to-md.sh"))
+    let output = Command::new(root.join("scripts/schema-to-md.sh"))
         .arg(&inline_path)
         .output()
-        .context("run tools/schema-to-md.sh; ensure jq is installed")?;
+        .context("run scripts/schema-to-md.sh; ensure jq is installed")?;
     let _ = fs::remove_file(&inline_path);
     if !output.status.success() {
         bail!(

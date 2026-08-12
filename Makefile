@@ -16,7 +16,7 @@ lint:
 
 ui:
 	cd ui && pnpm install --frozen-lockfile
-	cd ui && pnpm frontend:build
+	cd ui && pnpm build
 
 ui-check:
 	cd ui && pnpm install --frozen-lockfile
