@@ -364,10 +364,6 @@ impl SessionConnection {
         &self.registration
     }
 
-    pub fn into_stream(self) -> UnixStream {
-        self.stream
-    }
-
     pub fn into_signing_key(
         self,
         timeout: Duration,
