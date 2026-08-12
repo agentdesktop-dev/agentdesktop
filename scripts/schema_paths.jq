@@ -225,4 +225,3 @@ def schema_paths(prefix):
   end);
 
 [schema_paths("")] | .[]  | ["|`" + .[0] + "`|" + .[2] + "|" + .[1] + "|"] | join(",")
-

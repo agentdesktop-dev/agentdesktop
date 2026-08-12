@@ -16,7 +16,7 @@ make build
 - `agentdesktop-client`: reusable client for the daemon's local API transport.
 - `agentdesktop-core`: shared configuration, data models, serialization, and telemetry utilities.
 - `agentdesktop-proto`: generated FleetAgent gRPC contracts shared by the daemon and controller.
-- `agentdesktop-ui`: cross-platform Tauri desktop and tray client under `ui/src-tauri`.
+- `ui`: React/Vite management UI embedded in the controller binary.
 
 The daemon and controller use structured `tracing` output. Set `RUST_LOG=debug` for verbose events or `LOG_FORMAT=json` for JSON logs.
 
@@ -347,25 +347,3 @@ To exercise the real privileged path during development, build as your user and 
 ```
 
 This uses the production defaults for state, the local socket, and Claude Code's `/etc/claude-code/managed-settings.d` directory. Additional daemon arguments are forwarded unchanged. The wrapper builds both `agentdesktopd` and its sibling `agentdesktop` credential helper as your user, then starts only the daemon with `sudo`. The runner preserves your development `PATH` so discovery can still see user-installed programs. The local socket is intentionally mode `0666`: every local process may inspect daemon state and request gateway credentials, and its requested `client_id` is not process-authenticated. Discovery reads install and package metadata; it never executes discovered programs.
-
-## Tray client
-
-The tray client is a Tauri application under `ui/`. It polls the daemon for health, enrollment, and discovery state and does not manage the privileged daemon's lifecycle. While OIDC enrollment is waiting, the tray exposes an **Enroll with SSO…** action that opens the authorization URL in the user's browser.
-
-```console
-cd ui
-pnpm install
-AGENTDESKTOP_SOCKET=/tmp/agentdesktop.sock pnpm dev
-```
-
-On Linux, Tauri's tray support requires either AppIndicator or Ayatana AppIndicator development libraries. The application has no visible window yet; use its tray menu to inspect status, refresh, or quit.
-
-On macOS, build a simple menu bar app bundle from a Mac:
-
-```console
-cd ui
-pnpm install
-pnpm build:mac
-```
-
-The build uses the existing `.icns` app icon and the in-app template tray icon. Tauri writes the `.app` and `.dmg` outputs under `target/release/bundle/macos/` and `target/release/bundle/dmg/`.
