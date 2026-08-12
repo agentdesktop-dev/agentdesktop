@@ -11,7 +11,7 @@ use crate::secure_fs;
 
 use super::{deep_merge, responses_base_url};
 
-const MANAGED_HEADER: &str = "# Managed by AgentDesktop. Manual changes will be replaced.\n";
+const MANAGED_HEADER: &str = "# Managed by Agentdesktop. Manual changes will be replaced.\n";
 
 pub fn apply(
     path: &Path,
@@ -87,7 +87,7 @@ fn managed_config(
 
     let provider_name = "agentdesktop";
     let mut provider = json!({
-        "name": "AgentDesktop",
+        "name": "Agentdesktop",
         "base_url": responses_base_url(gateway),
         "wire_api": "responses",
     });
@@ -137,7 +137,7 @@ fn remove(path: &Path) -> anyhow::Result<()> {
                 program = "codex",
                 action = "unchanged",
                 path = %path.display(),
-                "preserving managed configuration not owned by AgentDesktop"
+                "preserving managed configuration not owned by Agentdesktop"
             );
             Ok(())
         }

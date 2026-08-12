@@ -1,11 +1,11 @@
-# AgentDesktop Community Code of Conduct
+# Agentdesktop Community Code of Conduct
 
-All members of the AgentDesktop community must abide by the [Linux Foundation projects Code of Conduct](https://lfprojects.org/policies/code-of-conduct/).
+All members of the Agentdesktop community must abide by the [Linux Foundation projects Code of Conduct](https://lfprojects.org/policies/code-of-conduct/).
 Only by respecting one another can we build a strong and collaborative community.
 
 ## Generative AI Policy
 
-While AgentDesktop is a project designed to enable AI use cases, first and foremost it is a project by humans, for humans.
+While Agentdesktop is a project designed to enable AI use cases, first and foremost it is a project by humans, for humans.
 Usage of AI during contributions must abide by the [Linux Foundation Generative AI policy](https://www.linuxfoundation.org/legal/generative-ai).
 
 In addition, please:

@@ -1,4 +1,4 @@
-//! AgentDesktop daemon and controller-managed configuration.
+//! Agentdesktop daemon and controller-managed configuration.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -11,7 +11,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-/// Configuration for an AgentDesktop daemon.
+/// Configuration for an Agentdesktop daemon.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -119,7 +119,7 @@ pub struct ControllerConnectionConfig {
     pub heartbeat_interval: Duration,
 }
 
-/// Startup configuration for the AgentDesktop fleet controller.
+/// Startup configuration for the Agentdesktop fleet controller.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -274,7 +274,7 @@ fn default_heartbeat_interval() -> Duration {
     Duration::from_secs(30)
 }
 
-/// Settings for developer tools managed by AgentDesktop.
+/// Settings for developer tools managed by Agentdesktop.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -304,7 +304,7 @@ impl ProgramsConfig {
 
 /// Settings reconciled into Claude Code's managed configuration.
 ///
-/// Arbitrary keys are written directly to AgentDesktop's managed-settings
+/// Arbitrary keys are written directly to Agentdesktop's managed-settings
 /// drop-in. Generated gateway settings take precedence when values overlap.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -338,7 +338,7 @@ pub struct ClaudeDesktopConfig {
 ///
 /// Values under `managedConfig` are written to Codex's `managed_config.toml`.
 /// When generated inference-gateway settings overlap with those values,
-/// AgentDesktop's generated values take precedence.
+/// Agentdesktop's generated values take precedence.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -358,7 +358,7 @@ pub struct CodexConfig {
 ///
 /// Values under `managedConfig` are written to OpenCode's managed JSONC file.
 /// When generated inference-gateway settings overlap with those values,
-/// AgentDesktop's generated values take precedence.
+/// Agentdesktop's generated values take precedence.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

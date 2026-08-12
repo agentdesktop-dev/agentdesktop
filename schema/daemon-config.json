@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "DaemonConfig",
-  "description": "Configuration for an AgentDesktop daemon.",
+  "description": "Configuration for an Agentdesktop daemon.",
   "type": "object",
   "properties": {
     "controller": {
@@ -38,7 +38,7 @@
   "additionalProperties": false,
   "$defs": {
     "ClaudeCodeConfig": {
-      "description": "Settings reconciled into Claude Code's managed configuration.\n\nArbitrary keys are written directly to AgentDesktop's managed-settings\ndrop-in. Generated gateway settings take precedence when values overlap.",
+      "description": "Settings reconciled into Claude Code's managed configuration.\n\nArbitrary keys are written directly to Agentdesktop's managed-settings\ndrop-in. Generated gateway settings take precedence when values overlap.",
       "type": "object",
       "properties": {
         "useInferenceGateway": {
@@ -60,7 +60,7 @@
       "additionalProperties": true
     },
     "CodexConfig": {
-      "description": "Settings reconciled into Codex's organization-managed configuration.\n\nValues under `managedConfig` are written to Codex's `managed_config.toml`.\nWhen generated inference-gateway settings overlap with those values,\nAgentDesktop's generated values take precedence.",
+      "description": "Settings reconciled into Codex's organization-managed configuration.\n\nValues under `managedConfig` are written to Codex's `managed_config.toml`.\nWhen generated inference-gateway settings overlap with those values,\nAgentdesktop's generated values take precedence.",
       "type": "object",
       "properties": {
         "managedConfig": {
@@ -151,7 +151,7 @@
       ]
     },
     "OpenCodeConfig": {
-      "description": "Settings reconciled into OpenCode's system-managed configuration.\n\nValues under `managedConfig` are written to OpenCode's managed JSONC file.\nWhen generated inference-gateway settings overlap with those values,\nAgentDesktop's generated values take precedence.",
+      "description": "Settings reconciled into OpenCode's system-managed configuration.\n\nValues under `managedConfig` are written to OpenCode's managed JSONC file.\nWhen generated inference-gateway settings overlap with those values,\nAgentdesktop's generated values take precedence.",
       "type": "object",
       "properties": {
         "managedConfig": {
@@ -179,7 +179,7 @@
       "additionalProperties": false
     },
     "ProgramsConfig": {
-      "description": "Settings for developer tools managed by AgentDesktop.",
+      "description": "Settings for developer tools managed by Agentdesktop.",
       "type": "object",
       "properties": {
         "claudeCode": {

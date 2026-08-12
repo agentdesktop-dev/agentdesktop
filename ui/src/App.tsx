@@ -205,7 +205,7 @@ export function App() {
       <aside className="sidebar">
         <div className="brand">
           <img className="brand-mark" src={agentdesktopIcon} alt="" />
-          <span>AgentDesktop</span>
+          <span>Agentdesktop</span>
         </div>
         <nav className="primary-nav" aria-label="Primary navigation">
           {nav.map((item) => {

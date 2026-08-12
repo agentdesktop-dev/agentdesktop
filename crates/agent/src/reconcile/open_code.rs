@@ -12,7 +12,7 @@ use crate::secure_fs;
 
 use super::{deep_merge, responses_base_url};
 
-const MANAGED_HEADER: &str = "// Managed by AgentDesktop. Manual changes will be replaced.\n";
+const MANAGED_HEADER: &str = "// Managed by Agentdesktop. Manual changes will be replaced.\n";
 const CONFIG_PROGRAM: &str = "opencode";
 
 pub fn apply(
@@ -69,7 +69,7 @@ fn managed_config(
     let provider_name = "agentdesktop";
     let provider = json!({
         "npm": "@ai-sdk/openai",
-        "name": "AgentDesktop",
+        "name": "Agentdesktop",
         "options": {
             "baseURL": responses_base_url(gateway),
             "apiKey": "agentdesktop-managed",
@@ -139,16 +139,16 @@ async function credential() {{
     child.exited,
   ]);
   if (exitCode !== 0) {{
-    throw new Error(`AgentDesktop credential helper failed: ${{stderr.trim() || `exit ${{exitCode}}`}}`);
+    throw new Error(`Agentdesktop credential helper failed: ${{stderr.trim() || `exit ${{exitCode}}`}}`);
   }}
   const token = stdout.trim();
-  if (!token) throw new Error("AgentDesktop credential helper returned an empty token");
+  if (!token) throw new Error("Agentdesktop credential helper returned an empty token");
   cachedToken = token;
   refreshAfter = Date.now() + 60_000;
   return token;
 }}
 
-export const AgentDesktop = async () => ({{
+export const Agentdesktop = async () => ({{
   "chat.headers": async (input, output) => {{
     if (input.model.providerID !== provider) return;
     output.headers.Authorization = `Bearer ${{await credential()}}`;
@@ -232,7 +232,7 @@ fn remove_owned(path: &Path, description: &str) -> anyhow::Result<()> {
                 kind = description,
                 action = "unchanged",
                 path = %path.display(),
-                "preserving managed file not owned by AgentDesktop"
+                "preserving managed file not owned by Agentdesktop"
             );
             Ok(())
         }

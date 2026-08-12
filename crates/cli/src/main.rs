@@ -12,9 +12,9 @@ use serde::Deserialize;
 const MAX_HOOK_INPUT_BYTES: u64 = 1024 * 1024;
 
 #[derive(Parser)]
-#[command(about = "Client for the AgentDesktop daemon")]
+#[command(about = "Client for the Agentdesktop daemon")]
 struct Args {
-    /// Unix socket exposed by the local AgentDesktop daemon.
+    /// Unix socket exposed by the local Agentdesktop daemon.
     #[arg(long, default_value = DEFAULT_SOCKET_PATH, global = true)]
     socket: PathBuf,
 

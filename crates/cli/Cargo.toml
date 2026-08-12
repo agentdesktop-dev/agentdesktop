@@ -1,6 +1,6 @@
 [package]
 name = "agentdesktop-cli"
-description = "Command-line client for the local AgentDesktop daemon."
+description = "Command-line client for the local Agentdesktop daemon."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

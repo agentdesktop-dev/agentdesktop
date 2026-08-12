@@ -177,7 +177,7 @@ pub fn default_claude_desktop_managed_settings_path() -> PathBuf {
     PathBuf::from("/etc/claude-desktop/managed-settings.json")
 }
 
-/// Returns the path of AgentDesktop's Claude Desktop credential helper.
+/// Returns the path of Agentdesktop's Claude Desktop credential helper.
 pub fn default_claude_desktop_credential_helper_path() -> PathBuf {
     PathBuf::from("/etc/claude-desktop/agentdesktop-credential-helper")
 }
@@ -187,7 +187,7 @@ pub fn default_open_code_managed_config_path() -> PathBuf {
     PathBuf::from("/etc/opencode/opencode.jsonc")
 }
 
-/// Returns the path of AgentDesktop's managed OpenCode credential plugin.
+/// Returns the path of Agentdesktop's managed OpenCode credential plugin.
 pub fn default_open_code_plugin_path() -> PathBuf {
     PathBuf::from("/etc/opencode/plugins/agentdesktop.js")
 }

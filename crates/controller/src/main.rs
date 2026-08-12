@@ -15,7 +15,7 @@ use clap::Parser;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 
 #[derive(Parser)]
-#[command(about = "AgentDesktop fleet controller")]
+#[command(about = "Agentdesktop fleet controller")]
 struct Args {
     /// Path to the controller YAML configuration file.
     #[arg(long, default_value = DEFAULT_CONTROLLER_CONFIG_PATH)]
