@@ -1,4 +1,5 @@
 mod claude_code;
+mod claude_desktop;
 mod codex;
 mod open_code;
 
@@ -10,6 +11,8 @@ use serde_json::Value;
 #[derive(Clone)]
 pub struct Reconciler {
     claude_code_managed_settings_dir: PathBuf,
+    claude_desktop_managed_settings_path: PathBuf,
+    claude_desktop_credential_helper_path: PathBuf,
     codex_managed_config_path: PathBuf,
     open_code_managed_config_path: PathBuf,
     open_code_plugin_path: PathBuf,
@@ -20,6 +23,8 @@ pub struct Reconciler {
 impl Reconciler {
     pub fn new(
         claude_code_managed_settings_dir: PathBuf,
+        claude_desktop_managed_settings_path: PathBuf,
+        claude_desktop_credential_helper_path: PathBuf,
         codex_managed_config_path: PathBuf,
         open_code_managed_config_path: PathBuf,
         open_code_plugin_path: PathBuf,
@@ -28,6 +33,8 @@ impl Reconciler {
     ) -> Self {
         Self {
             claude_code_managed_settings_dir,
+            claude_desktop_managed_settings_path,
+            claude_desktop_credential_helper_path,
             codex_managed_config_path,
             open_code_managed_config_path,
             open_code_plugin_path,
@@ -58,6 +65,20 @@ impl Reconciler {
             tool_use_hook.as_deref(),
             session_new_hook.as_deref(),
             claude_code,
+        )?;
+        let claude_desktop = config.programs.claude_desktop.as_ref().map(|desktop| {
+            let gateway = config
+                .inference_gateway
+                .as_ref()
+                .filter(|_| desktop.use_inference_gateway);
+            (desktop, gateway)
+        });
+        claude_desktop::apply(
+            &self.claude_desktop_managed_settings_path,
+            &self.claude_desktop_credential_helper_path,
+            &self.credential_helper,
+            &self.socket,
+            claude_desktop,
         )?;
         let codex = config.programs.codex.as_ref().map(|codex| {
             let gateway = config
@@ -149,6 +170,16 @@ pub fn default_claude_code_managed_settings_dir() -> PathBuf {
 /// Returns the system-wide Codex managed configuration path.
 pub fn default_codex_managed_config_path() -> PathBuf {
     PathBuf::from("/etc/codex/managed_config.toml")
+}
+
+/// Returns Claude Desktop's system-managed settings path.
+pub fn default_claude_desktop_managed_settings_path() -> PathBuf {
+    PathBuf::from("/etc/claude-desktop/managed-settings.json")
+}
+
+/// Returns the path of AgentDesktop's Claude Desktop credential helper.
+pub fn default_claude_desktop_credential_helper_path() -> PathBuf {
+    PathBuf::from("/etc/claude-desktop/agentdesktop-credential-helper")
 }
 
 /// Returns the system-wide OpenCode managed configuration path.

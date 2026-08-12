@@ -155,7 +155,7 @@ async fn report_claude_session_start(socket: &std::path::Path) -> anyhow::Result
         socket,
         "/v1/telemetry",
         &TelemetryEventKind::SessionNew {
-            client_id: "claude-code".to_owned(),
+            client_id: claude_client_id(),
             session_id: input.session_id,
         },
     )
@@ -190,18 +190,30 @@ fn parse_claude_pre_tool_use(
     }
 
     Ok(TelemetryEventKind::ToolUse {
-        client_id: "claude-code".to_owned(),
+        client_id: claude_client_id(),
         tool_name: input.tool_name,
         tool_use_id: input.tool_use_id.filter(|id| !id.is_empty()),
         tool_input: include_input.then_some(input.tool_input),
     })
 }
 
+fn claude_client_id() -> String {
+    claude_client_id_for_entrypoint(std::env::var("CLAUDE_CODE_ENTRYPOINT").ok().as_deref())
+        .to_owned()
+}
+
+fn claude_client_id_for_entrypoint(entrypoint: Option<&str>) -> &'static str {
+    match entrypoint {
+        Some("claude-desktop" | "claude-desktop-3p") => "claude-desktop",
+        _ => "claude-code",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use agentdesktop_core::model::TelemetryEventKind;
 
-    use super::parse_claude_pre_tool_use;
+    use super::{claude_client_id_for_entrypoint, parse_claude_pre_tool_use};
 
     #[test]
     fn parses_claude_pre_tool_use_input_without_unrelated_fields() {
@@ -234,5 +246,18 @@ mod tests {
         assert_eq!(tool_input.as_ref().unwrap()["command"], "cargo test");
         assert!(!serialized.contains("session-secret"));
         assert!(!serialized.contains("transcript"));
+    }
+
+    #[test]
+    fn attributes_desktop_entrypoints_to_claude_desktop() {
+        assert_eq!(
+            claude_client_id_for_entrypoint(Some("claude-desktop")),
+            "claude-desktop"
+        );
+        assert_eq!(
+            claude_client_id_for_entrypoint(Some("claude-desktop-3p")),
+            "claude-desktop"
+        );
+        assert_eq!(claude_client_id_for_entrypoint(Some("cli")), "claude-code");
     }
 }

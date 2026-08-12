@@ -40,6 +40,20 @@ struct Args {
     )]
     claude_code_managed_settings_dir: PathBuf,
 
+    /// Path to Claude Desktop's system-managed JSON configuration.
+    #[arg(
+        long,
+        default_value_os_t = reconcile::default_claude_desktop_managed_settings_path()
+    )]
+    claude_desktop_managed_settings: PathBuf,
+
+    /// Path used for Claude Desktop's AgentDesktop credential helper.
+    #[arg(
+        long,
+        default_value_os_t = reconcile::default_claude_desktop_credential_helper_path()
+    )]
+    claude_desktop_credential_helper: PathBuf,
+
     /// Path to Codex's organization-managed TOML configuration.
     #[arg(long, default_value_os_t = reconcile::default_codex_managed_config_path())]
     codex_managed_config: PathBuf,
@@ -62,6 +76,8 @@ async fn main() -> anyhow::Result<()> {
     let enrollment = EnrollmentState::new(config.controller.is_some());
     let reconciler = reconcile::Reconciler::new(
         args.claude_code_managed_settings_dir.clone(),
+        args.claude_desktop_managed_settings.clone(),
+        args.claude_desktop_credential_helper.clone(),
         args.codex_managed_config.clone(),
         args.open_code_managed_config.clone(),
         args.open_code_plugin.clone(),

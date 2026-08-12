@@ -282,6 +282,9 @@ pub struct ProgramsConfig {
     /// Claude Code managed-settings configuration. Arbitrary keys are passed through directly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_code: Option<ClaudeCodeConfig>,
+    /// Claude Desktop managed configuration. Arbitrary keys are passed through directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_desktop: Option<ClaudeDesktopConfig>,
     /// Codex managed configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex: Option<CodexConfig>,
@@ -292,7 +295,10 @@ pub struct ProgramsConfig {
 
 impl ProgramsConfig {
     fn is_empty(&self) -> bool {
-        self.claude_code.is_none() && self.codex.is_none() && self.open_code.is_none()
+        self.claude_code.is_none()
+            && self.claude_desktop.is_none()
+            && self.codex.is_none()
+            && self.open_code.is_none()
     }
 }
 
@@ -308,6 +314,22 @@ pub struct ClaudeCodeConfig {
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub use_inference_gateway: bool,
     /// Arbitrary Claude Code managed-settings values, flattened into this object.
+    #[serde(default, flatten)]
+    pub settings: BTreeMap<String, serde_json::Value>,
+}
+
+/// Settings reconciled into Claude Desktop's managed configuration.
+///
+/// Arbitrary keys are written directly to the managed settings file. Generated
+/// gateway settings take precedence when values overlap.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeDesktopConfig {
+    /// Whether this program uses the top-level inference gateway.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub use_inference_gateway: bool,
+    /// Arbitrary Claude Desktop managed-settings values, flattened into this object.
     #[serde(default, flatten)]
     pub settings: BTreeMap<String, serde_json::Value>,
 }
