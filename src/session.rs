@@ -9,9 +9,13 @@ pub use registry::SessionRegistry;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::{run_user_agent, serve_registrations};
 
 #[cfg(all(target_os = "windows", target_env = "msvc"))]
 pub mod windows;
+#[cfg(all(target_os = "windows", target_env = "msvc"))]
+pub use windows::{run_user_agent, serve_registrations};
 
 fn spawn_runtime_worker<F, Fut>(
     name: &'static str,

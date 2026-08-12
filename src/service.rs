@@ -21,12 +21,7 @@ const LOCAL_GATEWAY_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub async fn run(config: Config) -> anyhow::Result<()> {
     let _telemetry = crate::telemetry::init()?;
-    #[cfg(target_os = "linux")]
-    let central_session_mode = config.session_socket.is_some();
-    #[cfg(all(target_os = "windows", target_env = "msvc"))]
-    let central_session_mode = config.session_pipe.is_some();
-    #[cfg(not(any(target_os = "linux", all(target_os = "windows", target_env = "msvc"))))]
-    let central_session_mode = false;
+    let central_session_mode = config.has_session_endpoint();
     let managed_identity = if central_session_mode {
         None
     } else {
@@ -253,26 +248,14 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     };
     #[cfg(not(target_os = "linux"))]
     let capture_task = None;
-    #[cfg(target_os = "linux")]
-    let session_task = session_state.as_ref().map(|(socket, registry)| {
-        tokio::spawn(crate::session::linux::serve_registrations(
-            std::sync::Arc::clone(socket),
+    let session_task = session_state.as_ref().map(|(endpoint, registry)| {
+        tokio::spawn(crate::session::serve_registrations(
+            endpoint.clone(),
             registry.clone(),
             Duration::from_millis(config.connect_timeout_ms),
             shutdown_rx.clone(),
         ))
     });
-    #[cfg(all(target_os = "windows", target_env = "msvc"))]
-    let session_task = session_state.as_ref().map(|(path, registry)| {
-        tokio::spawn(crate::session::windows::serve_registrations(
-            path.clone(),
-            registry.clone(),
-            Duration::from_millis(config.connect_timeout_ms),
-            shutdown_rx.clone(),
-        ))
-    });
-    #[cfg(not(any(target_os = "linux", all(target_os = "windows", target_env = "msvc"))))]
-    let session_task = None;
     let renewal_task = managed_identity.map(renewal::spawn);
     let result = if let Some(gateway) = &mut local_gateway {
         tokio::select! {
@@ -323,8 +306,7 @@ pub async fn run_session_agent(config: Config) -> anyhow::Result<()> {
             let identity = context.client_identity.clone();
             let renewal = renewal::spawn(context);
             let result =
-                crate::session::linux::run_user_agent(socket, identity, Duration::from_secs(1))
-                    .await;
+                crate::session::run_user_agent(socket, identity, Duration::from_secs(1)).await;
             renewal.abort();
             result
         }
@@ -373,8 +355,7 @@ pub async fn run_session_agent(config: Config) -> anyhow::Result<()> {
     let context = renewal::load(&config)?.context("session agent requires managed identity")?;
     let identity = context.client_identity.clone();
     let renewal = renewal::spawn(context);
-    let result =
-        crate::session::windows::run_user_agent(pipe, identity, Duration::from_secs(1)).await;
+    let result = crate::session::run_user_agent(pipe, identity, Duration::from_secs(1)).await;
     renewal.abort();
     result
 }

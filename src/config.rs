@@ -191,14 +191,8 @@ impl Config {
             bail!("transparent capture requires an owned or registered standalone Agent Gateway");
         }
 
-        #[cfg(target_os = "linux")]
         let central_managed_service =
-            self.mode == DeploymentMode::Managed && self.session_socket.is_some();
-        #[cfg(all(target_os = "windows", target_env = "msvc"))]
-        let central_managed_service =
-            self.mode == DeploymentMode::Managed && self.session_pipe.is_some();
-        #[cfg(not(any(target_os = "linux", all(target_os = "windows", target_env = "msvc"))))]
-        let central_managed_service = false;
+            self.mode == DeploymentMode::Managed && self.has_session_endpoint();
         if self.mode == DeploymentMode::Managed
             && self.identity_issuer.is_none()
             && !central_managed_service
@@ -232,6 +226,15 @@ impl Config {
         }
 
         Ok(self)
+    }
+
+    pub fn has_session_endpoint(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        return self.session_socket.is_some();
+        #[cfg(all(target_os = "windows", target_env = "msvc"))]
+        return self.session_pipe.is_some();
+        #[cfg(not(any(target_os = "linux", all(target_os = "windows", target_env = "msvc"))))]
+        return false;
     }
 }
 
