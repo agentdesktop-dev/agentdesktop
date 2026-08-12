@@ -25,7 +25,6 @@ pub struct AdminState {
 pub struct ControllerSettings {
     pub fleet_listen: String,
     pub admin_listen: String,
-    pub enrollment_token_enabled: bool,
     pub oidc_enabled: bool,
     pub tls_enabled: bool,
     pub gateway_jwt_enabled: bool,

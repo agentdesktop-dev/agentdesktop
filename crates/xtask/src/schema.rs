@@ -4,7 +4,7 @@ use std::{
     process::Command,
 };
 
-use agentdesktop_core::config::{DaemonConfig, DesiredConfig};
+use agentdesktop_core::config::{ControllerConfig, DaemonConfig, DesiredConfig};
 use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
 
@@ -14,6 +14,7 @@ pub fn generate() -> Result<()> {
     fs::create_dir_all(&schema_dir).context("create schema directory")?;
 
     write_schema::<DaemonConfig>(&root, "daemon-config", "Daemon Configuration")?;
+    write_schema::<ControllerConfig>(&root, "controller-config", "Controller Configuration")?;
     write_schema::<DesiredConfig>(&root, "desired-config", "Desired Configuration")?;
     Ok(())
 }

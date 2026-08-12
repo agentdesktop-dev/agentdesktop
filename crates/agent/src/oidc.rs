@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-use agentdesktop_core::config::ControllerConfig;
+use agentdesktop_core::config::ControllerConnectionConfig;
 use agentdesktop_proto::fleet::{BeginEnrollmentRequest, CompleteEnrollmentRequest};
 use anyhow::{Context, bail};
 use axum::{
@@ -20,6 +20,65 @@ use url::Url;
 use crate::{enrollment::EnrollmentState, identity::Identity, remote};
 
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const SUCCESS_PAGE: &str = r##"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Enrollment complete · AgentDesktop</title>
+  <style>
+    :root { color-scheme: light; font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #fff; color: #18181b; }
+    main { width: min(100% - 40px, 380px); padding: 32px; }
+    svg { display: block; width: 42px; height: 42px; margin-bottom: 24px; }
+    h1 { margin: 0 0 8px; font-size: 20px; line-height: 1.35; font-weight: 600; letter-spacing: -.01em; }
+    p { margin: 0; color: #71717a; font-size: 14px; line-height: 1.55; }
+  </style>
+</head>
+<body>
+  <main>
+    <svg viewBox="0 0 256 256" fill="none" aria-label="AgentDesktop">
+      <path d="M72 61v134M184 61v134M72 94h112M72 162h112" stroke="#8023C3" stroke-width="22" stroke-linecap="round"/>
+      <circle cx="72" cy="61" r="20" fill="#8023C3"/>
+      <circle cx="184" cy="195" r="20" fill="#8023C3"/>
+      <circle cx="128" cy="128" r="18" fill="#5B168E"/>
+    </svg>
+    <h1>Enrollment complete</h1>
+    <p>You can close this window and return to AgentDesktop.</p>
+  </main>
+</body>
+</html>"##;
+
+const FAILURE_PAGE: &str = r##"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Enrollment failed · AgentDesktop</title>
+  <style>
+    :root { color-scheme: light; font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #fff; color: #18181b; }
+    main { width: min(100% - 40px, 380px); padding: 32px; }
+    svg { display: block; width: 42px; height: 42px; margin-bottom: 24px; }
+    h1 { margin: 0 0 8px; font-size: 20px; line-height: 1.35; font-weight: 600; letter-spacing: -.01em; }
+    p { margin: 0; color: #71717a; font-size: 14px; line-height: 1.55; }
+  </style>
+</head>
+<body>
+  <main>
+    <svg viewBox="0 0 256 256" fill="none" aria-label="AgentDesktop">
+      <path d="M72 61v134M184 61v134M72 94h112M72 162h112" stroke="#8023C3" stroke-width="22" stroke-linecap="round"/>
+      <circle cx="72" cy="61" r="20" fill="#8023C3"/>
+      <circle cx="184" cy="195" r="20" fill="#8023C3"/>
+      <circle cx="128" cy="128" r="18" fill="#5B168E"/>
+    </svg>
+    <h1>Enrollment failed</h1>
+    <p>Return to AgentDesktop and try again. Details are available in the daemon logs.</p>
+  </main>
+</body>
+</html>"##;
 
 #[derive(Clone)]
 struct CallbackState {
@@ -36,7 +95,7 @@ struct CallbackQuery {
 }
 
 pub async fn enroll(
-    controller: &ControllerConfig,
+    controller: &ControllerConnectionConfig,
     enrollment: &EnrollmentState,
     callback_listen: Option<SocketAddr>,
 ) -> anyhow::Result<Identity> {
@@ -172,13 +231,9 @@ async fn callback(
     }
 
     if succeeded {
-        Html("AgentDesktop enrollment is complete. You can close this window.").into_response()
+        Html(SUCCESS_PAGE).into_response()
     } else {
-        (
-            StatusCode::BAD_REQUEST,
-            Html("AgentDesktop enrollment failed. Return to the daemon logs for details."),
-        )
-            .into_response()
+        (StatusCode::BAD_REQUEST, Html(FAILURE_PAGE)).into_response()
     }
 }
 

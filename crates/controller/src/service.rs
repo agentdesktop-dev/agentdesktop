@@ -2,9 +2,9 @@ use std::{path::Path, pin::Pin};
 
 use agentdesktop_proto::fleet::{
     AgentMessage, BeginEnrollmentRequest, BeginEnrollmentResponse, CompleteEnrollmentRequest,
-    ControllerMessage, DesiredConfig, EnrollRequest, EnrollResponse,
-    InferenceGatewayCredentialRequest, InferenceGatewayCredentialResponse, agent_message,
-    controller_message, fleet_agent_server::FleetAgent,
+    ControllerMessage, DesiredConfig, EnrollResponse, InferenceGatewayCredentialRequest,
+    InferenceGatewayCredentialResponse, agent_message, controller_message,
+    fleet_agent_server::FleetAgent,
 };
 use anyhow::Context;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -23,7 +23,6 @@ use crate::{database::Database, gateway_jwt::GatewayJwtIssuer, oidc::OidcProvide
 
 #[derive(Clone)]
 pub struct FleetAgentService {
-    enrollment_token: Option<String>,
     oidc: Option<OidcProvider>,
     database: Database,
     desired_config: Option<DesiredConfig>,
@@ -32,14 +31,12 @@ pub struct FleetAgentService {
 
 impl FleetAgentService {
     pub fn new(
-        enrollment_token: Option<String>,
         oidc: Option<OidcProvider>,
         database: Database,
         desired_config: Option<DesiredConfig>,
         gateway_jwt_issuer: Option<GatewayJwtIssuer>,
     ) -> Self {
         Self {
-            enrollment_token,
             oidc,
             database,
             desired_config,
@@ -51,21 +48,6 @@ impl FleetAgentService {
 #[tonic::async_trait]
 impl FleetAgent for FleetAgentService {
     type ConnectStream = Pin<Box<dyn Stream<Item = Result<ControllerMessage, Status>> + Send>>;
-
-    async fn enroll(
-        &self,
-        request: Request<EnrollRequest>,
-    ) -> Result<Response<EnrollResponse>, Status> {
-        let request = request.into_inner();
-        let Some(expected) = &self.enrollment_token else {
-            return Err(Status::failed_precondition("enrollment is disabled"));
-        };
-        if request.token != *expected {
-            return Err(Status::unauthenticated("invalid enrollment token"));
-        }
-
-        self.enroll_device(&request.hostname, "", "", None).await
-    }
 
     async fn begin_enrollment(
         &self,

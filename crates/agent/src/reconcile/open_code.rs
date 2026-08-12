@@ -1,4 +1,4 @@
-use std::{fs, io::Write, path::Path};
+use std::{fs, path::Path};
 
 use agentdesktop_core::config::{
     InferenceGatewayAuthentication, InferenceGatewayConfig, OpenCodeConfig,
@@ -7,6 +7,8 @@ use anyhow::Context;
 use serde_json::{Value, json};
 use tracing::info;
 use url::Url;
+
+use crate::secure_fs;
 
 const MANAGED_HEADER: &str = "// Managed by AgentDesktop. Manual changes will be replaced.\n";
 const CONFIG_PROGRAM: &str = "opencode";
@@ -217,14 +219,7 @@ fn reconcile_file(path: &Path, contents: &[u8], description: &str) -> anyhow::Re
         .unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(directory)
         .with_context(|| format!("create OpenCode directory {}", directory.display()))?;
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("OpenCode managed path has no UTF-8 file name")?;
-    let temporary = directory.join(format!(".{file_name}.agentdesktop.tmp"));
-    write_file(&temporary, contents)?;
-    fs::rename(&temporary, path)
-        .with_context(|| format!("install {description} at {}", path.display()))?;
+    secure_fs::atomic_write(path, contents, 0o644)?;
     info!(
         program = CONFIG_PROGRAM,
         kind = description,
@@ -264,21 +259,6 @@ fn remove_owned(path: &Path, description: &str) -> anyhow::Result<()> {
             Err(error).with_context(|| format!("read {description} from {}", path.display()))
         }
     }
-}
-
-fn write_file(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o644);
-    }
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("write OpenCode managed file to {}", path.display()))?;
-    file.write_all(contents)
-        .with_context(|| format!("write OpenCode managed file to {}", path.display()))
 }
 
 #[cfg(test)]

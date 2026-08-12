@@ -1,4 +1,4 @@
-use std::{fs, io::Write, path::Path};
+use std::{fs, path::Path};
 
 use anyhow::Context;
 
@@ -8,7 +8,11 @@ use agentdesktop_core::config::{
 use serde_json::{Value, json};
 use tracing::info;
 
+use crate::secure_fs;
+
 const FILE_NAME: &str = "50-agentdesktop.json";
+const OWNER_FILE_NAME: &str = ".50-agentdesktop.json.owner";
+const OWNER_MARKER: &[u8] = b"AgentDesktop\n";
 
 pub fn apply(
     directory: &Path,
@@ -16,16 +20,21 @@ pub fn apply(
     config: Option<(&ClaudeCodeConfig, Option<&InferenceGatewayConfig>)>,
 ) -> anyhow::Result<()> {
     let path = directory.join(FILE_NAME);
+    let owner_path = directory.join(OWNER_FILE_NAME);
     let Some((config, gateway)) = config else {
-        return remove(&path);
+        return remove(&path, &owner_path);
     };
 
     let settings = managed_settings(config, gateway, credential_helper)?;
     let mut contents =
         serde_json::to_vec_pretty(&settings).context("serialize Claude Code managed settings")?;
     contents.push(b'\n');
+    let owned = is_owned(&owner_path)?;
     let action = match fs::read(&path) {
         Ok(existing) if existing == contents => {
+            if !owned {
+                secure_fs::atomic_write(&owner_path, OWNER_MARKER, 0o644)?;
+            }
             info!(
                 program = "claude-code",
                 action = "unchanged",
@@ -34,7 +43,11 @@ pub fn apply(
             );
             return Ok(());
         }
-        Ok(_) => "update",
+        Ok(_) if owned => "update",
+        Ok(_) => anyhow::bail!(
+            "refusing to replace Claude Code managed settings not owned by AgentDesktop at {}",
+            path.display()
+        ),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => "create",
         Err(error) => {
             return Err(error).with_context(|| {
@@ -49,10 +62,8 @@ pub fn apply(
             directory.display()
         )
     })?;
-    let temporary = directory.join(format!(".{FILE_NAME}.tmp"));
-    write_file(&temporary, &contents)?;
-    fs::rename(&temporary, &path)
-        .with_context(|| format!("install Claude Code managed settings at {}", path.display()))?;
+    secure_fs::atomic_write(&path, &contents, 0o644)?;
+    secure_fs::atomic_write(&owner_path, OWNER_MARKER, 0o644)?;
     info!(
         program = "claude-code",
         action,
@@ -100,7 +111,18 @@ fn merge(base: &mut Value, overlay: Value) {
     }
 }
 
-fn remove(path: &Path) -> anyhow::Result<()> {
+fn remove(path: &Path, owner_path: &Path) -> anyhow::Result<()> {
+    if !is_owned(owner_path)? {
+        if path.exists() {
+            info!(
+                program = "claude-code",
+                action = "unchanged",
+                path = %path.display(),
+                "preserving managed settings not owned by AgentDesktop"
+            );
+        }
+        return Ok(());
+    }
     match fs::remove_file(path) {
         Ok(()) => {
             info!(
@@ -109,7 +131,7 @@ fn remove(path: &Path) -> anyhow::Result<()> {
                 path = %path.display(),
                 "reconciled managed settings"
             );
-            Ok(())
+            remove_owner_marker(owner_path)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             info!(
@@ -118,26 +140,29 @@ fn remove(path: &Path) -> anyhow::Result<()> {
                 path = %path.display(),
                 "managed settings already absent"
             );
-            Ok(())
+            remove_owner_marker(owner_path)
         }
         Err(error) => Err(error)
             .with_context(|| format!("remove Claude Code managed settings at {}", path.display())),
     }
 }
 
-fn write_file(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o644);
+fn is_owned(owner_path: &Path) -> anyhow::Result<bool> {
+    match fs::read(owner_path) {
+        Ok(contents) => Ok(contents == OWNER_MARKER),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error)
+            .with_context(|| format!("read ownership marker from {}", owner_path.display())),
     }
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("write Claude Code managed settings to {}", path.display()))?;
-    file.write_all(contents)
-        .with_context(|| format!("write Claude Code managed settings to {}", path.display()))
+}
+
+fn remove_owner_marker(owner_path: &Path) -> anyhow::Result<()> {
+    match fs::remove_file(owner_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("remove ownership marker at {}", owner_path.display())),
+    }
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use std::{fs, io::Write, path::Path};
+use std::{fs, path::Path};
 
 use agentdesktop_core::config::{
     CodexConfig, InferenceGatewayAuthentication, InferenceGatewayConfig,
@@ -6,6 +6,8 @@ use agentdesktop_core::config::{
 use anyhow::Context;
 use serde_json::{Value, json};
 use tracing::info;
+
+use crate::secure_fs;
 
 const MANAGED_HEADER: &str = "# Managed by AgentDesktop. Manual changes will be replaced.\n";
 
@@ -59,10 +61,7 @@ pub fn apply(
             directory.display()
         )
     })?;
-    let temporary = directory.join(".managed_config.toml.agentdesktop.tmp");
-    write_file(&temporary, &contents)?;
-    fs::rename(&temporary, path)
-        .with_context(|| format!("install Codex managed configuration at {}", path.display()))?;
+    secure_fs::atomic_write(path, &contents, 0o644)?;
     info!(
         program = "codex",
         action,
@@ -172,21 +171,6 @@ fn remove(path: &Path) -> anyhow::Result<()> {
         Err(error) => Err(error)
             .with_context(|| format!("read Codex managed configuration from {}", path.display())),
     }
-}
-
-fn write_file(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o644);
-    }
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("write Codex managed configuration to {}", path.display()))?;
-    file.write_all(contents)
-        .with_context(|| format!("write Codex managed configuration to {}", path.display()))
 }
 
 #[cfg(test)]

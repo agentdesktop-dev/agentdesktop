@@ -15,11 +15,11 @@ use tonic::{
 use tracing::{debug, info, warn};
 
 use agentdesktop_core::{
-    config::{self, ControllerConfig},
+    config::{self, ControllerConnectionConfig},
     model::Discovery as AgentDiscovery,
 };
 use agentdesktop_proto::fleet::{
-    AgentMessage, ConfigState, ConfigStatus, Discovery, EnrollRequest, Heartbeat, Hello,
+    AgentMessage, ConfigState, ConfigStatus, Discovery, Heartbeat, Hello,
     InferenceGatewayCredentialRequest, Inventory, agent_message, controller_message,
     fleet_agent_client::FleetAgentClient,
 };
@@ -29,13 +29,13 @@ use crate::{
     identity::{self, Identity},
     oidc,
     reconcile::Reconciler,
+    secure_fs,
 };
 
 pub async fn run(
-    controller: ControllerConfig,
+    controller: ControllerConnectionConfig,
     discovered: AgentDiscovery,
     state_dir: PathBuf,
-    enrollment_token: Option<String>,
     oidc_callback_listen: Option<SocketAddr>,
     reconciler: Reconciler,
     enrollment: EnrollmentState,
@@ -48,13 +48,7 @@ pub async fn run(
                 identity
             }
             None => {
-                let identity = match enrollment_token.clone() {
-                    Some(token) => {
-                        enrollment.set("enrolling").await;
-                        enroll_with_token(&controller, token).await?
-                    }
-                    None => oidc::enroll(&controller, &enrollment, oidc_callback_listen).await?,
-                };
+                let identity = oidc::enroll(&controller, &enrollment, oidc_callback_listen).await?;
                 identity::save(&identity_path, &identity)?;
                 enrollment.set("enrolled").await;
                 info!(device_id = %identity.device_id, "enrolled device");
@@ -112,7 +106,7 @@ fn invalidate_identity(path: &Path) -> anyhow::Result<()> {
 }
 
 pub async fn inference_gateway_credential(
-    controller: &ControllerConfig,
+    controller: &ControllerConnectionConfig,
     state_dir: &Path,
     client_id: &str,
 ) -> anyhow::Result<agentdesktop_core::model::InferenceGatewayCredential> {
@@ -139,28 +133,8 @@ pub async fn inference_gateway_credential(
     })
 }
 
-async fn enroll_with_token(
-    controller: &ControllerConfig,
-    token: String,
-) -> anyhow::Result<Identity> {
-    let mut client = client(controller).await?;
-    let response = client
-        .enroll(EnrollRequest {
-            token,
-            hostname: hostname(),
-        })
-        .await
-        .context("enroll with controller")?
-        .into_inner();
-
-    Ok(Identity {
-        device_id: response.device_id,
-        credential: response.credential,
-    })
-}
-
 async fn connect(
-    controller: &ControllerConfig,
+    controller: &ControllerConnectionConfig,
     identity: &Identity,
     discovered: &AgentDiscovery,
     state_dir: &Path,
@@ -293,14 +267,9 @@ fn apply_desired_config(
         let config = config::parse_desired(yaml)?;
         debug!(revision = desired.revision, "parsed desired configuration");
         reconciler.apply(&config)?;
-        std::fs::create_dir_all(state_dir)
-            .with_context(|| format!("create state directory {}", state_dir.display()))?;
+        secure_fs::ensure_private_dir(state_dir)?;
         let path = state_dir.join("remote-config.yaml");
-        let temporary = state_dir.join("remote-config.yaml.tmp");
-        std::fs::write(&temporary, &desired.yaml)
-            .with_context(|| format!("write remote configuration to {}", temporary.display()))?;
-        std::fs::rename(&temporary, &path)
-            .with_context(|| format!("install remote configuration at {}", path.display()))?;
+        secure_fs::atomic_write(&path, &desired.yaml, 0o600)?;
         info!(
             revision = desired.revision,
             path = %path.display(),
@@ -336,7 +305,7 @@ async fn send(
 }
 
 pub(crate) async fn client(
-    controller: &ControllerConfig,
+    controller: &ControllerConnectionConfig,
 ) -> anyhow::Result<FleetAgentClient<Channel>> {
     let mut endpoint = Endpoint::from_shared(controller.address.clone())
         .with_context(|| format!("parse controller address {}", controller.address))?;

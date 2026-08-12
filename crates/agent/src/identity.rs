@@ -1,7 +1,9 @@
-use std::{fs, io::Write, path::Path};
+use std::{fs, path::Path};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+
+use crate::secure_fs;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -22,27 +24,6 @@ pub fn load(path: &Path) -> anyhow::Result<Option<Identity>> {
 
 pub fn save(path: &Path, identity: &Identity) -> anyhow::Result<()> {
     let parent = path.parent().context("identity path has no parent")?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("create state directory {}", parent.display()))?;
-
-    let temporary = path.with_extension("json.tmp");
-    write_private(&temporary, &serde_json::to_vec_pretty(identity)?)?;
-    fs::rename(&temporary, path)
-        .with_context(|| format!("install identity at {}", path.display()))?;
-    Ok(())
-}
-
-fn write_private(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("write identity to {}", path.display()))?;
-    file.write_all(contents)
-        .with_context(|| format!("write identity to {}", path.display()))
+    secure_fs::ensure_private_dir(parent)?;
+    secure_fs::atomic_write(path, &serde_json::to_vec_pretty(identity)?, 0o600)
 }

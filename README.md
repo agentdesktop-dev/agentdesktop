@@ -39,9 +39,11 @@ The production-oriented defaults are `/etc/agentdesktop/config.yaml` and `/run/a
 ## Configuration schema
 
 The checked-in [daemon JSON Schema](schema/daemon-config.json) describes local
-daemon startup configuration. It is a superset of the controller-managed
-[desired configuration schema](schema/desired-config.json). Generated field
-references for the [daemon](schema/daemon-config.md) and
+daemon startup configuration. The [controller schema](schema/controller-config.json)
+describes the fleet controller process, while the
+[desired configuration schema](schema/desired-config.json) describes the state
+it distributes. Generated field references for the
+[daemon](schema/daemon-config.md), [controller](schema/controller-config.md), and
 [desired configuration](schema/desired-config.md) contain the same Rust doc
 comments in compact tables.
 
@@ -70,20 +72,20 @@ controller:
   heartbeatInterval: 5s
 ```
 
-Start the controller with a one-time enrollment token:
+Device enrollment is OIDC-only. The checked-in `controller.yaml.example` uses
+local Dex and explicitly enables insecure local development. Start it with:
 
 ```console
 make ui
 cargo run --bin agentdesktop-controller -- \
-  --enrollment-token development \
-  --database-url 'sqlite://agentdesktop-controller.db?mode=rwc'
+  --config ./controller.yaml.example
 ```
 
 The controller also serves its embedded management UI at
 `http://127.0.0.1:8080`. It shows fleet health, device inventory, desired
 configuration, and runtime settings, and can remove enrolled devices. The admin
-listener is restricted to loopback addresses; use `--admin-listen` to select a
-different local port.
+listener is restricted to loopback addresses; set `adminListen` in controller
+configuration to select a different local port.
 
 Then start the daemon with a writable development state directory:
 
@@ -91,11 +93,10 @@ Then start the daemon with a writable development state directory:
 cargo run --bin agentdesktopd -- \
   --config ./config.controller.yaml.example \
   --socket /tmp/agentdesktop.sock \
-  --state-dir /tmp/agentdesktop-state \
-  --enrollment-token development
+  --state-dir /tmp/agentdesktop-state
 ```
 
-The daemon writes `identity.json` and any accepted `remote-config.yaml` under its state directory. On restart it reapplies that last accepted controller configuration before connecting. If no cached or non-empty local desired configuration exists, it preserves managed files until the controller responds rather than temporarily removing them. To have the controller offer desired configuration when a device connects, pass `--desired-config <path>` and optionally `--desired-config-revision <number>`.
+The daemon writes `identity.json` and any accepted `remote-config.yaml` under its state directory. On restart it reapplies that last accepted controller configuration before connecting. If no cached or non-empty local desired configuration exists, it preserves managed files until the controller responds rather than temporarily removing them. To have the controller offer desired configuration when a device connects, set `desiredConfig.path` and `desiredConfig.revision` in controller configuration.
 
 ### OIDC enrollment
 
@@ -105,12 +106,10 @@ With the local Dex `local-public` client, start the controller with:
 
 ```console
 cargo run --bin agentdesktop-controller -- \
-  --oidc-issuer http://dex.local \
-  --oidc-client-id local-public \
-  --database-url 'sqlite://agentdesktop-controller.db?mode=rwc'
+  --config ./controller.yaml.example
 ```
 
-Use a fresh state directory and omit the enrollment token:
+Use a fresh state directory:
 
 ```console
 cargo run --bin agentdesktopd -- \
@@ -119,7 +118,7 @@ cargo run --bin agentdesktopd -- \
   --state-dir /tmp/agentdesktop-oidc-state
 ```
 
-Open the authorization URL printed by the daemon, or choose **Enroll with SSO…** from the tray menu. Dex redirects the browser to `http://127.0.0.1:5555/callback`, where the daemon completes enrollment. The callback must remain registered on the OIDC client. For production, use an HTTPS issuer; the plaintext issuer above is only suitable for local development.
+Open the authorization URL printed by the daemon, or choose **Enroll with SSO…** from the tray menu. Dex redirects the browser to `http://127.0.0.1:5555/callback`, where the daemon completes enrollment. The callback must remain registered on the OIDC client. Production controllers reject plaintext OIDC issuers; this local example sets `allowInsecureDev: true`.
 
 When the daemon runs in a Docker container, keep the registered redirect URI on
 host loopback but bind the callback server to the container interface:
@@ -137,9 +136,9 @@ that request to the daemon. Restrict the published host port to loopback as
 shown above. Without `--oidc-callback-listen`, the daemon continues to bind the
 callback directly to the loopback address from the redirect URI.
 
-The controller uses SQLite by default and runs embedded migrations at startup. Point the same binary at Postgres with `--database-url 'postgres://user:password@host/database'`. Enrollment, device metadata, heartbeats, discoveries, and configuration status are persisted through one portable SQLx `AnyPool` query set.
+The controller uses SQLite by default and runs embedded migrations at startup. Set `databaseUrl: postgres://user:password@host/database` to use Postgres. Enrollment, device metadata, heartbeats, discoveries, and configuration status are persisted through one portable SQLx `AnyPool` query set.
 
-For TLS, give the controller `--tls-certificate` and `--tls-key`, use an `https://` controller address, and set `caCertificatePath` in daemon YAML when using a private CA. Device identity and credentials never belong in YAML.
+For TLS, configure `tls.certificate` and `tls.key`, use an `https://` controller address, and set `caCertificatePath` in daemon YAML when using a private CA. A non-loopback `fleetListen` is rejected without TLS unless `allowInsecureDev` is explicitly enabled. Device identity and credentials never belong in YAML.
 
 ### Claude Code managed settings
 
@@ -178,18 +177,32 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
   -out /tmp/agentdesktop-gateway-jwt.pem
 ```
 
-Start the controller with the example as desired state and enable JWT issuance:
+Configure the controller with the desired state and JWT issuer:
 
-```console
-cargo run --bin agentdesktop-controller -- \
-  --enrollment-token development \
-  --desired-config ./config.claude-code.yaml.example \
-  --gateway-jwt-private-key /tmp/agentdesktop-gateway-jwt.pem \
-  --gateway-jwt-issuer agentdesktop-controller \
-  --gateway-jwt-key-id agentdesktop
+```yaml
+oidc:
+  issuer: https://idp.example.com
+  clientId: agentdesktop
+
+desiredConfig:
+  path: ./config.claude-code.yaml.example
+  revision: 1
+
+gatewayJwt:
+  privateKey: /tmp/agentdesktop-gateway-jwt.pem
+  issuer: agentdesktop-controller
+  keyId: agentdesktop
+  lifetime: 5m
 ```
 
-Agentgateway must trust the corresponding RSA public key and require issuer `agentdesktop-controller` and audience `agentgateway`. For OIDC-enrolled devices, the gateway JWT subject is the verified OIDC subject; token-enrolled devices use their device ID. The JWT also carries the `device_id` claim. In production, keep the private key outside the database with restrictive permissions and distribute only its public JWK to Agentgateway.
+Relative certificate, signing-key, and desired-configuration paths are resolved
+from the controller YAML directory. Start it with only the configuration path:
+
+```console
+cargo run --bin agentdesktop-controller -- --config ./controller.yaml
+```
+
+Agentgateway must trust the corresponding RSA public key and require issuer `agentdesktop-controller` and audience `agentgateway`. The gateway JWT subject is the verified OIDC subject, `act.sub` identifies the device, and `client_id` is asserted by the arbitrary local client requesting the credential. In production, keep the private key outside the database with restrictive permissions and distribute only its public JWK to Agentgateway.
 
 On Linux, the daemon atomically reconciles AgentDesktop's dedicated drop-in at `/etc/claude-code/managed-settings.d/50-agentdesktop.json`. For an unprivileged development run, redirect that exact directory:
 
@@ -198,8 +211,7 @@ cargo run --bin agentdesktopd -- \
   --config ./config.controller.yaml.example \
   --socket /tmp/agentdesktop.sock \
   --state-dir /tmp/agentdesktop-state \
-  --claude-code-managed-settings-dir /tmp/claude-code-managed-settings.d \
-  --enrollment-token development
+  --claude-code-managed-settings-dir /tmp/claude-code-managed-settings.d
 ```
 
 Inspect the result with `jq . /tmp/claude-code-managed-settings.d/50-agentdesktop.json`. When `programs.claudeCode` is absent from a later desired revision, the daemon removes only its own drop-in file.
@@ -301,12 +313,11 @@ its ownership marker. User and project OpenCode configuration remains untouched.
 To exercise the real privileged path during development, build as your user and elevate only the resulting daemon binary with the wrapper:
 
 ```console
-AGENTDESKTOP_ENROLLMENT_TOKEN=development \
-  ./scripts/run-agentdesktopd-root \
+./scripts/run-agentdesktopd-root \
   --config ./config.controller.yaml.example
 ```
 
-This uses the production defaults for state, the local socket, and Claude Code's `/etc/claude-code/managed-settings.d` directory. Additional daemon arguments are forwarded unchanged. The wrapper builds both `agentdesktopd` and its sibling `agentdesktop` credential helper as your user, then starts only the daemon with `sudo`. The runner preserves your development `PATH` so discovery can still see user-installed programs. Discovery reads install and package metadata; it never executes discovered programs.
+This uses the production defaults for state, the local socket, and Claude Code's `/etc/claude-code/managed-settings.d` directory. Additional daemon arguments are forwarded unchanged. The wrapper builds both `agentdesktopd` and its sibling `agentdesktop` credential helper as your user, then starts only the daemon with `sudo`. The runner preserves your development `PATH` so discovery can still see user-installed programs. The local socket is intentionally mode `0666`: every local process may inspect daemon state and request gateway credentials, and its requested `client_id` is not process-authenticated. Discovery reads install and package metadata; it never executes discovered programs.
 
 ## Tray client
 
