@@ -496,18 +496,14 @@ programs:
 
     #[test]
     fn checked_in_examples_use_their_declared_configuration_surface() {
-        parse_controller(include_str!("../../../controller.yaml.example"))
+        parse_controller(include_str!("../../../examples/scenario/controller.yaml"))
             .expect("controller example");
-        parse_daemon(include_str!("../../../config.yaml")).expect("base daemon example");
-        parse_daemon(include_str!("../../../config.controller.yaml.example"))
-            .expect("controller-connected daemon example");
-        parse_daemon(include_str!("../../../config.docker.yaml")).expect("Docker daemon example");
-        parse_desired(include_str!("../../../config.claude-code.yaml.example"))
+        parse_daemon(include_str!(
+            "../../../examples/scenario/agentdesktopd.yaml"
+        ))
+        .expect("controller-connected daemon example");
+        parse_desired(include_str!("../../../examples/scenario/claude-code.yaml"))
             .expect("Claude Code desired configuration example");
-        parse_desired(include_str!("../../../config.codex.yaml.example"))
-            .expect("Codex desired configuration example");
-        parse_desired(include_str!("../../../config.opencode.yaml.example"))
-            .expect("OpenCode desired configuration example");
     }
 
     #[test]

@@ -1,16 +1,14 @@
-# yaml-language-server: $schema=./schema/controller-config.json
-# Local controller development configuration.
+# yaml-language-server: $schema=../../schema/controller-config.json
 fleetListen: 0.0.0.0:8443
 allowInsecureDev: true
-
 databaseUrl: sqlite:///tmp/agentdesktop-controller.db?mode=rwc
 
 oidc:
-  issuer: http://dex.local
+  issuer: http://127.0.0.1:5556/dex
   clientId: local-public
 
 desiredConfig:
-  path: ./config.claude-code.yaml.example
+  path: ./claude-code.yaml
 
 gatewayJwt:
   privateKey: /tmp/agentdesktop-gateway-jwt.pem
