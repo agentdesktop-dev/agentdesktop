@@ -1,0 +1,24 @@
+issuer: http://127.0.0.1:5556/dex
+
+storage:
+  type: memory
+
+web:
+  http: 0.0.0.0:5556
+
+oauth2:
+  skipApprovalScreen: true
+
+staticClients:
+- id: local-public
+  name: AgentDesktop
+  public: true
+  redirectURIs:
+  - http://127.0.0.1:5555/callback
+
+enablePasswordDB: true
+staticPasswords:
+- email: admin@example.com
+  username: admin
+  userID: local-admin
+  hash: $2y$10$cA5xff5AaaAoxB8VZjwXUeXZIlH8V0sLf/JkIBXHip6gnQsyKJiHW

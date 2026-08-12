@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=./schema/desired-config.json
+# yaml-language-server: $schema=../../schema/desired-config.json
 inferenceGateway:
   url: http://localhost:4000
   authentication:
@@ -8,7 +8,3 @@ inferenceGateway:
 programs:
   claudeCode:
     companyAnnouncements: ["Managed by AgentDesktop"]
-    env:
-      COMPANY_ENVIRONMENT: production
-    permissions:
-      defaultMode: plan

@@ -23,7 +23,9 @@ The daemon and controller use structured `tracing` output. Set `RUST_LOG=debug` 
 Run it as your user while developing:
 
 ```console
-cargo run --bin agentdesktopd -- --config ./config.yaml --socket /tmp/agentdesktop.sock
+cargo run --bin agentdesktopd -- \
+  --config ./examples/scenario/agentdesktopd.yaml \
+  --socket /tmp/agentdesktop.sock
 ```
 
 In another terminal:
@@ -65,7 +67,8 @@ schema and then formats the Rust workspace.
 
 The optional `agentdesktop-controller` binary exposes the `FleetAgent` gRPC API. The daemon enrolls once, stores its generated identity outside the human-authored YAML, and then maintains an outbound stream for inventory, heartbeats, and desired configuration.
 
-For a local plaintext development run, use `config.controller.yaml.example` or add:
+For a local plaintext development run, use
+`examples/scenario/agentdesktopd.yaml` or add:
 
 ```yaml
 controller:
@@ -73,13 +76,14 @@ controller:
   heartbeatInterval: 5s
 ```
 
-Device enrollment is OIDC-only. The checked-in `controller.yaml.example` uses
-local Dex and explicitly enables insecure local development. Start it with:
+Device enrollment is OIDC-only. The local scenario includes Dex and explicitly
+enables insecure local development:
 
 ```console
+docker compose -f examples/scenario/compose.yaml up -d
 make ui
 cargo run --bin agentdesktop-controller -- \
-  --config ./controller.yaml.example
+  --config ./examples/scenario/controller.yaml
 ```
 
 The controller also serves its embedded management UI at
@@ -92,7 +96,7 @@ Then start the daemon with a writable development state directory:
 
 ```console
 cargo run --bin agentdesktopd -- \
-  --config ./config.controller.yaml.example \
+  --config ./examples/scenario/agentdesktopd.yaml \
   --socket /tmp/agentdesktop.sock \
   --state-dir /tmp/agentdesktop-state
 ```
@@ -103,18 +107,20 @@ The daemon writes `identity.json` and any accepted `remote-config.yaml` under it
 
 OIDC enrollment is available for interactive device setup. The agent uses an authorization-code flow with PKCE, receives the browser callback on loopback, and sends the code to the controller for exchange and ID-token validation. The resulting OIDC issuer and subject are recorded on the device; subsequent connections continue to use the device's own credential.
 
-With the local Dex `local-public` client, start the controller with:
+The bundled Dex login is `admin@example.com` / `password`. Start Dex and the
+controller with:
 
 ```console
+docker compose -f examples/scenario/compose.yaml up -d
 cargo run --bin agentdesktop-controller -- \
-  --config ./controller.yaml.example
+  --config ./examples/scenario/controller.yaml
 ```
 
 Use a fresh state directory:
 
 ```console
 cargo run --bin agentdesktopd -- \
-  --config ./config.controller.yaml.example \
+  --config ./examples/scenario/agentdesktopd.yaml \
   --socket /tmp/agentdesktop.sock \
   --state-dir /tmp/agentdesktop-oidc-state
 ```
@@ -202,7 +208,7 @@ oidc:
   clientId: agentdesktop
 
 desiredConfig:
-  path: ./config.claude-code.yaml.example
+  path: ./claude-code.yaml
   revision: 1
 
 gatewayJwt:
@@ -219,13 +225,13 @@ from the controller YAML directory. Start it with only the configuration path:
 cargo run --bin agentdesktop-controller -- --config ./controller.yaml
 ```
 
-Agentgateway must trust the corresponding RSA public key and require issuer `agentdesktop-controller` and audience `agentgateway`. When JWT issuance is enabled, the controller publishes its public key set at `http://127.0.0.1:8080/.well-known/jwks.json`; [agentgateway.yaml.example](agentgateway.yaml.example) is a minimal matching configuration. The gateway JWT subject is the verified OIDC subject, `act.sub` identifies the device, and `client_id` is asserted by the arbitrary local client requesting the credential. In production, keep the private key outside the database with restrictive permissions; only its public JWK is exposed.
+Agentgateway must trust the corresponding RSA public key and require issuer `agentdesktop-controller` and audience `agentgateway`. When JWT issuance is enabled, the controller publishes its public key set at `http://127.0.0.1:8080/.well-known/jwks.json`; [examples/scenario/agentgateway.yaml](examples/scenario/agentgateway.yaml) is a minimal matching configuration. The gateway JWT subject is the verified OIDC subject, `act.sub` identifies the device, and `client_id` is asserted by the arbitrary local client requesting the credential. In production, keep the private key outside the database with restrictive permissions; only its public JWK is exposed.
 
 On Linux, the daemon atomically reconciles AgentDesktop's dedicated drop-in at `/etc/claude-code/managed-settings.d/50-agentdesktop.json`. For an unprivileged development run, redirect that exact directory:
 
 ```console
 cargo run --bin agentdesktopd -- \
-  --config ./config.controller.yaml.example \
+  --config ./examples/scenario/agentdesktopd.yaml \
   --socket /tmp/agentdesktop.sock \
   --state-dir /tmp/agentdesktop-state \
   --claude-code-managed-settings-dir /tmp/claude-code-managed-settings.d
@@ -246,8 +252,7 @@ It writes only the JWT to stdout, which is the interface Claude Code expects.
 ### Codex managed configuration
 
 Codex can use the configured inference gateway and rotating controller JWTs.
-`config.codex.yaml.example` also shows arbitrary organization-managed Codex
-settings:
+Codex also accepts arbitrary organization-managed settings:
 
 ```yaml
 programs:
@@ -269,7 +274,7 @@ For an unprivileged development run, redirect the managed file:
 
 ```console
 cargo run --bin agentdesktopd -- \
-  --config ./config.codex.yaml.example \
+  --config ./examples/scenario/agentdesktopd.yaml \
   --socket /tmp/agentdesktop.sock \
   --state-dir /tmp/agentdesktop-state \
   --claude-code-managed-settings-dir /tmp/claude-code-managed-settings.d \
@@ -315,7 +320,7 @@ For an unprivileged development run, redirect both managed files:
 
 ```console
 cargo run --bin agentdesktopd -- \
-  --config ./config.opencode.yaml.example \
+  --config ./examples/scenario/agentdesktopd.yaml \
   --socket /tmp/agentdesktop.sock \
   --state-dir /tmp/agentdesktop-state \
   --claude-code-managed-settings-dir /tmp/claude-code-managed-settings.d \
@@ -331,7 +336,7 @@ To exercise the real privileged path during development, build as your user and 
 
 ```console
 ./scripts/run-agentdesktopd-root \
-  --config ./config.controller.yaml.example
+  --config ./examples/scenario/agentdesktopd.yaml
 ```
 
 This uses the production defaults for state, the local socket, and Claude Code's `/etc/claude-code/managed-settings.d` directory. Additional daemon arguments are forwarded unchanged. The wrapper builds both `agentdesktopd` and its sibling `agentdesktop` credential helper as your user, then starts only the daemon with `sudo`. The runner preserves your development `PATH` so discovery can still see user-installed programs. The local socket is intentionally mode `0666`: every local process may inspect daemon state and request gateway credentials, and its requested `client_id` is not process-authenticated. Discovery reads install and package metadata; it never executes discovered programs.
