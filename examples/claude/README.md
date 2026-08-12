@@ -20,8 +20,8 @@ docker compose -f examples/claude/compose.yaml up -d
 
 Run the local daemon. Note: typically this would be run on a different machine; for this example we run the controller and daemon together.
 ```console
-./scripts/run-agentdesktopd-root \
-  --config examples/claude/agentdesktopd.yaml
+./scripts/run-agentdesktop-root \
+  --config examples/claude/agentdesktop.yaml
 ```
 
 Sign in with `admin@example.com` / `password`. The controller UI is at

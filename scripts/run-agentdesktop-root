@@ -6,9 +6,9 @@ workspace_dir="$(cd -- "${script_dir}/.." && pwd)"
 
 cargo build \
   --manifest-path "${workspace_dir}/Cargo.toml" \
-  --bin agentdesktop \
-  --bin agentdesktopd
+  --bin agentdesktop
 
 exec "${script_dir}/cargo-sudo-runner" \
-  "${workspace_dir}/target/debug/agentdesktopd" \
+  "${workspace_dir}/target/debug/agentdesktop" \
+  daemon \
   "$@"

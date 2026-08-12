@@ -85,8 +85,8 @@ You need Rust, pnpm, Docker Compose, and OpenSSL.
 4. In another terminal, start the device daemon:
 
    ```console
-   ./scripts/run-agentdesktopd-root \
-     --config examples/claude/agentdesktopd.yaml
+   ./scripts/run-agentdesktop-root \
+     --config examples/claude/agentdesktop.yaml
    ```
 
 Open <http://127.0.0.1:8080> and enroll with:
