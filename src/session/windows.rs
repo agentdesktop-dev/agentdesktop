@@ -1,32 +1,18 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::net::SocketAddr;
-use std::os::windows::io::{
-    AsRawHandle, FromRawHandle, IntoRawHandle, OwnedHandle as StdOwnedHandle,
-};
+use std::os::windows::io::AsRawHandle;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Sender, channel};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use base64::Engine;
-use p256::ecdsa::signature::Signer as _;
-use p256::ecdsa::{Signature, SigningKey as P256SigningKey};
-use p256::pkcs8::DecodePrivateKey;
 use rustls::pki_types::CertificateDer;
-use rustls::sign::{Signer, SigningKey};
-use rustls::{Error as TlsError, SignatureAlgorithm, SignatureScheme as TlsSignatureScheme};
-use tokio::net::windows::named_pipe::{
-    ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
-};
+use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::RwLock;
-use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
-use windows_sys::Win32::Foundation::{
-    CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, LocalFree,
-};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
@@ -35,12 +21,14 @@ use windows_sys::Win32::Security::{
     SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread, OpenThreadToken};
+use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
 
 use crate::service::hbone::{ExternalClientIdentity, HboneClient, RotatingClientIdentity};
-use crate::session_protocol::{
-    AgentResponse, ForwarderRequest, Registration, SignatureScheme, read_frame, write_frame,
-};
+use crate::session_protocol::{Registration, RegistrationIdentity, read_frame};
+
+mod managed;
+
+pub use managed::run_user_agent;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct UserSid(Vec<u8>);
@@ -134,94 +122,6 @@ pub async fn accept(mut pipe: NamedPipeServer) -> Result<SessionConnection> {
     })
 }
 
-pub async fn run_user_agent(
-    path: &str,
-    identity: RotatingClientIdentity,
-    reconnect_delay: Duration,
-) -> Result<()> {
-    loop {
-        let result = run_user_agent_session(path, &identity).await;
-        if let Err(error) = result {
-            tracing::warn!(event = "session_agent_disconnected", reason = %error);
-        }
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => return Ok(()),
-            _ = tokio::time::sleep(reconnect_delay) => {}
-        }
-    }
-}
-
-async fn run_user_agent_session(path: &str, identity: &RotatingClientIdentity) -> Result<()> {
-    let mut pipe = ClientOptions::new()
-        .open(path)
-        .context("connect to machine forwarder session pipe")?;
-    let (generation, client_identity) = identity.pem_snapshot()?;
-    let certificates = rustls_pemfile::certs(&mut std::io::Cursor::new(
-        &client_identity.certificate_chain_pem,
-    ))
-    .map(|certificate| {
-        certificate
-            .map(|certificate| {
-                base64::engine::general_purpose::STANDARD.encode(certificate.as_ref())
-            })
-            .context("parse user certificate chain")
-    })
-    .collect::<Result<Vec<_>>>()?;
-    write_frame(
-        &mut pipe,
-        &Registration {
-            version: crate::session_protocol::VERSION,
-            certificate_generation: generation,
-            certificate_chain_der_base64: certificates,
-            local_gateway: None,
-        },
-    )
-    .await
-    .context("register user certificate")?;
-    let signing_key = P256SigningKey::from_pkcs8_pem(&client_identity.private_key_pem)
-        .context("parse user signing key")?;
-    serve_signing_requests(&mut pipe, identity, generation, &signing_key).await
-}
-
-async fn serve_signing_requests(
-    pipe: &mut NamedPipeClient,
-    identity: &RotatingClientIdentity,
-    generation: u64,
-    signing_key: &P256SigningKey,
-) -> Result<()> {
-    let mut current_generation = identity.subscribe_generation();
-    loop {
-        tokio::select! {
-            changed = current_generation.changed() => {
-                changed.context("managed identity generation closed")?;
-                if *current_generation.borrow() != generation {
-                    return Ok(());
-                }
-            }
-            request = read_frame::<ForwarderRequest, _>(&mut *pipe) => {
-                let request = request.context("read signing request")?;
-                let ForwarderRequest::Sign { request_id, scheme, message_base64 } = request;
-                let response = match scheme {
-                    SignatureScheme::EcdsaP256Sha256 => {
-                        let message = base64::engine::general_purpose::STANDARD
-                            .decode(message_base64)
-                            .context("decode signing input")?;
-                        let signature: Signature = signing_key.sign(&message);
-                        AgentResponse::Signature {
-                            request_id,
-                            signature_base64: base64::engine::general_purpose::STANDARD
-                                .encode(signature.to_der().as_bytes()),
-                        }
-                    }
-                };
-                write_frame(&mut *pipe, &response)
-                    .await
-                    .context("write signing response")?;
-            }
-        }
-    }
-}
-
 impl SessionRegistry {
     pub fn new(endpoint: SocketAddr, server_name: String, connect_timeout: Duration) -> Self {
         Self {
@@ -233,13 +133,13 @@ impl SessionRegistry {
     }
 
     pub async fn register(&self, connection: SessionConnection) -> Result<()> {
-        if connection.registration().local_gateway.is_some() {
-            anyhow::bail!("self-managed Windows session registration is not implemented");
-        }
         let sid = connection.sid().clone();
         let generation = connection.registration().certificate_generation;
-        let certificates = connection
-            .registration()
+        let RegistrationIdentity::Managed(registration) = &connection.registration().identity
+        else {
+            anyhow::bail!("self-managed Windows session registration is not implemented");
+        };
+        let certificates = registration
             .certificate_chain_der_base64
             .iter()
             .map(|certificate| {
@@ -354,150 +254,6 @@ impl SessionConnection {
     pub fn into_pipe(self) -> NamedPipeServer {
         self.pipe
     }
-
-    pub fn into_signing_key(self, timeout: Duration) -> Result<SigningKeyWorker> {
-        let (requests, receiver) = unbounded_channel();
-        let pipe = detach_pipe(self.pipe)?;
-        let worker = super::spawn_runtime_worker("agentdesktop-session-signer", move || {
-            let pipe = unsafe { NamedPipeServer::from_raw_handle(pipe.into_raw_handle()) }
-                .context("attach user session pipe to signing runtime")?;
-            Ok(run_signing_worker(pipe, receiver, timeout))
-        })?;
-        Ok((
-            Arc::new(SessionSigningKey {
-                requests,
-                next_request_id: AtomicU64::new(1),
-                timeout,
-            }),
-            worker,
-        ))
-    }
-}
-
-type SigningKeyWorker = (Arc<dyn SigningKey>, tokio::task::JoinHandle<Result<()>>);
-
-struct SigningWork {
-    request: ForwarderRequest,
-    response: Sender<Result<AgentResponse, String>>,
-}
-
-async fn run_signing_worker(
-    mut pipe: NamedPipeServer,
-    mut requests: tokio::sync::mpsc::UnboundedReceiver<SigningWork>,
-    timeout: Duration,
-) -> Result<()> {
-    loop {
-        let work = tokio::select! {
-            work = requests.recv() => match work {
-                Some(work) => work,
-                None => return Ok(()),
-            },
-            incoming = read_frame::<AgentResponse, _>(&mut pipe) => {
-                incoming.context("monitor user session pipe")?;
-                anyhow::bail!("user session sent an unsolicited signing response");
-            }
-        };
-        let response = tokio::time::timeout(timeout, async {
-            write_frame(&mut pipe, &work.request)
-                .await
-                .context("send signing request")?;
-            read_frame(&mut pipe).await.context("read signing response")
-        })
-        .await
-        .context("user session signing timed out")??;
-        let _ = work.response.send(Ok(response));
-    }
-}
-
-#[derive(Debug)]
-struct SessionSigningKey {
-    requests: UnboundedSender<SigningWork>,
-    next_request_id: AtomicU64,
-    timeout: Duration,
-}
-
-impl SigningKey for SessionSigningKey {
-    fn choose_scheme(&self, offered: &[TlsSignatureScheme]) -> Option<Box<dyn Signer>> {
-        offered
-            .contains(&TlsSignatureScheme::ECDSA_NISTP256_SHA256)
-            .then(|| {
-                Box::new(SessionSigner {
-                    requests: self.requests.clone(),
-                    request_id: self.next_request_id.fetch_add(1, Ordering::Relaxed),
-                    timeout: self.timeout,
-                }) as Box<dyn Signer>
-            })
-    }
-
-    fn algorithm(&self) -> SignatureAlgorithm {
-        SignatureAlgorithm::ECDSA
-    }
-}
-
-#[derive(Debug)]
-struct SessionSigner {
-    requests: UnboundedSender<SigningWork>,
-    request_id: u64,
-    timeout: Duration,
-}
-
-impl Signer for SessionSigner {
-    fn sign(&self, message: &[u8]) -> std::result::Result<Vec<u8>, TlsError> {
-        let (response, receiver) = channel();
-        self.requests
-            .send(SigningWork {
-                request: ForwarderRequest::Sign {
-                    request_id: self.request_id,
-                    scheme: SignatureScheme::EcdsaP256Sha256,
-                    message_base64: base64::engine::general_purpose::STANDARD.encode(message),
-                },
-                response,
-            })
-            .map_err(|_| TlsError::General("user session signer is unavailable".to_owned()))?;
-        let response = receiver
-            .recv_timeout(self.timeout)
-            .map_err(|error| TlsError::General(format!("wait for user session signer: {error}")))?
-            .map_err(TlsError::General)?;
-        match response {
-            AgentResponse::Signature {
-                request_id,
-                signature_base64,
-            } if request_id == self.request_id => base64::engine::general_purpose::STANDARD
-                .decode(signature_base64)
-                .map_err(|error| TlsError::General(format!("decode signing response: {error}"))),
-            AgentResponse::Error { request_id, reason } if request_id == self.request_id => Err(
-                TlsError::General(format!("user session refused signing: {reason}")),
-            ),
-            _ => Err(TlsError::General(
-                "user session returned a mismatched signing response".to_owned(),
-            )),
-        }
-    }
-
-    fn scheme(&self) -> TlsSignatureScheme {
-        TlsSignatureScheme::ECDSA_NISTP256_SHA256
-    }
-}
-
-fn detach_pipe(pipe: NamedPipeServer) -> Result<StdOwnedHandle> {
-    let process = unsafe { GetCurrentProcess() };
-    let mut duplicate: HANDLE = std::ptr::null_mut();
-    if unsafe {
-        DuplicateHandle(
-            process,
-            pipe.as_raw_handle() as HANDLE,
-            process,
-            &mut duplicate,
-            0,
-            0,
-            DUPLICATE_SAME_ACCESS,
-        )
-    } == 0
-    {
-        return Err(std::io::Error::last_os_error()).context("duplicate user session pipe");
-    }
-    drop(pipe);
-    Ok(unsafe { StdOwnedHandle::from_raw_handle(duplicate as _) })
 }
 
 fn user_sid_from_pipe(pipe: HANDLE) -> Result<UserSid> {
@@ -576,10 +332,15 @@ impl Drop for LocalAllocation {
 
 #[cfg(test)]
 mod tests {
+    use super::managed::run_user_agent_session;
     use super::*;
     use crate::identity::enrollment::ClientIdentity;
+    use crate::session_protocol::{AgentResponse, ForwarderRequest, SignatureScheme, write_frame};
     use p256::ecdsa::signature::Verifier as _;
+    use p256::ecdsa::{Signature, SigningKey as P256SigningKey};
+    use p256::pkcs8::DecodePrivateKey;
     use rcgen::{CertifiedKey, generate_simple_self_signed};
+    use rustls::SignatureScheme as TlsSignatureScheme;
     use tokio::net::windows::named_pipe::ClientOptions;
 
     fn pipe_name(label: &str) -> String {
@@ -589,14 +350,10 @@ mod tests {
     fn registration() -> Registration {
         let CertifiedKey { cert, .. } =
             generate_simple_self_signed(["agentdesktop.test".to_owned()]).unwrap();
-        Registration {
-            version: crate::session_protocol::VERSION,
-            certificate_generation: 1,
-            certificate_chain_der_base64: vec![
-                base64::engine::general_purpose::STANDARD.encode(cert.der()),
-            ],
-            local_gateway: None,
-        }
+        Registration::managed(
+            1,
+            vec![base64::engine::general_purpose::STANDARD.encode(cert.der())],
+        )
     }
 
     #[tokio::test]

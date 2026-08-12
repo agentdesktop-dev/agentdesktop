@@ -267,8 +267,9 @@ src/
   launch.rs                  Linux application scopes and launch gate
   service.rs                 Connector lifecycle orchestration
   service/                   HBONE, forwarding, capture, renewal, status
-  session/                   Authenticated Linux and Windows user sessions
-  session_protocol.rs        Bounded registration and external-signing frames
+  session/                   Platform sessions split by managed/self-managed mode
+  session_protocol.rs        Bounded registration envelope and framing
+  session_protocol/          Managed signing and self-managed Gateway messages
   identity/                  OAuth, enrollment, keys, credential storage
   apps/                      Application adapters, currently Claude Code
   platform/                  OS-native source attribution, capture, and trust
@@ -290,6 +291,10 @@ examples/managed-walkthrough/ Managed development fixture
 scripts/                     Builds, smoke tests, and walkthrough drivers
 tests/                       Rust integration tests and Fedora VM harness
 ```
+
+Use file-rooted Rust modules rather than `mod.rs`. For example, declare
+`session::linux` in `session/linux.rs` and place its children under
+`session/linux/`; do not create `session/linux/mod.rs`.
 
 ## Development setup
 
