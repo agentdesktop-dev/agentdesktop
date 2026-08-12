@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::net::SocketAddr;
-use std::os::windows::io::AsRawHandle;
+use std::os::windows::io::{
+    AsRawHandle, FromRawHandle, IntoRawHandle, OwnedHandle as StdOwnedHandle,
+};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
@@ -22,7 +24,9 @@ use tokio::sync::RwLock;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, LocalFree,
+};
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
@@ -31,7 +35,7 @@ use windows_sys::Win32::Security::{
     SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
-use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread, OpenThreadToken};
 
 use crate::service::hbone::{ExternalClientIdentity, HboneClient, RotatingClientIdentity};
 use crate::session_protocol::{
@@ -245,7 +249,7 @@ impl SessionRegistry {
                     .context("decode registered certificate")
             })
             .collect::<Result<Vec<_>>>()?;
-        let (signing_key, worker) = connection.into_signing_key(self.connect_timeout);
+        let (signing_key, worker) = connection.into_signing_key(self.connect_timeout)?;
         let identity = RotatingClientIdentity::new_external(
             ExternalClientIdentity {
                 certificates,
@@ -351,22 +355,26 @@ impl SessionConnection {
         self.pipe
     }
 
-    pub fn into_signing_key(
-        self,
-        timeout: Duration,
-    ) -> (Arc<dyn SigningKey>, tokio::task::JoinHandle<Result<()>>) {
+    pub fn into_signing_key(self, timeout: Duration) -> Result<SigningKeyWorker> {
         let (requests, receiver) = unbounded_channel();
-        let worker = tokio::spawn(run_signing_worker(self.pipe, receiver, timeout));
-        (
+        let pipe = detach_pipe(self.pipe)?;
+        let worker = super::spawn_runtime_worker("agentdesktop-session-signer", move || {
+            let pipe = unsafe { NamedPipeServer::from_raw_handle(pipe.into_raw_handle()) }
+                .context("attach user session pipe to signing runtime")?;
+            Ok(run_signing_worker(pipe, receiver, timeout))
+        })?;
+        Ok((
             Arc::new(SessionSigningKey {
                 requests,
                 next_request_id: AtomicU64::new(1),
                 timeout,
             }),
             worker,
-        )
+        ))
     }
 }
+
+type SigningKeyWorker = (Arc<dyn SigningKey>, tokio::task::JoinHandle<Result<()>>);
 
 struct SigningWork {
     request: ForwarderRequest,
@@ -469,6 +477,27 @@ impl Signer for SessionSigner {
     fn scheme(&self) -> TlsSignatureScheme {
         TlsSignatureScheme::ECDSA_NISTP256_SHA256
     }
+}
+
+fn detach_pipe(pipe: NamedPipeServer) -> Result<StdOwnedHandle> {
+    let process = unsafe { GetCurrentProcess() };
+    let mut duplicate: HANDLE = std::ptr::null_mut();
+    if unsafe {
+        DuplicateHandle(
+            process,
+            pipe.as_raw_handle() as HANDLE,
+            process,
+            &mut duplicate,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error()).context("duplicate user session pipe");
+    }
+    drop(pipe);
+    Ok(unsafe { StdOwnedHandle::from_raw_handle(duplicate as _) })
 }
 
 fn user_sid_from_pipe(pipe: HANDLE) -> Result<UserSid> {
@@ -583,7 +612,7 @@ mod tests {
         assert!(!connection.sid().0.is_empty());
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn signing_key_uses_named_pipe_channel() {
         let name = pipe_name("signer");
         let server = create_server(&name).unwrap();
@@ -591,7 +620,7 @@ mod tests {
         let mut client = ClientOptions::new().open(&name).unwrap();
         write_frame(&mut client, &registration()).await.unwrap();
         let connection = accepted.await.unwrap().unwrap();
-        let (key, worker) = connection.into_signing_key(Duration::from_secs(1));
+        let (key, worker) = connection.into_signing_key(Duration::from_secs(1)).unwrap();
         let client_task = tokio::spawn(async move {
             let request: ForwarderRequest = read_frame(&mut client).await.unwrap();
             let ForwarderRequest::Sign {
@@ -616,14 +645,11 @@ mod tests {
             .await
             .unwrap();
         });
-        let signature = tokio::task::spawn_blocking(move || {
-            key.choose_scheme(&[TlsSignatureScheme::ECDSA_NISTP256_SHA256])
-                .unwrap()
-                .sign(b"certificate verify")
-                .unwrap()
-        })
-        .await
-        .unwrap();
+        let signature = key
+            .choose_scheme(&[TlsSignatureScheme::ECDSA_NISTP256_SHA256])
+            .unwrap()
+            .sign(b"certificate verify")
+            .unwrap();
 
         assert_eq!(signature, b"DER signature");
         client_task.await.unwrap();

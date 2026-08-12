@@ -35,6 +35,12 @@ use crate::session_protocol::{
     AgentResponse, ForwarderRequest, Registration, SignatureScheme, read_frame, write_frame,
 };
 
+/// An authenticated user-agent registration and its still-open IPC lease.
+///
+/// Registration consumes this value into exactly one socket owner. In
+/// remote-managed mode the socket carries private-key signing requests. In
+/// self-managed local mode it is only a lease proving that the user agent still
+/// owns the registered local Agent Gateway.
 pub struct SessionConnection {
     uid: u32,
     registration: Registration,
@@ -99,7 +105,7 @@ impl SessionRegistry {
                         .context("decode registered certificate")
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let (signing_key, monitor) = connection.into_signing_key(self.connect_timeout);
+            let (signing_key, monitor) = connection.into_signing_key(self.connect_timeout)?;
             let identity = RotatingClientIdentity::new_external(
                 ExternalClientIdentity {
                     certificates,
@@ -364,25 +370,40 @@ impl SessionConnection {
         &self.registration
     }
 
-    pub fn into_signing_key(
-        self,
-        timeout: Duration,
-    ) -> (Arc<dyn SigningKey>, tokio::task::JoinHandle<Result<()>>) {
+    pub fn into_signing_key(self, timeout: Duration) -> Result<SigningKeyWorker> {
+        // Remote-managed mode keeps the private key in the user agent. This
+        // async worker owns signing I/O and session liveness; its exit removes
+        // this certificate generation from the machine forwarder.
         let (requests, receiver) = unbounded_channel();
-        let worker = tokio::spawn(run_signing_worker(self.stream, receiver, timeout));
-        (
+        let stream = self
+            .stream
+            .into_std()
+            .context("detach user session socket from service runtime")?;
+        let worker = super::spawn_runtime_worker("agentdesktop-session-signer", move || {
+            let stream = UnixStream::from_std(stream)
+                .context("attach user session socket to signing runtime")?;
+            Ok(run_signing_worker(stream, receiver, timeout))
+        })?;
+        Ok((
             Arc::new(SessionSigningKey {
                 requests,
                 next_request_id: AtomicU64::new(1),
             }),
             worker,
-        )
+        ))
     }
 
     fn into_monitor(self) -> tokio::task::JoinHandle<Result<()>> {
+        // Self-managed local mode needs no post-registration messages because
+        // Agent Gateway runs in the user's session. The open socket is instead
+        // a lease: EOF revokes that Gateway client so a crashed or logged-out
+        // user agent cannot leave stale routing and its capability active in
+        // the machine forwarder.
         tokio::spawn(monitor_disconnect(self.stream))
     }
 }
+
+type SigningKeyWorker = (Arc<dyn SigningKey>, tokio::task::JoinHandle<Result<()>>);
 
 struct SigningWork {
     request: ForwarderRequest,
@@ -717,7 +738,7 @@ mod tests {
         assert_eq!(connection.registration().certificate_generation, 4);
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn signing_key_keeps_operation_on_user_session_channel() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("sessions.sock");
@@ -762,17 +783,13 @@ mod tests {
             .unwrap();
         });
         let connection = accept(&listener).await.unwrap();
-        let (signing_key, _monitor) = connection.into_signing_key(Duration::from_secs(1));
+        let (signing_key, _monitor) = connection.into_signing_key(Duration::from_secs(1)).unwrap();
 
-        let signature = tokio::task::spawn_blocking(move || {
-            signing_key
-                .choose_scheme(&[TlsSignatureScheme::ECDSA_NISTP256_SHA256])
-                .unwrap()
-                .sign(b"certificate verify")
-                .unwrap()
-        })
-        .await
-        .unwrap();
+        let signature = signing_key
+            .choose_scheme(&[TlsSignatureScheme::ECDSA_NISTP256_SHA256])
+            .unwrap()
+            .sign(b"certificate verify")
+            .unwrap();
 
         agent.await.unwrap();
         assert_eq!(signature, b"DER signature");
@@ -803,7 +820,9 @@ mod tests {
             std::future::pending::<()>().await;
         });
         let connection = accept(&listener).await.unwrap();
-        let (signing_key, worker) = connection.into_signing_key(Duration::from_millis(50));
+        let (signing_key, worker) = connection
+            .into_signing_key(Duration::from_millis(50))
+            .unwrap();
 
         let error = tokio::task::spawn_blocking(move || {
             signing_key
