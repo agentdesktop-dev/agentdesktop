@@ -2,6 +2,9 @@ use std::future::Future;
 
 use anyhow::{Context, Result};
 
+mod managed;
+mod registry;
+
 #[cfg(target_os = "linux")]
 pub mod linux;
 
@@ -39,4 +42,24 @@ where
             .await
             .context("signing worker thread stopped without a result")?
     }))
+}
+
+async fn run_reconnecting<Session, SessionFuture>(
+    reconnect_delay: std::time::Duration,
+    disconnect_event: &'static str,
+    mut session: Session,
+) -> Result<()>
+where
+    Session: FnMut() -> SessionFuture,
+    SessionFuture: Future<Output = Result<()>>,
+{
+    loop {
+        if let Err(error) = session().await {
+            tracing::warn!(event = disconnect_event, reason = %error);
+        }
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => return Ok(()),
+            _ = tokio::time::sleep(reconnect_delay) => {}
+        }
+    }
 }

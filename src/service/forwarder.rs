@@ -42,42 +42,24 @@ pub async fn serve_native_sessions(
     shutdown_timeout: Duration,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
-    if max_tunnels == 0 {
-        bail!("max tunnels must be greater than zero");
-    }
-    let permits = Arc::new(Semaphore::new(max_tunnels));
-    let mut tunnels = JoinSet::new();
-    tokio::pin!(shutdown);
-    loop {
-        tokio::select! {
-            _ = &mut shutdown => break,
-            Some(result) = tunnels.join_next(), if !tunnels.is_empty() => {
-                if let Err(error) = result {
-                    tracing::warn!(event = "tunnel_task_failed", reason = %error);
-                }
+    serve_resolved(
+        listener,
+        max_tunnels,
+        shutdown_timeout,
+        shutdown,
+        move |stream| {
+            let sessions = sessions.clone();
+            let destination = destination.clone();
+            async move {
+                let resolved = sessions
+                    .client_for_native(&stream)
+                    .await
+                    .map(|client| (client, destination));
+                (stream, resolved)
             }
-            accepted = listener.accept() => {
-                let (stream, _) = accepted?;
-                let Ok(permit) = permits.clone().try_acquire_owned() else {
-                    tracing::warn!(event = "tunnel_rejected", reason = "overloaded");
-                    continue;
-                };
-                let sessions = sessions.clone();
-                let destination = destination.clone();
-                tunnels.spawn(async move {
-                    let result = match sessions.client_for_native(&stream).await {
-                        Ok(hbone) => forward(stream, &hbone, Ok(destination)).await,
-                        Err(error) => reject(stream, error).await,
-                    };
-                    drop(permit);
-                    if let Err(error) = result {
-                        tracing::warn!(event = "tunnel_failed", reason = %error);
-                    }
-                });
-            }
-        }
-    }
-    drain_tunnels(&mut tunnels, shutdown_timeout).await
+        },
+    )
+    .await
 }
 
 #[cfg(all(target_os = "windows", target_env = "msvc"))]
@@ -90,53 +72,29 @@ pub async fn serve_native_sessions(
     shutdown_timeout: Duration,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
-    if max_tunnels == 0 {
-        bail!("max tunnels must be greater than zero");
-    }
-    let permits = Arc::new(Semaphore::new(max_tunnels));
-    let mut tunnels = JoinSet::new();
-    tokio::pin!(shutdown);
-    loop {
-        tokio::select! {
-            _ = &mut shutdown => break,
-            Some(result) = tunnels.join_next(), if !tunnels.is_empty() => {
-                if let Err(error) = result {
-                    tracing::warn!(event = "tunnel_task_failed", reason = %error);
+    serve_resolved(
+        listener,
+        max_tunnels,
+        shutdown_timeout,
+        shutdown,
+        move |stream| {
+            let sessions = sessions.clone();
+            let destination = destination.clone();
+            async move {
+                let resolved = async {
+                    let context = crate::platform::windows::redirect_context(&stream)?;
+                    if context.original_destination != public_destination {
+                        bail!("WFP native flow has an unexpected original destination");
+                    }
+                    let client = sessions.client_for_sid(&context.user_sid).await?;
+                    Ok((client, destination))
                 }
+                .await;
+                (stream, resolved)
             }
-            accepted = listener.accept() => {
-                let (stream, _) = accepted?;
-                let Ok(permit) = permits.clone().try_acquire_owned() else {
-                    tracing::warn!(event = "tunnel_rejected", reason = "overloaded");
-                    continue;
-                };
-                let sessions = sessions.clone();
-                let destination = destination.clone();
-                tunnels.spawn(async move {
-                    let client = async {
-                        let context = crate::platform::windows::redirect_context(&stream)?;
-                        if context.flow_kind != crate::platform::windows::FlowKind::Native {
-                            bail!("captured WFP flow reached the native listener");
-                        }
-                        if context.original_destination != public_destination {
-                            bail!("WFP native flow has an unexpected original destination");
-                        }
-                        sessions.client_for_sid(&context.user_sid).await
-                    }
-                    .await;
-                    let result = match client {
-                        Ok(hbone) => forward(stream, &hbone, Ok(destination)).await,
-                        Err(error) => reject(stream, error).await,
-                    };
-                    drop(permit);
-                    if let Err(error) = result {
-                        tracing::warn!(event = "tunnel_failed", reason = %error);
-                    }
-                });
-            }
-        }
-    }
-    drain_tunnels(&mut tunnels, shutdown_timeout).await
+        },
+    )
+    .await
 }
 
 #[cfg(all(target_os = "windows", target_env = "msvc"))]
@@ -211,54 +169,28 @@ pub async fn serve_capture_sessions(
     shutdown_timeout: Duration,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
-    if max_tunnels == 0 {
-        bail!("max tunnels must be greater than zero");
-    }
-    let permits = Arc::new(Semaphore::new(max_tunnels));
-    let mut tunnels = JoinSet::new();
-    tokio::pin!(shutdown);
-    loop {
-        tokio::select! {
-            _ = &mut shutdown => break,
-            Some(result) = tunnels.join_next(), if !tunnels.is_empty() => {
-                if let Err(error) = result {
-                    tracing::warn!(event = "tunnel_task_failed", reason = %error);
+    serve_resolved(
+        listener,
+        max_tunnels,
+        shutdown_timeout,
+        shutdown,
+        move |stream| {
+            let sessions = sessions.clone();
+            async move {
+                let resolved = async {
+                    let original_destination = super::capture::original_socket_address(&stream)?;
+                    let client = sessions
+                        .client_for_capture(&stream, original_destination)
+                        .await?;
+                    let destination = original_destination.to_string().parse()?;
+                    Ok((client, destination))
                 }
+                .await;
+                (stream, resolved)
             }
-            accepted = listener.accept() => {
-                let (stream, _) = accepted?;
-                let Ok(permit) = permits.clone().try_acquire_owned() else {
-                    tracing::warn!(event = "tunnel_rejected", reason = "overloaded");
-                    continue;
-                };
-                let sessions = sessions.clone();
-                tunnels.spawn(async move {
-                    let result = match super::capture::original_socket_address(&stream) {
-                        Ok(original_destination) => {
-                            match sessions.client_for_capture(&stream, original_destination).await {
-                                Ok(hbone) => forward(
-                                    stream,
-                                    &hbone,
-                                    original_destination
-                                        .to_string()
-                                        .parse()
-                                        .map_err(anyhow::Error::from),
-                                )
-                                .await,
-                                Err(error) => reject(stream, error).await,
-                            }
-                        }
-                        Err(error) => reject(stream, error).await,
-                    };
-                    drop(permit);
-                    if let Err(error) = result {
-                        tracing::warn!(event = "tunnel_failed", reason = %error);
-                    }
-                });
-            }
-        }
-    }
-    drain_tunnels(&mut tunnels, shutdown_timeout).await
+        },
+    )
+    .await
 }
 
 async fn serve<F>(
@@ -273,11 +205,42 @@ async fn serve<F>(
 where
     F: Fn(&TcpStream, &Authority) -> Result<Authority> + Send + Sync + 'static,
 {
+    let destination_for = Arc::new(destination_for);
+    serve_resolved(
+        listener,
+        max_tunnels,
+        shutdown_timeout,
+        shutdown,
+        move |stream| {
+            let hbone = hbone.clone();
+            let destination_for = destination_for.clone();
+            let fixed_destination = fixed_destination.clone();
+            async move {
+                let resolved = destination_for(&stream, &fixed_destination)
+                    .map(|destination| (hbone, destination));
+                (stream, resolved)
+            }
+        },
+    )
+    .await
+}
+
+async fn serve_resolved<Resolve, Resolved>(
+    listener: TcpListener,
+    max_tunnels: usize,
+    shutdown_timeout: Duration,
+    shutdown: impl Future<Output = ()>,
+    resolve: Resolve,
+) -> Result<()>
+where
+    Resolve: Fn(TcpStream) -> Resolved + Send + Sync + 'static,
+    Resolved: Future<Output = (TcpStream, Result<(HboneClient, Authority)>)> + Send + 'static,
+{
     if max_tunnels == 0 {
         bail!("max tunnels must be greater than zero");
     }
     let permits = Arc::new(Semaphore::new(max_tunnels));
-    let destination_for = Arc::new(destination_for);
+    let resolve = Arc::new(resolve);
     let mut tunnels = JoinSet::new();
     tokio::pin!(shutdown);
     loop {
@@ -294,12 +257,13 @@ where
                     tracing::warn!(event = "tunnel_rejected", reason = "overloaded");
                     continue;
                 };
-                let hbone = hbone.clone();
-                let destination_for = destination_for.clone();
-                let fixed_destination = fixed_destination.clone();
+                let resolve = resolve.clone();
                 tunnels.spawn(async move {
-                    let destination = destination_for(&stream, &fixed_destination);
-                    let result = forward(stream, &hbone, destination).await;
+                    let (stream, resolved) = resolve(stream).await;
+                    let result = match resolved {
+                        Ok((hbone, destination)) => forward(stream, &hbone, Ok(destination)).await,
+                        Err(error) => reject(stream, error).await,
+                    };
                     drop(permit);
                     if let Err(error) = result {
                         tracing::warn!(event = "tunnel_failed", reason = %error);

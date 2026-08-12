@@ -73,13 +73,13 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             crate::config::DeploymentMode::Standalone => {
                 #[cfg(target_os = "linux")]
                 {
-                    let token = local_gateway
+                    let capability = local_gateway
                         .as_ref()
                         .context("standalone tunneling requires an owned local Agent Gateway")?
-                        .capture_token();
-                    capture::local_hbone(
+                        .capability();
+                    crate::local_gateway::connect(
                         gateway_endpoint,
-                        token,
+                        capability,
                         Duration::from_millis(config.connect_timeout_ms),
                     )
                     .await?
@@ -95,6 +95,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     let session_state = if let Some(path) = &config.session_socket {
         let registry = crate::session::linux::SessionRegistry::new(
+            config.mode,
             gateway_endpoint,
             config
                 .upstream
@@ -284,7 +285,11 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             status = gateway.wait() => {
                 bail!("local Agent Gateway exited unexpectedly with {}", status?);
             }
-            result = wait_capture(capture_task) => {
+            result = wait_optional_service(capture_task) => {
+                gateway.stop().await?;
+                result
+            }
+            result = wait_optional_service(session_task) => {
                 gateway.stop().await?;
                 result
             }
@@ -293,7 +298,8 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         tokio::select! {
             result = join_service(native_task) => result,
             result = join_service(status_task) => result,
-            result = wait_capture(session_task) => result,
+            result = wait_optional_service(capture_task) => result,
+            result = wait_optional_service(session_task) => result,
         }
     };
     if let Some(task) = renewal_task {
@@ -334,7 +340,7 @@ pub async fn run_session_agent(config: Config) -> anyhow::Result<()> {
                 .wait_until_reachable(&config.upstream, LOCAL_GATEWAY_STARTUP_TIMEOUT)
                 .await?;
             let endpoint = gateway_endpoint(&config).await?;
-            let token = gateway.capture_token().environment_value().to_owned();
+            let token = gateway.capability().environment_value().to_owned();
             tokio::select! {
                 result = crate::session::linux::run_local_user_agent(
                     socket,
@@ -386,7 +392,7 @@ async fn join_service(task: tokio::task::JoinHandle<anyhow::Result<()>>) -> anyh
     task.await.context("service task failed")?
 }
 
-async fn wait_capture(
+async fn wait_optional_service(
     task: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
 ) -> anyhow::Result<()> {
     match task {

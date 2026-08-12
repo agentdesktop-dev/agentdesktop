@@ -15,13 +15,13 @@ use windows_sys::Win32::System::IO::DeviceIoControl;
 use crate::session::windows::UserSid;
 
 const MAGIC: &[u8; 4] = b"AGWF";
-const VERSION: u16 = 1;
+const CONFIGURATION_VERSION: u32 = 1;
+const REDIRECT_CONTEXT_VERSION: u16 = 1;
 const HEADER_LEN: usize = 16;
 const MAX_CONTEXT_LEN: usize = 256;
 const SOCKADDR_IN_LEN: usize = 16;
 const SOCKADDR_IN6_LEN: usize = 28;
 const FLOW_NATIVE: u16 = 1;
-const FLOW_CAPTURED: u16 = 2;
 const AGWFP_IOCTL_SET_CONFIGURATION: u32 = (0x12 << 16) | (2 << 14) | ((0x800 + 1) << 2);
 
 #[repr(C)]
@@ -44,14 +44,7 @@ struct WfpConfiguration {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum FlowKind {
-    Native,
-    Captured,
-}
-
-#[derive(Debug, Eq, PartialEq)]
 pub struct RedirectContext {
-    pub flow_kind: FlowKind,
     pub original_destination: SocketAddr,
     pub user_sid: UserSid,
 }
@@ -61,7 +54,7 @@ pub fn configure_native_redirect(
     proxy_destination: SocketAddr,
 ) -> Result<()> {
     let config = WfpConfiguration {
-        version: VERSION.into(),
+        version: CONFIGURATION_VERSION,
         size: size_of::<WfpConfiguration>() as u32,
         live_service_pid: std::process::id(),
         flags: 0,
@@ -169,14 +162,13 @@ fn parse_redirect_context(bytes: &[u8]) -> Result<RedirectContext> {
         bail!("WFP redirect context has an invalid header");
     }
     let version = u16::from_le_bytes([bytes[4], bytes[5]]);
-    if version != VERSION {
+    if version != REDIRECT_CONTEXT_VERSION {
         bail!("unsupported WFP redirect context version {version}");
     }
-    let flow_kind = match u16::from_le_bytes([bytes[6], bytes[7]]) {
-        FLOW_NATIVE => FlowKind::Native,
-        FLOW_CAPTURED => FlowKind::Captured,
-        value => bail!("WFP redirect context has invalid flow kind {value}"),
-    };
+    let flow_kind = u16::from_le_bytes([bytes[6], bytes[7]]);
+    if flow_kind != FLOW_NATIVE {
+        bail!("WFP redirect context has invalid flow kind {flow_kind}");
+    }
     if bytes[12..16] != [0; 4] {
         bail!("WFP redirect context reserved field is not zero");
     }
@@ -192,7 +184,6 @@ fn parse_redirect_context(bytes: &[u8]) -> Result<RedirectContext> {
     let sockaddr = &bytes[HEADER_LEN..HEADER_LEN + sockaddr_len];
     let user_sid = UserSid::from_bytes(bytes[HEADER_LEN + sockaddr_len..].to_vec())?;
     Ok(RedirectContext {
-        flow_kind,
         original_destination: parse_sockaddr(sockaddr)?,
         user_sid,
     })
@@ -226,8 +217,8 @@ mod tests {
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
     use super::{
-        AGWFP_IOCTL_SET_CONFIGURATION, HEADER_LEN, MAGIC, VERSION, WfpConfiguration, WfpEndpoint,
-        parse_redirect_context,
+        AGWFP_IOCTL_SET_CONFIGURATION, HEADER_LEN, MAGIC, REDIRECT_CONTEXT_VERSION,
+        WfpConfiguration, WfpEndpoint, parse_redirect_context,
     };
 
     #[test]
@@ -262,7 +253,7 @@ mod tests {
         sockaddr[4..8].copy_from_slice(&[127, 0, 0, 1]);
         let mut context = Vec::with_capacity(HEADER_LEN + sockaddr.len() + sid.len());
         context.extend_from_slice(MAGIC);
-        context.extend_from_slice(&VERSION.to_le_bytes());
+        context.extend_from_slice(&REDIRECT_CONTEXT_VERSION.to_le_bytes());
         context.extend_from_slice(&super::FLOW_NATIVE.to_le_bytes());
         context.extend_from_slice(&(sockaddr.len() as u16).to_le_bytes());
         context.extend_from_slice(&(sid.len() as u16).to_le_bytes());
@@ -272,14 +263,13 @@ mod tests {
 
         let parsed = parse_redirect_context(&context).unwrap();
 
-        assert_eq!(parsed.flow_kind, super::FlowKind::Native);
         assert_eq!(parsed.original_destination.to_string(), "127.0.0.1:15001");
     }
 
     #[test]
     fn rejects_trailing_or_truncated_context_data() {
         let mut context = Vec::from(*MAGIC);
-        context.extend_from_slice(&VERSION.to_le_bytes());
+        context.extend_from_slice(&REDIRECT_CONTEXT_VERSION.to_le_bytes());
         context.extend_from_slice(&super::FLOW_NATIVE.to_le_bytes());
         context.extend_from_slice(&16_u16.to_le_bytes());
         context.extend_from_slice(&12_u16.to_le_bytes());

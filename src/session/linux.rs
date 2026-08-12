@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs;
 use std::net::SocketAddr;
 use std::os::fd::AsFd;
@@ -16,10 +15,12 @@ use netlink_packet_sock_diag::{
 };
 use netlink_sys::{Socket, SocketAddr as NetlinkSocketAddr, protocols::NETLINK_SOCK_DIAG};
 use tokio::net::{TcpStream, UnixListener, UnixStream};
-use tokio::sync::{RwLock, watch};
+use tokio::sync::watch;
 use tokio::task::JoinSet;
 
+use crate::config::DeploymentMode;
 use crate::service::hbone::{HboneClient, TlsRoots};
+use crate::session::registry::{ClientRegistry, RegistrationVersion};
 use crate::session_protocol::{Registration, RegistrationIdentity, read_frame};
 
 mod managed;
@@ -42,32 +43,29 @@ pub struct SessionConnection {
 
 #[derive(Clone)]
 pub struct SessionRegistry {
+    mode: DeploymentMode,
     endpoint: SocketAddr,
     server_name: String,
     connect_timeout: Duration,
     roots: TlsRoots,
-    clients: Arc<RwLock<HashMap<u32, RegisteredClient>>>,
-}
-
-#[derive(Clone)]
-struct RegisteredClient {
-    certificate_generation: u64,
-    client: HboneClient,
+    clients: ClientRegistry<u32>,
 }
 
 impl SessionRegistry {
     pub fn new(
+        mode: DeploymentMode,
         endpoint: SocketAddr,
         server_name: String,
         connect_timeout: Duration,
         roots: TlsRoots,
     ) -> Self {
         Self {
+            mode,
             endpoint,
             server_name,
             connect_timeout,
             roots,
-            clients: Arc::new(RwLock::new(HashMap::new())),
+            clients: ClientRegistry::default(),
         }
     }
 
@@ -75,42 +73,31 @@ impl SessionRegistry {
         let uid = connection.uid();
         let generation = connection.registration().certificate_generation;
         let identity = connection.registration().identity.clone();
-        let (client, monitor) = match identity {
-            RegistrationIdentity::SelfManaged(registration) => {
-                self_managed::register(self, connection, registration).await?
+        let (client, monitor, version) = match (self.mode, identity) {
+            (DeploymentMode::Standalone, RegistrationIdentity::SelfManaged(registration)) => {
+                let (client, monitor) =
+                    self_managed::register(self, connection, registration).await?;
+                (client, monitor, RegistrationVersion::SelfManaged)
             }
-            RegistrationIdentity::Managed(registration) => {
-                managed::register(self, connection, generation, registration).await?
+            (DeploymentMode::Managed, RegistrationIdentity::Managed(registration)) => {
+                let (client, monitor) =
+                    managed::register(self, connection, generation, registration).await?;
+                (client, monitor, RegistrationVersion::Managed(generation))
+            }
+            (DeploymentMode::Standalone, RegistrationIdentity::Managed(_)) => {
+                anyhow::bail!("managed identity cannot register with a standalone forwarder")
+            }
+            (DeploymentMode::Managed, RegistrationIdentity::SelfManaged(_)) => {
+                anyhow::bail!("self-managed identity cannot register with a managed forwarder")
             }
         };
-        let mut clients = self.clients.write().await;
-        if clients
-            .get(&uid)
-            .is_some_and(|current| current.certificate_generation >= generation)
-        {
-            anyhow::bail!("session certificate generation is not newer for uid {uid}");
-        }
-        clients.insert(
-            uid,
-            RegisteredClient {
-                certificate_generation: generation,
-                client,
-            },
-        );
-        let registry = self.clone();
-        tokio::spawn(async move {
-            let _ = monitor.await;
-            registry.remove_generation(uid, generation).await;
-        });
-        Ok(())
+        self.clients.install(uid, version, client, monitor).await
     }
 
     pub async fn client_for_uid(&self, uid: u32) -> Result<HboneClient> {
         self.clients
-            .read()
+            .client(&uid)
             .await
-            .get(&uid)
-            .map(|registered| registered.client.clone())
             .with_context(|| format!("no registered user session for uid {uid}"))
     }
 
@@ -128,17 +115,7 @@ impl SessionRegistry {
     }
 
     pub async fn remove(&self, uid: u32) {
-        self.clients.write().await.remove(&uid);
-    }
-
-    async fn remove_generation(&self, uid: u32, generation: u64) {
-        let mut clients = self.clients.write().await;
-        if clients
-            .get(&uid)
-            .is_some_and(|registered| registered.certificate_generation == generation)
-        {
-            clients.remove(&uid);
-        }
+        self.clients.remove(&uid).await;
     }
 }
 
@@ -346,10 +323,10 @@ fn query_uid(client: SocketAddr, server: SocketAddr) -> Result<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::managed::serve_signing_requests;
     use super::*;
     use crate::identity::enrollment::ClientIdentity;
     use crate::service::hbone::RotatingClientIdentity;
+    use crate::session::managed::serve_signing_requests;
     use crate::session_protocol::{AgentResponse, ForwarderRequest, write_frame};
     use base64::Engine;
     use bytes::Bytes;
@@ -494,6 +471,7 @@ mod tests {
         let connection = accept(&listener).await.unwrap();
         let uid = connection.uid();
         let registry = SessionRegistry::new(
+            DeploymentMode::Managed,
             "127.0.0.1:9".parse().unwrap(),
             "gateway.test".to_owned(),
             Duration::from_secs(1),
@@ -511,6 +489,45 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn registry_rejects_registration_from_other_deployment_mode() {
+        let (stream, _) = UnixStream::pair().unwrap();
+        let managed_registry = SessionRegistry::new(
+            DeploymentMode::Managed,
+            "127.0.0.1:9".parse().unwrap(),
+            "gateway.test".to_owned(),
+            Duration::from_secs(1),
+            TlsRoots::Native,
+        );
+        let self_managed = SessionConnection {
+            uid: 1000,
+            registration: Registration::self_managed(
+                1,
+                crate::session_protocol::self_managed::Registration {
+                    endpoint: "127.0.0.1:15008".parse().unwrap(),
+                    tunnel_token: "local-secret".to_owned(),
+                },
+            ),
+            stream,
+        };
+        assert!(managed_registry.register(self_managed).await.is_err());
+
+        let (stream, _) = UnixStream::pair().unwrap();
+        let standalone_registry = SessionRegistry::new(
+            DeploymentMode::Standalone,
+            "127.0.0.1:9".parse().unwrap(),
+            "gateway.test".to_owned(),
+            Duration::from_secs(1),
+            TlsRoots::Native,
+        );
+        let managed = SessionConnection {
+            uid: 1000,
+            registration: Registration::managed(1, Vec::new()),
+            stream,
+        };
+        assert!(standalone_registry.register(managed).await.is_err());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -624,6 +641,7 @@ mod tests {
         let mut server_roots = rustls::RootCertStore::empty();
         server_roots.add(ca.der().clone()).unwrap();
         let registry = SessionRegistry::new(
+            DeploymentMode::Managed,
             gateway_address,
             "gateway.test".to_owned(),
             Duration::from_secs(2),
@@ -657,7 +675,7 @@ mod tests {
             let mut connection = h2::server::handshake(stream).await.unwrap();
             let (request, mut respond) = connection.accept().await.unwrap().unwrap();
             assert_eq!(
-                request.headers()[crate::service::capture::TUNNEL_TOKEN_HEADER],
+                request.headers()[crate::local_gateway::TUNNEL_TOKEN_HEADER],
                 "local-secret"
             );
             respond.send_response(Response::new(()), true).unwrap();
@@ -685,6 +703,7 @@ mod tests {
         let connection = accept(&listener).await.unwrap();
         let uid = connection.uid();
         let registry = SessionRegistry::new(
+            DeploymentMode::Standalone,
             "127.0.0.1:9".parse().unwrap(),
             "unused.invalid".to_owned(),
             Duration::from_secs(1),

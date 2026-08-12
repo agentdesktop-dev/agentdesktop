@@ -15,7 +15,7 @@ pub(super) async fn register(
     connection: SessionConnection,
     registration: crate::session_protocol::self_managed::Registration,
 ) -> Result<(HboneClient, tokio::task::JoinHandle<Result<()>>)> {
-    let client = crate::service::capture::local_hbone_with_token(
+    let client = crate::local_gateway::connect_with_capability(
         registration.endpoint,
         &registration.tunnel_token,
         registry.connect_timeout,
@@ -31,39 +31,39 @@ pub async fn run_local_user_agent(
     reconnect_delay: Duration,
 ) -> Result<()> {
     let generation = 1;
-    loop {
-        let result: Result<()> = async {
-            let mut stream = UnixStream::connect(path)
+    let path = path.to_owned();
+    super::super::run_reconnecting(
+        reconnect_delay,
+        "local_gateway_registration_disconnected",
+        move || {
+            let path = path.clone();
+            let tunnel_token = tunnel_token.clone();
+            async move {
+                let mut stream = UnixStream::connect(path)
+                    .await
+                    .context("connect to machine forwarder session socket")?;
+                write_frame(
+                    &mut stream,
+                    &Registration::self_managed(
+                        generation,
+                        crate::session_protocol::self_managed::Registration {
+                            endpoint,
+                            tunnel_token,
+                        },
+                    ),
+                )
                 .await
-                .context("connect to machine forwarder session socket")?;
-            write_frame(
-                &mut stream,
-                &Registration::self_managed(
-                    generation,
-                    crate::session_protocol::self_managed::Registration {
-                        endpoint,
-                        tunnel_token: tunnel_token.clone(),
-                    },
-                ),
-            )
-            .await
-            .context("register local Agent Gateway")?;
-            let mut unexpected = [0_u8; 1];
-            match stream.read(&mut unexpected).await {
-                Ok(0) => anyhow::bail!("machine forwarder closed local Gateway registration"),
-                Ok(_) => anyhow::bail!("machine forwarder sent unexpected registration data"),
-                Err(error) => Err(error).context("monitor local Gateway registration"),
+                .context("register local Agent Gateway")?;
+                let mut unexpected = [0_u8; 1];
+                match stream.read(&mut unexpected).await {
+                    Ok(0) => anyhow::bail!("machine forwarder closed local Gateway registration"),
+                    Ok(_) => anyhow::bail!("machine forwarder sent unexpected registration data"),
+                    Err(error) => Err(error).context("monitor local Gateway registration"),
+                }
             }
-        }
-        .await;
-        if let Err(error) = result {
-            tracing::warn!(event = "local_gateway_registration_disconnected", reason = %error);
-        }
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => return Ok(()),
-            _ = tokio::time::sleep(reconnect_delay) => {}
-        }
-    }
+        },
+    )
+    .await
 }
 
 impl SessionConnection {

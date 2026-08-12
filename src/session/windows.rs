@@ -1,15 +1,10 @@
-use std::collections::HashMap;
 use std::ffi::c_void;
 use std::net::SocketAddr;
 use std::os::windows::io::AsRawHandle;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use base64::Engine;
-use rustls::pki_types::CertificateDer;
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
-use tokio::sync::RwLock;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
@@ -23,9 +18,9 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
 use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
 
-use crate::service::hbone::{
-    ExternalClientIdentity, HboneClient, RotatingClientIdentity, TlsRoots,
-};
+use crate::service::hbone::{HboneClient, TlsRoots};
+use crate::session::managed::connect_gateway;
+use crate::session::registry::{ClientRegistry, RegistrationVersion};
 use crate::session_protocol::{Registration, RegistrationIdentity, read_frame};
 
 mod managed;
@@ -62,13 +57,7 @@ pub struct SessionRegistry {
     endpoint: SocketAddr,
     server_name: String,
     connect_timeout: Duration,
-    clients: Arc<RwLock<HashMap<UserSid, RegisteredClient>>>,
-}
-
-#[derive(Clone)]
-struct RegisteredClient {
-    certificate_generation: u64,
-    client: HboneClient,
+    clients: ClientRegistry<UserSid>,
 }
 
 pub fn create_server(path: &str) -> Result<NamedPipeServer> {
@@ -130,83 +119,44 @@ impl SessionRegistry {
             endpoint,
             server_name,
             connect_timeout,
-            clients: Arc::new(RwLock::new(HashMap::new())),
+            clients: ClientRegistry::default(),
         }
     }
 
     pub async fn register(&self, connection: SessionConnection) -> Result<()> {
         let sid = connection.sid().clone();
         let generation = connection.registration().certificate_generation;
-        let RegistrationIdentity::Managed(registration) = &connection.registration().identity
+        let RegistrationIdentity::Managed(registration) =
+            connection.registration().identity.clone()
         else {
             anyhow::bail!("self-managed Windows session registration is not implemented");
         };
-        let certificates = registration
-            .certificate_chain_der_base64
-            .iter()
-            .map(|certificate| {
-                base64::engine::general_purpose::STANDARD
-                    .decode(certificate)
-                    .map(CertificateDer::from)
-                    .context("decode registered certificate")
-            })
-            .collect::<Result<Vec<_>>>()?;
         let (signing_key, worker) = connection.into_signing_key(self.connect_timeout)?;
-        let identity = RotatingClientIdentity::new_external(
-            ExternalClientIdentity {
-                certificates,
-                signing_key,
-            },
-            generation,
-        );
-        let client = HboneClient::connect_mtls(
+        let client = connect_gateway(
             self.endpoint,
             self.server_name.clone(),
-            identity,
             self.connect_timeout,
             TlsRoots::Native,
+            generation,
+            registration,
+            signing_key,
         )
         .await?;
-        let mut clients = self.clients.write().await;
-        if clients
-            .get(&sid)
-            .is_some_and(|current| current.certificate_generation >= generation)
-        {
-            anyhow::bail!("session certificate generation is not newer for Windows user");
-        }
-        clients.insert(
-            sid.clone(),
-            RegisteredClient {
-                certificate_generation: generation,
+        self.clients
+            .install(
+                sid,
+                RegistrationVersion::Managed(generation),
                 client,
-            },
-        );
-        drop(clients);
-        let registry = self.clone();
-        tokio::spawn(async move {
-            let _ = worker.await;
-            registry.remove_generation(&sid, generation).await;
-        });
-        Ok(())
+                worker,
+            )
+            .await
     }
 
     pub async fn client_for_sid(&self, sid: &UserSid) -> Result<HboneClient> {
         self.clients
-            .read()
+            .client(sid)
             .await
-            .get(sid)
-            .map(|registered| registered.client.clone())
             .context("no registered user session for Windows user")
-    }
-
-    async fn remove_generation(&self, sid: &UserSid, generation: u64) {
-        let mut clients = self.clients.write().await;
-        if clients
-            .get(sid)
-            .is_some_and(|registered| registered.certificate_generation == generation)
-        {
-            clients.remove(sid);
-        }
     }
 }
 
@@ -335,9 +285,12 @@ impl Drop for LocalAllocation {
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine;
+
     use super::managed::run_user_agent_session;
     use super::*;
     use crate::identity::enrollment::ClientIdentity;
+    use crate::service::hbone::RotatingClientIdentity;
     use crate::session_protocol::{AgentResponse, ForwarderRequest, SignatureScheme, write_frame};
     use p256::ecdsa::signature::Verifier as _;
     use p256::ecdsa::{Signature, SigningKey as P256SigningKey};

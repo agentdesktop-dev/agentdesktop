@@ -179,6 +179,11 @@ impl Config {
         }
 
         #[cfg(target_os = "linux")]
+        if self.capture_enabled && self.mode == DeploymentMode::Managed {
+            bail!("managed transparent capture requires immutable Gateway identity propagation");
+        }
+
+        #[cfg(target_os = "linux")]
         if self.capture_enabled
             && self.session_socket.is_none()
             && (self.mode != DeploymentMode::Standalone || self.gateway_binary.is_none())
@@ -448,7 +453,7 @@ mod tests {
         assert!(
             managed
                 .to_string()
-                .contains("owned or registered standalone")
+                .contains("requires immutable Gateway identity propagation")
         );
     }
 
@@ -555,8 +560,8 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn accepts_managed_central_capture_with_session_socket() {
-        let config = parse(&[
+    fn rejects_managed_central_capture_with_session_socket() {
+        let error = parse(&[
             "connector",
             "--mode",
             "managed",
@@ -566,10 +571,13 @@ mod tests {
             "/run/agentdesktop/sessions.sock",
             "--capture-enabled",
         ])
-        .unwrap();
+        .unwrap_err();
 
-        assert!(config.capture_enabled);
-        assert!(config.identity_issuer.is_none());
+        assert!(
+            error
+                .to_string()
+                .contains("requires immutable Gateway identity propagation")
+        );
     }
 
     #[test]

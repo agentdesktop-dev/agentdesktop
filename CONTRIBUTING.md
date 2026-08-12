@@ -267,7 +267,11 @@ src/
   launch.rs                  Linux application scopes and launch gate
   service.rs                 Connector lifecycle orchestration
   service/                   HBONE, forwarding, capture, renewal, status
-  session/                   Platform sessions split by managed/self-managed mode
+  session.rs                 Shared registry, signer, and session supervision
+  session/managed.rs         Delegated signing and managed HBONE identity
+  session/registry.rs        Generation- and lease-safe per-user clients
+  session/linux/             Unix transport and self-managed Gateway leases
+  session/windows/           Named-pipe transport for managed sessions
   session_protocol.rs        Bounded registration envelope and framing
   session_protocol/          Managed signing and self-managed Gateway messages
   identity/                  OAuth, enrollment, keys, credential storage

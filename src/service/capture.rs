@@ -5,56 +5,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use base64::Engine as _;
 use clap::Args;
-use http::HeaderMap;
-use http::header::HeaderValue;
 use http::uri::Authority;
 use tokio::net::{TcpListener, TcpStream};
 
 use super::forwarder;
-use super::hbone::HboneClient;
+use crate::local_gateway::{GatewayCapability, connect};
 use crate::platform::linux::original_destination;
-
-pub const TUNNEL_TOKEN_HEADER: &str = "x-agentdesktop-token";
-pub const TUNNEL_TOKEN_ENV: &str = "AGENTDESKTOP_CAPTURE_TOKEN";
-
-pub struct CaptureToken {
-    value: HeaderValue,
-}
-
-impl CaptureToken {
-    pub fn generate() -> Result<Self> {
-        let mut random = [0_u8; 32];
-        getrandom::fill(&mut random).context("generate capture token")?;
-        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random);
-        Self::from_header_value(HeaderValue::from_str(&encoded)?)
-    }
-
-    fn from_header_value(mut value: HeaderValue) -> Result<Self> {
-        if value.is_empty() {
-            bail!("tunnel token must not be empty");
-        }
-        value.set_sensitive(true);
-        Ok(Self { value })
-    }
-
-    pub(crate) fn from_str(value: &str) -> Result<Self> {
-        Self::from_header_value(
-            HeaderValue::from_str(value).context("tunnel token is not a valid header value")?,
-        )
-    }
-
-    pub(crate) fn environment_value(&self) -> &str {
-        self.value
-            .to_str()
-            .expect("validated capture tokens contain visible ASCII")
-    }
-
-    fn header_value(&self) -> HeaderValue {
-        self.value.clone()
-    }
-}
 
 #[derive(Args, Debug)]
 pub struct CaptureArgs {
@@ -71,7 +28,7 @@ pub struct CaptureArgs {
 pub async fn run(args: CaptureArgs) -> Result<()> {
     validate_capture_endpoints(args.listen, args.hbone_endpoint)?;
     let token = load_tunnel_token(&args.token_file)?;
-    let hbone = local_hbone(args.hbone_endpoint, &token, Duration::from_secs(5)).await?;
+    let hbone = connect(args.hbone_endpoint, &token, Duration::from_secs(5)).await?;
     let listener = TcpListener::bind(args.listen).await?;
     tracing::info!(event = "capture_started", listen = %listener.local_addr()?);
     forwarder::serve_capture(
@@ -82,24 +39,6 @@ pub async fn run(args: CaptureArgs) -> Result<()> {
         shutdown_signal(),
     )
     .await
-}
-
-pub async fn local_hbone(
-    endpoint: SocketAddr,
-    token: &CaptureToken,
-    connect_timeout: Duration,
-) -> Result<HboneClient> {
-    let mut headers = HeaderMap::new();
-    headers.insert(TUNNEL_TOKEN_HEADER, token.header_value());
-    HboneClient::connect_with_headers(endpoint, headers, connect_timeout).await
-}
-
-pub async fn local_hbone_with_token(
-    endpoint: SocketAddr,
-    token: &str,
-    connect_timeout: Duration,
-) -> Result<HboneClient> {
-    local_hbone(endpoint, &CaptureToken::from_str(token)?, connect_timeout).await
 }
 
 pub fn original_authority(stream: &TcpStream) -> Result<Authority> {
@@ -123,7 +62,7 @@ async fn shutdown_signal() {
     }
 }
 
-pub fn load_tunnel_token(path: &Path) -> Result<CaptureToken> {
+pub fn load_tunnel_token(path: &Path) -> Result<GatewayCapability> {
     let metadata = fs::metadata(path)
         .with_context(|| format!("read tunnel token metadata from {}", path.display()))?;
     if !metadata.is_file() {
@@ -140,9 +79,7 @@ pub fn load_tunnel_token(path: &Path) -> Result<CaptureToken> {
     }
     let token = fs::read_to_string(path)
         .with_context(|| format!("read tunnel token from {}", path.display()))?;
-    let value =
-        HeaderValue::from_str(token.trim()).context("tunnel token is not a valid header value")?;
-    CaptureToken::from_header_value(value)
+    GatewayCapability::from_str(token.trim())
 }
 
 #[cfg(test)]
@@ -150,14 +87,14 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
-    use super::{CaptureToken, load_tunnel_token};
+    use super::load_tunnel_token;
+    use crate::local_gateway::GatewayCapability;
 
     #[test]
-    fn generates_unique_sensitive_tokens() {
-        let first = CaptureToken::generate().unwrap();
-        let second = CaptureToken::generate().unwrap();
+    fn generates_unique_tokens() {
+        let first = GatewayCapability::generate().unwrap();
+        let second = GatewayCapability::generate().unwrap();
         assert_ne!(first.environment_value(), second.environment_value());
-        assert!(first.header_value().is_sensitive());
     }
 
     #[test]

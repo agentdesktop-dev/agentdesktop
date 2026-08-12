@@ -19,18 +19,8 @@ impl Registration {
                 "local Gateway endpoint must be loopback",
             ));
         }
-        if self.tunnel_token.is_empty()
-            || self.tunnel_token.len() > 256
-            || !self
-                .tunnel_token
-                .bytes()
-                .all(|byte| (0x21..=0x7e).contains(&byte))
-        {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                "local Gateway tunnel token is invalid",
-            ));
-        }
+        crate::local_gateway::validate_capability(&self.tunnel_token)
+            .map_err(|error| Error::new(ErrorKind::InvalidData, error))?;
         Ok(())
     }
 }
