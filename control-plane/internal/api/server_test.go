@@ -18,9 +18,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/agentpolicy"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/ca"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/certificate"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/deviceidentity"
+	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/discoveryreport"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/enrollment"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/renewal"
 )
@@ -30,16 +32,78 @@ type testAuthenticator struct {
 	err       error
 }
 
+type recordingDiscoveryStore struct {
+	device         deviceidentity.Identity
+	report         discoveryreport.Report
+	stored         discoveryreport.StoredReport
+	inventory      discoveryreport.InventoryPage
+	inventoryQuery discoveryreport.InventoryQuery
+	devices        discoveryreport.InventoryDevicePage
+	deviceQuery    discoveryreport.InventoryDeviceQuery
+	rescanRequest  discoveryreport.RescanRequest
+	rescanResult   discoveryreport.RescanResult
+	rescanStatus   discoveryreport.RescanStatus
+}
+
+type recordingAgentPolicyStore struct {
+	request agentpolicy.Request
+	policy  agentpolicy.Policy
+	err     error
+}
+
+func (store *recordingAgentPolicyStore) PutAgentPolicy(_ context.Context, _ enrollment.Principal, request agentpolicy.Request) (agentpolicy.Policy, error) {
+	store.request = request
+	return store.policy, store.err
+}
+
+func (store *recordingAgentPolicyStore) GetAgentPolicy(context.Context, enrollment.Principal) (agentpolicy.Policy, error) {
+	return store.policy, store.err
+}
+
+func (store *recordingDiscoveryStore) PutLatestDiscoveryReport(_ context.Context, device deviceidentity.Identity, _ int, encoded []byte) (discoveryreport.StoredReport, error) {
+	store.device = device
+	if err := json.Unmarshal(encoded, &store.report); err != nil {
+		return discoveryreport.StoredReport{}, err
+	}
+	return store.stored, nil
+}
+
+func (store *recordingDiscoveryStore) GetLatestDiscoveryReport(context.Context, enrollment.Principal, string) (discoveryreport.StoredReport, error) {
+	return store.stored, nil
+}
+
+func (store *recordingDiscoveryStore) ListInventoryAssets(_ context.Context, _ enrollment.Principal, query discoveryreport.InventoryQuery) (discoveryreport.InventoryPage, error) {
+	store.inventoryQuery = query
+	return store.inventory, nil
+}
+
+func (store *recordingDiscoveryStore) ListInventoryDevices(_ context.Context, _ enrollment.Principal, query discoveryreport.InventoryDeviceQuery) (discoveryreport.InventoryDevicePage, error) {
+	store.deviceQuery = query
+	return store.devices, nil
+}
+
+func (store *recordingDiscoveryStore) RequestDiscoveryRescan(_ context.Context, _ enrollment.Principal, request discoveryreport.RescanRequest) (discoveryreport.RescanResult, error) {
+	store.rescanRequest = request
+	return store.rescanResult, nil
+}
+
+func (store *recordingDiscoveryStore) GetDiscoveryRescanStatus(context.Context, deviceidentity.Identity) (discoveryreport.RescanStatus, error) {
+	return store.rescanStatus, nil
+}
+
 func (authenticator testAuthenticator) Authenticate(*http.Request) (enrollment.Principal, error) {
 	return authenticator.principal, authenticator.err
 }
 
 type recordingStore struct {
 	principal    enrollment.Principal
+	deviceName   string
 	issuance     enrollment.Issuance
 	status       enrollment.Status
 	getErr       error
 	adminRecords []enrollment.AdministrativeRecord
+	adminDevices []enrollment.AdministrativeDevice
+	adminSummary enrollment.FleetSummary
 }
 
 func (store *recordingStore) Get(
@@ -59,6 +123,14 @@ func (store *recordingStore) List(context.Context, enrollment.Principal, string,
 	return store.adminRecords, nil
 }
 
+func (store *recordingStore) ListDevices(context.Context, enrollment.Principal, int) ([]enrollment.AdministrativeDevice, error) {
+	return store.adminDevices, nil
+}
+
+func (store *recordingStore) Summary(context.Context, enrollment.Principal) (enrollment.FleetSummary, error) {
+	return store.adminSummary, nil
+}
+
 func (store *recordingStore) Reject(_ context.Context, _ enrollment.Principal, id string) (enrollment.AdministrativeRecord, error) {
 	return enrollment.AdministrativeRecord{EnrollmentID: id, Status: "rejected"}, nil
 }
@@ -71,12 +143,14 @@ func (store *recordingStore) CreatePending(
 	_ context.Context,
 	principal enrollment.Principal,
 	request certificate.Request,
+	deviceName string,
 	id string,
 ) (enrollment.Enrollment, error) {
 	store.principal = principal
+	store.deviceName = deviceName
 	return enrollment.Enrollment{
 		ID: id, Status: "pending", Issuer: principal.Issuer, Subject: principal.Subject,
-		PublicKeyFingerprint: request.PublicKeyFingerprint,
+		DeviceName: deviceName, PublicKeyFingerprint: request.PublicKeyFingerprint,
 	}, nil
 }
 
@@ -198,7 +272,7 @@ func TestEnrollmentUsesAuthenticatedPrincipal(t *testing.T) {
 		testAuthenticator{principal: enrollment.Principal{Issuer: "https://issuer.example/", Subject: "admin-1"}},
 		enrollment.NewService(store, apiIssuer{}),
 	)
-	body, err := json.Marshal(map[string]string{"csr": signedCSR(t)})
+	body, err := json.Marshal(map[string]string{"csr": signedCSR(t), "device_name": "  workstation-7  "})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,6 +285,9 @@ func TestEnrollmentUsesAuthenticatedPrincipal(t *testing.T) {
 	}
 	if store.principal.Subject != "user-1" || store.principal.Issuer != "https://issuer.example/" {
 		t.Fatalf("stored principal = %#v", store.principal)
+	}
+	if store.deviceName != "workstation-7" {
+		t.Fatalf("stored device name = %q", store.deviceName)
 	}
 }
 
@@ -262,6 +339,158 @@ func TestRenewalRequiresOAuthAndVerifiedDeviceCertificate(t *testing.T) {
 	}
 }
 
+func TestDiscoveryReportRequiresVerifiedDeviceCertificateAndSupportsAdminRead(t *testing.T) {
+	const (
+		organizationID = "11111111-1111-4111-8111-111111111111"
+		userID         = "33333333-3333-4333-8333-333333333333"
+		deviceID       = "22222222-2222-4222-8222-222222222222"
+		trustDomain    = "devices.example.com"
+	)
+	report := discoveryreport.Report{
+		SchemaVersion: discoveryreport.SchemaVersion, CollectorVersion: "0.1.0", Platform: "macos",
+		Coverage: discoveryreport.Coverage{ProjectScopes: "not_scanned"},
+		Agents:   []discoveryreport.Agent{{ID: "claude-code", Installed: true, Running: "detected", Evidence: []string{"executable"}}},
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &recordingDiscoveryStore{stored: discoveryreport.StoredReport{DeviceID: deviceID, Report: report}}
+	handler := NewServer(
+		testAuthenticator{},
+		testAuthenticator{principal: enrollment.Principal{Issuer: "https://issuer.example/", Subject: "admin-1"}},
+		enrollment.NewService(&recordingStore{}, apiIssuer{}),
+		WithDiscoveryReports(discoveryreport.NewService(store), trustDomain),
+	)
+	request := httptest.NewRequest(http.MethodPut, "/v1/device-reports/current", bytes.NewReader(encoded))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("report without certificate status = %d", response.Code)
+	}
+	identityURI, _ := url.Parse("spiffe://" + trustDomain + "/ns/" + organizationID + "/sa/user." + userID + ".device." + deviceID)
+	leaf := &x509.Certificate{SerialNumber: big.NewInt(1), URIs: []*url.URL{identityURI}}
+	request = httptest.NewRequest(http.MethodPut, "/v1/device-reports/current", bytes.NewReader(encoded))
+	request.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}, VerifiedChains: [][]*x509.Certificate{{leaf}}}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || store.device.DeviceID != deviceID || store.report.Agents[0].ID != "claude-code" {
+		t.Fatalf("report status = %d, body = %s, device = %#v", response.Code, response.Body.String(), store.device)
+	}
+	injected := append(encoded[:len(encoded)-1], []byte(`,"device_id":"`+deviceID+`"}`)...)
+	request = httptest.NewRequest(http.MethodPut, "/v1/device-reports/current", bytes.NewReader(injected))
+	request.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}, VerifiedChains: [][]*x509.Certificate{{leaf}}}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("identity-bearing report status = %d, body = %s", response.Code, response.Body.String())
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/admin/devices/"+deviceID+"/discovery-report", nil))
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"device_id":"`+deviceID+`"`)) {
+		t.Fatalf("admin discovery status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestAdministratorInventorySupportsPagedAssetsAndDeviceDrillDown(t *testing.T) {
+	administrator := enrollment.Principal{Issuer: "https://issuer.example/", Subject: "admin-1"}
+	store := &recordingDiscoveryStore{
+		inventory: discoveryreport.InventoryPage{Kind: "agent", Total: 4},
+		devices:   discoveryreport.InventoryDevicePage{Total: 17},
+	}
+	handler := NewServer(
+		testAuthenticator{}, testAuthenticator{principal: administrator},
+		enrollment.NewService(&recordingStore{}, apiIssuer{}),
+		WithDiscoveryReports(discoveryreport.NewService(store), "devices.example.com"),
+	)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/admin/inventory?kind=agent&q=claude&limit=25&offset=50", nil))
+	if response.Code != http.StatusOK || store.inventoryQuery != (discoveryreport.InventoryQuery{Kind: "agent", Search: "claude", Limit: 25, Offset: 50}) {
+		t.Fatalf("inventory status = %d, query = %#v, body = %s", response.Code, store.inventoryQuery, response.Body.String())
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/admin/inventory/devices?kind=mcp&key=github&detail=stdio&q=macbook&limit=20", nil))
+	if response.Code != http.StatusOK || store.deviceQuery.Kind != "mcp" || store.deviceQuery.Key != "github" ||
+		store.deviceQuery.Detail != "stdio" || store.deviceQuery.Search != "macbook" || store.deviceQuery.Limit != 20 {
+		t.Fatalf("inventory devices status = %d, query = %#v, body = %s", response.Code, store.deviceQuery, response.Body.String())
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/admin/inventory?kind=unknown", nil))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid inventory status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestAdministratorRequestsRescanAndDevicePollsWithCertificate(t *testing.T) {
+	const (
+		organizationID = "11111111-1111-4111-8111-111111111111"
+		userID         = "33333333-3333-4333-8333-333333333333"
+		deviceID       = "22222222-2222-4222-8222-222222222222"
+		trustDomain    = "devices.example.com"
+	)
+	store := &recordingDiscoveryStore{
+		rescanResult: discoveryreport.RescanResult{Requested: 1},
+		rescanStatus: discoveryreport.RescanStatus{Pending: true},
+	}
+	handler := NewServer(
+		testAuthenticator{}, testAuthenticator{principal: enrollment.Principal{Issuer: "issuer", Subject: "admin"}},
+		enrollment.NewService(&recordingStore{}, apiIssuer{}),
+		WithDiscoveryReports(discoveryreport.NewService(store), trustDomain),
+	)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/admin/discovery-rescans", bytes.NewBufferString(`{"target_mode":"selected","device_ids":["`+deviceID+`"]}`)))
+	if response.Code != http.StatusAccepted || store.rescanRequest.TargetMode != "selected" || store.rescanRequest.DeviceIDs[0] != deviceID {
+		t.Fatalf("rescan request status = %d, request = %#v, body = %s", response.Code, store.rescanRequest, response.Body.String())
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/device-reports/current/rescan", nil))
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("rescan poll without certificate status = %d", response.Code)
+	}
+	identityURI, _ := url.Parse("spiffe://" + trustDomain + "/ns/" + organizationID + "/sa/user." + userID + ".device." + deviceID)
+	leaf := &x509.Certificate{SerialNumber: big.NewInt(1), URIs: []*url.URL{identityURI}}
+	request := httptest.NewRequest(http.MethodGet, "/v1/device-reports/current/rescan", nil)
+	request.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}, VerifiedChains: [][]*x509.Certificate{{leaf}}}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"pending":true`)) {
+		t.Fatalf("rescan poll status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestAdministratorCanGetAndUpdateAgentPolicy(t *testing.T) {
+	administrator := enrollment.Principal{Issuer: "https://issuer.example/", Subject: "admin-1"}
+	rules := agentpolicy.Default().Rules
+	rules[2].Action = "deny"
+	store := &recordingAgentPolicyStore{policy: agentpolicy.Policy{
+		SchemaVersion: agentpolicy.SchemaVersion, Rules: rules, Configured: true, Enforcement: "not_available",
+	}}
+	handler := NewServer(
+		testAuthenticator{}, testAuthenticator{principal: administrator},
+		enrollment.NewService(&recordingStore{}, apiIssuer{}),
+		WithAgentPolicy(agentpolicy.NewService(store)),
+	)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/admin/agent-policy", nil))
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"agent_id":"codex-cli","action":"deny"`)) {
+		t.Fatalf("get policy status = %d, body = %s", response.Code, response.Body.String())
+	}
+	body, err := json.Marshal(agentpolicy.Request{SchemaVersion: agentpolicy.SchemaVersion, Rules: rules})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPut, "/v1/admin/agent-policy", bytes.NewReader(body)))
+	if response.Code != http.StatusOK || len(store.request.Rules) != 5 || store.request.Rules[2].Action != "deny" {
+		t.Fatalf("put policy status = %d, request = %#v, body = %s", response.Code, store.request, response.Body.String())
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPut, "/v1/admin/agent-policy", bytes.NewBufferString(`{"schema_version":1,"rules":[]}`)))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid policy status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
 func TestEnrollmentRejectsUnauthenticatedAndUnknownFields(t *testing.T) {
 	service := enrollment.NewService(&recordingStore{}, apiIssuer{})
 	unauthenticated := NewServer(testAuthenticator{err: errors.New("invalid token")}, testAuthenticator{}, service)
@@ -284,7 +513,11 @@ func TestApprovalRequiresAdministratorAndReturnsCertificate(t *testing.T) {
 		OrganizationID: "organization-1", CSRDER: []byte("csr"), StartedAt: time.Unix(1_000, 0),
 	}}
 	administrator := testAuthenticator{principal: enrollment.Principal{Issuer: "https://issuer.example/", Subject: "admin-1"}}
-	handler := NewServer(testAuthenticator{}, administrator, enrollment.NewService(store, apiIssuer{}))
+	handler := NewServer(
+		testAuthenticator{},
+		administrator,
+		enrollment.NewService(store, apiIssuer{}),
+	)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/admin/enrollments/enrollment-1/approve", nil))
 	if response.Code != http.StatusOK {
@@ -342,15 +575,39 @@ func TestAdministratorListsAndRejectsPendingEnrollment(t *testing.T) {
 		EnrollmentID: "enrollment-1",
 		Status:       "pending",
 		Subject:      "user-1",
-	}}}
+		Username:     "employee",
+		DeviceName:   "workstation-7",
+	}}, adminDevices: []enrollment.AdministrativeDevice{{
+		DeviceID: "device-1",
+		Status:   "active",
+		Subject:  "user-1",
+		Username: "employee",
+	}}, adminSummary: enrollment.FleetSummary{ActiveDevices: 1, PendingEnrollments: 1}}
 	administrator := testAuthenticator{principal: enrollment.Principal{
 		Issuer: "https://issuer.example/", Subject: "admin-1",
 	}}
 	handler := NewServer(testAuthenticator{}, administrator, enrollment.NewService(store, apiIssuer{}))
 
 	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/admin/summary", nil))
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"active_devices":1`)) {
+		t.Fatalf("summary status = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/admin/devices", nil))
+	if response.Code != http.StatusOK ||
+		!bytes.Contains(response.Body.Bytes(), []byte(`"device_id":"device-1"`)) ||
+		!bytes.Contains(response.Body.Bytes(), []byte(`"username":"employee"`)) {
+		t.Fatalf("device list status = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/admin/enrollments", nil))
-	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"enrollment_id":"enrollment-1"`)) {
+	if response.Code != http.StatusOK ||
+		!bytes.Contains(response.Body.Bytes(), []byte(`"enrollment_id":"enrollment-1"`)) ||
+		!bytes.Contains(response.Body.Bytes(), []byte(`"username":"employee"`)) ||
+		!bytes.Contains(response.Body.Bytes(), []byte(`"device_name":"workstation-7"`)) {
 		t.Fatalf("list status = %d, body = %s", response.Code, response.Body.String())
 	}
 

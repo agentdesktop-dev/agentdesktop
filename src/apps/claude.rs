@@ -8,6 +8,10 @@ use serde_json::{Map, Value};
 
 const CONNECTOR_BASE_URL: &str = "http://127.0.0.1:8080";
 const PLACEHOLDER_CREDENTIAL: &str = "local-gateway-placeholder";
+const OWNED_ENVIRONMENT: [(&str, &str); 2] = [
+    ("ANTHROPIC_BASE_URL", CONNECTOR_BASE_URL),
+    ("ANTHROPIC_API_KEY", PLACEHOLDER_CREDENTIAL),
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectionStatus {
@@ -16,12 +20,23 @@ pub enum ConnectionStatus {
     NotInstalled,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DisconnectionStatus {
+    Disconnected,
+    AlreadyDisconnected,
+}
+
 pub fn connect_installed() -> Result<ConnectionStatus> {
     if !is_installed()? {
         return Ok(ConnectionStatus::NotInstalled);
     }
     let home = env::var_os("HOME").context("HOME is not set")?;
     connect_settings(&PathBuf::from(home).join(".claude/settings.json"))
+}
+
+pub fn disconnect_installed() -> Result<DisconnectionStatus> {
+    let home = env::var_os("HOME").context("HOME is not set")?;
+    disconnect_settings(&PathBuf::from(home).join(".claude/settings.json"))
 }
 
 pub fn is_installed() -> Result<bool> {
@@ -51,7 +66,7 @@ fn ensure_capture_routing_is_clear_for(
         bail!(
             "Claude capture cannot start while ANTHROPIC_BASE_URL is set; run Claude normally for configured routing, or unset it before using transparent capture"
         );
-    } 
+    }
     if !settings_path.exists() {
         return Ok(());
     }
@@ -123,17 +138,13 @@ fn connect_settings(path: &Path) -> Result<ConnectionStatus> {
             )
         })?;
 
-    let desired = [
-        ("ANTHROPIC_BASE_URL", CONNECTOR_BASE_URL),
-        ("ANTHROPIC_API_KEY", PLACEHOLDER_CREDENTIAL),
-    ];
-    if desired
+    if OWNED_ENVIRONMENT
         .iter()
         .all(|(name, value)| environment.get(*name).and_then(Value::as_str) == Some(*value))
     {
         return Ok(ConnectionStatus::AlreadyConnected);
     }
-    for (name, value) in desired {
+    for (name, value) in OWNED_ENVIRONMENT {
         if let Some(existing) = environment.get(name)
             && existing.as_str() != Some(value)
         {
@@ -144,6 +155,62 @@ fn connect_settings(path: &Path) -> Result<ConnectionStatus> {
         environment.insert(name.to_owned(), Value::String(value.to_owned()));
     }
 
+    write_settings(path, &settings)?;
+    Ok(ConnectionStatus::Connected)
+}
+
+fn disconnect_settings(path: &Path) -> Result<DisconnectionStatus> {
+    if !path.exists() {
+        return Ok(DisconnectionStatus::AlreadyDisconnected);
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        bail!(
+            "Claude Code settings {} is not a regular file",
+            path.display()
+        );
+    }
+    let mut settings = serde_json::from_slice::<Value>(&fs::read(path)?)
+        .with_context(|| format!("Claude Code settings {} is not valid JSON", path.display()))?;
+    let root = settings.as_object_mut().with_context(|| {
+        format!(
+            "Claude Code settings {} must contain a JSON object",
+            path.display()
+        )
+    })?;
+    let mut changed = false;
+    let remove_environment = if let Some(environment) = root.get_mut("env") {
+        let environment = environment.as_object_mut().with_context(|| {
+            format!(
+                "Claude Code settings {} has a non-object env setting",
+                path.display()
+            )
+        })?;
+        for (name, value) in OWNED_ENVIRONMENT {
+            if environment.get(name).and_then(Value::as_str) == Some(value) {
+                environment.remove(name);
+                changed = true;
+            }
+        }
+        environment.is_empty()
+    } else {
+        false
+    };
+    if !changed {
+        return Ok(DisconnectionStatus::AlreadyDisconnected);
+    }
+    if remove_environment {
+        root.remove("env");
+    }
+    if root.is_empty() {
+        fs::remove_file(path)?;
+    } else {
+        write_settings(path, &settings)?;
+    }
+    Ok(DisconnectionStatus::Disconnected)
+}
+
+fn write_settings(path: &Path, settings: &Value) -> Result<()> {
     let parent = path
         .parent()
         .context("Claude Code settings has no parent")?;
@@ -165,14 +232,14 @@ fn connect_settings(path: &Path) -> Result<ConnectionStatus> {
         .persist(path)
         .map_err(|error| error.error)
         .with_context(|| format!("failed to update Claude Code settings {}", path.display()))?;
-    Ok(ConnectionStatus::Connected)
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        CONNECTOR_BASE_URL, ConnectionStatus, PLACEHOLDER_CREDENTIAL, connect_settings,
-        ensure_capture_routing_is_clear_for,
+        CONNECTOR_BASE_URL, ConnectionStatus, DisconnectionStatus, PLACEHOLDER_CREDENTIAL,
+        connect_settings, disconnect_settings, ensure_capture_routing_is_clear_for,
     };
     use std::ffi::OsStr;
     use std::fs;
@@ -229,6 +296,62 @@ mod tests {
             "https://existing.example"
         );
         assert!(saved["env"].get("ANTHROPIC_API_KEY").is_none());
+    }
+
+    #[test]
+    fn disconnects_claude_without_removing_unrelated_settings() {
+        let temporary = tempfile::tempdir().unwrap();
+        let settings = temporary.path().join("settings.json");
+        fs::write(
+            &settings,
+            serde_json::to_vec(&json!({
+                "theme": "light",
+                "env": {
+                    "ANTHROPIC_BASE_URL": CONNECTOR_BASE_URL,
+                    "ANTHROPIC_API_KEY": PLACEHOLDER_CREDENTIAL,
+                    "USER_SETTING": "preserved"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            disconnect_settings(&settings).unwrap(),
+            DisconnectionStatus::Disconnected
+        );
+        let saved: Value = serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
+        assert_eq!(saved["theme"], "light");
+        assert_eq!(saved["env"]["USER_SETTING"], "preserved");
+        assert!(saved["env"].get("ANTHROPIC_BASE_URL").is_none());
+        assert!(saved["env"].get("ANTHROPIC_API_KEY").is_none());
+        assert_eq!(
+            disconnect_settings(&settings).unwrap(),
+            DisconnectionStatus::AlreadyDisconnected
+        );
+    }
+
+    #[test]
+    fn disconnect_removes_an_agentdesktop_only_settings_file() {
+        let temporary = tempfile::tempdir().unwrap();
+        let settings = temporary.path().join("settings.json");
+        fs::write(
+            &settings,
+            serde_json::to_vec(&json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": CONNECTOR_BASE_URL,
+                    "ANTHROPIC_API_KEY": PLACEHOLDER_CREDENTIAL
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            disconnect_settings(&settings).unwrap(),
+            DisconnectionStatus::Disconnected
+        );
+        assert!(!settings.exists());
     }
 
     #[test]

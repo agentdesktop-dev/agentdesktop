@@ -40,6 +40,7 @@ cleanup() {
     done < <(podman ps --all --filter pod=agentdesktop-managed-walkthrough --format '{{.Names}}')
   fi
   "$walkthrough" stop >/dev/null 2>&1 || true
+  rm -rf "$runtime"
   exit "$exit_code"
 }
 trap cleanup EXIT INT TERM
@@ -74,7 +75,7 @@ wait_for_url() {
   return 1
 }
 
-for command in cargo curl jq podman; do
+for command in cargo curl jq openssl podman; do
   require "$command"
 done
 

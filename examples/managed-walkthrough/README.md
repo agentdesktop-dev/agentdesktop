@@ -1,10 +1,10 @@
 # Managed native walkthrough
 
-This walkthrough exercises ordinary OAuth user identity and authority-issued mTLS device identity through Agent Desktop and Agent Gateway. It covers browser login, administrator approval, a Claude request, and administrative device revocation. Agent Gateway uses the checked-in configuration only; it needs no source changes. All infrastructure runs in one disposable Podman pod. Agent Desktop and Claude remain host processes, but trust the generated CAs through a process-local bundle; the walkthrough never changes the host trust store or uses `sudo`.
+This walkthrough exercises ordinary OAuth user identity and authority-issued mTLS device identity through Agent Desktop and Agent Gateway. It covers browser login, administrator approval, a Claude request, and administrative device revocation. Agent Gateway uses the checked-in configuration only; it needs no source changes. Infrastructure runs in one disposable Podman pod or Docker shared network namespace. Agent Desktop and Claude remain host processes, but trust the generated CAs through a process-local bundle; the walkthrough never changes the host trust store or uses `sudo`.
 
-The walkthrough uses the repository's mock OIDC and Anthropic servers. It expects:
+The manual walkthrough uses the repository's mock OIDC and Anthropic servers. It expects:
 
-- Fedora with Podman, `openssl`, `curl`, `jq`, Rust, and Claude Code.
+- Podman 5+ or Docker, plus `openssl`, `curl`, `jq`, Rust, and Claude Code.
 - Repository root as the current directory unless a command says otherwise.
 
 For a zero-input API-driven verification of the same enrollment, approval, mTLS forwarding, and revocation path, run:
@@ -13,7 +13,7 @@ For a zero-input API-driven verification of the same enrollment, approval, mTLS 
 scripts/managed-e2e.sh
 ```
 
-The script incrementally rebuilds the current connector, uses cached Podman image layers, exits nonzero on failure, and removes its containers and generated identity state. It is the recommended first managed walkthrough. It proves the direct development topology on the host; it does not exercise Windows WFP, the installed machine/session split, managed transparent capture, or pre-expiry revocation enforcement. The manual steps below and `scripts/vm-managed-walkthrough.sh` remain available for the desktop user and administrator journeys.
+The automated `managed-e2e.sh` path requires Podman. It incrementally rebuilds the current connector, uses cached image layers, exits nonzero on failure, and removes its containers and generated identity state. It is the recommended first managed walkthrough. It proves the direct development topology on the host; it does not exercise Windows WFP, the installed machine/session split, managed transparent capture, or pre-expiry revocation enforcement. The manual steps below support Podman or Docker, and `scripts/vm-managed-walkthrough.sh` remains available for the Fedora desktop user and administrator journeys.
 
 Use these fixed local values:
 
@@ -41,7 +41,41 @@ The launcher binds every published port to `127.0.0.1`, creates fresh certificat
 
 The mock Anthropic API accepts the fake Gateway-owned API key and returns `SMOKE_OK`; it never contacts Anthropic.
 
-## Log in and enroll
+To run the same managed identity path against real Anthropic instead, enter the Gateway-owned key without placing it in shell history:
+
+```bash
+printf 'Anthropic API key: '
+read -r -s ANTHROPIC_API_KEY
+printf '\n'
+export ANTHROPIC_API_KEY
+scripts/managed-walkthrough.sh start-anthropic
+unset ANTHROPIC_API_KEY
+```
+
+`start-anthropic` fails before changing the running stack when the key is absent. The key is passed only to the disposable Gateway container and remains visible to the local container runtime for that container's lifetime. Stop the walkthrough to remove it. Agent Desktop and Claude Code receive only the connector placeholder credential.
+
+Switching modes recreates the disposable certificates, database, and identity directory. Repeat desktop sign-in and administrator approval afterward.
+
+## Desktop UI quickstart
+
+The checked-in [`organization.json`](organization.json) points the desktop UI at this disposable infrastructure. In a second terminal, run:
+
+```bash
+cd ui
+SSL_CERT_FILE="$PWD/../examples/managed-walkthrough/certs/process-ca-bundle.crt" \
+AGENTDESKTOP_IDENTITY_DIR="$PWD/../examples/managed-walkthrough/certs/identity" \
+AGENTDESKTOP_CREDENTIAL_STORAGE=file \
+AGENTDESKTOP_ORGANIZATION_CONFIG="$PWD/../examples/managed-walkthrough/organization.json" \
+npm run dev:desktop
+```
+
+Select **Sign in**, then open `http://localhost:8091/admin/` and approve the pending device. Select **Check status** if needed. Agent Desktop applies the supported Claude Code route automatically and the UI-local connector starts managed mTLS forwarding after approval. Stop the fixture with `scripts/managed-walkthrough.sh stop` from the repository root.
+
+Claude Code returns `SMOKE_OK` for every prompt when the walkthrough was started with `start`. The fixed response proves the managed route reached the mock provider; it is not a real model answer. Use `start-anthropic` for real model responses. Agent Desktop shows accepted, active, completed, and failed opaque flows since connector start. Raw provider routing preserves Claude payload compatibility without parsing content. Neither UI exposes prompt or response content.
+
+## CLI walkthrough
+
+### Log in and enroll
 
 Set the process-local trust bundle, then log in and create the device enrollment:
 
@@ -82,7 +116,7 @@ cargo run -- identity enroll-status \
   --gateway-origin https://127.0.0.1:8443
 ```
 
-## Start Agent Desktop
+### Start Agent Desktop
 
 Start Agent Desktop with the same process-local CA bundle:
 
@@ -104,7 +138,7 @@ ANTHROPIC_AUTH_TOKEN=connector-placeholder \
 claude
 ```
 
-## Revoke the device
+### Revoke the device
 
 Read `device_id` from the approval or enrollment-status response and revoke it:
 

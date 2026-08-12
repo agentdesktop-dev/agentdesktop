@@ -21,3 +21,10 @@ binds:
     routes:
     - backends:
       - host: 127.0.0.1:18081
+        policies:
+          backendAuth:
+            credentials:
+            - key: $ANTHROPIC_API_KEY
+              location:
+                header:
+                  name: x-api-key

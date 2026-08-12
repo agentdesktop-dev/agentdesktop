@@ -17,7 +17,11 @@ fn help_exits_successfully() {
 
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
-    for command in ["serve", "connect-agents", "identity", "capture", "launch"] {
+    for command in ["serve", "connect-agents", "disconnect-agents", "identity"] {
+        assert!(help.contains(command));
+    }
+    #[cfg(target_os = "linux")]
+    for command in ["capture", "launch", "trust"] {
         assert!(help.contains(command));
     }
 
@@ -30,16 +34,19 @@ fn help_exits_successfully() {
     assert!(help.contains("--mode <MODE>"));
     assert!(help.contains("--upstream <UPSTREAM>"));
 
-    let output = Command::new(env!("CARGO_BIN_EXE_agentdesktop"))
-        .args(["launch", "--help"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    assert!(
-        String::from_utf8(output.stdout)
-            .unwrap()
-            .contains("--skip-preflight")
-    );
+    #[cfg(target_os = "linux")]
+    {
+        let output = Command::new(env!("CARGO_BIN_EXE_agentdesktop"))
+            .args(["launch", "--help"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .contains("--skip-preflight")
+        );
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -163,6 +170,19 @@ fn connector_subcommand_persists_claude_settings() {
         settings["env"]["ANTHROPIC_API_KEY"],
         "local-gateway-placeholder"
     );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_agentdesktop"))
+        .arg("disconnect-agents")
+        .env("HOME", home)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Claude Code disconnected.\n"
+    );
+    assert!(!home.join(".claude/settings.json").exists());
 }
 
 #[cfg(unix)]

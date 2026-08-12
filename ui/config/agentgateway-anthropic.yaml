@@ -1,11 +1,29 @@
 # yaml-language-server: $schema=https://agentgateway.dev/schema/config
+# Standalone development only. Managed clients use an external organization-owned Gateway;
+# this file is not part of the managed installer or organization bootstrap.
 config:
   readinessAddr: 127.0.0.1:15100
 
-llm:
-  port: 4100
-  models:
-  - name: "*"
-    provider: anthropic
-    params:
-      apiKey: $ANTHROPIC_API_KEY
+binds:
+- port: 4100
+  tunnelProtocol: connect
+  listeners:
+  - name: desktop-connect
+    protocol: HTTP
+    routes: []
+- port: 4000
+  mode: internal
+  listeners:
+  - name: native-llm
+    protocol: HTTP
+    routes:
+    - backends:
+      - ai:
+          groups:
+          - providers:
+            - name: anthropic
+              provider:
+                anthropic: {}
+              policies:
+                backendAuth:
+                  key: $ANTHROPIC_API_KEY

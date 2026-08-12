@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 
-use crate::apps::claude::{ConnectionStatus, connect_installed, is_installed};
+use crate::apps::claude::{
+    ConnectionStatus, DisconnectionStatus, connect_installed, disconnect_installed, is_installed,
+};
 use crate::identity::enrollment::{
     EnrollmentClient, EnrollmentStatus, load_enrollment_for, save_enrollment_for,
 };
@@ -35,6 +37,16 @@ pub async fn run(yes: bool) -> anyhow::Result<()> {
         ConnectionStatus::Connected => println!("Claude Code connected."),
         ConnectionStatus::AlreadyConnected => println!("Claude Code is already connected."),
         ConnectionStatus::NotInstalled => println!("No supported AI agents were found."),
+    }
+    Ok(())
+}
+
+pub fn disconnect() -> anyhow::Result<()> {
+    match disconnect_installed()? {
+        DisconnectionStatus::Disconnected => println!("Claude Code disconnected."),
+        DisconnectionStatus::AlreadyDisconnected => {
+            println!("Claude Code is already disconnected.")
+        }
     }
     Ok(())
 }

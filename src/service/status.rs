@@ -13,11 +13,19 @@ use crate::config::DeploymentMode;
 use crate::identity::oauth::ManagedIdentity;
 use crate::platform::{PlatformCapabilities, capabilities};
 
+use super::forwarder::{ForwarderMetrics, ForwarderMetricsSnapshot};
+use super::hbone::HboneClient;
+
 #[derive(Clone)]
 struct StatusState {
-    gateway: SocketAddr,
+    gateway: Option<HboneClient>,
+    gateway_endpoint: SocketAddr,
     identity: Option<ManagedIdentity>,
+    metrics: ForwarderMetrics,
     mode: DeploymentMode,
+    max_in_flight: usize,
+    connect_timeout_ms: u64,
+    shutdown_timeout_ms: u64,
 }
 
 #[derive(Serialize)]
@@ -33,20 +41,35 @@ struct StatusResponse {
     mode: &'static str,
     gateway: &'static str,
     identity: &'static str,
+    in_flight: usize,
+    max_in_flight: usize,
+    connect_timeout_ms: u64,
+    shutdown_timeout_ms: u64,
     platform: PlatformCapabilities,
+    metrics: ForwarderMetricsSnapshot,
 }
 
 pub async fn serve(
     listener: TcpListener,
-    gateway: SocketAddr,
+    gateway: Option<HboneClient>,
+    gateway_endpoint: SocketAddr,
     mode: DeploymentMode,
     identity: Option<ManagedIdentity>,
+    metrics: ForwarderMetrics,
+    max_in_flight: usize,
+    connect_timeout_ms: u64,
+    shutdown_timeout_ms: u64,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     let state = StatusState {
         gateway,
+        gateway_endpoint,
         identity,
+        metrics,
         mode,
+        max_in_flight,
+        connect_timeout_ms,
+        shutdown_timeout_ms,
     };
     let router = Router::new()
         .route("/_agentdesktop/healthz", get(health))
@@ -59,7 +82,7 @@ pub async fn serve(
 }
 
 async fn health(State(state): State<StatusState>) -> (StatusCode, Json<HealthResponse>) {
-    let reachable = gateway_reachable(state.gateway).await;
+    let reachable = gateway_reachable(&state).await;
     (
         if reachable {
             StatusCode::OK
@@ -79,7 +102,7 @@ async fn health(State(state): State<StatusState>) -> (StatusCode, Json<HealthRes
 }
 
 async fn status(State(state): State<StatusState>) -> Json<StatusResponse> {
-    let reachable = gateway_reachable(state.gateway).await;
+    let reachable = gateway_reachable(&state).await;
     let identity = match &state.identity {
         Some(identity) => identity.status().await.unwrap_or("unavailable"),
         None => "not-required",
@@ -93,14 +116,25 @@ async fn status(State(state): State<StatusState>) -> Json<StatusResponse> {
             "unreachable"
         },
         identity,
+        in_flight: state.metrics.in_flight(),
+        max_in_flight: state.max_in_flight,
+        connect_timeout_ms: state.connect_timeout_ms,
+        shutdown_timeout_ms: state.shutdown_timeout_ms,
         platform: capabilities(),
+        metrics: state.metrics.snapshot(),
     })
 }
 
-async fn gateway_reachable(gateway: SocketAddr) -> bool {
-    tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(gateway))
+async fn gateway_reachable(state: &StatusState) -> bool {
+    match &state.gateway {
+        Some(gateway) => gateway.is_reachable().await,
+        None => tokio::time::timeout(
+            Duration::from_secs(2),
+            TcpStream::connect(state.gateway_endpoint),
+        )
         .await
-        .is_ok_and(|result| result.is_ok())
+        .is_ok_and(|result| result.is_ok()),
+    }
 }
 
 use std::future::Future;

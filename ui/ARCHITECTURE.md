@@ -10,14 +10,14 @@ Code under `src-tauri/` owns operating-system and trust-boundary behavior:
 - macOS accessory activation and Windows GUI-process behavior.
 - Single-instance enforcement and window show, focus, hide, and quit behavior.
 - Per-user desktop preference persistence.
-- Provider credential storage through the native platform credential store.
-- Read-only, redacted managed organization and device-credential status.
+- Standalone-only provider credential storage through the native platform credential store. Managed organization mode never exposes this workflow.
+- Managed browser sign-in, device enrollment, approval polling, and redacted status.
 - Loopback connector status polling and tray-state updates.
 - Safe application adapters shared from the root Rust library.
 - Tauri commands exposed to the webview.
 - Packaging, application identity, capabilities, and code-signing configuration.
 
-The host currently exposes seven commands:
+The host currently exposes eight commands:
 
 | Command | Purpose |
 | --- | --- |
@@ -26,10 +26,11 @@ The host currently exposes seven commands:
 | `get_connector_status` | Reads and validates the connector's structured loopback status response. |
 | `get_claude_status` | Inspects Claude Code installation and routing without changing files. |
 | `get_managed_device_status` | Returns organization, session, enrollment, and public certificate metadata without credential material. |
+| `setup_managed_device` | Opens organization sign-in when needed, requests or refreshes device enrollment, and persists credentials entirely in Rust. |
 | `open_managed_page` | Opens only the configured organization support page or enrollment administration console in the system browser. |
 | `connect_claude` | Optionally stores a standalone provider key, then safely adds connector routing when no conflict exists. |
 
-The host reuses the root crate only for narrow application-adapter and managed-identity status behavior. It does not start the forwarding runtime in-process. Managed status is projected into a redacted DTO; OAuth tokens, private keys, and certificate PEM are never serialized into the webview, and public device identifiers are omitted from bulk diagnostics. The UI-local development backend may supervise Agent Gateway: it polls the native credential store and injects the provider key into the child environment when the Gateway configuration references `$ANTHROPIC_API_KEY`. The key is never returned by a Tauri command or included in diagnostics. Future installed-service lifecycle or configuration operations belong behind narrow Rust commands or a local authenticated IPC/control API. The UI must not interpret Agent Gateway policy.
+The host reuses the root crate for narrow application-adapter and managed-identity operations. It does not start the forwarding runtime in-process. Managed status is projected into a redacted DTO; OAuth tokens, private keys, certificate PEM, policy, model assignments, and provider credentials are never serialized into the webview. The separate UI-local development backend runs the connector service. In standalone mode only, it may supervise Agent Gateway and inject a credential-store provider key into the child environment when the Gateway configuration references `$ANTHROPIC_API_KEY`. In managed mode it waits for an approved client certificate, then starts mTLS forwarding to the organization-owned Gateway. Secrets are never returned by a Tauri command or included in diagnostics. Future installed-service lifecycle or configuration operations belong behind narrow Rust commands or a local authenticated IPC/control API. The UI must not interpret, cache, or enforce Agent Gateway policy.
 
 ## Window UI: React and TypeScript
 

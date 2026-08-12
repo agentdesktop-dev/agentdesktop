@@ -4,13 +4,16 @@ use std::{
 };
 
 use agentdesktop::{
-    config::Config,
-    proxy::{self, ProxyOptions},
+    config::{Config, DeploymentMode, upstream_origin},
+    identity::{
+        enrollment::load_client_identity_for,
+        storage::{CredentialStore, default_storage_root},
+    },
+    service,
 };
 use agentdesktop_ui::provider_credentials;
-use anyhow::bail;
+use anyhow::Context;
 use clap::Parser;
-use tokio::net::TcpListener;
 use tokio::process::{Child, Command};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -25,44 +28,65 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let config = Cli::parse().config.validate()?;
-    if config.identity_issuer.is_some() {
-        bail!("the UI development backend does not manage identity; run the installed service");
-    }
+    let mut config = Cli::parse().config.validate()?;
     #[cfg(target_os = "linux")]
     if config.capture_enabled {
-        bail!("the UI development backend does not manage transparent capture");
+        anyhow::bail!("the UI development backend does not manage transparent capture");
     }
 
-    let _telemetry = agentdesktop::telemetry::init()?;
-    let gateway_task = match (&config.gateway_binary, &config.gateway_config) {
-        (Some(binary), Some(gateway_config)) => Some(tokio::spawn(manage_gateway(
-            binary.clone(),
-            gateway_config.clone(),
-        ))),
-        _ => None,
-    };
-
-    let listener = TcpListener::bind(config.listen).await?;
-    let serve = proxy::serve_with_identity(
-        listener,
-        config.upstream,
-        config.mode,
-        None,
-        ProxyOptions {
-            connect_timeout: Duration::from_millis(config.connect_timeout_ms),
-            request_timeout: Duration::from_millis(config.request_timeout_ms),
-            shutdown_timeout: Duration::from_millis(config.shutdown_timeout_ms),
-            max_in_flight: config.max_in_flight,
-        },
-        shutdown_signal(),
-    );
-
-    let result = serve.await;
-    if let Some(task) = gateway_task {
-        task.abort();
+    if config.mode == DeploymentMode::Managed {
+        wait_for_managed_identity(&config).await?;
     }
-    result
+    let gateway_task = take_development_gateway(&mut config)
+        .map(|(binary, gateway_config)| tokio::spawn(manage_gateway(binary, gateway_config)));
+    if let Some(mut gateway_task) = gateway_task {
+        tokio::select! {
+            result = service::run(config) => {
+                gateway_task.abort();
+                result
+            }
+            result = &mut gateway_task => {
+                result.context("development Gateway task failed")??;
+                anyhow::bail!("development Gateway task exited unexpectedly")
+            }
+        }
+    } else {
+        service::run(config).await
+    }
+}
+
+fn take_development_gateway(config: &mut Config) -> Option<(PathBuf, PathBuf)> {
+    config
+        .gateway_binary
+        .take()
+        .zip(config.gateway_config.take())
+}
+
+async fn wait_for_managed_identity(config: &Config) -> anyhow::Result<()> {
+    let issuer = config
+        .identity_issuer
+        .as_ref()
+        .context("managed development requires an identity issuer")?;
+    let gateway_origin = upstream_origin(&config.upstream)?;
+    let identity_root = config
+        .identity_dir
+        .clone()
+        .map_or_else(default_storage_root, Ok)?;
+    eprintln!("[desktop] waiting for managed device approval");
+    loop {
+        if credential_store_is_initialized(&identity_root)
+            && let Ok(store) = CredentialStore::load(&identity_root)
+            && load_client_identity_for(issuer, &gateway_origin, &store).is_ok()
+        {
+            eprintln!("[desktop] managed device identity is ready");
+            return Ok(());
+        }
+        tokio::time::sleep(CREDENTIAL_CHECK_INTERVAL).await;
+    }
+}
+
+fn credential_store_is_initialized(identity_root: &Path) -> bool {
+    identity_root.join("credential-storage").is_file()
 }
 
 async fn manage_gateway(binary: PathBuf, config: PathBuf) -> anyhow::Result<()> {
@@ -135,21 +159,24 @@ async fn stop_gateway(child: &mut Option<Child>) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn shutdown_signal() {
-    if let Err(error) = tokio::signal::ctrl_c().await {
-        let _ = error;
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{gateway_requires_provider_key, spawn_gateway};
+    use super::{credential_store_is_initialized, gateway_requires_provider_key, spawn_gateway};
 
     #[test]
-    fn bundled_gateway_accepts_claude_model_ids_unchanged() {
+    fn does_not_open_an_uninitialized_managed_credential_store() {
+        let temporary = tempfile::tempdir().unwrap();
+        assert!(!credential_store_is_initialized(temporary.path()));
+
+        std::fs::write(temporary.path().join("credential-storage"), b"file\n").unwrap();
+        assert!(credential_store_is_initialized(temporary.path()));
+    }
+
+    #[test]
+    fn bundled_gateway_routes_models_without_rewriting() {
         let config = include_str!("../../../config/agentgateway-anthropic.yaml");
-        assert!(config.contains("- name: \"*\""));
-        assert!(!config.contains("anthropic/*"));
+        assert!(config.contains("tunnelProtocol: connect"));
+        assert!(config.contains("anthropic: {}"));
         assert!(!config.contains("stripPrefix"));
     }
 

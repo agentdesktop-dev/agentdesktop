@@ -33,13 +33,12 @@ export interface ConnectorRuntime {
   mode: string;
   gateway: string;
   identity: string;
-  inFlight: number;
-  maxInFlight: number;
-  connectTimeoutMs: number;
-  requestTimeoutMs: number;
-  shutdownTimeoutMs: number;
+  inFlight: number | null;
+  maxInFlight: number | null;
+  connectTimeoutMs: number | null;
+  shutdownTimeoutMs: number | null;
   platform: PlatformCapabilities;
-  metrics: MetricsSnapshot;
+  metrics: MetricsSnapshot | null;
 }
 
 export interface ConnectorSnapshot {

@@ -126,10 +126,8 @@ where
 {
     validate_issuer(&config.issuer)?;
     validate_gateway_origin(&config.gateway_origin)?;
-    let client = reqwest::Client::new();
-    let discovery_url = config
-        .issuer
-        .join(".well-known/oauth-authorization-server")?;
+    let client = super::tls::http_client()?;
+    let discovery_url = oauth_discovery_url(&config.issuer)?;
     let metadata: AuthorizationServerMetadata = client
         .get(discovery_url)
         .send()
@@ -232,13 +230,9 @@ async fn refresh_session(session: &mut StoredSession, store: &CredentialStore) -
         scope: session.scope.clone(),
         gateway_origin: session.gateway_origin.clone(),
     };
-    let client = reqwest::Client::new();
+    let client = super::tls::http_client()?;
     let metadata: AuthorizationServerMetadata = client
-        .get(
-            config
-                .issuer
-                .join(".well-known/oauth-authorization-server")?,
-        )
+        .get(oauth_discovery_url(&config.issuer)?)
         .send()
         .await?
         .error_for_status()?
@@ -343,6 +337,13 @@ fn validate_gateway_origin(gateway_origin: &Url) -> Result<()> {
         bail!("gateway origin must be an HTTP(S) origin without a path, query, or fragment");
     }
     Ok(())
+}
+
+fn oauth_discovery_url(issuer: &Url) -> Result<Url> {
+    Ok(Url::parse(&format!(
+        "{}/.well-known/oauth-authorization-server",
+        issuer.as_str().trim_end_matches('/')
+    ))?)
 }
 
 fn validate_metadata(config: &LoginConfig, metadata: &AuthorizationServerMetadata) -> Result<()> {
@@ -475,7 +476,7 @@ fn random_secret() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{LoginConfig, open_authorization_url_with, validate_issuer};
+    use super::{LoginConfig, oauth_discovery_url, open_authorization_url_with, validate_issuer};
     use anyhow::bail;
     use url::Url;
 
@@ -488,6 +489,15 @@ mod tests {
     fn rejects_remote_http_issuer() {
         let error = validate_issuer(&Url::parse("http://identity.example").unwrap()).unwrap_err();
         assert!(error.to_string().contains("must use HTTPS"));
+    }
+
+    #[test]
+    fn appends_discovery_to_path_scoped_issuer() {
+        let issuer = Url::parse("https://identity.example/realms/acme").unwrap();
+        assert_eq!(
+            oauth_discovery_url(&issuer).unwrap().as_str(),
+            "https://identity.example/realms/acme/.well-known/oauth-authorization-server"
+        );
     }
 
     #[test]

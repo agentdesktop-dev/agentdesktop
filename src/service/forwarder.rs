@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
@@ -13,9 +14,81 @@ use super::hbone::HboneClient;
 
 const GATEWAY_UNAVAILABLE: &[u8] = b"HTTP/1.1 502 Bad Gateway\r\ncontent-type: text/plain; charset=utf-8\r\nx-agentdesktop-error: gateway-unavailable\r\ncontent-length: 26\r\nconnection: close\r\n\r\nagent gateway unavailable\n";
 
+#[derive(Clone, Default)]
+pub struct ForwarderMetrics {
+    counters: Arc<ForwarderCounters>,
+}
+
+#[derive(Default)]
+struct ForwarderCounters {
+    requests: AtomicU64,
+    upstream_responses: AtomicU64,
+    identity_failures: AtomicU64,
+    overload_rejections: AtomicU64,
+    upstream_timeouts: AtomicU64,
+    upstream_failures: AtomicU64,
+    in_flight: AtomicUsize,
+}
+
+#[derive(serde::Serialize)]
+pub struct ForwarderMetricsSnapshot {
+    requests: u64,
+    upstream_responses: u64,
+    identity_failures: u64,
+    overload_rejections: u64,
+    upstream_timeouts: u64,
+    upstream_failures: u64,
+}
+
+impl ForwarderMetrics {
+    pub fn snapshot(&self) -> ForwarderMetricsSnapshot {
+        ForwarderMetricsSnapshot {
+            requests: self.counters.requests.load(Ordering::Relaxed),
+            upstream_responses: self.counters.upstream_responses.load(Ordering::Relaxed),
+            identity_failures: self.counters.identity_failures.load(Ordering::Relaxed),
+            overload_rejections: self.counters.overload_rejections.load(Ordering::Relaxed),
+            upstream_timeouts: self.counters.upstream_timeouts.load(Ordering::Relaxed),
+            upstream_failures: self.counters.upstream_failures.load(Ordering::Relaxed),
+        }
+    }
+
+    pub fn in_flight(&self) -> usize {
+        self.counters.in_flight.load(Ordering::Relaxed)
+    }
+
+    fn start_flow(&self) -> ActiveFlow {
+        self.counters.in_flight.fetch_add(1, Ordering::Relaxed);
+        ActiveFlow(self.clone())
+    }
+
+    fn record_failure(&self, error: &anyhow::Error) {
+        if error
+            .chain()
+            .any(|cause| cause.is::<tokio::time::error::Elapsed>())
+        {
+            self.counters
+                .upstream_timeouts
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.counters
+                .upstream_failures
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+struct ActiveFlow(ForwarderMetrics);
+
+impl Drop for ActiveFlow {
+    fn drop(&mut self) {
+        self.0.counters.in_flight.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 pub async fn serve_native(
     listener: TcpListener,
     hbone: HboneClient,
+    metrics: ForwarderMetrics,
     destination: Authority,
     max_tunnels: usize,
     shutdown_timeout: Duration,
@@ -24,6 +97,7 @@ pub async fn serve_native(
     serve(
         listener,
         hbone,
+        metrics,
         max_tunnels,
         shutdown_timeout,
         shutdown,
@@ -37,6 +111,7 @@ pub async fn serve_native(
 pub async fn serve_native_sessions(
     listener: TcpListener,
     sessions: crate::session::SessionRegistry<u32>,
+    metrics: ForwarderMetrics,
     destination: Authority,
     max_tunnels: usize,
     shutdown_timeout: Duration,
@@ -44,6 +119,7 @@ pub async fn serve_native_sessions(
 ) -> Result<()> {
     serve_resolved(
         listener,
+        metrics,
         max_tunnels,
         shutdown_timeout,
         shutdown,
@@ -65,6 +141,7 @@ pub async fn serve_native_sessions(
 pub async fn serve_native_sessions(
     listener: TcpListener,
     sessions: crate::session::SessionRegistry<crate::session::windows::UserSid>,
+    metrics: ForwarderMetrics,
     public_destination: std::net::SocketAddr,
     destination: Authority,
     max_tunnels: usize,
@@ -73,6 +150,7 @@ pub async fn serve_native_sessions(
 ) -> Result<()> {
     serve_resolved(
         listener,
+        metrics,
         max_tunnels,
         shutdown_timeout,
         shutdown,
@@ -101,6 +179,7 @@ pub async fn serve_native_sessions(
 #[cfg(all(target_os = "windows", target_env = "msvc"))]
 pub async fn serve_native_without_attribution(
     listener: TcpListener,
+    metrics: ForwarderMetrics,
     max_tunnels: usize,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
@@ -120,11 +199,16 @@ pub async fn serve_native_without_attribution(
             }
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
+                metrics.counters.requests.fetch_add(1, Ordering::Relaxed);
                 let Ok(permit) = permits.clone().try_acquire_owned() else {
+                    metrics.counters.overload_rejections.fetch_add(1, Ordering::Relaxed);
                     tracing::warn!(event = "tunnel_rejected", reason = "overloaded");
                     continue;
                 };
+                let metrics = metrics.clone();
                 rejections.spawn(async move {
+                    let _active_flow = metrics.start_flow();
+                    metrics.counters.identity_failures.fetch_add(1, Ordering::Relaxed);
                     if let Err(error) = reject(
                         stream,
                         anyhow::anyhow!("Windows WFP user attribution is unavailable"),
@@ -153,6 +237,7 @@ pub async fn serve_capture(
     serve(
         listener,
         hbone,
+        ForwarderMetrics::default(),
         max_tunnels,
         shutdown_timeout,
         shutdown,
@@ -172,6 +257,7 @@ pub async fn serve_capture_sessions(
 ) -> Result<()> {
     serve_resolved(
         listener,
+        metrics,
         max_tunnels,
         shutdown_timeout,
         shutdown,
@@ -200,6 +286,7 @@ pub async fn serve_capture_sessions(
 async fn serve<F>(
     listener: TcpListener,
     hbone: HboneClient,
+    metrics: ForwarderMetrics,
     max_tunnels: usize,
     shutdown_timeout: Duration,
     shutdown: impl Future<Output = ()>,
@@ -212,6 +299,7 @@ where
     let destination_for = Arc::new(destination_for);
     serve_resolved(
         listener,
+        metrics,
         max_tunnels,
         shutdown_timeout,
         shutdown,
@@ -231,6 +319,7 @@ where
 
 async fn serve_resolved<Resolve, Resolved>(
     listener: TcpListener,
+    metrics: ForwarderMetrics,
     max_tunnels: usize,
     shutdown_timeout: Duration,
     shutdown: impl Future<Output = ()>,
@@ -257,20 +346,37 @@ where
             }
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
+                metrics.counters.requests.fetch_add(1, Ordering::Relaxed);
                 let Ok(permit) = permits.clone().try_acquire_owned() else {
+                    metrics.counters.overload_rejections.fetch_add(1, Ordering::Relaxed);
                     tracing::warn!(event = "tunnel_rejected", reason = "overloaded");
                     continue;
                 };
                 let resolve = resolve.clone();
+                let metrics = metrics.clone();
                 tunnels.spawn(async move {
+                    let _active_flow = metrics.start_flow();
                     let (stream, resolved) = resolve(stream).await;
-                    let result = match resolved {
-                        Ok((hbone, destination)) => forward(stream, &hbone, Ok(destination)).await,
-                        Err(error) => reject(stream, error).await,
+                    let (result, resolution_failed) = match resolved {
+                        Ok((hbone, destination)) => {
+                            (forward(stream, &hbone, Ok(destination)).await, false)
+                        }
+                        Err(error) => {
+                            metrics.counters.identity_failures.fetch_add(1, Ordering::Relaxed);
+                            (reject(stream, error).await, true)
+                        }
                     };
                     drop(permit);
-                    if let Err(error) = result {
-                        tracing::warn!(event = "tunnel_failed", reason = %error);
+                    match result {
+                        Ok(()) => {
+                            metrics.counters.upstream_responses.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(error) => {
+                            if !resolution_failed {
+                                metrics.record_failure(&error);
+                            }
+                            tracing::warn!(event = "tunnel_failed", reason = %error);
+                        }
                     }
                 });
             }
@@ -292,7 +398,6 @@ async fn drain_tunnels(tunnels: &mut JoinSet<()>, shutdown_timeout: Duration) ->
     Ok(())
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "windows", target_env = "msvc")))]
 async fn reject(mut stream: TcpStream, error: anyhow::Error) -> Result<()> {
     let _ = stream.write_all(GATEWAY_UNAVAILABLE).await;
     stream.shutdown().await?;
@@ -327,7 +432,7 @@ mod tests {
     use tokio::sync::oneshot;
     use tokio::time::{Duration, timeout};
 
-    use super::{HboneClient, serve_native};
+    use super::{ForwarderMetrics, HboneClient, serve_native};
     #[cfg(all(target_os = "windows", target_env = "msvc"))]
     use super::{serve_native_sessions, serve_native_without_attribution};
 
@@ -360,9 +465,12 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let metrics = ForwarderMetrics::default();
+        let metrics_snapshot = metrics.clone();
         let relay = tokio::spawn(serve_native(
             listener,
             hbone,
+            metrics,
             "native.internal:18443".parse().unwrap(),
             1,
             Duration::from_secs(1),
@@ -384,6 +492,11 @@ mod tests {
         .await
         .expect("native forwarding exchange timed out");
         assert!(response.ends_with(b"SMOKE_OK"));
+        let snapshot = metrics_snapshot.snapshot();
+        assert_eq!(snapshot.requests, 1);
+        assert_eq!(snapshot.upstream_responses, 1);
+        assert_eq!(snapshot.upstream_failures, 0);
+        assert_eq!(metrics_snapshot.in_flight(), 0);
         let _ = shutdown_tx.send(());
         relay.await.unwrap().unwrap();
         server.await.unwrap();
@@ -404,9 +517,12 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let metrics = ForwarderMetrics::default();
+        let metrics_snapshot = metrics.clone();
         let relay = tokio::spawn(serve_native(
             listener,
             hbone,
+            metrics,
             "native.internal:18443".parse().unwrap(),
             1,
             Duration::from_secs(1),
@@ -431,6 +547,11 @@ mod tests {
 
         assert!(response.starts_with(b"HTTP/1.1 502 Bad Gateway\r\n"));
         assert!(response.ends_with(b"agent gateway unavailable\n"));
+        let snapshot = metrics_snapshot.snapshot();
+        assert_eq!(snapshot.requests, 1);
+        assert_eq!(snapshot.upstream_responses, 0);
+        assert_eq!(snapshot.upstream_failures, 1);
+        assert_eq!(metrics_snapshot.in_flight(), 0);
         let _ = shutdown_tx.send(());
         relay.await.unwrap().unwrap();
     }
@@ -441,9 +562,14 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (shutdown, stopping) = oneshot::channel();
-        let service = tokio::spawn(serve_native_without_attribution(listener, 8, async move {
-            let _ = stopping.await;
-        }));
+        let service = tokio::spawn(serve_native_without_attribution(
+            listener,
+            ForwarderMetrics::default(),
+            8,
+            async move {
+                let _ = stopping.await;
+            },
+        ));
         let mut client = TcpStream::connect(address).await.unwrap();
         let mut response = Vec::new();
         client.read_to_end(&mut response).await.unwrap();
@@ -470,6 +596,7 @@ mod tests {
         let service = tokio::spawn(serve_native_sessions(
             listener,
             registry,
+            ForwarderMetrics::default(),
             "127.0.0.1:8080".parse().unwrap(),
             "native.agentdesktop.internal:18443".parse().unwrap(),
             8,

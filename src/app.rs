@@ -21,6 +21,8 @@ enum Command {
         #[arg(long, help = "Connect supported agents without prompting")]
         yes: bool,
     },
+    /// Remove only Agent Desktop-owned settings from supported AI agents.
+    DisconnectAgents,
     /// Configure managed identity for Agent Desktop.
     Identity {
         #[command(subcommand)]
@@ -54,6 +56,10 @@ pub async fn run() -> anyhow::Result<ExitCode> {
         }
         Command::ConnectAgents { yes } => {
             crate::connection::run(yes).await?;
+            None
+        }
+        Command::DisconnectAgents => {
+            crate::connection::disconnect()?;
             None
         }
         Command::Identity { command } => {

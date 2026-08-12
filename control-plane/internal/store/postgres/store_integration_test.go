@@ -6,14 +6,17 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/agentpolicy"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/certificate"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/deviceidentity"
+	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/discoveryreport"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/enrollment"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/identifier"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/renewal"
@@ -51,8 +54,9 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 	}
 	record, err := store.CreatePending(
 		ctx,
-		enrollment.Principal{Issuer: issuer, Subject: "user-1"},
+		enrollment.Principal{Issuer: issuer, Subject: "user-1", DisplayName: "employee"},
 		request,
+		"workstation-7",
 		enrollmentID,
 	)
 	if err != nil {
@@ -79,6 +83,7 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 		ctx,
 		enrollment.Principal{Issuer: issuer, Subject: "user-1"},
 		request,
+		"workstation-7",
 		retryID,
 	)
 	if err != nil {
@@ -93,20 +98,20 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	var storedIssuer, storedSubject, storedStatus, storedFingerprint string
+	var storedIssuer, storedSubject, storedDisplayName, storedStatus, storedFingerprint string
 	var storedCSR []byte
 	err = pool.QueryRow(ctx, `
-		SELECT organizations.issuer, users.subject, enrollments.status,
+		SELECT organizations.issuer, users.subject, COALESCE(users.display_name, ''), enrollments.status,
 		       enrollments.public_key_fingerprint, enrollments.csr_der
 		FROM enrollments
 		JOIN organizations ON organizations.id = enrollments.organization_id
 		JOIN users ON users.id = enrollments.user_id
 		WHERE enrollments.id = $1
-	`, record.ID).Scan(&storedIssuer, &storedSubject, &storedStatus, &storedFingerprint, &storedCSR)
+	`, record.ID).Scan(&storedIssuer, &storedSubject, &storedDisplayName, &storedStatus, &storedFingerprint, &storedCSR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if storedIssuer != issuer || storedSubject != "user-1" || storedStatus != "pending" ||
+	if storedIssuer != issuer || storedSubject != "user-1" || storedDisplayName != "employee" || storedStatus != "pending" ||
 		storedFingerprint != request.PublicKeyFingerprint || string(storedCSR) != string(request.DER) {
 		t.Fatal("persisted enrollment does not match validated input")
 	}
@@ -240,7 +245,7 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 	}
 	if _, err := store.Begin(
 		ctx,
-		enrollment.Principal{Issuer: issuer, Subject: "user-2"},
+		enrollment.Principal{Issuer: issuer, Subject: "user-2", DisplayName: "reviewer"},
 		presentedDevice,
 		validRequest(t),
 		retryRenewalID,
@@ -353,8 +358,9 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 	}
 	rejectRecord, err := store.CreatePending(
 		ctx,
-		enrollment.Principal{Issuer: issuer, Subject: "user-2"},
+		enrollment.Principal{Issuer: issuer, Subject: "user-2", DisplayName: "reviewer"},
 		rejectRequest,
+		"review-device",
 		rejectEnrollmentID,
 	)
 	if err != nil {
@@ -364,7 +370,8 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pendingRecords) != 1 || pendingRecords[0].EnrollmentID != rejectRecord.ID || pendingRecords[0].Subject != "user-2" {
+	if len(pendingRecords) != 1 || pendingRecords[0].EnrollmentID != rejectRecord.ID || pendingRecords[0].Subject != "user-2" ||
+		pendingRecords[0].Username != "reviewer" || pendingRecords[0].DeviceName != "review-device" {
 		t.Fatalf("pending administrator records = %#v", pendingRecords)
 	}
 	foreignOrganizationID, err := identifier.New()
@@ -380,8 +387,167 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(approvedRecords) != 1 || approvedRecords[0].DeviceID != deviceID {
+	if len(approvedRecords) != 1 || approvedRecords[0].DeviceID != deviceID || approvedRecords[0].Username != "employee" || approvedRecords[0].DeviceName != "workstation-7" {
 		t.Fatalf("approved administrator records = %#v", approvedRecords)
+	}
+	devices, err := store.ListDevices(ctx, administrator, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != 1 || devices[0].DeviceID != deviceID || devices[0].DeviceName != "workstation-7" || devices[0].Status != "active" ||
+		devices[0].Subject != "user-1" || devices[0].Username != "employee" || devices[0].CertificateCount != 3 ||
+		devices[0].RenewalCount != 2 || devices[0].CurrentCertificateSerialNumber == nil ||
+		*devices[0].CurrentCertificateSerialNumber != recoveredCertificate.SerialNumber {
+		t.Fatalf("administrator devices = %#v", devices)
+	}
+	var ownerUserID string
+	if err := pool.QueryRow(ctx, `SELECT id FROM users WHERE organization_id = $1 AND subject = 'user-1'`, organizationID).Scan(&ownerUserID); err != nil {
+		t.Fatal(err)
+	}
+	discoveryIdentity := deviceidentity.Identity{
+		OrganizationID: organizationID,
+		UserID:         ownerUserID,
+		DeviceID:       deviceID,
+		SerialNumber:   recoveredCertificate.SerialNumber,
+	}
+	discovery := discoveryreport.Report{
+		SchemaVersion:    discoveryreport.SchemaVersion,
+		CollectorVersion: "0.1.0",
+		Platform:         "macos",
+		Coverage:         discoveryreport.Coverage{ProjectScopes: "not_scanned"},
+		Agents: []discoveryreport.Agent{{
+			ID: "claude-code", Installed: true, Running: "detected", Evidence: []string{"executable"},
+			MCPServers: []discoveryreport.MCPServer{{Name: "github", Scope: "user", Transport: "stdio"}},
+			Skills:     []discoveryreport.NamedResource{{Name: "review-pr", Scope: "user"}},
+			Plugins:    []discoveryreport.Plugin{{Name: "browser", Scope: "user", State: "enabled"}},
+		}},
+	}
+	discoveryJSON, err := json.Marshal(discovery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleIdentity := discoveryIdentity
+	staleIdentity.SerialNumber = renewedCertificate.SerialNumber
+	if _, err := store.PutLatestDiscoveryReport(ctx, staleIdentity, discovery.SchemaVersion, discoveryJSON); !errors.Is(err, discoveryreport.ErrNotActive) {
+		t.Fatalf("stale certificate discovery report error = %v", err)
+	}
+	foreignIdentity := discoveryIdentity
+	foreignIdentity.OrganizationID = foreignOrganizationID
+	if _, err := store.PutLatestDiscoveryReport(ctx, foreignIdentity, discovery.SchemaVersion, discoveryJSON); !errors.Is(err, discoveryreport.ErrNotActive) {
+		t.Fatalf("foreign certificate discovery report error = %v", err)
+	}
+	wrongUserIdentity := discoveryIdentity
+	wrongUserIdentity.UserID = foreignOrganizationID
+	if _, err := store.PutLatestDiscoveryReport(ctx, wrongUserIdentity, discovery.SchemaVersion, discoveryJSON); !errors.Is(err, discoveryreport.ErrNotActive) {
+		t.Fatalf("wrong-user discovery report error = %v", err)
+	}
+	if _, err := store.PutLatestDiscoveryReport(ctx, discoveryIdentity, discovery.SchemaVersion, discoveryJSON); err != nil {
+		t.Fatal(err)
+	}
+	rescan, err := store.RequestDiscoveryRescan(ctx, administrator, discoveryreport.RescanRequest{
+		TargetMode: "selected", DeviceIDs: []string{deviceID},
+	})
+	if err != nil || rescan.Requested != 1 || rescan.RequestedAt.IsZero() {
+		t.Fatalf("selected discovery rescan = %#v, error = %v", rescan, err)
+	}
+	rescanStatus, err := store.GetDiscoveryRescanStatus(ctx, discoveryIdentity)
+	if err != nil || !rescanStatus.Pending || rescanStatus.RequestedAt == nil {
+		t.Fatalf("pending discovery rescan = %#v, error = %v", rescanStatus, err)
+	}
+	if _, err := store.PutLatestDiscoveryReport(ctx, discoveryIdentity, discovery.SchemaVersion, discoveryJSON); err != nil {
+		t.Fatal(err)
+	}
+	rescanStatus, err = store.GetDiscoveryRescanStatus(ctx, discoveryIdentity)
+	if err != nil || rescanStatus.Pending {
+		t.Fatalf("completed discovery rescan = %#v, error = %v", rescanStatus, err)
+	}
+	allRescan, err := store.RequestDiscoveryRescan(ctx, administrator, discoveryreport.RescanRequest{TargetMode: "all_active"})
+	if err != nil || allRescan.Requested != 1 {
+		t.Fatalf("all-active discovery rescan = %#v, error = %v", allRescan, err)
+	}
+	inventory, err := store.ListInventoryAssets(ctx, administrator, discoveryreport.InventoryQuery{Kind: "agent", Limit: 50})
+	if err != nil || inventory.Counts.ActiveDevices != 1 || inventory.Counts.ReportingDevices != 1 ||
+		inventory.Counts.Agents != 1 || inventory.Counts.MCPServers != 1 || inventory.Counts.Skills != 1 || inventory.Counts.Plugins != 1 ||
+		inventory.Total != 1 || len(inventory.Assets) != 1 ||
+		inventory.Assets[0].Key != "claude-code" || inventory.Assets[0].DeviceCount != 1 {
+		t.Fatalf("agent inventory = %#v, error = %v", inventory, err)
+	}
+	for _, expectation := range []struct {
+		kind, key, detail string
+	}{
+		{kind: "mcp", key: "github", detail: "stdio"},
+		{kind: "skill", key: "review-pr"},
+		{kind: "plugin", key: "browser", detail: "enabled"},
+	} {
+		assets, err := store.ListInventoryAssets(ctx, administrator, discoveryreport.InventoryQuery{Kind: expectation.kind, Limit: 50})
+		if err != nil || assets.Total != 1 || len(assets.Assets) != 1 || assets.Assets[0].Key != expectation.key || assets.Assets[0].Detail != expectation.detail {
+			t.Fatalf("%s inventory = %#v, error = %v", expectation.kind, assets, err)
+		}
+		devices, err := store.ListInventoryDevices(ctx, administrator, discoveryreport.InventoryDeviceQuery{
+			Kind: expectation.kind, Key: expectation.key, Detail: expectation.detail, Limit: 50,
+		})
+		if err != nil || devices.Total != 1 || len(devices.Devices) != 1 || devices.Devices[0].DeviceID != deviceID {
+			t.Fatalf("%s inventory devices = %#v, error = %v", expectation.kind, devices, err)
+		}
+	}
+	inventoryDevices, err := store.ListInventoryDevices(ctx, administrator, discoveryreport.InventoryDeviceQuery{
+		Kind: "agent", Key: "claude-code", Limit: 50,
+	})
+	if err != nil || inventoryDevices.Total != 1 || len(inventoryDevices.Devices) != 1 || inventoryDevices.Devices[0].DeviceID != deviceID {
+		t.Fatalf("agent inventory devices = %#v, error = %v", inventoryDevices, err)
+	}
+	searchedDevices, err := store.ListInventoryDevices(ctx, administrator, discoveryreport.InventoryDeviceQuery{Search: "workstation", Limit: 50})
+	if err != nil || searchedDevices.Total != 1 || len(searchedDevices.Devices) != 1 {
+		t.Fatalf("searched inventory devices = %#v, error = %v", searchedDevices, err)
+	}
+	if _, err := store.GetAgentPolicy(ctx, administrator); !errors.Is(err, agentpolicy.ErrNotFound) {
+		t.Fatalf("missing agent policy error = %v", err)
+	}
+	policyRequest := agentpolicy.Request{SchemaVersion: agentpolicy.SchemaVersion, Rules: agentpolicy.Default().Rules}
+	policyRequest.Rules[2].Action = "deny"
+	policy, err := store.PutAgentPolicy(ctx, administrator, policyRequest)
+	if err != nil || !policy.Configured || policy.Rules[2].AgentID != "codex-cli" || policy.Rules[2].Action != "deny" {
+		t.Fatalf("stored agent policy = %#v, error = %v", policy, err)
+	}
+	loadedPolicy, err := store.GetAgentPolicy(ctx, administrator)
+	if err != nil || len(loadedPolicy.Rules) != 5 || loadedPolicy.Rules[2].Action != "deny" || loadedPolicy.Enforcement != "not_available" {
+		t.Fatalf("loaded agent policy = %#v, error = %v", loadedPolicy, err)
+	}
+	if _, err := store.GetAgentPolicy(ctx, foreignAdministrator); !errors.Is(err, agentpolicy.ErrNotFound) {
+		t.Fatalf("foreign agent policy error = %v", err)
+	}
+	policyRequest.Rules[2].Action = "allow"
+	if _, err := store.PutAgentPolicy(ctx, administrator, policyRequest); err != nil {
+		t.Fatal(err)
+	}
+	loadedPolicy, err = store.GetAgentPolicy(ctx, administrator)
+	if err != nil || loadedPolicy.Rules[2].Action != "allow" {
+		t.Fatalf("replaced agent policy = %#v, error = %v", loadedPolicy, err)
+	}
+	loadedDiscovery, err := store.GetLatestDiscoveryReport(ctx, administrator, deviceID)
+	if err != nil || len(loadedDiscovery.Report.Agents) != 1 || loadedDiscovery.Report.Agents[0].ID != "claude-code" {
+		t.Fatalf("discovery report = %#v, error = %v", loadedDiscovery, err)
+	}
+	if _, err := store.GetLatestDiscoveryReport(ctx, foreignAdministrator, deviceID); !errors.Is(err, discoveryreport.ErrNotFound) {
+		t.Fatalf("foreign discovery report error = %v", err)
+	}
+	discovery.Agents[0].Installed = false
+	discoveryJSON, _ = json.Marshal(discovery)
+	if _, err := store.PutLatestDiscoveryReport(ctx, discoveryIdentity, discovery.SchemaVersion, discoveryJSON); err != nil {
+		t.Fatal(err)
+	}
+	loadedDiscovery, err = store.GetLatestDiscoveryReport(ctx, administrator, deviceID)
+	if err != nil || loadedDiscovery.Report.Agents[0].Installed {
+		t.Fatalf("replacement discovery report = %#v, error = %v", loadedDiscovery, err)
+	}
+	summary, err := store.Summary(ctx, administrator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.PendingEnrollments != 1 || summary.ApprovedEnrollments != 1 ||
+		summary.ActiveDevices != 1 || summary.RevokedDevices != 0 ||
+		summary.CertificatesExpiring24H != 1 || summary.Renewals24H != 2 || summary.GeneratedAt.IsZero() {
+		t.Fatalf("fleet summary before revocation = %#v", summary)
 	}
 	if _, err := store.RevokeDevice(ctx, foreignAdministrator, deviceID); !errors.Is(err, enrollment.ErrNotActive) {
 		t.Fatalf("foreign device revocation error = %v, want ErrNotActive", err)
@@ -398,6 +564,12 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 	}
 	if _, err := store.Begin(ctx, owner, presentedDevice, validRequest(t), retryRenewalID); !errors.Is(err, renewal.ErrNotActive) {
 		t.Fatalf("revoked device renewal error = %v, want ErrNotActive", err)
+	}
+	if _, err := store.PutLatestDiscoveryReport(ctx, discoveryIdentity, discovery.SchemaVersion, discoveryJSON); !errors.Is(err, discoveryreport.ErrNotActive) {
+		t.Fatalf("revoked device discovery report error = %v", err)
+	}
+	if retained, err := store.GetLatestDiscoveryReport(ctx, administrator, deviceID); err != nil || retained.DeviceID != deviceID {
+		t.Fatalf("retained revoked-device discovery report = %#v, error = %v", retained, err)
 	}
 	var deviceStatus string
 	var deviceRevokedAt, certificateRevokedAt time.Time
@@ -457,6 +629,15 @@ func TestCreatePendingPersistsAuthenticatedIdentityAndCSR(t *testing.T) {
 	}
 	if auditCount != 1 {
 		t.Fatalf("rejection audit event count = %d, want 1", auditCount)
+	}
+	summary, err = store.Summary(ctx, administrator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.PendingEnrollments != 0 || summary.RejectedEnrollments != 1 ||
+		summary.ActiveDevices != 0 || summary.RevokedDevices != 1 ||
+		summary.CertificatesExpiring24H != 0 {
+		t.Fatalf("fleet summary after revocation = %#v", summary)
 	}
 
 }

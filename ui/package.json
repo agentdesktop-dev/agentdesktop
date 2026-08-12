@@ -10,7 +10,6 @@
     "dev:desktop": "node scripts/dev-desktop.mjs",
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview --host 127.0.0.1",
     "start": "tauri dev",
     "tauri": "tauri",
     "dist": "tauri build",

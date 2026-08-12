@@ -15,6 +15,7 @@ pub(crate) mod hbone;
 mod renewal;
 mod status;
 
+use forwarder::ForwarderMetrics;
 use hbone::HboneClient;
 
 const LOCAL_GATEWAY_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -52,13 +53,17 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     } else {
         Some(match config.mode {
             crate::config::DeploymentMode::Managed => {
+                let host = config
+                    .upstream
+                    .host_str()
+                    .context("managed Gateway upstream has no hostname")?;
+                let port = config
+                    .upstream
+                    .port_or_known_default()
+                    .context("managed Gateway upstream has no port")?;
                 HboneClient::connect_mtls(
-                    gateway_endpoint,
-                    config
-                        .upstream
-                        .host_str()
-                        .context("managed Gateway upstream has no hostname")?
-                        .to_owned(),
+                    host.to_owned(),
+                    port,
                     client_identity.context("managed mode requires an enrolled client identity")?,
                     Duration::from_millis(config.connect_timeout_ms),
                     hbone::TlsRoots::Native,
@@ -139,6 +144,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         )?;
     }
     let status_listener = TcpListener::bind(config.status_listen).await?;
+    let metrics = ForwarderMetrics::default();
     tracing::info!(
         event = "connector_started",
         mode = config.mode.as_str(),
@@ -154,6 +160,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         tokio::spawn(forwarder::serve_native_sessions(
             native_listener,
             registry.clone(),
+            metrics.clone(),
             config.native_target.clone(),
             config.max_in_flight,
             Duration::from_millis(config.shutdown_timeout_ms),
@@ -165,6 +172,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             hbone
                 .clone()
                 .context("forwarding identity is unavailable")?,
+            metrics.clone(),
             config.native_target.clone(),
             config.max_in_flight,
             Duration::from_millis(config.shutdown_timeout_ms),
@@ -177,6 +185,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             tokio::spawn(forwarder::serve_native_sessions(
                 native_listener,
                 registry.clone(),
+                metrics.clone(),
                 config.listen,
                 config.native_target.clone(),
                 config.max_in_flight,
@@ -186,6 +195,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         } else if session_state.is_some() {
             tokio::spawn(forwarder::serve_native_without_attribution(
                 native_listener,
+                metrics.clone(),
                 config.max_in_flight,
                 wait_for_shutdown(native_shutdown),
             ))
@@ -195,6 +205,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
                 hbone
                     .clone()
                     .context("forwarding identity is unavailable")?,
+                metrics.clone(),
                 config.native_target.clone(),
                 config.max_in_flight,
                 Duration::from_millis(config.shutdown_timeout_ms),
@@ -207,6 +218,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         hbone
             .clone()
             .context("forwarding identity is unavailable")?,
+        metrics.clone(),
         config.native_target.clone(),
         config.max_in_flight,
         Duration::from_millis(config.shutdown_timeout_ms),
@@ -215,9 +227,14 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     let status_shutdown = shutdown_rx.clone();
     let status_task = tokio::spawn(status::serve(
         status_listener,
+        hbone.clone(),
         gateway_endpoint,
         config.mode,
         identity.clone(),
+        metrics.clone(),
+        config.max_in_flight,
+        config.connect_timeout_ms,
+        config.shutdown_timeout_ms,
         wait_for_shutdown(status_shutdown),
     ));
 
@@ -247,7 +264,8 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         None
     };
     #[cfg(not(target_os = "linux"))]
-    let capture_task = None;
+    let capture_task: Option<tokio::task::JoinHandle<anyhow::Result<()>>> = None;
+    #[cfg(any(target_os = "linux", all(target_os = "windows", target_env = "msvc")))]
     let session_task = session_state.as_ref().map(|(endpoint, registry)| {
         tokio::spawn(crate::session::serve_registrations(
             endpoint.clone(),
@@ -256,6 +274,8 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             shutdown_rx.clone(),
         ))
     });
+    #[cfg(not(any(target_os = "linux", all(target_os = "windows", target_env = "msvc"))))]
+    let session_task: Option<tokio::task::JoinHandle<anyhow::Result<()>>> = None;
     let renewal_task = managed_identity.map(renewal::spawn);
     let result = if let Some(gateway) = &mut local_gateway {
         tokio::select! {

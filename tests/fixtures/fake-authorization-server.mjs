@@ -128,6 +128,7 @@ export async function startFakeAuthorizationServer({
         iss: issuer,
         aud: audience,
         sub: tokenSubject,
+        preferred_username: tokenSubject,
         iat: now,
         exp: now + 3600,
         jti: randomUUID(),

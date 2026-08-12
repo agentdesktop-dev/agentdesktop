@@ -1,6 +1,8 @@
 # Agent Desktop
 
-Agent Desktop connects AI applications on a laptop to [Agent Gateway](https://github.com/agentgateway/agentgateway). It gives individuals and organizations one place to route AI traffic through Gateway policy without putting policy, provider credentials, or content inspection in a desktop agent.
+Agent Desktop is an open-source workstation application for managing employee AI agents. It is designed to discover local agents and resources, apply organization policy, enforce controls, and report operational activity while employees continue using tools such as Claude Code normally.
+
+The current development milestone implements device enrollment, managed identity, inference routing through [Agent Gateway](https://github.com/agentgateway/agentgateway), revocation bookkeeping, privacy-safe flow statistics, and bounded macOS agent/MCP/skill discovery for managed devices. Cross-platform discovery, centralized endpoint policy distribution, audit/warn modes, sandbox controls, budgets, and detailed agent activity remain target capabilities.
 
 Source: [github.com/agentdesktop-dev/agentdesktop](https://github.com/agentdesktop-dev/agentdesktop)
 
@@ -15,7 +17,17 @@ Agent Desktop supports two deployment models. They use the same thin connector, 
 | **Self-managed local** (`standalone` in the CLI) | Individual developers, independent AI users, and OSS users protecting agents on their own machine | On the user's laptop, as a separate process beside Agent Desktop | The user owns Gateway policy, provider credentials, trust, and data retention. No organization, OAuth login, enrollment service, MDM, or remote control plane is required. |
 | **Remote managed** (`managed` in the CLI) | Companies, security teams, and IT administrators managing employee laptops | Remotely in the organization's network | The organization owns Gateway policy and provider credentials. The employee signs in with organizational OAuth, an administrator approves the device, and a short-lived mTLS certificate identifies the organization, user, and device. MDM may install and configure the connector. |
 
-Use **self-managed local** when one person owns both the laptop and its AI policy. Use **remote managed** when an organization needs centrally administered policy and cryptographically verified employee and device identity across a fleet.
+Use **self-managed local** when one person owns both the laptop and its AI policy. Use **remote managed** when an organization needs centrally administered policy and cryptographically verified employee and device identity across a fleet. See [Deployment Modes](docs/architecture/deployment-modes.md) for the implemented feature comparison and one-app convergence plan.
+
+## Product direction
+
+| Area | Target experience | Current implementation |
+| --- | --- | --- |
+| Discovery | Inventory agents, models, providers, MCP servers, tools, and relevant configuration on every endpoint. | Remote managed macOS reports Claude Code, Claude Desktop, Codex CLI, OpenClaw, VS Code Copilot, configured MCP names/transports, skills, and plugins from fixed user-level roots. Claude Desktop MCP Extensions are included. Project, model/provider, Linux, and Windows discovery are not implemented. |
+| Policy | Scope agent, inference, MCP/tool, sandbox, usage, and observability policy by organization, group, user, device, project, or resource. | Administration stores one organization-wide Allow/Deny desired policy for supported agents. Endpoint enforcement is not implemented; Agent Gateway remains the inference-policy boundary. |
+| Enforcement | Reconcile policy locally through application configuration, routing, capture/filtering, or sandboxing. | Native inference routing is implemented. Standalone Linux capture is a narrow platform-specific path. |
+| Observability | Report inventory, policy decisions, usage, and agent activity locally and centrally. | Enrollment/device state, opaque flow counts, Gateway health, and request outcomes are available. Prompts and responses are not collected. |
+| Operation | Run quietly in the background across Linux, macOS, and Windows, normally deployed through MDM. | Tauri development UI works on macOS; production packaging and cross-platform enforcement remain incomplete. |
 
 ## Why this project exists
 
@@ -94,7 +106,7 @@ Run a local standalone connector plus Agent Gateway smoke environment with Podma
 ./scripts/container-down.sh
 ```
 
-Run the zero-input managed enrollment, approval, mTLS forwarding, and revocation-bookkeeping journey with Podman 5+, `curl`, and `jq`:
+Run the zero-input managed enrollment, approval, mTLS forwarding, and revocation-bookkeeping journey with Podman 5+, Rust, OpenSSL, `curl`, and `jq`:
 
 ```bash
 scripts/managed-e2e.sh
@@ -102,14 +114,123 @@ scripts/managed-e2e.sh
 
 These paths use deterministic local fixtures and do not contact Anthropic. See [CONTRIBUTING.md](CONTRIBUTING.md#walkthroughs) for prerequisites, expected behavior, and the interactive Fedora journey.
 
+## Desktop UI quickstarts
+
+The Tauri 2 desktop application lives in [`ui/`](ui/). Both quickstarts require Node.js 20 or newer, Rust, and the [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/). Install its dependencies once:
+
+```bash
+cd ui
+npm install
+```
+
+### Standalone local quickstart
+
+Install `agentgateway` on `PATH`, or set `AGENTDESKTOP_GATEWAY_BINARY` to its path, then run from `ui/`:
+
+```bash
+npm run dev:desktop
+```
+
+This starts the connector, Vite, the native host, and an Agent Desktop-owned local Gateway. In the UI, add the Anthropic API key and connect Claude Code. The key is stored in the platform credential store and passed only to the Gateway child process.
+
+To use a separately started local Gateway instead:
+
+```bash
+AGENTDESKTOP_GATEWAY_MODE=external \
+AGENTDESKTOP_UPSTREAM=http://127.0.0.1:4100 \
+npm run dev:desktop
+```
+
+The external Gateway must expose an HTTP/2 CONNECT listener on `4100` and an internal native route on `4000`, as shown in `ui/config/agentgateway-anthropic.yaml`. Configure provider credentials in that independently managed Gateway.
+
+### Remote managed quickstart
+
+This path deploys the production-shaped server stack on a Linux VM and connects Agent Desktop from a separate laptop. It uses real Keycloak OAuth, PostgreSQL enrollment/device records, authority-issued certificates, Agent Gateway, and real Anthropic. It does not use a mock provider or preloaded enrollment/device records.
+
+It remains a development deployment because it uses generated private CAs, seeded Keycloak users, a file-backed enrollment CA, and nonstandard ports. The VM needs Docker Engine with Compose, Git, OpenSSL, `curl`, and `jq`. The laptop needs Node.js 20+, Rust, and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/). Create a public DNS record such as `agentdesktop.example.com` for the VM and allow inbound TCP `8444`, `8090`, and `8443`.
+
+On the VM, clone this repository and prepare the server hostname:
+
+```bash
+git clone https://github.com/agentdesktop-dev/agentdesktop.git
+cd agentdesktop/examples/managed-vm
+./prepare.sh agentdesktop.example.com
+```
+
+Edit `.env`, keep `PUBLIC_HOST` identical to the name passed to `prepare.sh`, and replace every secret placeholder with a real value:
+
+```dotenv
+PUBLIC_HOST=agentdesktop.example.com
+ANTHROPIC_API_KEY=sk-ant-...
+KEYCLOAK_ADMIN_PASSWORD=choose-a-long-random-value
+```
+
+Start and verify the server stack:
+
+```bash
+docker compose config --quiet
+docker compose up -d --build
+./verify.sh
+docker compose ps
+```
+
+`verify.sh` must print `Managed VM stack is healthy.` The VM now holds real Keycloak, enrollment, device, and certificate state in Docker volumes. The Anthropic key remains in the Gateway container environment and is never sent to Agent Desktop or Claude Code.
+
+Copy only the public bootstrap and server CA from the VM to the laptop through a trusted channel:
+
+```bash
+install -d -m 0700 "$HOME/.config/agentdesktop-vm-example"
+scp VM_USER@agentdesktop.example.com:~/agentdesktop/examples/managed-vm/runtime/organization.json \
+    "$HOME/.config/agentdesktop-vm-example/organization.json"
+scp VM_USER@agentdesktop.example.com:~/agentdesktop/examples/managed-vm/runtime/certs/server-ca.crt \
+    "$HOME/.config/agentdesktop-vm-example/server-ca.crt"
+chmod 0600 "$HOME/.config/agentdesktop-vm-example/organization.json"
+```
+
+Do not copy any `.key` file. Trust `server-ca.crt` in the laptop browser or operating-system trust store for OAuth and administration. On macOS, import it into the login keychain and set it to **Always Trust**.
+
+On the laptop, clone the repository, point Agent Desktop at the copied public files, and start the client:
+
+```bash
+git clone https://github.com/agentdesktop-dev/agentdesktop.git
+cd agentdesktop
+export SSL_CERT_FILE="$HOME/.config/agentdesktop-vm-example/server-ca.crt"
+export AGENTDESKTOP_ORGANIZATION_CONFIG="$HOME/.config/agentdesktop-vm-example/organization.json"
+export AGENTDESKTOP_IDENTITY_DIR="$HOME/.config/agentdesktop-vm-example/identity"
+export AGENTDESKTOP_CREDENTIAL_STORAGE=file
+npm --prefix ui install
+npm --prefix ui run dev:desktop
+```
+
+In Agent Desktop, sign in as `employee` / `employee-change-me`. Open `https://agentdesktop.example.com:8090/admin/`, sign in as `administrator` / `administrator-change-me`, and approve the pending user and machine. These are seeded development accounts in the real Keycloak server; the resulting OAuth session, enrollment, device, and certificate records are persistent stack data.
+
+After approval, wait for Agent Desktop to apply the supported Claude Code route automatically, then send a prompt. The request uses the laptop's short-lived mTLS device identity, crosses the remote Gateway, and receives a real Anthropic response. The raw compatibility route preserves current Claude Code payloads without parsing content.
+
+Administration shows the real device, discovery inventory, enrollment, force-rescan, and agent-policy data. For cleanup, troubleshooting, trust boundaries, and production replacements, follow the [Managed Server and Client Walkthrough](docs/deployment/managed-vm-walkthrough.md).
+
+For a non-mock evaluation on one development laptop, use the walkthrough's [laptop-local variant](docs/deployment/managed-vm-walkthrough.md#laptop-local-variant), which uses this same stack with `agentdesktop.localhost` and provides `reset-local.sh` for complete cleanup.
+
+Build and test the UI from `ui/`:
+
+```bash
+npm run build
+cargo test --manifest-path src-tauri/Cargo.toml
+npm run dist
+```
+
+Native bundles are written to `ui/src-tauri/target/release/bundle/`. See the [UI guide](ui/README.md) for frontend-only browser development and platform-specific installer commands, or browse the [organized examples](examples/README.md).
+
 ## Documentation
 
 - [Contributor Guide](CONTRIBUTING.md): architecture, flows, code map, development setup, and walkthroughs.
 - [Standalone Operations](docs/deployment/standalone.md): local installation, ownership, credentials, lifecycle, logs, and removal.
 - [Managed Remote Operations](docs/deployment/managed.md): login, enrollment, certificate lifecycle, runtime, and logout.
+- [Deployment Modes](docs/architecture/deployment-modes.md): self-managed local versus remote managed features, gaps, and one-app convergence plan.
+- [Managed Server and Client Walkthrough](docs/deployment/managed-vm-walkthrough.md): deploy the VM stack, enroll clients, approve devices, and verify per-client statistics.
 - [Managed Installer Development](docs/deployment/managed-installer.md): organization bootstrap and packaging.
 - [Linux Transparent Capture](docs/deployment/linux-capture.md): systemd scopes, cgroup v2, nftables, trust, and testing.
 - [Control Plane](control-plane/README.md): enrollment API, administrator operations, PostgreSQL, and CA configuration.
+- [Enrollment Administration UI](admin-ui/README.md): server-hosted React console for enrollment review and device administration.
 - [Platform Compatibility](docs/compatibility/platforms.md): tested and unavailable platform behavior.
 - [Phase Status](docs/development/phase-status.md): verified progress, active blockers, and the next milestone.
 - [Architecture and Delivery Plan](AGENTS.md): project boundaries, design decisions, and phased roadmap.

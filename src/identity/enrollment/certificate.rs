@@ -9,7 +9,7 @@ use x509_parser::pem::parse_x509_pem;
 
 use super::client::{EnrollmentRecord, EnrollmentStatus};
 
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ClientIdentity {
     pub certificate_chain_pem: String,
     pub private_key_pem: String,

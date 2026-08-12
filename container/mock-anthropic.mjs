@@ -2,6 +2,7 @@ import http from "node:http";
 
 const port = Number(process.env.MOCK_ANTHROPIC_PORT ?? "8000");
 const host = process.env.MOCK_ANTHROPIC_HOST ?? "0.0.0.0";
+const expectedApiKey = process.env.MOCK_ANTHROPIC_API_KEY;
 const model = "claude-sonnet-4-20250514";
 
 const message = {
@@ -76,6 +77,10 @@ function respondStream(response) {
 const server = http.createServer((request, response) => {
   if (request.method !== "POST") {
     respondJson(response, 405, { type: "error", error: { type: "invalid_request_error", message: "method not allowed" } });
+    return;
+  }
+  if (expectedApiKey && request.headers["x-api-key"] !== expectedApiKey) {
+    respondJson(response, 401, { type: "error", error: { type: "authentication_error", message: "invalid API key" } });
     return;
   }
 

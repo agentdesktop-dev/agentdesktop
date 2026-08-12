@@ -3,6 +3,7 @@ package enrollment
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,8 +17,19 @@ type approvalStore struct {
 	issuing   []Issuance
 }
 
-func (store *approvalStore) CreatePending(context.Context, Principal, certificate.Request, string) (Enrollment, error) {
+func (store *approvalStore) CreatePending(context.Context, Principal, certificate.Request, string, string) (Enrollment, error) {
 	return Enrollment{}, nil
+}
+
+func TestNormalizeDeviceName(t *testing.T) {
+	if value, err := normalizeDeviceName("  workstation-7  "); err != nil || value != "workstation-7" {
+		t.Fatalf("normalized device name = %q, %v", value, err)
+	}
+	for _, value := range []string{"line\nbreak", strings.Repeat("x", maxDeviceNameLength+1)} {
+		if _, err := normalizeDeviceName(value); !errors.Is(err, ErrInvalidDeviceName) {
+			t.Fatalf("device name %q error = %v", value, err)
+		}
+	}
 }
 
 func (store *approvalStore) BeginIssuance(context.Context, Principal, string, string) (Issuance, error) {
@@ -52,6 +64,14 @@ func (store *approvalStore) ListIssuing(context.Context, time.Time, int) ([]Issu
 
 func (store *approvalStore) List(context.Context, Principal, string, int) ([]AdministrativeRecord, error) {
 	return nil, nil
+}
+
+func (store *approvalStore) ListDevices(context.Context, Principal, int) ([]AdministrativeDevice, error) {
+	return nil, nil
+}
+
+func (store *approvalStore) Summary(context.Context, Principal) (FleetSummary, error) {
+	return FleetSummary{}, nil
 }
 
 func (store *approvalStore) Reject(context.Context, Principal, string) (AdministrativeRecord, error) {

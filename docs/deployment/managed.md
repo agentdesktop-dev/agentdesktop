@@ -23,6 +23,12 @@ Agent Desktop owns:
 
 The production topology separates these duties across processes. A privileged machine forwarder owns listeners, capture, OS-derived source attribution, and user-keyed tunnel pools. One session agent per logged-in user owns OAuth, enrollment records, and private-key signing. The machine process receives public certificate chains and signing results through authenticated local IPC; it never loads OAuth tokens or private-key bytes. The direct `serve` commands below remain the simplest development topology and do not by themselves exercise that installed split.
 
+## Policy boundary
+
+Managed Agent Desktop is policy-free. The employee application and organization bootstrap contain no model allowlists, team assignments, guardrails, provider credentials, backend routes, or policy documents. The connector selects the configured application path, proves user/device identity, and forwards opaque bytes to the organization-owned Gateway.
+
+The enrollment service owns organizational membership workflows, invitations, device enrollment, certificate lifecycle, and revocation state. It may record which centrally defined access package is assigned to a user or team, but it must not define or evaluate AI policy. Agent Gateway owns the referenced access resources, provider secrets, model and agent routing, authorization, rate limits, guardrails, request telemetry, and enforcement. A future central admin UX must manage Gateway-native resources through a trusted Gateway integration rather than distribute policy to employee devices or create an enrollment-specific policy language.
+
 OAuth tokens are never attached to CONNECT requests or application traffic. Managed forwarding authenticates the outer HTTP/2 connection with the authority-issued mTLS certificate only.
 
 ## Prerequisites
@@ -129,15 +135,23 @@ The native target must match an internal bind in the remote Agent Gateway config
 
 Forwarding defaults to a five-second tunnel-establishment timeout, a ten-second graceful-shutdown deadline, and 128 concurrent tunnels. Override these with `--connect-timeout-ms`, `--shutdown-timeout-ms`, and `--max-in-flight`. The connector does not replay failed application requests and never falls back directly to the provider.
 
-## Connect an application
+## Automatic application routing
 
-For Claude Code, use the connector-assisted native path:
+After enrollment approval, Agent Desktop automatically reconciles the supported Claude Code native path. It writes the connector loopback endpoint and a placeholder credential while preserving unrelated settings. Employees do not choose a routing destination; Agent Gateway validates or removes the placeholder and supplies the real provider credential.
+
+For headless development without the desktop host, apply the same connector-assisted path explicitly:
 
 ```bash
 cargo run -- connect-agents
 ```
 
-After separate user consent, this writes the connector loopback endpoint and a placeholder credential to Claude Code's user settings while preserving unrelated values. Agent Gateway must validate or remove the placeholder and supply the real provider credential. Managed process-scoped capture is not implemented.
+Remove only Agent Desktop-owned Claude Code routing values without deleting other Claude settings:
+
+```bash
+cargo run -- disconnect-agents
+```
+
+The intended managed model is organization-owned agent, MCP, and skill allowlists. The current build does not yet distribute or locally enforce those endpoint allowlists, so discovery must not be treated as authorization. Managed process-scoped capture is not implemented.
 
 ## Certificate lifecycle
 
@@ -181,11 +195,12 @@ Revocation currently prevents renewal and records the certificate revocation tim
 
 ## Walkthroughs
 
+- End-to-end VM server and laptop setup: [Managed Server and Client Walkthrough](managed-vm-walkthrough.md)
 - Fast, zero-input managed E2E: `scripts/managed-e2e.sh`
 - API-by-API host walkthrough: [Managed Native Walkthrough](../../examples/managed-walkthrough/README.md)
 - Interactive Fedora user and administrator journey: [QEMU Desktop Test Environment](../../tests/vm/README.md)
 - Managed installer packaging: [Managed Installer Development](managed-installer.md)
 
-The walkthroughs use deterministic local identity and provider fixtures and do not contact Anthropic.
+The default fixture-based walkthroughs use local identity and provider services and do not contact Anthropic. The manual walkthrough also has an explicit `start-anthropic` variant for real-provider validation.
 
 Linux has the complete interactive managed walkthrough. Windows session transport, external signing, WFP source attribution, and standalone native forwarding are implemented and tested as separate boundaries, but there is not yet one reproducible managed Windows installation walkthrough. macOS runtime validation remains pending.

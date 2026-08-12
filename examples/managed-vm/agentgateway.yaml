@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+config:
+  readinessAddr: 0.0.0.0:15021
+  logging:
+    format: json
+    fields:
+      add:
+        client_identity: source.identity.serviceAccount
+
+binds:
+- port: 8443
+  tunnelProtocol: connect
+  listeners:
+  - name: managed-connect
+    protocol: HTTPS
+    tls:
+      cert: /certs/gateway-server.crt
+      key: /certs/gateway-server.key
+      root: /certs/enrollment-ca.crt
+    routes: []
+- port: 4000
+  mode: internal
+  listeners:
+  - name: native-llm
+    protocol: HTTP
+    routes:
+    - name: managed-anthropic
+      backends:
+      - host: api.anthropic.com:443
+        policies:
+          backendTLS: {}
+          backendAuth:
+            credentials:
+            - key: $ANTHROPIC_API_KEY
+              location:
+                header:
+                  name: x-api-key

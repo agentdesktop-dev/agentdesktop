@@ -13,10 +13,8 @@ use http::HeaderMap;
 use http::uri::Authority;
 use http::{Method, Request, StatusCode, Uri};
 use rustls::RootCertStore;
-#[cfg(any(target_os = "linux", all(target_os = "windows", target_env = "msvc")))]
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::ServerName;
-#[cfg(any(target_os = "linux", all(target_os = "windows", target_env = "msvc")))]
 use rustls::sign::{CertifiedKey, SigningKey, SingleCertAndKey};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
@@ -43,11 +41,9 @@ struct IdentityState {
 #[derive(Clone)]
 enum ClientIdentitySource {
     Pem(ClientIdentity),
-    #[cfg(any(target_os = "linux", all(target_os = "windows", target_env = "msvc")))]
     External(ExternalClientIdentity),
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "windows", target_env = "msvc")))]
 #[derive(Clone)]
 pub(crate) struct ExternalClientIdentity {
     pub certificates: Vec<CertificateDer<'static>>,
@@ -66,7 +62,6 @@ impl RotatingClientIdentity {
         }
     }
 
-    #[cfg(any(target_os = "linux", all(target_os = "windows", target_env = "msvc")))]
     pub(crate) fn new_external(identity: ExternalClientIdentity, generation: u64) -> Self {
         let (generation_tx, _) = watch::channel(generation);
         Self {
@@ -78,15 +73,21 @@ impl RotatingClientIdentity {
         }
     }
 
-    pub fn replace(&self, identity: ClientIdentity) -> Result<()> {
+    pub fn replace_if_changed(&self, identity: ClientIdentity) -> Result<bool> {
         let mut state = self
             .state
             .lock()
             .map_err(|_| anyhow::anyhow!("managed client identity lock poisoned"))?;
+        if matches!(
+            &state.identity,
+            ClientIdentitySource::Pem(current) if current == &identity
+        ) {
+            return Ok(false);
+        }
         state.identity = ClientIdentitySource::Pem(identity);
         state.generation = state.generation.wrapping_add(1);
         self.generation.send_replace(state.generation);
-        Ok(())
+        Ok(true)
     }
 
     fn snapshot(&self) -> Result<(u64, ClientIdentitySource)> {
@@ -97,12 +98,10 @@ impl RotatingClientIdentity {
         Ok((state.generation, state.identity.clone()))
     }
 
-    #[cfg(any(target_os = "linux", all(target_os = "windows", target_env = "msvc")))]
     pub(crate) fn pem_snapshot(&self) -> Result<(u64, ClientIdentity)> {
         let (generation, identity) = self.snapshot()?;
         match identity {
             ClientIdentitySource::Pem(identity) => Ok((generation, identity)),
-            #[cfg(any(target_os = "linux", all(target_os = "windows", target_env = "msvc")))]
             ClientIdentitySource::External(_) => {
                 bail!("external client identity cannot be exported")
             }
@@ -118,11 +117,17 @@ impl RotatingClientIdentity {
 enum Transport {
     Plain(SocketAddr),
     Tls {
-        endpoint: SocketAddr,
+        endpoint: TlsEndpoint,
         server_name: String,
         identity: RotatingClientIdentity,
         roots: TlsRoots,
     },
+}
+
+#[derive(Clone)]
+enum TlsEndpoint {
+    Resolved(SocketAddr),
+    Host { host: String, port: u16 },
 }
 
 #[derive(Clone)]
@@ -165,6 +170,29 @@ impl HboneClient {
     }
 
     pub async fn connect_mtls(
+        host: String,
+        port: u16,
+        identity: RotatingClientIdentity,
+        connect_timeout: Duration,
+        roots: TlsRoots,
+    ) -> Result<Self> {
+        Self::new(
+            Transport::Tls {
+                endpoint: TlsEndpoint::Host {
+                    host: host.clone(),
+                    port,
+                },
+                server_name: host,
+                identity,
+                roots,
+            },
+            HeaderMap::new(),
+            connect_timeout,
+        )
+        .await
+    }
+
+    pub(crate) async fn connect_mtls_endpoint(
         endpoint: SocketAddr,
         server_name: String,
         identity: RotatingClientIdentity,
@@ -173,7 +201,7 @@ impl HboneClient {
     ) -> Result<Self> {
         Self::new(
             Transport::Tls {
-                endpoint,
+                endpoint: TlsEndpoint::Resolved(endpoint),
                 server_name,
                 identity,
                 roots,
@@ -226,7 +254,9 @@ impl HboneClient {
                         ..
                     },
                     Some(identity),
-                ) => Box::new(connect_tls(*endpoint, server_name, identity, roots.clone()).await?),
+                ) => Box::new(
+                    connect_tls(endpoint, server_name, identity, roots.clone()).await?,
+                ),
                 _ => unreachable!("transport and identity snapshot must agree"),
             };
             h2::client::handshake(io)
@@ -245,6 +275,10 @@ impl HboneClient {
             connection,
         ));
         Ok((generation, sender))
+    }
+
+    pub async fn is_reachable(&self) -> bool {
+        self.sender().await.is_ok()
     }
 
     async fn invalidate(&self, generation: u64) {
@@ -299,7 +333,7 @@ impl HboneClient {
 }
 
 async fn connect_tls(
-    endpoint: SocketAddr,
+    endpoint: &TlsEndpoint,
     server_name: &str,
     identity: ClientIdentitySource,
     roots: TlsRoots,
@@ -319,7 +353,6 @@ async fn connect_tls(
                     .context("managed client identity contains no private key")?;
             builder.with_client_auth_cert(certificates, private_key)?
         }
-        #[cfg(any(target_os = "linux", all(target_os = "windows", target_env = "msvc")))]
         ClientIdentitySource::External(identity) => {
             let certified_key = CertifiedKey::new(identity.certificates, identity.signing_key);
             builder.with_client_cert_resolver(Arc::new(SingleCertAndKey::from(certified_key)))
@@ -327,25 +360,21 @@ async fn connect_tls(
     };
     config.alpn_protocols = vec![b"h2".to_vec()];
     let name = ServerName::try_from(server_name.to_owned())?;
-    let stream = TcpStream::connect(endpoint).await?;
+    let stream = match endpoint {
+        TlsEndpoint::Resolved(endpoint) => TcpStream::connect(endpoint).await?,
+        TlsEndpoint::Host { host, port } => connect_tcp(host, *port).await?,
+    };
     Ok(TlsConnector::from(Arc::new(config))
         .connect(name, stream)
         .await?)
 }
 
 fn native_roots() -> Result<RootCertStore> {
-    let native = rustls_native_certs::load_native_certs();
-    if !native.errors.is_empty() {
-        tracing::warn!(
-            event = "native_ca_load_incomplete",
-            errors = native.errors.len()
-        );
-    }
-    let mut roots = RootCertStore::empty();
-    for certificate in native.certs {
-        roots.add(certificate)?;
-    }
-    Ok(roots)
+    crate::identity::tls::root_store()
+}
+
+async fn connect_tcp(host: &str, port: u16) -> io::Result<TcpStream> {
+    TcpStream::connect((host, port)).await
 }
 
 async fn drive_connection(
@@ -456,7 +485,39 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::time::{Duration, timeout};
 
-    use super::HboneClient;
+    use super::{HboneClient, RotatingClientIdentity, connect_tcp};
+    use crate::identity::enrollment::ClientIdentity;
+
+    #[test]
+    fn rotates_managed_identity_only_when_credentials_change() {
+        let first = ClientIdentity {
+            certificate_chain_pem: "first certificate".into(),
+            private_key_pem: "first key".into(),
+        };
+        let identity = RotatingClientIdentity::new(first.clone());
+
+        assert!(!identity.replace_if_changed(first).unwrap());
+        assert_eq!(identity.snapshot().unwrap().0, 1);
+
+        let second = ClientIdentity {
+            certificate_chain_pem: "second certificate".into(),
+            private_key_pem: "second key".into(),
+        };
+        assert!(identity.replace_if_changed(second.clone()).unwrap());
+        let (generation, current) = identity.pem_snapshot().unwrap();
+        assert_eq!(generation, 2);
+        assert!(current == second);
+    }
+
+    #[tokio::test]
+    async fn hostname_connection_uses_a_reachable_resolved_address() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let connection = tokio::spawn(async move { listener.accept().await.unwrap() });
+
+        connect_tcp("localhost", port).await.unwrap();
+        connection.await.unwrap();
+    }
 
     #[tokio::test]
     async fn opens_authority_tunnel_and_preserves_bytes() {

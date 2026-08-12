@@ -23,10 +23,10 @@ POST /v1/enrollments
 Authorization: Bearer <access-token>
 Content-Type: application/json
 
-{"csr":"-----BEGIN CERTIFICATE REQUEST-----\n..."}
+{"csr":"-----BEGIN CERTIFICATE REQUEST-----\n...","device_name":"workstation-7"}
 ```
 
-The service returns `202 Accepted` with a server-generated enrollment ID, pending status, canonical issuer and subject, and the validated public-key fingerprint. Request data cannot supply or override organization, user, approval, or device identity.
+The service returns `202 Accepted` with a server-generated enrollment ID, pending status, canonical issuer and subject, and the validated public-key fingerprint. The optional bounded `device_name` is client-reported inventory metadata only. Request data cannot supply or override organization, user, approval, or device identity.
 
 The organization bootstrap supplies a distinct HTTPS `enrollment_url`; Agent Desktop does not expect an external OAuth provider to advertise connector-specific enrollment metadata. Agent Desktop generates a P-256 key, stores its PKCS#8 private key through the selected protected credential backend, and verifies that the service fingerprint matches the CSR public key. It polls with ordinary bearer authentication and accepts an approved record only when the returned leaf certificate's SubjectPublicKeyInfo exactly matches the retained private key. The private key is never printed by enrollment commands.
 

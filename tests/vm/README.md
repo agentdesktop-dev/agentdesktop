@@ -11,6 +11,7 @@ This is the authoritative environment for kicking the tires on the complete Linu
 - Packer with the QEMU plugin, only when building the base
 - KVM for interactive use and normal CI performance; QEMU TCG is selected when KVM is unavailable
 - `ssh` and `setsid` for guest control
+- Podman 5+ or Docker, Rust with Cargo, Node.js 20+, OpenSSL, `curl`, and `jq` for the managed walkthrough wrapper
 
 The checked-in Packer definition downloads and verifies the Fedora 44 Everything netinstaller, performs an unattended Workstation installation, and installs the repository-pinned Claude Code version used by the walkthroughs. The resulting image is stored under the ignored `tests/vm/.artifacts` directory. Claude Code is a base-image test prerequisite; connector and Agent Gateway builds remain scenario artifacts and are never baked into the base.
 
@@ -69,7 +70,7 @@ Perform the user journey in the Fedora desktop:
 
 Perform the administrator journey in the host browser at `http://localhost:8091/admin/`: sign in, inspect the pending device, and approve, reject, or revoke it. This cleartext endpoint is a walkthrough-only adapter bound to host loopback. The VM-facing identity, enrollment, and Gateway endpoints remain HTTPS with the canonical `host.test` issuer. Production administrators use organization-trusted HTTPS.
 
-Run `scripts/vm-managed-walkthrough.sh stop` afterward. Omit `--reset` to refresh the server stack and installer while preserving the running Fedora VM.
+Run `scripts/vm-managed-walkthrough.sh stop` afterward; this stops host-side services but leaves Fedora running. Use `tests/vm/vm.sh stop` when the VM is no longer needed. Omit `--reset` only when the running VM has no prior Agent Desktop installation or identity state; otherwise use `--reset` for a clean walkthrough.
 
 The mock identity provider and Anthropic service are deterministic test fixtures. Enrollment uses the repository control plane, and the real Agent Gateway enforces the issued mTLS device identity before forwarding to the mock provider.
 

@@ -1,0 +1,16 @@
+project_id = "my-gcp-project"
+zone       = "us-central1-a"
+
+instance_name = "agentdesktop-managed"
+public_host    = "agentdesktop.example.com"
+
+# Restrict this to the public IPv4 addresses of development clients and
+# administrator workstations. Use 0.0.0.0/0 only for a deliberate isolated test.
+client_source_ranges = [
+  "203.0.113.10/32",
+]
+
+# Set this to the name (not DNS suffix) of an existing Cloud DNS managed zone
+# to create the public_host A record. Otherwise, create an A record manually
+# using the public_ip Terraform output.
+dns_managed_zone = null

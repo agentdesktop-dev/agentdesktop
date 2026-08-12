@@ -16,6 +16,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/enrollment"
 )
@@ -26,6 +28,7 @@ type Validator struct {
 	issuer        string
 	audience      string
 	requiredScope string
+	requiredRole  string
 	keys          map[string]verificationKey
 	now           func() time.Time
 }
@@ -63,12 +66,21 @@ type tokenHeader struct {
 }
 
 type tokenClaims struct {
-	Audience audience `json:"aud"`
-	Expires  int64    `json:"exp"`
-	IssuedAt int64    `json:"iat"`
-	Issuer   string   `json:"iss"`
-	Scope    string   `json:"scope"`
-	Subject  string   `json:"sub"`
+	Audience          audience `json:"aud"`
+	Expires           int64    `json:"exp"`
+	IssuedAt          int64    `json:"iat"`
+	Issuer            string   `json:"iss"`
+	PreferredUsername string   `json:"preferred_username"`
+	Scope             string   `json:"scope"`
+	Subject           string   `json:"sub"`
+	RealmAccess       struct {
+		Roles []string `json:"roles"`
+	} `json:"realm_access"`
+}
+
+func (validator *Validator) RequireRealmRole(role string) *Validator {
+	validator.requiredRole = role
+	return validator
 }
 
 type audience []string
@@ -145,10 +157,23 @@ func (validator *Validator) Authenticate(request *http.Request) (enrollment.Prin
 	if claims.Issuer != validator.issuer || claims.Subject == "" ||
 		claims.Expires <= now || claims.IssuedAt > now+60 ||
 		!contains(claims.Audience, validator.audience) ||
-		!contains(strings.Fields(claims.Scope), validator.requiredScope) {
+		!contains(strings.Fields(claims.Scope), validator.requiredScope) ||
+		(validator.requiredRole != "" && !contains(claims.RealmAccess.Roles, validator.requiredRole)) {
 		return enrollment.Principal{}, ErrInvalidToken
 	}
-	return enrollment.Principal{Issuer: claims.Issuer, Subject: claims.Subject}, nil
+	return enrollment.Principal{
+		Issuer:      claims.Issuer,
+		Subject:     claims.Subject,
+		DisplayName: displayName(claims.PreferredUsername),
+	}, nil
+}
+
+func displayName(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || utf8.RuneCountInString(value) > 256 || strings.IndexFunc(value, unicode.IsControl) >= 0 {
+		return ""
+	}
+	return value
 }
 
 func getJSON(ctx context.Context, client *http.Client, target string, destination any) error {

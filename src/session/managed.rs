@@ -50,7 +50,7 @@ pub(crate) async fn connect_gateway(
         },
         generation,
     );
-    HboneClient::connect_mtls(endpoint, server_name, identity, connect_timeout, roots).await
+    HboneClient::connect_mtls_endpoint(endpoint, server_name, identity, connect_timeout, roots).await
 }
 
 pub(crate) async fn run_agent_session<Transport>(

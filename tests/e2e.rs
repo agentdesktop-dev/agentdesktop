@@ -88,6 +88,7 @@ async fn waits_for_owned_local_gateway_before_listening() {
     std::fs::write(&gateway_config, "").unwrap();
 
     let listen = unused_address();
+    let status_listen = unused_address();
     let upstream = unused_address();
     let mut connector = Connector(
         Command::new(env!("CARGO_BIN_EXE_agentdesktop"))
@@ -97,6 +98,8 @@ async fn waits_for_owned_local_gateway_before_listening() {
                 "standalone",
                 "--listen",
                 &listen.to_string(),
+                "--status-listen",
+                &status_listen.to_string(),
                 "--upstream",
                 &format!("http://{upstream}"),
                 "--gateway-binary",

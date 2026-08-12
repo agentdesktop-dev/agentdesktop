@@ -30,7 +30,7 @@ pub struct Config {
     #[arg(
         long,
         env = "AGENTDESKTOP_NATIVE_TARGET",
-        default_value = "native.agentdesktop.internal:18443"
+        default_value = "native.agentdesktop.internal:4000"
     )]
     pub native_target: Authority,
 
@@ -295,6 +295,10 @@ mod tests {
 
         assert_eq!(config.listen.to_string(), "[::1]:9000");
         assert_eq!(config.upstream.as_str(), "https://gateway.example/");
+        assert_eq!(
+            config.native_target.as_str(),
+            "native.agentdesktop.internal:4000"
+        );
         assert_eq!(config.mode, DeploymentMode::Managed);
     }
 

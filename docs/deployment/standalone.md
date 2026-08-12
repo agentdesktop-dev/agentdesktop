@@ -4,6 +4,8 @@ This guide covers a single-user installation where Agent Gateway and the edge co
 
 ## Installation
 
+The current development installer targets Linux hosts with a systemd user service. Production packaging for macOS and Windows is not yet available.
+
 The standalone release is distributed as one platform-specific executable containing Agent Gateway, the connector, helper commands, and a starter Agent Gateway configuration:
 
 ```bash
@@ -92,9 +94,19 @@ Run the same setup manually with:
 agentdesktop connect-agents
 ```
 
+Remove only Agent Desktop-owned Claude Code routing values with:
+
+```bash
+agentdesktop disconnect-agents
+```
+
+The disconnect command removes values only when they still exactly match Agent Desktop's connector URL and placeholder credential. It preserves unrelated or user-modified Claude settings.
+
 The installer owns `~/.local/bin/agentdesktop` as a stable link to the private bundle. It does not edit shell startup files or add directories to `PATH`; environments that do not already include `~/.local/bin` receive an installer warning. The command can be rerun at any time without reinstalling Agent Desktop. Matching settings are reported as already connected; conflicting provider or gateway settings are left unchanged. After connection, launch `claude` normally. Claude Code applies the user settings to terminal and IDE sessions, so Agent Desktop does not install or require a Claude-specific launcher. Requests fail when Agent Gateway is unavailable and do not fall back to Anthropic directly.
 
 Application configuration is routed rather than enforced: a user who can change application settings can bypass it. The standalone Linux `claude` profile provides process-scoped transparent routing; stronger enforcement against local administrators still requires an explicit host or MDM boundary.
+
+The desktop management coverage view reports local inference routing and opaque flow activity. Agent/application discovery, model/provider inventory, MCP/tools, centralized policy modes, budgets, and general sandbox status are not available in the current standalone milestone and appear as unavailable rather than fabricated inventory.
 
 Do not configure the same application through `connect-agents` and transparent capture simultaneously. Run normally for connector-assisted native routing, or use `agentdesktop launch --profile claude -- claude` for standalone Linux capture.
 

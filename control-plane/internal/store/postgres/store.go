@@ -3,11 +3,14 @@ package postgres
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
+	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/agentpolicy"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/certificate"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/deviceidentity"
+	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/discoveryreport"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/enrollment"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/identifier"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/renewal"
@@ -50,6 +53,7 @@ func (store *Store) CreatePending(
 	ctx context.Context,
 	principal enrollment.Principal,
 	request certificate.Request,
+	deviceName string,
 	enrollmentID string,
 ) (enrollment.Enrollment, error) {
 	transaction, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -62,25 +66,26 @@ func (store *Store) CreatePending(
 	if err != nil {
 		return enrollment.Enrollment{}, err
 	}
-	userID, err := upsertUser(ctx, transaction, organizationID, principal.Subject)
+	userID, err := upsertUser(ctx, transaction, organizationID, principal.Subject, principal.DisplayName)
 	if err != nil {
 		return enrollment.Enrollment{}, err
 	}
 	createdAt := time.Now().UTC()
-	var storedEnrollmentID string
+	var storedEnrollmentID, storedDeviceName string
 	var storedCreatedAt time.Time
 	err = transaction.QueryRow(ctx, `
 		INSERT INTO enrollments (
 			id, organization_id, user_id, status, csr_der,
-			public_key_fingerprint, created_at, updated_at
-		) VALUES ($1, $2, $3, 'pending', $4, $5, $6, $6)
+			public_key_fingerprint, device_name, created_at, updated_at
+		) VALUES ($1, $2, $3, 'pending', $4, $5, NULLIF($6, ''), $7, $7)
 		ON CONFLICT (organization_id, user_id, public_key_fingerprint)
 		WHERE status = 'pending'
-		DO UPDATE SET updated_at = EXCLUDED.updated_at
-		RETURNING id, created_at
-	`, enrollmentID, organizationID, userID, request.DER, request.PublicKeyFingerprint, createdAt).Scan(
+		DO UPDATE SET updated_at = EXCLUDED.updated_at, device_name = EXCLUDED.device_name
+		RETURNING id, created_at, COALESCE(device_name, '')
+	`, enrollmentID, organizationID, userID, request.DER, request.PublicKeyFingerprint, deviceName, createdAt).Scan(
 		&storedEnrollmentID,
 		&storedCreatedAt,
+		&storedDeviceName,
 	)
 	if err != nil {
 		return enrollment.Enrollment{}, err
@@ -104,6 +109,7 @@ func (store *Store) CreatePending(
 		Status:               "pending",
 		Issuer:               principal.Issuer,
 		Subject:              principal.Subject,
+		DeviceName:           storedDeviceName,
 		PublicKeyFingerprint: request.PublicKeyFingerprint,
 		CreatedAt:            storedCreatedAt,
 	}, nil
@@ -124,11 +130,17 @@ func (store *Store) BeginIssuance(
 	if err != nil {
 		return enrollment.Issuance{}, err
 	}
-	if _, err := transaction.Exec(ctx, `
-		INSERT INTO devices (id, organization_id, status)
-		VALUES ($1, $2, 'active')
-	`, deviceID, organizationID); err != nil {
+	inserted, err := transaction.Exec(ctx, `
+		INSERT INTO devices (id, organization_id, status, device_name)
+		SELECT $1, $2, 'active', device_name
+		FROM enrollments
+		WHERE id = $3 AND organization_id = $2 AND status = 'pending'
+	`, deviceID, organizationID, enrollmentID)
+	if err != nil {
 		return enrollment.Issuance{}, err
+	}
+	if inserted.RowsAffected() != 1 {
+		return enrollment.Issuance{}, enrollment.ErrNotPending
 	}
 	issuance := enrollment.Issuance{
 		EnrollmentID:   enrollmentID,
@@ -724,7 +736,8 @@ func (store *Store) List(
 	limit int,
 ) ([]enrollment.AdministrativeRecord, error) {
 	rows, err := store.pool.Query(ctx, `
-		SELECT enrollments.id, enrollments.status, users.subject,
+		SELECT enrollments.id, enrollments.status, users.subject, COALESCE(users.display_name, ''),
+		       COALESCE(enrollments.device_name, ''),
 		       enrollments.public_key_fingerprint, enrollments.created_at,
 		       enrollments.updated_at, enrollments.device_id
 		FROM enrollments
@@ -746,6 +759,8 @@ func (store *Store) List(
 			&record.EnrollmentID,
 			&record.Status,
 			&record.Subject,
+			&record.Username,
+			&record.DeviceName,
 			&record.PublicKeyFingerprint,
 			&record.CreatedAt,
 			&record.UpdatedAt,
@@ -759,6 +774,610 @@ func (store *Store) List(
 		records = append(records, record)
 	}
 	return records, rows.Err()
+}
+
+func (store *Store) ListDevices(
+	ctx context.Context,
+	administrator enrollment.Principal,
+	limit int,
+) ([]enrollment.AdministrativeDevice, error) {
+	rows, err := store.pool.Query(ctx, `
+		SELECT devices.id, COALESCE(devices.device_name, ''), devices.status, users.subject,
+		       COALESCE(users.display_name, ''), devices.created_at,
+		       devices.revoked_at, devices.current_certificate_serial_number,
+		       current_certificate.not_after,
+		       (SELECT count(*) FROM certificates
+		        WHERE certificates.organization_id = devices.organization_id
+		          AND certificates.device_id = devices.id),
+		       (SELECT count(*) FROM certificate_renewals
+		        WHERE certificate_renewals.organization_id = devices.organization_id
+		          AND certificate_renewals.device_id = devices.id
+		          AND certificate_renewals.status = 'approved')
+		FROM devices
+		JOIN organizations ON organizations.id = devices.organization_id
+		JOIN LATERAL (
+			SELECT enrollments.user_id
+			FROM enrollments
+			WHERE enrollments.organization_id = devices.organization_id
+			  AND enrollments.device_id = devices.id
+			  AND enrollments.status = 'approved'
+			ORDER BY enrollments.updated_at DESC, enrollments.id DESC
+			LIMIT 1
+		) AS owning_enrollment ON true
+		JOIN users ON users.id = owning_enrollment.user_id
+		LEFT JOIN certificates AS current_certificate
+		  ON current_certificate.serial_number = devices.current_certificate_serial_number
+		WHERE organizations.issuer = $1
+		ORDER BY devices.created_at DESC, devices.id
+		LIMIT $2
+	`, administrator.Issuer, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	devices := make([]enrollment.AdministrativeDevice, 0)
+	for rows.Next() {
+		var device enrollment.AdministrativeDevice
+		if err := rows.Scan(
+			&device.DeviceID,
+			&device.DeviceName,
+			&device.Status,
+			&device.Subject,
+			&device.Username,
+			&device.CreatedAt,
+			&device.RevokedAt,
+			&device.CurrentCertificateSerialNumber,
+			&device.CurrentCertificateNotAfter,
+			&device.CertificateCount,
+			&device.RenewalCount,
+		); err != nil {
+			return nil, err
+		}
+		devices = append(devices, device)
+	}
+	return devices, rows.Err()
+}
+
+func (store *Store) PutLatestDiscoveryReport(
+	ctx context.Context,
+	device deviceidentity.Identity,
+	schemaVersion int,
+	reportJSON []byte,
+) (discoveryreport.StoredReport, error) {
+	receivedAt := time.Now().UTC()
+	var storedAt time.Time
+	err := store.pool.QueryRow(ctx, `
+		INSERT INTO device_discovery_reports (
+			device_id, organization_id, user_id, certificate_serial_number,
+			schema_version, report, received_at
+		)
+		SELECT devices.id, devices.organization_id, $3, certificates.serial_number,
+		       $5, $6::jsonb, $7
+		FROM devices
+		JOIN certificates
+		  ON certificates.serial_number = $4
+		 AND certificates.device_id = devices.id
+		 AND certificates.organization_id = devices.organization_id
+		WHERE devices.id = $1 AND devices.organization_id = $2
+		  AND devices.status = 'active'
+		  AND devices.current_certificate_serial_number = certificates.serial_number
+		  AND certificates.revoked_at IS NULL
+		  AND certificates.not_before <= now() AND certificates.not_after > now()
+		  AND EXISTS (
+			SELECT 1 FROM enrollments
+			WHERE enrollments.organization_id = devices.organization_id
+			  AND enrollments.device_id = devices.id
+			  AND enrollments.user_id = $3
+			  AND enrollments.status = 'approved'
+		  )
+		ON CONFLICT (device_id) DO UPDATE SET
+			organization_id = EXCLUDED.organization_id,
+			user_id = EXCLUDED.user_id,
+			certificate_serial_number = EXCLUDED.certificate_serial_number,
+			schema_version = EXCLUDED.schema_version,
+			report = EXCLUDED.report,
+			received_at = EXCLUDED.received_at
+		RETURNING received_at
+	`, device.DeviceID, device.OrganizationID, device.UserID, device.SerialNumber,
+		schemaVersion, reportJSON, receivedAt).Scan(&storedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return discoveryreport.StoredReport{}, discoveryreport.ErrNotActive
+	}
+	if err != nil {
+		return discoveryreport.StoredReport{}, err
+	}
+	var report discoveryreport.Report
+	if err := json.Unmarshal(reportJSON, &report); err != nil {
+		return discoveryreport.StoredReport{}, err
+	}
+	return discoveryreport.StoredReport{DeviceID: device.DeviceID, ReceivedAt: storedAt, Report: report}, nil
+}
+
+func (store *Store) GetLatestDiscoveryReport(
+	ctx context.Context,
+	administrator enrollment.Principal,
+	deviceID string,
+) (discoveryreport.StoredReport, error) {
+	var stored discoveryreport.StoredReport
+	var reportJSON []byte
+	err := store.pool.QueryRow(ctx, `
+		SELECT reports.device_id, reports.received_at, reports.report
+		FROM device_discovery_reports AS reports
+		JOIN organizations ON organizations.id = reports.organization_id
+		WHERE reports.device_id = $1 AND organizations.issuer = $2
+	`, deviceID, administrator.Issuer).Scan(&stored.DeviceID, &stored.ReceivedAt, &reportJSON)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return discoveryreport.StoredReport{}, discoveryreport.ErrNotFound
+	}
+	if err != nil {
+		return discoveryreport.StoredReport{}, err
+	}
+	if err := json.Unmarshal(reportJSON, &stored.Report); err != nil {
+		return discoveryreport.StoredReport{}, err
+	}
+	return stored, nil
+}
+
+func (store *Store) ListInventoryAssets(
+	ctx context.Context,
+	administrator enrollment.Principal,
+	query discoveryreport.InventoryQuery,
+) (discoveryreport.InventoryPage, error) {
+	page := discoveryreport.InventoryPage{
+		Kind: query.Kind, Limit: query.Limit, Offset: query.Offset, GeneratedAt: time.Now().UTC(),
+		Assets: make([]discoveryreport.InventoryAsset, 0),
+	}
+	err := store.pool.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM devices WHERE organization_id = organizations.id AND status = 'active'),
+			(SELECT count(*) FROM device_discovery_reports AS reports
+			 JOIN devices ON devices.id = reports.device_id
+			 WHERE reports.organization_id = organizations.id AND devices.status = 'active'),
+			(SELECT count(*) FROM (
+				SELECT DISTINCT agent->>'id', agent->>'version'
+				FROM device_discovery_reports AS reports
+				JOIN devices ON devices.id = reports.device_id AND devices.status = 'active'
+				CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(reports.report->'agents') = 'array' THEN reports.report->'agents' ELSE '[]'::jsonb END) AS agent
+				WHERE reports.organization_id = organizations.id
+				  AND ((agent->>'installed')::boolean OR (agent->'evidence') ? 'configuration')
+			) AS distinct_agents),
+			(SELECT count(*) FROM (
+				SELECT DISTINCT server->>'name', server->>'transport'
+				FROM device_discovery_reports AS reports
+				JOIN devices ON devices.id = reports.device_id AND devices.status = 'active'
+				CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(reports.report->'agents') = 'array' THEN reports.report->'agents' ELSE '[]'::jsonb END) AS agent
+				CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(agent->'mcp_servers') = 'array' THEN agent->'mcp_servers' ELSE '[]'::jsonb END) AS server
+				WHERE reports.organization_id = organizations.id
+			) AS distinct_mcp),
+			(SELECT count(*) FROM (
+				SELECT DISTINCT skill->>'name'
+				FROM device_discovery_reports AS reports
+				JOIN devices ON devices.id = reports.device_id AND devices.status = 'active'
+				CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(reports.report->'agents') = 'array' THEN reports.report->'agents' ELSE '[]'::jsonb END) AS agent
+				CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(agent->'skills') = 'array' THEN agent->'skills' ELSE '[]'::jsonb END) AS skill
+				WHERE reports.organization_id = organizations.id
+			) AS distinct_skills),
+			(SELECT count(*) FROM (
+				SELECT DISTINCT plugin->>'name'
+				FROM device_discovery_reports AS reports
+				JOIN devices ON devices.id = reports.device_id AND devices.status = 'active'
+				CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(reports.report->'agents') = 'array' THEN reports.report->'agents' ELSE '[]'::jsonb END) AS agent
+				CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(agent->'plugins') = 'array' THEN agent->'plugins' ELSE '[]'::jsonb END) AS plugin
+				WHERE reports.organization_id = organizations.id
+			) AS distinct_plugins)
+		FROM organizations
+		WHERE issuer = $1
+	`, administrator.Issuer).Scan(
+		&page.Counts.ActiveDevices,
+		&page.Counts.ReportingDevices,
+		&page.Counts.Agents,
+		&page.Counts.MCPServers,
+		&page.Counts.Skills,
+		&page.Counts.Plugins,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return discoveryreport.InventoryPage{}, discoveryreport.ErrNotFound
+	}
+	if err != nil {
+		return discoveryreport.InventoryPage{}, err
+	}
+	assetSQL := inventoryAssetSQL(query.Kind)
+	rows, err := store.pool.Query(ctx, assetSQL, administrator.Issuer, query.Search, query.Limit, query.Offset)
+	if err != nil {
+		return discoveryreport.InventoryPage{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var asset discoveryreport.InventoryAsset
+		if err := rows.Scan(
+			&asset.Kind, &asset.Key, &asset.Version, &asset.Detail,
+			&asset.DeviceCount, &asset.RunningCount, &page.Total,
+		); err != nil {
+			return discoveryreport.InventoryPage{}, err
+		}
+		page.Assets = append(page.Assets, asset)
+	}
+	return page, rows.Err()
+}
+
+func inventoryAssetSQL(kind string) string {
+	switch kind {
+	case "agent":
+		return `
+			WITH assets AS (
+				SELECT agent->>'id' AS key, NULLIF(agent->>'version', '') AS version, '' AS detail,
+				       count(DISTINCT reports.device_id) AS device_count,
+				       count(DISTINCT reports.device_id) FILTER (WHERE agent->>'running' = 'detected') AS running_count
+				FROM device_discovery_reports AS reports
+				JOIN organizations ON organizations.id = reports.organization_id
+				JOIN devices ON devices.id = reports.device_id AND devices.status = 'active'
+				CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(reports.report->'agents') = 'array' THEN reports.report->'agents' ELSE '[]'::jsonb END) AS agent
+				WHERE organizations.issuer = $1
+				  AND ((agent->>'installed')::boolean OR (agent->'evidence') ? 'configuration')
+				GROUP BY agent->>'id', NULLIF(agent->>'version', '')
+			)
+			SELECT 'agent', key, version, detail, device_count, running_count, count(*) OVER()
+			FROM assets
+			WHERE $2 = '' OR strpos(lower(key), lower($2)) > 0 OR strpos(lower(COALESCE(version, '')), lower($2)) > 0
+			ORDER BY device_count DESC, key, version NULLS LAST
+			LIMIT $3 OFFSET $4`
+	case "mcp":
+		return `
+			WITH assets AS (
+				SELECT server->>'name' AS key, NULL::text AS version, server->>'transport' AS detail,
+				       count(DISTINCT reports.device_id) AS device_count, 0::bigint AS running_count
+				FROM device_discovery_reports AS reports
+				JOIN organizations ON organizations.id = reports.organization_id
+				JOIN devices ON devices.id = reports.device_id AND devices.status = 'active'
+				CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(reports.report->'agents') = 'array' THEN reports.report->'agents' ELSE '[]'::jsonb END) AS agent
+				CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(agent->'mcp_servers') = 'array' THEN agent->'mcp_servers' ELSE '[]'::jsonb END) AS server
+				WHERE organizations.issuer = $1
+				GROUP BY server->>'name', server->>'transport'
+			)
+			SELECT 'mcp', key, version, detail, device_count, running_count, count(*) OVER()
+			FROM assets
+			WHERE $2 = '' OR strpos(lower(key), lower($2)) > 0 OR strpos(lower(detail), lower($2)) > 0
+			ORDER BY device_count DESC, key, detail
+			LIMIT $3 OFFSET $4`
+	case "skill":
+		return `
+			WITH assets AS (
+				SELECT skill->>'name' AS key, NULL::text AS version, '' AS detail,
+				       count(DISTINCT reports.device_id) AS device_count, 0::bigint AS running_count
+				FROM device_discovery_reports AS reports
+				JOIN organizations ON organizations.id = reports.organization_id
+				JOIN devices ON devices.id = reports.device_id AND devices.status = 'active'
+				CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(reports.report->'agents') = 'array' THEN reports.report->'agents' ELSE '[]'::jsonb END) AS agent
+				CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(agent->'skills') = 'array' THEN agent->'skills' ELSE '[]'::jsonb END) AS skill
+				WHERE organizations.issuer = $1
+				GROUP BY skill->>'name'
+			)
+			SELECT 'skill', key, version, detail, device_count, running_count, count(*) OVER()
+			FROM assets
+			WHERE $2 = '' OR strpos(lower(key), lower($2)) > 0
+			ORDER BY device_count DESC, key
+			LIMIT $3 OFFSET $4`
+	default:
+		return `
+			WITH assets AS (
+				SELECT plugin->>'name' AS key, NULL::text AS version, plugin->>'state' AS detail,
+				       count(DISTINCT reports.device_id) AS device_count, 0::bigint AS running_count
+				FROM device_discovery_reports AS reports
+				JOIN organizations ON organizations.id = reports.organization_id
+				JOIN devices ON devices.id = reports.device_id AND devices.status = 'active'
+				CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(reports.report->'agents') = 'array' THEN reports.report->'agents' ELSE '[]'::jsonb END) AS agent
+				CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(agent->'plugins') = 'array' THEN agent->'plugins' ELSE '[]'::jsonb END) AS plugin
+				WHERE organizations.issuer = $1
+				GROUP BY plugin->>'name', plugin->>'state'
+			)
+			SELECT 'plugin', key, version, detail, device_count, running_count, count(*) OVER()
+			FROM assets
+			WHERE $2 = '' OR strpos(lower(key), lower($2)) > 0 OR strpos(lower(detail), lower($2)) > 0
+			ORDER BY device_count DESC, key, detail
+			LIMIT $3 OFFSET $4`
+	}
+}
+
+func (store *Store) ListInventoryDevices(
+	ctx context.Context,
+	administrator enrollment.Principal,
+	query discoveryreport.InventoryDeviceQuery,
+) (discoveryreport.InventoryDevicePage, error) {
+	page := discoveryreport.InventoryDevicePage{
+		Devices: make([]discoveryreport.InventoryDevice, 0), Limit: query.Limit, Offset: query.Offset,
+	}
+	rows, err := store.pool.Query(ctx, inventoryDeviceSQL(query.Kind),
+		administrator.Issuer, query.Key, query.Version, query.Detail, query.Search, query.Limit, query.Offset)
+	if err != nil {
+		return discoveryreport.InventoryDevicePage{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var device discoveryreport.InventoryDevice
+		if err := rows.Scan(
+			&device.DeviceID, &device.DeviceName, &device.Subject, &device.Username,
+			&device.Status, &device.ReportReceivedAt, &page.Total,
+		); err != nil {
+			return discoveryreport.InventoryDevicePage{}, err
+		}
+		page.Devices = append(page.Devices, device)
+	}
+	return page, rows.Err()
+}
+
+func inventoryDeviceSQL(kind string) string {
+	assetFilter := "true"
+	switch kind {
+	case "agent":
+		assetFilter = `EXISTS (
+			SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(reports.report->'agents') = 'array' THEN reports.report->'agents' ELSE '[]'::jsonb END) AS agent
+			WHERE agent->>'id' = $2
+			  AND ($3 = '' OR agent->>'version' = $3)
+			  AND ((agent->>'installed')::boolean OR (agent->'evidence') ? 'configuration')
+		)`
+	case "mcp":
+		assetFilter = `EXISTS (
+			SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(reports.report->'agents') = 'array' THEN reports.report->'agents' ELSE '[]'::jsonb END) AS agent
+			CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(agent->'mcp_servers') = 'array' THEN agent->'mcp_servers' ELSE '[]'::jsonb END) AS server
+			WHERE server->>'name' = $2 AND ($4 = '' OR server->>'transport' = $4)
+		)`
+	case "skill":
+		assetFilter = `EXISTS (
+			SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(reports.report->'agents') = 'array' THEN reports.report->'agents' ELSE '[]'::jsonb END) AS agent
+			CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(agent->'skills') = 'array' THEN agent->'skills' ELSE '[]'::jsonb END) AS skill
+			WHERE skill->>'name' = $2
+		)`
+	case "plugin":
+		assetFilter = `EXISTS (
+			SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(reports.report->'agents') = 'array' THEN reports.report->'agents' ELSE '[]'::jsonb END) AS agent
+			CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(agent->'plugins') = 'array' THEN agent->'plugins' ELSE '[]'::jsonb END) AS plugin
+			WHERE plugin->>'name' = $2 AND ($4 = '' OR plugin->>'state' = $4)
+		)`
+	}
+	return `
+		SELECT devices.id, COALESCE(devices.device_name, ''), users.subject,
+		       COALESCE(users.display_name, ''), devices.status, reports.received_at,
+		       count(*) OVER()
+		FROM devices
+		JOIN organizations ON organizations.id = devices.organization_id
+		JOIN LATERAL (
+			SELECT enrollments.user_id
+			FROM enrollments
+			WHERE enrollments.organization_id = devices.organization_id
+			  AND enrollments.device_id = devices.id
+			  AND enrollments.status = 'approved'
+			ORDER BY enrollments.updated_at DESC, enrollments.id DESC
+			LIMIT 1
+		) AS owning_enrollment ON true
+		JOIN users ON users.id = owning_enrollment.user_id
+		LEFT JOIN device_discovery_reports AS reports ON reports.device_id = devices.id
+		WHERE organizations.issuer = $1 AND devices.status = 'active'
+		  AND $2::text IS NOT NULL AND $3::text IS NOT NULL AND $4::text IS NOT NULL
+		  AND (` + assetFilter + `)
+		  AND ($5 = ''
+		       OR strpos(lower(COALESCE(devices.device_name, '')), lower($5)) > 0
+		       OR strpos(lower(users.subject), lower($5)) > 0
+		       OR strpos(lower(COALESCE(users.display_name, '')), lower($5)) > 0
+		       OR strpos(lower(devices.id::text), lower($5)) > 0)
+		ORDER BY COALESCE(devices.device_name, ''), devices.id
+		LIMIT $6 OFFSET $7`
+}
+
+func (store *Store) RequestDiscoveryRescan(
+	ctx context.Context,
+	administrator enrollment.Principal,
+	request discoveryreport.RescanRequest,
+) (discoveryreport.RescanResult, error) {
+	transaction, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return discoveryreport.RescanResult{}, err
+	}
+	defer transaction.Rollback(ctx)
+	organizationID, err := findOrganization(ctx, transaction, administrator.Issuer)
+	if err != nil {
+		return discoveryreport.RescanResult{}, err
+	}
+	requestedAt := time.Now().UTC()
+	query := `
+		INSERT INTO device_discovery_rescan_requests (
+			device_id, organization_id, requested_by_subject, requested_at
+		)
+		SELECT devices.id, devices.organization_id, $2, $3
+		FROM devices
+		WHERE devices.organization_id = $1 AND devices.status = 'active'
+	`
+	arguments := []any{organizationID, administrator.Subject, requestedAt}
+	if request.TargetMode == "selected" {
+		query += ` AND devices.id = ANY($4::uuid[])`
+		arguments = append(arguments, request.DeviceIDs)
+	}
+	query += `
+		ON CONFLICT (device_id) DO UPDATE SET
+			organization_id = EXCLUDED.organization_id,
+			requested_by_subject = EXCLUDED.requested_by_subject,
+			requested_at = EXCLUDED.requested_at
+	`
+	command, err := transaction.Exec(ctx, query, arguments...)
+	if err != nil {
+		return discoveryreport.RescanResult{}, err
+	}
+	requested := command.RowsAffected()
+	if request.TargetMode == "selected" && requested != int64(len(request.DeviceIDs)) {
+		return discoveryreport.RescanResult{}, discoveryreport.ErrNotActive
+	}
+	auditID, err := identifier.New()
+	if err != nil {
+		return discoveryreport.RescanResult{}, err
+	}
+	if _, err := transaction.Exec(ctx, `
+		INSERT INTO audit_events (id, organization_id, actor_subject, action, target_id)
+		VALUES ($1, $2, $3, 'discovery.rescan_requested', NULL)
+	`, auditID, organizationID, administrator.Subject); err != nil {
+		return discoveryreport.RescanResult{}, err
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return discoveryreport.RescanResult{}, err
+	}
+	return discoveryreport.RescanResult{Requested: requested, RequestedAt: requestedAt}, nil
+}
+
+func (store *Store) GetDiscoveryRescanStatus(
+	ctx context.Context,
+	device deviceidentity.Identity,
+) (discoveryreport.RescanStatus, error) {
+	var requestedAt, receivedAt *time.Time
+	err := store.pool.QueryRow(ctx, `
+		SELECT requests.requested_at, reports.received_at
+		FROM devices
+		JOIN certificates
+		  ON certificates.serial_number = $4
+		 AND certificates.device_id = devices.id
+		 AND certificates.organization_id = devices.organization_id
+		LEFT JOIN device_discovery_rescan_requests AS requests ON requests.device_id = devices.id
+		LEFT JOIN device_discovery_reports AS reports ON reports.device_id = devices.id
+		WHERE devices.id = $1 AND devices.organization_id = $2
+		  AND devices.status = 'active'
+		  AND devices.current_certificate_serial_number = certificates.serial_number
+		  AND certificates.revoked_at IS NULL
+		  AND certificates.not_before <= now() AND certificates.not_after > now()
+		  AND EXISTS (
+			SELECT 1 FROM enrollments
+			WHERE enrollments.organization_id = devices.organization_id
+			  AND enrollments.device_id = devices.id
+			  AND enrollments.user_id = $3
+			  AND enrollments.status = 'approved'
+		  )
+	`, device.DeviceID, device.OrganizationID, device.UserID, device.SerialNumber).Scan(&requestedAt, &receivedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return discoveryreport.RescanStatus{}, discoveryreport.ErrNotActive
+	}
+	if err != nil {
+		return discoveryreport.RescanStatus{}, err
+	}
+	pending := requestedAt != nil && (receivedAt == nil || requestedAt.After(*receivedAt))
+	return discoveryreport.RescanStatus{Pending: pending, RequestedAt: requestedAt}, nil
+}
+
+func (store *Store) PutAgentPolicy(
+	ctx context.Context,
+	administrator enrollment.Principal,
+	request agentpolicy.Request,
+) (agentpolicy.Policy, error) {
+	transaction, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return agentpolicy.Policy{}, err
+	}
+	defer transaction.Rollback(ctx)
+	organizationID, err := findOrganization(ctx, transaction, administrator.Issuer)
+	if err != nil {
+		return agentpolicy.Policy{}, err
+	}
+	rulesJSON, err := json.Marshal(request.Rules)
+	if err != nil {
+		return agentpolicy.Policy{}, err
+	}
+	now := time.Now().UTC()
+	_, err = transaction.Exec(ctx, `
+		INSERT INTO organization_agent_policies (
+			organization_id, schema_version, rules, updated_by_subject, updated_at
+		) VALUES ($1, $2, $3::jsonb, $4, $5)
+		ON CONFLICT (organization_id) DO UPDATE SET
+			schema_version = EXCLUDED.schema_version,
+			rules = EXCLUDED.rules,
+			updated_by_subject = EXCLUDED.updated_by_subject,
+			updated_at = EXCLUDED.updated_at
+	`, organizationID, request.SchemaVersion, rulesJSON, administrator.Subject, now)
+	if err != nil {
+		return agentpolicy.Policy{}, err
+	}
+	auditID, err := identifier.New()
+	if err != nil {
+		return agentpolicy.Policy{}, err
+	}
+	if _, err := transaction.Exec(ctx, `
+		INSERT INTO audit_events (id, organization_id, actor_subject, action, target_id)
+		VALUES ($1, $2, $3, 'agent_policy.updated', NULL)
+	`, auditID, organizationID, administrator.Subject); err != nil {
+		return agentpolicy.Policy{}, err
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return agentpolicy.Policy{}, err
+	}
+	return agentpolicy.Policy{
+		SchemaVersion: request.SchemaVersion, Rules: request.Rules, Configured: true,
+		Enforcement: "not_available", UpdatedBy: administrator.Subject, UpdatedAt: now,
+	}, nil
+}
+
+func (store *Store) GetAgentPolicy(
+	ctx context.Context,
+	administrator enrollment.Principal,
+) (agentpolicy.Policy, error) {
+	var policy agentpolicy.Policy
+	var rulesJSON []byte
+	err := store.pool.QueryRow(ctx, `
+		SELECT policies.schema_version, policies.rules, policies.updated_by_subject, policies.updated_at
+		FROM organization_agent_policies AS policies
+		JOIN organizations ON organizations.id = policies.organization_id
+		WHERE organizations.issuer = $1
+	`, administrator.Issuer).Scan(&policy.SchemaVersion, &rulesJSON, &policy.UpdatedBy, &policy.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return agentpolicy.Policy{}, agentpolicy.ErrNotFound
+	}
+	if err != nil {
+		return agentpolicy.Policy{}, err
+	}
+	if err := json.Unmarshal(rulesJSON, &policy.Rules); err != nil {
+		return agentpolicy.Policy{}, err
+	}
+	policy.Configured = true
+	policy.Enforcement = "not_available"
+	return policy, nil
+}
+
+func (store *Store) Summary(
+	ctx context.Context,
+	administrator enrollment.Principal,
+) (enrollment.FleetSummary, error) {
+	var summary enrollment.FleetSummary
+	err := store.pool.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM enrollments WHERE organization_id = organizations.id AND status = 'pending'),
+			(SELECT count(*) FROM enrollments WHERE organization_id = organizations.id AND status = 'issuing'),
+			(SELECT count(*) FROM enrollments WHERE organization_id = organizations.id AND status = 'approved'),
+			(SELECT count(*) FROM enrollments WHERE organization_id = organizations.id AND status = 'rejected'),
+			(SELECT count(*) FROM devices WHERE organization_id = organizations.id AND status = 'active'),
+			(SELECT count(*) FROM devices WHERE organization_id = organizations.id AND status = 'revoked'),
+			(SELECT count(*)
+			 FROM devices
+			 JOIN certificates ON certificates.serial_number = devices.current_certificate_serial_number
+			 WHERE devices.organization_id = organizations.id
+			   AND devices.status = 'active'
+			   AND certificates.revoked_at IS NULL
+			   AND certificates.not_after > now()
+			   AND certificates.not_after <= now() + interval '24 hours'),
+			(SELECT count(*) FROM certificate_renewals
+			 WHERE organization_id = organizations.id
+			   AND status = 'approved'
+			   AND updated_at >= now() - interval '24 hours'),
+			now()
+		FROM organizations
+		WHERE issuer = $1
+	`, administrator.Issuer).Scan(
+		&summary.PendingEnrollments,
+		&summary.IssuingEnrollments,
+		&summary.ApprovedEnrollments,
+		&summary.RejectedEnrollments,
+		&summary.ActiveDevices,
+		&summary.RevokedDevices,
+		&summary.CertificatesExpiring24H,
+		&summary.Renewals24H,
+		&summary.GeneratedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return enrollment.FleetSummary{}, enrollment.ErrInvalidPrincipal
+	}
+	return summary, err
 }
 
 func (store *Store) RevokeDevice(
@@ -926,19 +1545,19 @@ func findOrganization(ctx context.Context, transaction pgx.Tx, issuer string) (s
 	return id, err
 }
 
-func upsertUser(ctx context.Context, transaction pgx.Tx, organizationID, subject string) (string, error) {
+func upsertUser(ctx context.Context, transaction pgx.Tx, organizationID, subject, displayName string) (string, error) {
 	id, err := identifier.New()
 	if err != nil {
 		return "", err
 	}
 	var storedID string
 	err = transaction.QueryRow(ctx, `
-		INSERT INTO users (id, organization_id, subject)
-		VALUES ($1, $2, $3)
+		INSERT INTO users (id, organization_id, subject, display_name)
+		VALUES ($1, $2, $3, NULLIF($4, ''))
 		ON CONFLICT (organization_id, subject)
-		DO UPDATE SET subject = EXCLUDED.subject
+		DO UPDATE SET display_name = COALESCE(EXCLUDED.display_name, users.display_name)
 		RETURNING id
-	`, id, organizationID, subject).Scan(&storedID)
+	`, id, organizationID, subject, displayName).Scan(&storedID)
 	return storedID, err
 }
 

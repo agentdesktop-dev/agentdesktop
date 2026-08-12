@@ -72,6 +72,7 @@ struct AuthorityRecoveryChallenge {
 
 pub struct EnrollmentClient {
     client: Client,
+    device_name: Option<String>,
     endpoint: Url,
     renewal_endpoint: Url,
     recovery_challenge_endpoint: Url,
@@ -89,7 +90,20 @@ impl EnrollmentClient {
             bail!("enrollment service URL must be an HTTPS origin");
         }
         Ok(Self {
+            client: crate::identity::tls::http_client()?,
+            device_name: local_device_name(),
+            endpoint: service_url.join("v1/enrollments")?,
+            renewal_endpoint: service_url.join("v1/renewals")?,
+            recovery_challenge_endpoint: service_url.join("v1/recovery/challenges")?,
+            recovery_endpoint: service_url.join("v1/recovery")?,
+        })
+    }
+
+    #[cfg(test)]
+    fn for_test(service_url: &Url) -> Result<Self> {
+        Ok(Self {
             client: Client::new(),
+            device_name: Some("test-device".into()),
             endpoint: service_url.join("v1/enrollments")?,
             renewal_endpoint: service_url.join("v1/renewals")?,
             recovery_challenge_endpoint: service_url.join("v1/recovery/challenges")?,
@@ -103,11 +117,15 @@ impl EnrollmentClient {
         let csr = CertificateParams::default()
             .serialize_request(&key)?
             .pem()?;
+        let mut body = serde_json::json!({"csr": csr});
+        if let Some(device_name) = &self.device_name {
+            body["device_name"] = serde_json::Value::String(device_name.clone());
+        }
         let response = self
             .client
             .post(self.endpoint.clone())
             .bearer_auth(identity.bearer_token().await?)
-            .json(&serde_json::json!({"csr": csr}))
+            .json(&body)
             .send()
             .await?;
         if response.status() != StatusCode::ACCEPTED {
@@ -171,9 +189,14 @@ impl EnrollmentClient {
         let csr = CertificateParams::default()
             .serialize_request(&key)?
             .pem()?;
-        let client = Client::builder()
-            .identity(device_identity(&enrollment)?)
-            .build()?;
+        let mut client = Client::builder();
+        if let Some(path) = std::env::var_os("SSL_CERT_FILE").filter(|path| !path.is_empty()) {
+            let bundle = std::fs::read(path)?;
+            for certificate in reqwest::Certificate::from_pem_bundle(&bundle)? {
+                client = client.add_root_certificate(certificate);
+            }
+        }
+        let client = client.identity(device_identity(&enrollment)?).build()?;
         let response = client
             .post(self.renewal_endpoint.clone())
             .bearer_auth(identity.bearer_token().await?)
@@ -324,6 +347,15 @@ impl EnrollmentClient {
     }
 }
 
+fn local_device_name() -> Option<String> {
+    let value = hostname::get().ok()?.into_string().ok()?;
+    let value = value.trim();
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return None;
+    }
+    Some(value.chars().take(128).collect())
+}
+
 impl AuthorityRecord {
     fn with_key(self, key: &KeyPair) -> EnrollmentRecord {
         self.with_private_key(
@@ -418,13 +450,7 @@ mod tests {
     }
 
     fn fixture_client(service_url: &Url) -> EnrollmentClient {
-        EnrollmentClient {
-            client: reqwest::Client::new(),
-            endpoint: service_url.join("v1/enrollments").unwrap(),
-            renewal_endpoint: service_url.join("v1/renewals").unwrap(),
-            recovery_challenge_endpoint: service_url.join("v1/recovery/challenges").unwrap(),
-            recovery_endpoint: service_url.join("v1/recovery").unwrap(),
-        }
+        EnrollmentClient::for_test(service_url).unwrap()
     }
 
     #[test]
@@ -610,6 +636,7 @@ mod tests {
         Json(body): Json<Value>,
     ) -> (StatusCode, Json<Value>) {
         assert_eq!(headers["authorization"], "Bearer access-token");
+        assert_eq!(body["device_name"], "test-device");
         let csr = body["csr"].as_str().unwrap();
         let request = CertificateSigningRequestParams::from_pem(csr).unwrap();
         let fingerprint = base64::engine::general_purpose::URL_SAFE_NO_PAD

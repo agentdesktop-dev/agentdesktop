@@ -12,9 +12,11 @@ import (
 	"time"
 
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/adminui"
+	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/agentpolicy"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/api"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/auth"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/ca"
+	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/discoveryreport"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/enrollment"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/renewal"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/store/postgres"
@@ -76,6 +78,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if administratorRole := os.Getenv("ADMIN_OAUTH_ROLE"); administratorRole != "" {
+		administratorValidator.RequireRealmRole(administratorRole)
+	}
 	certificateIssuer, closeSigner, err := loadCertificateIssuer(
 		caSignerBackend, caCertificatePath, trustDomain, certificateLifetime,
 	)
@@ -95,6 +100,8 @@ func main() {
 	renewalService := renewal.NewService(store, certificateIssuer)
 	options := []api.Option{
 		api.WithRenewal(validator, renewalService, trustDomain),
+		api.WithDiscoveryReports(discoveryreport.NewService(store), trustDomain),
+		api.WithAgentPolicy(agentpolicy.NewService(store)),
 	}
 	if clientID := os.Getenv("ADMIN_UI_OAUTH_CLIENT_ID"); clientID != "" {
 		options = append(options, api.WithAdminUI(adminui.Config{

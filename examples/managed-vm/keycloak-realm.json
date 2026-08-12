@@ -1,0 +1,203 @@
+{
+  "realm": "agentdesktop",
+  "displayName": "Agent Desktop VM Example",
+  "enabled": true,
+  "sslRequired": "external",
+  "defaultSignatureAlgorithm": "ES256",
+  "revokeRefreshToken": true,
+  "refreshTokenMaxReuse": 0,
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "rememberMe": true,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "roles": {
+    "realm": [
+      {
+        "name": "agentdesktop-administrator",
+        "description": "May administer Agent Desktop enrollment"
+      }
+    ]
+  },
+  "components": {
+    "org.keycloak.keys.KeyProvider": [
+      {
+        "name": "ecdsa-generated",
+        "providerId": "ecdsa-generated",
+        "subComponents": {},
+        "config": {
+          "priority": ["200"],
+          "enabled": ["true"],
+          "active": ["true"],
+          "ecGenerateCertificate": ["false"],
+          "ecdsaEllipticCurveKey": ["P-256"]
+        }
+      }
+    ]
+  },
+  "clientScopes": [
+    {
+      "name": "agentgateway.invoke",
+      "description": "Invoke the managed Agent Gateway",
+      "protocol": "openid-connect",
+      "attributes": {
+        "display.on.consent.screen": "true",
+        "include.in.token.scope": "true"
+      }
+    },
+    {
+      "name": "agentdesktop.enrollment.admin",
+      "description": "Administer Agent Desktop enrollment",
+      "protocol": "openid-connect",
+      "attributes": {
+        "display.on.consent.screen": "true",
+        "include.in.token.scope": "true"
+      }
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "agentdesktop",
+      "name": "Agent Desktop",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": [
+        "http://127.0.0.1:*"
+      ],
+      "webOrigins": [],
+      "optionalClientScopes": [
+        "agentgateway.invoke"
+      ],
+      "protocolMappers": [
+        {
+          "name": "subject",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-sub-mapper",
+          "consentRequired": false,
+          "config": {
+            "access.token.claim": "true",
+            "lightweight.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "preferred-username",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-property-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "username",
+            "claim.name": "preferred_username",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "lightweight.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "agentdesktop-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "agentdesktop",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "agentdesktop-admin",
+      "name": "Agent Desktop Administration",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": [
+        "http://127.0.0.1:*"
+      ],
+      "webOrigins": [],
+      "optionalClientScopes": [
+        "agentdesktop.enrollment.admin"
+      ],
+      "protocolMappers": [
+        {
+          "name": "subject",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-sub-mapper",
+          "consentRequired": false,
+          "config": {
+            "access.token.claim": "true",
+            "lightweight.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "realm-roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "realm_access.roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "access.token.claim": "true",
+            "lightweight.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "agentdesktop-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "agentdesktop",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "employee",
+      "email": "employee@example.test",
+      "firstName": "Example",
+      "lastName": "Employee",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "employee-change-me",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "administrator",
+      "email": "administrator@example.test",
+      "firstName": "Example",
+      "lastName": "Administrator",
+      "enabled": true,
+      "emailVerified": true,
+      "realmRoles": [
+        "agentdesktop-administrator"
+      ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "administrator-change-me",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}

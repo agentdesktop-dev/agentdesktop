@@ -1,5 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(target_os = "macos")]
+mod discovery;
+
 use std::{
     env, fs,
     io::ErrorKind,
@@ -9,9 +12,12 @@ use std::{
 
 use agentdesktop::apps::claude;
 use agentdesktop::identity::{
-    enrollment::{EnrollmentStatus, load_enrollment_for},
-    oauth::load_session_for,
-    storage::{CredentialStore, default_storage_root},
+    enrollment::{
+        EnrollmentClient, EnrollmentRecord, EnrollmentStatus, load_enrollment_for,
+        save_enrollment_for,
+    },
+    oauth::{LoginConfig, ManagedIdentity, load_session_for, login, open_authorization_url},
+    storage::{CredentialStorageMode, CredentialStore, default_storage_root},
 };
 use agentdesktop::organization::OrganizationBootstrap;
 use agentdesktop_ui::provider_credentials;
@@ -26,11 +32,13 @@ use tauri::{
 
 const OPEN_MENU_ID: &str = "open";
 const QUIT_MENU_ID: &str = "quit";
-const CONNECTOR_STATUS_URL: &str = "http://127.0.0.1:8080/_agentdesktop/status";
+const CONNECTOR_STATUS_URL: &str = "http://127.0.0.1:8081/_agentdesktop/status";
 const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const MANAGED_ROUTING_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 const CONNECTOR_BASE_URL: &str = "http://127.0.0.1:8080";
 const PLACEHOLDER_CREDENTIAL: &str = "local-gateway-placeholder";
 const IDENTITY_DIR_ENV: &str = "AGENTDESKTOP_IDENTITY_DIR";
+const CREDENTIAL_STORAGE_ENV: &str = "AGENTDESKTOP_CREDENTIAL_STORAGE";
 const ORGANIZATION_CONFIG_ENV: &str = "AGENTDESKTOP_ORGANIZATION_CONFIG";
 const DESIRED_CLAUDE_ENVIRONMENT: [(&str, &str); 2] = [
     ("ANTHROPIC_BASE_URL", CONNECTOR_BASE_URL),
@@ -88,13 +96,17 @@ struct ConnectorRuntime {
     mode: String,
     gateway: String,
     identity: String,
-    in_flight: usize,
-    max_in_flight: usize,
-    connect_timeout_ms: u64,
-    request_timeout_ms: u64,
-    shutdown_timeout_ms: u64,
+    #[serde(default)]
+    in_flight: Option<usize>,
+    #[serde(default)]
+    max_in_flight: Option<usize>,
+    #[serde(default)]
+    connect_timeout_ms: Option<u64>,
+    #[serde(default)]
+    shutdown_timeout_ms: Option<u64>,
     platform: PlatformCapabilities,
-    metrics: MetricsSnapshot,
+    #[serde(default)]
+    metrics: Option<MetricsSnapshot>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -205,6 +217,26 @@ impl ManagedDeviceSnapshot {
     }
 }
 
+fn apply_enrollment_snapshot(snapshot: &mut ManagedDeviceSnapshot, enrollment: EnrollmentRecord) {
+    snapshot.enrollment = match enrollment.status {
+        EnrollmentStatus::Pending => "pending",
+        EnrollmentStatus::Issuing => "issuing",
+        EnrollmentStatus::Approved => "approved",
+        EnrollmentStatus::Rejected => "rejected",
+    };
+    snapshot.enrollment_id = Some(enrollment.enrollment_id);
+    snapshot.enrollment_created_at = Some(enrollment.created_at);
+    snapshot.device_id = enrollment.device_id;
+    snapshot.public_key_fingerprint = Some(enrollment.public_key_fingerprint);
+    snapshot.certificate = enrollment
+        .certificate
+        .map(|certificate| ManagedCertificateSnapshot {
+            serial_number: certificate.serial_number,
+            not_before: certificate.not_before,
+            not_after: certificate.not_after,
+        });
+}
+
 fn resolve_organization_config(
     explicit: Option<PathBuf>,
     resource_directory: Option<&Path>,
@@ -276,6 +308,16 @@ fn managed_device_snapshot(app: &AppHandle) -> ManagedDeviceSnapshot {
     if !storage_root.exists() {
         return snapshot;
     }
+    match identity_storage_is_empty(&storage_root) {
+        Ok(true) => return snapshot,
+        Ok(false) => {}
+        Err(_) => {
+            snapshot.session = "unavailable";
+            snapshot.enrollment = "unavailable";
+            snapshot.detail = Some("The managed credential location is unavailable.".to_owned());
+            return snapshot;
+        }
+    }
     let store = match CredentialStore::load(&storage_root) {
         Ok(store) => store,
         Err(_) => {
@@ -299,24 +341,41 @@ fn managed_device_snapshot(app: &AppHandle) -> ManagedDeviceSnapshot {
             Ok(enrollment) => enrollment,
             Err(_) => return snapshot,
         };
-    snapshot.enrollment = match enrollment.status {
-        EnrollmentStatus::Pending => "pending",
-        EnrollmentStatus::Issuing => "issuing",
-        EnrollmentStatus::Approved => "approved",
-        EnrollmentStatus::Rejected => "rejected",
-    };
-    snapshot.enrollment_id = Some(enrollment.enrollment_id);
-    snapshot.enrollment_created_at = Some(enrollment.created_at);
-    snapshot.device_id = enrollment.device_id;
-    snapshot.public_key_fingerprint = Some(enrollment.public_key_fingerprint);
-    snapshot.certificate = enrollment
-        .certificate
-        .map(|certificate| ManagedCertificateSnapshot {
-            serial_number: certificate.serial_number,
-            not_before: certificate.not_before,
-            not_after: certificate.not_after,
-        });
+    apply_enrollment_snapshot(&mut snapshot, enrollment);
     snapshot
+}
+
+fn identity_storage_is_empty(storage_root: &Path) -> std::io::Result<bool> {
+    if storage_root.join("credential-storage").exists() {
+        return Ok(false);
+    }
+    Ok(fs::read_dir(storage_root)?.next().is_none())
+}
+
+fn managed_credential_store() -> Result<CredentialStore, String> {
+    let storage_root = env::var_os(IDENTITY_DIR_ENV)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .map_or_else(default_storage_root, Ok)
+        .map_err(|error| error.to_string())?;
+    if storage_root.join("credential-storage").is_file() {
+        CredentialStore::load(&storage_root).map_err(|error| error.to_string())
+    } else {
+        let mode = match env::var(CREDENTIAL_STORAGE_ENV).as_deref() {
+            Ok("auto") | Err(env::VarError::NotPresent) => CredentialStorageMode::Auto,
+            Ok("file") => CredentialStorageMode::File,
+            Ok("secret-service") => CredentialStorageMode::SecretService,
+            Ok(value) => {
+                return Err(format!(
+                    "{CREDENTIAL_STORAGE_ENV} must be auto, file, or secret-service, got {value:?}"
+                ));
+            }
+            Err(env::VarError::NotUnicode(_)) => {
+                return Err(format!("{CREDENTIAL_STORAGE_ENV} is not valid text"));
+            }
+        };
+        CredentialStore::setup(mode, &storage_root).map_err(|error| error.to_string())
+    }
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -489,8 +548,19 @@ fn show_main_window(app: &AppHandle) {
 
 #[tauri::command]
 fn get_bootstrap(app: AppHandle) -> Result<Bootstrap, String> {
-    let manages_provider_credentials = env::var_os("AGENTDESKTOP_GATEWAY_BINARY").is_some()
+    let managed = organization_config_path(&app).is_some();
+    let owns_local_gateway = env::var_os("AGENTDESKTOP_GATEWAY_BINARY").is_some()
         && env::var_os("AGENTDESKTOP_GATEWAY_CONFIG").is_some();
+    let local_provider_credential_configured = if managed {
+        false
+    } else {
+        provider_credentials::is_configured().map_err(|error| error.to_string())?
+    };
+    let (manages_provider_credentials, provider_credential_configured) = provider_access_state(
+        managed,
+        owns_local_gateway,
+        local_provider_credential_configured,
+    );
     Ok(Bootstrap {
         settings: load_settings(&app)?,
         version: app.package_info().version.to_string(),
@@ -501,9 +571,27 @@ fn get_bootstrap(app: AppHandle) -> Result<Bootstrap, String> {
             _ => std::env::consts::OS,
         },
         manages_provider_credentials,
-        provider_credential_configured: provider_credentials::is_configured()
-            .map_err(|error| error.to_string())?,
+        provider_credential_configured,
     })
+}
+
+fn provider_access_state(
+    managed: bool,
+    owns_local_gateway: bool,
+    local_credential_configured: bool,
+) -> (bool, bool) {
+    if managed {
+        (false, true)
+    } else {
+        (owns_local_gateway, local_credential_configured)
+    }
+}
+
+fn validate_provider_credential_input(managed: bool, has_api_key: bool) -> Result<(), String> {
+    if managed && has_api_key {
+        return Err("provider credentials are managed by the organization".into());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -532,6 +620,72 @@ fn get_managed_device_status(app: AppHandle) -> ManagedDeviceSnapshot {
 }
 
 #[tauri::command]
+async fn setup_managed_device(app: AppHandle) -> Result<ManagedDeviceSnapshot, String> {
+    let bootstrap = load_organization_bootstrap(&app)?;
+    let store = managed_credential_store()?;
+    let gateway_origin = bootstrap.gateway.url.clone();
+    let session = match load_session_for(&bootstrap.identity.issuer, &gateway_origin, &store) {
+        Ok(session) => session,
+        Err(_) => login(
+            &LoginConfig {
+                issuer: bootstrap.identity.issuer.clone(),
+                client_id: bootstrap.identity.client_id.clone(),
+                audience: bootstrap.identity.audience.clone(),
+                scope: bootstrap.identity.scope.clone(),
+                gateway_origin: gateway_origin.clone(),
+            },
+            &store,
+            open_authorization_url,
+        )
+        .await
+        .map_err(|error| error.to_string())?,
+    };
+    let identity = ManagedIdentity::new(session, store.clone());
+    let client = EnrollmentClient::new(&bootstrap.identity.enrollment_url)
+        .map_err(|error| error.to_string())?;
+    let enrollment = match load_enrollment_for(&bootstrap.identity.issuer, &gateway_origin, &store)
+    {
+        Ok(enrollment) if enrollment.status == EnrollmentStatus::Approved => enrollment,
+        Ok(enrollment) => client
+            .status(&identity, &enrollment)
+            .await
+            .map_err(|error| error.to_string())?,
+        Err(_) => client
+            .request(&identity)
+            .await
+            .map_err(|error| error.to_string())?,
+    };
+    save_enrollment_for(
+        &bootstrap.identity.issuer,
+        &gateway_origin,
+        &store,
+        &enrollment,
+    )
+    .map_err(|error| error.to_string())?;
+    if enrollment.status == EnrollmentStatus::Approved {
+        let _ = claude::connect_installed();
+    }
+
+    let mut snapshot = ManagedDeviceSnapshot::from_bootstrap(&bootstrap);
+    snapshot.session = "ready";
+    apply_enrollment_snapshot(&mut snapshot, enrollment);
+    Ok(snapshot)
+}
+
+async fn run_managed_routing_reconciler(bootstrap: OrganizationBootstrap, identity_root: PathBuf) {
+    loop {
+        if identity_root.join("credential-storage").is_file()
+            && let Ok(store) = CredentialStore::load(&identity_root)
+            && load_enrollment_for(&bootstrap.identity.issuer, &bootstrap.gateway.url, &store)
+                .is_ok_and(|enrollment| enrollment.status == EnrollmentStatus::Approved)
+        {
+            let _ = claude::connect_installed();
+        }
+        tokio::time::sleep(MANAGED_ROUTING_RECONCILE_INTERVAL).await;
+    }
+}
+
+#[tauri::command]
 fn open_managed_page(app: AppHandle, page: ManagedPage) -> Result<(), String> {
     let bootstrap = load_organization_bootstrap(&app)?;
     let url = match page {
@@ -546,10 +700,14 @@ fn open_managed_page(app: AppHandle, page: ManagedPage) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn connect_claude(api_key: Option<String>) -> Result<ClaudeSnapshot, String> {
+fn connect_claude(app: AppHandle, api_key: Option<String>) -> Result<ClaudeSnapshot, String> {
     if claude_connection_status()? == ClaudeConnectionState::Conflict {
         return Err("Claude Code already has a different provider or gateway configuration".into());
     }
+    validate_provider_credential_input(
+        organization_config_path(&app).is_some(),
+        api_key.is_some(),
+    )?;
     if let Some(api_key) = api_key {
         provider_credentials::store(api_key).map_err(|error| error.to_string())?;
     }
@@ -603,6 +761,19 @@ fn main() {
                 }
             });
 
+            if let Ok(bootstrap) = load_organization_bootstrap(app.handle()) {
+                let identity_root = env::var_os(IDENTITY_DIR_ENV)
+                    .filter(|path| !path.is_empty())
+                    .map(PathBuf::from)
+                    .map_or_else(default_storage_root, Ok)?;
+                tauri::async_runtime::spawn(run_managed_routing_reconciler(
+                    bootstrap.clone(),
+                    identity_root.clone(),
+                ));
+                #[cfg(target_os = "macos")]
+                tauri::async_runtime::spawn(discovery::run_reporter(bootstrap, identity_root));
+            }
+
             if load_settings(app.handle())?.open_on_startup {
                 show_main_window(app.handle());
             }
@@ -622,6 +793,7 @@ fn main() {
             get_connector_status,
             get_claude_status,
             get_managed_device_status,
+            setup_managed_device,
             open_managed_page,
             connect_claude
         ])
@@ -632,8 +804,10 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClaudeConnectionState, ConnectorRuntime, ConnectorSnapshot, MetricsSnapshot,
-        PlatformCapabilities, Settings, claude_connection_status_for, resolve_organization_config,
+        ClaudeConnectionState, ConnectorRuntime, ConnectorSnapshot, ManagedDeviceSnapshot,
+        MetricsSnapshot, OrganizationBootstrap, PlatformCapabilities, Settings,
+        claude_connection_status_for, provider_access_state, resolve_organization_config,
+        validate_provider_credential_input,
     };
 
     #[test]
@@ -651,11 +825,10 @@ mod tests {
             mode: "standalone".to_owned(),
             gateway: gateway.to_owned(),
             identity: identity.to_owned(),
-            in_flight: 0,
-            max_in_flight: 128,
-            connect_timeout_ms: 5_000,
-            request_timeout_ms: 30_000,
-            shutdown_timeout_ms: 10_000,
+            in_flight: None,
+            max_in_flight: None,
+            connect_timeout_ms: None,
+            shutdown_timeout_ms: None,
             platform: PlatformCapabilities {
                 os: "macos".to_owned(),
                 native_gateway: true,
@@ -664,14 +837,14 @@ mod tests {
                 secret_service: false,
                 protected_file_credentials: false,
             },
-            metrics: MetricsSnapshot {
+            metrics: Some(MetricsSnapshot {
                 requests: 0,
                 upstream_responses: 0,
                 identity_failures: 0,
                 overload_rejections: 0,
                 upstream_timeouts: 0,
                 upstream_failures: 0,
-            },
+            }),
         };
 
         assert_eq!(
@@ -690,6 +863,52 @@ mod tests {
             ConnectorSnapshot::from_runtime(runtime("reachable", "refresh-required")).state,
             "ready"
         );
+    }
+
+    #[test]
+    fn accepts_the_current_connector_status_shape() {
+        let runtime: ConnectorRuntime = serde_json::from_str(
+            r#"{
+                "version":"0.1.0",
+                "mode":"managed",
+                "gateway":"reachable",
+                "identity":"ready",
+                "platform":{
+                    "os":"macos",
+                    "native_gateway":true,
+                    "transparent_capture":false,
+                    "trust_installation":false,
+                    "secret_service":false,
+                    "protected_file_credentials":false
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert!(runtime.metrics.is_none());
+        assert_eq!(ConnectorSnapshot::from_runtime(runtime).state, "ready");
+    }
+
+    #[test]
+    fn projects_only_public_managed_configuration() {
+        let bootstrap = OrganizationBootstrap::parse(include_bytes!(
+            "../../../examples/managed-walkthrough/organization.json"
+        ))
+        .unwrap();
+        let snapshot =
+            serde_json::to_value(ManagedDeviceSnapshot::from_bootstrap(&bootstrap)).unwrap();
+
+        assert_eq!(snapshot["organizationName"], "Walkthrough Organization");
+        assert!(snapshot.get("clientId").is_none());
+    }
+
+    #[test]
+    fn managed_ui_never_manages_provider_credentials() {
+        assert_eq!(provider_access_state(true, true, true), (false, true));
+        assert_eq!(provider_access_state(true, false, false), (false, true));
+        assert!(validate_provider_credential_input(true, true).is_err());
+        assert!(validate_provider_credential_input(true, false).is_ok());
+        assert_eq!(provider_access_state(false, true, true), (true, true));
     }
 
     #[test]
@@ -719,6 +938,15 @@ mod tests {
             ),
             Some(explicit)
         );
+    }
+
+    #[test]
+    fn distinguishes_first_run_from_partial_managed_credential_state() {
+        let temporary = tempfile::tempdir().unwrap();
+        assert!(super::identity_storage_is_empty(temporary.path()).unwrap());
+
+        std::fs::write(temporary.path().join("orphaned-credential"), b"partial").unwrap();
+        assert!(!super::identity_storage_is_empty(temporary.path()).unwrap());
     }
 
     #[test]

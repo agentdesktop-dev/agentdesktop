@@ -14,6 +14,7 @@ use crate::identity::storage::{CredentialStore, default_storage_root};
 const CERTIFICATE_RENEW_BEFORE: Duration = Duration::from_secs(6 * 60 * 60);
 const CERTIFICATE_RENEWAL_CHECK_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const CERTIFICATE_RENEWAL_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+const PERSISTED_IDENTITY_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 pub struct ManagedIdentityContext {
     pub identity: ManagedIdentity,
@@ -67,20 +68,36 @@ pub fn spawn(context: ManagedIdentityContext) -> tokio::task::JoinHandle<()> {
 }
 
 async fn renew_certificate(context: RenewalContext) {
+    let mut next_renewal_check = tokio::time::Instant::now();
     loop {
-        let delay = match renew_certificate_once(&context).await {
-            Ok(true) => {
-                tracing::info!(event = "device_certificate_renewed");
-                CERTIFICATE_RENEWAL_CHECK_INTERVAL
-            }
-            Ok(false) => CERTIFICATE_RENEWAL_CHECK_INTERVAL,
-            Err(_) => {
-                tracing::warn!(event = "device_certificate_renewal_failed");
-                CERTIFICATE_RENEWAL_RETRY_INTERVAL
-            }
-        };
-        tokio::time::sleep(delay).await;
+        match reload_client_identity(&context) {
+            Ok(true) => tracing::info!(event = "device_certificate_reloaded"),
+            Ok(false) => {}
+            Err(_) => tracing::warn!(event = "device_certificate_reload_failed"),
+        }
+
+        if tokio::time::Instant::now() >= next_renewal_check {
+            let delay = match renew_certificate_once(&context).await {
+                Ok(true) => {
+                    tracing::info!(event = "device_certificate_renewed");
+                    CERTIFICATE_RENEWAL_CHECK_INTERVAL
+                }
+                Ok(false) => CERTIFICATE_RENEWAL_CHECK_INTERVAL,
+                Err(_) => {
+                    tracing::warn!(event = "device_certificate_renewal_failed");
+                    CERTIFICATE_RENEWAL_RETRY_INTERVAL
+                }
+            };
+            next_renewal_check = tokio::time::Instant::now() + delay;
+        }
+        tokio::time::sleep(PERSISTED_IDENTITY_CHECK_INTERVAL).await;
     }
+}
+
+fn reload_client_identity(context: &RenewalContext) -> anyhow::Result<bool> {
+    let replacement =
+        load_client_identity_for(&context.issuer, &context.gateway_origin, &context.store)?;
+    context.tunnel_identity.replace_if_changed(replacement)
 }
 
 async fn renew_certificate_once(context: &RenewalContext) -> anyhow::Result<bool> {
@@ -110,6 +127,6 @@ async fn renew_certificate_once(context: &RenewalContext) -> anyhow::Result<bool
     }
     let replacement =
         load_client_identity_for(&context.issuer, &context.gateway_origin, &context.store)?;
-    context.tunnel_identity.replace(replacement)?;
+    context.tunnel_identity.replace_if_changed(replacement)?;
     Ok(true)
 }

@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -46,7 +47,8 @@ func TestValidatorAuthenticatesIssuerSignedBearerToken(t *testing.T) {
 	validator.now = func() time.Time { return time.Unix(1_000, 0) }
 	token := signToken(t, key, map[string]any{
 		"iss": issuer, "sub": "user-1", "aud": "agentdesktop",
-		"scope": "openid agentgateway.invoke", "iat": 900, "exp": 1100,
+		"preferred_username": "employee",
+		"scope":              "openid agentgateway.invoke", "iat": 900, "exp": 1100,
 	})
 	request := httptest.NewRequest(http.MethodPost, "/v1/enrollments", nil)
 	request.Header.Set("authorization", "Bearer "+token)
@@ -55,12 +57,27 @@ func TestValidatorAuthenticatesIssuerSignedBearerToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if principal.Issuer != issuer || principal.Subject != "user-1" {
+	if principal.Issuer != issuer || principal.Subject != "user-1" || principal.DisplayName != "employee" {
 		t.Fatalf("principal = %#v", principal)
 	}
 
+	validator.RequireRealmRole("agentdesktop-administrator")
+	if _, err := validator.Authenticate(request); err != ErrInvalidToken {
+		t.Fatalf("missing administrator role error = %v", err)
+	}
+	administratorToken := signToken(t, key, map[string]any{
+		"iss": issuer, "sub": "admin-1", "aud": "agentdesktop",
+		"scope": "agentdesktop.enrollment.admin", "iat": 900, "exp": 1100,
+		"realm_access": map[string]any{"roles": []string{"agentdesktop-administrator"}},
+	})
+	validator.requiredScope = "agentdesktop.enrollment.admin"
+	request.Header.Set("authorization", "Bearer "+administratorToken)
+	if _, err := validator.Authenticate(request); err != nil {
+		t.Fatalf("administrator role token error = %v", err)
+	}
+
 	tampered := request.Clone(request.Context())
-	tampered.Header.Set("authorization", "Bearer "+token+"x")
+	tampered.Header.Set("authorization", "Bearer "+administratorToken+"x")
 	if _, err := validator.Authenticate(tampered); err != ErrInvalidToken {
 		t.Fatalf("tampered token error = %v", err)
 	}
@@ -98,6 +115,17 @@ func TestValidatorAuthenticatesRS256BearerToken(t *testing.T) {
 	request.Header.Set("authorization", "Bearer "+input+"."+base64.RawURLEncoding.EncodeToString(signature))
 	if _, err := validator.Authenticate(request); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDisplayNameRejectsUnsafeMetadata(t *testing.T) {
+	if value := displayName("  employee  "); value != "employee" {
+		t.Fatalf("display name = %q", value)
+	}
+	for _, value := range []string{"line\nbreak", strings.Repeat("x", 257)} {
+		if displayName(value) != "" {
+			t.Fatalf("accepted unsafe display name %q", value)
+		}
 	}
 }
 

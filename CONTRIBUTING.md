@@ -361,14 +361,13 @@ To exercise a real pinned Claude Code CLI against the mock provider:
 To show one allowed request and one Gateway policy denial:
 
 ```bash
-./scripts/container-up.sh smoke
 ./scripts/container-policy-smoke.sh
 ./scripts/container-down.sh
 ```
 
 ### Automated managed E2E
 
-This is the preferred fast check for managed enrollment, administrator approval, mTLS forwarding, and revocation bookkeeping. It requires Podman 5 or newer, `curl`, `jq`, and free access to the fixture's fixed loopback ports. The first run builds or pulls several container images. It requires no arguments or input and reports success through its exit code.
+This is the preferred fast check for managed enrollment, administrator approval, mTLS forwarding, and revocation bookkeeping. It requires Podman 5 or newer, Rust, OpenSSL, `curl`, `jq`, and free access to the fixture's fixed loopback ports. The first run builds or pulls several container images. It requires no arguments or input and reports success through its exit code.
 
 ```bash
 scripts/managed-e2e.sh
@@ -396,11 +395,13 @@ Use the disposable VM to evaluate installation, browser login, administrator UI 
 scripts/vm-managed-walkthrough.sh prepare --reset
 ```
 
-Then follow [tests/vm/README.md](tests/vm/README.md). The administrator uses the host browser while the user journey runs inside Fedora. Stop everything afterward:
+Then follow [tests/vm/README.md](tests/vm/README.md). The administrator uses the host browser while the user journey runs inside Fedora. Stop the host-side walkthrough services afterward:
 
 ```bash
 scripts/vm-managed-walkthrough.sh stop
 ```
+
+The Fedora VM remains running for inspection. Stop it separately with `tests/vm/vm.sh stop`.
 
 ### Standalone Linux capture journey
 

@@ -65,7 +65,7 @@ impl OrganizationBootstrap {
             &self.organization.support_url,
             true,
         )?;
-        validate_https_url("identity issuer", &self.identity.issuer, false)?;
+        validate_issuer_url(&self.identity.issuer)?;
         validate_https_url(
             "enrollment service URL",
             &self.identity.enrollment_url,
@@ -146,6 +146,19 @@ fn validate_https_url(name: &str, url: &Url, allow_path: bool) -> Result<()> {
     Ok(())
 }
 
+fn validate_issuer_url(url: &Url) -> Result<()> {
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || url.username() != ""
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        bail!("identity issuer must be an HTTPS URL without credentials, query, or fragment");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::OrganizationBootstrap;
@@ -182,6 +195,21 @@ mod tests {
     }
 
     #[test]
+    fn accepts_an_identity_issuer_with_a_path() {
+        let mut bootstrap: serde_json::Value = serde_json::from_slice(&valid()).unwrap();
+        bootstrap["identity"]["issuer"] = "https://login.acme.example/realms/acme".into();
+        OrganizationBootstrap::parse(&serde_json::to_vec(&bootstrap).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn accepts_the_managed_ui_walkthrough_bootstrap() {
+        OrganizationBootstrap::parse(include_bytes!(
+            "../examples/managed-walkthrough/organization.json"
+        ))
+        .unwrap();
+    }
+
+    #[test]
     fn accepts_only_ca_certificates_for_optional_organization_trust() {
         let key = KeyPair::generate().unwrap();
         let mut parameters = CertificateParams::new(Vec::<String>::new()).unwrap();
@@ -213,5 +241,13 @@ mod tests {
         let mut secret: serde_json::Value = serde_json::from_slice(&valid()).unwrap();
         secret["identity"]["client_secret"] = "must-not-be-embedded".into();
         assert!(OrganizationBootstrap::parse(&serde_json::to_vec(&secret).unwrap()).is_err());
+
+        for forbidden in ["policy", "provider_credentials", "model_access"] {
+            let mut bootstrap: serde_json::Value = serde_json::from_slice(&valid()).unwrap();
+            bootstrap[forbidden] = serde_json::json!({"must": "remain central"});
+            assert!(
+                OrganizationBootstrap::parse(&serde_json::to_vec(&bootstrap).unwrap()).is_err()
+            );
+        }
     }
 }

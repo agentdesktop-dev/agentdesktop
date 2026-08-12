@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,9 +10,13 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..")
 const connectorArguments = process.argv.slice(2);
 const isWindows = process.platform === "win32";
 const connectorPort = 8080;
+const statusPort = 8081;
 const uiPort = 1420;
-const connectorStatusUrl = `http://127.0.0.1:${connectorPort}/_agentdesktop/status`;
+const connectorStatusUrl = `http://127.0.0.1:${statusPort}/_agentdesktop/status`;
 const uiUrl = `http://127.0.0.1:${uiPort}/`;
+const devPidFile = process.env.AGENTDESKTOP_DEV_PID_FILE
+  ? resolve(process.cwd(), process.env.AGENTDESKTOP_DEV_PID_FILE)
+  : undefined;
 
 if (connectorArguments.includes("--help") || connectorArguments.includes("-h")) {
   console.log(`Usage: npm run dev:desktop -- [backend options]
@@ -23,7 +28,8 @@ Defaults:
   AGENTDESKTOP_MODE=standalone
   Agent Desktop-owned agentgateway on http://127.0.0.1:4100
 
-Set AGENTDESKTOP_GATEWAY_MODE=external to use an independently started Gateway.`);
+Set AGENTDESKTOP_GATEWAY_MODE=external to use an independently started Gateway.
+Set AGENTDESKTOP_ORGANIZATION_CONFIG to an organization JSON file for managed mode.`);
   process.exit(0);
 }
 
@@ -35,9 +41,40 @@ function findExecutable(name) {
   return lookup.status === 0 ? lookup.stdout.trim().split(/\r?\n/, 1)[0] : undefined;
 }
 
-const gatewayMode = process.env.AGENTDESKTOP_GATEWAY_MODE || "owned";
+const organizationConfigPath = process.env.AGENTDESKTOP_ORGANIZATION_CONFIG
+  ? resolve(process.cwd(), process.env.AGENTDESKTOP_ORGANIZATION_CONFIG)
+  : undefined;
+let organizationConfig;
+if (organizationConfigPath) {
+  try {
+    organizationConfig = JSON.parse(readFileSync(organizationConfigPath, "utf8"));
+  } catch (error) {
+    console.error(`[desktop] cannot read organization configuration: ${error.message}`);
+    process.exit(1);
+  }
+}
+const connectorMode = process.env.AGENTDESKTOP_MODE || (organizationConfig ? "managed" : "standalone");
+if (!new Set(["standalone", "managed"]).has(connectorMode)) {
+  console.error("[desktop] AGENTDESKTOP_MODE must be standalone or managed");
+  process.exit(1);
+}
+if (
+  connectorMode === "managed" &&
+  (!organizationConfig?.gateway?.url ||
+    !organizationConfig?.identity?.issuer ||
+    !organizationConfig?.identity?.enrollment_url)
+) {
+  console.error("[desktop] managed mode requires AGENTDESKTOP_ORGANIZATION_CONFIG");
+  process.exit(1);
+}
+const gatewayMode =
+  process.env.AGENTDESKTOP_GATEWAY_MODE || (connectorMode === "managed" ? "external" : "owned");
 if (!new Set(["owned", "external"]).has(gatewayMode)) {
   console.error("[desktop] AGENTDESKTOP_GATEWAY_MODE must be owned or external");
+  process.exit(1);
+}
+if (connectorMode === "managed" && gatewayMode !== "external") {
+  console.error("[desktop] managed mode requires an organization-owned external Gateway");
   process.exit(1);
 }
 const ownsGateway = gatewayMode === "owned";
@@ -58,13 +95,32 @@ if (ownsGateway && !gatewayBinary) {
 }
 const upstream =
   process.env.AGENTDESKTOP_UPSTREAM ||
-  (ownsGateway ? "http://127.0.0.1:4100" : "http://127.0.0.1:4000");
+  (connectorMode === "managed"
+    ? organizationConfig.gateway.url
+    : ownsGateway
+      ? "http://127.0.0.1:4100"
+      : "http://127.0.0.1:4100");
 const gatewayUrl = new URL(upstream);
 const gatewayPort = Number(gatewayUrl.port || (gatewayUrl.protocol === "https:" ? 443 : 80));
 const environment = {
   ...process.env,
-  AGENTDESKTOP_MODE: process.env.AGENTDESKTOP_MODE || "standalone",
+  AGENTDESKTOP_MODE: connectorMode,
   AGENTDESKTOP_UPSTREAM: upstream,
+  AGENTDESKTOP_NATIVE_TARGET:
+    process.env.AGENTDESKTOP_NATIVE_TARGET || "native.agentdesktop.internal:4000",
+  AGENTDESKTOP_STATUS_LISTEN:
+    process.env.AGENTDESKTOP_STATUS_LISTEN || `127.0.0.1:${statusPort}`,
+  ...(organizationConfigPath
+    ? { AGENTDESKTOP_ORGANIZATION_CONFIG: organizationConfigPath }
+    : {}),
+  ...(connectorMode === "managed"
+    ? {
+        AGENTDESKTOP_IDENTITY_ISSUER:
+          process.env.AGENTDESKTOP_IDENTITY_ISSUER || organizationConfig.identity.issuer,
+        AGENTDESKTOP_ENROLLMENT_URL:
+          process.env.AGENTDESKTOP_ENROLLMENT_URL || organizationConfig.identity.enrollment_url
+      }
+    : {}),
   ...(ownsGateway
     ? {
         AGENTDESKTOP_GATEWAY_BINARY: gatewayBinary,
@@ -118,28 +174,32 @@ async function isAgentDesktopUi() {
 }
 
 async function preflight() {
-  const [connectorOpen, uiOpen, gatewayOpen] = await Promise.all([
+  const [connectorOpen, statusOpen, uiOpen, gatewayOpen] = await Promise.all([
     isPortOpen(connectorPort),
+    isPortOpen(statusPort),
     isPortOpen(uiPort),
     ownsGateway ? isPortOpen(gatewayPort) : false
   ]);
-  if (!connectorOpen && !uiOpen && !gatewayOpen) return true;
+  if (!connectorOpen && !statusOpen && !uiOpen && !gatewayOpen) return true;
 
   const [connectorOwned, uiOwned] = await Promise.all([
-    connectorOpen ? isAgentDesktopConnector() : false,
+    statusOpen ? isAgentDesktopConnector() : false,
     uiOpen ? isAgentDesktopUi() : false
   ]);
-  if (connectorOwned && uiOwned) {
+  if (connectorOpen && connectorOwned && uiOwned) {
     console.log("[desktop] Agent Desktop is already running");
     return false;
   }
 
   const conflicts = [];
   if (connectorOpen) {
+    conflicts.push(`another process uses application port ${connectorPort}`);
+  }
+  if (statusOpen) {
     conflicts.push(
       connectorOwned
-        ? `the Agent Desktop connector already uses port ${connectorPort}`
-        : `another process uses connector port ${connectorPort}`
+        ? `the Agent Desktop status service already uses port ${statusPort}`
+        : `another process uses status port ${statusPort}`
     );
   }
   if (uiOpen) {
@@ -177,6 +237,41 @@ function finishWhenStopped() {
   if (!shuttingDown || children.size !== 0) return;
   if (forceTimer) clearTimeout(forceTimer);
   process.exitCode = finalExitCode;
+}
+
+function processExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function writeDevPidFile() {
+  if (!devPidFile) return;
+  try {
+    const existingPid = Number.parseInt(readFileSync(devPidFile, "utf8").trim(), 10);
+    if (Number.isSafeInteger(existingPid) && existingPid !== process.pid && processExists(existingPid)) {
+      throw new Error(`another desktop launcher owns ${devPidFile}`);
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  mkdirSync(dirname(devPidFile), { recursive: true });
+  writeFileSync(devPidFile, `${process.pid}\n`, { mode: 0o600 });
+  chmodSync(devPidFile, 0o600);
+}
+
+function removeDevPidFile() {
+  if (!devPidFile) return;
+  try {
+    if (readFileSync(devPidFile, "utf8").trim() === String(process.pid)) {
+      rmSync(devPidFile);
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") console.error(`[desktop] cannot remove PID file: ${error.message}`);
+  }
 }
 
 function beginShutdown(exitCode, signal = "SIGTERM") {
@@ -222,11 +317,13 @@ process.once("SIGINT", () => beginShutdown(130, "SIGINT"));
 process.once("SIGTERM", () => beginShutdown(143, "SIGTERM"));
 if (!isWindows) process.once("SIGHUP", () => beginShutdown(129, "SIGHUP"));
 process.once("exit", () => {
+  removeDevPidFile();
   for (const child of children.values()) terminateProcessTree(child, "SIGTERM");
 });
 
-console.log(`[desktop] connector mode=${environment.AGENTDESKTOP_MODE}`);
+console.log(`[desktop] connector mode=${connectorMode}`);
 if (await preflight()) {
+  writeDevPidFile();
   start("backend", "cargo", [
     "run",
     "--manifest-path",

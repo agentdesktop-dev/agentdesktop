@@ -1,4 +1,4 @@
-import { AlertCircle, Check, Copy, ExternalLink, LoaderCircle, RefreshCw } from "lucide-react";
+import { AlertCircle, Bot, Check, CircleSlash2, Copy, ExternalLink, LoaderCircle, RefreshCw, Route, ShieldCheck, Waypoints } from "lucide-react";
 import { startTransition, useEffect, useState, useTransition } from "react";
 
 import {
@@ -8,7 +8,8 @@ import {
   getConnectorStatus,
   getManagedDeviceStatus,
   openManagedPage,
-  saveSettings
+  saveSettings,
+  setupManagedDevice
 } from "./backend";
 import type {
   Bootstrap,
@@ -22,7 +23,7 @@ import type {
   Settings
 } from "./types";
 
-type View = "home" | "details";
+type View = "home" | "coverage" | "details";
 type Notice = { tone: "success" | "error"; message: string } | null;
 type StepState = "done" | "waiting" | "error" | "muted";
 
@@ -127,7 +128,7 @@ function managedEnrollmentStep(
   }
 }
 
-function failureCount(metrics: MetricsSnapshot | undefined): number {
+function failureCount(metrics: MetricsSnapshot | null | undefined): number {
   if (!metrics) return 0;
   return (
     metrics.identityFailures +
@@ -169,6 +170,28 @@ function Step({
   );
 }
 
+function CoverageRow({
+  icon: Icon,
+  title,
+  detail,
+  tone,
+  state
+}: {
+  icon: typeof Route;
+  title: string;
+  detail: string;
+  tone: "active" | "partial" | "unavailable";
+  state: string;
+}) {
+  return (
+    <div className="coverage-row">
+      <span className={`coverage-icon coverage-icon-${tone}`} aria-hidden="true"><Icon size={15} /></span>
+      <span><strong>{title}</strong><small>{detail}</small></span>
+      <span className={`coverage-state coverage-state-${tone}`}>{state}</span>
+    </div>
+  );
+}
+
 function Home({
   bootstrap,
   connector,
@@ -177,11 +200,13 @@ function Home({
   apiKey,
   showCredentialForm,
   isConnecting,
+  isManaging,
   onApiKeyChange,
   onCancelCredential,
   onConnect,
   onOpenManagedPage,
-  onRequestCredential
+  onRequestCredential,
+  onSetupManaged
 }: {
   bootstrap: Bootstrap | null;
   connector: ConnectorSnapshot | null;
@@ -190,11 +215,13 @@ function Home({
   apiKey: string;
   showCredentialForm: boolean;
   isConnecting: boolean;
+  isManaging: boolean;
   onApiKeyChange: (value: string) => void;
   onCancelCredential: () => void;
   onConnect: (apiKey?: string) => void;
   onOpenManagedPage: (page: ManagedPage) => void;
   onRequestCredential: () => void;
+  onSetupManaged: () => void;
 }) {
   const runtime = connector?.runtime;
   const managed = runtime?.mode === "managed" || Boolean(managedDevice?.configured);
@@ -210,19 +237,23 @@ function Home({
       ? "error"
       : "waiting";
   const enrollmentStep = managedEnrollmentStep(managedDevice, identityReady);
+  const managedAccessReady = !managed || (identityReady && enrollmentStep.state === "done");
   const claudeReady = claude?.state === "connected";
+  const managedRoutingReady = Boolean(claude && (!claude.installed || claudeReady));
   const ready =
     connector?.state === "ready" &&
     gatewayReady &&
     identityReady &&
     providerConfigured &&
-    claudeReady;
+    (managed ? managedRoutingReady : claudeReady);
 
-  const connectorStep: StepState = !connector
+  const connectorStep: StepState = managed && !managedAccessReady
     ? "waiting"
-    : connector.state === "offline" || !gatewayReady
-      ? "error"
-      : "done";
+    : !connector
+      ? "waiting"
+      : connector.state === "offline" || !gatewayReady
+        ? "error"
+        : "done";
   const claudeStep: StepState = !claude
     ? "waiting"
     : claudeReady
@@ -232,6 +263,24 @@ function Home({
         : claude.state === "not-installed"
           ? "muted"
           : "waiting";
+  const managedRoutingStep: StepState = !managedAccessReady || !claude
+    ? "waiting"
+    : claude.state === "conflict"
+      ? "error"
+      : claude.installed && !claudeReady
+        ? "waiting"
+        : "done";
+  const managedRoutingDetail = !managedAccessReady
+    ? "Applies automatically after organization access is approved"
+    : !claude
+      ? "Checking supported agents"
+      : claude.state === "conflict"
+        ? "Claude Code has settings that conflict with organization routing"
+        : claude.installed && !claudeReady
+          ? "Applying organization routing to Claude Code"
+          : claudeReady
+            ? "Organization routing applied automatically to Claude Code"
+            : "Supported agents are configured automatically when detected";
 
   return (
     <>
@@ -239,33 +288,19 @@ function Home({
         <p className="kicker">
           {managed ? managedDevice?.organizationName ?? "Organization setup" : "Local setup"}
         </p>
-        <h1>{ready ? "Routing is ready" : "Finish setup"}</h1>
+        <h1>{ready ? (managed ? "Managed and ready" : "Routing is ready") : (managed ? "Action required" : "Finish setup")}</h1>
         <p className="intro-copy">
           {ready
             ? managed
-              ? "Claude Code traffic is authenticated and routed through your organization."
+              ? "Agent Desktop is running in the background. Continue using your AI applications normally."
               : "Claude Code will send requests through Agent Gateway."
-            : "Complete the remaining item, then use Claude Code normally."}
+            : managed
+              ? "Complete organization access before using managed AI applications."
+              : "Complete the remaining steps, then use Claude Code normally."}
         </p>
       </div>
 
       <ol className="setup-list">
-        <Step
-          state={connectorStep}
-          title="Gateway"
-          detail={
-            !connector
-              ? "Checking connection"
-              : connector.state === "offline"
-                ? "Agent Desktop is not responding"
-                : gatewayReady
-                  ? managed
-                    ? "Organization gateway is reachable"
-                    : "Local gateway is reachable"
-                  : "Gateway is unavailable"
-          }
-        />
-
         {managed ? (
           <>
             <Step
@@ -273,7 +308,16 @@ function Home({
               title="Organization account"
               detail={managedAccountDetail(identity, managedDevice)}
               action={
-                accountState === "error" && managedDevice?.supportUrl ? (
+                !identityReady && identity !== "unavailable" ? (
+                  <button
+                    className="button button-primary"
+                    type="button"
+                    onClick={onSetupManaged}
+                    disabled={isManaging}
+                  >
+                    {isManaging ? "Signing in…" : "Sign in"}
+                  </button>
+                ) : accountState === "error" && managedDevice?.supportUrl ? (
                   <button
                     className="button button-secondary"
                     type="button"
@@ -289,7 +333,23 @@ function Home({
               title="Device access"
               detail={enrollmentStep.detail}
               action={
-                enrollmentStep.state === "error" && managedDevice?.supportUrl ? (
+                identityReady &&
+                ["not-enrolled", "pending", "issuing"].includes(
+                  managedDevice?.enrollment ?? "not-enrolled"
+                ) ? (
+                  <button
+                    className={managedDevice?.enrollment === "not-enrolled" ? "button button-primary" : "button button-secondary"}
+                    type="button"
+                    onClick={onSetupManaged}
+                    disabled={isManaging}
+                  >
+                    {isManaging
+                      ? "Checking…"
+                      : managedDevice?.enrollment === "not-enrolled"
+                        ? "Request access"
+                        : "Check status"}
+                  </button>
+                ) : enrollmentStep.state === "error" && managedDevice?.supportUrl ? (
                   <button
                     className="button button-secondary"
                     type="button"
@@ -304,25 +364,39 @@ function Home({
         ) : null}
 
         <Step
-          state={providerConfigured ? "done" : providerManaged ? "waiting" : "muted"}
-          title="Provider access"
+          state={connectorStep}
+          title={managed ? "Organization connection" : "Gateway"}
           detail={
-            managed
-              ? "Managed by your organization"
-              : providerConfigured
-                ? "Available to Agent Gateway"
-                : providerManaged
-                  ? "Anthropic API key required"
-                  : "Configured in an external Agent Gateway"
-          }
-          action={
-            providerNeedsCredential && !showCredentialForm ? (
-              <button className="button button-secondary" type="button" onClick={onRequestCredential}>
-                Add key
-              </button>
-            ) : undefined
+            managed && !managedAccessReady
+              ? "Starts after organization access is approved"
+              : !connector
+                ? "Checking connection"
+                : connector.state === "offline"
+                  ? "Agent Desktop is not responding"
+                  : gatewayReady
+                    ? managed
+                      ? "Connected to your organization"
+                      : "Local gateway is reachable"
+                    : managed
+                      ? "Your organization service is temporarily unavailable"
+                      : "Gateway is unavailable"
           }
         />
+
+        {!managed ? (
+          <Step
+            state={providerConfigured ? "done" : providerManaged ? "waiting" : "muted"}
+            title="Provider access"
+            detail={providerConfigured ? "Available to Agent Gateway" : providerManaged ? "Anthropic API key required" : "Configured in an external Agent Gateway"}
+            action={
+              providerNeedsCredential && !showCredentialForm ? (
+                <button className="button button-secondary" type="button" onClick={onRequestCredential}>
+                  Add key
+                </button>
+              ) : undefined
+            }
+          />
+        ) : null}
 
         {showCredentialForm ? (
           <li className="credential-entry">
@@ -358,29 +432,122 @@ function Home({
           </li>
         ) : null}
 
-        <Step
-          state={claudeStep}
-          title="Claude Code"
-          detail={claude?.detail ?? "Checking installation"}
-          action={
-            claude?.canConnect ? (
-              <button
-                className="button button-primary"
-                type="button"
-                onClick={() => (providerNeedsCredential ? onRequestCredential() : onConnect())}
-                disabled={isConnecting || !bootstrap}
-              >
-                {isConnecting ? "Connecting…" : "Connect"}
-              </button>
-            ) : undefined
-          }
-        />
+        {managed ? (
+          <Step state={managedRoutingStep} title="Agent routing" detail={managedRoutingDetail} />
+        ) : (
+          <Step
+            state={claudeStep}
+            title="Claude Code"
+            detail={claude?.detail ?? "Checking installation"}
+            action={
+              claude?.canConnect && managedAccessReady ? (
+                <button
+                  className="button button-primary"
+                  type="button"
+                  onClick={() => (providerNeedsCredential ? onRequestCredential() : onConnect())}
+                  disabled={isConnecting || !bootstrap}
+                >
+                  {isConnecting ? "Connecting…" : "Connect"}
+                </button>
+              ) : undefined
+            }
+          />
+        )}
       </ol>
 
-      <div className="activity-line" aria-label="Activity since connector start">
-        <span>{numberFormat.format(runtime?.metrics.requests ?? 0)} requests</span>
-        <span>{numberFormat.format(failureCount(runtime?.metrics))} failures</span>
-        <span>{runtime?.inFlight ?? 0} active</span>
+      {runtime?.metrics ? (
+        <div className="activity-line" aria-label="Activity since connector start">
+          <span>{numberFormat.format(runtime.metrics.requests)} flows</span>
+          <span>{numberFormat.format(runtime.metrics.upstreamResponses)} completed</span>
+          <span>{numberFormat.format(failureCount(runtime.metrics))} failed</span>
+          <span>{runtime.inFlight ?? 0} active</span>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+function Coverage({
+  connector,
+  managedDevice
+}: {
+  connector: ConnectorSnapshot | null;
+  managedDevice: ManagedDeviceSnapshot | null;
+}) {
+  const runtime = connector?.runtime;
+  const gatewayReady = runtime?.gateway === "reachable";
+  const discoveryAvailable = runtime?.platform.os === "macos";
+  const organization = managedDevice?.organizationName ?? "Your organization";
+
+  return (
+    <>
+      <div className="coverage-intro">
+        <p className="kicker">Organization controls</p>
+        <h1>Management coverage</h1>
+        <p>Current routing, visibility, and enforcement on this device.</p>
+      </div>
+
+      <section className="coverage-overview" aria-labelledby="coverage-owner-heading">
+        <span className="coverage-owner-icon" aria-hidden="true"><ShieldCheck size={18} /></span>
+        <div>
+          <h2 id="coverage-owner-heading">Managed by {organization}</h2>
+          <p>Routing is automatic. This device shows status and does not offer route selection.</p>
+        </div>
+        <span className="coverage-owner-state">Organization managed</span>
+      </section>
+
+      <section className="coverage-group" aria-labelledby="traffic-control-heading">
+        <div className="coverage-group-heading">
+          <h2 id="traffic-control-heading">Traffic control</h2>
+          <span>Enforcement</span>
+        </div>
+        <CoverageRow
+          icon={Route}
+          title="Inference routing"
+          detail={gatewayReady ? "Supported agent traffic uses the organization Gateway automatically." : "The organization Gateway is unavailable; managed traffic remains closed."}
+          tone={gatewayReady ? "active" : "unavailable"}
+          state={gatewayReady ? "Enforced" : "Unavailable"}
+        />
+      </section>
+
+      <section className="coverage-group" aria-labelledby="endpoint-visibility-heading">
+        <div className="coverage-group-heading">
+          <h2 id="endpoint-visibility-heading">Endpoint visibility</h2>
+          <span>Reporting</span>
+        </div>
+        <CoverageRow
+          icon={Bot}
+          title="Agents"
+          detail={discoveryAvailable ? "Known agent names, versions, and runtime state report centrally." : "Agent discovery is not available on this platform."}
+          tone={discoveryAvailable ? "partial" : "unavailable"}
+          state={discoveryAvailable ? "Reporting" : "Unavailable"}
+        />
+        <CoverageRow
+          icon={Waypoints}
+          title="MCP servers and skills"
+          detail={discoveryAvailable ? "Configured names report from fixed user locations; use is not yet enforced." : "MCP and skill discovery is not available on this platform."}
+          tone={discoveryAvailable ? "partial" : "unavailable"}
+          state={discoveryAvailable ? "Reporting" : "Unavailable"}
+        />
+      </section>
+
+      <section className="coverage-group" aria-labelledby="local-controls-heading">
+        <div className="coverage-group-heading">
+          <h2 id="local-controls-heading">Local controls</h2>
+          <span>Enforcement</span>
+        </div>
+        <CoverageRow
+          icon={CircleSlash2}
+          title="Sandbox and filesystem"
+          detail="Filesystem and process controls are not configured in this build."
+          tone="unavailable"
+          state="Not configured"
+        />
+      </section>
+
+      <div className="coverage-boundary">
+        <AlertCircle size={15} aria-hidden="true" />
+        <p><strong>Discovery is not authorization.</strong> Organization agent, MCP, and skill allowlists are not yet distributed or enforced on this device.</p>
       </div>
     </>
   );
@@ -544,20 +711,42 @@ function Details({
         <dl>
           <Definition label="Status" value={statusLabel(connector)} />
           <Definition label="Mode" value={humanize(runtime?.mode)} />
-          <Definition label="Gateway" value={humanize(runtime?.gateway)} />
+          <Definition
+            label={runtime?.mode === "managed" ? "Organization service" : "Gateway"}
+            value={runtime?.mode === "managed" ? (runtime.gateway === "reachable" ? "Connected" : "Unavailable") : humanize(runtime?.gateway)}
+          />
           <Definition label="Identity" value={humanize(runtime?.identity)} />
           <Definition label="Desktop version" value={bootstrap?.version ?? "Unavailable"} />
           <Definition label="Connector version" value={runtime?.version ?? "Unavailable"} />
         </dl>
       </section>
 
+      {metrics ? (
+        <section className="detail-section" aria-labelledby="traffic-heading">
+          <div className="section-heading">
+            <h2 id="traffic-heading">Local traffic</h2>
+            <span className="state-value">Since connector start</span>
+          </div>
+          <dl>
+            <Definition label="Accepted flows" value={numberFormat.format(metrics.requests)} />
+            <Definition label="Completed flows" value={numberFormat.format(metrics.upstreamResponses)} />
+            <Definition label="Active flows" value={numberFormat.format(runtime?.inFlight ?? 0)} />
+            <Definition label="Overload rejections" value={numberFormat.format(metrics.overloadRejections)} />
+            <Definition label="Tunnel timeouts" value={numberFormat.format(metrics.upstreamTimeouts)} />
+            <Definition label="Tunnel failures" value={numberFormat.format(metrics.upstreamFailures)} />
+          </dl>
+          <p className="section-note">
+            Agent Desktop counts opaque TCP flows. Model requests and tokens are measured by Agent Gateway and shown in administration.
+          </p>
+        </section>
+      ) : null}
+
       <details className="detail-section disclosure">
         <summary>Advanced diagnostics</summary>
         <dl>
           <Definition label="Operating system" value={humanize(platform?.os ?? bootstrap?.platform)} />
           <Definition label="Maximum in flight" value={runtime?.maxInFlight ?? "Unavailable"} />
-          <Definition label="Connect timeout" value={runtime ? `${runtime.connectTimeoutMs} ms` : "Unavailable"} />
-          <Definition label="Request timeout" value={runtime ? `${runtime.requestTimeoutMs} ms` : "Unavailable"} />
+          <Definition label="Connect timeout" value={runtime?.connectTimeoutMs ? `${runtime.connectTimeoutMs} ms` : "Unavailable"} />
           <Definition label="Identity failures" value={numberFormat.format(metrics?.identityFailures ?? 0)} />
           <Definition label="Overload rejections" value={numberFormat.format(metrics?.overloadRejections ?? 0)} />
           <Definition label="Upstream timeouts" value={numberFormat.format(metrics?.upstreamTimeouts ?? 0)} />
@@ -599,7 +788,9 @@ export function Desktop() {
   const [showCredentialForm, setShowCredentialForm] = useState(false);
   const [isRefreshing, startRefreshing] = useTransition();
   const [isConnecting, startConnecting] = useTransition();
+  const [isManaging, startManaging] = useTransition();
   const [isSaving, startSaving] = useTransition();
+  const managed = connector?.runtime?.mode === "managed" || Boolean(managedDevice?.configured);
 
   useEffect(() => {
     let active = true;
@@ -619,13 +810,46 @@ export function Desktop() {
   }, []);
 
   useEffect(() => {
+    if (!managedDevice || !["pending", "issuing"].includes(managedDevice.enrollment)) return;
+    let active = true;
+    let timeout: number | undefined;
+    const pollApproval = async () => {
+      try {
+        const nextManagedDevice = await setupManagedDevice();
+        const nextClaude = nextManagedDevice.enrollment === "approved"
+          ? await getClaudeStatus()
+          : null;
+        if (active) {
+          startTransition(() => {
+            setManagedDevice(nextManagedDevice);
+            if (nextClaude) setClaude(nextClaude);
+          });
+          if (nextManagedDevice.enrollment === "approved") {
+            setNotice({ tone: "success", message: "Organization access is ready" });
+          }
+        }
+      } catch (error: unknown) {
+        if (active) setNotice({ tone: "error", message: errorMessage(error) });
+      } finally {
+        if (active) timeout = window.setTimeout(pollApproval, 5000);
+      }
+    };
+    timeout = window.setTimeout(pollApproval, 5000);
+    return () => {
+      active = false;
+      if (timeout !== undefined) window.clearTimeout(timeout);
+    };
+  }, [managedDevice?.enrollment]);
+
+  useEffect(() => {
     let active = true;
     const refresh = () => {
-      Promise.all([getConnectorStatus(), getManagedDeviceStatus()])
-        .then(([snapshot, nextManagedDevice]) => {
+      Promise.all([getConnectorStatus(), getClaudeStatus(), getManagedDeviceStatus()])
+        .then(([snapshot, nextClaude, nextManagedDevice]) => {
           if (active) {
             startTransition(() => {
               setConnector(snapshot);
+              setClaude(nextClaude);
               setManagedDevice(nextManagedDevice);
             });
           }
@@ -674,6 +898,27 @@ export function Desktop() {
         setApiKey("");
         setShowCredentialForm(false);
         setNotice({ tone: "success", message: "Claude Code connected" });
+      } catch (error: unknown) {
+        setNotice({ tone: "error", message: errorMessage(error) });
+      }
+    });
+  }
+
+  function handleManagedSetup() {
+    setNotice(null);
+    startManaging(async () => {
+      try {
+        const nextManagedDevice = await setupManagedDevice();
+        setManagedDevice(nextManagedDevice);
+        const pending = ["pending", "issuing"].includes(nextManagedDevice.enrollment);
+        setNotice({
+          tone: "success",
+          message: pending
+            ? "Device access requested; an administrator must approve it"
+            : "Organization access is ready"
+        });
+        setConnector(await getConnectorStatus());
+        setClaude(await getClaudeStatus());
       } catch (error: unknown) {
         setNotice({ tone: "error", message: errorMessage(error) });
       }
@@ -754,8 +999,21 @@ export function Desktop() {
               setNotice(null);
             }}
           >
-            Home
+            Status
           </button>
+          {managed ? (
+            <button
+              type="button"
+              className={view === "coverage" ? "nav-active" : ""}
+              aria-current={view === "coverage" ? "page" : undefined}
+              onClick={() => {
+                setView("coverage");
+                setNotice(null);
+              }}
+            >
+              Coverage
+            </button>
+          ) : null}
           <button
             type="button"
             className={view === "details" ? "nav-active" : ""}
@@ -794,6 +1052,7 @@ export function Desktop() {
             apiKey={apiKey}
             showCredentialForm={showCredentialForm}
             isConnecting={isConnecting}
+            isManaging={isManaging}
             onApiKeyChange={setApiKey}
             onCancelCredential={() => {
               setApiKey("");
@@ -802,7 +1061,10 @@ export function Desktop() {
             onConnect={handleConnect}
             onOpenManagedPage={handleOpenManagedPage}
             onRequestCredential={() => setShowCredentialForm(true)}
+            onSetupManaged={handleManagedSetup}
           />
+        ) : view === "coverage" && managed ? (
+          <Coverage connector={connector} managedDevice={managedDevice} />
         ) : (
           <Details
             bootstrap={bootstrap}

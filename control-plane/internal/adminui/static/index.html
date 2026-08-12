@@ -1,46 +1,14 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Agent Desktop Administration</title>
-  <link rel="stylesheet" href="/admin/styles.css">
-</head>
-<body>
-  <header>
-    <div class="brand"><span class="mark">AD</span><span>Agent Desktop</span></div>
-    <div id="session" class="session">Signed out</div>
-  </header>
-  <main>
-    <section class="heading">
-      <div>
-        <p class="eyebrow">Device administration</p>
-        <h1 id="organization">Organization</h1>
-        <p class="subhead">Review enrollment requests and control access to managed AI gateways.</p>
-      </div>
-      <button id="sign-in" class="primary">Sign in as administrator</button>
-      <button id="sign-out" class="quiet hidden">Sign out</button>
-    </section>
-
-    <section id="workspace" class="hidden">
-      <nav class="tabs" aria-label="Enrollment status">
-        <button data-status="pending" class="active">Pending <span id="pending-count">0</span></button>
-        <button data-status="approved">Approved</button>
-        <button data-status="rejected">Rejected</button>
-      </nav>
-      <div class="toolbar">
-        <div id="view-title">Pending requests</div>
-        <button id="refresh" class="icon" title="Refresh" aria-label="Refresh">↻</button>
-      </div>
-      <div id="notice" role="status" class="notice hidden"></div>
-      <div id="records" class="records"></div>
-      <div id="empty" class="empty hidden">
-        <div class="empty-mark">✓</div>
-        <h2>No requests here</h2>
-        <p>This view will update when devices change state.</p>
-      </div>
-    </section>
-  </main>
-  <script src="/admin/app.js"></script>
-</body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f2f3ef" />
+    <title>Agent Desktop Administration</title>
+    <script type="module" crossorigin src="./assets/index-CaEo8D4x.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-Ct4UppcJ.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
 </html>

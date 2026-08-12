@@ -20,6 +20,7 @@ export OAUTH_ISSUER=https://issuer.example/
 export OAUTH_AUDIENCE=agentdesktop
 export OAUTH_SCOPE=agentgateway.invoke
 export ADMIN_OAUTH_SCOPE=agentdesktop.enrollment.admin
+export ADMIN_OAUTH_ROLE=agentdesktop-administrator
 export ORGANIZATION_ID=3fdba0e6-8c2f-47a8-8202-78d38a32ad9f
 export ORGANIZATION_NAME='Example Organization'
 export CA_CERTIFICATE_PATH="$PWD/development-ca.crt"
@@ -30,6 +31,8 @@ export SERVER_TLS_CERTIFICATE_PATH="$PWD/development-server.crt"
 export SERVER_TLS_PRIVATE_KEY_PATH="$PWD/development-server.key"
 go run ./cmd/enrollment-server -migrate
 ```
+
+`ADMIN_OAUTH_ROLE` is optional for compatibility, but production deployments should set it. Administrator requests must then carry both `ADMIN_OAUTH_SCOPE` and that realm role in `realm_access.roles`.
 
 `ISSUANCE_RECONCILIATION_INTERVAL` defaults to `1m`, and `ISSUANCE_RECONCILIATION_GRACE` defaults to `5m`. The worker retries claims that remain `issuing` beyond the grace period using the original enrollment ID, device ID, CSR, and claim time. An external CA adapter must use the enrollment ID as its idempotency key so a timeout or process crash cannot create a second credential.
 
@@ -86,10 +89,10 @@ POST /v1/enrollments
 Authorization: Bearer <access-token>
 Content-Type: application/json
 
-{"csr":"-----BEGIN CERTIFICATE REQUEST-----\n..."}
+{"csr":"-----BEGIN CERTIFICATE REQUEST-----\n...","device_name":"workstation-7"}
 ```
 
-The service returns `202 Accepted` with a server-generated enrollment ID and the validated public-key fingerprint. CSR subject and SAN values are untrusted and will not determine certificate identity during issuance.
+The service returns `202 Accepted` with a server-generated enrollment ID and the validated public-key fingerprint. `device_name` is optional, client-reported display metadata limited to 128 characters; it is never treated as device identity. CSR subject and SAN values are likewise untrusted and will not determine certificate identity during issuance.
 
 Approve a pending enrollment with a token carrying `ADMIN_OAUTH_SCOPE`:
 
@@ -110,7 +113,43 @@ POST /v1/admin/enrollments/{enrollment_id}/reject
 Authorization: Bearer <administrator-access-token>
 ```
 
-The list defaults to `pending`, accepts `pending`, `issuing`, `approved`, or `rejected`, and returns at most 100 records ordered oldest first. Rejection is an audited exact `pending` to `rejected` transition. Unknown, foreign-organization, and already-transitioned enrollment IDs return the same `409 enrollment_not_pending` response.
+The enrollment list defaults to `pending`, accepts `pending`, `issuing`, `approved`, or `rejected`, and returns at most 100 records ordered oldest first. Rejection is an audited exact `pending` to `rejected` transition. Unknown, foreign-organization, and already-transitioned enrollment IDs return the same `409 enrollment_not_pending` response.
+
+Fleet inventory is aggregated over each device's latest discovery report and remains server-paged for large organizations:
+
+```http
+GET /v1/admin/inventory?kind=agent&q=claude&limit=25&offset=0
+GET /v1/admin/inventory/devices?kind=agent&key=claude-code&version=2.1.4&limit=50&offset=0
+Authorization: Bearer <administrator-access-token>
+```
+
+Supported inventory kinds are `agent`, `mcp`, `skill`, and `plugin`. Asset and device pages are limited to 100 records. Device search covers device name, owner display name, immutable subject, and authority-assigned device ID.
+
+Administrators can save one desired Allow/Deny policy for the five supported agents:
+
+```http
+GET /v1/admin/agent-policy
+
+PUT /v1/admin/agent-policy
+Authorization: Bearer <administrator-access-token>
+Content-Type: application/json
+
+{"schema_version":1,"rules":[{"agent_id":"claude-code","action":"allow"},{"agent_id":"claude-desktop","action":"allow"},{"agent_id":"codex-cli","action":"deny"},{"agent_id":"openclaw","action":"deny"},{"agent_id":"vscode-copilot","action":"allow"}]}
+```
+
+The policy is organization-scoped and audited. It records desired state only and returns `enforcement: "not_available"`; current clients cannot block arbitrary agent execution. See [Organization agent policy](../docs/architecture/organization-agent-policy-v1.md).
+
+Administrators can force a discovery refresh for every active device or a selected set:
+
+```http
+POST /v1/admin/discovery-rescans
+Authorization: Bearer <administrator-access-token>
+Content-Type: application/json
+
+{"target_mode":"all_active","device_ids":[]}
+```
+
+Managed desktops poll `GET /v1/device-reports/current/rescan` every 30 seconds using their current device certificate. A newer report satisfies the request.
 
 Approved list records include the authority-assigned device ID. An administrator can revoke that device:
 
@@ -120,6 +159,20 @@ Authorization: Bearer <administrator-access-token>
 ```
 
 Revocation atomically marks the active device and all its unrevoked certificates with the same revocation time and records a `device.revoked` audit event. Unknown, foreign-organization, and already-revoked device IDs return the same `409 device_not_active` response. Revocation immediately blocks renewal. Existing certificates remain valid until expiry because authenticated versioned publication and fail-closed Agent Gateway consumption are not implemented yet. The publication format, freshness contract, and recovery behavior remain explicit design work; do not infer a CRL endpoint from the persisted schema.
+
+Administrators can read organization-scoped fleet statistics and authoritative device lifecycle records:
+
+```http
+GET /v1/admin/summary
+Authorization: Bearer <administrator-access-token>
+
+GET /v1/admin/devices
+Authorization: Bearer <administrator-access-token>
+```
+
+The summary reports enrollment counts, active and revoked device counts, current certificates expiring within 24 hours, and successful renewals in the previous 24 hours. The device list returns at most 100 records with client-reported display name, owner subject, authority-assigned device ID, persisted status, enrollment/revocation time, current certificate serial and expiry, certificate generation count, and successful renewal count. Both endpoints are scoped by the authenticated administrator's issuer.
+
+These APIs contain enrollment and certificate lifecycle statistics only. AI requests do not pass through the enrollment authority; request, token, model, cost, and policy statistics remain Agent Gateway telemetry responsibilities.
 
 Agent Gateway independently validates the issued client certificate and derives its bound organizational user and device identity. Managed forwarding carries no OAuth JWT and does not call the enrollment service per request.
 

@@ -1,0 +1,102 @@
+services:
+  postgres:
+    image: docker.io/library/postgres:17.6
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: agentdesktop
+      POSTGRES_PASSWORD: agentdesktop-development
+      POSTGRES_USER: agentdesktop
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentdesktop -d agentdesktop"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    volumes:
+    - postgres-data:/var/lib/postgresql/data
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.3.3
+    restart: unless-stopped
+    user: "0"
+    command:
+    - start-dev
+    - --import-realm
+    - --http-enabled=false
+    - --https-port=8444
+    - --https-certificate-file=/certs/identity-server.crt
+    - --https-certificate-key-file=/certs/identity-server.key
+    - --hostname=https://${PUBLIC_HOST}:8444
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: bootstrap-admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KC_HEALTH_ENABLED: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8444'"]
+      interval: 3s
+      timeout: 2s
+      retries: 30
+    ports:
+    - 0.0.0.0:8444:8444
+    volumes:
+    - ./runtime/certs:/certs:ro
+    - ./runtime/keycloak-realm.json:/opt/keycloak/data/import/agentdesktop-realm.json:ro
+    - keycloak-data:/opt/keycloak/data
+    networks:
+      default:
+        aliases:
+        - ${PUBLIC_HOST}
+
+  enrollment-server:
+    build:
+      context: ../../control-plane
+    restart: unless-stopped
+    user: "0"
+    command: ["-migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://agentdesktop:agentdesktop-development@postgres:5432/agentdesktop?sslmode=disable
+      OAUTH_ISSUER: https://${PUBLIC_HOST}:8444/realms/agentdesktop
+      OAUTH_AUDIENCE: agentdesktop
+      OAUTH_SCOPE: agentgateway.invoke
+      ADMIN_OAUTH_SCOPE: agentdesktop.enrollment.admin
+      ADMIN_OAUTH_ROLE: agentdesktop-administrator
+      ADMIN_UI_OAUTH_CLIENT_ID: agentdesktop-admin
+      ADMIN_UI_AUTHORIZATION_ENDPOINT: https://${PUBLIC_HOST}:8444/realms/agentdesktop/protocol/openid-connect/auth
+      ADMIN_UI_TOKEN_ENDPOINT: https://${PUBLIC_HOST}:8444/realms/agentdesktop/protocol/openid-connect/token
+      ORGANIZATION_ID: 11111111-1111-4111-8111-111111111111
+      ORGANIZATION_NAME: VM Example Organization
+      CA_SIGNER_BACKEND: file
+      CA_CERTIFICATE_PATH: /certs/enrollment-ca.crt
+      CA_PRIVATE_KEY_PATH: /certs/enrollment-ca.key
+      MTLS_TRUST_DOMAIN: agentdesktop.example
+      SERVER_TLS_CERTIFICATE_PATH: /certs/enrollment-server.crt
+      SERVER_TLS_PRIVATE_KEY_PATH: /certs/enrollment-server.key
+      SSL_CERT_FILE: /certs/server-ca.crt
+      LISTEN_ADDRESS: 0.0.0.0:8090
+      CLIENT_CERTIFICATE_LIFETIME: 168h
+    ports:
+    - 0.0.0.0:8090:8090
+    volumes:
+    - ./runtime/certs:/certs:ro
+
+  agentgateway:
+    image: ghcr.io/agentgateway/agentgateway:v1.4.1
+    restart: unless-stopped
+    user: "0"
+    command: ["-f", "/config/agentgateway.yaml"]
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    ports:
+    - 0.0.0.0:8443:8443
+    - 127.0.0.1:15021:15021
+    volumes:
+    - ./agentgateway.yaml:/config/agentgateway.yaml:ro
+    - ./runtime/certs:/certs:ro
+
+volumes:
+  keycloak-data:
+  postgres-data:

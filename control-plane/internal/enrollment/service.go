@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/ca"
 	"github.com/agentdesktop-dev/agentdesktop/control-plane/internal/certificate"
@@ -12,19 +14,24 @@ import (
 )
 
 var (
-	ErrInvalidPrincipal = errors.New("invalid authenticated principal")
-	ErrIssuanceFailed   = errors.New("certificate issuance failed")
-	ErrNotFound         = errors.New("enrollment not found")
-	ErrNotPending       = errors.New("enrollment is not pending")
-	ErrNotActive        = errors.New("device is not active")
+	ErrInvalidPrincipal  = errors.New("invalid authenticated principal")
+	ErrIssuanceFailed    = errors.New("certificate issuance failed")
+	ErrNotFound          = errors.New("enrollment not found")
+	ErrNotPending        = errors.New("enrollment is not pending")
+	ErrNotActive         = errors.New("device is not active")
+	ErrInvalidDeviceName = errors.New("invalid device name")
 )
 
+const maxDeviceNameLength = 128
+
 type Store interface {
-	CreatePending(context.Context, Principal, certificate.Request, string) (Enrollment, error)
+	CreatePending(context.Context, Principal, certificate.Request, string, string) (Enrollment, error)
 	BeginIssuance(context.Context, Principal, string, string) (Issuance, error)
 	CompleteIssuance(context.Context, Principal, Issuance, IssuedCertificate) (Approval, error)
 	Get(context.Context, Principal, string) (Status, error)
 	List(context.Context, Principal, string, int) ([]AdministrativeRecord, error)
+	ListDevices(context.Context, Principal, int) ([]AdministrativeDevice, error)
+	Summary(context.Context, Principal) (FleetSummary, error)
 	ListIssuing(context.Context, time.Time, int) ([]Issuance, error)
 	Reject(context.Context, Principal, string) (AdministrativeRecord, error)
 	RevokeDevice(context.Context, Principal, string) (DeviceRevocation, error)
@@ -39,7 +46,7 @@ func NewService(store Store, issuer ca.RetryableIssuer) *Service {
 	return &Service{store: store, issuer: issuer}
 }
 
-func (service *Service) Request(ctx context.Context, principal Principal, encodedCSR string) (Enrollment, error) {
+func (service *Service) Request(ctx context.Context, principal Principal, encodedCSR, deviceName string) (Enrollment, error) {
 	if principal.Issuer == "" || principal.Subject == "" || strings.TrimSpace(encodedCSR) == "" {
 		return Enrollment{}, ErrInvalidPrincipal
 	}
@@ -47,11 +54,26 @@ func (service *Service) Request(ctx context.Context, principal Principal, encode
 	if err != nil {
 		return Enrollment{}, err
 	}
+	deviceName, err = normalizeDeviceName(deviceName)
+	if err != nil {
+		return Enrollment{}, err
+	}
 	id, err := identifier.New()
 	if err != nil {
 		return Enrollment{}, err
 	}
-	return service.store.CreatePending(ctx, principal, request, id)
+	return service.store.CreatePending(ctx, principal, request, deviceName, id)
+}
+
+func normalizeDeviceName(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	if utf8.RuneCountInString(value) > maxDeviceNameLength || strings.IndexFunc(value, unicode.IsControl) >= 0 {
+		return "", ErrInvalidDeviceName
+	}
+	return value, nil
 }
 
 func (service *Service) Get(ctx context.Context, principal Principal, enrollmentID string) (Status, error) {
@@ -94,6 +116,27 @@ func (service *Service) RevokeDevice(
 		return DeviceRevocation{}, ErrInvalidPrincipal
 	}
 	return service.store.RevokeDevice(ctx, administrator, deviceID)
+}
+
+func (service *Service) ListDevices(
+	ctx context.Context,
+	administrator Principal,
+	limit int,
+) ([]AdministrativeDevice, error) {
+	if administrator.Issuer == "" || administrator.Subject == "" || limit <= 0 || limit > 100 {
+		return nil, ErrInvalidPrincipal
+	}
+	return service.store.ListDevices(ctx, administrator, limit)
+}
+
+func (service *Service) Summary(
+	ctx context.Context,
+	administrator Principal,
+) (FleetSummary, error) {
+	if administrator.Issuer == "" || administrator.Subject == "" {
+		return FleetSummary{}, ErrInvalidPrincipal
+	}
+	return service.store.Summary(ctx, administrator)
 }
 
 func validAdministrativeStatus(status string) bool {

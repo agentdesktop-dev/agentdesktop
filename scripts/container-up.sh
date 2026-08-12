@@ -13,7 +13,7 @@ source "$root_dir/scripts/container-engine.sh"
 
 case "$mode" in
   smoke)
-    gateway_config="agentgateway-smoke.yaml"
+    gateway_config="agentgateway-native-smoke.yaml"
     ;;
   anthropic)
     gateway_config="agentgateway-anthropic.yaml"
@@ -93,5 +93,5 @@ EOF
 fi
 
 echo "Agent Gateway did not become ready" >&2
-"$container_engine" logs "$gateway_container" >&2 || true
+"$container_engine" logs "$connector_container" >&2 || true
 exit 1

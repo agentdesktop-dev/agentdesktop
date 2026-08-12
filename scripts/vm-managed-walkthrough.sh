@@ -148,6 +148,8 @@ case "$command" in
       exit 2
     }
     require curl
+    require cargo
+    require jq
     require node
     require openssl
     mkdir -p "$runtime"
