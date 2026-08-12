@@ -46,31 +46,12 @@ pub(super) async fn register(
         },
         generation,
     );
-    #[cfg(test)]
-    let client = if let Some(roots) = registry.roots.clone() {
-        HboneClient::connect_mtls_with_roots(
-            registry.endpoint,
-            registry.server_name.clone(),
-            identity,
-            registry.connect_timeout,
-            roots,
-        )
-        .await?
-    } else {
-        HboneClient::connect_mtls(
-            registry.endpoint,
-            registry.server_name.clone(),
-            identity,
-            registry.connect_timeout,
-        )
-        .await?
-    };
-    #[cfg(not(test))]
     let client = HboneClient::connect_mtls(
         registry.endpoint,
         registry.server_name.clone(),
         identity,
         registry.connect_timeout,
+        registry.roots.clone(),
     )
     .await?;
     Ok((client, monitor))

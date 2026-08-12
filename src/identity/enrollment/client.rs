@@ -97,17 +97,6 @@ impl EnrollmentClient {
         })
     }
 
-    #[cfg(test)]
-    fn for_test(service_url: &Url) -> Result<Self> {
-        Ok(Self {
-            client: Client::new(),
-            endpoint: service_url.join("v1/enrollments")?,
-            renewal_endpoint: service_url.join("v1/renewals")?,
-            recovery_challenge_endpoint: service_url.join("v1/recovery/challenges")?,
-            recovery_endpoint: service_url.join("v1/recovery")?,
-        })
-    }
-
     pub async fn request(&self, identity: &ManagedIdentity) -> Result<EnrollmentRecord> {
         let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
         let fingerprint = public_key_fingerprint(&key);
@@ -428,6 +417,32 @@ mod tests {
         recovery_certificate: tokio::sync::Mutex<String>,
     }
 
+    fn fixture_client(service_url: &Url) -> EnrollmentClient {
+        EnrollmentClient {
+            client: reqwest::Client::new(),
+            endpoint: service_url.join("v1/enrollments").unwrap(),
+            renewal_endpoint: service_url.join("v1/renewals").unwrap(),
+            recovery_challenge_endpoint: service_url.join("v1/recovery/challenges").unwrap(),
+            recovery_endpoint: service_url.join("v1/recovery").unwrap(),
+        }
+    }
+
+    #[test]
+    fn client_requires_https_origin() {
+        assert!(EnrollmentClient::new(&Url::parse("https://authority.example/").unwrap()).is_ok());
+        for invalid in [
+            "http://authority.example/",
+            "https://authority.example/path",
+            "https://authority.example/?query=value",
+            "https://authority.example/#fragment",
+        ] {
+            assert!(
+                EnrollmentClient::new(&Url::parse(invalid).unwrap()).is_err(),
+                "accepted invalid enrollment service URL: {invalid}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn requests_csr_and_installs_matching_certificate() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -454,7 +469,7 @@ mod tests {
         )
         .unwrap();
         let identity = test_identity(&store);
-        let client = EnrollmentClient::for_test(&service_url).unwrap();
+        let client = fixture_client(&service_url);
 
         let pending = client.request(&identity).await.unwrap();
         assert_eq!(pending.status, EnrollmentStatus::Pending);

@@ -121,8 +121,14 @@ enum Transport {
         endpoint: SocketAddr,
         server_name: String,
         identity: RotatingClientIdentity,
-        roots: Option<RootCertStore>,
+        roots: TlsRoots,
     },
+}
+
+#[derive(Clone)]
+pub enum TlsRoots {
+    Native,
+    Custom(RootCertStore),
 }
 
 #[derive(Clone)]
@@ -163,34 +169,14 @@ impl HboneClient {
         server_name: String,
         identity: RotatingClientIdentity,
         connect_timeout: Duration,
+        roots: TlsRoots,
     ) -> Result<Self> {
         Self::new(
             Transport::Tls {
                 endpoint,
                 server_name,
                 identity,
-                roots: None,
-            },
-            HeaderMap::new(),
-            connect_timeout,
-        )
-        .await
-    }
-
-    #[cfg(all(test, target_os = "linux"))]
-    pub(crate) async fn connect_mtls_with_roots(
-        endpoint: SocketAddr,
-        server_name: String,
-        identity: RotatingClientIdentity,
-        connect_timeout: Duration,
-        roots: RootCertStore,
-    ) -> Result<Self> {
-        Self::new(
-            Transport::Tls {
-                endpoint,
-                server_name,
-                identity,
-                roots: Some(roots),
+                roots,
             },
             HeaderMap::new(),
             connect_timeout,
@@ -316,11 +302,11 @@ async fn connect_tls(
     endpoint: SocketAddr,
     server_name: &str,
     identity: ClientIdentitySource,
-    roots: Option<RootCertStore>,
+    roots: TlsRoots,
 ) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
     let roots = match roots {
-        Some(roots) => roots,
-        None => native_roots()?,
+        TlsRoots::Native => native_roots()?,
+        TlsRoots::Custom(roots) => roots,
     };
     let builder = rustls::ClientConfig::builder().with_root_certificates(roots);
     let mut config = match identity {

@@ -23,7 +23,9 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
 use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
 
-use crate::service::hbone::{ExternalClientIdentity, HboneClient, RotatingClientIdentity};
+use crate::service::hbone::{
+    ExternalClientIdentity, HboneClient, RotatingClientIdentity, TlsRoots,
+};
 use crate::session_protocol::{Registration, RegistrationIdentity, read_frame};
 
 mod managed;
@@ -162,6 +164,7 @@ impl SessionRegistry {
             self.server_name.clone(),
             identity,
             self.connect_timeout,
+            TlsRoots::Native,
         )
         .await?;
         let mut clients = self.clients.write().await;

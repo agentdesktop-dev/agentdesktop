@@ -66,6 +66,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
                         .to_owned(),
                     client_identity.context("managed mode requires an enrolled client identity")?,
                     Duration::from_millis(config.connect_timeout_ms),
+                    hbone::TlsRoots::Native,
                 )
                 .await?
             }
@@ -101,6 +102,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
                 .context("managed Gateway upstream has no hostname")?
                 .to_owned(),
             Duration::from_millis(config.connect_timeout_ms),
+            hbone::TlsRoots::Native,
         );
         Some((
             std::sync::Arc::new(crate::session::linux::SessionSocket::bind(path)?),

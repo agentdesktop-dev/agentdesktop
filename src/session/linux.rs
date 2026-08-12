@@ -19,7 +19,7 @@ use tokio::net::{TcpStream, UnixListener, UnixStream};
 use tokio::sync::{RwLock, watch};
 use tokio::task::JoinSet;
 
-use crate::service::hbone::HboneClient;
+use crate::service::hbone::{HboneClient, TlsRoots};
 use crate::session_protocol::{Registration, RegistrationIdentity, read_frame};
 
 mod managed;
@@ -45,8 +45,7 @@ pub struct SessionRegistry {
     endpoint: SocketAddr,
     server_name: String,
     connect_timeout: Duration,
-    #[cfg(test)]
-    roots: Option<rustls::RootCertStore>,
+    roots: TlsRoots,
     clients: Arc<RwLock<HashMap<u32, RegisteredClient>>>,
 }
 
@@ -57,21 +56,19 @@ struct RegisteredClient {
 }
 
 impl SessionRegistry {
-    pub fn new(endpoint: SocketAddr, server_name: String, connect_timeout: Duration) -> Self {
+    pub fn new(
+        endpoint: SocketAddr,
+        server_name: String,
+        connect_timeout: Duration,
+        roots: TlsRoots,
+    ) -> Self {
         Self {
             endpoint,
             server_name,
             connect_timeout,
-            #[cfg(test)]
-            roots: None,
+            roots,
             clients: Arc::new(RwLock::new(HashMap::new())),
         }
-    }
-
-    #[cfg(test)]
-    fn with_roots(mut self, roots: rustls::RootCertStore) -> Self {
-        self.roots = Some(roots);
-        self
     }
 
     pub async fn register(&self, connection: SessionConnection) -> Result<()> {
@@ -500,6 +497,7 @@ mod tests {
             "127.0.0.1:9".parse().unwrap(),
             "gateway.test".to_owned(),
             Duration::from_secs(1),
+            TlsRoots::Native,
         );
         registry.register(connection).await.unwrap();
         assert!(registry.client_for_uid(uid).await.is_ok());
@@ -629,8 +627,8 @@ mod tests {
             gateway_address,
             "gateway.test".to_owned(),
             Duration::from_secs(2),
-        )
-        .with_roots(server_roots);
+            TlsRoots::Custom(server_roots),
+        );
         registry.register(connection).await.unwrap();
         let mut tunnel = registry
             .client_for_uid(uid)
@@ -690,6 +688,7 @@ mod tests {
             "127.0.0.1:9".parse().unwrap(),
             "unused.invalid".to_owned(),
             Duration::from_secs(1),
+            TlsRoots::Native,
         );
         registry.register(connection).await.unwrap();
 
