@@ -6,19 +6,20 @@ use anyhow::{Context, Result};
 use tokio::io::AsyncReadExt;
 use tokio::net::UnixStream;
 
-use super::{SessionConnection, SessionRegistry};
+use super::SessionConnection;
 use crate::service::hbone::HboneClient;
+use crate::session::SessionRegistry;
 use crate::session_protocol::{Registration, write_frame};
 
 pub(super) async fn register(
-    registry: &SessionRegistry,
+    registry: &SessionRegistry<u32>,
     connection: SessionConnection,
     registration: crate::session_protocol::self_managed::Registration,
 ) -> Result<(HboneClient, tokio::task::JoinHandle<Result<()>>)> {
     let client = crate::local_gateway::connect_with_capability(
         registration.endpoint,
         &registration.tunnel_token,
-        registry.connect_timeout,
+        registry.connect_timeout(),
     )
     .await?;
     Ok((client, connection.into_monitor()))

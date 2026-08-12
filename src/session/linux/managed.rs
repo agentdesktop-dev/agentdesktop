@@ -4,25 +4,25 @@ use anyhow::{Context, Result};
 use tokio::net::UnixStream;
 
 use super::SessionConnection;
-use super::SessionRegistry;
 use crate::service::hbone::{HboneClient, RotatingClientIdentity};
+use crate::session::SessionRegistry;
 use crate::session::managed::{
     SigningKeyWorker, connect_gateway, run_agent_session, spawn_signing_key,
 };
 use crate::session_protocol::managed;
 
 pub(super) async fn register(
-    registry: &SessionRegistry,
+    registry: &SessionRegistry<u32>,
     connection: SessionConnection,
     generation: u64,
     registration: managed::Registration,
 ) -> Result<(HboneClient, tokio::task::JoinHandle<Result<()>>)> {
-    let (signing_key, monitor) = connection.into_signing_key(registry.connect_timeout)?;
+    let (signing_key, monitor) = connection.into_signing_key(registry.connect_timeout())?;
     let client = connect_gateway(
-        registry.endpoint,
-        registry.server_name.clone(),
-        registry.connect_timeout,
-        registry.roots.clone(),
+        registry.endpoint(),
+        registry.server_name().to_owned(),
+        registry.connect_timeout(),
+        registry.roots().clone(),
         generation,
         registration,
         signing_key,

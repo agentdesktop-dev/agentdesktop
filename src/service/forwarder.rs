@@ -36,7 +36,7 @@ pub async fn serve_native(
 #[cfg(target_os = "linux")]
 pub async fn serve_native_sessions(
     listener: TcpListener,
-    sessions: crate::session::linux::SessionRegistry,
+    sessions: crate::session::SessionRegistry<u32>,
     destination: Authority,
     max_tunnels: usize,
     shutdown_timeout: Duration,
@@ -51,8 +51,7 @@ pub async fn serve_native_sessions(
             let sessions = sessions.clone();
             let destination = destination.clone();
             async move {
-                let resolved = sessions
-                    .client_for_native(&stream)
+                let resolved = crate::session::linux::client_for_native(&sessions, &stream)
                     .await
                     .map(|client| (client, destination));
                 (stream, resolved)
@@ -65,7 +64,7 @@ pub async fn serve_native_sessions(
 #[cfg(all(target_os = "windows", target_env = "msvc"))]
 pub async fn serve_native_sessions(
     listener: TcpListener,
-    sessions: crate::session::windows::SessionRegistry,
+    sessions: crate::session::SessionRegistry<crate::session::windows::UserSid>,
     public_destination: std::net::SocketAddr,
     destination: Authority,
     max_tunnels: usize,
@@ -86,7 +85,9 @@ pub async fn serve_native_sessions(
                     if context.original_destination != public_destination {
                         bail!("WFP native flow has an unexpected original destination");
                     }
-                    let client = sessions.client_for_sid(&context.user_sid).await?;
+                    let client =
+                        crate::session::windows::client_for_sid(&sessions, &context.user_sid)
+                            .await?;
                     Ok((client, destination))
                 }
                 .await;
@@ -164,7 +165,7 @@ pub async fn serve_capture(
 #[cfg(target_os = "linux")]
 pub async fn serve_capture_sessions(
     listener: TcpListener,
-    sessions: crate::session::linux::SessionRegistry,
+    sessions: crate::session::SessionRegistry<u32>,
     max_tunnels: usize,
     shutdown_timeout: Duration,
     shutdown: impl Future<Output = ()>,
@@ -179,9 +180,12 @@ pub async fn serve_capture_sessions(
             async move {
                 let resolved = async {
                     let original_destination = super::capture::original_socket_address(&stream)?;
-                    let client = sessions
-                        .client_for_capture(&stream, original_destination)
-                        .await?;
+                    let client = crate::session::linux::client_for_capture(
+                        &sessions,
+                        &stream,
+                        original_destination,
+                    )
+                    .await?;
                     let destination = original_destination.to_string().parse()?;
                     Ok((client, destination))
                 }
@@ -455,10 +459,12 @@ mod tests {
     async fn windows_attributed_listener_rejects_direct_connections() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let registry = crate::session::windows::SessionRegistry::new(
+        let registry = crate::session::SessionRegistry::<crate::session::windows::UserSid>::new(
+            crate::config::DeploymentMode::Managed,
             "127.0.0.1:1".parse().unwrap(),
             "gateway.example".to_owned(),
             Duration::from_secs(1),
+            crate::service::hbone::TlsRoots::Native,
         );
         let (shutdown, stopping) = oneshot::channel();
         let service = tokio::spawn(serve_native_sessions(

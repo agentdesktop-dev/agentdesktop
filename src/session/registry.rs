@@ -1,12 +1,15 @@
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use anyhow::Result;
 use tokio::sync::RwLock;
 
-use crate::service::hbone::HboneClient;
+use crate::config::DeploymentMode;
+use crate::service::hbone::{HboneClient, TlsRoots};
 
 #[derive(Clone, Copy)]
 pub(crate) enum RegistrationVersion {
@@ -16,7 +19,12 @@ pub(crate) enum RegistrationVersion {
 }
 
 #[derive(Clone)]
-pub(crate) struct ClientRegistry<Key> {
+pub struct SessionRegistry<Key> {
+    mode: DeploymentMode,
+    endpoint: SocketAddr,
+    server_name: String,
+    connect_timeout: Duration,
+    roots: TlsRoots,
     inner: Arc<RegistryInner<Key>>,
 }
 
@@ -31,18 +39,49 @@ struct RegisteredClient {
     client: HboneClient,
 }
 
-impl<Key> Default for ClientRegistry<Key> {
-    fn default() -> Self {
+impl<Key> SessionRegistry<Key> {
+    pub fn new(
+        mode: DeploymentMode,
+        endpoint: SocketAddr,
+        server_name: String,
+        connect_timeout: Duration,
+        roots: TlsRoots,
+    ) -> Self {
         Self {
+            mode,
+            endpoint,
+            server_name,
+            connect_timeout,
+            roots,
             inner: Arc::new(RegistryInner {
                 clients: RwLock::new(HashMap::new()),
                 next_lease_id: AtomicU64::new(1),
             }),
         }
     }
+
+    pub(crate) fn mode(&self) -> DeploymentMode {
+        self.mode
+    }
+
+    pub(crate) fn endpoint(&self) -> SocketAddr {
+        self.endpoint
+    }
+
+    pub(crate) fn server_name(&self) -> &str {
+        &self.server_name
+    }
+
+    pub(crate) fn connect_timeout(&self) -> Duration {
+        self.connect_timeout
+    }
+
+    pub(crate) fn roots(&self) -> &TlsRoots {
+        &self.roots
+    }
 }
 
-impl<Key> ClientRegistry<Key>
+impl<Key> SessionRegistry<Key>
 where
     Key: Clone + Eq + Hash + Send + Sync + 'static,
 {
@@ -95,11 +134,6 @@ where
             .map(|registered| registered.client.clone())
     }
 
-    #[cfg(target_os = "linux")]
-    pub(crate) async fn remove(&self, key: &Key) {
-        self.inner.clients.write().await.remove(key);
-    }
-
     async fn remove_lease(&self, key: &Key, lease_id: u64) {
         let mut clients = self.inner.clients.write().await;
         if clients
@@ -124,7 +158,13 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn old_self_managed_lease_cannot_remove_replacement() {
-        let registry = ClientRegistry::default();
+        let registry = SessionRegistry::new(
+            DeploymentMode::Standalone,
+            "127.0.0.1:9".parse().unwrap(),
+            "unused.invalid".to_owned(),
+            Duration::from_secs(1),
+            TlsRoots::Native,
+        );
         let (first_done, first_monitor) = tokio::sync::oneshot::channel();
         registry
             .install(
@@ -159,7 +199,13 @@ mod tests {
 
     #[tokio::test]
     async fn managed_registration_requires_newer_generation() {
-        let registry = ClientRegistry::default();
+        let registry = SessionRegistry::new(
+            DeploymentMode::Managed,
+            "127.0.0.1:9".parse().unwrap(),
+            "gateway.test".to_owned(),
+            Duration::from_secs(1),
+            TlsRoots::Native,
+        );
         registry
             .install(
                 1000_u32,

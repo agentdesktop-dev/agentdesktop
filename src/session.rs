@@ -5,6 +5,8 @@ use anyhow::{Context, Result};
 mod managed;
 mod registry;
 
+pub use registry::SessionRegistry;
+
 #[cfg(target_os = "linux")]
 pub mod linux;
 

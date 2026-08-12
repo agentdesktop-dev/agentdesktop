@@ -19,8 +19,9 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 use crate::config::DeploymentMode;
-use crate::service::hbone::{HboneClient, TlsRoots};
-use crate::session::registry::{ClientRegistry, RegistrationVersion};
+use crate::service::hbone::HboneClient;
+use crate::session::SessionRegistry;
+use crate::session::registry::RegistrationVersion;
 use crate::session_protocol::{Registration, RegistrationIdentity, read_frame};
 
 mod managed;
@@ -41,82 +42,58 @@ pub struct SessionConnection {
     stream: UnixStream,
 }
 
-#[derive(Clone)]
-pub struct SessionRegistry {
-    mode: DeploymentMode,
-    endpoint: SocketAddr,
-    server_name: String,
-    connect_timeout: Duration,
-    roots: TlsRoots,
-    clients: ClientRegistry<u32>,
+pub async fn register_authenticated_session(
+    registry: &SessionRegistry<u32>,
+    connection: SessionConnection,
+) -> Result<()> {
+    let uid = connection.uid();
+    let generation = connection.registration().certificate_generation;
+    let identity = connection.registration().identity.clone();
+    let (client, monitor, version) = match (registry.mode(), identity) {
+        (DeploymentMode::Standalone, RegistrationIdentity::SelfManaged(registration)) => {
+            let (client, monitor) =
+                self_managed::register(registry, connection, registration).await?;
+            (client, monitor, RegistrationVersion::SelfManaged)
+        }
+        (DeploymentMode::Managed, RegistrationIdentity::Managed(registration)) => {
+            let (client, monitor) =
+                managed::register(registry, connection, generation, registration).await?;
+            (client, monitor, RegistrationVersion::Managed(generation))
+        }
+        (DeploymentMode::Standalone, RegistrationIdentity::Managed(_)) => {
+            anyhow::bail!("managed identity cannot register with a standalone forwarder")
+        }
+        (DeploymentMode::Managed, RegistrationIdentity::SelfManaged(_)) => {
+            anyhow::bail!("self-managed identity cannot register with a managed forwarder")
+        }
+    };
+    registry.install(uid, version, client, monitor).await
 }
 
-impl SessionRegistry {
-    pub fn new(
-        mode: DeploymentMode,
-        endpoint: SocketAddr,
-        server_name: String,
-        connect_timeout: Duration,
-        roots: TlsRoots,
-    ) -> Self {
-        Self {
-            mode,
-            endpoint,
-            server_name,
-            connect_timeout,
-            roots,
-            clients: ClientRegistry::default(),
-        }
-    }
+pub async fn client_for_uid(registry: &SessionRegistry<u32>, uid: u32) -> Result<HboneClient> {
+    registry
+        .client(&uid)
+        .await
+        .with_context(|| format!("no registered user session for uid {uid}"))
+}
 
-    pub async fn register(&self, connection: SessionConnection) -> Result<()> {
-        let uid = connection.uid();
-        let generation = connection.registration().certificate_generation;
-        let identity = connection.registration().identity.clone();
-        let (client, monitor, version) = match (self.mode, identity) {
-            (DeploymentMode::Standalone, RegistrationIdentity::SelfManaged(registration)) => {
-                let (client, monitor) =
-                    self_managed::register(self, connection, registration).await?;
-                (client, monitor, RegistrationVersion::SelfManaged)
-            }
-            (DeploymentMode::Managed, RegistrationIdentity::Managed(registration)) => {
-                let (client, monitor) =
-                    managed::register(self, connection, generation, registration).await?;
-                (client, monitor, RegistrationVersion::Managed(generation))
-            }
-            (DeploymentMode::Standalone, RegistrationIdentity::Managed(_)) => {
-                anyhow::bail!("managed identity cannot register with a standalone forwarder")
-            }
-            (DeploymentMode::Managed, RegistrationIdentity::SelfManaged(_)) => {
-                anyhow::bail!("self-managed identity cannot register with a managed forwarder")
-            }
-        };
-        self.clients.install(uid, version, client, monitor).await
-    }
+pub async fn client_for_native(
+    registry: &SessionRegistry<u32>,
+    stream: &TcpStream,
+) -> Result<HboneClient> {
+    client_for_uid(registry, native_peer_uid(stream).await?).await
+}
 
-    pub async fn client_for_uid(&self, uid: u32) -> Result<HboneClient> {
-        self.clients
-            .client(&uid)
-            .await
-            .with_context(|| format!("no registered user session for uid {uid}"))
-    }
-
-    pub async fn client_for_native(&self, stream: &TcpStream) -> Result<HboneClient> {
-        self.client_for_uid(native_peer_uid(stream).await?).await
-    }
-
-    pub async fn client_for_capture(
-        &self,
-        stream: &TcpStream,
-        original_destination: SocketAddr,
-    ) -> Result<HboneClient> {
-        self.client_for_uid(captured_peer_uid(stream, original_destination).await?)
-            .await
-    }
-
-    pub async fn remove(&self, uid: u32) {
-        self.clients.remove(&uid).await;
-    }
+pub async fn client_for_capture(
+    registry: &SessionRegistry<u32>,
+    stream: &TcpStream,
+    original_destination: SocketAddr,
+) -> Result<HboneClient> {
+    client_for_uid(
+        registry,
+        captured_peer_uid(stream, original_destination).await?,
+    )
+    .await
 }
 
 pub struct SessionSocket {
@@ -161,7 +138,7 @@ impl Drop for SessionSocket {
 
 pub async fn serve_registrations(
     socket: Arc<SessionSocket>,
-    registry: SessionRegistry,
+    registry: SessionRegistry<u32>,
     registration_timeout: Duration,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -180,7 +157,10 @@ pub async fn serve_registrations(
                 let connection = accepted?;
                 let registry = registry.clone();
                 registrations.spawn(async move {
-                    tokio::time::timeout(registration_timeout, registry.register(connection))
+                    tokio::time::timeout(
+                        registration_timeout,
+                        register_authenticated_session(&registry, connection),
+                    )
                         .await
                         .context("user session registration timed out")??;
                     Ok::<_, anyhow::Error>(())
@@ -325,7 +305,7 @@ fn query_uid(client: SocketAddr, server: SocketAddr) -> Result<u32> {
 mod tests {
     use super::*;
     use crate::identity::enrollment::ClientIdentity;
-    use crate::service::hbone::RotatingClientIdentity;
+    use crate::service::hbone::{RotatingClientIdentity, TlsRoots};
     use crate::session::managed::serve_signing_requests;
     use crate::session_protocol::{AgentResponse, ForwarderRequest, write_frame};
     use base64::Engine;
@@ -477,13 +457,15 @@ mod tests {
             Duration::from_secs(1),
             TlsRoots::Native,
         );
-        registry.register(connection).await.unwrap();
-        assert!(registry.client_for_uid(uid).await.is_ok());
+        register_authenticated_session(&registry, connection)
+            .await
+            .unwrap();
+        assert!(client_for_uid(&registry, uid).await.is_ok());
 
         release.send(()).unwrap();
         agent.await.unwrap();
         tokio::time::timeout(Duration::from_secs(1), async {
-            while registry.client_for_uid(uid).await.is_ok() {
+            while client_for_uid(&registry, uid).await.is_ok() {
                 tokio::task::yield_now().await;
             }
         })
@@ -512,7 +494,11 @@ mod tests {
             ),
             stream,
         };
-        assert!(managed_registry.register(self_managed).await.is_err());
+        assert!(
+            register_authenticated_session(&managed_registry, self_managed)
+                .await
+                .is_err()
+        );
 
         let (stream, _) = UnixStream::pair().unwrap();
         let standalone_registry = SessionRegistry::new(
@@ -527,7 +513,11 @@ mod tests {
             registration: Registration::managed(1, Vec::new()),
             stream,
         };
-        assert!(standalone_registry.register(managed).await.is_err());
+        assert!(
+            register_authenticated_session(&standalone_registry, managed)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -647,9 +637,10 @@ mod tests {
             Duration::from_secs(2),
             TlsRoots::Custom(server_roots),
         );
-        registry.register(connection).await.unwrap();
-        let mut tunnel = registry
-            .client_for_uid(uid)
+        register_authenticated_session(&registry, connection)
+            .await
+            .unwrap();
+        let mut tunnel = client_for_uid(&registry, uid)
             .await
             .unwrap()
             .open_tunnel("provider.test:443".parse().unwrap())
@@ -709,10 +700,11 @@ mod tests {
             Duration::from_secs(1),
             TlsRoots::Native,
         );
-        registry.register(connection).await.unwrap();
+        register_authenticated_session(&registry, connection)
+            .await
+            .unwrap();
 
-        registry
-            .client_for_uid(uid)
+        client_for_uid(&registry, uid)
             .await
             .unwrap()
             .open_tunnel("provider.test:443".parse().unwrap())

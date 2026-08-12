@@ -1,5 +1,4 @@
 use std::ffi::c_void;
-use std::net::SocketAddr;
 use std::os::windows::io::AsRawHandle;
 use std::time::Duration;
 
@@ -18,9 +17,11 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
 use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
 
-use crate::service::hbone::{HboneClient, TlsRoots};
+use crate::config::DeploymentMode;
+use crate::service::hbone::HboneClient;
+use crate::session::SessionRegistry;
 use crate::session::managed::connect_gateway;
-use crate::session::registry::{ClientRegistry, RegistrationVersion};
+use crate::session::registry::RegistrationVersion;
 use crate::session_protocol::{Registration, RegistrationIdentity, read_frame};
 
 mod managed;
@@ -50,14 +51,6 @@ pub struct SessionConnection {
     sid: UserSid,
     registration: Registration,
     pipe: NamedPipeServer,
-}
-
-#[derive(Clone)]
-pub struct SessionRegistry {
-    endpoint: SocketAddr,
-    server_name: String,
-    connect_timeout: Duration,
-    clients: ClientRegistry<UserSid>,
 }
 
 pub fn create_server(path: &str) -> Result<NamedPipeServer> {
@@ -113,56 +106,53 @@ pub async fn accept(mut pipe: NamedPipeServer) -> Result<SessionConnection> {
     })
 }
 
-impl SessionRegistry {
-    pub fn new(endpoint: SocketAddr, server_name: String, connect_timeout: Duration) -> Self {
-        Self {
-            endpoint,
-            server_name,
-            connect_timeout,
-            clients: ClientRegistry::default(),
-        }
+pub async fn register_authenticated_session(
+    registry: &SessionRegistry<UserSid>,
+    connection: SessionConnection,
+) -> Result<()> {
+    if registry.mode() != DeploymentMode::Managed {
+        anyhow::bail!("Windows session registry is only available in managed mode");
     }
-
-    pub async fn register(&self, connection: SessionConnection) -> Result<()> {
-        let sid = connection.sid().clone();
-        let generation = connection.registration().certificate_generation;
-        let RegistrationIdentity::Managed(registration) =
-            connection.registration().identity.clone()
-        else {
-            anyhow::bail!("self-managed Windows session registration is not implemented");
-        };
-        let (signing_key, worker) = connection.into_signing_key(self.connect_timeout)?;
-        let client = connect_gateway(
-            self.endpoint,
-            self.server_name.clone(),
-            self.connect_timeout,
-            TlsRoots::Native,
-            generation,
-            registration,
-            signing_key,
+    let sid = connection.sid().clone();
+    let generation = connection.registration().certificate_generation;
+    let RegistrationIdentity::Managed(registration) = connection.registration().identity.clone()
+    else {
+        anyhow::bail!("self-managed Windows session registration is not implemented");
+    };
+    let (signing_key, worker) = connection.into_signing_key(registry.connect_timeout())?;
+    let client = connect_gateway(
+        registry.endpoint(),
+        registry.server_name().to_owned(),
+        registry.connect_timeout(),
+        registry.roots().clone(),
+        generation,
+        registration,
+        signing_key,
+    )
+    .await?;
+    registry
+        .install(
+            sid,
+            RegistrationVersion::Managed(generation),
+            client,
+            worker,
         )
-        .await?;
-        self.clients
-            .install(
-                sid,
-                RegistrationVersion::Managed(generation),
-                client,
-                worker,
-            )
-            .await
-    }
+        .await
+}
 
-    pub async fn client_for_sid(&self, sid: &UserSid) -> Result<HboneClient> {
-        self.clients
-            .client(sid)
-            .await
-            .context("no registered user session for Windows user")
-    }
+pub async fn client_for_sid(
+    registry: &SessionRegistry<UserSid>,
+    sid: &UserSid,
+) -> Result<HboneClient> {
+    registry
+        .client(sid)
+        .await
+        .context("no registered user session for Windows user")
 }
 
 pub async fn serve_registrations(
     path: String,
-    registry: SessionRegistry,
+    registry: SessionRegistry<UserSid>,
     registration_timeout: Duration,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -185,9 +175,12 @@ pub async fn serve_registrations(
         };
         let registry = registry.clone();
         registrations.spawn(async move {
-            tokio::time::timeout(registration_timeout, registry.register(connection))
-                .await
-                .context("user session registration timed out")??;
+            tokio::time::timeout(
+                registration_timeout,
+                register_authenticated_session(&registry, connection),
+            )
+            .await
+            .context("user session registration timed out")??;
             Ok::<_, anyhow::Error>(())
         });
     }

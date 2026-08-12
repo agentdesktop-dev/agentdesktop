@@ -94,7 +94,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 
     #[cfg(target_os = "linux")]
     let session_state = if let Some(path) = &config.session_socket {
-        let registry = crate::session::linux::SessionRegistry::new(
+        let registry = crate::session::SessionRegistry::<u32>::new(
             config.mode,
             gateway_endpoint,
             config
@@ -115,7 +115,8 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 
     #[cfg(all(target_os = "windows", target_env = "msvc"))]
     let session_state = if let Some(path) = &config.session_pipe {
-        let registry = crate::session::windows::SessionRegistry::new(
+        let registry = crate::session::SessionRegistry::<crate::session::windows::UserSid>::new(
+            crate::config::DeploymentMode::Managed,
             gateway_endpoint,
             config
                 .upstream
@@ -123,6 +124,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
                 .context("managed Gateway upstream has no hostname")?
                 .to_owned(),
             Duration::from_millis(config.connect_timeout_ms),
+            hbone::TlsRoots::Native,
         );
         Some((path.clone(), registry))
     } else {
