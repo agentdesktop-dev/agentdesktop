@@ -185,6 +185,27 @@ async fn connect(
                     kind: agent.kind.clone(),
                     version: agent.version.clone().unwrap_or_default(),
                     path: agent.executable.display().to_string(),
+                    mcp_servers: agent
+                        .mcp_servers
+                        .iter()
+                        .map(|server| agentdesktop_proto::fleet::McpServer {
+                            name: server.name.clone(),
+                            transport: server.transport.clone(),
+                            command: server.command.clone().unwrap_or_default(),
+                            url: server.url.clone().unwrap_or_default(),
+                            enabled: server.enabled,
+                            source: server.source.display().to_string(),
+                        })
+                        .collect(),
+                    skills: agent
+                        .skills
+                        .iter()
+                        .map(|skill| agentdesktop_proto::fleet::Skill {
+                            path: skill.path.display().to_string(),
+                            front_matter_json: serde_json::to_vec(&skill.front_matter)
+                                .expect("skill front matter is JSON-compatible"),
+                        })
+                        .collect(),
                 })
                 .collect(),
         }),

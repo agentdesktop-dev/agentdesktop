@@ -82,6 +82,8 @@ async fn main() -> anyhow::Result<()> {
             kind = %agent.kind,
             executable = %agent.executable.display(),
             version = agent.version.as_deref().unwrap_or("unknown"),
+            mcps = agent.mcp_servers.len(),
+            skills = agent.skills.len(),
             "discovered program"
         );
     }

@@ -82,6 +82,22 @@ message Discovery {
   string kind = 1;
   string version = 2;
   string path = 3;
+  repeated McpServer mcp_servers = 4;
+  repeated Skill skills = 5;
+}
+
+message McpServer {
+  string name = 1;
+  string transport = 2;
+  string command = 3;
+  string url = 4;
+  bool enabled = 5;
+  string source = 6;
+}
+
+message Skill {
+  string path = 1;
+  bytes front_matter_json = 2;
 }
 
 message DesiredConfig {
