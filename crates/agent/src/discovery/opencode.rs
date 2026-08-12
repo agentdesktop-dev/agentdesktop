@@ -8,5 +8,7 @@ pub(super) fn discover() -> Option<Agent> {
         version: metadata::pacman_version_for_file(&executable),
         executable,
         kind: "opencode".to_owned(),
+        mcp_servers: Vec::new(),
+        skills: Vec::new(),
     })
 }

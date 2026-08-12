@@ -277,8 +277,21 @@ async fn handle_agent_message(
         }
         Some(agent_message::Message::Inventory(inventory)) => {
             let discoveries = inventory.discoveries.len();
+            let mcp_servers = inventory
+                .discoveries
+                .iter()
+                .map(|discovery| discovery.mcp_servers.len())
+                .sum::<usize>();
+            let skills = inventory
+                .discoveries
+                .iter()
+                .map(|discovery| discovery.skills.len())
+                .sum::<usize>();
             database.replace_inventory(device_id, &inventory).await?;
-            info!(device_id, discoveries, "stored device inventory");
+            info!(
+                device_id,
+                discoveries, mcp_servers, skills, "stored device inventory"
+            );
         }
         Some(agent_message::Message::ConfigStatus(status)) => {
             database.update_config_status(device_id, &status).await?;

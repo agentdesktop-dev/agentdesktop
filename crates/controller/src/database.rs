@@ -1,7 +1,8 @@
 use anyhow::Context;
 use sqlx::{AnyPool, any::AnyPoolOptions};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::PathBuf};
 
+use agentdesktop_core::model::{McpServer, Skill};
 use agentdesktop_proto::fleet::{ConfigStatus, Hello, Inventory};
 use serde::Serialize;
 
@@ -74,11 +75,37 @@ impl From<DeviceRow> for DeviceSummary {
     }
 }
 
-#[derive(Clone, Debug, Serialize, sqlx::FromRow)]
+#[derive(Clone, Debug, Serialize)]
 pub struct DeviceDiscovery {
     pub kind: String,
     pub version: String,
     pub path: String,
+    pub mcp_servers: Vec<McpServer>,
+    pub skills: Vec<Skill>,
+}
+
+#[derive(sqlx::FromRow)]
+struct DeviceDiscoveryRow {
+    kind: String,
+    version: String,
+    path: String,
+    mcp_servers_json: String,
+    skills_json: String,
+}
+
+impl TryFrom<DeviceDiscoveryRow> for DeviceDiscovery {
+    type Error = anyhow::Error;
+
+    fn try_from(row: DeviceDiscoveryRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            kind: row.kind,
+            version: row.version,
+            path: row.path,
+            mcp_servers: serde_json::from_str(&row.mcp_servers_json)
+                .context("decode discovered MCP servers")?,
+            skills: serde_json::from_str(&row.skills_json).context("decode discovered skills")?,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -211,14 +238,18 @@ impl Database {
         let Some(device) = device else {
             return Ok(None);
         };
-        let discoveries = sqlx::query_as(
-            "SELECT kind, version, path FROM discoveries
+        let rows: Vec<DeviceDiscoveryRow> = sqlx::query_as(
+            "SELECT kind, version, path, mcp_servers_json, skills_json FROM discoveries
              WHERE device_id = $1 ORDER BY kind ASC, path ASC",
         )
         .bind(device_id)
         .fetch_all(&self.pool)
         .await
         .context("load device discoveries")?;
+        let discoveries: Vec<DeviceDiscovery> = rows
+            .into_iter()
+            .map(DeviceDiscovery::try_from)
+            .collect::<anyhow::Result<_>>()?;
         let mut device: DeviceSummary = device.into();
         device.installed_tools = discoveries
             .iter()
@@ -277,14 +308,44 @@ impl Database {
             .execute(&mut *transaction)
             .await?;
         for discovery in &inventory.discoveries {
+            let mcp_servers: Vec<McpServer> = discovery
+                .mcp_servers
+                .iter()
+                .map(|server| McpServer {
+                    name: server.name.clone(),
+                    transport: server.transport.clone(),
+                    command: (!server.command.is_empty()).then(|| server.command.clone()),
+                    url: (!server.url.is_empty()).then(|| server.url.clone()),
+                    enabled: server.enabled,
+                    source: PathBuf::from(&server.source),
+                })
+                .collect();
+            let skills: Vec<Skill> = discovery
+                .skills
+                .iter()
+                .map(|skill| {
+                    let front_matter = serde_json::from_slice(&skill.front_matter_json)
+                        .context("decode reported skill front matter")?;
+                    Ok(Skill {
+                        path: PathBuf::from(&skill.path),
+                        front_matter,
+                    })
+                })
+                .collect::<anyhow::Result<_>>()?;
+            let mcp_servers_json =
+                serde_json::to_string(&mcp_servers).context("encode discovered MCP servers")?;
+            let skills_json = serde_json::to_string(&skills).context("encode discovered skills")?;
             sqlx::query(
-                "INSERT INTO discoveries (device_id, kind, version, path)
-                 VALUES ($1, $2, $3, $4)",
+                "INSERT INTO discoveries
+                    (device_id, kind, version, path, mcp_servers_json, skills_json)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
             )
             .bind(device_id)
             .bind(&discovery.kind)
             .bind(&discovery.version)
             .bind(&discovery.path)
+            .bind(mcp_servers_json)
+            .bind(skills_json)
             .execute(&mut *transaction)
             .await?;
         }
@@ -325,4 +386,75 @@ fn unix_time_seconds() -> i64 {
         .as_secs()
         .try_into()
         .unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::BTreeMap, path::PathBuf};
+
+    use agentdesktop_proto::fleet::{Discovery, Inventory, McpServer, Skill};
+
+    use super::Database;
+
+    #[tokio::test]
+    async fn persists_discovered_mcp_servers_and_skills() {
+        let path = std::env::temp_dir().join(format!(
+            "agentdesktop-inventory-test-{}.db",
+            std::process::id()
+        ));
+        let database = Database::connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .await
+            .expect("connect test database");
+        database
+            .enroll_device("device", "host", "credential", "issuer", "subject")
+            .await
+            .expect("enroll device");
+        let front_matter = BTreeMap::from([
+            ("name", serde_json::json!("llm-research")),
+            ("description", serde_json::json!("Compare gateways")),
+        ]);
+        database
+            .replace_inventory(
+                "device",
+                &Inventory {
+                    discoveries: vec![Discovery {
+                        kind: "codex".to_owned(),
+                        version: "1.0.0".to_owned(),
+                        path: "/bin/codex".to_owned(),
+                        mcp_servers: vec![McpServer {
+                            name: "docs".to_owned(),
+                            transport: "http".to_owned(),
+                            url: "https://example.com/mcp".to_owned(),
+                            enabled: true,
+                            source: "/home/user/.codex/config.toml".to_owned(),
+                            ..Default::default()
+                        }],
+                        skills: vec![Skill {
+                            path: "/home/user/.codex/skills/llm-research/SKILL.md".to_owned(),
+                            front_matter_json: serde_json::to_vec(&front_matter).unwrap(),
+                        }],
+                    }],
+                },
+            )
+            .await
+            .expect("store inventory");
+
+        let device = database
+            .get_device("device")
+            .await
+            .expect("load device")
+            .expect("device exists");
+        assert_eq!(device.discoveries[0].mcp_servers[0].name, "docs");
+        assert_eq!(
+            device.discoveries[0].skills[0].path,
+            PathBuf::from("/home/user/.codex/skills/llm-research/SKILL.md")
+        );
+        assert_eq!(
+            device.discoveries[0].skills[0].front_matter["name"],
+            "llm-research"
+        );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
 }

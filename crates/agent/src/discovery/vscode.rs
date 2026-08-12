@@ -16,5 +16,7 @@ pub(super) fn discover() -> Option<Agent> {
         version,
         executable,
         kind: "vscode".to_owned(),
+        mcp_servers: Vec::new(),
+        skills: Vec::new(),
     })
 }
