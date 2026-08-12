@@ -1,5 +1,6 @@
 use std::{net::SocketAddr, time::SystemTime};
 
+use anyhow::Context;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -10,6 +11,8 @@ use axum::{
 use rust_embed::RustEmbed;
 use serde::Serialize;
 use tracing::info;
+
+use agentdesktop_core::config::DaemonConfig;
 
 use crate::{
     daemon_config::DaemonConfigStore,
@@ -68,6 +71,7 @@ pub async fn serve(address: SocketAddr, state: AdminState) -> anyhow::Result<()>
     let app = Router::new()
         .route("/api/v1/overview", get(overview))
         .route("/api/v1/devices", get(devices))
+        .route("/api/v1/daemon-config", get(daemon_config))
         .route(
             "/api/v1/devices/{device_id}",
             get(device).delete(delete_device),
@@ -148,6 +152,25 @@ async fn delete_device(
 
 async fn settings(State(state): State<AdminState>) -> Json<ControllerSettings> {
     Json(state.settings)
+}
+
+#[derive(Serialize)]
+struct ActiveDaemonConfig {
+    config: Option<DaemonConfig>,
+}
+
+async fn daemon_config(
+    State(state): State<AdminState>,
+) -> Result<Json<ActiveDaemonConfig>, AdminError> {
+    let config = state
+        .daemon_config
+        .current()
+        .map(|active| {
+            let yaml = std::str::from_utf8(&active.yaml).context("daemon config is not UTF-8")?;
+            agentdesktop_core::config::parse_daemon(yaml)
+        })
+        .transpose()?;
+    Ok(Json(ActiveDaemonConfig { config }))
 }
 
 async fn asset(uri: Uri) -> Response {

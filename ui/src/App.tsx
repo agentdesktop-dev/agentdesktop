@@ -92,6 +92,32 @@ type ControllerSettings = {
   gateway_jwt_enabled: boolean;
 };
 
+type AgentKind = "claudeCode" | "codex" | "openCode";
+
+type AgentDraft = {
+  kind: AgentKind;
+  useGateway: boolean;
+  settings: string;
+};
+
+type DaemonConfigDocument = {
+  inferenceGateway?: {
+    url: string;
+    authentication?: {
+      type: string;
+      audience?: string;
+    };
+  };
+  telemetry?: {
+    events?: string[];
+  };
+  programs?: Partial<Record<AgentKind, Record<string, unknown>>>;
+};
+
+type ActiveDaemonConfig = {
+  config: DaemonConfigDocument | null;
+};
+
 const nav = [
   { href: "/", label: "Overview", icon: Gauge },
   { href: "/devices", label: "Devices", icon: Laptop },
@@ -142,19 +168,27 @@ function useApi<T>(path: string) {
   const [loading, setLoading] = useState(true);
   useEffect(() => {
     const controller = new AbortController();
+    let active = true;
     setLoading(true);
     fetch(path, { signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) throw new Error(await response.text());
         return response.json() as Promise<T>;
       })
-      .then(setData)
+      .then((response) => {
+        if (active) setData(response);
+      })
       .catch((reason: Error) => {
-        if (reason.name !== "AbortError")
+        if (active && reason.name !== "AbortError")
           setError(reason.message || "Request failed");
       })
-      .finally(() => setLoading(false));
-    return () => controller.abort();
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
   }, [path]);
   return { data, error, loading };
 }
@@ -830,6 +864,8 @@ function DeleteDeviceDialog({
 
 function ConfigurationPage() {
   const addAgentMenu = useRef<HTMLDetailsElement>(null);
+  const initializedFromController = useRef(false);
+  const activeConfig = useApi<ActiveDaemonConfig>("/api/v1/daemon-config");
   const [gateway, setGateway] = useState(true);
   const [gatewayUrl, setGatewayUrl] = useState("https://gateway.example.com");
   const [controllerJwt, setControllerJwt] = useState(true);
@@ -854,6 +890,35 @@ function ConfigurationPage() {
   const availableAgents = configurableAgents.filter(
     (candidate) => !agents.some((agent) => agent.kind === candidate.kind),
   );
+
+  useEffect(() => {
+    if (
+      initializedFromController.current ||
+      activeConfig.loading ||
+      activeConfig.error ||
+      !activeConfig.data
+    ) {
+      return;
+    }
+    initializedFromController.current = true;
+    const config = activeConfig.data.config;
+    if (!config) return;
+
+    const inferenceGateway = config.inferenceGateway;
+    const events = new Set(config.telemetry?.events ?? []);
+    setGateway(Boolean(inferenceGateway));
+    if (inferenceGateway) {
+      setGatewayUrl(inferenceGateway.url);
+      setControllerJwt(
+        inferenceGateway.authentication?.type === "controllerJwt",
+      );
+      setAudience(inferenceGateway.authentication?.audience ?? "agentgateway");
+    }
+    setSessionNewTelemetry(events.has("session.new"));
+    setToolUseTelemetry(events.has("tool.use") || events.has("tool.use.input"));
+    setToolInputTelemetry(events.has("tool.use.input"));
+    setAgents(agentDrafts(config.programs));
+  }, [activeConfig.data, activeConfig.error, activeConfig.loading]);
 
   useEffect(() => {
     const closeMenu = (event: PointerEvent) => {
@@ -903,202 +968,230 @@ function ConfigurationPage() {
       </section>
       <div className="configuration-builder">
         <section className="card wizard-card">
-          <div className="wizard-section">
-            <label className="toggle-row">
-              <span>
+          <details className="wizard-section" open={gateway}>
+            <summary className="wizard-section-summary">
+              <span className="wizard-section-title">
                 <strong>Inference gateway</strong>
-                <small>Connection shared by agents that opt into it.</small>
+                <small>Shared connection settings for managed agents.</small>
               </span>
-              <input
-                type="checkbox"
-                checked={gateway}
-                onChange={(event) => setGateway(event.target.checked)}
-              />
-            </label>
-            {gateway && (
-              <div className="form-grid">
-                <label className="field full-width">
-                  <span>Gateway URL</span>
-                  <input
-                    value={gatewayUrl}
-                    onChange={(event) => setGatewayUrl(event.target.value)}
-                  />
-                </label>
-                <label className="toggle-row compact full-width">
-                  <span>
-                    <strong>Controller JWT</strong>
-                    <small>Use identity-aware short-lived credentials.</small>
-                  </span>
-                  <input
-                    type="checkbox"
-                    checked={controllerJwt}
-                    onChange={(event) => setControllerJwt(event.target.checked)}
-                  />
-                </label>
-                {controllerJwt && (
+              <ChevronRight size={15} />
+            </summary>
+            <div className="wizard-section-content">
+              <label className="toggle-row">
+                <span>
+                  <strong>Enable inference gateway</strong>
+                  <small>Agents can opt into these shared settings.</small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={gateway}
+                  onChange={(event) => setGateway(event.target.checked)}
+                />
+              </label>
+              {gateway && (
+                <div className="form-grid">
                   <label className="field full-width">
-                    <span>JWT audience</span>
+                    <span>Gateway URL</span>
                     <input
-                      value={audience}
-                      onChange={(event) => setAudience(event.target.value)}
+                      value={gatewayUrl}
+                      onChange={(event) => setGatewayUrl(event.target.value)}
                     />
                   </label>
-                )}
+                  <label className="toggle-row compact full-width">
+                    <span>
+                      <strong>Controller JWT</strong>
+                      <small>Use identity-aware short-lived credentials.</small>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={controllerJwt}
+                      onChange={(event) =>
+                        setControllerJwt(event.target.checked)
+                      }
+                    />
+                  </label>
+                  {controllerJwt && (
+                    <label className="field full-width">
+                      <span>JWT audience</span>
+                      <input
+                        value={audience}
+                        onChange={(event) => setAudience(event.target.value)}
+                      />
+                    </label>
+                  )}
+                </div>
+              )}
+            </div>
+          </details>
+          <details
+            className="wizard-section"
+            open={sessionNewTelemetry || toolUseTelemetry || toolInputTelemetry}
+          >
+            <summary className="wizard-section-summary">
+              <span className="wizard-section-title">
+                <strong>Telemetry</strong>
+                <small>Select the events to collect.</small>
+              </span>
+              <ChevronRight size={15} />
+            </summary>
+            <div className="wizard-section-content">
+              <div className="telemetry-options">
+                <label className="telemetry-option">
+                  <span>
+                    <strong>New session</strong>
+                    <small>A developer-tool session starts.</small>
+                  </span>
+                  <code>session.new</code>
+                  <input
+                    type="checkbox"
+                    checked={sessionNewTelemetry}
+                    onChange={(event) =>
+                      setSessionNewTelemetry(event.target.checked)
+                    }
+                  />
+                </label>
+                <label className="telemetry-option">
+                  <span>
+                    <strong>Tool use</strong>
+                    <small>Agent, tool name, and invocation ID.</small>
+                  </span>
+                  <code>tool.use</code>
+                  <input
+                    type="checkbox"
+                    checked={toolUseTelemetry}
+                    onChange={(event) => {
+                      setToolUseTelemetry(event.target.checked);
+                      if (!event.target.checked) setToolInputTelemetry(false);
+                    }}
+                  />
+                </label>
+                <label className="telemetry-option">
+                  <span>
+                    <strong>Tool input</strong>
+                    <small>May contain source code, prompts, or secrets.</small>
+                  </span>
+                  <code>tool.use.input</code>
+                  <input
+                    type="checkbox"
+                    checked={toolInputTelemetry}
+                    onChange={(event) => {
+                      setToolInputTelemetry(event.target.checked);
+                      if (event.target.checked) setToolUseTelemetry(true);
+                    }}
+                  />
+                </label>
               </div>
-            )}
-          </div>
-          <div className="wizard-section">
-            <div className="section-label">
-              <strong>Telemetry</strong>
-              <small>Select the events to collect.</small>
             </div>
-            <div className="telemetry-options">
-              <label className="telemetry-option">
-                <span>
-                  <strong>New session</strong>
-                  <small>A developer-tool session starts.</small>
-                </span>
-                <code>session.new</code>
-                <input
-                  type="checkbox"
-                  checked={sessionNewTelemetry}
-                  onChange={(event) =>
-                    setSessionNewTelemetry(event.target.checked)
-                  }
-                />
-              </label>
-              <label className="telemetry-option">
-                <span>
-                  <strong>Tool use</strong>
-                  <small>Agent, tool name, and invocation ID.</small>
-                </span>
-                <code>tool.use</code>
-                <input
-                  type="checkbox"
-                  checked={toolUseTelemetry}
-                  onChange={(event) => {
-                    setToolUseTelemetry(event.target.checked);
-                    if (!event.target.checked) setToolInputTelemetry(false);
-                  }}
-                />
-              </label>
-              <label className="telemetry-option">
-                <span>
-                  <strong>Tool input</strong>
-                  <small>May contain source code, prompts, or secrets.</small>
-                </span>
-                <code>tool.use.input</code>
-                <input
-                  type="checkbox"
-                  checked={toolInputTelemetry}
-                  onChange={(event) => {
-                    setToolInputTelemetry(event.target.checked);
-                    if (event.target.checked) setToolUseTelemetry(true);
-                  }}
-                />
-              </label>
-            </div>
-          </div>
-          <div className="wizard-section">
-            <div className="agent-list-heading">
-              <div className="section-label">
+          </details>
+          <details className="wizard-section" open={agents.length > 0}>
+            <summary className="wizard-section-summary">
+              <span className="wizard-section-title">
                 <strong>Agents</strong>
                 <small>Add the developer tools you want to manage.</small>
-              </div>
-              {availableAgents.length > 0 && (
-                <details className="add-agent-menu" ref={addAgentMenu}>
-                  <summary className="button secondary">
-                    <Plus size={14} /> Add agent
-                    <ChevronRight className="menu-chevron" size={13} />
-                  </summary>
-                  <div className="add-agent-options">
-                    {availableAgents.map((agent) => (
-                      <button
-                        type="button"
-                        key={agent.kind}
-                        onClick={(event) => {
-                          addAgent(agent.kind);
-                          event.currentTarget
-                            .closest("details")
-                            ?.removeAttribute("open");
-                        }}
-                      >
-                        <ToolIcon kind={agent.iconKind} />
-                        <span>{agent.label}</span>
-                        <Plus size={13} />
-                      </button>
-                    ))}
-                  </div>
-                </details>
-              )}
-            </div>
-            <div className="agent-drafts">
-              {agents.map((agent) => {
-                const definition = configurableAgents.find(
-                  (candidate) => candidate.kind === agent.kind,
-                );
-                if (!definition) return null;
-                return (
-                  <section className="agent-draft" key={agent.kind}>
-                    <div className="agent-draft-heading">
-                      <span className="tool-cell">
-                        <ToolIcon kind={definition.iconKind} />
-                        <strong>{definition.label}</strong>
-                      </span>
-                      <button
-                        type="button"
-                        className="icon-button"
-                        aria-label={`Remove ${definition.label}`}
-                        onClick={() =>
-                          setAgents((current) =>
-                            current.filter(
-                              (candidate) => candidate.kind !== agent.kind,
-                            ),
-                          )
-                        }
-                      >
-                        <Trash2 size={14} />
-                      </button>
+              </span>
+              <ChevronRight size={15} />
+            </summary>
+            <div className="wizard-section-content">
+              <div className="agent-list-heading">
+                {availableAgents.length > 0 && (
+                  <details className="add-agent-menu" ref={addAgentMenu}>
+                    <summary className="button secondary">
+                      <Plus size={14} /> Add agent
+                      <ChevronRight className="menu-chevron" size={13} />
+                    </summary>
+                    <div className="add-agent-options">
+                      {availableAgents.map((agent) => (
+                        <button
+                          type="button"
+                          key={agent.kind}
+                          onClick={(event) => {
+                            addAgent(agent.kind);
+                            event.currentTarget
+                              .closest("details")
+                              ?.removeAttribute("open");
+                          }}
+                        >
+                          <ToolIcon kind={agent.iconKind} />
+                          <span>{agent.label}</span>
+                          <Plus size={13} />
+                        </button>
+                      ))}
                     </div>
-                    <label className="toggle-row compact">
-                      <span>
-                        <strong>Use inference gateway</strong>
-                        <small>Apply the general gateway settings above.</small>
-                      </span>
-                      <input
-                        type="checkbox"
-                        disabled={!gateway}
-                        checked={gateway && agent.useGateway}
-                        onChange={(event) =>
-                          updateAgent(agent.kind, {
-                            useGateway: event.target.checked,
-                          })
-                        }
-                      />
-                    </label>
-                    <label className="field">
-                      <span>Additional settings (YAML)</span>
-                      <textarea
-                        rows={7}
-                        spellCheck={false}
-                        placeholder={definition.placeholder}
-                        value={agent.settings}
-                        onChange={(event) =>
-                          updateAgent(agent.kind, {
-                            settings: event.target.value,
-                          })
-                        }
-                      />
-                      <small>Use the agent’s native configuration keys.</small>
-                    </label>
-                  </section>
-                );
-              })}
-              {agents.length === 0 && (
-                <p className="agent-empty">No agents added.</p>
-              )}
+                  </details>
+                )}
+              </div>
+              <div className="agent-drafts">
+                {agents.map((agent) => {
+                  const definition = configurableAgents.find(
+                    (candidate) => candidate.kind === agent.kind,
+                  );
+                  if (!definition) return null;
+                  return (
+                    <section className="agent-draft" key={agent.kind}>
+                      <div className="agent-draft-heading">
+                        <span className="tool-cell">
+                          <ToolIcon kind={definition.iconKind} />
+                          <strong>{definition.label}</strong>
+                        </span>
+                        <button
+                          type="button"
+                          className="icon-button"
+                          aria-label={`Remove ${definition.label}`}
+                          onClick={() =>
+                            setAgents((current) =>
+                              current.filter(
+                                (candidate) => candidate.kind !== agent.kind,
+                              ),
+                            )
+                          }
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                      <label className="toggle-row compact">
+                        <span>
+                          <strong>Use inference gateway</strong>
+                          <small>
+                            Apply the general gateway settings above.
+                          </small>
+                        </span>
+                        <input
+                          type="checkbox"
+                          disabled={!gateway}
+                          checked={gateway && agent.useGateway}
+                          onChange={(event) =>
+                            updateAgent(agent.kind, {
+                              useGateway: event.target.checked,
+                            })
+                          }
+                        />
+                      </label>
+                      <label className="field">
+                        <span>Additional settings (YAML)</span>
+                        <textarea
+                          rows={7}
+                          spellCheck={false}
+                          placeholder={definition.placeholder}
+                          value={agent.settings}
+                          onChange={(event) =>
+                            updateAgent(agent.kind, {
+                              settings: event.target.value,
+                            })
+                          }
+                        />
+                        <small>
+                          Use the agent’s native configuration keys.
+                        </small>
+                      </label>
+                    </section>
+                  );
+                })}
+                {agents.length === 0 && (
+                  <p className="agent-empty">No agents added.</p>
+                )}
+              </div>
             </div>
-          </div>
+          </details>
         </section>
         <section className="card output-card">
           <div className="output-heading">
@@ -1123,14 +1216,6 @@ function ConfigurationPage() {
     </div>
   );
 }
-
-type AgentKind = "claudeCode" | "codex" | "openCode";
-
-type AgentDraft = {
-  kind: AgentKind;
-  useGateway: boolean;
-  settings: string;
-};
 
 const configurableAgents: Array<{
   kind: AgentKind;
@@ -1216,6 +1301,73 @@ function daemonConfigYaml(options: {
 
 function yamlString(value: string) {
   return JSON.stringify(value);
+}
+
+function agentDrafts(programs: DaemonConfigDocument["programs"]): AgentDraft[] {
+  if (!programs) return [];
+  return configurableAgents.flatMap(({ kind }) => {
+    const program = programs[kind];
+    if (!program) return [];
+    const { useInferenceGateway, ...settings } = program;
+    return [
+      {
+        kind,
+        useGateway: useInferenceGateway !== false,
+        settings: objectYaml(settings),
+      },
+    ];
+  });
+}
+
+function objectYaml(value: Record<string, unknown>) {
+  return yamlLines(value, 0).join("\n");
+}
+
+function yamlLines(value: unknown, indent: number): string[] {
+  const padding = " ".repeat(indent);
+  if (Array.isArray(value)) {
+    if (value.length === 0) return [`${padding}[]`];
+    return value.flatMap((item) => {
+      if (isNonEmptyCollection(item)) {
+        return [`${padding}-`, ...yamlLines(item, indent + 2)];
+      }
+      return [`${padding}- ${yamlScalar(item)}`];
+    });
+  }
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value);
+    if (entries.length === 0) return [`${padding}{}`];
+    return entries.flatMap(([key, item]) => {
+      const yamlKey = /^[A-Za-z_][A-Za-z0-9_.-]*$/.test(key)
+        ? key
+        : yamlString(key);
+      if (isNonEmptyCollection(item)) {
+        return [`${padding}${yamlKey}:`, ...yamlLines(item, indent + 2)];
+      }
+      return [`${padding}${yamlKey}: ${yamlScalar(item)}`];
+    });
+  }
+  return [`${padding}${yamlScalar(value)}`];
+}
+
+function isNonEmptyCollection(value: unknown) {
+  return (
+    (Array.isArray(value) && value.length > 0) ||
+    (value !== null &&
+      typeof value === "object" &&
+      Object.keys(value).length > 0)
+  );
+}
+
+function yamlScalar(value: unknown) {
+  if (typeof value === "string") return yamlString(value);
+  if (value === null) return "null";
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (Array.isArray(value)) return "[]";
+  if (typeof value === "object") return "{}";
+  return yamlString(String(value));
 }
 
 function SettingsPage() {
