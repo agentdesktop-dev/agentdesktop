@@ -21,6 +21,7 @@ pub struct Reconciler {
 }
 
 impl Reconciler {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         claude_code_managed_settings_dir: PathBuf,
         claude_desktop_managed_settings_path: PathBuf,

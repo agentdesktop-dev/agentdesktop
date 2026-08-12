@@ -8,7 +8,7 @@ use agentdesktop_proto::fleet::{
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_core::Stream;
-use rand::RngCore;
+use rand::Rng;
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;

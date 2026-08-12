@@ -50,8 +50,8 @@ pub fn apply(
         remove_owned(helper_path, &helper_owner, "credential helper")?;
     }
 
-    let mut settings = managed_settings(config, gateway, helper_path)?;
-    let mut contents = serde_json::to_vec_pretty(&mut settings)
+    let settings = managed_settings(config, gateway, helper_path)?;
+    let mut contents = serde_json::to_vec_pretty(&settings)
         .context("serialize Claude Desktop managed settings")?;
     contents.push(b'\n');
     write_owned(
