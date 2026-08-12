@@ -5,7 +5,10 @@ CREATE TABLE devices (
     architecture TEXT NOT NULL DEFAULT '',
     agent_version TEXT NOT NULL DEFAULT '',
     created_at BIGINT NOT NULL,
-    last_seen_at BIGINT
+    last_seen_at BIGINT,
+    enrolled_by_issuer TEXT NOT NULL DEFAULT '',
+    enrolled_by_subject TEXT NOT NULL DEFAULT '',
+    idp_claims_json TEXT
 );
 
 CREATE TABLE device_credentials (
@@ -18,6 +21,8 @@ CREATE TABLE discoveries (
     kind TEXT NOT NULL,
     version TEXT NOT NULL,
     path TEXT NOT NULL,
+    mcp_servers_json TEXT NOT NULL DEFAULT '[]',
+    skills_json TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (device_id, kind, path)
 );
 
