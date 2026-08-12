@@ -97,24 +97,92 @@ fn default_heartbeat_interval() -> Duration {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProgramsConfig {
-    /// Claude Code managed-settings configuration.
+    /// Claude Code managed-settings configuration. Arbitrary keys are passed through directly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_code: Option<ClaudeCodeConfig>,
+    /// Codex managed configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex: Option<CodexConfig>,
+    /// OpenCode managed configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_code: Option<OpenCodeConfig>,
 }
 
 impl ProgramsConfig {
     fn is_empty(&self) -> bool {
-        self.claude_code.is_none()
+        self.claude_code.is_none() && self.codex.is_none() && self.open_code.is_none()
     }
 }
 
 /// Settings reconciled into Claude Code's managed configuration.
+///
+/// Keys other than `inferenceGateway` are written directly to AgentDesktop's
+/// managed-settings drop-in. When generated gateway settings overlap with
+/// pass-through values, AgentDesktop's generated values take precedence.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeCodeConfig {
+    /// Name of an entry in `inferenceGateways` that Claude Code should use.
+    ///
+    /// Omit this field to manage Claude Code settings without configuring an inference gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_gateway: Option<String>,
+    /// Arbitrary Claude Code managed-settings values, flattened into this object.
+    #[serde(default, flatten)]
+    pub settings: BTreeMap<String, serde_json::Value>,
+}
+
+/// Settings reconciled into Codex's organization-managed configuration.
+///
+/// Values under `managedConfig` are written to Codex's `managed_config.toml`.
+/// When generated inference-gateway settings overlap with those values,
+/// AgentDesktop's generated values take precedence.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ClaudeCodeConfig {
-    /// Name of an entry in `inferenceGateways` that Claude Code should use.
-    pub inference_gateway: String,
+pub struct CodexConfig {
+    /// Name of an entry in `inferenceGateways` that Codex should use.
+    ///
+    /// Omit this field to manage general Codex settings without configuring an inference gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_gateway: Option<String>,
+    /// Arbitrary values written to Codex's organization-managed TOML configuration.
+    ///
+    /// Use Codex's native snake_case configuration keys. TOML has no null value,
+    /// so null values cannot be reconciled.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub managed_config: BTreeMap<String, serde_json::Value>,
+}
+
+/// Settings reconciled into OpenCode's system-managed configuration.
+///
+/// Values under `managedConfig` are written to OpenCode's managed JSONC file.
+/// When generated inference-gateway settings overlap with those values,
+/// AgentDesktop's generated values take precedence.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OpenCodeConfig {
+    /// Name of an entry in `inferenceGateways` that OpenCode should use.
+    ///
+    /// Omit this field to manage general OpenCode settings without configuring an inference gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_gateway: Option<String>,
+    /// Model ID selected from `models` when using the inference gateway.
+    ///
+    /// This is required when `inferenceGateway` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Models exposed by the managed inference-gateway provider, keyed by model ID.
+    ///
+    /// Each value is an arbitrary OpenCode model configuration object. At least
+    /// one model is required when `inferenceGateway` is set.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<String, serde_json::Value>,
+    /// Arbitrary values written to OpenCode's system-managed configuration.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub managed_config: BTreeMap<String, serde_json::Value>,
 }
 
 /// Loads and validates a daemon YAML configuration file from `path`.
@@ -188,12 +256,40 @@ fn validate_desired(
     }
 
     if let Some(claude_code) = &programs.claude_code
-        && !inference_gateways.contains_key(&claude_code.inference_gateway)
+        && let Some(inference_gateway) = &claude_code.inference_gateway
+        && !inference_gateways.contains_key(inference_gateway)
     {
         anyhow::bail!(
             "Claude Code references unknown inference gateway {}",
-            claude_code.inference_gateway
+            inference_gateway
         );
+    }
+    if let Some(codex) = &programs.codex
+        && let Some(inference_gateway) = &codex.inference_gateway
+        && !inference_gateways.contains_key(inference_gateway)
+    {
+        anyhow::bail!(
+            "Codex references unknown inference gateway {}",
+            inference_gateway
+        );
+    }
+    if let Some(open_code) = &programs.open_code
+        && let Some(inference_gateway) = &open_code.inference_gateway
+    {
+        if !inference_gateways.contains_key(inference_gateway) {
+            anyhow::bail!(
+                "OpenCode references unknown inference gateway {}",
+                inference_gateway
+            );
+        }
+        let model = open_code
+            .model
+            .as_deref()
+            .filter(|model| !model.trim().is_empty())
+            .context("OpenCode requires model when inferenceGateway is set")?;
+        if !open_code.models.contains_key(model) {
+            anyhow::bail!("OpenCode model {model} is not declared in models");
+        }
     }
     Ok(())
 }
@@ -234,5 +330,51 @@ programs:
         parse_daemon(include_str!("../../../config.docker.yaml")).expect("Docker daemon example");
         parse_desired(include_str!("../../../config.claude-code.yaml.example"))
             .expect("Claude Code desired configuration example");
+        parse_desired(include_str!("../../../config.codex.yaml.example"))
+            .expect("Codex desired configuration example");
+        parse_desired(include_str!("../../../config.opencode.yaml.example"))
+            .expect("OpenCode desired configuration example");
+    }
+
+    #[test]
+    fn codex_rejects_an_unknown_inference_gateway() {
+        let error = parse_desired(
+            r#"
+programs:
+  codex:
+    inferenceGateway: missing
+"#,
+        )
+        .expect_err("unknown gateway should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Codex references unknown inference gateway missing")
+        );
+    }
+
+    #[test]
+    fn open_code_requires_a_declared_gateway_model() {
+        let error = parse_desired(
+            r#"
+inferenceGateways:
+  corporate:
+    url: https://gateway.example.com
+programs:
+  openCode:
+    inferenceGateway: corporate
+    model: missing
+    models:
+      available: {}
+"#,
+        )
+        .expect_err("undeclared model should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("OpenCode model missing is not declared in models")
+        );
     }
 }

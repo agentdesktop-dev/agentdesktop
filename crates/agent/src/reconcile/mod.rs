@@ -1,4 +1,6 @@
 mod claude_code;
+mod codex;
+mod open_code;
 
 use std::path::PathBuf;
 
@@ -7,33 +9,105 @@ use agentdesktop_core::config::DesiredConfig;
 #[derive(Clone)]
 pub struct Reconciler {
     claude_code_managed_settings_dir: PathBuf,
-    credential_helper: String,
+    codex_managed_config_path: PathBuf,
+    open_code_managed_config_path: PathBuf,
+    open_code_plugin_path: PathBuf,
+    credential_helper: PathBuf,
+    socket: PathBuf,
 }
 
 impl Reconciler {
-    pub fn new(claude_code_managed_settings_dir: PathBuf, credential_helper: String) -> Self {
+    pub fn new(
+        claude_code_managed_settings_dir: PathBuf,
+        codex_managed_config_path: PathBuf,
+        open_code_managed_config_path: PathBuf,
+        open_code_plugin_path: PathBuf,
+        credential_helper: PathBuf,
+        socket: PathBuf,
+    ) -> Self {
         Self {
             claude_code_managed_settings_dir,
+            codex_managed_config_path,
+            open_code_managed_config_path,
+            open_code_plugin_path,
             credential_helper,
+            socket,
         }
     }
 
     pub fn apply(&self, config: &DesiredConfig) -> anyhow::Result<()> {
         let claude_code = config.programs.claude_code.as_ref().map(|claude_code| {
-            let gateway = &config.inference_gateways[&claude_code.inference_gateway];
+            let gateway = claude_code
+                .inference_gateway
+                .as_ref()
+                .map(|name| &config.inference_gateways[name]);
             (claude_code, gateway)
         });
         claude_code::apply(
             &self.claude_code_managed_settings_dir,
-            &self.credential_helper,
+            &self.claude_credential_helper_command(),
             claude_code,
+        )?;
+        let codex = config.programs.codex.as_ref().map(|codex| {
+            let gateway = codex
+                .inference_gateway
+                .as_ref()
+                .map(|name| &config.inference_gateways[name]);
+            (codex, gateway)
+        });
+        codex::apply(
+            &self.codex_managed_config_path,
+            &self.credential_helper,
+            &self.socket,
+            codex,
+        )?;
+        let open_code = config.programs.open_code.as_ref().map(|open_code| {
+            let gateway = open_code
+                .inference_gateway
+                .as_ref()
+                .map(|name| &config.inference_gateways[name]);
+            (open_code, gateway)
+        });
+        open_code::apply(
+            &self.open_code_managed_config_path,
+            &self.open_code_plugin_path,
+            &self.credential_helper,
+            &self.socket,
+            open_code,
         )
     }
+
+    fn claude_credential_helper_command(&self) -> String {
+        format!(
+            "{} --socket {} credential",
+            shell_quote(&self.credential_helper.to_string_lossy()),
+            shell_quote(&self.socket.to_string_lossy())
+        )
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 #[cfg(target_os = "linux")]
 pub fn default_claude_code_managed_settings_dir() -> PathBuf {
     PathBuf::from("/etc/claude-code/managed-settings.d")
+}
+
+/// Returns the system-wide Codex managed configuration path.
+pub fn default_codex_managed_config_path() -> PathBuf {
+    PathBuf::from("/etc/codex/managed_config.toml")
+}
+
+/// Returns the system-wide OpenCode managed configuration path.
+pub fn default_open_code_managed_config_path() -> PathBuf {
+    PathBuf::from("/etc/opencode/opencode.jsonc")
+}
+
+/// Returns the path of AgentDesktop's managed OpenCode credential plugin.
+pub fn default_open_code_plugin_path() -> PathBuf {
+    PathBuf::from("/etc/opencode/plugins/agentdesktop.js")
 }
 
 #[cfg(target_os = "macos")]

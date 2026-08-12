@@ -7,9 +7,11 @@ inferenceGateways:
       audience: agentgateway
 
 programs:
-  claudeCode:
+  codex:
     inferenceGateway: corporate
-    env:
-      COMPANY_ENVIRONMENT: production
-    permissions:
-      defaultMode: plan
+    managedConfig:
+      model_reasoning_effort: high
+      approval_policy: on-request
+      sandbox_mode: workspace-write
+      otel:
+        environment: production

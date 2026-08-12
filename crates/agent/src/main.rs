@@ -44,6 +44,18 @@ struct Args {
         default_value_os_t = reconcile::default_claude_code_managed_settings_dir()
     )]
     claude_code_managed_settings_dir: PathBuf,
+
+    /// Path to Codex's organization-managed TOML configuration.
+    #[arg(long, default_value_os_t = reconcile::default_codex_managed_config_path())]
+    codex_managed_config: PathBuf,
+
+    /// Path to OpenCode's system-managed JSONC configuration.
+    #[arg(long, default_value_os_t = reconcile::default_open_code_managed_config_path())]
+    open_code_managed_config: PathBuf,
+
+    /// Path used for AgentDesktop's OpenCode credential plugin.
+    #[arg(long, default_value_os_t = reconcile::default_open_code_plugin_path())]
+    open_code_plugin: PathBuf,
 }
 
 #[tokio::main]
@@ -55,7 +67,11 @@ async fn main() -> anyhow::Result<()> {
     let enrollment = EnrollmentState::new(config.controller.is_some());
     let reconciler = reconcile::Reconciler::new(
         args.claude_code_managed_settings_dir.clone(),
-        credential_helper_command(&args.socket)?,
+        args.codex_managed_config.clone(),
+        args.open_code_managed_config.clone(),
+        args.open_code_plugin.clone(),
+        credential_helper_executable()?,
+        args.socket.clone(),
     );
     reconciler
         .apply(&config.desired_config())
@@ -131,19 +147,10 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn credential_helper_command(socket: &Path) -> anyhow::Result<String> {
-    let executable = std::env::current_exe()
+fn credential_helper_executable() -> anyhow::Result<PathBuf> {
+    Ok(std::env::current_exe()
         .context("locate agentdesktopd executable")?
-        .with_file_name(format!("agentdesktop{}", std::env::consts::EXE_SUFFIX));
-    Ok(format!(
-        "{} --socket {} credential",
-        shell_quote(&executable.to_string_lossy()),
-        shell_quote(&socket.to_string_lossy())
-    ))
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
+        .with_file_name(format!("agentdesktop{}", std::env::consts::EXE_SUFFIX)))
 }
 
 fn bind(path: &PathBuf) -> anyhow::Result<UnixListener> {

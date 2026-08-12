@@ -155,9 +155,21 @@ inferenceGateways:
 programs:
   claudeCode:
     inferenceGateway: corporate
+    env:
+      COMPANY_ENVIRONMENT: production
+    permissions:
+      defaultMode: plan
 ```
 
-The Claude Code adapter translates this to `ANTHROPIC_BASE_URL` plus an `apiKeyHelper` command that calls the local AgentDesktop CLI. The CLI asks the daemon for a credential, the daemon authenticates to the controller with its device credential, and the controller returns a short-lived RS256 JWT. Claude caches the result for one minute; the JWT lifetime defaults to five minutes. No gateway credential is stored in YAML or managed settings.
+Keys alongside `inferenceGateway` are passed directly into AgentDesktop's
+Claude Code managed-settings drop-in. Objects are deep-merged with generated
+settings; AgentDesktop-owned gateway values take precedence on conflicts. The
+gateway adapter adds `ANTHROPIC_BASE_URL` plus an `apiKeyHelper` command that
+calls the local AgentDesktop CLI. The CLI asks the daemon for a credential, the
+daemon authenticates to the controller with its device credential, and the
+controller returns a short-lived RS256 JWT. Claude caches the result for one
+minute; the JWT lifetime defaults to five minutes. No gateway credential is
+stored in YAML or managed settings.
 
 Generate a controller signing key for development:
 
@@ -201,6 +213,92 @@ cargo run --bin agentdesktop -- \
 ```
 
 It writes only the JWT to stdout, which is the interface Claude Code expects.
+
+### Codex managed configuration
+
+Codex can use the same named inference gateways and rotating controller JWTs.
+`config.codex.yaml.example` also shows arbitrary organization-managed Codex
+settings:
+
+```yaml
+programs:
+  codex:
+    inferenceGateway: corporate
+    managedConfig:
+      model_reasoning_effort: high
+      approval_policy: on-request
+      sandbox_mode: workspace-write
+```
+
+Keys under `managedConfig` use Codex's native snake_case names and are written
+to `/etc/codex/managed_config.toml`. AgentDesktop adds a custom Responses API
+provider for the selected gateway. For `controllerJwt` authentication, its
+`auth.command` invokes the local `agentdesktop credential` helper and refreshes
+the token every minute. Generated provider settings take precedence on
+conflicts, while unrelated custom providers and settings are preserved.
+
+For an unprivileged development run, redirect the managed file:
+
+```console
+cargo run --bin agentdesktopd -- \
+  --config ./config.codex.yaml.example \
+  --socket /tmp/agentdesktop.sock \
+  --state-dir /tmp/agentdesktop-state \
+  --claude-code-managed-settings-dir /tmp/claude-code-managed-settings.d \
+  --codex-managed-config /tmp/codex-managed_config.toml
+```
+
+When `programs.codex` is removed, AgentDesktop removes only the managed TOML
+file it owns. It never changes `~/.codex/config.toml`.
+
+### OpenCode managed configuration
+
+OpenCode supports enforced system configuration, so AgentDesktop writes its
+owned JSONC file at `/etc/opencode/opencode.jsonc`. The model catalog is
+explicit because OpenCode custom providers do not discover arbitrary gateway
+models automatically:
+
+```yaml
+programs:
+  openCode:
+    inferenceGateway: corporate
+    model: gpt-5.6-terra
+    models:
+      gpt-5.6-terra:
+        name: GPT 5.6 Terra
+        limit:
+          context: 200000
+          output: 65536
+    managedConfig:
+      autoupdate: false
+      permission:
+        edit: ask
+        bash: ask
+```
+
+AgentDesktop generates an `@ai-sdk/openai` Responses API provider, selects it
+as the only enabled provider, and sets the configured default model. For a
+`controllerJwt` gateway it also writes
+`/etc/opencode/plugins/agentdesktop.js`. The plugin uses OpenCode's
+`chat.headers` hook to obtain a JWT from the local credential helper and caches
+it for one minute. Existing `managedConfig.plugin` entries, unrelated provider
+definitions, and other general settings are preserved.
+
+For an unprivileged development run, redirect both managed files:
+
+```console
+cargo run --bin agentdesktopd -- \
+  --config ./config.opencode.yaml.example \
+  --socket /tmp/agentdesktop.sock \
+  --state-dir /tmp/agentdesktop-state \
+  --claude-code-managed-settings-dir /tmp/claude-code-managed-settings.d \
+  --codex-managed-config /tmp/codex-managed_config.toml \
+  --open-code-managed-config /tmp/opencode/opencode.jsonc \
+  --open-code-plugin /tmp/opencode/plugins/agentdesktop.js
+```
+
+When `programs.openCode` is removed, AgentDesktop removes only files carrying
+its ownership marker. User and project OpenCode configuration remains untouched.
 
 To exercise the real privileged path during development, build as your user and elevate only the resulting daemon binary with the wrapper:
 
