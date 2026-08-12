@@ -59,16 +59,13 @@ scripts/vm-managed-walkthrough.sh prepare --reset
 
 The VM walkthrough remains intentionally interactive. For a faster no-input check of the current connector against the same real control plane and Agent Gateway stack, run `scripts/managed-e2e.sh`; it drives user login and administrator actions through deterministic fixture APIs and reports success through its exit code.
 
-The harness starts the real rootless Podman walkthrough stack, builds an organization-specific installer, and copies it to Fedora's Downloads directory. Over SSH, it also installs and starts the root-owned machine forwarder under `/opt/agentdesktop` to simulate the machine portion of MDM deployment. It does not install the per-user bundle, enroll the user, modify Claude settings, or install trust on the user's behalf.
+The harness starts the real rootless Podman walkthrough stack and simulates MDM over SSH. It installs the root-owned bundle under `/opt/agentdesktop`, exposes `/usr/local/bin/agentdesktop`, starts the machine forwarder, and distributes the walkthrough organization's CA. It does not enroll the user or modify Claude settings.
 
 Perform the user journey in the Fedora desktop:
 
-1. Run `~/Downloads/agentdesktop-installer install` in Terminal.
-2. Review the organization, gateway, enrollment, and inspection summary.
-3. Choose whether to install the organization's public CA. This consent is separate and is not implied by noninteractive installer acceptance.
-4. Approve the normal desktop privilege prompt when installing software or trust.
-5. Run `agentdesktop connect-agents`, complete browser sign-in, and approve the separate Claude Code settings change.
-6. After an administrator approves the pending enrollment, launch `claude` normally and ask it to reply with exactly `SMOKE_OK`.
+1. Run `agentdesktop connect-agents` and complete browser sign-in.
+2. Approve the separate Claude Code settings change.
+3. After an administrator approves the pending enrollment, launch `claude` normally and ask it to reply with exactly `SMOKE_OK`.
 
 Perform the administrator journey in the host browser at `http://localhost:8091/admin/`: sign in, inspect the pending device, and approve, reject, or revoke it. This cleartext endpoint is a walkthrough-only adapter bound to host loopback. The VM-facing identity, enrollment, and Gateway endpoints remain HTTPS with the canonical `host.test` issuer. Production administrators use organization-trusted HTTPS.
 

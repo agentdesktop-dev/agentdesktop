@@ -78,13 +78,17 @@ install_machine_forwarder() {
   run_vm ssh install -d -m 0755 "$machine_stage"
   run_vm copy "$root/target/release/agentdesktop" "$machine_stage/agentdesktop"
   run_vm copy "$root/target/release/agentdesktop-install" "$machine_stage/agentdesktop-install"
+  run_vm copy "$root/target/release/agentdesktop-capture-setup" "$machine_stage/agentdesktop-capture-setup"
   run_vm copy "$state/organization.json" "$machine_stage/organization.json"
+  run_vm copy "$root/examples/managed-walkthrough/certs/gateway-server-ca.crt" "$machine_stage/organization-ca.crt"
   run_vm ssh "sudo '$machine_stage/agentdesktop-install' managed-install \
     --root '$machine_root' \
     --connector '$machine_stage/agentdesktop' \
     --organization '$machine_stage/organization.json' \
     --control '$machine_stage/agentdesktop-install' \
-    --command-link /usr/local/libexec/agentdesktop-forwarder"
+    --command-link /usr/local/bin/agentdesktop"
+  run_vm ssh "sudo '$machine_stage/agentdesktop-capture-setup' system-install \
+    --certificate '$machine_stage/organization-ca.crt'"
   run_vm ssh "sudo install -m 0644 \
     '$machine_root/share/systemd/system/agentdesktop-forwarder.service' \
     /etc/systemd/system/agentdesktop-forwarder.service"
@@ -109,29 +113,22 @@ prepare_vm() {
   }
 
   write_organization
-  "$root/scripts/build-managed-installer.sh" \
-    "$state/organization.json" \
-    "$state/agentdesktop-installer"
-  run_vm ssh install -d -m 0755 /home/agentdesktop/Downloads
-  run_vm copy "$state/agentdesktop-installer" /home/agentdesktop/Downloads/agentdesktop-installer
-  run_vm ssh chmod +x /home/agentdesktop/Downloads/agentdesktop-installer
+  cargo build --release \
+    --bin agentdesktop \
+    --bin agentdesktop-install \
+    --bin agentdesktop-capture-setup
   install_machine_forwarder
 
   cat <<'EOF'
 
-Managed walkthrough is ready.
-
-The root-owned machine forwarder was installed over SSH to simulate MDM.
+Managed walkthrough is ready. The root-owned Agent Desktop bundle, machine
+forwarder, command, and organization CA were installed over SSH to simulate MDM.
 
 In the Fedora desktop:
   1. Open Terminal.
-  2. Run:
-      ~/Downloads/agentdesktop-installer install
-  3. Review the installation summary.
-  4. Choose whether to install the organization CA and approve the desktop privilege prompt.
-  5. Run `agentdesktop connect-agents`.
-  6. Complete browser sign-in and approve the separate Claude Code settings prompt.
-  7. Launch `claude` normally and ask it to reply with exactly SMOKE_OK.
+  2. Run `agentdesktop connect-agents`.
+  3. Complete browser sign-in and approve the separate Claude Code settings prompt.
+  4. Launch `claude` normally and ask it to reply with exactly SMOKE_OK.
 
 Approve the pending device at http://localhost:8091/admin/ on the host.
 Run `scripts/vm-managed-walkthrough.sh stop` when finished.

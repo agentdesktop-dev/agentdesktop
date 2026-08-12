@@ -112,23 +112,23 @@ fn main() -> Result<()> {
             command_link,
             capture_enabled,
         } => {
-            let mut files: Vec<(&Path, &str, bool)> = vec![
-                (connector.as_path(), "bin/agentdesktop", true),
-                (agentgateway.as_path(), "bin/agentgateway", true),
+            let mut files: Vec<(&Path, &str, u32)> = vec![
+                (connector.as_path(), "bin/agentdesktop", 0o755),
+                (agentgateway.as_path(), "bin/agentgateway", 0o755),
                 (
                     starter_config.as_path(),
                     "share/examples/agentgateway.yaml",
-                    false,
+                    0o600,
                 ),
             ];
             if let Some(control) = &control {
-                files.push((control.as_path(), "bin/agentdesktop-install", true));
+                files.push((control.as_path(), "bin/agentdesktop-install", 0o755));
             }
             if let Some(capture_setup) = &capture_setup {
                 files.push((
                     capture_setup.as_path(),
                     "bin/agentdesktop-capture-setup",
-                    true,
+                    0o755,
                 ));
             }
             install(
@@ -148,12 +148,12 @@ fn main() -> Result<()> {
             command_link,
         } => {
             let bootstrap = OrganizationBootstrap::parse(&fs::read(&organization)?)?;
-            let mut files: Vec<(&Path, &str, bool)> = vec![
-                (connector.as_path(), "bin/agentdesktop", true),
-                (organization.as_path(), "share/organization.json", false),
+            let mut files: Vec<(&Path, &str, u32)> = vec![
+                (connector.as_path(), "bin/agentdesktop", 0o755),
+                (organization.as_path(), "share/organization.json", 0o644),
             ];
             if let Some(control) = &control {
-                files.push((control.as_path(), "bin/agentdesktop-install", true));
+                files.push((control.as_path(), "bin/agentdesktop-install", 0o755));
             }
             install(
                 &root,
@@ -229,7 +229,7 @@ fn run_systemctl<const N: usize>(
 
 fn install(
     root: &Path,
-    files: &[(&Path, &str, bool)],
+    files: &[(&Path, &str, u32)],
     systemd_unit: &str,
     machine_systemd_unit: Option<(&str, String)>,
     deployment: &str,
@@ -255,7 +255,7 @@ fn install(
     fs::create_dir(&staging)?;
 
     let stage_result = (|| -> Result<()> {
-        for (source, relative, executable) in files {
+        for (source, relative, mode) in files {
             let destination = staging.join(relative);
             fs::create_dir_all(destination.parent().expect("destination has parent"))?;
             fs::copy(source, &destination).with_context(|| {
@@ -265,7 +265,7 @@ fn install(
                     destination.display()
                 )
             })?;
-            set_mode(&destination, if *executable { 0o755 } else { 0o600 })?;
+            set_mode(&destination, *mode)?;
         }
         let unit = staging.join(SYSTEMD_UNIT);
         fs::create_dir_all(unit.parent().expect("systemd unit has parent"))?;

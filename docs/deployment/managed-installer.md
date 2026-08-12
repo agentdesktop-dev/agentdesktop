@@ -40,7 +40,7 @@ The managed installer is suitable for SSH-based development that simulates the p
 
 The machine-forwarder template must never be activated from this default user-writable install root. MDM or a system package must copy the connector and machine unit into root-owned locations before enabling it. The machine unit owns the listeners, capture path, and `/run/agentdesktop/sessions.sock`; it has no identity issuer or credential-store arguments. The user unit owns OAuth, enrollment, renewal, and signing, and registers through that socket.
 
-The Fedora managed walkthrough performs this machine installation over SSH into `/opt/agentdesktop` before the user begins the interactive installation, simulating the MDM-owned portion with the VM's passwordless development account.
+The Fedora managed walkthrough performs the complete device installation over SSH into `/opt/agentdesktop`, exposes `/usr/local/bin/agentdesktop`, installs organization trust, and starts the machine forwarder. This simulates MDM with the VM's passwordless development account. The user then begins with `agentdesktop connect-agents`; enrollment credentials and the user service remain owned by that user.
 
 After MDM has activated the root-owned machine forwarder, the user runs the printed `agentdesktop connect-agents` command. That command signs in through the browser, requests and waits for authority approval, starts the user session agent, verifies machine-service readiness, and separately asks before changing Claude settings.
 

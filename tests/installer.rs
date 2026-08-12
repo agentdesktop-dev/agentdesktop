@@ -195,6 +195,8 @@ fn refuses_to_replace_an_unowned_stable_command() {
 
 #[test]
 fn installs_managed_bundle_without_local_gateway() {
+    use std::os::unix::fs::PermissionsExt;
+
     let temporary = tempfile::tempdir().unwrap();
     let fixtures = temporary.path().join("fixtures");
     fs::create_dir(&fixtures).unwrap();
@@ -232,6 +234,14 @@ fn installs_managed_bundle_without_local_gateway() {
 
     assert!(install.status.success(), "{:?}", install.stderr);
     assert!(root.join("share/organization.json").is_file());
+    assert_eq!(
+        fs::metadata(root.join("share/organization.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o644
+    );
     assert_eq!(
         fs::read_link(command_link).unwrap(),
         root.join("bin/agentdesktop")
