@@ -10,6 +10,8 @@ gateway=https://host.test:4000/
 enrollment=https://host.test:8090/
 vm_forwards=18080:18080,8090:8090,4000:8443,15021:15021
 install_root=/home/agentdesktop/.local/lib/agentdesktop
+machine_root=/opt/agentdesktop
+machine_stage=/home/agentdesktop/Downloads/agentdesktop-mdm
 
 run_vm() {
   VM_HOST_FORWARDS=$vm_forwards "$vm" "$@"
@@ -72,6 +74,26 @@ fs.writeFileSync(process.argv[3], `${JSON.stringify(organization, null, 2)}\n`);
 EOF
 }
 
+install_machine_forwarder() {
+  run_vm ssh install -d -m 0755 "$machine_stage"
+  run_vm copy "$root/target/release/agentdesktop" "$machine_stage/agentdesktop"
+  run_vm copy "$root/target/release/agentdesktop-install" "$machine_stage/agentdesktop-install"
+  run_vm copy "$state/organization.json" "$machine_stage/organization.json"
+  run_vm ssh "sudo '$machine_stage/agentdesktop-install' managed-install \
+    --root '$machine_root' \
+    --connector '$machine_stage/agentdesktop' \
+    --organization '$machine_stage/organization.json' \
+    --control '$machine_stage/agentdesktop-install' \
+    --command-link /usr/local/libexec/agentdesktop-forwarder"
+  run_vm ssh "sudo install -m 0644 \
+    '$machine_root/share/systemd/system/agentdesktop-forwarder.service' \
+    /etc/systemd/system/agentdesktop-forwarder.service"
+  run_vm ssh "sudo systemctl daemon-reload && \
+    sudo systemctl enable agentdesktop-forwarder.service && \
+    sudo systemctl restart agentdesktop-forwarder.service"
+  run_vm ssh "test -S /run/agentdesktop/sessions.sock"
+}
+
 prepare_vm() {
   run_vm status | grep -q '^running ' || {
     printf 'VM is not running; use prepare --reset\n' >&2
@@ -93,10 +115,13 @@ prepare_vm() {
   run_vm ssh install -d -m 0755 /home/agentdesktop/Downloads
   run_vm copy "$state/agentdesktop-installer" /home/agentdesktop/Downloads/agentdesktop-installer
   run_vm ssh chmod +x /home/agentdesktop/Downloads/agentdesktop-installer
+  install_machine_forwarder
 
   cat <<'EOF'
 
 Managed walkthrough is ready.
+
+The root-owned machine forwarder was installed over SSH to simulate MDM.
 
 In the Fedora desktop:
   1. Open Terminal.
