@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use agentdesktop_controller::{
     admin::{self, AdminState, ControllerSettings},
     database::Database,
+    desired_config::{self, DesiredConfigStore},
     gateway_jwt::GatewayJwtIssuer,
     oidc::OidcProvider,
-    service::{FleetAgentService, load_desired_config},
+    service::FleetAgentService,
 };
 use agentdesktop_core::{DEFAULT_CONTROLLER_CONFIG_PATH, config, telemetry};
 use agentdesktop_proto::fleet::fleet_agent_server::FleetAgentServer;
@@ -33,9 +34,17 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     let desired_config = match &config.desired_config {
-        Some(desired) => load_desired_config(Some(&desired.path), desired.revision)?,
+        Some(desired) => Some(desired_config::load(&desired.path, desired.revision)?),
         None => None,
     };
+    let desired_config = DesiredConfigStore::new(desired_config);
+    if let Some(desired) = &config.desired_config {
+        desired_config::watch(
+            desired.path.clone(),
+            desired.revision,
+            desired_config.clone(),
+        )?;
+    }
     let database = Database::connect(&config.database_url).await?;
     let oidc = match &config.oidc {
         Some(oidc) => {
@@ -70,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
     if gateway_jwt_issuer.is_some() {
         tracing::info!("inference gateway JWT issuance enabled");
     }
+    let gateway_jwks = gateway_jwt_issuer.as_ref().map(GatewayJwtIssuer::jwks);
     let admin_state = AdminState::new(
         database.clone(),
         desired_config.clone(),
@@ -80,6 +90,7 @@ async fn main() -> anyhow::Result<()> {
             tls_enabled: config.tls.is_some(),
             gateway_jwt_enabled: gateway_jwt_issuer.is_some(),
         },
+        gateway_jwks,
     );
     let service = FleetAgentService::new(oidc, database, desired_config, gateway_jwt_issuer);
 

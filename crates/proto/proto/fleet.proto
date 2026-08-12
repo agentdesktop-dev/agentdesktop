@@ -48,7 +48,25 @@ message AgentMessage {
     Heartbeat heartbeat = 2;
     Inventory inventory = 3;
     ConfigStatus config_status = 4;
+    TelemetryEvent telemetry = 5;
   }
+}
+
+// A timestamped telemetry observation reported by an enrolled device.
+message TelemetryEvent {
+  uint64 timestamp_unix_ms = 1;
+
+  oneof event {
+    ToolUseEvent tool_use = 2;
+  }
+}
+
+// A developer tool invocation observed through a managed tool hook.
+message ToolUseEvent {
+  string client_id = 1;
+  string tool_name = 2;
+  string tool_use_id = 3;
+  bytes input_json = 4;
 }
 
 message ControllerMessage {

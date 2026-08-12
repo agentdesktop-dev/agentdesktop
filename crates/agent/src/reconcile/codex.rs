@@ -9,6 +9,8 @@ use tracing::info;
 
 use crate::secure_fs;
 
+use super::{deep_merge, responses_base_url};
+
 const MANAGED_HEADER: &str = "# Managed by AgentDesktop. Manual changes will be replaced.\n";
 
 pub fn apply(
@@ -112,28 +114,8 @@ fn managed_config(
             (provider_name): provider,
         },
     });
-    merge(&mut settings, generated);
+    deep_merge(&mut settings, generated);
     Ok(settings)
-}
-
-fn responses_base_url(gateway: &InferenceGatewayConfig) -> String {
-    let mut url = gateway.url.clone();
-    let path = url.path().trim_end_matches('/');
-    if !path.ends_with("/v1") {
-        url.set_path(&format!("{path}/v1"));
-    }
-    url.to_string().trim_end_matches('/').to_owned()
-}
-
-fn merge(base: &mut Value, overlay: Value) {
-    match (base, overlay) {
-        (Value::Object(base), Value::Object(overlay)) => {
-            for (key, value) in overlay {
-                merge(base.entry(key).or_insert(Value::Null), value);
-            }
-        }
-        (base, overlay) => *base = overlay,
-    }
 }
 
 fn remove(path: &Path) -> anyhow::Result<()> {

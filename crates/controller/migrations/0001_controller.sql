@@ -34,4 +34,14 @@ CREATE TABLE device_config_status (
     updated_at BIGINT NOT NULL
 );
 
+CREATE TABLE telemetry_events (
+    id TEXT PRIMARY KEY,
+    device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    timestamp_unix_ms BIGINT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL
+);
+
 CREATE INDEX discoveries_device_id_idx ON discoveries(device_id);
+CREATE INDEX telemetry_events_device_time_idx
+    ON telemetry_events(device_id, timestamp_unix_ms DESC);

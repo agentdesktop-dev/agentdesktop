@@ -10,6 +10,8 @@ use url::Url;
 
 use crate::secure_fs;
 
+use super::{deep_merge, responses_base_url};
+
 const MANAGED_HEADER: &str = "// Managed by AgentDesktop. Manual changes will be replaced.\n";
 const CONFIG_PROGRAM: &str = "opencode";
 
@@ -82,7 +84,7 @@ fn managed_config(
             (provider_name): provider,
         },
     });
-    merge(&mut settings, generated);
+    deep_merge(&mut settings, generated);
     if let Some(plugin_url) = plugin_url {
         append_plugin(&mut settings, plugin_url);
     }
@@ -156,15 +158,6 @@ export const AgentDesktop = async () => ({{
     ))
 }
 
-fn responses_base_url(gateway: &InferenceGatewayConfig) -> String {
-    let mut url = gateway.url.clone();
-    let path = url.path().trim_end_matches('/');
-    if !path.ends_with("/v1") {
-        url.set_path(&format!("{path}/v1"));
-    }
-    url.to_string().trim_end_matches('/').to_owned()
-}
-
 fn file_url(path: &Path) -> anyhow::Result<String> {
     let absolute = if path.is_absolute() {
         path.to_owned()
@@ -181,17 +174,6 @@ fn file_url(path: &Path) -> anyhow::Result<String> {
                 absolute.display()
             )
         })
-}
-
-fn merge(base: &mut Value, overlay: Value) {
-    match (base, overlay) {
-        (Value::Object(base), Value::Object(overlay)) => {
-            for (key, value) in overlay {
-                merge(base.entry(key).or_insert(Value::Null), value);
-            }
-        }
-        (base, overlay) => *base = overlay,
-    }
 }
 
 fn reconcile_file(path: &Path, contents: &[u8], description: &str) -> anyhow::Result<()> {

@@ -70,3 +70,32 @@ pub struct InferenceGatewayCredential {
     pub credential: String,
     pub expires_at_unix_seconds: u64,
 }
+
+/// A timestamped telemetry observation emitted by a managed device.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetryEvent {
+    /// Time at which the daemon accepted the event, in Unix milliseconds.
+    pub timestamp_unix_ms: u64,
+    /// Typed telemetry payload.
+    #[serde(flatten)]
+    pub event: TelemetryEventKind,
+}
+
+/// Extensible set of telemetry event payloads.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum TelemetryEventKind {
+    /// A tool invocation observed before execution.
+    ToolUse {
+        /// Developer client that emitted the event.
+        client_id: String,
+        /// Tool name supplied by the developer client.
+        tool_name: String,
+        /// Optional invocation identifier supplied by the developer client.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
+        /// Tool input exactly as supplied to the hook.
+        tool_input: serde_json::Value,
+    },
+}

@@ -16,12 +16,14 @@ use tracing::{debug, info, warn};
 
 use agentdesktop_core::{
     config::{self, ControllerConnectionConfig},
-    model::Discovery as AgentDiscovery,
+    model::{
+        Discovery as AgentDiscovery, TelemetryEvent as ModelTelemetryEvent, TelemetryEventKind,
+    },
 };
 use agentdesktop_proto::fleet::{
     AgentMessage, ConfigState, ConfigStatus, Discovery, Heartbeat, Hello,
-    InferenceGatewayCredentialRequest, Inventory, agent_message, controller_message,
-    fleet_agent_client::FleetAgentClient,
+    InferenceGatewayCredentialRequest, Inventory, TelemetryEvent, ToolUseEvent, agent_message,
+    controller_message, fleet_agent_client::FleetAgentClient, telemetry_event,
 };
 
 use crate::{
@@ -39,6 +41,7 @@ pub async fn run(
     oidc_callback_listen: Option<SocketAddr>,
     reconciler: Reconciler,
     enrollment: EnrollmentState,
+    mut telemetry: mpsc::Receiver<ModelTelemetryEvent>,
 ) -> anyhow::Result<()> {
     let identity_path = state_dir.join("identity.json");
     loop {
@@ -58,7 +61,16 @@ pub async fn run(
 
         let mut delay = Duration::from_secs(1);
         loop {
-            match connect(&controller, &identity, &discovered, &state_dir, &reconciler).await {
+            match connect(
+                &controller,
+                &identity,
+                &discovered,
+                &state_dir,
+                &reconciler,
+                &mut telemetry,
+            )
+            .await
+            {
                 Ok(()) => warn!("controller stream closed"),
                 Err(error) if is_unauthenticated(&error) => {
                     let error_chain = format!("{error:#}");
@@ -139,6 +151,7 @@ async fn connect(
     discovered: &AgentDiscovery,
     state_dir: &Path,
     reconciler: &Reconciler,
+    telemetry: &mut mpsc::Receiver<ModelTelemetryEvent>,
 ) -> anyhow::Result<()> {
     let mut client = client(controller).await?;
     let (sender, receiver) = mpsc::channel(16);
@@ -221,6 +234,9 @@ async fn connect(
                         .as_secs(),
                 })).await?;
             }
+            Some(event) = telemetry.recv() => {
+                send(&sender, agent_message::Message::Telemetry(telemetry_to_proto(event))).await?;
+            }
             message = inbound.message() => {
                 let Some(message) = message.context("read controller stream")? else {
                     return Ok(());
@@ -245,6 +261,27 @@ async fn connect(
                 }
             }
         }
+    }
+}
+
+fn telemetry_to_proto(event: ModelTelemetryEvent) -> TelemetryEvent {
+    let timestamp_unix_ms = event.timestamp_unix_ms;
+    let event = match event.event {
+        TelemetryEventKind::ToolUse {
+            client_id,
+            tool_name,
+            tool_use_id,
+            tool_input,
+        } => telemetry_event::Event::ToolUse(ToolUseEvent {
+            client_id,
+            tool_name,
+            tool_use_id: tool_use_id.unwrap_or_default(),
+            input_json: serde_json::to_vec(&tool_input).expect("tool input is JSON-compatible"),
+        }),
+    };
+    TelemetryEvent {
+        timestamp_unix_ms,
+        event: Some(event),
     }
 }
 

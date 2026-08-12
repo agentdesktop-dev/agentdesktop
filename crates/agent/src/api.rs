@@ -4,13 +4,16 @@ use axum::{
     Json, Router,
     extract::{Query, State},
     http::StatusCode,
-    routing::get,
+    routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 
 use agentdesktop_core::{
-    config::{ControllerConnectionConfig, DaemonConfig},
-    model::{Discovery, EnrollmentStatus, InferenceGatewayCredential},
+    config::DaemonConfig,
+    model::{
+        Discovery, EnrollmentStatus, InferenceGatewayCredential, TelemetryEvent, TelemetryEventKind,
+    },
 };
 
 use crate::{enrollment::EnrollmentState, remote};
@@ -20,8 +23,8 @@ pub struct AppState {
     pub config: DaemonConfig,
     pub discovery: Discovery,
     pub enrollment: EnrollmentState,
-    pub controller: Option<ControllerConnectionConfig>,
     pub state_dir: PathBuf,
+    pub telemetry: Option<mpsc::Sender<TelemetryEvent>>,
 }
 
 #[derive(Serialize)]
@@ -40,11 +43,74 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/config", get(config))
         .route("/v1/discovery", get(discover))
         .route("/v1/enrollment", get(enrollment))
+        .route("/v1/telemetry", post(telemetry))
         .route(
             "/v1/inference-gateway/credential",
             get(inference_gateway_credential),
         )
         .with_state(state)
+}
+
+async fn telemetry(
+    State(state): State<AppState>,
+    Json(event): Json<TelemetryEventKind>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let sender = state.telemetry.as_ref().ok_or_else(|| {
+        (
+            StatusCode::FAILED_DEPENDENCY,
+            "daemon has no controller configured".to_owned(),
+        )
+    })?;
+    validate_telemetry(&event)?;
+    let event = TelemetryEvent {
+        timestamp_unix_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX),
+        event,
+    };
+    sender.try_send(event).map_err(|error| {
+        let status = match error {
+            mpsc::error::TrySendError::Full(_) => StatusCode::SERVICE_UNAVAILABLE,
+            mpsc::error::TrySendError::Closed(_) => StatusCode::FAILED_DEPENDENCY,
+        };
+        (status, "telemetry pipeline is unavailable".to_owned())
+    })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn validate_telemetry(event: &TelemetryEventKind) -> Result<(), (StatusCode, String)> {
+    match event {
+        TelemetryEventKind::ToolUse {
+            client_id,
+            tool_name,
+            tool_use_id,
+            tool_input,
+        } => {
+            if client_id.is_empty() || client_id.len() > 64 {
+                return Err((StatusCode::BAD_REQUEST, "invalid client ID".to_owned()));
+            }
+            if tool_name.is_empty() || tool_name.len() > 128 {
+                return Err((StatusCode::BAD_REQUEST, "invalid tool name".to_owned()));
+            }
+            if tool_use_id.as_ref().is_some_and(|id| id.len() > 256) {
+                return Err((StatusCode::BAD_REQUEST, "invalid tool use ID".to_owned()));
+            }
+            if serde_json::to_vec(tool_input)
+                .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?
+                .len()
+                > 256 * 1024
+            {
+                return Err((
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "tool input is too large".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn health() -> Json<Health> {
@@ -67,7 +133,7 @@ async fn inference_gateway_credential(
     State(state): State<AppState>,
     Query(query): Query<CredentialQuery>,
 ) -> Result<Json<InferenceGatewayCredential>, (StatusCode, String)> {
-    let controller = state.controller.as_ref().ok_or_else(|| {
+    let controller = state.config.controller.as_ref().ok_or_else(|| {
         (
             StatusCode::FAILED_DEPENDENCY,
             "daemon has no controller configured".to_string(),

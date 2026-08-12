@@ -22,6 +22,7 @@ agentdesktop-client = { path = "crates/client" }
 agentdesktop-core = { path = "crates/core" }
 agentdesktop-proto = { path = "crates/proto" }
 anyhow = "1"
+aws-lc-rs = "1.18"
 axum = "0.8"
 base64 = "0.22"
 bytes = "1"
@@ -32,8 +33,11 @@ humantime-serde = "1"
 hyper = { version = "1", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1", features = ["service", "tokio"] }
 memchr = "2.7"
+notify = "8.2"
+notify-debouncer-full = "0.7"
 jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
 open = "5.4"
+pem-rfc7468 = { version = "1", features = ["alloc"] }
 prost = "0.14"
 rand = "0.9"
 reqwest = { version = "0.13", default-features = false, features = ["charset", "http2", "json", "rustls"] }

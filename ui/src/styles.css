@@ -363,6 +363,53 @@ tbody tr:hover {
   border-bottom: 1px solid var(--border-soft);
 }
 
+.event-row {
+  min-height: 58px;
+  padding: 9px 15px;
+  display: grid;
+  grid-template-columns: minmax(150px, 0.7fr) minmax(220px, 1.5fr) 70px;
+  align-items: center;
+  gap: 16px;
+  border-bottom: 1px solid var(--border-soft);
+  color: #4b535c;
+  font-size: 12px;
+}
+
+.event-row:last-child {
+  border-bottom: 0;
+}
+
+.event-source {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.event-source > span {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.event-source strong {
+  color: #24292f;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.event-source small,
+.event-row time {
+  color: var(--subtle);
+  font-size: 10px;
+}
+
+.event-row time {
+  text-align: right;
+  white-space: nowrap;
+}
+
 .tool-inventory-item:last-child {
   border-bottom: 0;
 }
@@ -491,6 +538,23 @@ tbody tr:hover {
 code {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 12px;
+}
+
+.event-row code {
+  overflow: hidden;
+  color: #57606a;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 700px) {
+  .event-row {
+    grid-template-columns: 1fr auto;
+  }
+
+  .event-row code {
+    grid-column: 1 / -1;
+  }
 }
 
 .capability-row code,
