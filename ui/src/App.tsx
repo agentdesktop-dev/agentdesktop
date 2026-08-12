@@ -21,6 +21,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import agentdesktopIcon from "../app-icon.svg";
 import claudeCodeIcon from "./assets/tool-icons/claude-code.svg";
+import claudeDesktopIcon from "./assets/tool-icons/claude-desktop.svg";
 import codexIcon from "./assets/tool-icons/codex.svg";
 import copilotIcon from "./assets/tool-icons/copilot.svg";
 import openCodeIcon from "./assets/tool-icons/opencode.svg";
@@ -92,7 +93,7 @@ type ControllerSettings = {
   gateway_jwt_enabled: boolean;
 };
 
-type AgentKind = "claudeCode" | "codex" | "openCode";
+type AgentKind = "claudeCode" | "claudeDesktop" | "codex" | "openCode";
 
 type AgentDraft = {
   kind: AgentKind;
@@ -1231,6 +1232,12 @@ const configurableAgents: Array<{
     placeholder: "permissions:\n  defaultMode: plan",
   },
   {
+    kind: "claudeDesktop",
+    label: "Claude Desktop",
+    iconKind: "claude-desktop",
+    placeholder: "isLocalDevMcpEnabled: true",
+  },
+  {
     kind: "codex",
     label: "Codex",
     iconKind: "codex",
@@ -1568,6 +1575,8 @@ function friendlyTool(kind: string) {
     codex: "Codex",
     claude_code: "Claude Code",
     "claude-code": "Claude Code",
+    claude_desktop: "Claude Desktop",
+    "claude-desktop": "Claude Desktop",
     opencode: "OpenCode",
     vscode: "VS Code",
   };
@@ -1576,6 +1585,9 @@ function friendlyTool(kind: string) {
 
 function friendlyEvent(kind: string) {
   const names: Record<string, string> = {
+    "session.new": "New session",
+    "tool.use": "Tool use",
+    // Preserve display of events stored by older development builds.
     sessionNew: "New session",
     toolUse: "Tool use",
   };
@@ -1596,6 +1608,8 @@ const toolIcons: Record<string, string> = {
   codex: codexIcon,
   "claude-code": claudeCodeIcon,
   claude_code: claudeCodeIcon,
+  "claude-desktop": claudeDesktopIcon,
+  claude_desktop: claudeDesktopIcon,
   opencode: openCodeIcon,
   vscode: copilotIcon,
 };

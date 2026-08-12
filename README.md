@@ -1,6 +1,6 @@
 # AgentDesktop
 
-AgentDesktop currently consists of a small Linux daemon and a CLI client. At startup, the daemon reads a YAML configuration and discovers Codex, OpenCode, Claude Code, and VS Code installations available on its `PATH`. It exposes its state through an HTTP API over a Unix domain socket.
+AgentDesktop currently consists of a small Linux daemon and a CLI client. At startup, the daemon reads a YAML configuration and discovers Codex, OpenCode, Claude Code, Claude Desktop, and VS Code installations available on its `PATH`. It exposes its state through an HTTP API over a Unix domain socket.
 
 Build it:
 
@@ -255,6 +255,38 @@ cargo run --bin agentdesktop -- \
 ```
 
 It writes only the JWT to stdout, which is the interface Claude Code expects.
+
+### Claude Desktop managed settings
+
+Claude Desktop is configured separately from Claude Code:
+
+```yaml
+programs:
+  claudeDesktop:
+    isLocalDevMcpEnabled: true
+```
+
+Keys under `claudeDesktop` are passed directly to Desktop's managed settings.
+When the shared inference gateway is enabled, AgentDesktop adds Desktop's
+gateway fields and, for controller JWT authentication, installs a small
+credential-helper script. On Linux these default to
+`/etc/claude-desktop/managed-settings.json` and
+`/etc/claude-desktop/agentdesktop-credential-helper`. Existing files without
+AgentDesktop ownership markers are preserved.
+
+For an unprivileged development run, redirect both paths:
+
+```console
+cargo run --bin agentdesktopd -- \
+  --config ./examples/claude/agentdesktopd.yaml \
+  --socket /tmp/agentdesktop.sock \
+  --state-dir /tmp/agentdesktop-state \
+  --claude-desktop-managed-settings /tmp/claude-desktop/managed-settings.json \
+  --claude-desktop-credential-helper /tmp/claude-desktop/agentdesktop-credential-helper
+```
+
+Discovery reads local MCP servers from Desktop's user configuration files.
+Desktop does not share Claude Code's skills or hook configuration.
 
 ### Codex managed configuration
 

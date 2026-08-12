@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
@@ -32,6 +33,57 @@ pub(super) fn json_version(path: &Path) -> Option<String> {
     let contents = fs::read(path).ok()?;
     let metadata: PackageMetadata = serde_json::from_slice(&contents).ok()?;
     Some(metadata.version).filter(|version| !version.is_empty())
+}
+
+/// Reads an Electron application's version from its packaged root `package.json`.
+///
+/// ASAR stores a JSON file index followed by uncompressed file contents, so this
+/// does not execute the application or unpack the archive.
+pub(super) fn electron_asar_version(path: &Path, product_name: &str) -> Option<String> {
+    const MAX_HEADER_SIZE: u64 = 16 * 1024 * 1024;
+    const MAX_PACKAGE_SIZE: u64 = 1024 * 1024;
+
+    let mut archive = fs::File::open(path).ok()?;
+    let mut prefix = [0_u8; 8];
+    archive.read_exact(&mut prefix).ok()?;
+    if u32::from_le_bytes(prefix[..4].try_into().ok()?) != 4 {
+        return None;
+    }
+    let header_size = u32::from_le_bytes(prefix[4..].try_into().ok()?) as u64;
+    if !(8..=MAX_HEADER_SIZE).contains(&header_size) {
+        return None;
+    }
+
+    let mut header = vec![0; usize::try_from(header_size).ok()?];
+    archive.read_exact(&mut header).ok()?;
+    let json_size = u32::from_le_bytes(header.get(4..8)?.try_into().ok()?) as usize;
+    let json = header.get(8..8_usize.checked_add(json_size)?)?;
+    let index: serde_json::Value = serde_json::from_slice(json).ok()?;
+    let package = index.get("files")?.get("package.json")?;
+    let offset = package.get("offset")?.as_str()?.parse::<u64>().ok()?;
+    let size = package.get("size")?.as_u64()?;
+    if size > MAX_PACKAGE_SIZE {
+        return None;
+    }
+
+    archive
+        .seek(SeekFrom::Start(
+            8_u64.checked_add(header_size)?.checked_add(offset)?,
+        ))
+        .ok()?;
+    let mut contents = vec![0; usize::try_from(size).ok()?];
+    archive.read_exact(&mut contents).ok()?;
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PackageMetadata {
+        product_name: String,
+        version: String,
+    }
+
+    let metadata: PackageMetadata = serde_json::from_slice(&contents).ok()?;
+    (metadata.product_name == product_name && !metadata.version.is_empty())
+        .then_some(metadata.version)
 }
 
 pub(super) fn home_dir() -> Option<PathBuf> {

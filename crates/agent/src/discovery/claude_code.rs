@@ -65,7 +65,7 @@ fn installed_plugin_roots(home: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn mcp_servers_from_json(path: &Path) -> Vec<McpServer> {
+pub(super) fn mcp_servers_from_json(path: &Path) -> Vec<McpServer> {
     let Ok(contents) = fs::read(path) else {
         return Vec::new();
     };

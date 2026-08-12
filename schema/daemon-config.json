@@ -48,6 +48,17 @@
       },
       "additionalProperties": true
     },
+    "ClaudeDesktopConfig": {
+      "description": "Settings reconciled into Claude Desktop's managed configuration.\n\nArbitrary keys are written directly to the managed settings file. Generated\ngateway settings take precedence when values overlap.",
+      "type": "object",
+      "properties": {
+        "useInferenceGateway": {
+          "description": "Whether this program uses the top-level inference gateway.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    },
     "CodexConfig": {
       "description": "Settings reconciled into Codex's organization-managed configuration.\n\nValues under `managedConfig` are written to Codex's `managed_config.toml`.\nWhen generated inference-gateway settings overlap with those values,\nAgentDesktop's generated values take precedence.",
       "type": "object",
@@ -176,6 +187,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/ClaudeCodeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "claudeDesktop": {
+          "description": "Claude Desktop managed configuration. Arbitrary keys are passed through directly.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClaudeDesktopConfig"
             },
             {
               "type": "null"

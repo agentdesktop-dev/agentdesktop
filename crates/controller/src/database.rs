@@ -441,7 +441,7 @@ impl Database {
                         anyhow::bail!("invalid telemetry session ID");
                     }
                     (
-                        "sessionNew",
+                        "session.new",
                         serde_json::json!({
                             "clientId": event.client_id,
                             "sessionId": event.session_id,
@@ -475,7 +475,7 @@ impl Database {
                     if let Some(tool_input) = tool_input {
                         payload["toolInput"] = tool_input;
                     }
-                    ("toolUse", payload)
+                    ("tool.use", payload)
                 }
             };
         sqlx::query(
@@ -623,7 +623,7 @@ mod tests {
             "llm-research"
         );
         assert_eq!(device.recent_events.len(), 1);
-        assert_eq!(device.recent_events[0].event_type, "toolUse");
+        assert_eq!(device.recent_events[0].event_type, "tool.use");
         assert_eq!(device.recent_events[0].payload["toolName"], "Bash");
         let principal = database
             .device_principal("device")

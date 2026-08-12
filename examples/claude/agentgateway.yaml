@@ -1,6 +1,24 @@
 # yaml-language-server: $schema=https://agentgateway.dev/schema/config
+frontendPolicies:
+  logging:
+    add:
+      llm.client: jwt.client_id
+      user: jwt.email
+gateways:
+  gateway:
+    port: 4000
+routes:
+- name: claude-desktop-reachability
+  gateways: gateway
+  matches:
+  - method: HEAD
+    path:
+      exact: /
+  policies:
+    directResponse:
+      status: 200
 llm:
-  port: 4000
+  gateways: gateway
   policies:
     jwtAuth:
       issuer: agentdesktop-controller
@@ -9,6 +27,10 @@ llm:
         url: http://127.0.0.1:8080/.well-known/jwks.json
   models:
   - name: "*"
+    provider: anthropic
+    params:
+      apiKey: $ANTHROPIC_API_KEY
+  - name: "claude-haiku-4-5"
     provider: anthropic
     params:
       apiKey: $ANTHROPIC_API_KEY
