@@ -43,6 +43,7 @@ dependencies = [
  "anyhow",
  "clap",
  "tokio",
+ "url",
 ]
 
 [[package]]

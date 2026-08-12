@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -42,6 +42,7 @@ pub struct CompletedEnrollment {
     pub hostname: String,
     pub issuer: String,
     pub subject: String,
+    pub idp_claims: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -61,6 +62,8 @@ struct TokenResponse {
 struct IdTokenClaims {
     sub: String,
     nonce: String,
+    #[serde(flatten)]
+    additional: BTreeMap<String, serde_json::Value>,
 }
 
 impl OidcProvider {
@@ -230,10 +233,15 @@ impl OidcProvider {
             bail!("OIDC nonce mismatch");
         }
 
+        let mut idp_claims = claims.additional;
+        idp_claims.insert("sub".to_owned(), claims.sub.clone().into());
+        idp_claims.insert("nonce".to_owned(), claims.nonce.into());
+
         Ok(CompletedEnrollment {
             hostname: pending.hostname,
             issuer: self.inner.issuer.clone(),
             subject: claims.sub,
+            idp_claims,
         })
     }
 }

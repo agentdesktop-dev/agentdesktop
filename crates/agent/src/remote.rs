@@ -41,44 +41,45 @@ pub async fn run(
     enrollment: EnrollmentState,
 ) -> anyhow::Result<()> {
     let identity_path = state_dir.join("identity.json");
-    let identity = match identity::load(&identity_path)? {
-        Some(identity) => {
-            enrollment.set("enrolled").await;
-            identity
-        }
-        None => {
-            let identity = match enrollment_token {
-                Some(token) => {
-                    enrollment.set("enrolling").await;
-                    enroll_with_token(&controller, token).await?
-                }
-                None => oidc::enroll(&controller, &enrollment, oidc_callback_listen).await?,
-            };
-            identity::save(&identity_path, &identity)?;
-            enrollment.set("enrolled").await;
-            info!(device_id = %identity.device_id, "enrolled device");
-            identity
-        }
-    };
-
-    let mut delay = Duration::from_secs(1);
     loop {
-        match connect(&controller, &identity, &discovered, &state_dir, &reconciler).await {
-            Ok(()) => warn!("controller stream closed"),
-            Err(error) => {
-                let error_chain = format!("{error:#}");
-                if error
-                    .downcast_ref::<tonic::Status>()
-                    .is_some_and(|status| status.code() == tonic::Code::Unauthenticated)
-                {
+        let identity = match identity::load(&identity_path)? {
+            Some(identity) => {
+                enrollment.set("enrolled").await;
+                identity
+            }
+            None => {
+                let identity = match enrollment_token.clone() {
+                    Some(token) => {
+                        enrollment.set("enrolling").await;
+                        enroll_with_token(&controller, token).await?
+                    }
+                    None => oidc::enroll(&controller, &enrollment, oidc_callback_listen).await?,
+                };
+                identity::save(&identity_path, &identity)?;
+                enrollment.set("enrolled").await;
+                info!(device_id = %identity.device_id, "enrolled device");
+                identity
+            }
+        };
+
+        let mut delay = Duration::from_secs(1);
+        loop {
+            match connect(&controller, &identity, &discovered, &state_dir, &reconciler).await {
+                Ok(()) => warn!("controller stream closed"),
+                Err(error) if is_unauthenticated(&error) => {
+                    let error_chain = format!("{error:#}");
+                    invalidate_identity(&identity_path)?;
+                    enrollment.set("starting").await;
                     warn!(
                         controller = %controller.address,
-                        retry_in_seconds = delay.as_secs(),
                         identity_path = %identity_path.display(),
                         error = %error_chain,
-                        "controller rejected the device credential; remove the identity file and restart the agent to re-enroll"
+                        "controller rejected the device credential; removed local identity and restarting enrollment"
                     );
-                } else {
+                    break;
+                }
+                Err(error) => {
+                    let error_chain = format!("{error:#}");
                     warn!(
                         controller = %controller.address,
                         retry_in_seconds = delay.as_secs(),
@@ -87,21 +88,40 @@ pub async fn run(
                     );
                 }
             }
-        }
 
-        time::sleep(delay).await;
-        delay = (delay * 2).min(Duration::from_secs(60));
+            time::sleep(delay).await;
+            delay = (delay * 2).min(Duration::from_secs(60));
+        }
+    }
+}
+
+fn is_unauthenticated(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<tonic::Status>()
+        .is_some_and(|status| status.code() == tonic::Code::Unauthenticated)
+}
+
+fn invalidate_identity(path: &Path) -> anyhow::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("remove rejected identity {}", path.display()))
+        }
     }
 }
 
 pub async fn inference_gateway_credential(
     controller: &ControllerConfig,
     state_dir: &Path,
+    client_id: &str,
 ) -> anyhow::Result<agentdesktop_core::model::InferenceGatewayCredential> {
     let identity =
         identity::load(&state_dir.join("identity.json"))?.context("device is not enrolled")?;
     let mut client = client(controller).await?;
-    let mut request = Request::new(InferenceGatewayCredentialRequest {});
+    let mut request = Request::new(InferenceGatewayCredentialRequest {
+        client_id: client_id.to_owned(),
+    });
     request.metadata_mut().insert(
         "authorization",
         format!("Bearer {}", identity.credential)
@@ -338,4 +358,29 @@ pub(crate) fn hostname() -> String {
         .or_else(|_| std::env::var("COMPUTERNAME"))
         .or_else(|_| std::fs::read_to_string("/etc/hostname").map(|value| value.trim().to_string()))
         .unwrap_or_else(|_| "unknown".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{invalidate_identity, is_unauthenticated};
+
+    #[test]
+    fn recognizes_contextualized_unauthenticated_status() {
+        let error = anyhow::Error::new(tonic::Status::unauthenticated("rejected"))
+            .context("open controller stream");
+        assert!(is_unauthenticated(&error));
+    }
+
+    #[test]
+    fn removes_rejected_identity_and_accepts_an_absent_file() {
+        let path = std::env::temp_dir().join(format!(
+            "agentdesktop-rejected-identity-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"identity").expect("write identity");
+
+        invalidate_identity(&path).expect("remove identity");
+        assert!(!path.exists());
+        invalidate_identity(&path).expect("already absent identity");
+    }
 }

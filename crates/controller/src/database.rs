@@ -14,6 +14,7 @@ pub struct Database {
 pub struct DevicePrincipal {
     pub issuer: String,
     pub subject: String,
+    pub idp_claims: Option<BTreeMap<String, serde_json::Value>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -137,18 +138,25 @@ impl Database {
         credential_hash: &str,
         enrolled_by_issuer: &str,
         enrolled_by_subject: &str,
+        idp_claims: Option<&BTreeMap<String, serde_json::Value>>,
     ) -> anyhow::Result<()> {
+        let idp_claims_json = idp_claims
+            .map(serde_json::to_string)
+            .transpose()
+            .context("encode verified IdP claims")?;
         let mut transaction = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO devices
-                (id, hostname, created_at, last_seen_at, enrolled_by_issuer, enrolled_by_subject)
-             VALUES ($1, $2, $3, $3, $4, $5)",
+                (id, hostname, created_at, last_seen_at, enrolled_by_issuer,
+                 enrolled_by_subject, idp_claims_json)
+             VALUES ($1, $2, $3, $3, $4, $5, $6)",
         )
         .bind(device_id)
         .bind(hostname)
         .bind(unix_time_seconds())
         .bind(enrolled_by_issuer)
         .bind(enrolled_by_subject)
+        .bind(idp_claims_json)
         .execute(&mut *transaction)
         .await?;
         sqlx::query(
@@ -172,14 +180,22 @@ impl Database {
     }
 
     pub async fn device_principal(&self, device_id: &str) -> anyhow::Result<DevicePrincipal> {
-        let (issuer, subject) = sqlx::query_as(
-            "SELECT enrolled_by_issuer, enrolled_by_subject FROM devices WHERE id = $1",
+        let (issuer, subject, idp_claims_json): (String, String, Option<String>) = sqlx::query_as(
+            "SELECT enrolled_by_issuer, enrolled_by_subject, idp_claims_json
+             FROM devices WHERE id = $1",
         )
         .bind(device_id)
         .fetch_one(&self.pool)
         .await
         .context("load device enrollment principal")?;
-        Ok(DevicePrincipal { issuer, subject })
+        let idp_claims = idp_claims_json
+            .map(|claims| serde_json::from_str(&claims).context("decode verified IdP claims"))
+            .transpose()?;
+        Ok(DevicePrincipal {
+            issuer,
+            subject,
+            idp_claims,
+        })
     }
 
     pub async fn list_devices(&self) -> anyhow::Result<Vec<DeviceSummary>> {
@@ -405,8 +421,19 @@ mod tests {
         let database = Database::connect(&format!("sqlite://{}?mode=rwc", path.display()))
             .await
             .expect("connect test database");
+        let idp_claims = BTreeMap::from([
+            ("sub".to_owned(), serde_json::json!("subject")),
+            ("email".to_owned(), serde_json::json!("john@example.com")),
+        ]);
         database
-            .enroll_device("device", "host", "credential", "issuer", "subject")
+            .enroll_device(
+                "device",
+                "host",
+                "credential",
+                "issuer",
+                "subject",
+                Some(&idp_claims),
+            )
             .await
             .expect("enroll device");
         let front_matter = BTreeMap::from([
@@ -453,6 +480,11 @@ mod tests {
             device.discoveries[0].skills[0].front_matter["name"],
             "llm-research"
         );
+        let principal = database
+            .device_principal("device")
+            .await
+            .expect("load device principal");
+        assert_eq!(principal.idp_claims.unwrap()["email"], "john@example.com");
 
         drop(database);
         let _ = std::fs::remove_file(path);

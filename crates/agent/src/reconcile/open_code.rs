@@ -114,6 +114,8 @@ fn credential_plugin(credential_helper: &Path, socket: &Path) -> anyhow::Result<
         "--socket".to_owned(),
         socket.to_string_lossy().into_owned(),
         "credential".to_owned(),
+        "--client-id".to_owned(),
+        "opencode".to_owned(),
     ];
     let provider = serde_json::to_string(&provider_name).context("encode OpenCode provider ID")?;
     let command = serde_json::to_string(&command).context("encode OpenCode credential command")?;
@@ -355,7 +357,7 @@ programs:
 
         assert!(plugin.contains(r#"const provider = "agentdesktop";"#));
         assert!(plugin.contains(
-            r#"const command = ["/usr/local/bin/agentdesktop","--socket","/run/agentdesktop/agentdesktop.sock","credential"];"#
+            r#"const command = ["/usr/local/bin/agentdesktop","--socket","/run/agentdesktop/agentdesktop.sock","credential","--client-id","opencode"];"#
         ));
         assert!(plugin.contains("input.model.providerID !== provider"));
         assert!(plugin.contains("output.headers.Authorization"));
