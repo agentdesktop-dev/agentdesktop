@@ -15,12 +15,16 @@
         }
       ]
     },
-    "inferenceGateways": {
-      "description": "Named inference gateways used as the local desired-state baseline.\n\nNames may contain letters, numbers, `.`, `-`, and `_`.",
-      "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/InferenceGatewayConfig"
-      }
+    "inferenceGateway": {
+      "description": "Inference gateway used as the local desired-state baseline.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/InferenceGatewayConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "programs": {
       "description": "Per-program settings used as the local desired-state baseline.",
@@ -30,30 +34,14 @@
   "additionalProperties": false,
   "$defs": {
     "ClaudeCodeConfig": {
-      "description": "Settings reconciled into Claude Code's managed configuration.\n\nKeys other than `inferenceGateway` are written directly to AgentDesktop's\nmanaged-settings drop-in. When generated gateway settings overlap with\npass-through values, AgentDesktop's generated values take precedence.",
+      "description": "Settings reconciled into Claude Code's managed configuration.\n\nArbitrary keys are written directly to AgentDesktop's managed-settings\ndrop-in. Generated gateway settings take precedence when values overlap.",
       "type": "object",
-      "properties": {
-        "inferenceGateway": {
-          "description": "Name of an entry in `inferenceGateways` that Claude Code should use.\n\nOmit this field to manage Claude Code settings without configuring an inference gateway.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
       "additionalProperties": true
     },
     "CodexConfig": {
       "description": "Settings reconciled into Codex's organization-managed configuration.\n\nValues under `managedConfig` are written to Codex's `managed_config.toml`.\nWhen generated inference-gateway settings overlap with those values,\nAgentDesktop's generated values take precedence.",
       "type": "object",
       "properties": {
-        "inferenceGateway": {
-          "description": "Name of an entry in `inferenceGateways` that Codex should use.\n\nOmit this field to manage general Codex settings without configuring an inference gateway.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "managedConfig": {
           "description": "Arbitrary values written to Codex's organization-managed TOML configuration.\n\nUse Codex's native snake_case configuration keys. TOML has no null value,\nso null values cannot be reconciled.",
           "type": "object",
@@ -141,27 +129,20 @@
       "description": "Settings reconciled into OpenCode's system-managed configuration.\n\nValues under `managedConfig` are written to OpenCode's managed JSONC file.\nWhen generated inference-gateway settings overlap with those values,\nAgentDesktop's generated values take precedence.",
       "type": "object",
       "properties": {
-        "inferenceGateway": {
-          "description": "Name of an entry in `inferenceGateways` that OpenCode should use.\n\nOmit this field to manage general OpenCode settings without configuring an inference gateway.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "managedConfig": {
           "description": "Arbitrary values written to OpenCode's system-managed configuration.",
           "type": "object",
           "additionalProperties": true
         },
         "model": {
-          "description": "Model ID selected from `models` when using the inference gateway.\n\nThis is required when `inferenceGateway` is set.",
+          "description": "Model ID selected from `models` when using the inference gateway.\n\nThis is required when a top-level `inferenceGateway` is configured.",
           "type": [
             "string",
             "null"
           ]
         },
         "models": {
-          "description": "Models exposed by the managed inference-gateway provider, keyed by model ID.\n\nEach value is an arbitrary OpenCode model configuration object. At least\none model is required when `inferenceGateway` is set.",
+          "description": "Models exposed by the managed inference-gateway provider, keyed by model ID.\n\nEach value is an arbitrary OpenCode model configuration object. At least\none model is required when a top-level `inferenceGateway` is configured.",
           "type": "object",
           "additionalProperties": true
         }

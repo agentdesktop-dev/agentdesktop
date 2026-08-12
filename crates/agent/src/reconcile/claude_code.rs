@@ -82,12 +82,8 @@ fn managed_settings(
         gateway.authentication,
         Some(InferenceGatewayAuthentication::ControllerJwt { .. })
     ) {
-        let name = config
-            .inference_gateway
-            .as_deref()
-            .context("Claude Code gateway configuration has no gateway name")?;
         generated["env"]["CLAUDE_CODE_API_KEY_HELPER_TTL_MS"] = json!("60000");
-        generated["apiKeyHelper"] = json!(format!("{credential_helper} {name}"));
+        generated["apiKeyHelper"] = json!(credential_helper);
     }
     merge(&mut settings, generated);
     Ok(settings)
@@ -155,15 +151,13 @@ mod tests {
     fn pass_through_settings_are_deep_merged_with_managed_gateway_values() {
         let desired = parse_desired(
             r#"
-inferenceGateways:
-  corporate:
-    url: https://gateway.example.com
-    authentication:
-      type: controllerJwt
-      audience: agentgateway
+inferenceGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
 programs:
   claudeCode:
-    inferenceGateway: corporate
     apiKeyHelper: ignored-helper
     env:
       COMPANY_ENVIRONMENT: production
@@ -174,7 +168,7 @@ programs:
         )
         .expect("valid desired configuration");
         let claude = desired.programs.claude_code.as_ref().unwrap();
-        let gateway = &desired.inference_gateways["corporate"];
+        let gateway = desired.inference_gateway.as_ref().unwrap();
 
         let settings = managed_settings(claude, Some(gateway), "agentdesktop credential")
             .expect("merged settings");
@@ -188,10 +182,7 @@ programs:
             settings["env"]["CLAUDE_CODE_API_KEY_HELPER_TTL_MS"],
             "60000"
         );
-        assert_eq!(
-            settings["apiKeyHelper"],
-            "agentdesktop credential corporate"
-        );
+        assert_eq!(settings["apiKeyHelper"], "agentdesktop credential");
         assert_eq!(settings["permissions"], json!({ "defaultMode": "plan" }));
     }
 }

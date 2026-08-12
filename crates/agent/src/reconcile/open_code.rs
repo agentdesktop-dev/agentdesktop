@@ -28,11 +28,7 @@ pub fn apply(
         authentication,
         Some(InferenceGatewayAuthentication::ControllerJwt { .. })
     ) {
-        let gateway_name = config
-            .inference_gateway
-            .as_deref()
-            .context("OpenCode gateway configuration has no gateway name")?;
-        let source = credential_plugin(gateway_name, credential_helper, socket)?;
+        let source = credential_plugin(credential_helper, socket)?;
         reconcile_file(plugin_path, source.as_bytes(), "credential plugin")?;
         Some(file_url(plugin_path)?)
     } else {
@@ -62,18 +58,14 @@ fn managed_config(
         return Ok(settings);
     };
 
-    let gateway_name = config
-        .inference_gateway
-        .as_deref()
-        .context("OpenCode gateway configuration has no gateway name")?;
     let model = config
         .model
         .as_deref()
         .context("OpenCode gateway configuration has no model")?;
-    let provider_name = format!("agentdesktop_{gateway_name}");
+    let provider_name = "agentdesktop";
     let provider = json!({
         "npm": "@ai-sdk/openai",
-        "name": format!("{gateway_name} via AgentDesktop"),
+        "name": "AgentDesktop",
         "options": {
             "baseURL": responses_base_url(gateway),
             "apiKey": "agentdesktop-managed",
@@ -82,7 +74,7 @@ fn managed_config(
     });
     let generated = json!({
         "$schema": "https://opencode.ai/config.json",
-        "enabled_providers": [provider_name.clone()],
+        "enabled_providers": [provider_name],
         "model": format!("{provider_name}/{model}"),
         "provider": {
             (provider_name): provider,
@@ -115,18 +107,13 @@ fn append_plugin(settings: &mut Value, plugin_url: &str) {
     }
 }
 
-fn credential_plugin(
-    gateway_name: &str,
-    credential_helper: &Path,
-    socket: &Path,
-) -> anyhow::Result<String> {
-    let provider_name = format!("agentdesktop_{gateway_name}");
+fn credential_plugin(credential_helper: &Path, socket: &Path) -> anyhow::Result<String> {
+    let provider_name = "agentdesktop";
     let command = [
         credential_helper.to_string_lossy().into_owned(),
         "--socket".to_owned(),
         socket.to_string_lossy().into_owned(),
         "credential".to_owned(),
-        gateway_name.to_owned(),
     ];
     let provider = serde_json::to_string(&provider_name).context("encode OpenCode provider ID")?;
     let command = serde_json::to_string(&command).context("encode OpenCode credential command")?;
@@ -304,15 +291,13 @@ mod tests {
     fn pass_through_settings_are_merged_with_gateway_and_plugin() {
         let desired = parse_desired(
             r#"
-inferenceGateways:
-  corporate:
-    url: https://gateway.example.com/proxy
-    authentication:
-      type: controllerJwt
-      audience: agentgateway
+inferenceGateway:
+  url: https://gateway.example.com/proxy
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
 programs:
   openCode:
-    inferenceGateway: corporate
     model: gpt-company
     models:
       gpt-company:
@@ -331,7 +316,7 @@ programs:
         )
         .expect("valid desired configuration");
         let open_code = desired.programs.open_code.as_ref().unwrap();
-        let gateway = &desired.inference_gateways["corporate"];
+        let gateway = desired.inference_gateway.as_ref().unwrap();
         let settings = managed_config(
             open_code,
             Some(gateway),
@@ -340,8 +325,8 @@ programs:
         .expect("merged settings");
 
         assert_eq!(settings["autoupdate"], false);
-        assert_eq!(settings["model"], "agentdesktop_corporate/gpt-company");
-        assert_eq!(settings["enabled_providers"][0], "agentdesktop_corporate");
+        assert_eq!(settings["model"], "agentdesktop/gpt-company");
+        assert_eq!(settings["enabled_providers"][0], "agentdesktop");
         assert_eq!(settings["plugin"][0], "opencode-existing-plugin");
         assert_eq!(
             settings["plugin"][1],
@@ -351,7 +336,7 @@ programs:
             settings["provider"]["existing"]["options"]["baseURL"],
             "https://existing.example.com/v1"
         );
-        let provider = &settings["provider"]["agentdesktop_corporate"];
+        let provider = &settings["provider"]["agentdesktop"];
         assert_eq!(provider["npm"], "@ai-sdk/openai");
         assert_eq!(
             provider["options"]["baseURL"],
@@ -363,15 +348,14 @@ programs:
     #[test]
     fn plugin_uses_argument_array_and_scopes_the_header() {
         let plugin = credential_plugin(
-            "corporate",
             Path::new("/usr/local/bin/agentdesktop"),
             Path::new("/run/agentdesktop/agentdesktop.sock"),
         )
         .expect("credential plugin");
 
-        assert!(plugin.contains(r#"const provider = "agentdesktop_corporate";"#));
+        assert!(plugin.contains(r#"const provider = "agentdesktop";"#));
         assert!(plugin.contains(
-            r#"const command = ["/usr/local/bin/agentdesktop","--socket","/run/agentdesktop/agentdesktop.sock","credential","corporate"];"#
+            r#"const command = ["/usr/local/bin/agentdesktop","--socket","/run/agentdesktop/agentdesktop.sock","credential"];"#
         ));
         assert!(plugin.contains("input.model.providerID !== provider"));
         assert!(plugin.contains("output.headers.Authorization"));

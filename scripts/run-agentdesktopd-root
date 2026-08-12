@@ -4,9 +4,11 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 workspace_dir="$(cd -- "${script_dir}/.." && pwd)"
 
-export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="${script_dir}/cargo-sudo-runner"
-exec cargo run \
+cargo build \
   --manifest-path "${workspace_dir}/Cargo.toml" \
-  --target x86_64-unknown-linux-gnu \
-  --bin agentdesktopd \
-  -- "$@"
+  --bin agentdesktop \
+  --bin agentdesktopd
+
+exec "${script_dir}/cargo-sudo-runner" \
+  "${workspace_dir}/target/debug/agentdesktopd" \
+  "$@"

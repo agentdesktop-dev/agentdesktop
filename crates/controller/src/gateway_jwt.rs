@@ -25,7 +25,6 @@ struct Claims<'a> {
     iat: u64,
     exp: u64,
     device_id: &'a str,
-    gateway: &'a str,
 }
 
 impl GatewayJwtIssuer {
@@ -50,7 +49,6 @@ impl GatewayJwtIssuer {
         &self,
         subject: &str,
         device_id: &str,
-        gateway: &str,
         audience: &str,
     ) -> anyhow::Result<(String, u64)> {
         let issued_at = SystemTime::now()
@@ -69,7 +67,6 @@ impl GatewayJwtIssuer {
                 iat: issued_at,
                 exp: expires_at,
                 device_id,
-                gateway,
             },
             &self.key,
         )

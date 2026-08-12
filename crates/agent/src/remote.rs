@@ -97,12 +97,11 @@ pub async fn run(
 pub async fn inference_gateway_credential(
     controller: &ControllerConfig,
     state_dir: &Path,
-    gateway: String,
 ) -> anyhow::Result<agentdesktop_core::model::InferenceGatewayCredential> {
     let identity =
         identity::load(&state_dir.join("identity.json"))?.context("device is not enrolled")?;
     let mut client = client(controller).await?;
-    let mut request = Request::new(InferenceGatewayCredentialRequest { gateway });
+    let mut request = Request::new(InferenceGatewayCredentialRequest {});
     request.metadata_mut().insert(
         "authorization",
         format!("Bearer {}", identity.credential)
