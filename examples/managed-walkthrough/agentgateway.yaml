@@ -13,7 +13,7 @@ binds:
       key: certs/gateway-server.key
       root: certs/enrollment-ca.crt
     routes: []
-- port: 4000
+- port: 18443
   mode: internal
   listeners:
   - name: native-llm

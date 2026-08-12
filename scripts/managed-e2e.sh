@@ -131,7 +131,7 @@ echo "Starting certificate-authenticated connector..."
 "$connector" serve \
   --mode managed \
   --upstream "$gateway" \
-  --native-target native.agentdesktop.internal:4000 \
+  --native-target native.agentdesktop.internal:18443 \
   --identity-issuer "$issuer" \
   --enrollment-url "$enrollment" \
   --listen 127.0.0.1:8080 \
