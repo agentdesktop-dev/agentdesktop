@@ -1,6 +1,13 @@
 # yaml-language-server: $schema=https://agentgateway.dev/schema/config
 config:
   readinessAddr: 0.0.0.0:15021
+  logging:
+    level: info
+    format: json
+
+frontendPolicies:
+  accessLog:
+    filter: "true"
 
 binds:
 - port: 8443

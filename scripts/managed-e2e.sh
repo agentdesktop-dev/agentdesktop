@@ -146,6 +146,8 @@ response=$(curl --fail-with-body --silent --show-error \
   --data "$request" \
   http://127.0.0.1:8080/v1/messages)
 jq -e '.content[] | select(.type == "text" and .text == "SMOKE_OK")' <<<"$response" >/dev/null
+podman logs agentdesktop-walkthrough-gateway 2>&1 \
+  | jq -e 'select(.scope == "request" and ."http.status" == 200)' >/dev/null
 
 echo "Revoking enrolled device..."
 revocation=$(curl --fail-with-body --silent --show-error --cacert "$trust_bundle" \
