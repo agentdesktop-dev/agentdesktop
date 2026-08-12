@@ -1,0 +1,13 @@
+.git
+.github
+.idea
+.vscode
+.codex
+.agents
+target
+ui/dist
+ui/node_modules
+*.db
+*.db-shm
+*.db-wal
+*.tsbuildinfo

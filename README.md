@@ -73,6 +73,7 @@ controller:
 Start the controller with a one-time enrollment token:
 
 ```console
+make ui
 cargo run --bin agentdesktop-controller -- \
   --enrollment-token development \
   --database-url 'sqlite://agentdesktop-controller.db?mode=rwc'
