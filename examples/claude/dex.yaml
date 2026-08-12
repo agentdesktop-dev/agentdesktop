@@ -11,7 +11,7 @@ oauth2:
 
 staticClients:
 - id: local-public
-  name: AgentDesktop
+  name: Agentdesktop
   public: true
   redirectURIs:
   - http://127.0.0.1:5555/callback

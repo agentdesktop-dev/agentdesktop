@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ControllerConfig",
-  "description": "Startup configuration for the AgentDesktop fleet controller.",
+  "description": "Startup configuration for the Agentdesktop fleet controller.",
   "type": "object",
   "properties": {
     "adminListen": {

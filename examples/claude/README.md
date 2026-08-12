@@ -1,6 +1,6 @@
 # Local scenario
 
-This scenario runs AgentDesktop with Dex, Claude Code, and Agentgateway.
+This scenario runs Agentdesktop with Dex, Claude Code, and Agentgateway.
 
 Generate the controller signing key and start the controller
 

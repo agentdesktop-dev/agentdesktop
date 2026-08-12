@@ -15,13 +15,13 @@ use tokio::net::UnixListener;
 use tokio::sync::mpsc;
 
 #[derive(Parser)]
-#[command(about = "AgentDesktop privileged daemon")]
+#[command(about = "Agentdesktop privileged daemon")]
 struct Args {
     /// Path to the local YAML configuration file.
     #[arg(long, default_value = DEFAULT_CONFIG_PATH)]
     config: PathBuf,
 
-    /// Unix socket used by local AgentDesktop clients.
+    /// Unix socket used by local Agentdesktop clients.
     #[arg(long, default_value = DEFAULT_SOCKET_PATH)]
     socket: PathBuf,
 
@@ -47,7 +47,7 @@ struct Args {
     )]
     claude_desktop_managed_settings: PathBuf,
 
-    /// Path used for Claude Desktop's AgentDesktop credential helper.
+    /// Path used for Claude Desktop's Agentdesktop credential helper.
     #[arg(
         long,
         default_value_os_t = reconcile::default_claude_desktop_credential_helper_path()
@@ -62,7 +62,7 @@ struct Args {
     #[arg(long, default_value_os_t = reconcile::default_open_code_managed_config_path())]
     open_code_managed_config: PathBuf,
 
-    /// Path used for AgentDesktop's OpenCode credential plugin.
+    /// Path used for Agentdesktop's OpenCode credential plugin.
     #[arg(long, default_value_os_t = reconcile::default_open_code_plugin_path())]
     open_code_plugin: PathBuf,
 }
@@ -202,7 +202,7 @@ fn credential_helper_executable() -> anyhow::Result<PathBuf> {
         .with_file_name(format!("agentdesktop{}", std::env::consts::EXE_SUFFIX));
     if !path.is_file() {
         anyhow::bail!(
-            "AgentDesktop credential helper is missing at {}; install or build agentdesktop next to agentdesktopd",
+            "Agentdesktop credential helper is missing at {}; install or build agentdesktop next to agentdesktopd",
             path.display()
         );
     }

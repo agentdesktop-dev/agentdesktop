@@ -12,6 +12,6 @@ telemetry:
 
 programs:
   claudeCode:
-    companyAnnouncements: ["Managed by AgentDesktop"]
+    companyAnnouncements: ["Managed by Agentdesktop"]
   claudeDesktop:
     isLocalDevMcpEnabled: true

@@ -14,7 +14,7 @@ use super::deep_merge;
 
 const FILE_NAME: &str = "50-agentdesktop.json";
 const OWNER_FILE_NAME: &str = ".50-agentdesktop.json.owner";
-const OWNER_MARKER: &[u8] = b"AgentDesktop\n";
+const OWNER_MARKER: &[u8] = b"Agentdesktop\n";
 
 pub fn apply(
     directory: &Path,
@@ -55,7 +55,7 @@ pub fn apply(
         }
         Ok(_) if owned => "update",
         Ok(_) => anyhow::bail!(
-            "refusing to replace Claude Code managed settings not owned by AgentDesktop at {}",
+            "refusing to replace Claude Code managed settings not owned by Agentdesktop at {}",
             path.display()
         ),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => "create",
@@ -161,7 +161,7 @@ fn remove(path: &Path, owner_path: &Path) -> anyhow::Result<()> {
                 program = "claude-code",
                 action = "unchanged",
                 path = %path.display(),
-                "preserving managed settings not owned by AgentDesktop"
+                "preserving managed settings not owned by Agentdesktop"
             );
         }
         return Ok(());

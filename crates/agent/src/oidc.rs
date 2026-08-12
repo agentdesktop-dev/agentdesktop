@@ -25,7 +25,7 @@ const SUCCESS_PAGE: &str = r##"<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Enrollment complete · AgentDesktop</title>
+  <title>Enrollment complete · Agentdesktop</title>
   <style>
     :root { color-scheme: light; font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     * { box-sizing: border-box; }
@@ -38,14 +38,14 @@ const SUCCESS_PAGE: &str = r##"<!doctype html>
 </head>
 <body>
   <main>
-    <svg viewBox="0 0 256 256" fill="none" aria-label="AgentDesktop">
+    <svg viewBox="0 0 256 256" fill="none" aria-label="Agentdesktop">
       <path d="M72 61v134M184 61v134M72 94h112M72 162h112" stroke="#8023C3" stroke-width="22" stroke-linecap="round"/>
       <circle cx="72" cy="61" r="20" fill="#8023C3"/>
       <circle cx="184" cy="195" r="20" fill="#8023C3"/>
       <circle cx="128" cy="128" r="18" fill="#5B168E"/>
     </svg>
     <h1>Enrollment complete</h1>
-    <p>You can close this window and return to AgentDesktop.</p>
+    <p>You can close this window and return to Agentdesktop.</p>
   </main>
 </body>
 </html>"##;
@@ -55,7 +55,7 @@ const FAILURE_PAGE: &str = r##"<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Enrollment failed · AgentDesktop</title>
+  <title>Enrollment failed · Agentdesktop</title>
   <style>
     :root { color-scheme: light; font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     * { box-sizing: border-box; }
@@ -68,14 +68,14 @@ const FAILURE_PAGE: &str = r##"<!doctype html>
 </head>
 <body>
   <main>
-    <svg viewBox="0 0 256 256" fill="none" aria-label="AgentDesktop">
+    <svg viewBox="0 0 256 256" fill="none" aria-label="Agentdesktop">
       <path d="M72 61v134M184 61v134M72 94h112M72 162h112" stroke="#8023C3" stroke-width="22" stroke-linecap="round"/>
       <circle cx="72" cy="61" r="20" fill="#8023C3"/>
       <circle cx="184" cy="195" r="20" fill="#8023C3"/>
       <circle cx="128" cy="128" r="18" fill="#5B168E"/>
     </svg>
     <h1>Enrollment failed</h1>
-    <p>Return to AgentDesktop and try again. Details are available in the daemon logs.</p>
+    <p>Return to Agentdesktop and try again. Details are available in the daemon logs.</p>
   </main>
 </body>
 </html>"##;
@@ -140,7 +140,7 @@ pub async fn enroll(
         "open this URL to enroll the device"
     );
     println!(
-        "Open this URL to enroll AgentDesktop:\n{}",
+        "Open this URL to enroll Agentdesktop:\n{}",
         begin.authorization_url
     );
 
