@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,12 +33,36 @@ Set AGENTDESKTOP_ORGANIZATION_CONFIG to an organization JSON file for managed mo
   process.exit(0);
 }
 
+const npmCli = process.env.npm_execpath;
+if (!npmCli) {
+  console.error("[desktop] npm CLI path is unavailable; start with npm run dev:desktop");
+  process.exit(1);
+}
+const tauriCommand = resolve(
+  repositoryRoot,
+  "ui/node_modules/.bin",
+  isWindows ? "tauri.cmd" : "tauri"
+);
+if (!existsSync(tauriCommand)) {
+  console.error(
+    `[desktop] UI dependencies for ${process.platform}/${process.arch} are not installed`
+  );
+  console.error("[desktop] run: npm --prefix ui ci");
+  process.exit(1);
+}
+
 function findExecutable(name) {
   const lookup = spawnSync(isWindows ? "where" : "which", [name], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"]
   });
   return lookup.status === 0 ? lookup.stdout.trim().split(/\r?\n/, 1)[0] : undefined;
+}
+
+if (isWindows && process.arch === "arm64" && !findExecutable("clang")) {
+  console.error("[desktop] Windows ARM64 builds require clang in PATH");
+  console.error("[desktop] install Visual Studio's C++ Clang tools for Windows component");
+  process.exit(1);
 }
 
 const organizationConfigPath = process.env.AGENTDESKTOP_ORGANIZATION_CONFIG
@@ -333,5 +357,5 @@ if (await preflight()) {
     "--",
     ...connectorArguments
   ]);
-  start("ui", isWindows ? "npm.cmd" : "npm", ["--prefix", "ui", "start"]);
+  start("ui", process.execPath, [npmCli, "--prefix", "ui", "start"]);
 }
