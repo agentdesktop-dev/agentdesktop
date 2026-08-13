@@ -1,8 +1,13 @@
 import {
+  CardHeader,
+  friendlyTool,
+  ToolIcon,
+  ToolInventory,
+} from "@agentdesktop/ui";
+import {
   ArrowLeft,
   Box,
   Check,
-  ChevronLeft,
   ChevronRight,
   CircleAlert,
   Code2,
@@ -12,19 +17,12 @@ import {
   Plus,
   RefreshCw,
   Search,
-  Server,
   Settings,
   SlidersHorizontal,
-  Sparkles,
   Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import agentdesktopIcon from "../app-icon.svg";
-import claudeCodeIcon from "./assets/tool-icons/claude-code.svg";
-import claudeDesktopIcon from "./assets/tool-icons/claude-desktop.svg";
-import codexIcon from "./assets/tool-icons/codex.svg";
-import copilotIcon from "./assets/tool-icons/copilot.svg";
-import openCodeIcon from "./assets/tool-icons/opencode.svg";
 
 type Device = {
   id: string;
@@ -223,13 +221,6 @@ export function App() {
             );
           })}
         </nav>
-        <div className="sidebar-foot">
-          <div className="controller-state">
-            <span className="status-dot" />
-            Controller online
-          </div>
-          <span>Local administration</span>
-        </div>
       </aside>
 
       <main className="main-area">
@@ -655,153 +646,6 @@ function DevicePage({ id }: { id: string }) {
       )}
     </div>
   );
-}
-
-function ToolInventory({
-  discovery,
-}: {
-  discovery: DeviceDetail["discoveries"][number];
-}) {
-  const servers = discovery.mcp_servers ?? [];
-  const skills = discovery.skills ?? [];
-  const [serverPage, setServerPage] = useState(0);
-  const [skillPage, setSkillPage] = useState(0);
-  const serverPages = Math.max(1, Math.ceil(servers.length / 5));
-  const skillPages = Math.max(1, Math.ceil(skills.length / 5));
-  const visibleServerPage = Math.min(serverPage, serverPages - 1);
-  const visibleSkillPage = Math.min(skillPage, skillPages - 1);
-  const hasCapabilities = servers.length > 0 || skills.length > 0;
-  return (
-    <details className="tool-inventory-item" open={hasCapabilities}>
-      <summary>
-        <span className="tool-cell">
-          <ToolIcon kind={discovery.kind} />
-          <strong>{friendlyTool(discovery.kind)}</strong>
-        </span>
-        <span className="tool-version">{discovery.version || "Unknown"}</span>
-        <code className="tool-path">{discovery.path}</code>
-        <span className="capability-counts">
-          {servers.length} MCP · {skills.length} skills
-        </span>
-      </summary>
-      <div className="capability-grid">
-        <CapabilitySection
-          icon={<Server size={14} />}
-          title="MCP servers"
-          page={visibleServerPage}
-          pages={serverPages}
-          onPageChange={setServerPage}
-        >
-          {servers.length ? (
-            servers
-              .slice(visibleServerPage * 5, visibleServerPage * 5 + 5)
-              .map((server) => (
-                <div
-                  className="capability-row"
-                  key={`${server.source}-${server.name}`}
-                >
-                  <div>
-                    <strong>{server.name}</strong>
-                    <span>
-                      {server.transport}
-                      {server.enabled ? "" : " · disabled"}
-                    </span>
-                  </div>
-                  <code>
-                    {server.url ?? server.command ?? "No endpoint reported"}
-                  </code>
-                  <small>{server.source}</small>
-                </div>
-              ))
-          ) : (
-            <p className="capability-empty">No MCP servers reported.</p>
-          )}
-        </CapabilitySection>
-        <CapabilitySection
-          icon={<Sparkles size={14} />}
-          title="Skills"
-          page={visibleSkillPage}
-          pages={skillPages}
-          onPageChange={setSkillPage}
-        >
-          {skills.length ? (
-            skills
-              .slice(visibleSkillPage * 5, visibleSkillPage * 5 + 5)
-              .map((skill) => (
-                <div className="capability-row" key={skill.path}>
-                  <div>
-                    <strong>
-                      {frontMatterText(skill.frontMatter.name) ??
-                        "Unnamed skill"}
-                    </strong>
-                  </div>
-                  {frontMatterText(skill.frontMatter.description) && (
-                    <p>{frontMatterText(skill.frontMatter.description)}</p>
-                  )}
-                  <small>{skill.path}</small>
-                </div>
-              ))
-          ) : (
-            <p className="capability-empty">No skills reported.</p>
-          )}
-        </CapabilitySection>
-      </div>
-    </details>
-  );
-}
-
-function CapabilitySection({
-  icon,
-  title,
-  page,
-  pages,
-  onPageChange,
-  children,
-}: React.PropsWithChildren<{
-  icon: React.ReactNode;
-  title: string;
-  page: number;
-  pages: number;
-  onPageChange: (page: number) => void;
-}>) {
-  return (
-    <section className="capability-section">
-      <div className="capability-heading">
-        <h4>
-          {icon}
-          {title}
-        </h4>
-        {pages > 1 && (
-          <nav className="mini-pager" aria-label={`${title} pages`}>
-            <button
-              type="button"
-              aria-label={`Previous ${title} page`}
-              disabled={page === 0}
-              onClick={() => onPageChange(page - 1)}
-            >
-              <ChevronLeft size={12} />
-            </button>
-            <span>
-              {page + 1}/{pages}
-            </span>
-            <button
-              type="button"
-              aria-label={`Next ${title} page`}
-              disabled={page + 1 === pages}
-              onClick={() => onPageChange(page + 1)}
-            >
-              <ChevronRight size={12} />
-            </button>
-          </nav>
-        )}
-      </div>
-      {children}
-    </section>
-  );
-}
-
-function frontMatterText(value: unknown) {
-  return typeof value === "string" && value.trim() ? value : null;
 }
 
 function DeleteDeviceDialog({
@@ -1449,26 +1293,6 @@ function SettingRow({
   );
 }
 
-function CardHeader({
-  title,
-  description,
-  action,
-}: {
-  title: string;
-  description: string;
-  action?: React.ReactNode;
-}) {
-  return (
-    <div className="card-header">
-      <div>
-        <h3>{title}</h3>
-        <p>{description}</p>
-      </div>
-      {action}
-    </div>
-  );
-}
-
 function DefinitionList({ entries }: { entries: Array<[string, string]> }) {
   return (
     <dl className="definition-list">
@@ -1571,19 +1395,6 @@ function friendlyOs(os: string) {
   return names[os.toLowerCase()] ?? (os || "Unknown");
 }
 
-function friendlyTool(kind: string) {
-  const names: Record<string, string> = {
-    codex: "Codex",
-    claude_code: "Claude Code",
-    "claude-code": "Claude Code",
-    claude_desktop: "Claude Desktop",
-    "claude-desktop": "Claude Desktop",
-    opencode: "OpenCode",
-    vscode: "VS Code",
-  };
-  return names[kind.toLowerCase()] ?? kind;
-}
-
 function friendlyEvent(kind: string) {
   const names: Record<string, string> = {
     "session.new": "New session",
@@ -1603,25 +1414,6 @@ function telemetryDetail(
   if (value === undefined) return "No input reported";
   const encoded = JSON.stringify(value);
   return encoded.length > 180 ? `${encoded.slice(0, 177)}…` : encoded;
-}
-
-const toolIcons: Record<string, string> = {
-  codex: codexIcon,
-  "claude-code": claudeCodeIcon,
-  claude_code: claudeCodeIcon,
-  "claude-desktop": claudeDesktopIcon,
-  claude_desktop: claudeDesktopIcon,
-  opencode: openCodeIcon,
-  vscode: copilotIcon,
-};
-
-function ToolIcon({ kind }: { kind: string }) {
-  const icon = toolIcons[kind.toLowerCase()];
-  return icon ? (
-    <img className="tool-icon" src={icon} alt="" aria-hidden="true" />
-  ) : (
-    <Code2 className="tool-icon-fallback" size={16} aria-hidden="true" />
-  );
 }
 
 function ToolAvatarGroup({ kinds }: { kinds: string[] }) {

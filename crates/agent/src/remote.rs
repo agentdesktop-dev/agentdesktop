@@ -8,7 +8,7 @@ use anyhow::{Context, bail};
 use rcgen::{CertificateParams, ExtendedKeyUsagePurpose, KeyPair, KeyUsagePurpose};
 use sha2::{Digest, Sha256};
 use tokio::{
-    sync::{Mutex, mpsc},
+    sync::{Mutex, mpsc, oneshot},
     time,
 };
 use tokio_stream::wrappers::ReceiverStream;
@@ -41,6 +41,10 @@ use crate::{
 
 static OAUTH_REFRESH_MUTEX: Mutex<()> = Mutex::const_new(());
 
+pub struct LogoutRequest {
+    pub completion: oneshot::Sender<Result<(), String>>,
+}
+
 pub async fn run(
     controller: ControllerConnectionConfig,
     discovered: AgentDiscovery,
@@ -49,17 +53,24 @@ pub async fn run(
     reconciler: Reconciler,
     enrollment: EnrollmentState,
     mut telemetry: mpsc::Receiver<ModelTelemetryEvent>,
+    mut logout: mpsc::Receiver<LogoutRequest>,
 ) -> anyhow::Result<()> {
     let identity_path = state_dir.join("identity.json");
     loop {
         let mut identity = match identity::load(&identity_path)? {
-            Some(mut identity) => {
+            Some(identity) => {
                 enrollment.set("enrolled").await;
-                refresh_oauth_if_needed(&mut identity, &identity_path).await?;
                 identity
             }
             None => {
-                let identity = oidc::enroll(&controller, &enrollment, oidc_callback_listen).await?;
+                let identity = tokio::select! {
+                    result = oidc::enroll(&controller, &enrollment, oidc_callback_listen) => result?,
+                    Some(request) = logout.recv() => {
+                        enrollment.set("starting").await;
+                        let _ = request.completion.send(Ok(()));
+                        continue;
+                    }
+                };
                 identity::save(&identity_path, &identity)?;
                 enrollment.set("enrolled").await;
                 info!(device_id = %identity.device_id, "enrolled device");
@@ -69,7 +80,16 @@ pub async fn run(
 
         let mut delay = Duration::from_secs(1);
         loop {
-            refresh_oauth_if_needed(&mut identity, &identity_path).await?;
+            let refresh_result = tokio::select! {
+                result = refresh_oauth_if_needed(&mut identity, &identity_path) => result,
+                Some(request) = logout.recv() => {
+                    if complete_logout(request, &identity_path, &identity, &enrollment).await {
+                        break;
+                    }
+                    continue;
+                }
+            };
+            refresh_result?;
             if certificate_needs_renewal(&identity) {
                 match renew_device_certificate(&controller, &identity).await {
                     Ok(renewed) => {
@@ -83,16 +103,27 @@ pub async fn run(
                 }
             }
             identity::save(&identity_path, &identity)?;
-            match connect(
-                &controller,
-                &identity,
-                &discovered,
-                &state_dir,
-                &reconciler,
-                &mut telemetry,
-            )
-            .await
-            {
+            let connection = tokio::select! {
+                result = connect(
+                    &controller,
+                    &identity,
+                    &discovered,
+                    &state_dir,
+                    &reconciler,
+                    &mut telemetry,
+                ) => Some(result),
+                Some(request) = logout.recv() => {
+                    if complete_logout(request, &identity_path, &identity, &enrollment).await {
+                        None
+                    } else {
+                        continue;
+                    }
+                }
+            };
+            let Some(connection) = connection else {
+                break;
+            };
+            match connection {
                 Ok(()) => warn!("controller stream closed"),
                 Err(error) if is_unauthenticated(&error) => {
                     let error_chain = format!("{error:#}");
@@ -117,10 +148,35 @@ pub async fn run(
                 }
             }
 
-            time::sleep(delay).await;
+            let logged_out = tokio::select! {
+                _ = time::sleep(delay) => false,
+                Some(request) = logout.recv() => {
+                    complete_logout(request, &identity_path, &identity, &enrollment).await
+                }
+            };
+            if logged_out {
+                break;
+            }
             delay = (delay * 2).min(Duration::from_secs(60));
         }
     }
+}
+
+async fn complete_logout(
+    request: LogoutRequest,
+    identity_path: &Path,
+    identity: &Identity,
+    enrollment: &EnrollmentState,
+) -> bool {
+    let result = identity::delete(identity_path, &identity.device_id)
+        .map_err(|error| format!("remove local organization identity: {error:#}"));
+    if result.is_ok() {
+        enrollment.set("starting").await;
+        info!(device_id = %identity.device_id, "logged out local organization session");
+    }
+    let logged_out = result.is_ok();
+    let _ = request.completion.send(result);
+    logged_out
 }
 
 fn is_unauthenticated(error: &anyhow::Error) -> bool {

@@ -45,17 +45,39 @@ function distanceToSegment(pointX, pointY, startX, startY, endX, endY) {
   return Math.hypot(deltaX, deltaY);
 }
 
-function alphaAt(pointX, pointY) {
-  const center = 16;
-  const inDisc = Math.hypot(pointX - center, pointY - center) <= 14;
-  const inLeftStroke = distanceToSegment(pointX, pointY, 9.5, 24, 16, 7.5) <= 1.4;
-  const inRightStroke = distanceToSegment(pointX, pointY, 16, 7.5, 22.5, 24) <= 1.4;
-  const inCrossbar = distanceToSegment(pointX, pointY, 12, 18.5, 20, 18.5) <= 1.15;
+function markColorAt(pointX, pointY) {
+  const strokeRadius = 1.4;
+  const onStructure =
+    distanceToSegment(pointX, pointY, 9, 7.6, 9, 24.4) <= strokeRadius ||
+    distanceToSegment(pointX, pointY, 23, 7.6, 23, 24.4) <= strokeRadius ||
+    distanceToSegment(pointX, pointY, 9, 11.75, 23, 11.75) <= strokeRadius ||
+    distanceToSegment(pointX, pointY, 9, 20.25, 23, 20.25) <= strokeRadius ||
+    Math.hypot(pointX - 9, pointY - 7.6) <= 2.5 ||
+    Math.hypot(pointX - 23, pointY - 24.4) <= 2.5;
+  const onCenter = Math.hypot(pointX - 16, pointY - 16) <= 2.25;
 
-  return inDisc && !(inLeftStroke || inRightStroke || inCrossbar);
+  if (onCenter) return [91, 22, 142];
+  if (onStructure) return [128, 35, 195];
+  return null;
 }
 
-function createIcon(size) {
+function colorAt(pointX, pointY, state) {
+  if (state !== "ready") {
+    const distance = Math.hypot(pointX - 25.5, pointY - 25.5);
+    if (distance <= 6.6 && distance > 5.5) return null;
+    if (distance <= 5.5) {
+      const cutout = state === "offline"
+        ? Math.abs(pointX - pointY) <= 0.8 || Math.abs(pointX + pointY - 51) <= 0.8
+        : (Math.abs(pointX - 25.5) <= 0.75 && pointY >= 21.7 && pointY <= 25.8) ||
+          Math.hypot(pointX - 25.5, pointY - 28.2) <= 0.85;
+      if (cutout) return null;
+      return state === "offline" ? [207, 34, 46] : [154, 103, 0];
+    }
+  }
+  return markColorAt(pointX, pointY);
+}
+
+function createIcon(size, state = "ready") {
   const scanlineLength = size * 4 + 1;
   const pixels = Buffer.alloc(scanlineLength * size);
   const samplesPerAxis = 4;
@@ -66,20 +88,27 @@ function createIcon(size) {
     pixels[rowOffset] = 0;
 
     for (let pixelX = 0; pixelX < size; pixelX += 1) {
+      const accumulated = [0, 0, 0];
       let coveredSamples = 0;
 
       for (let sampleY = 0; sampleY < samplesPerAxis; sampleY += 1) {
         for (let sampleX = 0; sampleX < samplesPerAxis; sampleX += 1) {
           const pointX = (pixelX + (sampleX + 0.5) / samplesPerAxis) * scale;
           const pointY = (pixelY + (sampleY + 0.5) / samplesPerAxis) * scale;
-          coveredSamples += alphaAt(pointX, pointY) ? 1 : 0;
+          const color = colorAt(pointX, pointY, state);
+          if (color) {
+            coveredSamples += 1;
+            accumulated[0] += color[0];
+            accumulated[1] += color[1];
+            accumulated[2] += color[2];
+          }
         }
       }
 
       const pixelOffset = rowOffset + 1 + pixelX * 4;
-      pixels[pixelOffset] = 20;
-      pixels[pixelOffset + 1] = 122;
-      pixels[pixelOffset + 2] = 114;
+      pixels[pixelOffset] = coveredSamples ? Math.round(accumulated[0] / coveredSamples) : 0;
+      pixels[pixelOffset + 1] = coveredSamples ? Math.round(accumulated[1] / coveredSamples) : 0;
+      pixels[pixelOffset + 2] = coveredSamples ? Math.round(accumulated[2] / coveredSamples) : 0;
       pixels[pixelOffset + 3] = Math.round(
         (coveredSamples / (samplesPerAxis * samplesPerAxis)) * 255
       );
@@ -103,4 +132,6 @@ function createIcon(size) {
 mkdirSync(outputDirectory, { recursive: true });
 writeFileSync(path.join(outputDirectory, "tray-icon.png"), createIcon(16));
 writeFileSync(path.join(outputDirectory, "tray-icon@2x.png"), createIcon(32));
+writeFileSync(path.join(outputDirectory, "tray-icon-attention.png"), createIcon(32, "attention"));
+writeFileSync(path.join(outputDirectory, "tray-icon-offline.png"), createIcon(32, "offline"));
 writeFileSync(path.join(outputDirectory, "app-icon.png"), createIcon(1024));

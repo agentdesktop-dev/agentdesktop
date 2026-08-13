@@ -25,12 +25,12 @@ ui-check:
 desktop:
 	cd desktop && npm ci
 	cd desktop && npm run build
-	cargo build -p agentdesktop-ui
+	cargo build -p agentdesktop
 
 desktop-check:
 	cd desktop && npm ci
 	cd desktop && npm run build
-	cargo check -p agentdesktop-ui
+	cargo check -p agentdesktop
 
 format:
 	cargo fmt --all

@@ -1,20 +1,23 @@
 [package]
-name = "agentdesktop-ui"
+name = "agentdesktop"
 version = "0.1.0"
-description = "Agent Desktop tray and settings application"
+description = "Agent Desktop UI, daemon, and command-line application"
 edition = "2024"
 publish = false
-default-run = "agentdesktop-ui"
+default-run = "agentdesktop"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+agentdesktop-agent.workspace = true
 agentdesktop-client.workspace = true
 agentdesktop-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
 open.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["image-png", "tray-icon"] }
 tauri-plugin-single-instance = "2"
 tokio.workspace = true

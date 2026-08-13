@@ -20,7 +20,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@fontsource-variable/manrope": "^5.3.0",
+    "@agentdesktop/ui": "file:../frontend/shared",
     "@tauri-apps/api": "^2.11.1",
     "lucide-react": "^1.28.0",
     "react": "^19.2.8",

@@ -1,16 +1,20 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-
 use std::{env, fs, io::ErrorKind, path::PathBuf, time::Duration};
 
+use agentdesktop_agent::{
+    cli::{self, ClientCommand},
+    daemon::{self, DaemonArgs},
+};
 use agentdesktop_client as client;
 use agentdesktop_core::{
     DEFAULT_SOCKET_PATH,
     config::DaemonConfig,
     model::{Discovery, EnrollmentStatus, Health},
 };
+use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use tauri::{
     AppHandle, Manager,
+    image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
 };
@@ -18,6 +22,38 @@ use tauri::{
 const OPEN_MENU_ID: &str = "open";
 const QUIT_MENU_ID: &str = "quit";
 const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const TRAY_READY_ICON: &[u8] = include_bytes!("../../assets/tray-icon@2x.png");
+const TRAY_ATTENTION_ICON: &[u8] = include_bytes!("../../assets/tray-icon-attention.png");
+const TRAY_OFFLINE_ICON: &[u8] = include_bytes!("../../assets/tray-icon-offline.png");
+
+#[derive(Parser)]
+#[command(about = "Agent Desktop UI, daemon, and command-line tools")]
+struct Args {
+    /// Local endpoint exposed by the daemon (Unix socket or Windows named pipe).
+    #[arg(long, default_value = DEFAULT_SOCKET_PATH, global = true)]
+    socket: PathBuf,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Run the privileged device daemon.
+    Daemon(DaemonArgs),
+
+    #[command(flatten)]
+    Client(ClientCommand),
+}
+
+fn tray_icon(state: &str) -> tauri::Result<Image<'static>> {
+    let bytes = match state {
+        "ready" => TRAY_READY_ICON,
+        "attention" => TRAY_ATTENTION_ICON,
+        _ => TRAY_OFFLINE_ICON,
+    };
+    Image::from_bytes(bytes)
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -201,8 +237,11 @@ async fn read_connector_status() -> ConnectorSnapshot {
             "The Agent Desktop daemon is unavailable: {error}"
         ));
     }
-    let config = match client::get::<DaemonConfig>(&endpoint, "/v1/config").await {
-        Ok(config) => config,
+    let (config, effective_config) = match tokio::try_join!(
+        client::get::<DaemonConfig>(&endpoint, "/v1/config"),
+        client::get::<DaemonConfig>(&endpoint, "/v1/effective-config")
+    ) {
+        Ok(configs) => configs,
         Err(error) => {
             return ConnectorSnapshot::offline(format!("Cannot read daemon state: {error}"));
         }
@@ -219,13 +258,12 @@ async fn read_connector_status() -> ConnectorSnapshot {
         } else {
             "not-required"
         });
-    let gateway = if config.inference_gateway.is_some() {
+    let gateway = if effective_config.inference_gateway.is_some() {
         "configured"
     } else {
         "not-configured"
     };
-    let state = if gateway == "configured" && !matches!(identity, "unavailable" | "not-configured")
-    {
+    let state = if !matches!(identity, "unavailable" | "not-configured") {
         "ready"
     } else {
         "attention"
@@ -259,7 +297,7 @@ async fn claude_snapshot() -> Result<ClaudeSnapshot, String> {
     let endpoint = socket_path();
     let (discovery, config) = tokio::try_join!(
         client::get::<Discovery>(&endpoint, "/v1/discovery"),
-        client::get::<DaemonConfig>(&endpoint, "/v1/config")
+        client::get::<DaemonConfig>(&endpoint, "/v1/effective-config")
     )
     .map_err(|error| format!("{error:#}"))?;
     let installed = discovery
@@ -282,10 +320,10 @@ async fn claude_snapshot() -> Result<ClaudeSnapshot, String> {
         }
     } else {
         ClaudeSnapshot {
-            state: "not-connected",
+            state: "discovered",
             installed: true,
             can_connect: false,
-            detail: "Claude Code is not selected in the active daemon configuration.",
+            detail: "Claude Code is discovered but is not selected in the active daemon configuration.",
         }
     })
 }
@@ -385,6 +423,27 @@ async fn get_managed_device_status() -> Result<ManagedDeviceSnapshot, String> {
 }
 
 #[tauri::command]
+async fn get_discovery() -> Result<Discovery, String> {
+    client::get(&socket_path(), "/v1/discovery")
+        .await
+        .map_err(|error| format!("{error:#}"))
+}
+
+#[tauri::command]
+async fn get_remote_config() -> Result<Option<String>, String> {
+    client::get(&socket_path(), "/v1/remote-config")
+        .await
+        .map_err(|error| format!("{error:#}"))
+}
+
+#[tauri::command]
+async fn logout_managed_device() -> Result<(), String> {
+    client::post_json(&socket_path(), "/v1/logout", &())
+        .await
+        .map_err(|error| format!("{error:#}"))
+}
+
+#[tauri::command]
 async fn setup_managed_device() -> Result<ManagedDeviceSnapshot, String> {
     let config = daemon_config().await?;
     let status = enrollment_status().await?;
@@ -409,7 +468,7 @@ async fn connect_claude(api_key: Option<String>) -> Result<ClaudeSnapshot, Strin
     claude_snapshot().await
 }
 
-fn main() {
+fn run_desktop() -> anyhow::Result<()> {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             show_main_window(app);
@@ -424,8 +483,9 @@ fn main() {
             let status = MenuItem::with_id(app, "status", "Checking daemon…", false, None::<&str>)?;
             let quit = MenuItem::with_id(app, QUIT_MENU_ID, "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open, &separator, &status, &quit])?;
-            let mut tray = TrayIconBuilder::with_id("main")
+            let tray = TrayIconBuilder::with_id("main")
                 .tooltip("Agent Desktop")
+                .icon(tray_icon("offline")?)
                 .menu(&menu)
                 .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| match event.id.as_ref() {
@@ -433,19 +493,27 @@ fn main() {
                     QUIT_MENU_ID => app.exit(0),
                     _ => {}
                 });
-            if let Some(icon) = app.default_window_icon() {
-                tray = tray.icon(icon.clone());
-                #[cfg(target_os = "macos")]
-                {
-                    tray = tray.icon_as_template(true);
-                }
-            }
-            tray.build(app)?;
+            #[cfg(target_os = "macos")]
+            let tray = tray.icon_as_template(true);
+            let tray = tray.build(app)?;
 
             tauri::async_runtime::spawn(async move {
+                let mut previous_state = "";
                 loop {
                     let snapshot = read_connector_status().await;
                     let _ = status.set_text(snapshot.tray_text());
+                    if snapshot.state != previous_state {
+                        if let Ok(icon) = tray_icon(snapshot.state) {
+                            let _ = tray
+                                .set_icon_with_as_template(Some(icon), cfg!(target_os = "macos"));
+                        }
+                        let _ = tray.set_tooltip(Some(match snapshot.state {
+                            "ready" => "Agent Desktop — ready",
+                            "attention" => "Agent Desktop — attention required",
+                            _ => "Agent Desktop — daemon offline",
+                        }));
+                        previous_state = snapshot.state;
+                    }
                     tokio::time::sleep(STATUS_POLL_INTERVAL).await;
                 }
             });
@@ -469,10 +537,73 @@ fn main() {
             get_connector_status,
             get_claude_status,
             get_managed_device_status,
+            get_discovery,
+            get_remote_config,
+            logout_managed_device,
             setup_managed_device,
             open_managed_page,
             connect_claude
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Agent Desktop");
+        .run(tauri::generate_context!())?;
+    Ok(())
+}
+
+fn run_command(command: Command, socket: PathBuf) -> anyhow::Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async move {
+            match command {
+                Command::Daemon(args) => daemon::run(args, socket).await,
+                Command::Client(command) => cli::run(command, socket).await,
+            }
+        })
+}
+
+#[cfg(windows)]
+fn prepare_desktop_process() {
+    // This is a console-subsystem executable so the CLI behaves normally on
+    // Windows. Detach that console only when launching the graphical mode.
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn FreeConsole() -> i32;
+    }
+    unsafe {
+        FreeConsole();
+    }
+}
+
+#[cfg(not(windows))]
+fn prepare_desktop_process() {}
+
+fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+    match args.command {
+        Some(command) => run_command(command, args.socket),
+        None => {
+            prepare_desktop_process();
+            run_desktop()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Args, Command};
+    use clap::Parser;
+
+    #[test]
+    fn no_subcommand_launches_desktop_mode() {
+        let args = Args::try_parse_from(["agentdesktop"]).unwrap();
+        assert!(args.command.is_none());
+    }
+
+    #[test]
+    fn daemon_and_client_commands_share_the_desktop_executable() {
+        let daemon = Args::try_parse_from(["agentdesktop", "daemon"]).unwrap();
+        assert!(matches!(daemon.command, Some(Command::Daemon(_))));
+
+        let status = Args::try_parse_from(["agentdesktop", "status"]).unwrap();
+        assert!(matches!(status.command, Some(Command::Client(_))));
+    }
 }
