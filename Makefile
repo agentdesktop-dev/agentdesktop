@@ -1,6 +1,6 @@
 IMAGE ?= agentdesktop-controller:dev
 
-.PHONY: build test check lint ui ui-check format gen generate-schema docker clean
+.PHONY: build test check lint ui ui-check desktop desktop-check format gen generate-schema docker clean
 
 build: ui
 	cargo build --workspace
@@ -22,6 +22,16 @@ ui-check:
 	cd ui && pnpm install --frozen-lockfile
 	cd ui && pnpm check
 
+desktop:
+	cd desktop && npm ci
+	cd desktop && npm run build
+	cargo build -p agentdesktop-ui
+
+desktop-check:
+	cd desktop && npm ci
+	cd desktop && npm run build
+	cargo check -p agentdesktop-ui
+
 format:
 	cargo fmt --all
 	cd ui && pnpm format
@@ -38,3 +48,4 @@ docker:
 clean:
 	cargo clean
 	rm -rf ui/dist
+	rm -rf desktop/dist
