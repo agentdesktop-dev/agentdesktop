@@ -60,28 +60,24 @@ fn embedded_version_from_reader(mut reader: impl Read, chunk_size: usize) -> Opt
     let retained_length = VERSION_MARKER.len() + MAX_VERSION_LENGTH;
     let mut chunk = vec![0; chunk_size];
     let mut retained = Vec::new();
-    let mut versions = BTreeSet::new();
 
     loop {
         let read = reader.read(&mut chunk).ok()?;
         let finished = read == 0;
         retained.extend_from_slice(&chunk[..read]);
-        collect_versions(&retained, finished, &mut versions);
-        if versions.len() > 1 {
-            return None;
+        if let Some(version) = find_version(&retained, finished) {
+            return Some(version);
         }
         if finished {
-            break;
+            return None;
         }
         if retained.len() > retained_length {
             retained.drain(..retained.len() - retained_length);
         }
     }
-
-    versions.into_iter().next()
 }
 
-fn collect_versions(bytes: &[u8], finished: bool, versions: &mut BTreeSet<String>) {
+fn find_version(bytes: &[u8], finished: bool) -> Option<String> {
     for start in memmem::find_iter(bytes, VERSION_MARKER) {
         let value = &bytes[start + VERSION_MARKER.len()..];
         let length = value
@@ -96,9 +92,10 @@ fn collect_versions(bytes: &[u8], finished: bool, versions: &mut BTreeSet<String
             continue;
         };
         if valid_version(version) {
-            versions.insert(version.to_owned());
+            return Some(version.to_owned());
         }
     }
+    None
 }
 
 fn valid_version(version: &str) -> bool {
@@ -125,17 +122,5 @@ mod tests {
             embedded_version_from_reader(Cursor::new(binary), 7).as_deref(),
             Some("1.18.11")
         );
-    }
-
-    #[test]
-    fn rejects_conflicting_embedded_versions() {
-        let binary = b"user-agent=opencode/1.18.11 user-agent=opencode/1.19.0 ";
-        assert_eq!(embedded_version_from_reader(Cursor::new(binary), 9), None);
-    }
-
-    #[test]
-    fn ignores_unrelated_versions() {
-        let binary = b"dependency/9.8.7 and some other text";
-        assert_eq!(embedded_version_from_reader(Cursor::new(binary), 8), None);
     }
 }

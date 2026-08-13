@@ -54,7 +54,7 @@ impl AdminState {
 }
 
 #[derive(RustEmbed)]
-#[folder = "../../ui/dist/"]
+#[folder = "../../frontend/controller/dist/"]
 struct AdminAssets;
 
 #[derive(Serialize)]

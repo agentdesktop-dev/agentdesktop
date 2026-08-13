@@ -1,0 +1,12 @@
+{
+  "name": "@agentdesktop/frontend",
+  "private": true,
+  "packageManager": "pnpm@11.3.0",
+  "scripts": {
+    "build": "pnpm --filter @agentdesktop/controller-web build && pnpm --filter @agentdesktop/desktop-web build",
+    "check": "pnpm --filter @agentdesktop/controller-web check && pnpm --filter @agentdesktop/controller-web exec biome check ../desktop && pnpm --filter @agentdesktop/desktop-web build",
+    "dev:controller": "pnpm --filter @agentdesktop/controller-web dev",
+    "dev:desktop": "pnpm --filter @agentdesktop/desktop-web dev:desktop",
+    "format": "pnpm --filter @agentdesktop/controller-web format && pnpm --filter @agentdesktop/controller-web exec biome format --write ../desktop"
+  }
+}

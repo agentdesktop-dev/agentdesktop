@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agentdesktop-controller.fullname" . }}
+  labels:
+    {{- include "agentdesktop-controller.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "agentdesktop-controller.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agentdesktop-controller.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+      - name: controller
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        args:
+        - --config
+        - /etc/agentdesktop/controller.yaml
+        ports:
+        - name: fleet
+          containerPort: 8443
+          protocol: TCP
+        - name: admin
+          containerPort: 8080
+          protocol: TCP
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+        volumeMounts:
+        - name: config
+          mountPath: /etc/agentdesktop/controller.yaml
+          subPath: controller.yaml
+          readOnly: true
+        - name: tls
+          mountPath: /etc/agentdesktop/tls
+          readOnly: true
+      volumes:
+      - name: config
+        {{- if .Values.controller.existingConfigSecret }}
+        secret:
+          secretName: {{ .Values.controller.existingConfigSecret }}
+          items:
+          - key: {{ .Values.controller.configSecretKey }}
+            path: controller.yaml
+        {{- else }}
+        configMap:
+          name: {{ include "agentdesktop-controller.fullname" . }}
+        {{- end }}
+      - name: tls
+        secret:
+          secretName: {{ required "controller.tlsSecretName is required" .Values.controller.tlsSecretName }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+

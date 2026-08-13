@@ -1,0 +1,7 @@
+The Agentdesktop fleet API is available through Service:
+  {{ include "agentdesktop-controller.fullname" . }}:{{ .Values.service.port }}
+
+The management UI binds to loopback and is not exposed by the Service. Open it
+with:
+  kubectl port-forward deployment/{{ include "agentdesktop-controller.fullname" . }} 8080:8080
+  http://127.0.0.1:8080

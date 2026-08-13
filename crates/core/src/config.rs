@@ -484,10 +484,10 @@ fn resolve_relative(path: &mut PathBuf, directory: &Path) {
 pub fn parse_daemon(contents: &str) -> anyhow::Result<DaemonConfig> {
     let config: DaemonConfig =
         crate::serdes::yamlviajson::from_str(contents).context("parse daemon configuration")?;
-    if let Some(controller) = &config.controller {
-        if !controller.address.starts_with("https://") {
-            anyhow::bail!("controller address must use HTTPS");
-        }
+    if let Some(controller) = &config.controller
+        && !controller.address.starts_with("https://")
+    {
+        anyhow::bail!("controller address must use HTTPS");
     }
     validate_daemon(config.inference_gateway.as_ref(), &config.programs)?;
     Ok(config)

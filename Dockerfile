@@ -1,19 +1,22 @@
 # syntax=docker/dockerfile:1.11
 
 FROM docker.io/library/node:24.17.0-bookworm AS ui
-WORKDIR /app/ui
-COPY ui/package.json ui/pnpm-lock.yaml ./
+WORKDIR /app/frontend
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
+COPY frontend/controller/package.json controller/package.json
+COPY frontend/desktop/package.json desktop/package.json
+COPY frontend/ui/package.json ui/package.json
 RUN corepack enable
 RUN --mount=type=cache,id=agentdesktop-pnpm,target=/pnpm/store \
     pnpm install --frozen-lockfile --store-dir=/pnpm/store
-COPY ui/ ./
-RUN pnpm build
+COPY frontend/ ./
+RUN pnpm --filter @agentdesktop/controller-web build
 
 FROM docker.io/library/rust:1.97.0-trixie AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
-COPY --from=ui /app/ui/dist ui/dist
+COPY --from=ui /app/frontend/controller/dist frontend/controller/dist
 RUN --mount=type=cache,id=agentdesktop-target,target=/app/target \
     --mount=type=cache,id=agentdesktop-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=agentdesktop-cargo-git,target=/usr/local/cargo/git \

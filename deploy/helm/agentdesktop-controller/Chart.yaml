@@ -1,0 +1,7 @@
+apiVersion: v2
+name: agentdesktop-controller
+description: Agentdesktop fleet controller using an external PostgreSQL database
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+

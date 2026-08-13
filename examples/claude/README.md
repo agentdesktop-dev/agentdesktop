@@ -45,12 +45,10 @@ Start Dex:
 docker compose -f examples/claude/compose.yaml up -d dex
 ```
 
-Build the UI and start the controller:
+Start the installed controller:
 
 ```console
-make ui
-cargo run --bin agentdesktop-controller -- \
-  --config examples/claude/controller.yaml
+agentdesktop-controller --config examples/claude/controller.yaml
 ```
 
 Start Agentgateway:
@@ -59,13 +57,21 @@ Start Agentgateway:
 docker compose -f examples/claude/compose.yaml up -d agentgateway
 ```
 
-Run the local daemon. Note: typically this would be run on a different machine; for this example we run the controller and daemon together.
-The helper authorizes the invoking desktop user to access the local API. Direct
-system deployments should pass that user's numeric UID with `--local-api-uid`.
+Run the installed local daemon. Typically this would run on a different
+machine; this example runs the controller and daemon together. Because it is
+launched with `sudo`, the daemon automatically authorizes the invoking desktop
+user to access its local API.
+
 ```console
-./scripts/run-agentdesktop-root \
+sudo "$(command -v agentdesktop)" daemon \
   --config examples/claude/agentdesktop.yaml
 ```
 
 Sign in with `admin@example.com` / `password`. The controller UI is at
 <http://127.0.0.1:8080>.
+
+After enrollment, open the local desktop UI from another terminal:
+
+```console
+agentdesktop
+```

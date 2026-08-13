@@ -2,7 +2,8 @@ use std::{net::SocketAddr, path::PathBuf};
 
 #[cfg(unix)]
 use std::{
-    os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
+    ffi::CString,
+    os::unix::fs::{FileTypeExt, PermissionsExt},
     path::Path,
 };
 
@@ -20,6 +21,17 @@ use tokio::sync::mpsc;
 
 use crate::{api, discovery, enrollment::EnrollmentState, reconcile, remote, secure_fs};
 
+#[cfg(unix)]
+const LOCAL_API_GROUP: &str = "agentdesktop";
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LocalApiAccess {
+    User(u32),
+    Group(u32),
+    Owner,
+}
+
 #[derive(Args)]
 pub struct DaemonArgs {
     /// Path to the local YAML configuration file.
@@ -33,11 +45,6 @@ pub struct DaemonArgs {
     /// Address for the OIDC callback server to bind instead of the redirect URI's loopback address.
     #[arg(long)]
     oidc_callback_listen: Option<SocketAddr>,
-
-    /// UID permitted to access the local API. Defaults to the daemon's effective UID.
-    #[cfg(unix)]
-    #[arg(long)]
-    local_api_uid: Option<u32>,
 
     /// Directory containing Claude Code managed-settings drop-in files.
     #[arg(
@@ -156,8 +163,10 @@ pub async fn run(args: DaemonArgs, socket: PathBuf) -> anyhow::Result<()> {
                 oidc_callback_listen,
                 reconciler,
                 remote_enrollment.clone(),
-                telemetry_receiver,
-                logout_receiver,
+                remote::Requests {
+                    telemetry: telemetry_receiver,
+                    logout: logout_receiver,
+                },
             )
             .await
             {
@@ -177,12 +186,7 @@ pub async fn run(args: DaemonArgs, socket: PathBuf) -> anyhow::Result<()> {
 
     tracing::info!(socket = %socket.display(), "agent daemon listening");
     #[cfg(unix)]
-    serve_unix(
-        &socket,
-        args.local_api_uid.unwrap_or_else(effective_uid),
-        app,
-    )
-    .await?;
+    serve_unix(&socket, local_api_access()?, app).await?;
     #[cfg(windows)]
     serve_named_pipe(&socket, app).await?;
 
@@ -190,22 +194,18 @@ pub async fn run(args: DaemonArgs, socket: PathBuf) -> anyhow::Result<()> {
 }
 
 #[cfg(unix)]
-async fn serve_unix(socket: &Path, local_api_uid: u32, app: axum::Router) -> anyhow::Result<()> {
-    let listener = bind_unix(socket, local_api_uid)?;
+async fn serve_unix(
+    socket: &Path,
+    access: LocalApiAccess,
+    app: axum::Router,
+) -> anyhow::Result<()> {
+    let listener = bind_unix(socket, access)?;
     loop {
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, _) = accepted.context("accept connection")?;
                 let peer = stream.peer_cred().context("inspect local API peer credentials")?;
-                if peer.uid() != local_api_uid {
-                    tracing::warn!(
-                        peer_uid = peer.uid(),
-                        peer_pid = peer.pid(),
-                        allowed_uid = local_api_uid,
-                        "rejected unauthorized local API connection"
-                    );
-                    continue;
-                }
+                tracing::debug!(peer_uid = peer.uid(), peer_pid = peer.pid(), "accepted local API connection");
                 let service = TowerToHyperService::new(app.clone());
                 tokio::spawn(async move {
                     if let Err(error) = hyper::server::conn::http1::Builder::new()
@@ -276,7 +276,7 @@ fn agentdesktop_executable() -> anyhow::Result<PathBuf> {
 }
 
 #[cfg(unix)]
-fn bind_unix(path: &Path, local_api_uid: u32) -> anyhow::Result<UnixListener> {
+fn bind_unix(path: &Path, access: LocalApiAccess) -> anyhow::Result<UnixListener> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create socket directory {}", parent.display()))?;
@@ -296,20 +296,75 @@ fn bind_unix(path: &Path, local_api_uid: u32) -> anyhow::Result<UnixListener> {
 
     let listener =
         UnixListener::bind(path).with_context(|| format!("bind socket {}", path.display()))?;
-    configure_socket_access(path, local_api_uid)?;
+    if let Err(error) = configure_socket_access(path, access) {
+        let _ = std::fs::remove_file(path);
+        return Err(error);
+    }
     Ok(listener)
 }
 
 #[cfg(unix)]
-fn configure_socket_access(path: &Path, local_api_uid: u32) -> anyhow::Result<()> {
-    let metadata = std::fs::symlink_metadata(path)
-        .with_context(|| format!("inspect socket ownership for {}", path.display()))?;
-    if metadata.uid() != local_api_uid {
-        std::os::unix::fs::chown(path, Some(local_api_uid), None)
-            .with_context(|| format!("set socket owner for {}", path.display()))?;
-    }
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+fn configure_socket_access(path: &Path, access: LocalApiAccess) -> anyhow::Result<()> {
+    let mode = match access {
+        LocalApiAccess::User(uid) => {
+            std::os::unix::fs::chown(path, Some(uid), None)
+                .with_context(|| format!("set socket owner for {}", path.display()))?;
+            tracing::info!(
+                authorized_uid = uid,
+                "local API access granted to sudo user"
+            );
+            0o600
+        }
+        LocalApiAccess::Group(gid) => {
+            std::os::unix::fs::chown(path, None, Some(gid))
+                .with_context(|| format!("set socket group for {}", path.display()))?;
+            tracing::info!(
+                group = LOCAL_API_GROUP,
+                gid,
+                "local API access granted to group"
+            );
+            0o660
+        }
+        LocalApiAccess::Owner => 0o600,
+    };
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
         .with_context(|| format!("set socket permissions on {}", path.display()))
+}
+
+#[cfg(unix)]
+fn local_api_access() -> anyhow::Result<LocalApiAccess> {
+    let euid = effective_uid();
+    if euid != 0 {
+        return Ok(LocalApiAccess::Owner);
+    }
+    if let Some(uid) = sudo_uid(std::env::var_os("SUDO_UID"), euid) {
+        return Ok(LocalApiAccess::User(uid));
+    }
+    group_id(LOCAL_API_GROUP)?.map(LocalApiAccess::Group).ok_or_else(|| {
+        anyhow::anyhow!(
+            "root daemon requires the `{LOCAL_API_GROUP}` group; create it and add authorized desktop users, or launch with sudo to authorize the invoking user automatically"
+        )
+    })
+}
+
+#[cfg(unix)]
+fn sudo_uid(value: Option<std::ffi::OsString>, effective_uid: u32) -> Option<u32> {
+    if effective_uid != 0 {
+        return None;
+    }
+    value
+        .and_then(|value| value.into_string().ok())
+        .and_then(|value| value.parse().ok())
+        .filter(|uid| *uid != 0)
+}
+
+#[cfg(unix)]
+fn group_id(name: &str) -> anyhow::Result<Option<u32>> {
+    let name = CString::new(name).context("local API group contains a null byte")?;
+    // SAFETY: getgrnam returns either null or a valid process-owned group
+    // entry. We copy the numeric ID before returning.
+    let group = unsafe { libc::getgrnam(name.as_ptr()) };
+    Ok((!group.is_null()).then(|| unsafe { (*group).gr_gid }))
 }
 
 #[cfg(unix)]

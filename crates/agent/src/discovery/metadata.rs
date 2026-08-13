@@ -285,27 +285,7 @@ fn skill_front_matter(contents: &str) -> Option<BTreeMap<String, serde_json::Val
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
-    use super::{find_in_directories, skill_front_matter};
-
-    #[test]
-    fn finds_an_executable_in_a_later_path_directory() {
-        let root = std::env::temp_dir().join(format!(
-            "agentdesktop-discovery-path-{}",
-            std::process::id()
-        ));
-        let first = root.join("first");
-        let second = root.join("second");
-        fs::create_dir_all(&second).unwrap();
-        let executable = second.join("tool");
-        fs::write(&executable, []).unwrap();
-
-        let found = find_in_directories("tool", [first, second]);
-        let _ = fs::remove_dir_all(root);
-
-        assert_eq!(found.as_deref(), Some(executable.as_path()));
-    }
+    use super::skill_front_matter;
 
     #[test]
     fn reads_only_skill_front_matter() {

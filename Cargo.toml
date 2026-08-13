@@ -7,7 +7,7 @@ members = [
     "crates/core",
     "crates/proto",
     "crates/xtask",
-    "desktop/src-tauri",
+    "crates/agentdesktop",
 ]
 
 [workspace.package]

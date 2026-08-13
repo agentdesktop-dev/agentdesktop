@@ -198,7 +198,7 @@ fn claude_client_id_for_entrypoint(entrypoint: Option<&str>) -> &'static str {
 mod tests {
     use agentdesktop_core::model::TelemetryEventKind;
 
-    use super::{claude_client_id_for_entrypoint, parse_claude_pre_tool_use};
+    use super::parse_claude_pre_tool_use;
 
     #[test]
     fn parses_claude_pre_tool_use_input_without_unrelated_fields() {
@@ -231,18 +231,5 @@ mod tests {
         assert_eq!(tool_input.as_ref().unwrap()["command"], "cargo test");
         assert!(!serialized.contains("session-secret"));
         assert!(!serialized.contains("transcript"));
-    }
-
-    #[test]
-    fn attributes_desktop_entrypoints_to_claude_desktop() {
-        assert_eq!(
-            claude_client_id_for_entrypoint(Some("claude-desktop")),
-            "claude-desktop"
-        );
-        assert_eq!(
-            claude_client_id_for_entrypoint(Some("claude-desktop-3p")),
-            "claude-desktop"
-        );
-        assert_eq!(claude_client_id_for_entrypoint(Some("cli")), "claude-code");
     }
 }

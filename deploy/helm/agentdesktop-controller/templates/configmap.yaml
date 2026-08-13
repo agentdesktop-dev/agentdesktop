@@ -1,0 +1,20 @@
+{{- if not .Values.controller.existingConfigSecret }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "agentdesktop-controller.fullname" . }}
+  labels:
+    {{- include "agentdesktop-controller.labels" . | nindent 4 }}
+data:
+  controller.yaml: |
+    fleetListen: 0.0.0.0:8443
+    adminListen: 127.0.0.1:8080
+    databaseUrl: {{ required "controller.databaseUrl is required" .Values.controller.databaseUrl | quote }}
+    tls: /etc/agentdesktop/tls
+    allowInsecureDev: {{ .Values.controller.allowInsecureDev }}
+    oidc:
+      issuer: {{ required "controller.oidc.issuer is required" .Values.controller.oidc.issuer | quote }}
+      clientId: {{ required "controller.oidc.clientId is required" .Values.controller.oidc.clientId | quote }}
+      redirectUri: {{ .Values.controller.oidc.redirectUri | quote }}
+{{- end }}
+

@@ -45,6 +45,11 @@ pub struct LogoutRequest {
     pub completion: oneshot::Sender<Result<(), String>>,
 }
 
+pub struct Requests {
+    pub telemetry: mpsc::Receiver<ModelTelemetryEvent>,
+    pub logout: mpsc::Receiver<LogoutRequest>,
+}
+
 pub async fn run(
     controller: ControllerConnectionConfig,
     discovered: AgentDiscovery,
@@ -52,9 +57,12 @@ pub async fn run(
     oidc_callback_listen: Option<SocketAddr>,
     reconciler: Reconciler,
     enrollment: EnrollmentState,
-    mut telemetry: mpsc::Receiver<ModelTelemetryEvent>,
-    mut logout: mpsc::Receiver<LogoutRequest>,
+    requests: Requests,
 ) -> anyhow::Result<()> {
+    let Requests {
+        mut telemetry,
+        mut logout,
+    } = requests;
     let identity_path = state_dir.join("identity.json");
     loop {
         let mut identity = match identity::load(&identity_path)? {

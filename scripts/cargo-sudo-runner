@@ -1,7 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-exec /usr/bin/sudo \
-  --preserve-env=RUST_LOG,LOG_FORMAT \
-  -- /usr/bin/env "PATH=${PATH}" \
-  "$@"

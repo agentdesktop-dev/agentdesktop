@@ -1,0 +1,4 @@
+packages:
+  - controller
+  - desktop
+  - ui

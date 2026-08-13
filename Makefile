@@ -1,40 +1,44 @@
 IMAGE ?= agentdesktop-controller:dev
 
-.PHONY: build test check lint ui ui-check desktop desktop-check format gen generate-schema docker clean
+.PHONY: build install test check lint frontend frontend-check desktop desktop-check format gen generate-schema docker clean
 
-build: ui
+build: frontend
 	cargo build --workspace
 
-test: ui
+install: frontend
+	cargo install --path crates/agentdesktop --locked --force
+	cargo install --path crates/controller --locked --force
+
+test: frontend
 	cargo test --workspace
 
-check: lint ui-check
+check: lint frontend-check
 
 lint:
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets -- -D warnings
 
-ui:
-	cd ui && pnpm install --frozen-lockfile
-	cd ui && pnpm build
+frontend:
+	pnpm --dir frontend install --frozen-lockfile
+	pnpm --dir frontend build
 
-ui-check:
-	cd ui && pnpm install --frozen-lockfile
-	cd ui && pnpm check
+frontend-check:
+	pnpm --dir frontend install --frozen-lockfile
+	pnpm --dir frontend check
 
 desktop:
-	cd desktop && npm ci
-	cd desktop && npm run build
+	pnpm --dir frontend install --frozen-lockfile
+	pnpm --dir frontend --filter @agentdesktop/desktop-web build
 	cargo build -p agentdesktop
 
 desktop-check:
-	cd desktop && npm ci
-	cd desktop && npm run build
+	pnpm --dir frontend install --frozen-lockfile
+	pnpm --dir frontend --filter @agentdesktop/desktop-web build
 	cargo check -p agentdesktop
 
 format:
 	cargo fmt --all
-	cd ui && pnpm format
+	pnpm --dir frontend format
 
 gen: generate-schema format
 	@:
@@ -47,5 +51,5 @@ docker:
 
 clean:
 	cargo clean
-	rm -rf ui/dist
-	rm -rf desktop/dist
+	rm -rf frontend/controller/dist
+	rm -rf frontend/desktop/dist

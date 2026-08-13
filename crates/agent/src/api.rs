@@ -216,11 +216,8 @@ async fn inference_gateway_credential(
             "daemon has no controller configured".to_string(),
         )
     })?;
-    // TODO: The client ID is asserted, not authenticated. On Linux we could use
-    // SO_PEERCRED to obtain the helper's PID and inspect its /proc parent chain
-    // for the expected Codex, Claude Code, or OpenCode executable. Equivalent
-    // peer-PID APIs exist for other local transports. This would provide useful
-    // process evidence, but not a hard boundary against the same user or root.
+    // Local transport permissions authenticate the user, not the calling
+    // process. The client ID selects an allowed policy within that boundary.
     remote::inference_gateway_credential(controller, &state.state_dir, &query.client_id)
         .await
         .map(Json)

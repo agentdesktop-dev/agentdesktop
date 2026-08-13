@@ -56,57 +56,14 @@ short-lived credentials for the inference gateway through the daemon.
 
 ## Try it locally
 
-The included scenario starts Dex as the identity provider, Agentgateway as the
-inference gateway, the Agentdesktop controller, and a local device daemon.
-
-You need Rust, pnpm, Docker Compose, and OpenSSL.
-
-1. Create a development signing key:
-
-   ```console
-   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
-     -out /tmp/agentdesktop-gateway-jwt.pem
-   ```
-
-2. Start Dex and Agentgateway:
-
-   ```console
-   docker compose -f examples/claude/compose.yaml up -d
-   ```
-
-3. Build the UI and start the controller:
-
-   ```console
-   make ui
-   cargo run --bin agentdesktop-controller -- \
-     --config examples/claude/controller.yaml
-   ```
-
-4. In another terminal, start the device daemon:
-
-   ```console
-   ./scripts/run-agentdesktop-root \
-     --config examples/claude/agentdesktop.yaml
-   ```
-
-Open <http://127.0.0.1:8080> and enroll with:
-
-```text
-admin@example.com
-password
-```
-
-The complete local setup is in [examples/claude](examples/claude/README.md).
+To run a simple example setup, follow the [Claude Code example](./examples/claude) which walks through
+managed Claude Code on managed devices and redirecting traffic through an Agentgateway instance.
 
 ## Configuration
 
-The controller watches a daemon configuration file and distributes each valid
-revision to connected devices. The management UI includes a configuration
-wizard that produces YAML for you to review and place in that file; it does not
-write to the controller filesystem.
+The controller watches a configuration file and distributes configuration to connected devices.
 
-A small configuration can manage a shared gateway, telemetry, Claude Code, and
-Claude Desktop:
+A small configuration can manage a shared gateway, telemetry, and agents. For example:
 
 ```yaml
 inferenceGateway:
@@ -125,28 +82,24 @@ programs:
   claudeCode:
     permissions:
       defaultMode: plan
+    companyAnnouncements: ["Managed by Agentdesktop"]
   claudeDesktop:
     isLocalDevMcpEnabled: true
 ```
 
-## Enrollment and gateway identity
+## Enrollment and identity
 
-Devices enroll with an OIDC authorization-code flow using PKCE. After
-enrollment, the daemon maintains an outbound connection to the controller for
-inventory, configuration, heartbeat, and telemetry traffic.
+Devices are enrolled through a dual-authentication scheme.
+A private key is bound to a device and never leaves that device.
+The public key is used to authenticate the device to the controller.
 
-When an agent requests a gateway credential, the controller issues a
-short-lived JWT containing the verified OIDC identity, the device ID, and the
-requesting client name. Agentgateway can trust the controller's JWKS and use
-those claims for authentication and policy.
+Additionally, an OIDC flow is used to authenticate the *user* of the device with an IDP-bound identity.
+
 
 ## Telemetry
 
-Telemetry is disabled unless events are selected in configuration.
-
-- `session.new` records a new agent session and its session identifier.
-- `tool.use` records tool-use metadata.
-- `tool.use.input` also includes the tool's input JSON.
+Sensitive events on from agents on devices, such as tool usages, session creation, etc can be reported
+back to the controll (opt-in).
 
 ## Project policy
 

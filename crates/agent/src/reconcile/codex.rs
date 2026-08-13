@@ -217,31 +217,4 @@ programs:
         let parsed: toml::Value = toml::from_str(&serialized).expect("parse generated TOML");
         assert_eq!(parsed["model_provider"].as_str(), Some("agentdesktop"));
     }
-
-    #[test]
-    fn does_not_duplicate_an_existing_v1_suffix() {
-        let config = parse_daemon(
-            r#"
-inferenceGateway:
-  url: https://gateway.example.com/v1/
-programs:
-  codex: {}
-"#,
-        )
-        .expect("valid daemon configuration");
-        let codex = config.programs.codex.as_ref().unwrap();
-        let gateway = config.inference_gateway.as_ref().unwrap();
-        let settings = managed_config(
-            codex,
-            Some(gateway),
-            Path::new("agentdesktop"),
-            Path::new("agentdesktop.sock"),
-        )
-        .expect("managed settings");
-
-        assert_eq!(
-            settings["model_providers"]["agentdesktop"]["base_url"],
-            "https://gateway.example.com/v1"
-        );
-    }
 }

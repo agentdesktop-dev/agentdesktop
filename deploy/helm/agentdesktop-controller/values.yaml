@@ -1,0 +1,39 @@
+replicaCount: 1
+
+image:
+  repository: agentdesktop-controller
+  tag: latest
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+controller:
+  # This chart does not deploy PostgreSQL. Point this URL at an existing
+  # database. Prefer existingConfigSecret when the URL contains credentials.
+  databaseUrl: ""
+  oidc:
+    issuer: https://id.example.com
+    clientId: agentdesktop
+    redirectUri: http://127.0.0.1:5555/callback
+  allowInsecureDev: false
+
+  # When set, this Secret is mounted instead of the generated ConfigMap. It
+  # must contain a complete controller configuration at configSecretKey.
+  existingConfigSecret: ""
+  configSecretKey: controller.yaml
+
+  # Existing Secret containing controller.pem, controller-key.pem,
+  # device-ca.pem, and device-ca-key.pem.
+  tlsSecretName: agentdesktop-controller-tls
+
+service:
+  type: ClusterIP
+  port: 8443
+
+resources: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

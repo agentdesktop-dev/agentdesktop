@@ -31,12 +31,22 @@ jobs:
       - name: Install Node
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
-          node-version-file: ui/.nvmrc
+          node-version-file: frontend/.nvmrc
 
       - name: Install UI dependencies
         run: |
           corepack enable
-          corepack pnpm --dir ui install --frozen-lockfile
+          corepack pnpm --dir frontend install --frozen-lockfile
+
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
 
       - name: Set up Rust build cache
         uses: ./.github/actions/rust-build-cache

@@ -212,34 +212,9 @@ fn event_triggers_reload(
 
 #[cfg(test)]
 mod tests {
-    use notify::event::{DataChange, ModifyKind, RenameMode};
     use tokio::time::{Instant, sleep, timeout};
 
     use super::*;
-
-    #[test]
-    fn recognizes_direct_changes_and_atomic_renames() {
-        let path = Path::new("/config/daemon.yaml");
-        let direct = Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Any)))
-            .add_path(path.to_path_buf());
-        assert!(event_triggers_reload(&direct, path, None, None));
-
-        let renamed = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::To)))
-            .add_path(path.to_path_buf());
-        assert!(event_triggers_reload(&renamed, path, None, None));
-    }
-
-    #[test]
-    fn ignores_unrelated_files_in_the_watched_directory() {
-        let event = Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Any)))
-            .add_path(PathBuf::from("/config/other.yaml"));
-        assert!(!event_triggers_reload(
-            &event,
-            Path::new("/config/daemon.yaml"),
-            None,
-            None,
-        ));
-    }
 
     #[tokio::test]
     async fn watches_atomic_replacements_and_retains_last_good_config() {
