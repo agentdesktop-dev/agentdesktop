@@ -260,6 +260,7 @@ inferenceGateway:
   authentication:
     type: controllerJwt
     audience: agentgateway
+    allowedClientIds: [opencode]
 programs:
   openCode:
     model: gpt-company

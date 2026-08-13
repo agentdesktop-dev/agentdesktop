@@ -34,6 +34,8 @@ memchr = "2.8"
 notify = "8.2"
 notify-debouncer-full = "0.7"
 jsonwebtoken = { version = "11.0", features = ["aws_lc_rs"] }
+keyring = "4.1"
+libc = "0.2"
 open = "5.4"
 pem-rfc7468 = { version = "1", features = ["alloc"] }
 prost = "0.14"

@@ -108,6 +108,14 @@
           "description": "Request a short-lived JWT from the controller using the device identity.",
           "type": "object",
           "properties": {
+            "allowedClientIds": {
+              "description": "Client identifiers permitted to request credentials for this gateway.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "uniqueItems": true
+            },
             "audience": {
               "description": "Audience placed in the issued JWT. This must match the gateway's expected audience.",
               "type": "string"
@@ -120,7 +128,8 @@
           "additionalProperties": false,
           "required": [
             "type",
-            "audience"
+            "audience",
+            "allowedClientIds"
           ]
         }
       ]

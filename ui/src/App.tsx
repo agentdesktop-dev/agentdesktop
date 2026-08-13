@@ -1271,6 +1271,7 @@ function daemonConfigYaml(options: {
         "  authentication:",
         "    type: controllerJwt",
         `    audience: ${yamlString(options.audience)}`,
+        "    allowedClientIds: [claude-code, claude-desktop, codex, opencode]",
       );
     }
     lines.push("");

@@ -114,6 +114,7 @@ inferenceGateway:
   authentication:
     type: controllerJwt
     audience: agentgateway
+    allowedClientIds: [claude-code, claude-desktop, codex, opencode]
 
 telemetry:
   events:

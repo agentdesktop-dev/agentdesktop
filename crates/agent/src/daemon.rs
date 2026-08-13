@@ -1,6 +1,6 @@
 use std::{
     net::SocketAddr,
-    os::unix::fs::{FileTypeExt, PermissionsExt},
+    os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
@@ -26,6 +26,10 @@ pub struct DaemonArgs {
     /// Address for the OIDC callback server to bind instead of the redirect URI's loopback address.
     #[arg(long)]
     oidc_callback_listen: Option<SocketAddr>,
+
+    /// UID permitted to access the local API. Defaults to the daemon's effective UID.
+    #[arg(long)]
+    local_api_uid: Option<u32>,
 
     /// Directory containing Claude Code managed-settings drop-in files.
     #[arg(
@@ -151,7 +155,8 @@ pub async fn run(args: DaemonArgs, socket: PathBuf) -> anyhow::Result<()> {
             }
         });
     }
-    let listener = bind(&socket)?;
+    let local_api_uid = args.local_api_uid.unwrap_or_else(effective_uid);
+    let listener = bind(&socket, local_api_uid)?;
     let app = api::router(api::AppState {
         config,
         discovery,
@@ -165,6 +170,16 @@ pub async fn run(args: DaemonArgs, socket: PathBuf) -> anyhow::Result<()> {
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, _) = accepted.context("accept connection")?;
+                let peer = stream.peer_cred().context("inspect local API peer credentials")?;
+                if peer.uid() != local_api_uid {
+                    tracing::warn!(
+                        peer_uid = peer.uid(),
+                        peer_pid = peer.pid(),
+                        allowed_uid = local_api_uid,
+                        "rejected unauthorized local API connection"
+                    );
+                    continue;
+                }
                 let service = TowerToHyperService::new(app.clone());
                 tokio::spawn(async move {
                     if let Err(error) = hyper::server::conn::http1::Builder::new()
@@ -192,7 +207,7 @@ fn agentdesktop_executable() -> anyhow::Result<PathBuf> {
     std::env::current_exe().context("locate agentdesktop executable")
 }
 
-fn bind(path: &PathBuf) -> anyhow::Result<UnixListener> {
+fn bind(path: &PathBuf, local_api_uid: u32) -> anyhow::Result<UnixListener> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create socket directory {}", parent.display()))?;
@@ -212,14 +227,22 @@ fn bind(path: &PathBuf) -> anyhow::Result<UnixListener> {
 
     let listener =
         UnixListener::bind(path).with_context(|| format!("bind socket {}", path.display()))?;
-    configure_socket_access(path)?;
+    configure_socket_access(path, local_api_uid)?;
     Ok(listener)
 }
 
-fn configure_socket_access(path: &Path) -> anyhow::Result<()> {
-    // The local API intentionally permits arbitrary clients. In particular,
-    // client_id on credential requests is caller-asserted rather than an
-    // authenticated process identity.
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))
+fn configure_socket_access(path: &Path, local_api_uid: u32) -> anyhow::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("inspect socket ownership for {}", path.display()))?;
+    if metadata.uid() != local_api_uid {
+        std::os::unix::fs::chown(path, Some(local_api_uid), None)
+            .with_context(|| format!("set socket owner for {}", path.display()))?;
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
         .with_context(|| format!("set socket permissions on {}", path.display()))
+}
+
+fn effective_uid() -> u32 {
+    // SAFETY: geteuid has no preconditions and does not dereference pointers.
+    unsafe { libc::geteuid() }
 }

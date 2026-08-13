@@ -172,6 +172,7 @@ inferenceGateway:
   authentication:
     type: controllerJwt
     audience: agentgateway
+    allowedClientIds: [codex]
 programs:
   codex:
     managedConfig:
