@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(about = "Manage the local Agentdesktop daemon")]
 struct Args {
-    /// Unix socket exposed by the local Agentdesktop daemon.
+    /// Local endpoint exposed by the daemon (Unix socket or Windows named pipe).
     #[arg(long, default_value = DEFAULT_SOCKET_PATH, global = true)]
     socket: PathBuf,
 

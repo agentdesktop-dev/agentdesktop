@@ -205,8 +205,3 @@ pub fn default_claude_code_managed_settings_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"));
     program_files.join("ClaudeCode").join("managed-settings.d")
 }
-
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-pub fn default_claude_code_managed_settings_dir() -> PathBuf {
-    PathBuf::from("/etc/claude-code/managed-settings.d")
-}
