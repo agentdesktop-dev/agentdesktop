@@ -74,7 +74,7 @@ pub async fn run(
                 Ok(()) => warn!("controller stream closed"),
                 Err(error) if is_unauthenticated(&error) => {
                     let error_chain = format!("{error:#}");
-                    invalidate_identity(&identity_path)?;
+                    identity::delete(&identity_path, &identity.device_id)?;
                     enrollment.set("starting").await;
                     warn!(
                         controller = %controller.address,
@@ -105,16 +105,6 @@ fn is_unauthenticated(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<tonic::Status>()
         .is_some_and(|status| status.code() == tonic::Code::Unauthenticated)
-}
-
-fn invalidate_identity(path: &Path) -> anyhow::Result<()> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => {
-            Err(error).with_context(|| format!("remove rejected identity {}", path.display()))
-        }
-    }
 }
 
 pub async fn inference_gateway_credential(
@@ -377,25 +367,12 @@ pub(crate) fn hostname() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{invalidate_identity, is_unauthenticated};
+    use super::is_unauthenticated;
 
     #[test]
     fn recognizes_contextualized_unauthenticated_status() {
         let error = anyhow::Error::new(tonic::Status::unauthenticated("rejected"))
             .context("open controller stream");
         assert!(is_unauthenticated(&error));
-    }
-
-    #[test]
-    fn removes_rejected_identity_and_accepts_an_absent_file() {
-        let path = std::env::temp_dir().join(format!(
-            "agentdesktop-rejected-identity-{}.json",
-            std::process::id()
-        ));
-        std::fs::write(&path, b"identity").expect("write identity");
-
-        invalidate_identity(&path).expect("remove identity");
-        assert!(!path.exists());
-        invalidate_identity(&path).expect("already absent identity");
     }
 }

@@ -19,6 +19,8 @@ docker compose -f examples/claude/compose.yaml up -d
 ```
 
 Run the local daemon. Note: typically this would be run on a different machine; for this example we run the controller and daemon together.
+The helper authorizes the invoking desktop user to access the local API. Direct
+system deployments should pass that user's numeric UID with `--local-api-uid`.
 ```console
 ./scripts/run-agentdesktop-root \
   --config examples/claude/agentdesktop.yaml

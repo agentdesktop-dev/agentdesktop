@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 workspace_dir="$(cd -- "${script_dir}/.." && pwd)"
+local_api_uid="$(id -u)"
 
 cargo build \
   --manifest-path "${workspace_dir}/Cargo.toml" \
@@ -11,4 +12,5 @@ cargo build \
 exec "${script_dir}/cargo-sudo-runner" \
   "${workspace_dir}/target/debug/agentdesktop" \
   daemon \
+  --local-api-uid "${local_api_uid}" \
   "$@"

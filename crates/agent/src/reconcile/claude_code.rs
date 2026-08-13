@@ -224,6 +224,7 @@ inferenceGateway:
   authentication:
     type: controllerJwt
     audience: agentgateway
+    allowedClientIds: [claude-code]
 programs:
   claudeCode:
     apiKeyHelper: ignored-helper

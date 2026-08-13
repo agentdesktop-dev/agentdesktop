@@ -54,6 +54,9 @@ pub enum InferenceGatewayAuthentication {
     ControllerJwt {
         /// Audience placed in the issued JWT. This must match the gateway's expected audience.
         audience: String,
+        /// Client identifiers permitted to request credentials for this gateway.
+        #[serde(rename = "allowedClientIds")]
+        allowed_client_ids: BTreeSet<String>,
     },
 }
 
@@ -497,11 +500,23 @@ fn validate_daemon(
         if gateway.url.query().is_some() || gateway.url.fragment().is_some() {
             anyhow::bail!("inference gateway URL cannot include a query or fragment");
         }
-        if let Some(InferenceGatewayAuthentication::ControllerJwt { audience }) =
-            &gateway.authentication
-            && audience.trim().is_empty()
+        if let Some(InferenceGatewayAuthentication::ControllerJwt {
+            audience,
+            allowed_client_ids,
+        }) = &gateway.authentication
         {
-            anyhow::bail!("inference gateway JWT audience cannot be empty");
+            if audience.trim().is_empty() {
+                anyhow::bail!("inference gateway JWT audience cannot be empty");
+            }
+            if allowed_client_ids.is_empty() {
+                anyhow::bail!("inference gateway JWT allowedClientIds cannot be empty");
+            }
+            if let Some(client_id) = allowed_client_ids
+                .iter()
+                .find(|client_id| !valid_client_id(client_id))
+            {
+                anyhow::bail!("invalid inference gateway client ID {client_id}");
+            }
         }
     }
 
@@ -519,6 +534,15 @@ fn validate_daemon(
         }
     }
     Ok(())
+}
+
+/// Returns whether a caller-provided inference-gateway client identifier is valid.
+pub fn valid_client_id(client_id: &str) -> bool {
+    !client_id.is_empty()
+        && client_id.len() <= 64
+        && client_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 fn default_true() -> bool {
@@ -557,6 +581,30 @@ programs:
             .expect("controller-connected daemon example");
         parse_daemon(include_str!("../../../examples/claude/claude-code.yaml"))
             .expect("Claude Code daemon configuration example");
+    }
+
+    #[test]
+    fn controller_jwt_requires_an_explicit_valid_client_allowlist() {
+        let missing = r#"
+inferenceGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
+"#;
+        let error = parse_daemon(missing).expect_err("missing allowlist must fail");
+        assert!(format!("{error:#}").contains("allowedClientIds"));
+
+        let invalid = r#"
+inferenceGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
+    allowedClientIds: ["not a client"]
+"#;
+        let error = parse_daemon(invalid).expect_err("invalid allowlist entry must fail");
+        assert!(format!("{error:#}").contains("invalid inference gateway client ID"));
     }
 
     #[test]

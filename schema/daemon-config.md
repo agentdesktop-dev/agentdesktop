@@ -8,6 +8,7 @@
 |`controller.heartbeatInterval`|string|Interval between device heartbeats. Defaults to `30s`.|
 |`inferenceGateway`|object|Inference gateway used by managed developer tools.|
 |`inferenceGateway.authentication`|object|Authentication mechanism used when connecting to this gateway.|
+|`inferenceGateway.authentication.allowedClientIds`|[]string|Client identifiers permitted to request credentials for this gateway.|
 |`inferenceGateway.authentication.audience`|string|Audience placed in the issued JWT. This must match the gateway's expected audience.|
 |`inferenceGateway.authentication.type`|enum|Possible values: `controllerJwt`.|
 |`inferenceGateway.url`|string|Base HTTP or HTTPS URL of the inference gateway.<br><br>The URL must include a host and cannot include credentials, a query, or a fragment.|

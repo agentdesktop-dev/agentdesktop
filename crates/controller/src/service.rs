@@ -94,12 +94,7 @@ impl FleetAgent for FleetAgentService {
     ) -> Result<Response<InferenceGatewayCredentialResponse>, Status> {
         let device_id = self.authenticate_device(request.metadata()).await?;
         let client_id = request.into_inner().client_id;
-        if client_id.is_empty()
-            || client_id.len() > 64
-            || !client_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-        {
+        if !agentdesktop_core::config::valid_client_id(&client_id) {
             return Err(Status::invalid_argument("invalid client_id"));
         }
         let daemon = self
@@ -113,14 +108,24 @@ impl FleetAgent for FleetAgentService {
             .inference_gateway
             .as_ref()
             .ok_or_else(|| Status::not_found("inference gateway is not configured"))?;
-        let audience = match gateway.authentication.as_ref() {
-            Some(InferenceGatewayAuthentication::ControllerJwt { audience }) => audience,
+        let (audience, allowed_client_ids) = match gateway.authentication.as_ref() {
+            Some(InferenceGatewayAuthentication::ControllerJwt {
+                audience,
+                allowed_client_ids,
+            }) => (audience, allowed_client_ids),
             None => {
                 return Err(Status::failed_precondition(
                     "inference gateway does not use controller JWT authentication",
                 ));
             }
         };
+        if !allowed_client_ids.contains(&client_id) {
+            warn!(
+                device_id,
+                client_id, "rejected disallowed inference gateway client"
+            );
+            return Err(Status::permission_denied("client_id is not allowed"));
+        }
         let issuer = self.gateway_jwt_issuer.as_ref().ok_or_else(|| {
             Status::failed_precondition("controller gateway JWT issuer is not configured")
         })?;

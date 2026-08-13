@@ -175,6 +175,7 @@ inferenceGateway:
   authentication:
     type: controllerJwt
     audience: agentgateway
+    allowedClientIds: [claude-desktop]
 programs:
   claudeDesktop:
     isLocalDevMcpEnabled: true
