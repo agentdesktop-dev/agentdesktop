@@ -27,6 +27,7 @@ struct Inner {
     redirect_uri: String,
     authorization_endpoint: Url,
     token_endpoint: Url,
+    userinfo_endpoint: Url,
     jwks: JwkSet,
     http: reqwest::Client,
     pending: Mutex<HashMap<String, PendingEnrollment>>,
@@ -50,12 +51,8 @@ struct DiscoveryDocument {
     issuer: String,
     authorization_endpoint: Url,
     token_endpoint: Url,
+    userinfo_endpoint: Url,
     jwks_uri: Url,
-}
-
-#[derive(Deserialize)]
-struct TokenResponse {
-    id_token: String,
 }
 
 #[derive(Deserialize)]
@@ -64,6 +61,11 @@ struct IdTokenClaims {
     nonce: String,
     #[serde(flatten)]
     additional: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct UserInfo {
+    sub: String,
 }
 
 impl OidcProvider {
@@ -113,6 +115,7 @@ impl OidcProvider {
                 redirect_uri,
                 authorization_endpoint: document.authorization_endpoint,
                 token_endpoint: document.token_endpoint,
+                userinfo_endpoint: document.userinfo_endpoint,
                 jwks,
                 http,
                 pending: Mutex::new(HashMap::new()),
@@ -143,7 +146,7 @@ impl OidcProvider {
         authorization_url
             .query_pairs_mut()
             .append_pair("response_type", "code")
-            .append_pair("scope", "openid profile email")
+            .append_pair("scope", "openid profile email offline_access")
             .append_pair("client_id", &self.inner.client_id)
             .append_pair("redirect_uri", &self.inner.redirect_uri)
             .append_pair("state", &state)
@@ -171,12 +174,15 @@ impl OidcProvider {
             authorization_url: authorization_url.into(),
             state,
             redirect_uri: self.inner.redirect_uri.clone(),
+            token_endpoint: self.inner.token_endpoint.to_string(),
+            client_id: self.inner.client_id.clone(),
         })
     }
 
     pub async fn complete(
         &self,
         request: CompleteEnrollmentRequest,
+        access_token: &str,
     ) -> anyhow::Result<CompletedEnrollment> {
         let pending = self
             .inner
@@ -188,33 +194,10 @@ impl OidcProvider {
         if pending.expires_at <= Instant::now() {
             bail!("enrollment expired");
         }
-        if request.authorization_code.is_empty() || request.code_verifier.is_empty() {
-            bail!("authorization code and PKCE verifier are required");
+        if request.id_token.is_empty() || access_token.is_empty() {
+            bail!("ID token and access token are required");
         }
-
-        let body = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("grant_type", "authorization_code")
-            .append_pair("code", &request.authorization_code)
-            .append_pair("redirect_uri", &self.inner.redirect_uri)
-            .append_pair("client_id", &self.inner.client_id)
-            .append_pair("code_verifier", &request.code_verifier)
-            .finish();
-        let token = self
-            .inner
-            .http
-            .post(self.inner.token_endpoint.clone())
-            .header("content-type", "application/x-www-form-urlencoded")
-            .body(body)
-            .send()
-            .await
-            .context("exchange OIDC authorization code")?
-            .error_for_status()
-            .context("OIDC token endpoint rejected authorization code")?
-            .json::<TokenResponse>()
-            .await
-            .context("decode OIDC token response")?;
-
-        let header = decode_header(&token.id_token).context("decode ID token header")?;
+        let header = decode_header(&request.id_token).context("decode ID token header")?;
         let kid = header.kid.context("ID token has no key ID")?;
         let jwk = self
             .inner
@@ -226,11 +209,15 @@ impl OidcProvider {
         validation.set_issuer(&[&self.inner.issuer]);
         validation.set_audience(&[&self.inner.client_id]);
         validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
-        let claims = decode::<IdTokenClaims>(&token.id_token, &key, &validation)
+        let claims = decode::<IdTokenClaims>(&request.id_token, &key, &validation)
             .context("validate OIDC ID token")?
             .claims;
         if claims.nonce != pending.nonce {
             bail!("OIDC nonce mismatch");
+        }
+        let access_subject = self.authenticate_access_token(access_token).await?;
+        if access_subject != claims.sub {
+            bail!("access token and ID token subjects do not match");
         }
 
         let mut idp_claims = claims.additional;
@@ -243,6 +230,29 @@ impl OidcProvider {
             subject: claims.sub,
             idp_claims,
         })
+    }
+
+    pub async fn authenticate_access_token(&self, access_token: &str) -> anyhow::Result<String> {
+        if access_token.is_empty() {
+            bail!("access token is required");
+        }
+        let user = self
+            .inner
+            .http
+            .get(self.inner.userinfo_endpoint.clone())
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .context("query OIDC UserInfo endpoint")?
+            .error_for_status()
+            .context("OIDC UserInfo endpoint rejected access token")?
+            .json::<UserInfo>()
+            .await
+            .context("decode OIDC UserInfo response")?;
+        if user.sub.is_empty() {
+            bail!("OIDC UserInfo response has no subject");
+        }
+        Ok(user.sub)
     }
 }
 

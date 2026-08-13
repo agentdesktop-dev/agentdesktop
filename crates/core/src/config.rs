@@ -109,7 +109,7 @@ pub enum TelemetryEventName {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ControllerConnectionConfig {
-    /// HTTP or HTTPS address of the controller's fleet API.
+    /// HTTPS address of the controller's fleet API.
     pub address: String,
     /// Path to a PEM-encoded CA certificate used to verify the controller.
     ///
@@ -138,19 +138,20 @@ pub struct ControllerConfig {
     /// SQLite or PostgreSQL URL used for controller state.
     #[serde(default = "default_controller_database_url")]
     pub database_url: String,
-    /// OpenID Connect enrollment settings. Omit to disable new enrollment.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub oidc: Option<ControllerOidcConfig>,
+    /// OpenID Connect settings used for device enrollment and authorization.
+    pub oidc: ControllerOidcConfig,
     /// Daemon configuration distributed to enrolled devices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daemon_config: Option<ControllerDaemonConfig>,
     /// Inference-gateway JWT signing settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_jwt: Option<ControllerGatewayJwtConfig>,
-    /// TLS identity used by the device-facing fleet API.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tls: Option<ControllerTlsConfig>,
-    /// Permit plaintext remote fleet traffic and non-HTTPS OIDC.
+    /// TLS identities used by the device-facing fleet API.
+    ///
+    /// A string selects a directory containing `controller.pem`,
+    /// `controller-key.pem`, `device-ca.pem`, and `device-ca-key.pem`.
+    pub tls: ControllerTlsConfig,
+    /// Permit a non-HTTPS OIDC issuer for isolated local development.
     ///
     /// This escape hatch is only appropriate for isolated local development.
     #[serde(default)]
@@ -207,11 +208,22 @@ pub struct ControllerGatewayJwtConfig {
     pub lifetime: Duration,
 }
 
-/// TLS certificate and private key used by the fleet API.
+/// TLS configuration for the fleet API and device certificate issuer.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum ControllerTlsConfig {
+    /// Directory containing the four standard TLS files.
+    Directory(PathBuf),
+    /// Explicit paths to each TLS file.
+    Files(ControllerTlsFiles),
+}
+
+/// Explicit TLS file paths for the fleet API and device certificate issuer.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ControllerTlsConfig {
+pub struct ControllerTlsFiles {
     /// Path to the PEM-encoded TLS certificate chain.
     ///
     /// Relative paths are resolved from the controller configuration directory.
@@ -220,19 +232,24 @@ pub struct ControllerTlsConfig {
     ///
     /// Relative paths are resolved from the controller configuration directory.
     pub key: PathBuf,
+    /// PEM CA roots used to verify issued device client certificates.
+    pub client_ca_certificate: PathBuf,
+    /// PEM private key used to issue device certificates from `clientCaCertificate`.
+    ///
+    /// Enrolled daemons generate their own private key and send a CSR.
+    pub client_ca_key: PathBuf,
 }
 
-impl Default for ControllerConfig {
-    fn default() -> Self {
-        Self {
-            fleet_listen: default_fleet_listen(),
-            admin_listen: default_admin_listen(),
-            database_url: default_controller_database_url(),
-            oidc: None,
-            daemon_config: None,
-            gateway_jwt: None,
-            tls: None,
-            allow_insecure_dev: false,
+impl ControllerTlsConfig {
+    pub fn files(&self) -> ControllerTlsFiles {
+        match self {
+            Self::Directory(directory) => ControllerTlsFiles {
+                certificate: directory.join("controller.pem"),
+                key: directory.join("controller-key.pem"),
+                client_ca_certificate: directory.join("device-ca.pem"),
+                client_ca_key: directory.join("device-ca-key.pem"),
+            },
+            Self::Files(files) => files.clone(),
         }
     }
 }
@@ -405,9 +422,14 @@ pub fn load_controller(path: &Path) -> anyhow::Result<ControllerConfig> {
     if let Some(gateway) = &mut config.gateway_jwt {
         resolve_relative(&mut gateway.private_key, directory);
     }
-    if let Some(tls) = &mut config.tls {
-        resolve_relative(&mut tls.certificate, directory);
-        resolve_relative(&mut tls.key, directory);
+    match &mut config.tls {
+        ControllerTlsConfig::Directory(path) => resolve_relative(path, directory),
+        ControllerTlsConfig::Files(tls) => {
+            resolve_relative(&mut tls.certificate, directory);
+            resolve_relative(&mut tls.key, directory);
+            resolve_relative(&mut tls.client_ca_certificate, directory);
+            resolve_relative(&mut tls.client_ca_key, directory);
+        }
     }
     Ok(config)
 }
@@ -419,27 +441,20 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
     if !config.admin_listen.ip().is_loopback() {
         anyhow::bail!("adminListen must use a loopback address");
     }
-    if !config.fleet_listen.ip().is_loopback() && config.tls.is_none() && !config.allow_insecure_dev
-    {
-        anyhow::bail!(
-            "a non-loopback fleetListen requires tls; allowInsecureDev is only for isolated development"
-        );
+    let oidc = &config.oidc;
+    if oidc.client_id.trim().is_empty() {
+        anyhow::bail!("oidc.clientId cannot be empty");
     }
-    if let Some(oidc) = &config.oidc {
-        if oidc.client_id.trim().is_empty() {
-            anyhow::bail!("oidc.clientId cannot be empty");
-        }
-        let issuer = Url::parse(&oidc.issuer).context("parse oidc.issuer URL")?;
-        match issuer.scheme() {
-            "https" => {}
-            "http" if config.allow_insecure_dev => {}
-            "http" => anyhow::bail!(
-                "oidc.issuer must use HTTPS; allowInsecureDev is only for isolated development"
-            ),
-            scheme => anyhow::bail!("oidc.issuer must use HTTPS, got {scheme}"),
-        }
-        Url::parse(&oidc.redirect_uri).context("parse oidc.redirectUri URL")?;
+    let issuer = Url::parse(&oidc.issuer).context("parse oidc.issuer URL")?;
+    match issuer.scheme() {
+        "https" => {}
+        "http" if config.allow_insecure_dev => {}
+        "http" => anyhow::bail!(
+            "oidc.issuer must use HTTPS; allowInsecureDev is only for isolated development"
+        ),
+        scheme => anyhow::bail!("oidc.issuer must use HTTPS, got {scheme}"),
     }
+    Url::parse(&oidc.redirect_uri).context("parse oidc.redirectUri URL")?;
     if let Some(daemon) = &config.daemon_config
         && daemon.revision == 0
     {
@@ -469,6 +484,11 @@ fn resolve_relative(path: &mut PathBuf, directory: &Path) {
 pub fn parse_daemon(contents: &str) -> anyhow::Result<DaemonConfig> {
     let config: DaemonConfig =
         crate::serdes::yamlviajson::from_str(contents).context("parse daemon configuration")?;
+    if let Some(controller) = &config.controller {
+        if !controller.address.starts_with("https://") {
+            anyhow::bail!("controller address must use HTTPS");
+        }
+    }
     validate_daemon(config.inference_gateway.as_ref(), &config.programs)?;
     Ok(config)
 }
@@ -561,7 +581,7 @@ mod tests {
     fn daemon_configuration_supports_local_and_managed_options() {
         let document = r#"
 controller:
-  address: http://127.0.0.1:8443
+  address: https://127.0.0.1:8443
 inferenceGateway:
   url: http://127.0.0.1:8080
 programs:
@@ -571,6 +591,48 @@ programs:
         let daemon = parse_daemon(document).expect("valid daemon configuration");
         assert!(daemon.controller.is_some());
         assert!(daemon.inference_gateway.is_some());
+    }
+
+    #[test]
+    fn daemon_controller_requires_https() {
+        let plaintext = r#"
+controller:
+  address: http://controller.example.com
+"#;
+        assert!(parse_daemon(plaintext).is_err());
+
+        let valid = r#"
+controller:
+  address: https://controller.example.com
+"#;
+        assert!(parse_daemon(valid).is_ok());
+    }
+
+    #[test]
+    fn controller_tls_accepts_explicit_files_and_directory_shorthand() {
+        let explicit = r#"
+tls:
+  certificate: /server.pem
+  key: /server-key.pem
+  clientCaCertificate: /device-ca.pem
+  clientCaKey: /device-ca-key.pem
+oidc:
+  issuer: https://idp.example.com
+  clientId: agentdesktop
+"#;
+        parse_controller(explicit).expect("explicit TLS files");
+
+        let directory = r#"
+tls: /etc/agentdesktop/tls
+oidc:
+  issuer: https://idp.example.com
+  clientId: agentdesktop
+"#;
+        let controller = parse_controller(directory).expect("TLS directory shorthand");
+        assert_eq!(
+            controller.tls.files().certificate,
+            std::path::PathBuf::from("/etc/agentdesktop/tls/controller.pem")
+        );
     }
 
     #[test]
@@ -613,6 +675,7 @@ inferenceGateway:
             parse_controller(
                 r#"
 fleetListen: 0.0.0.0:8443
+tls: /etc/agentdesktop/tls
 oidc:
   issuer: http://idp.example.com
   clientId: agentdesktop
@@ -624,6 +687,7 @@ oidc:
             r#"
 fleetListen: 0.0.0.0:8443
 allowInsecureDev: true
+tls: /etc/agentdesktop/tls
 oidc:
   issuer: http://idp.example.com
   clientId: agentdesktop

@@ -1,4 +1,5 @@
 # yaml-language-server: $schema=../../schema/daemon-config.json
 controller:
-  address: http://127.0.0.1:8443
+  address: https://127.0.0.1:8443
+  caCertificatePath: /tmp/agentdesktop-keys/device-ca.pem
   heartbeatInterval: 60s

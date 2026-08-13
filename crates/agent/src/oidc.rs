@@ -12,12 +12,17 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::Rng;
+use rcgen::{CertificateParams, ExtendedKeyUsagePurpose, KeyPair, KeyUsagePurpose};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, oneshot};
 use url::Url;
 
-use crate::{enrollment::EnrollmentState, identity::Identity, remote};
+use crate::{
+    enrollment::EnrollmentState,
+    identity::{Identity, OAuthCredentials},
+    remote,
+};
 
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const SUCCESS_PAGE: &str = r##"<!doctype html>
@@ -94,6 +99,15 @@ struct CallbackQuery {
     error_description: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    id_token: Option<String>,
+    refresh_token: Option<String>,
+    expires_in: u64,
+    token_type: String,
+}
+
 pub async fn enroll(
     controller: &ControllerConnectionConfig,
     enrollment: &EnrollmentState,
@@ -101,7 +115,14 @@ pub async fn enroll(
 ) -> anyhow::Result<Identity> {
     let verifier = random_secret();
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-    let mut client = remote::client(controller).await?;
+    let mut client = remote::client(controller, None).await?;
+    let device_key = KeyPair::generate().context("generate device TLS private key")?;
+    let mut certificate_params = CertificateParams::new(Vec::<String>::new())?;
+    certificate_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    certificate_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    let csr = certificate_params
+        .serialize_request(&device_key)
+        .context("create device certificate signing request")?;
     let begin = client
         .begin_enrollment(BeginEnrollmentRequest {
             hostname: remote::hostname(),
@@ -152,20 +173,131 @@ pub async fn enroll(
     server.await.context("join OIDC callback server")??;
     enrollment.set("enrolling").await;
 
+    let tokens = exchange_authorization_code(
+        &begin.token_endpoint,
+        &begin.client_id,
+        &begin.redirect_uri,
+        &authorization_code,
+        &verifier,
+    )
+    .await?;
+    let id_token = tokens
+        .id_token
+        .context("OIDC token response did not contain an ID token")?;
+    let refresh_token = tokens
+        .refresh_token
+        .context("OIDC token response did not contain a refresh token")?;
+
+    let mut request = tonic::Request::new(CompleteEnrollmentRequest {
+        enrollment_id: begin.enrollment_id,
+        authorization_code: String::new(),
+        code_verifier: String::new(),
+        certificate_signing_request_der: csr.der().as_ref().to_vec(),
+        id_token,
+    });
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", tokens.access_token)
+            .parse()
+            .context("encode OIDC access token")?,
+    );
     let response = client
-        .complete_enrollment(CompleteEnrollmentRequest {
-            enrollment_id: begin.enrollment_id,
-            authorization_code,
-            code_verifier: verifier,
-        })
+        .complete_enrollment(request)
         .await
         .context("complete OIDC enrollment")?
         .into_inner();
 
+    let client_certificate_pem = String::from_utf8(response.client_certificate_pem)
+        .context("controller returned a non-UTF-8 device certificate")?;
+    if client_certificate_pem.is_empty() {
+        anyhow::bail!("controller returned an empty device certificate");
+    }
     Ok(Identity {
         device_id: response.device_id,
-        credential: response.credential,
+        client_certificate_pem,
+        client_private_key_pem: device_key.serialize_pem(),
+        client_certificate_expires_at_unix_seconds: response
+            .client_certificate_expires_at_unix_seconds,
+        oauth: OAuthCredentials {
+            access_token: tokens.access_token,
+            refresh_token,
+            expires_at_unix_seconds: unix_time_seconds().saturating_add(tokens.expires_in),
+        },
+        oauth_token_endpoint: begin.token_endpoint,
+        oauth_client_id: begin.client_id,
     })
+}
+
+async fn exchange_authorization_code(
+    token_endpoint: &str,
+    client_id: &str,
+    redirect_uri: &str,
+    authorization_code: &str,
+    code_verifier: &str,
+) -> anyhow::Result<TokenResponse> {
+    let response = reqwest::Client::new()
+        .post(token_endpoint)
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", authorization_code),
+            ("redirect_uri", redirect_uri),
+            ("client_id", client_id),
+            ("code_verifier", code_verifier),
+        ])
+        .send()
+        .await
+        .context("exchange OIDC authorization code")?
+        .error_for_status()
+        .context("OIDC token endpoint rejected authorization code")?
+        .json::<TokenResponse>()
+        .await
+        .context("decode OIDC token response")?;
+    if !response.token_type.eq_ignore_ascii_case("Bearer") {
+        bail!("OIDC token endpoint returned unsupported token type");
+    }
+    Ok(response)
+}
+
+pub async fn refresh(identity: &mut Identity) -> anyhow::Result<()> {
+    let endpoint = &identity.oauth_token_endpoint;
+    let client_id = &identity.oauth_client_id;
+    let current = &identity.oauth;
+    let response = reqwest::Client::new()
+        .post(endpoint)
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", current.refresh_token.as_str()),
+            ("client_id", client_id.as_str()),
+        ])
+        .send()
+        .await
+        .context("refresh OIDC access token")?
+        .error_for_status()
+        .context("OIDC token endpoint rejected refresh token")?
+        .json::<TokenResponse>()
+        .await
+        .context("decode refreshed OIDC token response")?;
+    apply_refreshed_tokens(identity, response)
+}
+
+fn apply_refreshed_tokens(identity: &mut Identity, response: TokenResponse) -> anyhow::Result<()> {
+    if !response.token_type.eq_ignore_ascii_case("Bearer") {
+        bail!("OIDC token endpoint returned unsupported token type");
+    }
+    let current_refresh_token = identity.oauth.refresh_token.clone();
+    identity.oauth = OAuthCredentials {
+        access_token: response.access_token,
+        refresh_token: response.refresh_token.unwrap_or(current_refresh_token),
+        expires_at_unix_seconds: unix_time_seconds().saturating_add(response.expires_in),
+    };
+    Ok(())
+}
+
+fn unix_time_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 async fn bind_callback(
@@ -241,4 +373,43 @@ fn random_secret() -> String {
     let mut bytes = [0_u8; 32];
     rand::rng().fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TokenResponse, apply_refreshed_tokens};
+    use crate::identity::{Identity, OAuthCredentials};
+
+    #[test]
+    fn refresh_replaces_rotated_oauth_credentials() {
+        let mut identity = Identity {
+            device_id: "device".to_owned(),
+            client_certificate_pem: "certificate".to_owned(),
+            client_private_key_pem: "key".to_owned(),
+            client_certificate_expires_at_unix_seconds: u64::MAX,
+            oauth: OAuthCredentials {
+                access_token: "old-access".to_owned(),
+                refresh_token: "old-refresh".to_owned(),
+                expires_at_unix_seconds: 0,
+            },
+            oauth_token_endpoint: "https://idp.example/token".to_owned(),
+            oauth_client_id: "client".to_owned(),
+        };
+
+        apply_refreshed_tokens(
+            &mut identity,
+            TokenResponse {
+                access_token: "new-access".to_owned(),
+                id_token: None,
+                refresh_token: Some("new-refresh".to_owned()),
+                expires_in: 600,
+                token_type: "Bearer".to_owned(),
+            },
+        )
+        .unwrap();
+        let oauth = identity.oauth;
+        assert_eq!(oauth.access_token, "new-access");
+        assert_eq!(oauth.refresh_token, "new-refresh");
+        assert!(oauth.expires_at_unix_seconds > 0);
+    }
 }

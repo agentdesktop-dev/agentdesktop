@@ -5,13 +5,15 @@ package agentdesktop.fleet.v1;
 service FleetAgent {
   rpc BeginEnrollment(BeginEnrollmentRequest) returns (BeginEnrollmentResponse);
   rpc CompleteEnrollment(CompleteEnrollmentRequest) returns (EnrollResponse);
+  rpc RenewDeviceCertificate(RenewDeviceCertificateRequest) returns (DeviceCertificateResponse);
   rpc GetInferenceGatewayCredential(InferenceGatewayCredentialRequest) returns (InferenceGatewayCredentialResponse);
   rpc Connect(stream AgentMessage) returns (stream ControllerMessage);
 }
 
 message EnrollResponse {
   string device_id = 1;
-  string credential = 2;
+  bytes client_certificate_pem = 2;
+  uint64 client_certificate_expires_at_unix_seconds = 3;
 }
 
 message BeginEnrollmentRequest {
@@ -24,12 +26,27 @@ message BeginEnrollmentResponse {
   string authorization_url = 2;
   string state = 3;
   string redirect_uri = 4;
+  string token_endpoint = 5;
+  string client_id = 6;
 }
 
 message CompleteEnrollmentRequest {
   string enrollment_id = 1;
+  // Deprecated: the daemon exchanges the authorization code directly.
   string authorization_code = 2;
+  // Deprecated: the PKCE verifier is sent only to the identity provider.
   string code_verifier = 3;
+  bytes certificate_signing_request_der = 4;
+  string id_token = 5;
+}
+
+message RenewDeviceCertificateRequest {
+  bytes certificate_signing_request_der = 1;
+}
+
+message DeviceCertificateResponse {
+  bytes client_certificate_pem = 1;
+  uint64 expires_at_unix_seconds = 2;
 }
 
 message InferenceGatewayCredentialRequest {

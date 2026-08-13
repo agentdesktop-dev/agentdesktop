@@ -4,6 +4,7 @@ use agentdesktop_controller::{
     admin::{self, AdminState, ControllerSettings},
     daemon_config::{self, DaemonConfigStore},
     database::Database,
+    device_ca::DeviceCertificateIssuer,
     gateway_jwt::GatewayJwtIssuer,
     oidc::OidcProvider,
     service::FleetAgentService,
@@ -12,7 +13,7 @@ use agentdesktop_core::{DEFAULT_CONTROLLER_CONFIG_PATH, config, telemetry};
 use agentdesktop_proto::fleet::fleet_agent_server::FleetAgentServer;
 use anyhow::Context;
 use clap::Parser;
-use tonic::transport::{Identity, Server, ServerTlsConfig};
+use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
 #[derive(Parser)]
 #[command(about = "Agentdesktop fleet controller")]
@@ -27,12 +28,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let _log_flush = telemetry::setup_logging("info", false);
     let config = config::load_controller(&args.config)?;
-    if !config.fleet_listen.ip().is_loopback() && config.tls.is_none() {
-        tracing::warn!(
-            listen = %config.fleet_listen,
-            "allowing insecure remote fleet listener for development"
-        );
-    }
+    let tls = config.tls.files();
     let daemon_config = match &config.daemon_config {
         Some(daemon) => Some(daemon_config::load(&daemon.path, daemon.revision)?),
         None => None,
@@ -42,23 +38,18 @@ async fn main() -> anyhow::Result<()> {
         daemon_config::watch(daemon.path.clone(), daemon.revision, daemon_config.clone())?;
     }
     let database = Database::connect(&config.database_url).await?;
-    let oidc = match &config.oidc {
-        Some(oidc) => {
-            if oidc.issuer.starts_with("http://") {
-                tracing::warn!(issuer = %oidc.issuer, "allowing insecure OIDC issuer for development");
-            }
-            let provider = OidcProvider::discover(
-                oidc.issuer.clone(),
-                oidc.client_id.clone(),
-                oidc.redirect_uri.clone(),
-            )
-            .await
-            .context("initialize OIDC enrollment")?;
-            tracing::info!("OIDC enrollment enabled");
-            Some(provider)
-        }
-        None => None,
-    };
+    let oidc = &config.oidc;
+    if oidc.issuer.starts_with("http://") {
+        tracing::warn!(issuer = %oidc.issuer, "allowing insecure OIDC issuer for development");
+    }
+    let oidc = OidcProvider::discover(
+        oidc.issuer.clone(),
+        oidc.client_id.clone(),
+        oidc.redirect_uri.clone(),
+    )
+    .await
+    .context("initialize OIDC enrollment")?;
+    tracing::info!("OIDC enrollment enabled");
     let gateway_jwt_issuer = config
         .gateway_jwt
         .as_ref()
@@ -82,23 +73,47 @@ async fn main() -> anyhow::Result<()> {
         ControllerSettings {
             fleet_listen: config.fleet_listen.to_string(),
             admin_listen: config.admin_listen.to_string(),
-            oidc_enabled: oidc.is_some(),
-            tls_enabled: config.tls.is_some(),
+            oidc_enabled: true,
+            tls_enabled: true,
             gateway_jwt_enabled: gateway_jwt_issuer.is_some(),
         },
         gateway_jwks,
     );
-    let service = FleetAgentService::new(oidc, database, daemon_config, gateway_jwt_issuer);
+    let ca_certificate =
+        std::fs::read_to_string(&tls.client_ca_certificate).with_context(|| {
+            format!(
+                "read device CA certificate from {}",
+                tls.client_ca_certificate.display()
+            )
+        })?;
+    let ca_key = std::fs::read_to_string(&tls.client_ca_key)
+        .with_context(|| format!("read device CA key from {}", tls.client_ca_key.display()))?;
+    let device_certificate_issuer = DeviceCertificateIssuer::from_pem(ca_certificate, &ca_key)
+        .context("initialize device certificate issuer")?;
+    tracing::info!("device certificate issuance enabled");
+    let service = FleetAgentService::new(
+        Some(oidc),
+        database,
+        daemon_config,
+        gateway_jwt_issuer,
+        Some(device_certificate_issuer),
+    );
 
-    let mut server = Server::builder();
-    if let Some(tls) = &config.tls {
-        let certificate = std::fs::read(&tls.certificate)
-            .with_context(|| format!("read TLS certificate from {}", tls.certificate.display()))?;
-        let key = std::fs::read(&tls.key)
-            .with_context(|| format!("read TLS key from {}", tls.key.display()))?;
-        server = server
-            .tls_config(ServerTlsConfig::new().identity(Identity::from_pem(certificate, key)))?;
-    }
+    let certificate = std::fs::read(&tls.certificate)
+        .with_context(|| format!("read TLS certificate from {}", tls.certificate.display()))?;
+    let key = std::fs::read(&tls.key)
+        .with_context(|| format!("read TLS key from {}", tls.key.display()))?;
+    let client_ca = std::fs::read(&tls.client_ca_certificate).with_context(|| {
+        format!(
+            "read fleet client CA certificate from {}",
+            tls.client_ca_certificate.display()
+        )
+    })?;
+    let tls_config = ServerTlsConfig::new()
+        .identity(Identity::from_pem(certificate, key))
+        .client_ca_root(Certificate::from_pem(client_ca))
+        .client_auth_optional(true);
+    let mut server = Server::builder().tls_config(tls_config)?;
 
     let fleet_listen = config.fleet_listen;
     let admin_listen = config.admin_listen;

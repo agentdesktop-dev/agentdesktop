@@ -11,11 +11,6 @@ CREATE TABLE devices (
     idp_claims_json TEXT
 );
 
-CREATE TABLE device_credentials (
-    device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
-    credential_hash TEXT NOT NULL UNIQUE
-);
-
 CREATE TABLE discoveries (
     device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
     kind TEXT NOT NULL,
