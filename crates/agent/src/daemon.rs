@@ -141,6 +141,8 @@ pub async fn run(args: DaemonArgs, socket: PathBuf) -> anyhow::Result<()> {
     }
     let (telemetry_sender, telemetry_receiver) = mpsc::channel(256);
     let telemetry = config.controller.as_ref().map(|_| telemetry_sender.clone());
+    let (logout_sender, logout_receiver) = mpsc::channel(1);
+    let logout = config.controller.as_ref().map(|_| logout_sender);
     if let Some(controller) = config.controller.clone() {
         let remote_discovery = discovery.clone();
         let state_dir = args.state_dir.clone();
@@ -155,6 +157,7 @@ pub async fn run(args: DaemonArgs, socket: PathBuf) -> anyhow::Result<()> {
                 reconciler,
                 remote_enrollment.clone(),
                 telemetry_receiver,
+                logout_receiver,
             )
             .await
             {
@@ -169,6 +172,7 @@ pub async fn run(args: DaemonArgs, socket: PathBuf) -> anyhow::Result<()> {
         enrollment,
         state_dir: args.state_dir,
         telemetry,
+        logout,
     });
 
     tracing::info!(socket = %socket.display(), "agent daemon listening");

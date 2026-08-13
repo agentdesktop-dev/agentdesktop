@@ -4,6 +4,7 @@ import type {
   Bootstrap,
   ClaudeSnapshot,
   ConnectorSnapshot,
+  Discovery,
   ManagedDeviceSnapshot,
   ManagedPage,
   Settings
@@ -27,6 +28,18 @@ export async function getClaudeStatus(): Promise<ClaudeSnapshot> {
 
 export async function getManagedDeviceStatus(): Promise<ManagedDeviceSnapshot> {
   return invoke<ManagedDeviceSnapshot>("get_managed_device_status");
+}
+
+export async function getDiscovery(): Promise<Discovery> {
+  return invoke<Discovery>("get_discovery");
+}
+
+export async function getRemoteConfig(): Promise<string | null> {
+  return invoke<string | null>("get_remote_config");
+}
+
+export async function logoutManagedDevice(): Promise<void> {
+  return invoke<void>("logout_managed_device");
 }
 
 export async function setupManagedDevice(): Promise<ManagedDeviceSnapshot> {

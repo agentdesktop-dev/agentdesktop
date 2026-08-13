@@ -48,7 +48,7 @@ export interface ConnectorSnapshot {
 }
 
 export interface ClaudeSnapshot {
-  state: "not-installed" | "not-connected" | "connected" | "conflict";
+  state: "not-installed" | "not-connected" | "connected" | "discovered" | "conflict";
   installed: boolean;
   canConnect: boolean;
   detail: string;
@@ -76,3 +76,29 @@ export interface ManagedDeviceSnapshot {
 }
 
 export type ManagedPage = "support" | "administration";
+
+export interface McpServer {
+  name: string;
+  transport: string;
+  command?: string;
+  url?: string;
+  enabled: boolean;
+  source: string;
+}
+
+export interface Skill {
+  path: string;
+  frontMatter: Record<string, unknown>;
+}
+
+export interface DiscoveredAgent {
+  kind: string;
+  executable: string;
+  version: string | null;
+  mcpServers?: McpServer[];
+  skills?: Skill[];
+}
+
+export interface Discovery {
+  agents: DiscoveredAgent[];
+}

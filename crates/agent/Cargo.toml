@@ -4,10 +4,7 @@ description = "Privileged device daemon for discovery, reconciliation, and fleet
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
-
-[[bin]]
-name = "agentdesktop"
-path = "src/main.rs"
+autobins = false
 
 [dependencies]
 agentdesktop-client.workspace = true

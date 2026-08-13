@@ -103,25 +103,6 @@ a {
   font-weight: 600;
 }
 
-.sidebar-foot {
-  margin-top: auto;
-  padding: 14px 8px 0;
-  border-top: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  color: var(--subtle);
-  font-size: 11px;
-}
-
-.controller-state {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: #4b535c;
-  font-size: 12px;
-}
-
 .status-dot,
 .mini-dot {
   width: 7px;
@@ -1484,8 +1465,7 @@ code {
   }
 
   .brand > span:last-child,
-  .nav-item span,
-  .sidebar-foot {
+  .nav-item span {
     display: none;
   }
 

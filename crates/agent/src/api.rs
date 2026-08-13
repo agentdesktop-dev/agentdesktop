@@ -7,7 +7,7 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use agentdesktop_core::{
     config::DaemonConfig,
@@ -25,6 +25,7 @@ pub struct AppState {
     pub enrollment: EnrollmentState,
     pub state_dir: PathBuf,
     pub telemetry: Option<mpsc::Sender<TelemetryEvent>>,
+    pub logout: Option<mpsc::Sender<remote::LogoutRequest>>,
 }
 
 #[derive(Serialize)]
@@ -41,8 +42,11 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/config", get(config))
+        .route("/v1/effective-config", get(effective_config))
+        .route("/v1/remote-config", get(remote_config))
         .route("/v1/discovery", get(discover))
         .route("/v1/enrollment", get(enrollment))
+        .route("/v1/logout", post(logout))
         .route("/v1/telemetry", post(telemetry))
         .route(
             "/v1/inference-gateway/credential",
@@ -130,12 +134,76 @@ async fn config(State(state): State<AppState>) -> Json<DaemonConfig> {
     Json(state.config)
 }
 
+async fn effective_config(
+    State(state): State<AppState>,
+) -> Result<Json<DaemonConfig>, (StatusCode, String)> {
+    let path = state.state_dir.join("remote-config.yaml");
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => agentdesktop_core::config::parse_daemon(&contents)
+            .map(Json)
+            .map_err(|error| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("parse applied remote configuration: {error:#}"),
+                )
+            }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Json(state.config)),
+        Err(error) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("read applied remote configuration: {error}"),
+        )),
+    }
+}
+
+async fn remote_config(
+    State(state): State<AppState>,
+) -> Result<Json<Option<String>>, (StatusCode, String)> {
+    let path = state.state_dir.join("remote-config.yaml");
+    match std::fs::read_to_string(path) {
+        Ok(contents) => Ok(Json(Some(contents))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Json(None)),
+        Err(error) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("read applied remote configuration: {error}"),
+        )),
+    }
+}
+
 async fn discover(State(state): State<AppState>) -> Json<Discovery> {
     Json(state.discovery)
 }
 
 async fn enrollment(State(state): State<AppState>) -> Json<EnrollmentStatus> {
     Json(state.enrollment.get().await)
+}
+
+async fn logout(State(state): State<AppState>) -> Result<StatusCode, (StatusCode, String)> {
+    let sender = state.logout.as_ref().ok_or_else(|| {
+        (
+            StatusCode::FAILED_DEPENDENCY,
+            "daemon has no controller session to log out".to_owned(),
+        )
+    })?;
+    let (completion, completed) = oneshot::channel();
+    sender
+        .send(remote::LogoutRequest { completion })
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "controller session is unavailable".to_owned(),
+            )
+        })?;
+    completed
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "controller session stopped before logout completed".to_owned(),
+            )
+        })?
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn inference_gateway_credential(
