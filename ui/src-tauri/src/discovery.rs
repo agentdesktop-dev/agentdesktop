@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -11,6 +12,7 @@ use agentdesktop::organization::OrganizationBootstrap;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+#[cfg(target_os = "macos")]
 use toml::Value as TomlValue;
 
 const SCHEMA_VERSION: u8 = 1;
@@ -21,7 +23,9 @@ const RESCAN_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct DiscoveryRoots {
+    platform: &'static str,
     home: PathBuf,
+    #[cfg(target_os = "macos")]
     applications: PathBuf,
     managed_claude: PathBuf,
     system_prefixes: Vec<PathBuf>,
@@ -112,20 +116,45 @@ struct AgentBuilder {
 
 enum ParsedConfig {
     Json(JsonValue),
+    #[cfg(target_os = "macos")]
     Toml(TomlValue),
 }
 
 impl DiscoveryRoots {
+    #[cfg(target_os = "macos")]
     fn current() -> Result<Self> {
         let home = env::var_os("HOME")
             .map(PathBuf::from)
             .context("HOME is not set")?;
         Ok(Self {
+            platform: "macos",
             home,
             applications: PathBuf::from("/Applications"),
             managed_claude: PathBuf::from("/Library/Application Support/ClaudeCode"),
             system_prefixes: vec![PathBuf::from("/usr/local"), PathBuf::from("/opt/homebrew")],
             detect_processes: true,
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    fn current() -> Result<Self> {
+        let home = env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .context("USERPROFILE is not set")?;
+        let user_npm = env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData/Roaming"))
+            .join("npm");
+        let managed_claude = env::var_os("ProgramData")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+            .join("ClaudeCode");
+        Ok(Self {
+            platform: "windows",
+            home,
+            managed_claude,
+            system_prefixes: vec![user_npm],
+            detect_processes: false,
         })
     }
 }
@@ -251,18 +280,21 @@ fn discovery_client(
 
 fn collect(roots: &DiscoveryRoots) -> DiscoveryReport {
     let mut issues = BTreeSet::new();
-    let mut agents = vec![
-        collect_claude(roots, &mut issues),
-        collect_claude_desktop(roots, &mut issues),
-        collect_codex(roots, &mut issues),
-        collect_openclaw(roots, &mut issues),
-        collect_vscode(roots, &mut issues),
-    ];
+    let mut agents = vec![collect_claude(roots, &mut issues)];
+    #[cfg(target_os = "macos")]
+    if roots.platform == "macos" {
+        agents.extend([
+            collect_claude_desktop(roots, &mut issues),
+            collect_codex(roots, &mut issues),
+            collect_openclaw(roots, &mut issues),
+            collect_vscode(roots, &mut issues),
+        ]);
+    }
     agents.sort_by_key(|agent| agent.id);
     DiscoveryReport {
         schema_version: SCHEMA_VERSION,
         collector_version: env!("CARGO_PKG_VERSION"),
-        platform: "macos",
+        platform: roots.platform,
         coverage: Coverage {
             project_scopes: "not_scanned",
             partial: issues.iter().any(|issue| issue.code != "symlink_skipped"),
@@ -272,6 +304,7 @@ fn collect(roots: &DiscoveryRoots) -> DiscoveryReport {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn collect_claude_desktop(
     roots: &DiscoveryRoots,
     issues: &mut BTreeSet<CollectionIssue>,
@@ -337,6 +370,7 @@ fn collect_claude(roots: &DiscoveryRoots, issues: &mut BTreeSet<CollectionIssue>
     agent.finish(roots.detect_processes)
 }
 
+#[cfg(target_os = "macos")]
 fn collect_codex(roots: &DiscoveryRoots, issues: &mut BTreeSet<CollectionIssue>) -> AgentReport {
     let mut agent = AgentBuilder::new("codex-cli", &["codex"]);
     detect_executable(&mut agent, roots, "codex");
@@ -368,6 +402,7 @@ fn collect_codex(roots: &DiscoveryRoots, issues: &mut BTreeSet<CollectionIssue>)
     agent.finish(roots.detect_processes)
 }
 
+#[cfg(target_os = "macos")]
 fn collect_openclaw(roots: &DiscoveryRoots, issues: &mut BTreeSet<CollectionIssue>) -> AgentReport {
     let mut agent = AgentBuilder::new("openclaw", &["openclaw"]);
     detect_executable(&mut agent, roots, "openclaw");
@@ -402,6 +437,7 @@ fn collect_openclaw(roots: &DiscoveryRoots, issues: &mut BTreeSet<CollectionIssu
     agent.finish(roots.detect_processes)
 }
 
+#[cfg(target_os = "macos")]
 fn collect_vscode(roots: &DiscoveryRoots, issues: &mut BTreeSet<CollectionIssue>) -> AgentReport {
     let mut agent = AgentBuilder::new("vscode-copilot", &["Visual Studio Code"]);
     if roots.applications.join("Visual Studio Code.app").is_dir()
@@ -485,14 +521,27 @@ fn collect_vscode(roots: &DiscoveryRoots, issues: &mut BTreeSet<CollectionIssue>
 }
 
 fn detect_executable(agent: &mut AgentBuilder, roots: &DiscoveryRoots, name: &str) {
-    let mut candidates = vec![roots.home.join(".local/bin").join(name)];
-    if roots.detect_processes {
-        candidates.extend(
-            roots
-                .system_prefixes
-                .iter()
-                .map(|prefix| prefix.join("bin").join(name)),
-        );
+    let executable_names = if roots.platform == "windows" {
+        vec![
+            format!("{name}.exe"),
+            format!("{name}.cmd"),
+            format!("{name}.ps1"),
+        ]
+    } else {
+        vec![name.to_owned()]
+    };
+    let mut candidates = executable_names
+        .iter()
+        .map(|name| roots.home.join(".local/bin").join(name))
+        .collect::<Vec<_>>();
+    for prefix in &roots.system_prefixes {
+        candidates.extend(executable_names.iter().map(|name| {
+            if roots.platform == "windows" {
+                prefix.join(name)
+            } else {
+                prefix.join("bin").join(name)
+            }
+        }));
     }
     if candidates
         .iter()
@@ -503,14 +552,16 @@ fn detect_executable(agent: &mut AgentBuilder, roots: &DiscoveryRoots, name: &st
 }
 
 fn npm_package_version(roots: &DiscoveryRoots, package: &str) -> Option<String> {
-    std::iter::once(roots.home.join(".local"))
-        .chain(roots.system_prefixes.iter().cloned())
-        .map(|prefix| {
-            prefix
-                .join("lib/node_modules")
-                .join(package)
-                .join("package.json")
-        })
+    let user_root = roots.home.join(".local/lib/node_modules");
+    std::iter::once(user_root)
+        .chain(roots.system_prefixes.iter().map(|prefix| {
+            if roots.platform == "windows" {
+                prefix.join("node_modules")
+            } else {
+                prefix.join("lib/node_modules")
+            }
+        }))
+        .map(|root| root.join(package).join("package.json"))
         .find_map(|manifest| package_manifest_version(&manifest))
 }
 
@@ -524,6 +575,7 @@ fn package_manifest_version(path: &Path) -> Option<String> {
     safe_version(package.get("version")?.as_str()?)
 }
 
+#[cfg(target_os = "macos")]
 fn application_version(application: &Path) -> Option<String> {
     let info = application.join("Contents/Info.plist");
     let metadata = fs::symlink_metadata(&info).ok()?;
@@ -566,6 +618,7 @@ fn safe_version(value: &str) -> Option<String> {
     Some(value.to_owned())
 }
 
+#[cfg(target_os = "macos")]
 fn process_is_running(name: &str) -> bool {
     Command::new("/usr/bin/pgrep")
         .args(["-x", name])
@@ -574,6 +627,11 @@ fn process_is_running(name: &str) -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
+}
+
+#[cfg(target_os = "windows")]
+fn process_is_running(_name: &str) -> bool {
+    false
 }
 
 fn inspect_json(
@@ -590,6 +648,7 @@ fn inspect_json(
     });
 }
 
+#[cfg(target_os = "macos")]
 fn inspect_toml(
     agent: &mut AgentBuilder,
     issues: &mut BTreeSet<CollectionIssue>,
@@ -604,6 +663,7 @@ fn inspect_toml(
     });
 }
 
+#[cfg(target_os = "macos")]
 fn inspect_claude_desktop_extensions(
     agent: &mut AgentBuilder,
     issues: &mut BTreeSet<CollectionIssue>,
@@ -841,6 +901,7 @@ fn has_any_path(config: &ParsedConfig, paths: &[&[&str]]) -> bool {
 fn has_path(config: &ParsedConfig, path: &[&str]) -> bool {
     match config {
         ParsedConfig::Json(value) => json_at(value, path).is_some(),
+        #[cfg(target_os = "macos")]
         ParsedConfig::Toml(value) => toml_at(value, path).is_some(),
     }
 }
@@ -855,6 +916,7 @@ fn object_entries<'a>(config: &'a ParsedConfig, path: &[&str]) -> Vec<(&'a str, 
                     .map(|(name, value)| (name.as_str(), ConfigValue::Json(value)))
                     .collect()
             }),
+        #[cfg(target_os = "macos")]
         ParsedConfig::Toml(value) => toml_at(value, path)
             .and_then(TomlValue::as_table)
             .map_or_else(Vec::new, |table| {
@@ -869,6 +931,7 @@ fn object_entries<'a>(config: &'a ParsedConfig, path: &[&str]) -> Vec<(&'a str, 
 #[derive(Clone, Copy)]
 enum ConfigValue<'a> {
     Json(&'a JsonValue),
+    #[cfg(target_os = "macos")]
     Toml(&'a TomlValue),
 }
 
@@ -879,6 +942,7 @@ fn json_at<'a>(mut value: &'a JsonValue, path: &[&str]) -> Option<&'a JsonValue>
     Some(value)
 }
 
+#[cfg(target_os = "macos")]
 fn toml_at<'a>(mut value: &'a TomlValue, path: &[&str]) -> Option<&'a TomlValue> {
     for segment in path {
         value = value.get(*segment)?;
@@ -901,6 +965,7 @@ fn transport(value: ConfigValue<'_>) -> &'static str {
 fn has_field(value: ConfigValue<'_>, field: &str) -> bool {
     match value {
         ConfigValue::Json(value) => value.get(field).is_some(),
+        #[cfg(target_os = "macos")]
         ConfigValue::Toml(value) => value.get(field).is_some(),
     }
 }
@@ -908,6 +973,7 @@ fn has_field(value: ConfigValue<'_>, field: &str) -> bool {
 fn string_field(value: ConfigValue<'_>, field: &str) -> Option<String> {
     match value {
         ConfigValue::Json(value) => value.get(field)?.as_str().map(str::to_owned),
+        #[cfg(target_os = "macos")]
         ConfigValue::Toml(value) => value.get(field)?.as_str().map(str::to_owned),
     }
 }
@@ -915,6 +981,7 @@ fn string_field(value: ConfigValue<'_>, field: &str) -> Option<String> {
 fn boolean_field(value: ConfigValue<'_>, field: &str) -> Option<bool> {
     match value {
         ConfigValue::Json(value) => value.get(field)?.as_bool(),
+        #[cfg(target_os = "macos")]
         ConfigValue::Toml(value) => value.get(field)?.as_bool(),
     }
 }
@@ -922,6 +989,7 @@ fn boolean_field(value: ConfigValue<'_>, field: &str) -> Option<bool> {
 fn value_bool(value: ConfigValue<'_>) -> Option<bool> {
     match value {
         ConfigValue::Json(value) => value.as_bool(),
+        #[cfg(target_os = "macos")]
         ConfigValue::Toml(value) => value.as_bool(),
     }
 }
@@ -966,6 +1034,7 @@ impl FromNamedResource for Plugin {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn collect_nested_plugins(
     output: &mut BTreeSet<Plugin>,
     root: &Path,
@@ -985,6 +1054,7 @@ fn collect_nested_plugins(
     }
 }
 
+#[cfg(target_os = "macos")]
 fn insert_plugin(
     output: &mut BTreeSet<Plugin>,
     name: String,
@@ -1044,6 +1114,7 @@ mod tests {
     use super::{DiscoveryRoots, collect};
     use std::fs;
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn collection_is_deterministic_and_never_serializes_secrets_or_paths() {
         let temporary = tempfile::tempdir().unwrap();
@@ -1086,6 +1157,12 @@ mod tests {
             r#"{"version":"0.42.0","token":"SECRET_CODEX_PACKAGE"}"#,
         )
         .unwrap();
+        fs::create_dir_all(prefix.join("lib/node_modules/@anthropic-ai/claude-code")).unwrap();
+        fs::write(
+            prefix.join("lib/node_modules/@anthropic-ai/claude-code/package.json"),
+            r#"{"version":"2.1.4"}"#,
+        )
+        .unwrap();
         fs::create_dir_all(prefix.join("lib/node_modules/openclaw")).unwrap();
         fs::write(
             prefix.join("lib/node_modules/openclaw/package.json"),
@@ -1105,6 +1182,7 @@ mod tests {
         )
         .unwrap();
         let roots = DiscoveryRoots {
+            platform: "macos",
             home: home.clone(),
             applications: temporary.path().join("Applications"),
             managed_claude: temporary.path().join("managed"),
@@ -1159,7 +1237,9 @@ mod tests {
         fs::write(&secret, r#"{"mcpServers":{"secret-server":{}}}"#).unwrap();
         symlink(&secret, home.join(".claude.json")).unwrap();
         let report = collect(&DiscoveryRoots {
+            platform: "macos",
             home,
+            #[cfg(target_os = "macos")]
             applications: temporary.path().join("Applications"),
             managed_claude: temporary.path().join("managed"),
             system_prefixes: Vec::new(),
@@ -1189,7 +1269,9 @@ mod tests {
         )
         .unwrap();
         let report = collect(&DiscoveryRoots {
+            platform: "macos",
             home,
+            #[cfg(target_os = "macos")]
             applications: temporary.path().join("Applications"),
             managed_claude: temporary.path().join("managed"),
             system_prefixes: Vec::new(),
@@ -1201,5 +1283,81 @@ mod tests {
             !encoded.contains("SECRET_MALFORMED_VALUE")
                 && !encoded.contains("SECRET_PROJECT_SERVER")
         );
+    }
+
+    #[test]
+    fn windows_collection_reports_claude_code_from_fixed_user_roots() {
+        let temporary = tempfile::tempdir().unwrap();
+        let home = temporary.path().join("Users/developer");
+        let user_npm = home.join("AppData/Roaming/npm");
+        let managed_claude = temporary.path().join("ProgramData/ClaudeCode");
+        fs::create_dir_all(user_npm.join("node_modules/@anthropic-ai/claude-code")).unwrap();
+        fs::write(user_npm.join("claude.cmd"), "SECRET_LAUNCHER").unwrap();
+        fs::write(
+            user_npm.join("node_modules/@anthropic-ai/claude-code/package.json"),
+            r#"{"version":"2.1.4","token":"SECRET_PACKAGE"}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(home.join(".claude/skills/review-pr")).unwrap();
+        fs::write(
+            home.join(".claude/skills/review-pr/SKILL.md"),
+            "SECRET_SKILL",
+        )
+        .unwrap();
+        fs::write(
+            home.join(".claude.json"),
+            r#"{"mcpServers":{"github":{"command":"SECRET_COMMAND"}}}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(&managed_claude).unwrap();
+        fs::write(
+            managed_claude.join("managed-mcp.json"),
+            r#"{"mcpServers":{"organization":{"url":"SECRET_URL"}}}"#,
+        )
+        .unwrap();
+
+        let report = collect(&DiscoveryRoots {
+            platform: "windows",
+            home,
+            #[cfg(target_os = "macos")]
+            applications: temporary.path().join("Applications"),
+            managed_claude,
+            system_prefixes: vec![user_npm],
+            detect_processes: false,
+        });
+
+        assert_eq!(report.platform, "windows");
+        assert_eq!(report.agents.len(), 1);
+        let claude = &report.agents[0];
+        assert_eq!(claude.id, "claude-code");
+        assert!(claude.installed);
+        assert_eq!(claude.version.as_deref(), Some("2.1.4"));
+        assert_eq!(claude.running, "unknown");
+        assert!(claude.evidence.contains(&"executable"));
+        assert!(claude.evidence.contains(&"configuration"));
+        assert!(
+            claude
+                .mcp_servers
+                .iter()
+                .any(|server| server.name == "github")
+        );
+        assert!(
+            claude
+                .mcp_servers
+                .iter()
+                .any(|server| server.name == "organization")
+        );
+        assert!(claude.skills.iter().any(|skill| skill.name == "review-pr"));
+
+        let encoded = serde_json::to_string(&report).unwrap();
+        for secret in [
+            "SECRET_LAUNCHER",
+            "SECRET_PACKAGE",
+            "SECRET_SKILL",
+            "SECRET_COMMAND",
+            "SECRET_URL",
+        ] {
+            assert!(!encoded.contains(secret), "report leaked {secret}");
+        }
     }
 }

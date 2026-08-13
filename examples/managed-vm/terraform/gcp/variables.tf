@@ -31,17 +31,19 @@ variable "instance_name" {
 }
 
 variable "public_host" {
-  description = "Public DNS hostname used in OAuth URLs, certificates, and the client bootstrap."
+  description = "Optional public DNS hostname used in OAuth URLs, certificates, and the client bootstrap. When null, use the allocated static IPv4 address."
   type        = string
+  default     = null
+  nullable    = true
 
   validation {
-    condition = (
+    condition = var.public_host == null ? true : (
       can(regex("^[A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9]$", var.public_host)) &&
       strcontains(var.public_host, ".") &&
       !endswith(lower(var.public_host), ".local") &&
       !endswith(lower(var.public_host), ".localhost")
     )
-    error_message = "public_host must be a remote DNS hostname and must not use .local or .localhost."
+    error_message = "public_host must be null or a remote DNS hostname that does not use .local or .localhost."
   }
 }
 
@@ -56,7 +58,7 @@ variable "client_source_ranges" {
 }
 
 variable "dns_managed_zone" {
-  description = "Optional existing Cloud DNS managed-zone name. When set, Terraform creates the public_host A record."
+  description = "Optional existing Cloud DNS managed-zone name. When set with public_host, Terraform creates its A record."
   type        = string
   default     = null
   nullable    = true

@@ -718,10 +718,11 @@ function DiscoveryReportPanel({ state, onRefresh, onRescan, rescanning }: { stat
   }
   const report = state.report;
   const agents = report.agents.filter((agent) => agent.installed || agent.evidence.includes("configuration"));
+  const platform = report.platform === "windows" ? "Windows" : "macOS";
   return (
     <div className="inventory-report">
       <div className="inventory-report-meta">
-        <span><strong>macOS collector {report.collectorVersion}</strong><small>Received {formatRelative(report.receivedAt)} · Project scopes not scanned</small></span>
+        <span><strong>{platform} collector {report.collectorVersion}</strong><small>Received {formatRelative(report.receivedAt)} · Project scopes not scanned</small></span>
         <span className="inventory-report-actions"><CapabilityBadge tone={report.partial ? "partial" : "active"}>{report.partial ? "Partial" : "Complete"}</CapabilityBadge><button className="button button-secondary" type="button" disabled={rescanning} onClick={onRescan}>{rescanning ? <Spinner /> : <RefreshCw size={13} />} Rescan device</button></span>
       </div>
       <div className="agent-inventory-list">

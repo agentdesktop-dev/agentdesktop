@@ -68,8 +68,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-tar \
+COPYFILE_DISABLE=1 tar \
   --exclude='*/.DS_Store' \
+  --exclude='*/._*' \
   --exclude='admin-ui/node_modules' \
   --exclude='control-plane/node_modules' \
   --exclude='examples/managed-vm/.env' \
@@ -98,31 +99,64 @@ gcloud_options=(
   --quiet
 )
 
+# OS Login uses SHELL for remote commands, so choose a path present on Ubuntu.
+gcloud_remote() {
+  SHELL=/bin/bash gcloud "$@"
+}
+
+wait_for_iap_ssh() {
+  local attempt
+  local max_attempts=60
+  local retry_delay_seconds=5
+  local iap_log="$work_dir/iap-ssh.log"
+
+  echo "Waiting for IAP SSH access to $instance_name..."
+  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+    if gcloud_remote compute ssh "$instance_name" \
+      "${gcloud_options[@]}" \
+      --command=true >"$iap_log" 2>&1; then
+      rm -f "$iap_log"
+      return 0
+    fi
+
+    if ((attempt == max_attempts)); then
+      echo "IAP SSH did not become ready after $max_attempts attempts:" >&2
+      cat "$iap_log" >&2
+      return 1
+    fi
+
+    echo "IAP SSH is not ready (attempt $attempt/$max_attempts); retrying..."
+    sleep "$retry_delay_seconds"
+  done
+}
+
+wait_for_iap_ssh
+
 echo "Uploading the current local server source to $instance_name..."
-gcloud compute scp \
+gcloud_remote compute scp \
   "$source_archive" \
   "$instance_name:~/agentdesktop-source.tar.gz" \
   "${gcloud_options[@]}"
-gcloud compute scp \
+gcloud_remote compute scp \
   "$secrets_file" \
   "$instance_name:~/agentdesktop.env" \
   "${gcloud_options[@]}"
-gcloud compute scp \
+gcloud_remote compute scp \
   "$script_dir/remote-deploy.sh" \
   "$instance_name:~/agentdesktop-remote-deploy.sh" \
   "${gcloud_options[@]}"
 
-gcloud compute ssh "$instance_name" \
+gcloud_remote compute ssh "$instance_name" \
   "${gcloud_options[@]}" \
   --command="bash ~/agentdesktop-remote-deploy.sh '$public_host'"
 
 bootstrap_dir="${AGENTDESKTOP_BOOTSTRAP_DIR:-$script_dir/client-bootstrap}"
 mkdir -p "$bootstrap_dir"
-gcloud compute scp \
+gcloud_remote compute scp \
   "$instance_name:/opt/agentdesktop/examples/managed-vm/runtime/organization.json" \
   "$bootstrap_dir/" \
   "${gcloud_options[@]}"
-gcloud compute scp \
+gcloud_remote compute scp \
   "$instance_name:/opt/agentdesktop/examples/managed-vm/runtime/certs/server-ca.crt" \
   "$bootstrap_dir/" \
   "${gcloud_options[@]}"
@@ -134,10 +168,13 @@ cat <<EOF
 Agent Desktop managed development stack is running.
 
 Public IP:       $public_ip
-Public hostname: $public_host
+Public endpoint: $public_host
 Admin URL:       https://$public_host:8090/admin/
 Client files:    $bootstrap_dir
 
-Confirm that $public_host resolves to $public_ip before connecting a client.
 Trust server-ca.crt only on development clients that should access this stack.
 EOF
+
+if [[ "$public_host" != "$public_ip" ]]; then
+  echo "Confirm that $public_host resolves to $public_ip before connecting a client."
+fi

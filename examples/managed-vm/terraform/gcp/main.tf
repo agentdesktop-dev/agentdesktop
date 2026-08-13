@@ -1,6 +1,6 @@
 locals {
   region      = replace(var.zone, "/-[a-z]$/", "")
-  public_host = lower(var.public_host)
+  public_host = var.public_host == null ? google_compute_address.managed.address : lower(var.public_host)
   required_services = toset(concat(
     ["compute.googleapis.com", "iap.googleapis.com"],
     var.dns_managed_zone == null ? [] : ["dns.googleapis.com"]
@@ -119,4 +119,11 @@ resource "google_dns_record_set" "managed" {
   rrdatas      = [google_compute_address.managed.address]
 
   depends_on = [google_project_service.required]
+
+  lifecycle {
+    precondition {
+      condition     = var.public_host != null
+      error_message = "public_host must be set when dns_managed_zone is set."
+    }
+  }
 }

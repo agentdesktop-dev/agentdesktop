@@ -150,3 +150,13 @@ func validReport() Report {
 		}},
 	}
 }
+
+func TestWindowsClaudeCodeReportIsValid(t *testing.T) {
+	report := validReport()
+	report.Platform = "windows"
+	report.Agents[0].Running = "unknown"
+
+	if err := validate(report); err != nil {
+		t.Fatalf("validate Windows Claude Code report: %v", err)
+	}
+}

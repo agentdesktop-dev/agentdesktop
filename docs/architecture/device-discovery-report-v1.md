@@ -1,10 +1,10 @@
 # Device discovery report v1
 
-Device discovery reports are privacy-bounded, client-reported inventory metadata for Remote managed macOS devices. They do not participate in Agent Gateway policy decisions and are not a source of cryptographic identity.
+Device discovery reports are privacy-bounded, client-reported inventory metadata for remote managed macOS and Windows devices. They do not participate in Agent Gateway policy decisions and are not a source of cryptographic identity.
 
 ## Transport and authorization
 
-The macOS desktop sends `PUT /v1/device-reports/current` directly to the enrollment authority over HTTPS using its current managed client certificate. It does not attach an OAuth bearer token, and the JSON body contains no organization, user, device, or certificate identifiers.
+The managed desktop sends `PUT /v1/device-reports/current` directly to the enrollment authority over HTTPS using its current managed client certificate. It does not attach an OAuth bearer token, and the JSON body contains no organization, user, device, or certificate identifiers.
 
 The authority derives organization, user, device, and certificate serial from the verified SPIFFE client certificate. A single PostgreSQL statement accepts the report only when all of the following remain true at write time:
 
@@ -65,15 +65,15 @@ The request body is limited to 64 KiB, rejects unknown fields, and uses this sha
 }
 ```
 
-Agent IDs are closed to `claude-code`, `claude-desktop`, `codex-cli`, `openclaw`, and `vscode-copilot`. Source, scope, status, section, transport, running-state, and issue-code values are closed enums. An optional version is accepted only from fixed package/application metadata and must begin with a digit and contain no whitespace or shell punctuation. Names and versions are bounded client-reported metadata and must not be interpreted as proof that a resource is reachable, trusted, or effectively enabled.
+Platforms are closed to `macos` and `windows`. Agent IDs are closed to `claude-code`, `claude-desktop`, `codex-cli`, `openclaw`, and `vscode-copilot`. Source, scope, status, section, transport, running-state, and issue-code values are closed enums. An optional version is accepted only from fixed package/application metadata and must begin with a digit and contain no whitespace or shell punctuation. Names and versions are bounded client-reported metadata and must not be interpreted as proof that a resource is reachable, trusted, or effectively enabled.
 
 The GET response wraps the report with server-controlled `device_id` and `received_at` fields. PostgreSQL stores only the latest report for each device. Revocation prevents updates but retains the last report with its receipt time so administrators can recognize it as stale.
 
-## macOS collection boundary
+## Collection boundary
 
-Collection runs at startup and every 15 minutes while the managed Tauri background app is running. The desktop polls for certificate-authenticated force-rescan requests every 30 seconds and uploads immediately when one is pending. Production freshness across logout or reboot is not guaranteed until macOS login-item and deployment lifecycle support exists.
+Collection runs at startup and every 15 minutes while the managed Tauri background app is running. The desktop polls for certificate-authenticated force-rescan requests every 30 seconds and uploads immediately when one is pending. Production freshness across logout or reboot is not guaranteed until platform login/startup lifecycle support exists.
 
-Version 1 reads only these fixed locations:
+The macOS collector reads only these fixed locations:
 
 | Agent | Installation and configuration evidence |
 | --- | --- |
@@ -82,6 +82,13 @@ Version 1 reads only these fixed locations:
 | Codex CLI | Equivalent fixed executable locations, `~/.codex/config.toml`, `~/.codex/skills`, `~/.agents/skills` |
 | OpenClaw | Equivalent fixed executable locations, `~/.openclaw/openclaw.json`, `~/.openclaw/skills`, `~/.openclaw/extensions`, `~/.agents/skills` |
 | VS Code Copilot | `/Applications/Visual Studio Code.app`, `~/Applications/Visual Studio Code.app`, `~/.vscode/extensions`, `~/Library/Application Support/Code/User/mcp.json`, user profile `mcp.json` files, and fixed `.copilot`, `.claude`, and `.agents` skill/plugin locations |
+
+The initial Windows collector reports only Claude Code. It reads
+`%USERPROFILE%\.local\bin\claude.exe`, `%APPDATA%\npm\claude.cmd`,
+`%APPDATA%\npm\node_modules\@anthropic-ai\claude-code\package.json`,
+`%USERPROFILE%\.claude\settings.json`, `%USERPROFILE%\.claude.json`,
+`%USERPROFILE%\.claude\skills`, and `%ProgramData%\ClaudeCode\managed-mcp.json`.
+It does not inspect the process table, so `running` is reported as `unknown`.
 
 The collector does not honor path-changing environment variables, inspect project configuration, or crawl the home directory. Project discovery requires a future explicit managed allowlist.
 

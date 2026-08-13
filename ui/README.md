@@ -54,7 +54,7 @@ To launch only the Tauri UI, run `npm start`.
 
 The native host discovers managed organization configuration from `AGENTDESKTOP_ORGANIZATION_CONFIG`, a bundled `organization.json` resource, or an installed `share/organization.json`. It honors `AGENTDESKTOP_IDENTITY_DIR` when reading the connector's managed credential store. Only organization and public enrollment metadata are returned to React; OAuth tokens, private keys, and certificate PEM never cross the command boundary.
 
-The managed macOS desktop reports organization access, device identity, inference connectivity, Claude configuration, opaque local flow activity, and a bounded agent/MCP/skill inventory to the enrollment authority while the Tauri host runs. Claude Desktop MCP Extensions are included. Employees do not choose a routing destination: the current supported Claude adapter is reconciled automatically after approval. The desktop polls for force-rescan requests every 30 seconds. Agent-policy enforcement, sandbox status, and detailed agent actions remain unavailable.
+The managed macOS desktop reports organization access, device identity, inference connectivity, Claude configuration, opaque local flow activity, and a bounded agent/MCP/skill inventory to the enrollment authority while the Tauri host runs. Claude Desktop MCP Extensions are included. Windows reports a smaller Claude Code-only inventory from fixed user/global npm, configuration, MCP, and skill locations; process state remains unknown. Employees do not choose a routing destination: the current supported Claude adapter is reconciled automatically after approval. The desktop polls for force-rescan requests every 30 seconds. Agent-policy enforcement, sandbox status, and detailed agent actions remain unavailable.
 
 ## Build
 

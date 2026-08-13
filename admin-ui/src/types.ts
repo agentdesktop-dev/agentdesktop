@@ -104,7 +104,7 @@ export interface DeviceDiscoveryReport {
   receivedAt: string;
   schemaVersion: number;
   collectorVersion: string;
-  platform: "macos";
+  platform: "macos" | "windows";
   projectScopes: "not_scanned";
   partial: boolean;
   agents: DiscoveryAgent[];

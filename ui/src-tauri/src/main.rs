@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod discovery;
 
 use std::{
@@ -770,7 +770,7 @@ fn main() {
                     bootstrap.clone(),
                     identity_root.clone(),
                 ));
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
                 tauri::async_runtime::spawn(discovery::run_reporter(bootstrap, identity_root));
             }
 

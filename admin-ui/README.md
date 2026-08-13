@@ -52,7 +52,7 @@ The Vite build is written to `control-plane/internal/adminui/static/` and embedd
 
 The enrollment and device list APIs return at most 100 records. Enrollment tabs mark a count with `+` when that bound is reached; the fleet summary returns authoritative organization-wide counts.
 
-The server exposes latest-only managed macOS reports for five known agent families, configured MCP server names/transports, and skill/plugin names. Inventory aggregation and device search are server-paged and are not limited to the 100 records returned by the legacy device list. It does not expose model/provider inventory, project-scoped discovery, audit-event reads, connector heartbeat/online state, sandbox decisions, or budget data.
+The server exposes latest-only managed reports: macOS covers five known agent families, while Windows currently covers Claude Code only. Reports include configured MCP server names/transports and skill/plugin names where supported. Inventory aggregation and device search are server-paged and are not limited to the 100 records returned by the legacy device list. It does not expose model/provider inventory, project-scoped discovery, audit-event reads, connector heartbeat/online state, sandbox decisions, or budget data.
 
 The UI persists a simple organization-wide desired policy that marks each supported agent Allow or Deny. Endpoint blocking is not implemented, so the page labels enforcement unavailable.
 

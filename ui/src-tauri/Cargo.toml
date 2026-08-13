@@ -12,6 +12,7 @@ tauri-build = { version = "2", features = [] }
 agentdesktop = { path = "../.." }
 anyhow = "1"
 clap = { version = "4.5", features = ["derive", "env"] }
+json5 = "0.4"
 keyring = { version = "4.1.6", default-features = false, features = ["v1", "apple-native-keyring-store", "windows-native-keyring-store", "zbus-secret-service-keyring-store"] }
 open = "5.4.0"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
@@ -23,7 +24,6 @@ tokio = { version = "1", features = ["process", "time"] }
 zeroize = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-json5 = "0.4"
 plist = "1"
 toml = "0.9"
 

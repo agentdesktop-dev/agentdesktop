@@ -28,8 +28,8 @@ before using this architecture for real users.
 
 - A GCP project with billing enabled.
 - Terraform 1.6 or newer and the Google Cloud CLI on the development machine.
-- A public DNS hostname controlled by you, such as
-  `agentdesktop.example.com`.
+- A public DNS hostname is optional; the default uses the allocated static IPv4
+  address directly.
 - Permission to enable project services and administer Compute Engine. The
   deploying identity also needs IAP tunnel access and OS Admin Login. Cloud DNS
   administration is required only when Terraform manages the record.
@@ -52,6 +52,10 @@ gcloud auth application-default login
 gcloud config set project YOUR_PROJECT_ID
 ```
 
+Terraform uses Application Default Credentials, while source upload and IAP SSH
+use the active `gcloud` account. Both identities need the roles above; selecting
+the same account for both login commands is the simplest setup.
+
 ## Configure
 
 From this directory:
@@ -69,7 +73,7 @@ project_id = "my-gcp-project"
 zone       = "us-central1-a"
 
 instance_name = "agentdesktop-managed"
-public_host    = "agentdesktop.example.com"
+public_host    = null
 
 client_source_ranges = [
   "YOUR_PUBLIC_IPV4_ADDRESS/32",
@@ -82,10 +86,15 @@ dns_managed_zone = null
 Do not use `0.0.0.0/0` unless unrestricted Internet access is deliberate for an
 isolated test.
 
-If the hostname belongs to an existing Cloud DNS zone in the same project, set
-`dns_managed_zone` to the zone's resource name, not its DNS suffix. Terraform
-will create the `A` record. Otherwise leave it `null`; after apply, create an
-`A` record from `public_host` to the printed `public_ip`.
+With `public_host = null`, Terraform uses the allocated static IPv4 address in
+the development certificates, OAuth URLs, and client bootstrap. No DNS record
+is required.
+
+To use DNS instead, set `public_host` to the hostname. If it belongs to an
+existing Cloud DNS zone in the same project, set `dns_managed_zone` to the
+zone's resource name, not its DNS suffix, and Terraform creates the `A` record.
+For DNS hosted elsewhere, leave `dns_managed_zone` null and create the record
+using the `public_ip` output.
 
 Edit `deploy.env` and replace both placeholders:
 
@@ -116,12 +125,13 @@ The script performs these operations:
 1. Creates or updates the GCP infrastructure.
 2. Archives the current local server source, including uncommitted files.
 3. Uploads source and secrets through an IAP SSH tunnel.
-4. Waits for VM package installation, generates the hostname-bound development
+4. Waits for VM package installation, generates endpoint-bound development
    certificates on first deploy, builds the containers, and verifies the stack.
 5. Downloads the public client files into `client-bootstrap/`:
    `organization.json` and `server-ca.crt`.
 
-If Cloud DNS is not managed by this configuration, create the DNS record using:
+When `public_host` is set but Cloud DNS is not managed by this configuration,
+create the DNS record using:
 
 ```bash
 terraform output -raw public_ip
@@ -141,6 +151,25 @@ Copy `client-bootstrap/organization.json` and
 from the VM. Trust the development server CA on that client, point
 `SSL_CERT_FILE` and `AGENTDESKTOP_ORGANIZATION_CONFIG` at those files, and
 continue at [Start Agent Desktop on the laptop](../../../../docs/deployment/managed-vm-walkthrough.md#4-start-agent-desktop-on-the-laptop).
+
+On a Windows development VM that shares this repository, trust the downloaded
+CA once for the current user, install the Windows UI dependencies, and use the
+GCP launcher:
+
+```powershell
+$Bootstrap = Join-Path $PWD 'examples\managed-vm\terraform\gcp\client-bootstrap'
+Import-Certificate `
+  -FilePath "$Bootstrap\server-ca.crt" `
+  -CertStoreLocation 'Cert:\CurrentUser\Root'
+
+npm --prefix ui ci
+& .\examples\managed-vm\terraform\gcp\start-client.ps1
+```
+
+The launcher validates the bootstrap and CA trust, then derives the OAuth,
+enrollment, and Gateway endpoints from `organization.json`. Quit any existing
+Agent Desktop tray process before starting it; an already-running process keeps
+the organization configuration with which it was launched.
 
 The administrator application is available at the `admin_url` output. The
 seeded development accounts remain:

@@ -118,14 +118,17 @@ if (ownsGateway && !gatewayBinary) {
   process.exit(1);
 }
 const upstream =
-  process.env.AGENTDESKTOP_UPSTREAM ||
-  (connectorMode === "managed"
+  connectorMode === "managed"
     ? organizationConfig.gateway.url
-    : ownsGateway
-      ? "http://127.0.0.1:4100"
-      : "http://127.0.0.1:4100");
+    : process.env.AGENTDESKTOP_UPSTREAM || "http://127.0.0.1:4100";
 const gatewayUrl = new URL(upstream);
 const gatewayPort = Number(gatewayUrl.port || (gatewayUrl.protocol === "https:" ? 443 : 80));
+if (connectorMode === "managed") {
+  console.log(`[desktop] organization config: ${organizationConfigPath}`);
+  console.log(`[desktop] OAuth issuer: ${organizationConfig.identity.issuer}`);
+  console.log(`[desktop] enrollment URL: ${organizationConfig.identity.enrollment_url}`);
+  console.log(`[desktop] Gateway URL: ${organizationConfig.gateway.url}`);
+}
 const environment = {
   ...process.env,
   AGENTDESKTOP_MODE: connectorMode,
@@ -139,10 +142,8 @@ const environment = {
     : {}),
   ...(connectorMode === "managed"
     ? {
-        AGENTDESKTOP_IDENTITY_ISSUER:
-          process.env.AGENTDESKTOP_IDENTITY_ISSUER || organizationConfig.identity.issuer,
-        AGENTDESKTOP_ENROLLMENT_URL:
-          process.env.AGENTDESKTOP_ENROLLMENT_URL || organizationConfig.identity.enrollment_url
+        AGENTDESKTOP_IDENTITY_ISSUER: organizationConfig.identity.issuer,
+        AGENTDESKTOP_ENROLLMENT_URL: organizationConfig.identity.enrollment_url
       }
     : {}),
   ...(ownsGateway

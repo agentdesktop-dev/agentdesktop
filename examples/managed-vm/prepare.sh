@@ -5,13 +5,29 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 runtime="$root/runtime"
 public_host="${1:-}"
 
+is_ipv4() {
+  local octet
+  local -a octets
+
+  IFS=. read -r -a octets <<<"$1"
+  [[ "${#octets[@]}" -eq 4 ]] || return 1
+  for octet in "${octets[@]}"; do
+    [[ "$octet" =~ ^[0-9]{1,3}$ ]] || return 1
+    ((10#$octet <= 255)) || return 1
+  done
+}
+
 if [[ -z "$public_host" || ! "$public_host" =~ ^[A-Za-z0-9.-]+$ || "$public_host" == .* || "$public_host" == *. ]]; then
-  echo "usage: $0 SERVER_DNS_NAME" >&2
+  echo "usage: $0 SERVER_DNS_NAME_OR_IPV4" >&2
   exit 2
 fi
 if [[ "$public_host" == *.local ]]; then
   echo ".local is reserved for multicast DNS and is not supported by this example" >&2
   echo "use agentdesktop.localhost for a laptop-local deployment" >&2
+  exit 2
+fi
+if [[ "$public_host" =~ ^[0-9.]+$ ]] && ! is_ipv4 "$public_host"; then
+  echo "$public_host is not a valid IPv4 address" >&2
   exit 2
 fi
 command -v openssl >/dev/null || {
@@ -22,6 +38,11 @@ command -v jq >/dev/null || {
   echo "jq is required" >&2
   exit 1
 }
+
+certificate_san="DNS:$public_host"
+if is_ipv4 "$public_host"; then
+  certificate_san="IP:$public_host"
+fi
 
 rm -rf "$runtime"
 mkdir -p "$runtime/certs"
@@ -49,7 +70,7 @@ issue_server_certificate() {
     -keyout "$runtime/certs/$name.key" \
     -out "$runtime/certs/$name.csr" \
     -subj "/CN=$public_host" \
-    -addext "subjectAltName=DNS:$public_host"
+    -addext "subjectAltName=$certificate_san"
   openssl x509 -req \
     -in "$runtime/certs/$name.csr" \
     -CA "$runtime/certs/server-ca.crt" \
@@ -62,7 +83,7 @@ issue_server_certificate() {
       'basicConstraints=critical,CA:FALSE' \
       'keyUsage=critical,digitalSignature' \
       'extendedKeyUsage=serverAuth' \
-      "subjectAltName=DNS:$public_host")
+      "subjectAltName=$certificate_san")
   rm "$runtime/certs/$name.csr"
 }
 

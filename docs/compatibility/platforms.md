@@ -18,7 +18,7 @@ Last updated: 2026-08-11
 | CA trust installation/removal | Supported with explicit consent and fingerprint-scoped removal | Unavailable | Unavailable |
 | Transactional bundle installer | Supported | Build not validated | Build not validated |
 | User service integration | Generated systemd unit | Unavailable | Session logic implemented; production service installer pending |
-| Managed agent/MCP/skill discovery | Unavailable | Supported while the Tauri background app runs | Unavailable |
+| Managed agent/MCP/skill discovery | Unavailable | Supported for five known agent families while the Tauri background app runs | Claude Code user/global npm installation, fixed user/managed configuration, MCP, and skills while the Tauri background app runs; process state is unknown |
 
 The local `/_agentdesktop/status` response exposes the current binary's capability flags. On Linux, native opaque forwarding is unprivileged; transparent capture and trust installation report true. The `claude` launch profile owns a gated transient systemd user scope, validates its exact cgroup, verifies inspection trust, and installs fail-closed nftables rules before release. It provides routed process-tree capture, not sandbox isolation or anti-bypass against local administrators.
 

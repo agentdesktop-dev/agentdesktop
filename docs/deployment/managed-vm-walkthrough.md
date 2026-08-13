@@ -267,7 +267,7 @@ In Agent Desktop Administration, **Overview** shows:
 
 The administration navigation also exposes the intended management model:
 
-- **Inventory** shows enrolled endpoints from the authority. Managed macOS reports known agents with name, icon, static version, runtime state, configured MCP server names/transports, skills, and plugins. Administrators can request a rescan of all active devices or one expanded device.
+- **Inventory** shows enrolled endpoints from the authority. Managed macOS reports five known agent families with name, icon, static version, runtime state, configured MCP server names/transports, skills, and plugins. Managed Windows currently reports Claude Code installation/version, fixed user and managed configuration, MCP servers, and skills with runtime state marked unknown. Administrators can request a rescan of all active devices or one expanded device.
 - **Policies** stores one desired organization policy with Allow/Deny choices for Claude Code, Claude Desktop, Codex CLI, OpenClaw, and VS Code Copilot. Endpoint enforcement is not implemented yet.
 
 These remaining unavailable states are expected for the current milestone; do not treat them as a deployment failure.

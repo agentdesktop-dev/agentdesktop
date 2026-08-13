@@ -82,7 +82,7 @@ interface WireDeviceDiscoveryReport {
   report: {
     schema_version: number;
     collector_version: string;
-    platform: "macos";
+    platform: "macos" | "windows";
     coverage: { project_scopes: "not_scanned"; partial: boolean };
     agents: Array<{
       id: "claude-code" | "claude-desktop" | "codex-cli" | "openclaw" | "vscode-copilot";

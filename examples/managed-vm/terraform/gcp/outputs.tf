@@ -14,12 +14,12 @@ output "instance_name" {
 }
 
 output "public_ip" {
-  description = "Static public IPv4 address. Point public_host at this address when Cloud DNS is not managed here."
+  description = "Static public IPv4 address assigned to the deployment."
   value       = google_compute_address.managed.address
 }
 
 output "public_host" {
-  description = "Hostname embedded in certificates, OAuth configuration, and client bootstrap."
+  description = "DNS hostname or static IPv4 address embedded in certificates, OAuth configuration, and client bootstrap."
   value       = local.public_host
 }
 

@@ -102,7 +102,7 @@ func (service *Service) RescanStatus(ctx context.Context, device deviceidentity.
 }
 
 func validate(report Report) error {
-	if report.SchemaVersion != SchemaVersion || report.Platform != "macos" ||
+	if report.SchemaVersion != SchemaVersion || !oneOf(report.Platform, "macos", "windows") ||
 		!validText(report.CollectorVersion, 64) || report.Coverage.ProjectScopes != "not_scanned" ||
 		len(report.Agents) > maxAgents || len(report.Issues) > maxIssues {
 		return ErrInvalidReport

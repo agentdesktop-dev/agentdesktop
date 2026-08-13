@@ -64,9 +64,9 @@ In remote managed deployments, the enrollment service owns membership workflows,
 | TLS inspection | Agent Gateway-owned; Linux trust install/remove implemented for standalone capture | Gateway-owned remotely; managed trust may be distributed by MDM/bootstrap, but managed capture is missing |
 | Local activity stats | Implemented opaque flow counters in Agent Desktop | Implemented opaque flow counters in Agent Desktop |
 | Request/model stats | Agent Gateway responsibility; not a connector metric | Agent Gateway responsibility; not exposed through the enrollment administration service |
-| Agent/application discovery | Missing | Implemented for managed macOS while the Tauri host runs; latest report is authenticated with the current device certificate and rendered per device |
+| Agent/application discovery | Missing | Implemented for five known agent families on managed macOS and Claude Code on managed Windows while the Tauri host runs; latest report is authenticated with the current device certificate and rendered per device |
 | Model/provider inventory | Missing | Partial: Gateway traffic exists, but endpoint model/provider inventory is not reported |
-| MCP server and tool inventory | Missing | Partial: managed macOS reports configured MCP names/transports plus skill and plugin names from fixed roots; reachability and effective enablement are not asserted |
+| MCP server and tool inventory | Missing | Partial: managed macOS reports configured MCP names/transports plus skill and plugin names from fixed roots; Windows reports Claude Code MCP names/transports and skills; reachability and effective enablement are not asserted |
 | Endpoint policy distribution | Missing | Missing: Agent Gateway inference policy remains the only active policy source |
 | Agent allow/deny desired policy | Not applicable | Implemented as one organization policy for five known agents; endpoint enforcement is not available |
 | Audit/warn/enforce modes | Missing | Partial: inference routing is enforced; no general endpoint policy modes exist |
