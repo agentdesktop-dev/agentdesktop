@@ -1,29 +1,53 @@
 use std::path::Path;
 
-#[cfg(unix)]
 use anyhow::{Context, bail};
-#[cfg(unix)]
 use bytes::Bytes;
-#[cfg(unix)]
 use http_body_util::{BodyExt, Empty, Full};
-#[cfg(unix)]
 use hyper::{Request, client::conn::http1};
-#[cfg(unix)]
 use hyper_util::rt::TokioIo;
-#[cfg(unix)]
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 #[cfg(unix)]
 use tokio::net::UnixStream;
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 
 #[cfg(unix)]
-pub async fn get<T>(socket: &Path, path: &str) -> anyhow::Result<T>
+type LocalStream = UnixStream;
+#[cfg(windows)]
+type LocalStream = NamedPipeClient;
+
+#[cfg(unix)]
+async fn connect(endpoint: &Path) -> anyhow::Result<LocalStream> {
+    UnixStream::connect(endpoint)
+        .await
+        .with_context(|| format!("connect to {}", endpoint.display()))
+}
+
+#[cfg(windows)]
+async fn connect(endpoint: &Path) -> anyhow::Result<LocalStream> {
+    // CreateFile returns ERROR_PIPE_BUSY when all server instances are in use.
+    // A fresh instance should become available as soon as the daemon accepts
+    // one of them, so follow the retry pattern recommended by Tokio.
+    const ERROR_PIPE_BUSY: i32 = 231;
+    loop {
+        match ClientOptions::new().open(endpoint.as_os_str()) {
+            Ok(client) => return Ok(client),
+            Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("connect to {}", endpoint.display()));
+            }
+        }
+    }
+}
+
+pub async fn get<T>(endpoint: &Path, path: &str) -> anyhow::Result<T>
 where
     T: DeserializeOwned,
 {
-    let stream = UnixStream::connect(socket)
-        .await
-        .with_context(|| format!("connect to {}", socket.display()))?;
+    let stream = connect(endpoint).await?;
     let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
         .await
         .context("start HTTP connection")?;
@@ -58,14 +82,11 @@ where
     serde_json::from_slice(&body).context("decode daemon response")
 }
 
-#[cfg(unix)]
-pub async fn post_json<T>(socket: &Path, path: &str, value: &T) -> anyhow::Result<()>
+pub async fn post_json<T>(endpoint: &Path, path: &str, value: &T) -> anyhow::Result<()>
 where
     T: Serialize,
 {
-    let stream = UnixStream::connect(socket)
-        .await
-        .with_context(|| format!("connect to {}", socket.display()))?;
+    let stream = connect(endpoint).await?;
     let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
         .await
         .context("start HTTP connection")?;
@@ -98,20 +119,4 @@ where
         );
     }
     Ok(())
-}
-
-#[cfg(not(unix))]
-pub async fn get<T>(_endpoint: &Path, _path: &str) -> anyhow::Result<T>
-where
-    T: DeserializeOwned,
-{
-    anyhow::bail!("local daemon transport is not implemented on this platform")
-}
-
-#[cfg(not(unix))]
-pub async fn post_json<T>(_endpoint: &Path, _path: &str, _value: &T) -> anyhow::Result<()>
-where
-    T: serde::Serialize,
-{
-    anyhow::bail!("local daemon transport is not implemented on this platform")
 }

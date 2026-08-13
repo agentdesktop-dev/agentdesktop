@@ -1,4 +1,9 @@
-use std::{collections::BTreeSet, fs::File, io::Read, path::Path};
+use std::{
+    collections::BTreeSet,
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 use agentdesktop_core::model::Agent;
 use memchr::memmem;
@@ -6,7 +11,7 @@ use memchr::memmem;
 use super::metadata;
 
 pub(super) fn discover() -> Option<Agent> {
-    let executable = metadata::find_in_path("opencode")?;
+    let executable = metadata::find_executable("opencode", executable_candidates())?;
     Some(Agent {
         version: embedded_version(&executable),
         executable,
@@ -14,6 +19,26 @@ pub(super) fn discover() -> Option<Agent> {
         mcp_servers: Vec::new(),
         skills: Vec::new(),
     })
+}
+
+fn executable_candidates() -> Vec<PathBuf> {
+    let mut candidates = BTreeSet::new();
+    for home in metadata::user_home_dirs() {
+        candidates.insert(home.join(".opencode/bin/opencode"));
+        candidates.insert(home.join(".local/bin/opencode"));
+        #[cfg(windows)]
+        {
+            candidates.insert(home.join(".opencode/bin/opencode.exe"));
+            candidates.insert(home.join(".local/bin/opencode.exe"));
+            candidates.insert(home.join("AppData/Roaming/npm/opencode.cmd"));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    candidates.extend([
+        PathBuf::from("/opt/homebrew/bin/opencode"),
+        PathBuf::from("/usr/local/bin/opencode"),
+    ]);
+    candidates.into_iter().collect()
 }
 
 const VERSION_MARKER: &[u8] = b"user-agent=opencode/";

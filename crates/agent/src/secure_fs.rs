@@ -24,7 +24,7 @@ pub fn ensure_private_dir(path: &Path) -> anyhow::Result<()> {
 }
 
 /// Atomically replaces a file using a uniquely-created sibling temporary file.
-pub fn atomic_write(path: &Path, contents: &[u8], mode: u32) -> anyhow::Result<()> {
+pub fn atomic_write(path: &Path, contents: &[u8], _mode: u32) -> anyhow::Result<()> {
     let directory = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -44,7 +44,7 @@ pub fn atomic_write(path: &Path, contents: &[u8], mode: u32) -> anyhow::Result<(
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.mode(mode);
+            options.mode(_mode);
         }
         let mut file = match options.open(&temporary) {
             Ok(file) => file,

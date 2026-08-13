@@ -9,7 +9,7 @@ use agentdesktop_core::model::{Agent, McpServer};
 use super::metadata;
 
 pub(super) fn discover() -> Option<Agent> {
-    let executable = metadata::find_in_path("codex")?;
+    let executable = metadata::find_executable("codex", executable_candidates())?;
     let version = metadata::version_after_component(&executable, "releases").and_then(|release| {
         let target_marker = format!("-{}-", std::env::consts::ARCH);
         release
@@ -25,6 +25,25 @@ pub(super) fn discover() -> Option<Agent> {
     })
 }
 
+fn executable_candidates() -> Vec<PathBuf> {
+    let mut candidates = BTreeSet::new();
+    for home in metadata::user_home_dirs() {
+        candidates.insert(home.join(".local/bin/codex"));
+        candidates.insert(home.join(".npm-global/bin/codex"));
+        #[cfg(windows)]
+        {
+            candidates.insert(home.join(".local/bin/codex.exe"));
+            candidates.insert(home.join("AppData/Roaming/npm/codex.cmd"));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    candidates.extend([
+        PathBuf::from("/opt/homebrew/bin/codex"),
+        PathBuf::from("/usr/local/bin/codex"),
+    ]);
+    candidates.into_iter().collect()
+}
+
 fn discover_mcp_servers() -> Vec<McpServer> {
     config_paths()
         .into_iter()
@@ -34,8 +53,7 @@ fn discover_mcp_servers() -> Vec<McpServer> {
 
 fn config_paths() -> Vec<PathBuf> {
     let mut paths = BTreeSet::new();
-    paths.insert(PathBuf::from("/etc/codex/config.toml"));
-    paths.insert(PathBuf::from("/etc/codex/managed_config.toml"));
+    paths.extend(system_config_paths());
     if let Some(home) = metadata::home_dir() {
         let codex_home = std::env::var_os("CODEX_HOME")
             .map(PathBuf::from)
@@ -51,9 +69,24 @@ fn config_paths() -> Vec<PathBuf> {
     paths.into_iter().collect()
 }
 
+fn system_config_paths() -> Vec<PathBuf> {
+    #[cfg(unix)]
+    let root = Some(PathBuf::from("/etc/codex"));
+    #[cfg(windows)]
+    let root: Option<PathBuf> = None;
+
+    root.into_iter()
+        .flat_map(|root| [root.join("config.toml"), root.join("managed_config.toml")])
+        .collect()
+}
+
 fn skill_roots() -> Vec<PathBuf> {
     let mut roots = BTreeSet::new();
-    roots.insert(PathBuf::from("/etc/codex/skills"));
+    roots.extend(system_config_paths().into_iter().filter_map(|path| {
+        (path.file_name().is_some_and(|name| name == "config.toml"))
+            .then(|| path.parent().map(|parent| parent.join("skills")))
+            .flatten()
+    }));
     if let Some(home) = metadata::home_dir() {
         let codex_home = std::env::var_os("CODEX_HOME")
             .map(PathBuf::from)

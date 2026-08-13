@@ -10,7 +10,7 @@ use serde_json::Value;
 use super::metadata;
 
 pub(super) fn discover() -> Option<Agent> {
-    let executable = metadata::find_in_path("claude")?;
+    let executable = metadata::find_executable("claude", executable_candidates())?;
     Some(Agent {
         version: metadata::version_after_component(&executable, "versions"),
         executable,
@@ -20,10 +20,30 @@ pub(super) fn discover() -> Option<Agent> {
     })
 }
 
+fn executable_candidates() -> Vec<PathBuf> {
+    let mut candidates = BTreeSet::new();
+    for home in metadata::user_home_dirs() {
+        candidates.insert(home.join(".local/bin/claude"));
+        candidates.insert(home.join(".npm-global/bin/claude"));
+        #[cfg(windows)]
+        {
+            candidates.insert(home.join(".local/bin/claude.exe"));
+            candidates.insert(home.join("AppData/Roaming/npm/claude.cmd"));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    candidates.extend([
+        PathBuf::from("/opt/homebrew/bin/claude"),
+        PathBuf::from("/usr/local/bin/claude"),
+    ]);
+    candidates.into_iter().collect()
+}
+
 fn discover_mcp_servers() -> Vec<McpServer> {
     let mut servers = Vec::new();
-    let managed = PathBuf::from("/etc/claude-code/managed-mcp.json");
-    servers.extend(mcp_servers_from_json(&managed));
+    if let Some(managed) = managed_root().map(|root| root.join("managed-mcp.json")) {
+        servers.extend(mcp_servers_from_json(&managed));
+    }
 
     for home in metadata::user_home_dirs() {
         let user = home.join(".claude.json");
@@ -34,7 +54,7 @@ fn discover_mcp_servers() -> Vec<McpServer> {
 
 fn skill_roots() -> Vec<PathBuf> {
     let mut roots = BTreeSet::new();
-    roots.insert(PathBuf::from("/etc/claude-code/skills"));
+    roots.extend(managed_root().map(|root| root.join("skills")));
     roots.extend(metadata::current_dir_ancestors(Path::new(".claude/skills")));
     for home in metadata::user_home_dirs() {
         roots.insert(home.join(".claude/skills"));
@@ -43,6 +63,15 @@ fn skill_roots() -> Vec<PathBuf> {
         }
     }
     roots.into_iter().collect()
+}
+
+fn managed_root() -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    return Some(PathBuf::from("/etc/claude-code"));
+    #[cfg(target_os = "macos")]
+    return Some(PathBuf::from("/Library/Application Support/ClaudeCode"));
+    #[cfg(windows)]
+    return metadata::env_path("ProgramFiles").map(|path| path.join("ClaudeCode"));
 }
 
 fn installed_plugin_roots(home: &Path) -> Vec<PathBuf> {

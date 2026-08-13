@@ -10,9 +10,62 @@ use serde::Deserialize;
 
 pub(super) fn find_in_path(name: &str) -> Option<PathBuf> {
     let path = env::var_os("PATH")?;
-    env::split_paths(&path)
-        .map(|directory| directory.join(name))
-        .find(|candidate| candidate.is_file())
+    find_in_directories(name, env::split_paths(&path))
+}
+
+pub(super) fn find_executable(
+    name: &str,
+    additional_candidates: impl IntoIterator<Item = PathBuf>,
+) -> Option<PathBuf> {
+    find_in_path(name).or_else(|| {
+        additional_candidates
+            .into_iter()
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+fn find_in_directories(
+    name: &str,
+    directories: impl IntoIterator<Item = PathBuf>,
+) -> Option<PathBuf> {
+    let extensions = executable_extensions(name);
+    directories.into_iter().find_map(|directory| {
+        extensions
+            .iter()
+            .map(|extension| directory.join(format!("{name}{extension}")))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+#[cfg(windows)]
+fn executable_extensions(name: &str) -> Vec<String> {
+    if Path::new(name).extension().is_some() {
+        return vec![String::new()];
+    }
+
+    let mut extensions = vec![String::new()];
+    let path_extensions = env::var_os("PATHEXT")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+    extensions.extend(
+        path_extensions
+            .to_string_lossy()
+            .split(';')
+            .filter(|extension| !extension.is_empty())
+            .map(|extension| {
+                if extension.starts_with('.') {
+                    extension.to_owned()
+                } else {
+                    format!(".{extension}")
+                }
+            }),
+    );
+    extensions
+}
+
+#[cfg(unix)]
+fn executable_extensions(_name: &str) -> Vec<String> {
+    vec![String::new()]
 }
 
 pub(super) fn version_after_component(executable: &Path, component: &str) -> Option<String> {
@@ -87,8 +140,26 @@ pub(super) fn electron_asar_version(path: &Path, product_name: &str) -> Option<S
 }
 
 pub(super) fn home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        if let Some(profile) = env_path("USERPROFILE") {
+            return Some(profile);
+        }
+        let drive = env::var_os("HOMEDRIVE")?;
+        let path = env::var_os("HOMEPATH")?;
+        Some(PathBuf::from(drive).join(path))
+    }
+
+    #[cfg(unix)]
     env::var_os("HOME")
         .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+}
+
+#[cfg(windows)]
+pub(super) fn env_path(name: &str) -> Option<PathBuf> {
+    env::var_os(name)
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
 }
 
@@ -100,6 +171,7 @@ pub(super) fn user_home_dirs() -> Vec<PathBuf> {
     let mut homes = BTreeSet::new();
     homes.extend(home_dir());
 
+    #[cfg(unix)]
     if let Ok(passwd) = fs::read_to_string("/etc/passwd") {
         for line in passwd.lines() {
             let fields: Vec<_> = line.split(':').collect();
@@ -113,7 +185,19 @@ pub(super) fn user_home_dirs() -> Vec<PathBuf> {
         }
     }
 
-    for parent in [Path::new("/home"), Path::new("/Users")] {
+    #[cfg(target_os = "linux")]
+    let parents = vec![PathBuf::from("/home")];
+    #[cfg(target_os = "macos")]
+    let parents = vec![PathBuf::from("/Users")];
+    #[cfg(windows)]
+    let parents: Vec<PathBuf> = home_dir()
+        .and_then(|home| home.parent().map(Path::to_path_buf))
+        .into_iter()
+        .chain(env_path("SystemDrive").map(|drive| drive.join("Users")))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    for parent in &parents {
         let Ok(entries) = fs::read_dir(parent) else {
             continue;
         };
@@ -201,7 +285,27 @@ fn skill_front_matter(contents: &str) -> Option<BTreeMap<String, serde_json::Val
 
 #[cfg(test)]
 mod tests {
-    use super::skill_front_matter;
+    use std::fs;
+
+    use super::{find_in_directories, skill_front_matter};
+
+    #[test]
+    fn finds_an_executable_in_a_later_path_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "agentdesktop-discovery-path-{}",
+            std::process::id()
+        ));
+        let first = root.join("first");
+        let second = root.join("second");
+        fs::create_dir_all(&second).unwrap();
+        let executable = second.join("tool");
+        fs::write(&executable, []).unwrap();
+
+        let found = find_in_directories("tool", [first, second]);
+        let _ = fs::remove_dir_all(root);
+
+        assert_eq!(found.as_deref(), Some(executable.as_path()));
+    }
 
     #[test]
     fn reads_only_skill_front_matter() {
