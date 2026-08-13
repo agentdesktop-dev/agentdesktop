@@ -3,7 +3,7 @@
 |Field|Type|Description|
 |-|-|-|
 |`controller`|object|Controller connection settings. Omit this field to run without fleet management.|
-|`controller.address`|string|HTTP or HTTPS address of the controller's fleet API.|
+|`controller.address`|string|HTTPS address of the controller's fleet API.|
 |`controller.caCertificatePath`|string|Path to a PEM-encoded CA certificate used to verify the controller.<br><br>Omit this field to use the operating system's trusted certificate roots.|
 |`controller.heartbeatInterval`|string|Interval between device heartbeats. Defaults to `30s`.|
 |`inferenceGateway`|object|Inference gateway used by managed developer tools.|

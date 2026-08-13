@@ -2,6 +2,7 @@
 fleetListen: 0.0.0.0:8443
 allowInsecureDev: true
 databaseUrl: sqlite:///tmp/agentdesktop-controller.db?mode=rwc
+tls: /tmp/agentdesktop-keys
 
 oidc:
   issuer: http://127.0.0.1:5556/dex
@@ -11,4 +12,4 @@ daemonConfig:
   path: ./claude-code.yaml
 
 gatewayJwt:
-  privateKey: /tmp/agentdesktop-gateway-jwt.pem
+  privateKey: /tmp/agentdesktop-keys/gateway-jwt-key.pem

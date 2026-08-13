@@ -2,25 +2,24 @@ use std::pin::Pin;
 
 use agentdesktop_proto::fleet::{
     AgentMessage, BeginEnrollmentRequest, BeginEnrollmentResponse, CompleteEnrollmentRequest,
-    ControllerMessage, EnrollResponse, InferenceGatewayCredentialRequest,
-    InferenceGatewayCredentialResponse, agent_message, controller_message,
+    ControllerMessage, DeviceCertificateResponse, EnrollResponse,
+    InferenceGatewayCredentialRequest, InferenceGatewayCredentialResponse,
+    RenewDeviceCertificateRequest, agent_message, controller_message,
     fleet_agent_server::FleetAgent,
 };
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_core::Stream;
-use rand::Rng;
-use sha2::{Digest, Sha256};
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, time};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+use x509_parser::{extensions::GeneralName, parse_x509_certificate};
 
 use agentdesktop_core::config::InferenceGatewayAuthentication;
 
 use crate::{
-    daemon_config::DaemonConfigStore, database::Database, gateway_jwt::GatewayJwtIssuer,
-    oidc::OidcProvider,
+    daemon_config::DaemonConfigStore, database::Database, device_ca::DeviceCertificateIssuer,
+    gateway_jwt::GatewayJwtIssuer, oidc::OidcProvider,
 };
 
 #[derive(Clone)]
@@ -29,6 +28,7 @@ pub struct FleetAgentService {
     database: Database,
     daemon_config: DaemonConfigStore,
     gateway_jwt_issuer: Option<GatewayJwtIssuer>,
+    device_certificate_issuer: Option<DeviceCertificateIssuer>,
 }
 
 impl FleetAgentService {
@@ -37,12 +37,14 @@ impl FleetAgentService {
         database: Database,
         daemon_config: DaemonConfigStore,
         gateway_jwt_issuer: Option<GatewayJwtIssuer>,
+        device_certificate_issuer: Option<DeviceCertificateIssuer>,
     ) -> Self {
         Self {
             oidc,
             database,
             daemon_config,
             gateway_jwt_issuer,
+            device_certificate_issuer,
         }
     }
 }
@@ -75,8 +77,11 @@ impl FleetAgent for FleetAgentService {
             .oidc
             .as_ref()
             .ok_or_else(|| Status::failed_precondition("OIDC enrollment is disabled"))?;
+        let access_token = bearer_credential(request.metadata())?.to_owned();
+        let request = request.into_inner();
+        let csr_der = request.certificate_signing_request_der.clone();
         let completed = oidc
-            .complete(request.into_inner())
+            .complete(request, &access_token)
             .await
             .map_err(invalid_enrollment)?;
         self.enroll_device(
@@ -84,15 +89,37 @@ impl FleetAgent for FleetAgentService {
             &completed.issuer,
             &completed.subject,
             Some(&completed.idp_claims),
+            &csr_der,
         )
         .await
+    }
+
+    async fn renew_device_certificate(
+        &self,
+        request: Request<RenewDeviceCertificateRequest>,
+    ) -> Result<Response<DeviceCertificateResponse>, Status> {
+        let device_id = self.authenticate_device(&request).await?;
+        let issuer = self.device_certificate_issuer.as_ref().ok_or_else(|| {
+            Status::failed_precondition("device certificate issuance is disabled")
+        })?;
+        let issued = issuer
+            .issue(
+                &device_id,
+                &request.into_inner().certificate_signing_request_der,
+            )
+            .map_err(invalid_csr)?;
+        info!(device_id, "renewed device certificate");
+        Ok(Response::new(DeviceCertificateResponse {
+            client_certificate_pem: issued.chain_pem,
+            expires_at_unix_seconds: issued.expires_at_unix_seconds,
+        }))
     }
 
     async fn get_inference_gateway_credential(
         &self,
         request: Request<InferenceGatewayCredentialRequest>,
     ) -> Result<Response<InferenceGatewayCredentialResponse>, Status> {
-        let device_id = self.authenticate_device(request.metadata()).await?;
+        let device_id = self.authenticate_device(&request).await?;
         let client_id = request.into_inner().client_id;
         if !agentdesktop_core::config::valid_client_id(&client_id) {
             return Err(Status::invalid_argument("invalid client_id"));
@@ -165,7 +192,13 @@ impl FleetAgent for FleetAgentService {
         &self,
         request: Request<tonic::Streaming<AgentMessage>>,
     ) -> Result<Response<Self::ConnectStream>, Status> {
-        let authenticated_device_id = self.authenticate_device(request.metadata()).await?;
+        let authenticated_device_id = self.authenticate_device(&request).await?;
+        let oauth_revalidation = (
+            self.oidc.clone().ok_or_else(|| {
+                Status::failed_precondition("OIDC access-token validation is disabled")
+            })?,
+            bearer_credential(request.metadata())?.to_owned(),
+        );
 
         let mut inbound = request.into_inner();
         let (sender, receiver) = mpsc::channel(8);
@@ -200,9 +233,43 @@ impl FleetAgent for FleetAgentService {
         });
 
         let database = self.database.clone();
+        let auth_sender = sender.clone();
         tokio::spawn(async move {
+            let expected_subject = match database.device_principal(&authenticated_device_id).await {
+                Ok(principal) => principal.subject,
+                Err(error) => {
+                    error!(%error, device_id = %authenticated_device_id, "failed to load stream identity");
+                    return;
+                }
+            };
+            let mut auth_interval = time::interval(std::time::Duration::from_secs(5 * 60));
+            auth_interval.tick().await;
             loop {
-                match inbound.message().await {
+                tokio::select! {
+                _ = auth_interval.tick() => {
+                    let (oidc, access_token) = &oauth_revalidation;
+                    match oidc.authenticate_access_token(access_token).await {
+                        Ok(subject) if subject == expected_subject => {}
+                        Ok(_) => {
+                            warn!(device_id = %authenticated_device_id, "closing stream after OIDC subject changed");
+                            let _ = auth_sender
+                                .send(Err(Status::permission_denied("OIDC subject changed")))
+                                .await;
+                            break;
+                        }
+                        Err(error) => {
+                            let status = invalid_access_token(error);
+                            if status.code() == tonic::Code::Unavailable {
+                                warn!(device_id = %authenticated_device_id, "OIDC unavailable during stream revalidation; retaining connection");
+                                continue;
+                            }
+                            warn!(device_id = %authenticated_device_id, "closing stream after OIDC access token revalidation failed");
+                            let _ = auth_sender.send(Err(status)).await;
+                            break;
+                        }
+                    }
+                }
+                message = inbound.message() => match message {
                     Ok(Some(message)) => {
                         if let Some(agent_message::Message::Hello(hello)) = &message.message
                             && hello.device_id != authenticated_device_id
@@ -210,7 +277,7 @@ impl FleetAgent for FleetAgentService {
                             warn!(
                                 authenticated_device_id,
                                 claimed_device_id = %hello.device_id,
-                                "device credential and hello identity do not match"
+                                "device certificate and hello identity do not match"
                             );
                             break;
                         }
@@ -230,6 +297,7 @@ impl FleetAgent for FleetAgentService {
                         warn!(error = %err, device_id = %authenticated_device_id, "device stream failed");
                         break;
                     }
+                },
                 }
             }
         });
@@ -239,16 +307,50 @@ impl FleetAgent for FleetAgentService {
 }
 
 impl FleetAgentService {
-    async fn authenticate_device(
+    async fn authenticate_device<T>(&self, request: &Request<T>) -> Result<String, Status> {
+        let certificate_device_id = peer_certificate_device_id(request)?;
+        self.authenticate_device_identity(certificate_device_id.as_deref(), request.metadata())
+            .await
+    }
+
+    async fn authenticate_device_identity(
         &self,
+        certificate_device_id: Option<&str>,
         metadata: &tonic::metadata::MetadataMap,
     ) -> Result<String, Status> {
-        let credential = bearer_credential(metadata)?;
-        self.database
-            .authenticate(&credential_hash(credential))
+        let device_id = certificate_device_id
+            .ok_or_else(|| Status::unauthenticated("missing device certificate"))?;
+        let access_token = bearer_credential(metadata)?;
+        let oidc = self.oidc.as_ref().ok_or_else(|| {
+            Status::failed_precondition("OIDC access-token validation is disabled")
+        })?;
+        let access_subject = oidc
+            .authenticate_access_token(access_token)
             .await
-            .map_err(internal)?
-            .ok_or_else(|| Status::unauthenticated("unknown device credential"))
+            .map_err(invalid_access_token)?;
+        self.authenticate_device_certificate_identity(device_id, &access_subject)
+            .await
+    }
+
+    async fn authenticate_device_certificate_identity(
+        &self,
+        device_id: &str,
+        access_subject: &str,
+    ) -> Result<String, Status> {
+        let principal = self
+            .database
+            .device_principal(device_id)
+            .await
+            .map_err(|error| {
+                warn!(%error, device_id, "certificate references an unknown device");
+                Status::unauthenticated("unrecognized device certificate")
+            })?;
+        if access_subject != principal.subject {
+            return Err(Status::permission_denied(
+                "access token subject does not match enrolled device user",
+            ));
+        }
+        Ok(device_id.to_owned())
     }
 
     async fn enroll_device(
@@ -257,14 +359,19 @@ impl FleetAgentService {
         enrolled_by_issuer: &str,
         enrolled_by_subject: &str,
         idp_claims: Option<&std::collections::BTreeMap<String, serde_json::Value>>,
+        csr_der: &[u8],
     ) -> Result<Response<EnrollResponse>, Status> {
         let device_id = Uuid::new_v4().to_string();
-        let credential = new_credential();
+        let issued_certificate = self
+            .device_certificate_issuer
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("device certificate issuance is disabled"))?
+            .issue(&device_id, csr_der)
+            .map_err(invalid_csr)?;
         self.database
             .enroll_device(
                 &device_id,
                 hostname,
-                &credential_hash(&credential),
                 enrolled_by_issuer,
                 enrolled_by_subject,
                 idp_claims,
@@ -281,9 +388,48 @@ impl FleetAgentService {
 
         Ok(Response::new(EnrollResponse {
             device_id,
-            credential,
+            client_certificate_pem: issued_certificate.chain_pem,
+            client_certificate_expires_at_unix_seconds: issued_certificate.expires_at_unix_seconds,
         }))
     }
+}
+
+fn peer_certificate_device_id<T>(request: &Request<T>) -> Result<Option<String>, Status> {
+    let Some(certificates) = request.peer_certs() else {
+        return Ok(None);
+    };
+    let certificate = certificates
+        .first()
+        .ok_or_else(|| Status::unauthenticated("missing device certificate"))?;
+    device_id_from_certificate(certificate.as_ref()).map(Some)
+}
+
+fn device_id_from_certificate(certificate_der: &[u8]) -> Result<String, Status> {
+    const SUFFIX: &str = ".device.agentdesktop.invalid";
+    let (_, certificate) = parse_x509_certificate(certificate_der)
+        .map_err(|_| Status::unauthenticated("invalid device certificate"))?;
+    let subject_alt_name = certificate
+        .subject_alternative_name()
+        .map_err(|_| Status::unauthenticated("invalid device certificate subject"))?
+        .ok_or_else(|| Status::unauthenticated("device certificate has no subject identity"))?;
+    let mut device_ids =
+        subject_alt_name
+            .value
+            .general_names
+            .iter()
+            .filter_map(|name| match name {
+                GeneralName::DNSName(name) => name.strip_suffix(SUFFIX),
+                _ => None,
+            });
+    let device_id = device_ids
+        .next()
+        .ok_or_else(|| Status::unauthenticated("device certificate has no device identity"))?;
+    if device_ids.next().is_some() || Uuid::parse_str(device_id).is_err() {
+        return Err(Status::unauthenticated(
+            "device certificate has an invalid device identity",
+        ));
+    }
+    Ok(device_id.to_owned())
 }
 
 async fn handle_agent_message(
@@ -348,22 +494,12 @@ async fn handle_agent_message(
 fn bearer_credential(metadata: &tonic::metadata::MetadataMap) -> Result<&str, Status> {
     let value = metadata
         .get("authorization")
-        .ok_or_else(|| Status::unauthenticated("missing device credential"))?
+        .ok_or_else(|| Status::unauthenticated("missing OIDC access token"))?
         .to_str()
-        .map_err(|_| Status::unauthenticated("invalid device credential"))?;
+        .map_err(|_| Status::unauthenticated("invalid OIDC access token"))?;
     value
         .strip_prefix("Bearer ")
-        .ok_or_else(|| Status::unauthenticated("invalid device credential"))
-}
-
-fn new_credential() -> String {
-    let mut bytes = [0_u8; 32];
-    rand::rng().fill_bytes(&mut bytes);
-    URL_SAFE_NO_PAD.encode(bytes)
-}
-
-fn credential_hash(credential: &str) -> String {
-    URL_SAFE_NO_PAD.encode(Sha256::digest(credential.as_bytes()))
+        .ok_or_else(|| Status::unauthenticated("invalid OIDC access token"))
 }
 
 fn internal(err: anyhow::Error) -> Status {
@@ -374,4 +510,89 @@ fn internal(err: anyhow::Error) -> Status {
 fn invalid_enrollment(err: anyhow::Error) -> Status {
     warn!(error = %err, "OIDC enrollment failed");
     Status::unauthenticated("OIDC enrollment failed")
+}
+
+fn invalid_csr(err: anyhow::Error) -> Status {
+    warn!(error = %err, "device certificate request failed");
+    Status::invalid_argument("invalid certificate signing request")
+}
+
+fn invalid_access_token(err: anyhow::Error) -> Status {
+    warn!(error = %err, "OIDC access token rejected");
+    let request_error = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<reqwest::Error>());
+    if let Some(request_error) = request_error {
+        return match request_error.status() {
+            Some(reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN) => {
+                Status::unauthenticated("OIDC access token rejected")
+            }
+            _ => Status::unavailable("OIDC access-token validation is unavailable"),
+        };
+    }
+    Status::unauthenticated("OIDC access token rejected")
+}
+
+#[cfg(test)]
+mod tests {
+    use rcgen::{CertificateParams, KeyPair};
+
+    use super::{FleetAgentService, device_id_from_certificate};
+    use crate::{daemon_config::DaemonConfigStore, database::Database};
+
+    #[tokio::test]
+    async fn certificate_device_and_matching_user_authenticate() {
+        let device_id = "7ca03414-bb20-4c80-98ef-7b0538b988ba";
+        let path = std::env::temp_dir().join(format!(
+            "agentdesktop-mtls-{}-{}.db",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let database = Database::connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .await
+            .expect("connect database");
+        database
+            .enroll_device(device_id, "host", "issuer", "subject", None)
+            .await
+            .expect("enroll device");
+        let service =
+            FleetAgentService::new(None, database, DaemonConfigStore::new(None), None, None);
+        assert_eq!(
+            service
+                .authenticate_device_certificate_identity(device_id, "subject")
+                .await
+                .unwrap(),
+            device_id
+        );
+        assert!(
+            service
+                .authenticate_device_certificate_identity(
+                    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    "subject",
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            service
+                .authenticate_device_certificate_identity(device_id, "other-user")
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn extracts_controller_device_id_from_certificate_san() {
+        let device_id = "7ca03414-bb20-4c80-98ef-7b0538b988ba";
+        let key = KeyPair::generate().unwrap();
+        let certificate =
+            CertificateParams::new(vec![format!("{device_id}.device.agentdesktop.invalid")])
+                .unwrap()
+                .self_signed(&key)
+                .unwrap();
+        assert_eq!(
+            device_id_from_certificate(certificate.der().as_ref()).unwrap(),
+            device_id
+        );
+    }
 }

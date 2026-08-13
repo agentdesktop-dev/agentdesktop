@@ -10,7 +10,7 @@
       "default": "127.0.0.1:8080"
     },
     "allowInsecureDev": {
-      "description": "Permit plaintext remote fleet traffic and non-HTTPS OIDC.\n\nThis escape hatch is only appropriate for isolated local development.",
+      "description": "Permit a non-HTTPS OIDC issuer for isolated local development.\n\nThis escape hatch is only appropriate for isolated local development.",
       "type": "boolean",
       "default": false
     },
@@ -47,29 +47,19 @@
       ]
     },
     "oidc": {
-      "description": "OpenID Connect enrollment settings. Omit to disable new enrollment.",
-      "anyOf": [
-        {
-          "$ref": "#/$defs/ControllerOidcConfig"
-        },
-        {
-          "type": "null"
-        }
-      ]
+      "description": "OpenID Connect settings used for device enrollment and authorization.",
+      "$ref": "#/$defs/ControllerOidcConfig"
     },
     "tls": {
-      "description": "TLS identity used by the device-facing fleet API.",
-      "anyOf": [
-        {
-          "$ref": "#/$defs/ControllerTlsConfig"
-        },
-        {
-          "type": "null"
-        }
-      ]
+      "description": "TLS identities used by the device-facing fleet API.\n\nA string selects a directory containing `controller.pem`,\n`controller-key.pem`, `device-ca.pem`, and `device-ca-key.pem`.",
+      "$ref": "#/$defs/ControllerTlsConfig"
     }
   },
   "additionalProperties": false,
+  "required": [
+    "oidc",
+    "tls"
+  ],
   "$defs": {
     "ControllerDaemonConfig": {
       "description": "Controller-owned daemon configuration file and its revision.",
@@ -146,11 +136,32 @@
       ]
     },
     "ControllerTlsConfig": {
-      "description": "TLS certificate and private key used by the fleet API.",
+      "description": "TLS configuration for the fleet API and device certificate issuer.",
+      "anyOf": [
+        {
+          "description": "Directory containing the four standard TLS files.",
+          "type": "string"
+        },
+        {
+          "description": "Explicit paths to each TLS file.",
+          "$ref": "#/$defs/ControllerTlsFiles"
+        }
+      ]
+    },
+    "ControllerTlsFiles": {
+      "description": "Explicit TLS file paths for the fleet API and device certificate issuer.",
       "type": "object",
       "properties": {
         "certificate": {
           "description": "Path to the PEM-encoded TLS certificate chain.\n\nRelative paths are resolved from the controller configuration directory.",
+          "type": "string"
+        },
+        "clientCaCertificate": {
+          "description": "PEM CA roots used to verify issued device client certificates.",
+          "type": "string"
+        },
+        "clientCaKey": {
+          "description": "PEM private key used to issue device certificates from `clientCaCertificate`.\n\nEnrolled daemons generate their own private key and send a CSR.",
           "type": "string"
         },
         "key": {
@@ -161,7 +172,9 @@
       "additionalProperties": false,
       "required": [
         "certificate",
-        "key"
+        "key",
+        "clientCaCertificate",
+        "clientCaKey"
       ]
     }
   }

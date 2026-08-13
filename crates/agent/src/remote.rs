@@ -5,12 +5,16 @@ use std::{
 };
 
 use anyhow::{Context, bail};
+use rcgen::{CertificateParams, ExtendedKeyUsagePurpose, KeyPair, KeyUsagePurpose};
 use sha2::{Digest, Sha256};
-use tokio::{sync::mpsc, time};
+use tokio::{
+    sync::{Mutex, mpsc},
+    time,
+};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{
     Request,
-    transport::{Certificate, Channel, ClientTlsConfig, Endpoint},
+    transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity as TlsIdentity},
 };
 use tracing::{debug, info, warn};
 
@@ -22,8 +26,9 @@ use agentdesktop_core::{
 };
 use agentdesktop_proto::fleet::{
     AgentMessage, ConfigState, ConfigStatus, Discovery, Heartbeat, Hello,
-    InferenceGatewayCredentialRequest, Inventory, SessionNewEvent, TelemetryEvent, ToolUseEvent,
-    agent_message, controller_message, fleet_agent_client::FleetAgentClient, telemetry_event,
+    InferenceGatewayCredentialRequest, Inventory, RenewDeviceCertificateRequest, SessionNewEvent,
+    TelemetryEvent, ToolUseEvent, agent_message, controller_message,
+    fleet_agent_client::FleetAgentClient, telemetry_event,
 };
 
 use crate::{
@@ -33,6 +38,8 @@ use crate::{
     reconcile::Reconciler,
     secure_fs,
 };
+
+static OAUTH_REFRESH_MUTEX: Mutex<()> = Mutex::const_new(());
 
 pub async fn run(
     controller: ControllerConnectionConfig,
@@ -45,9 +52,10 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let identity_path = state_dir.join("identity.json");
     loop {
-        let identity = match identity::load(&identity_path)? {
-            Some(identity) => {
+        let mut identity = match identity::load(&identity_path)? {
+            Some(mut identity) => {
                 enrollment.set("enrolled").await;
+                refresh_oauth_if_needed(&mut identity, &identity_path).await?;
                 identity
             }
             None => {
@@ -61,6 +69,20 @@ pub async fn run(
 
         let mut delay = Duration::from_secs(1);
         loop {
+            refresh_oauth_if_needed(&mut identity, &identity_path).await?;
+            if certificate_needs_renewal(&identity) {
+                match renew_device_certificate(&controller, &identity).await {
+                    Ok(renewed) => {
+                        identity::save(&identity_path, &renewed)?;
+                        identity = renewed;
+                        info!(device_id = %identity.device_id, "renewed device certificate");
+                    }
+                    Err(error) => {
+                        warn!(error = %format!("{error:#}"), "device certificate renewal failed; retaining current certificate")
+                    }
+                }
+            }
+            identity::save(&identity_path, &identity)?;
             match connect(
                 &controller,
                 &identity,
@@ -80,7 +102,7 @@ pub async fn run(
                         controller = %controller.address,
                         identity_path = %identity_path.display(),
                         error = %error_chain,
-                        "controller rejected the device credential; removed local identity and restarting enrollment"
+                        "controller rejected the device identity; removed local identity and restarting enrollment"
                     );
                     break;
                 }
@@ -112,18 +134,15 @@ pub async fn inference_gateway_credential(
     state_dir: &Path,
     client_id: &str,
 ) -> anyhow::Result<agentdesktop_core::model::InferenceGatewayCredential> {
-    let identity =
+    let mut identity =
         identity::load(&state_dir.join("identity.json"))?.context("device is not enrolled")?;
-    let mut client = client(controller).await?;
+    let identity_path = state_dir.join("identity.json");
+    refresh_oauth_if_needed(&mut identity, &identity_path).await?;
+    let mut client = client(controller, Some(&identity)).await?;
     let mut request = Request::new(InferenceGatewayCredentialRequest {
         client_id: client_id.to_owned(),
     });
-    request.metadata_mut().insert(
-        "authorization",
-        format!("Bearer {}", identity.credential)
-            .parse()
-            .context("encode device credential")?,
-    );
+    authenticate_request(&identity, &mut request)?;
     let response = client
         .get_inference_gateway_credential(request)
         .await
@@ -143,15 +162,10 @@ async fn connect(
     reconciler: &Reconciler,
     telemetry: &mut mpsc::Receiver<ModelTelemetryEvent>,
 ) -> anyhow::Result<()> {
-    let mut client = client(controller).await?;
+    let mut client = client(controller, Some(identity)).await?;
     let (sender, receiver) = mpsc::channel(16);
     let mut request = Request::new(ReceiverStream::new(receiver));
-    request.metadata_mut().insert(
-        "authorization",
-        format!("Bearer {}", identity.credential)
-            .parse()
-            .context("encode device credential")?,
-    );
+    authenticate_request(identity, &mut request)?;
 
     let mut inbound = client
         .connect(request)
@@ -214,8 +228,17 @@ async fn connect(
 
     info!(address = %controller.address, "connected to controller");
     let mut heartbeat = time::interval(controller.heartbeat_interval);
+    let reconnect_at = identity.oauth.expires_at_unix_seconds.saturating_sub(60);
+    let oauth_reconnect = time::sleep(Duration::from_secs(
+        reconnect_at.saturating_sub(unix_time_seconds()),
+    ));
+    tokio::pin!(oauth_reconnect);
     loop {
         tokio::select! {
+            _ = &mut oauth_reconnect => {
+                info!("reconnecting controller stream to refresh OIDC access token");
+                return Ok(());
+            }
             _ = heartbeat.tick() => {
                 send(&sender, agent_message::Message::Heartbeat(Heartbeat {
                     unix_time_seconds: SystemTime::now()
@@ -342,20 +365,114 @@ async fn send(
 
 pub(crate) async fn client(
     controller: &ControllerConnectionConfig,
+    identity: Option<&Identity>,
 ) -> anyhow::Result<FleetAgentClient<Channel>> {
     let mut endpoint = Endpoint::from_shared(controller.address.clone())
         .with_context(|| format!("parse controller address {}", controller.address))?;
+    let mut tls_config = ClientTlsConfig::new();
+    let mut custom_tls = false;
     if let Some(path) = &controller.ca_certificate_path {
         let pem = std::fs::read(path)
             .with_context(|| format!("read controller CA certificate from {}", path.display()))?;
-        endpoint = endpoint
-            .tls_config(ClientTlsConfig::new().ca_certificate(Certificate::from_pem(pem)))?;
+        tls_config = tls_config.ca_certificate(Certificate::from_pem(pem));
+        custom_tls = true;
+    }
+    if let Some(identity) = identity {
+        tls_config = tls_config.identity(TlsIdentity::from_pem(
+            &identity.client_certificate_pem,
+            &identity.client_private_key_pem,
+        ));
+        custom_tls = true;
+    }
+    if custom_tls {
+        endpoint = endpoint.tls_config(tls_config)?;
     }
     let channel = endpoint
         .connect()
         .await
         .with_context(|| format!("connect to controller at {}", controller.address))?;
     Ok(FleetAgentClient::new(channel))
+}
+
+fn authenticate_request<T>(identity: &Identity, request: &mut Request<T>) -> anyhow::Result<()> {
+    let access_token = &identity.oauth.access_token;
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {access_token}")
+            .parse()
+            .context("encode OIDC access token")?,
+    );
+    Ok(())
+}
+
+async fn renew_device_certificate(
+    controller: &ControllerConnectionConfig,
+    identity: &Identity,
+) -> anyhow::Result<Identity> {
+    let key_pem = &identity.client_private_key_pem;
+    let key = KeyPair::from_pem(key_pem).context("parse device TLS private key")?;
+    let mut params = CertificateParams::new(Vec::<String>::new())?;
+    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    let csr = params
+        .serialize_request(&key)
+        .context("create replacement device certificate signing request")?;
+    let mut client = client(controller, Some(identity)).await?;
+    let mut request = Request::new(RenewDeviceCertificateRequest {
+        certificate_signing_request_der: csr.der().as_ref().to_vec(),
+    });
+    authenticate_request(identity, &mut request)?;
+    let response = client
+        .renew_device_certificate(request)
+        .await
+        .context("renew device certificate")?
+        .into_inner();
+    let certificate = String::from_utf8(response.client_certificate_pem)
+        .context("controller returned a non-UTF-8 device certificate")?;
+    if certificate.is_empty() {
+        bail!("controller returned an empty device certificate");
+    }
+    Ok(Identity {
+        device_id: identity.device_id.clone(),
+        client_certificate_pem: certificate,
+        client_private_key_pem: key_pem.to_owned(),
+        client_certificate_expires_at_unix_seconds: response.expires_at_unix_seconds,
+        oauth: identity.oauth.clone(),
+        oauth_token_endpoint: identity.oauth_token_endpoint.clone(),
+        oauth_client_id: identity.oauth_client_id.clone(),
+    })
+}
+
+async fn refresh_oauth_if_needed(
+    identity: &mut Identity,
+    identity_path: &Path,
+) -> anyhow::Result<()> {
+    let oauth = &identity.oauth;
+    if oauth.expires_at_unix_seconds <= unix_time_seconds().saturating_add(120) {
+        let _guard = OAUTH_REFRESH_MUTEX.lock().await;
+        if let Some(stored) = identity::load(identity_path)?
+            && stored.oauth.expires_at_unix_seconds > unix_time_seconds().saturating_add(120)
+        {
+            *identity = stored;
+            return Ok(());
+        }
+        oidc::refresh(identity).await?;
+        identity::save(identity_path, identity).context("persist rotated OIDC refresh token")?;
+        info!(device_id = %identity.device_id, "refreshed OIDC access token");
+    }
+    Ok(())
+}
+
+fn certificate_needs_renewal(identity: &Identity) -> bool {
+    identity.client_certificate_expires_at_unix_seconds
+        <= unix_time_seconds().saturating_add(24 * 60 * 60)
+}
+
+fn unix_time_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 pub(crate) fn hostname() -> String {

@@ -165,7 +165,6 @@ impl Database {
         &self,
         device_id: &str,
         hostname: &str,
-        credential_hash: &str,
         enrolled_by_issuer: &str,
         enrolled_by_subject: &str,
         idp_claims: Option<&BTreeMap<String, serde_json::Value>>,
@@ -189,24 +188,8 @@ impl Database {
         .bind(idp_claims_json)
         .execute(&mut *transaction)
         .await?;
-        sqlx::query(
-            "INSERT INTO device_credentials (device_id, credential_hash)
-             VALUES ($1, $2)",
-        )
-        .bind(device_id)
-        .bind(credential_hash)
-        .execute(&mut *transaction)
-        .await?;
         transaction.commit().await?;
         Ok(())
-    }
-
-    pub async fn authenticate(&self, credential_hash: &str) -> anyhow::Result<Option<String>> {
-        sqlx::query_scalar("SELECT device_id FROM device_credentials WHERE credential_hash = $1")
-            .bind(credential_hash)
-            .fetch_optional(&self.pool)
-            .await
-            .context("authenticate device credential")
     }
 
     pub async fn device_principal(&self, device_id: &str) -> anyhow::Result<DevicePrincipal> {
@@ -550,14 +533,7 @@ mod tests {
             ("email".to_owned(), serde_json::json!("john@example.com")),
         ]);
         database
-            .enroll_device(
-                "device",
-                "host",
-                "credential",
-                "issuer",
-                "subject",
-                Some(&idp_claims),
-            )
+            .enroll_device("device", "host", "issuer", "subject", Some(&idp_claims))
             .await
             .expect("enroll device");
         let front_matter = BTreeMap::from([

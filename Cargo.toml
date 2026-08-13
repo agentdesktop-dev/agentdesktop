@@ -41,7 +41,8 @@ pem-rfc7468 = { version = "1", features = ["alloc"] }
 prost = "0.14"
 protox = "0.9"
 rand = "0.10"
-reqwest = { version = "0.13", default-features = false, features = ["charset", "http2", "json", "rustls"] }
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
+reqwest = { version = "0.13", default-features = false, features = ["charset", "form", "http2", "json", "rustls"] }
 schemars = "=1.2.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -49,15 +50,17 @@ serde_json_path_to_error = "0.1"
 serde-transcode = "1.1"
 serde_yaml = "0.9"
 sha2 = "0.11"
-sqlx = { version = "0.9", default-features = false, features = ["any", "macros", "migrate", "postgres", "runtime-tokio", "sqlite", "tls-rustls-ring-webpki"] }
+sqlx = { version = "0.9", default-features = false, features = ["any", "macros", "migrate", "postgres", "runtime-tokio", "sqlite", "tls-rustls-aws-lc-rs"] }
 tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream = "0.1"
-tonic = { version = "0.14", features = ["transport", "tls-ring"] }
+tonic = { version = "0.14", features = ["transport", "tls-aws-lc"] }
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 toml = "1.1"
+time = "0.3"
 url = { version = "2.5", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
+x509-parser = "0.18"

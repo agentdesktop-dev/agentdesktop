@@ -80,7 +80,7 @@
       "type": "object",
       "properties": {
         "address": {
-          "description": "HTTP or HTTPS address of the controller's fleet API.",
+          "description": "HTTPS address of the controller's fleet API.",
           "type": "string"
         },
         "caCertificatePath": {
