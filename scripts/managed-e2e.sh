@@ -143,11 +143,22 @@ response=$(curl --fail-with-body --silent --show-error \
   --header 'content-type: application/json' \
   --header 'anthropic-version: 2023-06-01' \
   --header 'x-api-key: connector-placeholder' \
+  --header 'x-agentdesktop-identity: attacker-controlled' \
+  --header 'x-forwarded-client-cert: spiffe://attacker.example/ns/attacker/sa/attacker' \
   --data "$request" \
   http://127.0.0.1:8080/v1/messages)
 jq -e '.content[] | select(.type == "text" and .text == "SMOKE_OK")' <<<"$response" >/dev/null
 podman logs agentdesktop-walkthrough-gateway 2>&1 \
-  | jq -e 'select(.scope == "request" and ."http.status" == 200)' >/dev/null
+  | jq -e 'select(
+      .scope == "request"
+      and ."http.status" == 200
+      and ."source.identity.trust_domain" == "agentdesktop.test"
+      and ."source.identity.namespace" == "11111111-1111-4111-8111-111111111111"
+      and (."source.identity.service_account" | startswith("user.") and contains(".device."))
+      and ."source.tunnel.identity.trust_domain" == "agentdesktop.test"
+      and ."source.tunnel.identity.namespace" == "11111111-1111-4111-8111-111111111111"
+      and (."source.tunnel.identity.service_account" | startswith("user.") and contains(".device."))
+    )' >/dev/null
 
 echo "Revoking enrolled device..."
 revocation=$(curl --fail-with-body --silent --show-error --cacert "$trust_bundle" \

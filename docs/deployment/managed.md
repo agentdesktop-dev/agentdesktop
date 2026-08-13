@@ -2,7 +2,7 @@
 
 This guide covers development deployments where Agent Desktop runs on an organizational user's laptop and Agent Gateway runs remotely in the organization's network. It describes user login, device enrollment, certificate lifecycle, connector startup, and local cleanup.
 
-Managed mode is not yet a production security release. Published revocation consumption, signed distribution, managed transparent capture, and production platform validation remain incomplete. See [Phase Status](../development/phase-status.md).
+Managed mode is not yet a production security release. Linux managed transparent capture is validated in the Fedora walkthrough, but published revocation consumption, signed distribution, cross-platform capture, and production platform validation remain incomplete. See [Phase Status](../development/phase-status.md).
 
 ## Ownership
 
@@ -137,7 +137,9 @@ For Claude Code, use the connector-assisted native path:
 cargo run -- connect-agents
 ```
 
-After separate user consent, this writes the connector loopback endpoint and a placeholder credential to Claude Code's user settings while preserving unrelated values. Agent Gateway must validate or remove the placeholder and supply the real provider credential. Managed process-scoped capture is not implemented.
+After separate user consent, this writes the connector loopback endpoint and a placeholder credential to Claude Code's user settings while preserving unrelated values. Agent Gateway must validate or remove the placeholder and supply the real provider credential.
+
+Experimental managed process-scoped capture is available on Linux. It uses the same enrolled certificate through the machine forwarder, authorizes inspected requests from `source.tunnel.identity`, and fails closed when Agent Gateway is unavailable. Follow the reproducible Fedora workflow in [the VM guide](../../tests/vm/README.md#managed-installation-walkthrough); macOS and Windows managed capture are not yet available.
 
 ## Certificate lifecycle
 

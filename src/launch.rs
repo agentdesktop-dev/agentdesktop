@@ -50,7 +50,7 @@ const CLAUDE_PROFILE: Profile = Profile {
     name: "claude",
     environment: &[],
     preflight: Some(Preflight {
-        address: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080)),
+        address: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8081)),
         request:
             b"GET /_agentdesktop/healthz HTTP/1.1\r\nHost: 127.0.0.1:8081\r\nConnection: close\r\n\r\n",
     }),
@@ -114,9 +114,29 @@ fn verify_inspection_trust() -> Result<()> {
         },
         |root| Ok(PathBuf::from(root)),
     )?;
-    let certificate = config_root.join("agentgateway/inspection-ca/ca.crt");
-    let contents = std::fs::read(&certificate)
-        .with_context(|| format!("read inspection CA certificate {}", certificate.display()))?;
+    let local_certificate = config_root.join("agentgateway/inspection-ca/ca.crt");
+    let contents = if local_certificate.exists() {
+        std::fs::read(&local_certificate).with_context(|| {
+            format!(
+                "read inspection CA certificate {}",
+                local_certificate.display()
+            )
+        })?
+    } else {
+        let executable = std::env::current_exe().context("resolve the Agent Desktop executable")?;
+        let root = executable
+            .parent()
+            .and_then(Path::parent)
+            .context("resolve the Agent Desktop installation root")?;
+        let bootstrap = crate::organization::OrganizationBootstrap::parse(&std::fs::read(
+            root.join("share/organization.json"),
+        )?)?;
+        bootstrap
+            .trust
+            .context("managed organization does not provide inspection trust")?
+            .certificate_pem
+            .into_bytes()
+    };
     let fingerprint = Sha256::digest(&contents)
         .iter()
         .map(|byte| format!("{byte:02x}"))

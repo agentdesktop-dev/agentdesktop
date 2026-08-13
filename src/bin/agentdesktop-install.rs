@@ -369,8 +369,13 @@ fn managed_user_systemd_unit(root: &Path, bootstrap: &OrganizationBootstrap) -> 
 fn managed_machine_systemd_unit(root: &Path, bootstrap: &OrganizationBootstrap) -> String {
     let connector = quote_systemd_arg(&root.join("bin/agentdesktop"));
     let upstream = quote_systemd_value(bootstrap.gateway.url.as_str());
+    let capture = if bootstrap.trust.is_some() {
+        " --capture-enabled"
+    } else {
+        ""
+    };
     format!(
-        "[Unit]\nDescription=Agent Desktop machine forwarder\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={connector} serve --mode managed --upstream {upstream} --session-socket {SESSION_SOCKET}\nRestart=on-failure\nRestartSec=2\nRuntimeDirectory=agentdesktop\nRuntimeDirectoryMode=0755\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=read-only\n\n[Install]\nWantedBy=multi-user.target\n"
+        "[Unit]\nDescription=Agent Desktop machine forwarder\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={connector} serve --mode managed --upstream {upstream} --session-socket {SESSION_SOCKET}{capture}\nRestart=on-failure\nRestartSec=2\nRuntimeDirectory=agentdesktop\nRuntimeDirectoryMode=0755\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=read-only\n\n[Install]\nWantedBy=multi-user.target\n"
     )
 }
 

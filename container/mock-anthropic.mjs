@@ -1,4 +1,6 @@
 import http from "node:http";
+import https from "node:https";
+import fs from "node:fs";
 
 const port = Number(process.env.MOCK_ANTHROPIC_PORT ?? "8000");
 const host = process.env.MOCK_ANTHROPIC_HOST ?? "0.0.0.0";
@@ -73,7 +75,7 @@ function respondStream(response) {
   );
 }
 
-const server = http.createServer((request, response) => {
+const handleRequest = (request, response) => {
   if (request.method !== "POST") {
     respondJson(response, 405, { type: "error", error: { type: "invalid_request_error", message: "method not allowed" } });
     return;
@@ -109,7 +111,19 @@ const server = http.createServer((request, response) => {
       respondJson(response, 200, message);
     }
   });
-});
+};
+
+const tlsCertificate = process.env.MOCK_ANTHROPIC_TLS_CERTIFICATE;
+const tlsKey = process.env.MOCK_ANTHROPIC_TLS_KEY;
+if (Boolean(tlsCertificate) !== Boolean(tlsKey)) {
+  throw new Error("mock Anthropic TLS certificate and key must be provided together");
+}
+const server = tlsCertificate
+  ? https.createServer(
+      { cert: fs.readFileSync(tlsCertificate), key: fs.readFileSync(tlsKey) },
+      handleRequest,
+    )
+  : http.createServer(handleRequest);
 
 server.listen(port, host, () => {
   console.log(`mock Anthropic API listening on ${host}:${port}`);

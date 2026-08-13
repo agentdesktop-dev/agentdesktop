@@ -8,6 +8,13 @@ config:
 frontendPolicies:
   accessLog:
     filter: "true"
+    add:
+      source.identity.trust_domain: source.identity.trustDomain
+      source.identity.namespace: source.identity.namespace
+      source.identity.service_account: source.identity.serviceAccount
+      source.tunnel.identity.trust_domain: source.tunnel.identity.trustDomain
+      source.tunnel.identity.namespace: source.tunnel.identity.namespace
+      source.tunnel.identity.service_account: source.tunnel.identity.serviceAccount
 
 binds:
 - port: 8443
@@ -28,3 +35,21 @@ binds:
     routes:
     - backends:
       - host: 127.0.0.1:18081
+- port: 443
+  mode: internal
+  listeners:
+  - name: managed-captured-https
+    protocol: HTTPS
+    tls:
+      mode: dynamicCa
+      cert: certs/gateway-server-ca.crt
+      key: certs/gateway-server-ca.key
+    routes:
+    - name: managed-dynamic-forward
+      policies:
+        authorization:
+          rules:
+          - 'source.tunnel.identity.trustDomain == "agentdesktop.test" && source.tunnel.identity.namespace == "11111111-1111-4111-8111-111111111111"'
+        backendTLS: {}
+      backends:
+      - dynamic: {}

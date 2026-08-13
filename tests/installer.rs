@@ -195,21 +195,33 @@ fn refuses_to_replace_an_unowned_stable_command() {
 
 #[test]
 fn installs_managed_bundle_without_local_gateway() {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
 
     let temporary = tempfile::tempdir().unwrap();
     let fixtures = temporary.path().join("fixtures");
     fs::create_dir(&fixtures).unwrap();
     fs::write(fixtures.join("connector"), "managed-connector").unwrap();
     let organization = fixtures.join("organization.json");
-    fs::write(
-        &organization,
-        br#"{
+    let ca_key = KeyPair::generate().unwrap();
+    let mut ca_parameters = CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca_parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let ca = ca_parameters.self_signed(&ca_key).unwrap();
+    let organization_json = serde_json::json!({
           "format_version": 1,
           "organization": {"id":"acme","display_name":"Acme","support_url":"https://help.acme.example/"},
           "identity": {"issuer":"https://login.acme.example/","enrollment_url":"https://enrollment.acme.example/","client_id":"agentdesktop","audience":"gateway","scope":"invoke"},
-          "gateway": {"url":"https://gateway.acme.example/"}
-        }"#,
+          "gateway": {"url":"https://gateway.acme.example/"},
+          "trust": {
+              "certificate_pem": ca.pem(),
+              "inspection_scope": "managed AI application traffic"
+          }
+    });
+    fs::write(
+        &organization,
+        serde_json::to_vec(&organization_json).unwrap(),
     )
     .unwrap();
     let root = temporary.path().join("agentdesktop");
@@ -234,6 +246,7 @@ fn installs_managed_bundle_without_local_gateway() {
 
     assert!(install.status.success(), "{:?}", install.stderr);
     assert!(root.join("share/organization.json").is_file());
+    #[cfg(unix)]
     assert_eq!(
         fs::metadata(root.join("share/organization.json"))
             .unwrap()
@@ -260,6 +273,7 @@ fn installs_managed_bundle_without_local_gateway() {
             .unwrap();
     assert!(forwarder.contains("serve --mode managed"));
     assert!(forwarder.contains("--session-socket /run/agentdesktop/sessions.sock"));
+    assert!(forwarder.contains("--capture-enabled"));
     assert!(!forwarder.contains("--identity-issuer"));
     assert!(forwarder.contains("RuntimeDirectory=agentdesktop"));
 }

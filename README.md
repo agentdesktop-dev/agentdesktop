@@ -50,7 +50,7 @@ Traffic path answers **how an application reaches Agent Desktop**. It is indepen
 | Path | How it works | Current support |
 | --- | --- | --- |
 | **Native** | A gateway-aware application, currently Claude Code, is configured to use the connector's loopback listener. | Validated on Linux. The Windows 11 VM validates standalone native forwarding plus the session and WFP boundaries separately; a complete managed Windows walkthrough remains pending. This is the preferred path. |
-| **Captured** | Agent Desktop launches an application in an owned process scope and redirects its TCP/443 traffic without changing application settings. | Standalone Linux only. Managed capture, macOS, and Windows are not implemented. |
+| **Captured** | Agent Desktop launches an application in an owned process scope and redirects its TCP/443 traffic without changing application settings. | Supported for standalone Linux and experimental for managed Linux. macOS and Windows are not implemented. |
 
 An application must use only one path at a time. Configuring both native routing and capture can create duplicate routing or loops.
 

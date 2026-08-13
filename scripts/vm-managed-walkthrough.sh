@@ -8,7 +8,7 @@ vm=$root/tests/vm/vm.sh
 issuer=https://host.test:18080/
 gateway=https://host.test:4000/
 enrollment=https://host.test:8090/
-vm_forwards=18080:18080,8090:8090,4000:8443,15021:15021
+vm_forwards=443:18444,18080:18080,8090:8090,4000:8443,15021:15021
 install_root=/home/agentdesktop/.local/lib/agentdesktop
 machine_root=/opt/agentdesktop
 machine_stage=/home/agentdesktop/Downloads/agentdesktop-mdm
@@ -127,8 +127,13 @@ forwarder, command, and organization CA were installed over SSH to simulate MDM.
 In the Fedora desktop:
   1. Open Terminal.
   2. Run `agentdesktop connect-agents`.
-  3. Complete browser sign-in and approve the separate Claude Code settings prompt.
-  4. Launch `claude` normally and ask it to reply with exactly SMOKE_OK.
+  3. Complete browser sign-in.
+  4. For native mode, approve the Claude Code settings change, then launch `claude` normally.
+  5. For transparent mode, decline that change and run:
+      agentdesktop launch --profile claude -- curl --fail --silent --show-error \
+        -H 'content-type: application/json' \
+        -d '{"model":"claude-sonnet-5","max_tokens":64,"messages":[{"role":"user","content":"Reply with exactly SMOKE_OK"}]}' \
+        https://host.test/v1/messages
 
 Approve the pending device at http://localhost:8091/admin/ on the host.
 Run `scripts/vm-managed-walkthrough.sh stop` when finished.

@@ -55,7 +55,7 @@ The supported combinations are:
 | | Native | Captured |
 | --- | --- | --- |
 | Standalone | Supported | Supported on Linux |
-| Managed | Supported | Not implemented |
+| Managed | Supported | Experimental on Linux |
 
 ### Ownership boundaries
 
@@ -104,7 +104,7 @@ Relevant code:
 - Linux and Windows session transports: [src/session](src/session)
 - Linux and Windows source attribution: [src/platform](src/platform)
 
-### Standalone Linux capture
+### Linux capture
 
 Capture handles applications that cannot be configured with a gateway URL.
 
@@ -116,7 +116,7 @@ sequenceDiagram
     participant Helper as privileged capture helper
     participant App as selected application
     participant Desktop as Agent Desktop relay
-    participant Gateway as Local Agent Gateway
+    participant Gateway as Agent Gateway
 
     User->>Launch: launch --profile claude -- command
     Launch->>Systemd: Create transient user scope

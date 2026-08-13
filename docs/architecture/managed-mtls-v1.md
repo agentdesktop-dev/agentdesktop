@@ -1,6 +1,6 @@
 # Managed mTLS identity contract v1
 
-Status: selected production direction; enrollment request persistence, administrator-scoped listing, approval and rejection, PKCS#11 protected-key issuance, interrupted issuance and renewal reconciliation, owner-scoped certificate retrieval, valid-certificate renewal, expired-certificate recovery, Agent Desktop key/certificate persistence, proactive renewal and credential rotation, connector-side mTLS activation, and atomic device/certificate revocation persistence are implemented. Revocation consumption and Agent Gateway enforcement remain incomplete.
+Status: selected production direction; enrollment request persistence, administrator-scoped listing, approval and rejection, PKCS#11 protected-key issuance, interrupted issuance and renewal reconciliation, owner-scoped certificate retrieval, valid-certificate renewal, expired-certificate recovery, Agent Desktop key/certificate persistence, proactive renewal and credential rotation, connector-side mTLS activation, atomic device/certificate revocation persistence, and immutable outer-to-inner identity propagation are implemented. Revocation consumption and Agent Gateway enforcement remain incomplete.
 
 ## Trust model
 
@@ -38,6 +38,8 @@ Agent Gateway requires a client certificate chaining to the configured enrollmen
 
 For HBONE, one mTLS HTTP/2 connection may carry multiple CONNECT streams only for that same immutable context. No OAuth credential is carried on the outer request or inserted into the inner byte stream.
 
+Agent Gateway exposes the identity verified on the outer CONNECT transport as `source.tunnel.identity`. Managed captured-request authorization must use that immutable field. `source.identity` retains Agent Gateway's existing downstream TLS semantics and is not redefined or overwritten with tunnel identity; after inner TLS termination it describes only the inner TLS context. Native requests continue to expose their existing `source.identity` value, while also carrying `source.tunnel.identity` when they entered through CONNECT.
+
 ## Renewal and recovery
 
 Before expiry, Agent Desktop generates a new local key and CSR and renews over mTLS using its current certificate. The enrollment service verifies that the device remains active, issues a replacement, and records the new certificate serial and validity. Agent Desktop atomically activates the new key and certificate, opens new Gateway connections, and drains old connections.
@@ -55,4 +57,3 @@ Approval claims a pending enrollment as `issuing` before calling the CA, prevent
 ## Remaining implementation
 
 - Add fail-closed Agent Gateway consumption of persisted device and certificate revocation state.
-- Verify immutable certificate-derived outer-to-inner identity propagation for managed capture.

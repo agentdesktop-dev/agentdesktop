@@ -120,7 +120,7 @@ For ordinary managed HTTP, Agent Gateway validates the DPoP-bound token and a fr
 
 For transparent capture, Agent Gateway validates the DPoP-bound token and proof when accepting each outer `CONNECT` stream. It attaches the resulting verified identity to that tunnel as immutable internal metadata. Inspected inner requests inherit this metadata and must not reconstruct, replace, or shadow it using inner headers. The token and proof are not present on each inner request.
 
-Trusted outer-to-inner identity propagation is required Agent Gateway work. Transparent managed capture is not conformant until an end-to-end test proves that inner application headers cannot override the verified tunnel identity.
+Trusted outer-to-inner identity propagation remains a requirement of this superseded design. The selected mTLS contract now has an end-to-end managed-capture walkthrough proving that inner application headers cannot override verified tunnel identity.
 
 ## Credential stripping
 

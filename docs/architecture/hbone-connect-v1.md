@@ -21,7 +21,7 @@ Standalone local mode and managed remote mode use the same stream contract but d
 
 Standalone local mode uses a loopback Agent Gateway endpoint and one 256-bit capability per connector-owned Gateway process. Agent Desktop generates the capability in memory, injects it into the Gateway startup environment, and sends it only as `x-agentdesktop-token` on CONNECT. Agent Gateway compares it through `source.connectHeaders` on the re-entered route, so it never enters the inner TCP stream. The diagnostic `capture` subcommand can instead read the capability from a current-user-owned `0600` file. No organizational OAuth or device enrollment is required.
 
-Managed remote mode requires mTLS with a short-lived enrollment certificate whose authority-issued SPIFFE URI binds organization, user, and device. Agent Gateway derives immutable identity from the validated certificate and keeps the connection isolated to that certificate generation. Managed CONNECT requests carry no OAuth credential or connector authentication header.
+Managed remote mode requires mTLS with a short-lived enrollment certificate whose authority-issued SPIFFE URI binds organization, user, and device. Agent Gateway derives immutable identity from the validated certificate, exposes it to inner policy as `source.tunnel.identity`, and keeps the connection isolated to that certificate generation. `source.identity` retains Agent Gateway's existing downstream TLS semantics. Managed CONNECT requests carry no OAuth credential or connector authentication header.
 
 ## Failure behavior
 
@@ -29,10 +29,9 @@ The connector never retries a CONNECT, replays inner bytes, or opens the origina
 
 ## Current implementation status
 
-The connector implements and deterministically tests pooled plain and mTLS HTTP/2 connections, CONNECT streams, explicit destination-port validation, bidirectional byte fidelity, flow-control release, half-close signaling, generation-safe lazy reconnect for later flows after observed transport loss, Linux original-destination recovery, bounded relay concurrency, and standalone token lifecycle. Private-container coverage validates cgroup v2/nftables redirection and UDP denial through the real relay. Real Gateway smoke paths prove local token rejection/acceptance, native Claude forwarding, policy allow/deny, and dynamic captured forwarding.
+The connector implements and deterministically tests pooled plain and mTLS HTTP/2 connections, CONNECT streams, explicit destination-port validation, bidirectional byte fidelity, flow-control release, half-close signaling, generation-safe lazy reconnect for later flows after observed transport loss, Linux original-destination recovery, bounded relay concurrency, and standalone token lifecycle. Private-container coverage validates cgroup v2/nftables redirection and UDP denial through the real relay. Real Gateway smoke paths prove local token rejection/acceptance, native Claude forwarding, policy allow/deny, and dynamic captured forwarding. The managed Fedora walkthrough additionally proves that certificate-derived outer identity remains available as `source.tunnel.identity` through dynamic inner TLS termination, spoofed inner identity headers cannot replace it, and Gateway loss remains fail closed while the original destination is reachable.
 
-The following remain required before managed captured mode can be enabled and before capture is production-ready across platforms:
+The following remain required before capture is production-ready across platforms:
 
-- Immutable certificate-derived outer-to-inner identity propagation for managed capture.
 - Published certificate revocation consumption and fail-closed rejection before certificate expiry.
 - Production validation of Gateway restart, cancellation, existing-firewall interaction, and stale-rule recovery.

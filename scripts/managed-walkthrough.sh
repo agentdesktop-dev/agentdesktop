@@ -78,6 +78,7 @@ start() {
     --publish 127.0.0.1:18080:18080 \
     --publish 127.0.0.1:18082:18082 \
     --publish 127.0.0.1:18081:18081 \
+    --publish 127.0.0.1:18444:443 \
     --publish 127.0.0.1:8090:8090 \
     --publish 127.0.0.1:8091:8091 \
     --publish 127.0.0.1:8443:8443 \
@@ -113,6 +114,19 @@ start() {
 
   container run --detach \
     --pod "$pod" \
+    --name agentdesktop-walkthrough-captured-target \
+    --volume "$root_dir/container/mock-anthropic.mjs:/app/mock-anthropic.mjs:ro,Z" \
+    --volume "$walkthrough_dir/certs:/certs:ro,Z" \
+    --env MOCK_ANTHROPIC_HOST=0.0.0.0 \
+    --env MOCK_ANTHROPIC_PORT=443 \
+    --env MOCK_ANTHROPIC_TLS_CERTIFICATE=/certs/gateway-server.crt \
+    --env MOCK_ANTHROPIC_TLS_KEY=/certs/gateway-server.key \
+    docker.io/library/node:22-alpine \
+    node /app/mock-anthropic.mjs \
+    >/dev/null
+
+  container run --detach \
+    --pod "$pod" \
     --name agentdesktop-walkthrough-postgres \
     --env POSTGRES_USER=agentdesktop \
     --env POSTGRES_PASSWORD=agentdesktop \
@@ -125,6 +139,11 @@ start() {
     --resolve "${server_dns}:18080:127.0.0.1" \
     "${issuer}jwks"
   wait_for "mock Anthropic" curl --fail --silent http://127.0.0.1:18081/v1/messages/count_tokens \
+    -H 'content-type: application/json' --data '{}'
+  wait_for "captured mock Anthropic" curl --fail --silent \
+    --cacert "$walkthrough_dir/certs/gateway-server-ca.crt" \
+    --resolve "${server_dns}:18444:127.0.0.1" \
+    "https://${server_dns}:18444/v1/messages/count_tokens" \
     -H 'content-type: application/json' --data '{}'
   wait_for "PostgreSQL" container exec agentdesktop-walkthrough-postgres \
     psql -U agentdesktop -d agentdesktop -c 'SELECT 1'

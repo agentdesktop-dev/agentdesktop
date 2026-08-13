@@ -64,8 +64,17 @@ The harness starts the real rootless Podman walkthrough stack and simulates MDM 
 Perform the user journey in the Fedora desktop:
 
 1. Run `agentdesktop connect-agents` and complete browser sign-in.
-2. Approve the separate Claude Code settings change.
-3. After an administrator approves the pending enrollment, launch `claude` normally and ask it to reply with exactly `SMOKE_OK`.
+2. For native mode, approve the separate Claude Code settings change. After enrollment approval, launch `claude` normally and ask it to reply with exactly `SMOKE_OK`.
+3. For transparent mode, decline the Claude Code settings change. After enrollment approval, run the deterministic captured request:
+
+```bash
+agentdesktop launch --profile claude -- curl --fail --silent --show-error \
+  -H 'content-type: application/json' \
+  -d '{"model":"claude-sonnet-5","max_tokens":64,"messages":[{"role":"user","content":"Reply with exactly SMOKE_OK"}]}' \
+  https://host.test/v1/messages
+```
+
+The two paths are mutually exclusive for one application. The capture command creates a gated systemd scope, installs cgroup-scoped TCP/443 redirection and UDP/443 denial, preserves the original destination, and removes the rules when `curl` exits. Agent Gateway authorizes the inspected inner request from the enrolled certificate's `source.tunnel.identity` and forwards it to the deterministic TLS mock. `source.identity` retains Agent Gateway's existing downstream TLS meaning.
 
 Perform the administrator journey in the host browser at `http://localhost:8091/admin/`: sign in, inspect the pending device, and approve, reject, or revoke it. This cleartext endpoint is a walkthrough-only adapter bound to host loopback. The VM-facing identity, enrollment, and Gateway endpoints remain HTTPS with the canonical `host.test` issuer. Production administrators use organization-trusted HTTPS.
 
