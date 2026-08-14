@@ -1,0 +1,325 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version number (with or without a v prefix)
+        required: true
+        type: string
+      skip_github_release:
+        description: Skip creating the GitHub release
+        required: false
+        default: false
+        type: boolean
+
+env:
+  CARGO_TERM_COLOR: always
+  CI: true
+  CONTROLLER_IMAGE: ghcr.io/${{ github.repository_owner }}/agentdesktop-controller
+  CHART_REGISTRY: ghcr.io/${{ github.repository_owner }}/charts
+
+jobs:
+  setup:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Set canonical version
+        id: version
+        shell: bash
+        env:
+          VERSION_INPUT: ${{ inputs.version || github.ref_name }}
+        run: |
+          VERSION="${VERSION_INPUT}"
+          VERSION="${VERSION#v}"
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Version must be SemVer (for example, 1.2.3 or v1.2.3)" >&2
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+
+  build-controller-image:
+    needs: setup
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: blacksmith-4vcpu-ubuntu-2404-arm
+    steps:
+      - name: Prepare platform name
+        shell: bash
+        run: |
+          platform="${{ matrix.platform }}"
+          echo "PLATFORM_PAIR=${platform//\//-}" >> "${GITHUB_ENV}"
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          tags: ${{ env.CONTROLLER_IMAGE }}
+          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=controller-${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,scope=controller-${{ env.PLATFORM_PAIR }},mode=max
+
+      - name: Export digest
+        shell: bash
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: controller-digest-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  push-controller-image:
+    needs:
+      - setup
+      - build-controller-image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: controller-digest-*
+          merge-multiple: true
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Create and push manifest
+        working-directory: ${{ runner.temp }}/digests
+        shell: bash
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          tags=(-t "${CONTROLLER_IMAGE}:v${VERSION}")
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            tags+=(-t "${CONTROLLER_IMAGE}:latest")
+          fi
+          images=()
+          for digest in *; do
+            images+=("${CONTROLLER_IMAGE}@sha256:${digest}")
+          done
+          docker buildx imagetools create "${tags[@]}" "${images[@]}"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
+
+      - name: Sign versioned image
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: cosign sign --yes "${CONTROLLER_IMAGE}:v${VERSION}"
+
+      - name: Sign latest image
+        if: github.event_name == 'push'
+        run: cosign sign --yes "${CONTROLLER_IMAGE}:latest"
+
+  push-helm-chart:
+    needs:
+      - setup
+      - push-controller-image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Log in to GitHub Container Registry
+        shell: bash
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
+
+      - name: Package and push chart
+        shell: bash
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          mkdir -p "${{ runner.temp }}/charts"
+          helm package deploy/helm/agentdesktop-controller \
+            --version "${VERSION}" \
+            --app-version "v${VERSION}" \
+            --destination "${{ runner.temp }}/charts"
+          helm push \
+            "${{ runner.temp }}/charts/agentdesktop-controller-${VERSION}.tgz" \
+            "oci://${CHART_REGISTRY}"
+
+  build-binaries:
+    needs: setup
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os_name: linux
+            arch: amd64
+            target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            extension: ""
+          - os_name: linux
+            arch: arm64
+            target: aarch64-unknown-linux-gnu
+            runner: blacksmith-4vcpu-ubuntu-2404-arm
+            extension: ""
+          - os_name: darwin
+            arch: amd64
+            target: x86_64-apple-darwin
+            runner: macos-15-intel
+            extension: ""
+          - os_name: darwin
+            arch: arm64
+            target: aarch64-apple-darwin
+            runner: macos-26
+            extension: ""
+          - os_name: windows
+            arch: amd64
+            target: x86_64-pc-windows-msvc
+            runner: windows-2025
+            extension: .exe
+          - os_name: windows
+            arch: arm64
+            target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+            extension: .exe
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Node
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version-file: frontend/.nvmrc
+
+      - name: Install Linux desktop dependencies
+        if: matrix.os_name == 'linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
+        with:
+          toolchain: "1.97"
+          targets: ${{ matrix.target }}
+
+      - name: Build frontend
+        shell: bash
+        run: |
+          corepack enable
+          pnpm --dir frontend install --frozen-lockfile
+          pnpm --dir frontend --filter @agentdesktop/desktop-web build
+
+      - name: Build binary
+        shell: bash
+        run: cargo build --locked --release --package agentdesktop --target "${{ matrix.target }}"
+
+      - name: Stage binary and checksum
+        shell: bash
+        env:
+          OUTPUT_NAME: agentdesktop-${{ matrix.os_name }}-${{ matrix.arch }}${{ matrix.extension }}
+        run: |
+          mkdir -p release
+          cp "target/${{ matrix.target }}/release/agentdesktop${{ matrix.extension }}" "release/${OUTPUT_NAME}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd release && sha256sum "${OUTPUT_NAME}" > "${OUTPUT_NAME}.sha256")
+          else
+            (cd release && shasum -a 256 "${OUTPUT_NAME}" > "${OUTPUT_NAME}.sha256")
+          fi
+
+      - name: Upload binary
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: release-binary-${{ matrix.os_name }}-${{ matrix.arch }}
+          path: release/agentdesktop-*
+          if-no-files-found: error
+
+  release:
+    if: github.event_name == 'push' || !inputs.skip_github_release
+    needs:
+      - setup
+      - push-controller-image
+      - push-helm-chart
+      - build-binaries
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: release
+          pattern: release-binary-*
+          merge-multiple: true
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
+        with:
+          files: release/agentdesktop-*
+          tag_name: v${{ needs.setup.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          body: |
+            ## Artifacts
+
+            - Controller image: `${{ env.CONTROLLER_IMAGE }}:v${{ needs.setup.outputs.version }}`
+            - Helm chart: `oci://${{ env.CHART_REGISTRY }}/agentdesktop-controller:${{ needs.setup.outputs.version }}`
+            - Agentdesktop binaries for amd64 and arm64 on Linux, macOS, and Windows are attached below.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

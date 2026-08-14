@@ -1,8 +1,9 @@
 replicaCount: 1
 
 image:
-  repository: agentdesktop-controller
-  tag: latest
+  repository: ghcr.io/agentdesktop-dev/agentdesktop-controller
+  # Defaults to the chart's appVersion when empty.
+  tag: ""
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
