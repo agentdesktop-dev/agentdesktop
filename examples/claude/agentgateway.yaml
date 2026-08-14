@@ -21,7 +21,7 @@ llm:
   gateways: gateway
   policies:
     jwtAuth:
-      mode: Strict
+      mode: strict
       issuer: agentdesktop-controller
       audiences: [agentgateway]
       jwks:

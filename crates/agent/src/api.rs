@@ -138,21 +138,26 @@ async fn config(State(state): State<AppState>) -> Json<DaemonConfig> {
 async fn effective_config(
     State(state): State<AppState>,
 ) -> Result<Json<DaemonConfig>, (StatusCode, String)> {
-    let path = state.state_dir.join("remote-config.yaml");
+    load_effective_config(&state.config, &state.state_dir)
+        .map(Json)
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("read applied configuration: {error:#}"),
+            )
+        })
+}
+
+fn load_effective_config(
+    config: &DaemonConfig,
+    state_dir: &std::path::Path,
+) -> anyhow::Result<DaemonConfig> {
+    let path = state_dir.join("remote-config.yaml");
     match std::fs::read_to_string(&path) {
         Ok(contents) => agentdesktop_core::config::parse_daemon(&contents)
-            .map(Json)
-            .map_err(|error| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("parse applied remote configuration: {error:#}"),
-                )
-            }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Json(state.config)),
-        Err(error) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("read applied remote configuration: {error}"),
-        )),
+            .map_err(|error| error.context("parse applied remote configuration")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(config.clone()),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -214,7 +219,13 @@ async fn inference_gateway_credential(
     if !valid_client_id(&query.client_id) {
         return Err((StatusCode::BAD_REQUEST, "invalid client ID".to_owned()));
     }
-    let gateway = state.config.inference_gateway.as_ref().ok_or_else(|| {
+    let effective = load_effective_config(&state.config, &state.state_dir).map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("read applied configuration: {error:#}"),
+        )
+    })?;
+    let gateway = effective.inference_gateway.as_ref().ok_or_else(|| {
         (
             StatusCode::FAILED_DEPENDENCY,
             "daemon has no inference gateway configured".to_owned(),
@@ -257,4 +268,50 @@ async fn inference_gateway_credential(
     }
     .map(Json)
     .map_err(|error| (StatusCode::BAD_GATEWAY, format!("{error:#}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use agentdesktop_core::config::parse_daemon;
+
+    use super::load_effective_config;
+
+    #[test]
+    fn controller_configuration_is_the_effective_gateway_configuration() {
+        let root = std::env::temp_dir().join(format!(
+            "agentdesktop-api-effective-config-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let local = parse_daemon(
+            r#"
+controller:
+  address: https://controller.example.com
+"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("remote-config.yaml"),
+            r#"
+inferenceGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
+    allowedClientIds: [claude-code]
+"#,
+        )
+        .unwrap();
+
+        let effective = load_effective_config(&local, &root).unwrap();
+
+        assert_eq!(
+            effective.inference_gateway.unwrap().url.as_str(),
+            "https://gateway.example.com/"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -6,6 +6,10 @@ edition = "2024"
 publish = false
 default-run = "agentdesktop"
 
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

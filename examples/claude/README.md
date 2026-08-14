@@ -45,7 +45,7 @@ Start Dex:
 docker compose -f examples/claude/compose.yaml up -d dex
 ```
 
-Start the installed controller:
+Start the controller:
 
 ```console
 agentdesktop-controller --config examples/claude/controller.yaml
@@ -54,10 +54,11 @@ agentdesktop-controller --config examples/claude/controller.yaml
 Start Agentgateway:
 
 ```console
+ export ANTHROPIC_API_KEY=...
 docker compose -f examples/claude/compose.yaml up -d agentgateway
 ```
 
-Run the installed local daemon. Typically this would run on a different
+Run the installed local daemon. Typically, this would run on a different
 machine; this example runs the controller and daemon together. Because it is
 launched with `sudo`, the daemon automatically authorizes the invoking desktop
 user to access its local API.
@@ -75,3 +76,8 @@ After enrollment, open the local desktop UI from another terminal:
 ```console
 agentdesktop
 ```
+
+## Claude Code
+
+Now that agentdesktop is running, Claude Code can be run.
+It will show the configured `Managed by Agentdesktop` and direct traffic through the gateway.
