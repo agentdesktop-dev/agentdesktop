@@ -8,6 +8,13 @@ use std::{
 
 use anyhow::Context;
 use aws_lc_rs::{rsa::KeyPair as RsaKeyPair, signature::KeyPair as _};
+use axum::{
+    Json, Router,
+    extract::State,
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
+    routing::get,
+};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::Serialize;
@@ -25,6 +32,27 @@ pub struct GatewayJwtIssuer {
 #[derive(Clone, Debug, Serialize)]
 pub struct GatewayJwks {
     keys: Vec<GatewayJwk>,
+}
+
+/// HTTP routes published on the controller's device-facing TLS listener.
+pub fn routes(jwks: Option<GatewayJwks>) -> Router {
+    Router::<Option<GatewayJwks>>::new()
+        .route("/.well-known/jwks.json", get(serve_jwks))
+        .with_state(jwks)
+}
+
+async fn serve_jwks(State(jwks): State<Option<GatewayJwks>>) -> Result<Response, StatusCode> {
+    jwks.map(|jwks| {
+        (
+            [
+                (header::CACHE_CONTROL, "public, max-age=300"),
+                (header::CONTENT_TYPE, "application/jwk-set+json"),
+            ],
+            Json(jwks),
+        )
+            .into_response()
+    })
+    .ok_or(StatusCode::NOT_FOUND)
 }
 
 #[derive(Clone, Debug, Serialize)]

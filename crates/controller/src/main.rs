@@ -5,7 +5,7 @@ use agentdesktop_controller::{
     daemon_config::{self, DaemonConfigStore},
     database::Database,
     device_ca::DeviceCertificateIssuer,
-    gateway_jwt::GatewayJwtIssuer,
+    gateway_jwt::{self, GatewayJwtIssuer},
     oidc::OidcProvider,
     service::FleetAgentService,
 };
@@ -13,7 +13,10 @@ use agentdesktop_core::{DEFAULT_CONTROLLER_CONFIG_PATH, config, telemetry};
 use agentdesktop_proto::fleet::fleet_agent_server::FleetAgentServer;
 use anyhow::Context;
 use clap::Parser;
-use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
+use tonic::{
+    service::Routes,
+    transport::{Certificate, Identity, Server, ServerTlsConfig},
+};
 
 #[derive(Parser)]
 #[command(about = "Agentdesktop fleet controller")]
@@ -77,7 +80,6 @@ async fn main() -> anyhow::Result<()> {
             tls_enabled: true,
             gateway_jwt_enabled: gateway_jwt_issuer.is_some(),
         },
-        gateway_jwks,
     );
     let ca_certificate =
         std::fs::read_to_string(&tls.client_ca_certificate).with_context(|| {
@@ -113,14 +115,18 @@ async fn main() -> anyhow::Result<()> {
         .identity(Identity::from_pem(certificate, key))
         .client_ca_root(Certificate::from_pem(client_ca))
         .client_auth_optional(true);
-    let mut server = Server::builder().tls_config(tls_config)?;
+    let mut server = Server::builder()
+        .accept_http1(true)
+        .tls_config(tls_config)?;
 
     let fleet_listen = config.fleet_listen;
     let admin_listen = config.admin_listen;
     tracing::info!(listen = %fleet_listen, "fleet controller listening");
     let fleet = async move {
+        let routes = Routes::from(gateway_jwt::routes(gateway_jwks))
+            .add_service(FleetAgentServer::new(service));
         server
-            .add_service(FleetAgentServer::new(service))
+            .add_routes(routes)
             .serve(fleet_listen)
             .await
             .context("serve fleet gRPC API")

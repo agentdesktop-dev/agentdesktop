@@ -19,6 +19,9 @@ oidc:
   redirectUri: http://127.0.0.1:51327/callback
 allowInsecureDev: false
 
+# Optional short-lived JWT issuer for authenticated inference gateways.
+gatewayJwt: {}
+
 # Daemon configuration distributed to enrolled devices. Leave empty to
 # disable managed configuration.
 daemonConfig: {}

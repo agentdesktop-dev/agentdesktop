@@ -11,6 +11,9 @@ containing the controller TLS material:
 - `device-ca.pem`
 - `device-ca-key.pem`
 
+When `gatewayJwt` is configured, the Secret must also contain the configured
+JWT signing key, such as `gateway-jwt-key.pem`.
+
 The controller certificate must be valid for the address used by device
 daemons. Keep both private key files secret.
 

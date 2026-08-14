@@ -16,6 +16,10 @@ data:
       issuer: {{ required "oidc.issuer is required" .Values.oidc.issuer | quote }}
       clientId: {{ required "oidc.clientId is required" .Values.oidc.clientId | quote }}
       redirectUri: {{ .Values.oidc.redirectUri | quote }}
+    {{- with .Values.gatewayJwt }}
+    gatewayJwt:
+{{ toYaml . | indent 6 }}
+    {{- end }}
     {{- with .Values.daemonConfig }}
     daemonConfig:
       path: /etc/agentdesktop/config/daemon.yaml

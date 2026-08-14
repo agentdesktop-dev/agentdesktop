@@ -4,7 +4,18 @@ oidc:
   clientId: agentdesktop-kubernetes
   redirectUri: http://127.0.0.1:51327/callback
 allowInsecureDev: true
+gatewayJwt:
+  privateKey: /etc/agentdesktop/tls/gateway-jwt-key.pem
+  issuer: agentdesktop-controller
+  keyId: agentdesktop
+  lifetime: 5m
 daemonConfig:
+  inferenceGateway:
+    url: http://agentgateway-proxy.agentgateway-system.svc.cluster.local
+    authentication:
+      type: controllerJwt
+      audience: agentgateway
+      allowedClientIds: [claude-code]
   programs:
     claudeCode:
       companyAnnouncements:

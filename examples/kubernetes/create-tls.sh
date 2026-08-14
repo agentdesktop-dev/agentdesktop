@@ -3,6 +3,7 @@
 set -euo pipefail
 
 namespace="${1:-agentdesktop}"
+gateway_namespace="${2:-agentgateway-system}"
 work_dir="$(mktemp -d)"
 trap 'rm -rf "${work_dir}"' EXIT
 
@@ -13,6 +14,12 @@ if kubectl --namespace "${namespace}" get secret agentdesktop-controller-tls >/d
   kubectl --namespace "${namespace}" get secret agentdesktop-controller-tls \
     --output jsonpath='{.data.device-ca-key\.pem}' | openssl base64 -d -A \
     > "${work_dir}/device-ca-key.pem"
+  gateway_jwt_key="$(kubectl --namespace "${namespace}" get secret agentdesktop-controller-tls \
+    --output jsonpath='{.data.gateway-jwt-key\.pem}')"
+  if [[ -n "${gateway_jwt_key}" ]]; then
+    printf '%s' "${gateway_jwt_key}" | openssl base64 -d -A \
+      > "${work_dir}/gateway-jwt-key.pem"
+  fi
   echo "Reusing the existing device CA"
 else
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
@@ -21,6 +28,11 @@ else
     -days 30 -sha256 -subj /CN=Agentdesktop-Kubernetes-example-device-CA \
     -addext basicConstraints=critical,CA:TRUE \
     -addext keyUsage=critical,keyCertSign,cRLSign
+fi
+
+if [[ ! -s "${work_dir}/gateway-jwt-key.pem" ]]; then
+  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+    -out "${work_dir}/gateway-jwt-key.pem"
 fi
 
 openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
@@ -41,9 +53,14 @@ kubectl --namespace "${namespace}" create secret generic agentdesktop-controller
   --from-file="${work_dir}/controller-key.pem" \
   --from-file="${work_dir}/device-ca.pem" \
   --from-file="${work_dir}/device-ca-key.pem" \
+  --from-file="${work_dir}/gateway-jwt-key.pem" \
   --dry-run=client --output=yaml | kubectl apply -f -
 
-echo "Created Secret ${namespace}/agentdesktop-controller-tls"
+kubectl --namespace "${namespace}" create configmap agentdesktop-controller-ca \
+  --from-file=ca.crt="${work_dir}/device-ca.pem" \
+  --dry-run=client --output=yaml | kubectl apply -f -
+
+echo "Created Secret ${namespace}/agentdesktop-controller-tls and Agentgateway CA ConfigMap"
 
 if kubectl --namespace "${namespace}" get deployment agentdesktop >/dev/null 2>&1; then
   kubectl --namespace "${namespace}" rollout restart deployment/agentdesktop

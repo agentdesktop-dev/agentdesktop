@@ -17,7 +17,6 @@ use agentdesktop_core::config::DaemonConfig;
 use crate::{
     daemon_config::DaemonConfigStore,
     database::{Database, DeviceDetail, DeviceSummary},
-    gateway_jwt::GatewayJwks,
 };
 
 #[derive(Clone)]
@@ -25,7 +24,6 @@ pub struct AdminState {
     database: Database,
     daemon_config: DaemonConfigStore,
     settings: ControllerSettings,
-    gateway_jwks: Option<GatewayJwks>,
 }
 
 #[derive(Clone, Serialize)]
@@ -42,13 +40,11 @@ impl AdminState {
         database: Database,
         daemon_config: DaemonConfigStore,
         settings: ControllerSettings,
-        gateway_jwks: Option<GatewayJwks>,
     ) -> Self {
         Self {
             database,
             daemon_config,
             settings,
-            gateway_jwks,
         }
     }
 }
@@ -77,25 +73,12 @@ pub async fn serve(address: SocketAddr, state: AdminState) -> anyhow::Result<()>
             get(device).delete(delete_device),
         )
         .route("/api/v1/settings", get(settings))
-        .route("/.well-known/jwks.json", get(jwks))
         .fallback(get(asset))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(address).await?;
     info!(listen = %address, "controller admin UI listening");
     axum::serve(listener, app).await?;
     Ok(())
-}
-
-async fn jwks(State(state): State<AdminState>) -> Result<Response, StatusCode> {
-    let jwks = state.gateway_jwks.ok_or(StatusCode::NOT_FOUND)?;
-    Ok((
-        [
-            (header::CACHE_CONTROL, "public, max-age=300"),
-            (header::CONTENT_TYPE, "application/jwk-set+json"),
-        ],
-        Json(jwks),
-    )
-        .into_response())
 }
 
 async fn overview(State(state): State<AdminState>) -> Result<Json<Overview>, AdminError> {

@@ -55,7 +55,7 @@ jobs:
           - platform: linux/amd64
             runner: ubuntu-24.04
           - platform: linux/arm64
-            runner: blacksmith-4vcpu-ubuntu-2404-arm
+            runner: ubuntu-24.04-arm
     steps:
       - name: Prepare platform name
         shell: bash
@@ -208,7 +208,7 @@ jobs:
           - os_name: linux
             arch: arm64
             target: aarch64-unknown-linux-gnu
-            runner: blacksmith-4vcpu-ubuntu-2404-arm
+            runner: ubuntu-24.04-arm
             extension: ""
           - os_name: darwin
             arch: amd64
