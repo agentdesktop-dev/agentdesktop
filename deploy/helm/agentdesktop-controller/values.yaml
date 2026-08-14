@@ -17,7 +17,7 @@ controller:
   oidc:
     issuer: https://id.example.com
     clientId: agentdesktop
-    redirectUri: http://127.0.0.1:5555/callback
+    redirectUri: http://127.0.0.1:51327/callback
   allowInsecureDev: false
 
   # When set, this Secret is mounted instead of the generated ConfigMap. It

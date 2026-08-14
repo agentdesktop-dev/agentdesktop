@@ -296,7 +296,7 @@ fn default_controller_database_url() -> String {
 }
 
 fn default_oidc_redirect_uri() -> String {
-    "http://127.0.0.1:5555/callback".to_owned()
+    "http://127.0.0.1:51327/callback".to_owned()
 }
 
 fn default_gateway_oidc_scopes() -> Vec<String> {
@@ -750,7 +750,7 @@ inferenceGateway:
         else {
             panic!("expected OIDC authentication");
         };
-        assert_eq!(redirect_uri, "http://127.0.0.1:5555/callback");
+        assert_eq!(redirect_uri, "http://127.0.0.1:51327/callback");
         assert_eq!(scopes, ["openid", "offline_access"]);
 
         let remote_plaintext = r#"

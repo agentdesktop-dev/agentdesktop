@@ -14,7 +14,7 @@ staticClients:
   name: Agentdesktop standalone example
   public: true
   redirectURIs:
-  - http://127.0.0.1:5555/callback
+  - http://127.0.0.1:51327/callback
 
 enablePasswordDB: true
 staticPasswords:

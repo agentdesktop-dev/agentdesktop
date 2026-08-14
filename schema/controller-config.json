@@ -126,7 +126,7 @@
         "redirectUri": {
           "description": "Redirect URI registered for the native enrollment client.",
           "type": "string",
-          "default": "http://127.0.0.1:5555/callback"
+          "default": "http://127.0.0.1:51327/callback"
         }
       },
       "additionalProperties": false,

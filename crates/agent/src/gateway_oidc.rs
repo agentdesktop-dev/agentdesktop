@@ -228,7 +228,7 @@ mod tests {
         let url = authorization_url(
             Url::parse("https://idp.example/authorize").unwrap(),
             "agentdesktop",
-            &Url::parse("http://127.0.0.1:5555/callback").unwrap(),
+            &Url::parse("http://127.0.0.1:51327/callback").unwrap(),
             &["openid".to_owned(), "offline_access".to_owned()],
             "state",
             "challenge",

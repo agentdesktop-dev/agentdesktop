@@ -109,7 +109,7 @@ programs:
 ```
 
 Save this as `~/.config/agentdesktop/config.yaml`, register
-`http://127.0.0.1:5555/callback` with the OIDC provider, and run:
+`http://127.0.0.1:51327/callback` with the OIDC provider, and run:
 
 ```sh
 agentdesktop daemon --user

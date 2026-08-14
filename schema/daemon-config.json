@@ -152,7 +152,7 @@
             "redirectUri": {
               "description": "Loopback redirect URI registered for the native client.",
               "type": "string",
-              "default": "http://127.0.0.1:5555/callback"
+              "default": "http://127.0.0.1:51327/callback"
             },
             "scopes": {
               "description": "Scopes requested during sign-in.",
