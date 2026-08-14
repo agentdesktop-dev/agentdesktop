@@ -34,9 +34,10 @@ jobs:
           node-version-file: frontend/.nvmrc
 
       - name: Install UI dependencies
+        working-directory: frontend
         run: |
           corepack enable
-          corepack pnpm --dir frontend install --frozen-lockfile
+          pnpm install --frozen-lockfile
 
       - name: Install Linux desktop dependencies
         run: |

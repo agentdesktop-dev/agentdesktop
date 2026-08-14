@@ -19,26 +19,26 @@ lint:
 	cargo clippy --workspace --all-targets -- -D warnings
 
 frontend:
-	pnpm --dir frontend install --frozen-lockfile
-	pnpm --dir frontend build
+	cd frontend && pnpm install --frozen-lockfile
+	cd frontend && pnpm build
 
 frontend-check:
-	pnpm --dir frontend install --frozen-lockfile
-	pnpm --dir frontend check
+	cd frontend && pnpm install --frozen-lockfile
+	cd frontend && pnpm check
 
 desktop:
-	pnpm --dir frontend install --frozen-lockfile
-	pnpm --dir frontend --filter @agentdesktop/desktop-web build
+	cd frontend && pnpm install --frozen-lockfile
+	cd frontend && pnpm --filter @agentdesktop/desktop-web build
 	cargo build -p agentdesktop
 
 desktop-check:
-	pnpm --dir frontend install --frozen-lockfile
-	pnpm --dir frontend --filter @agentdesktop/desktop-web build
+	cd frontend && pnpm install --frozen-lockfile
+	cd frontend && pnpm --filter @agentdesktop/desktop-web build
 	cargo check -p agentdesktop
 
 format:
 	cargo fmt --all
-	pnpm --dir frontend format
+	cd frontend && pnpm format
 
 gen: generate-schema format
 	@:

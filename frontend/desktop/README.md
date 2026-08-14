@@ -14,8 +14,9 @@ From the repository root, install the shared frontend workspace and start the
 desktop application:
 
 ```sh
-pnpm --dir frontend install
-pnpm --dir frontend dev:desktop
+cd frontend
+pnpm install
+pnpm dev:desktop
 ```
 
 Set `AGENTDESKTOP_SOCKET` to override the default Unix socket or Windows named
@@ -33,8 +34,9 @@ make desktop
 Release installers are built on their target operating system:
 
 ```sh
-pnpm --dir frontend --filter @agentdesktop/desktop-web dist:mac
-pnpm --dir frontend --filter @agentdesktop/desktop-web dist:win
+cd frontend
+pnpm --filter @agentdesktop/desktop-web dist:mac
+pnpm --filter @agentdesktop/desktop-web dist:win
 ```
 
 Production distribution requires the relevant Apple or Windows signing setup.

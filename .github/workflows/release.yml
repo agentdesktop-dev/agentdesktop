@@ -261,10 +261,11 @@ jobs:
 
       - name: Build frontend
         shell: bash
+        working-directory: frontend
         run: |
           corepack enable
-          pnpm --dir frontend install --frozen-lockfile
-          pnpm --dir frontend --filter @agentdesktop/desktop-web build
+          pnpm install --frozen-lockfile
+          pnpm --filter @agentdesktop/desktop-web build
 
       - name: Build binary
         shell: bash
