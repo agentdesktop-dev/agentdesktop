@@ -140,7 +140,7 @@ impl FleetAgent for FleetAgentService {
                 audience,
                 allowed_client_ids,
             }) => (audience, allowed_client_ids),
-            None => {
+            Some(InferenceGatewayAuthentication::Oidc { .. }) | None => {
                 return Err(Status::failed_precondition(
                     "inference gateway does not use controller JWT authentication",
                 ));

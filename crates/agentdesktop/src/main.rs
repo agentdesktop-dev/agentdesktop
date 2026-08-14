@@ -41,8 +41,8 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run the privileged device daemon.
-    Daemon(DaemonArgs),
+    /// Run the device daemon.
+    Daemon(Box<DaemonArgs>),
 
     #[command(flatten)]
     Client(ClientCommand),
@@ -132,7 +132,30 @@ struct ManagedDeviceSnapshot {
 fn socket_path() -> PathBuf {
     env::var_os("AGENTDESKTOP_SOCKET")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET_PATH))
+        .unwrap_or_else(|| {
+            let system = PathBuf::from(DEFAULT_SOCKET_PATH);
+            if system.exists() {
+                return system;
+            }
+            user_socket_path().unwrap_or(system)
+        })
+}
+
+#[cfg(unix)]
+fn user_socket_path() -> Option<PathBuf> {
+    if let Some(runtime) = env::var_os("XDG_RUNTIME_DIR") {
+        return Some(PathBuf::from(runtime).join("agentdesktop.sock"));
+    }
+    let home = env::var_os("HOME").map(PathBuf::from)?;
+    let state = env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/state"));
+    Some(state.join("agentdesktop/agentdesktop.sock"))
+}
+
+#[cfg(windows)]
+fn user_socket_path() -> Option<PathBuf> {
+    None
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -400,7 +423,7 @@ fn run_command(command: Command, socket: PathBuf) -> anyhow::Result<()> {
         .build()?
         .block_on(async move {
             match command {
-                Command::Daemon(args) => daemon::run(args, socket).await,
+                Command::Daemon(args) => daemon::run(*args, socket).await,
                 Command::Client(command) => cli::run(command, socket).await,
             }
         })

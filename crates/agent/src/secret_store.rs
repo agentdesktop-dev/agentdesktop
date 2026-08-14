@@ -30,19 +30,37 @@ impl SecretStore {
     }
 
     pub fn get(&self, service: &str, account: &str) -> anyhow::Result<String> {
+        self.get_optional(service, account)?
+            .context("secret was not found")
+    }
+
+    pub fn get_optional(&self, service: &str, account: &str) -> anyhow::Result<Option<String>> {
         #[cfg(target_os = "linux")]
         {
             let path = self.entry_path(service, account);
-            let secret = std::fs::read(&path)
-                .with_context(|| format!("read secret from {}", path.display()))?;
-            String::from_utf8(secret).context("stored secret is not UTF-8")
+            match std::fs::read(&path) {
+                Ok(secret) => String::from_utf8(secret)
+                    .context("stored secret is not UTF-8")
+                    .map(Some),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => {
+                    Err(error).with_context(|| format!("read secret from {}", path.display()))
+                }
+            }
         }
 
         #[cfg(any(target_os = "macos", windows))]
-        keyring::Entry::new(service, account)
-            .context("open operating system credential store")?
-            .get_password()
-            .context("read secret from operating system credential store")
+        {
+            let entry = keyring::Entry::new(service, account)
+                .context("open operating system credential store")?;
+            match entry.get_password() {
+                Ok(secret) => Ok(Some(secret)),
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(error) => {
+                    Err(error).context("read secret from operating system credential store")
+                }
+            }
+        }
     }
 
     pub fn set(&self, service: &str, account: &str, secret: &str) -> anyhow::Result<()> {

@@ -30,7 +30,7 @@ const SUCCESS_PAGE: &str = r##"<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Enrollment complete · Agentdesktop</title>
+  <title>Sign-in complete · Agentdesktop</title>
   <style>
     :root { color-scheme: light; font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     * { box-sizing: border-box; }
@@ -49,7 +49,7 @@ const SUCCESS_PAGE: &str = r##"<!doctype html>
       <circle cx="184" cy="195" r="20" fill="#8023C3"/>
       <circle cx="128" cy="128" r="18" fill="#5B168E"/>
     </svg>
-    <h1>Enrollment complete</h1>
+    <h1>Sign-in complete</h1>
     <p>You can close this window and return to Agentdesktop.</p>
   </main>
 </body>
@@ -60,7 +60,7 @@ const FAILURE_PAGE: &str = r##"<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Enrollment failed · Agentdesktop</title>
+  <title>Sign-in failed · Agentdesktop</title>
   <style>
     :root { color-scheme: light; font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     * { box-sizing: border-box; }
@@ -79,7 +79,7 @@ const FAILURE_PAGE: &str = r##"<!doctype html>
       <circle cx="184" cy="195" r="20" fill="#8023C3"/>
       <circle cx="128" cy="128" r="18" fill="#5B168E"/>
     </svg>
-    <h1>Enrollment failed</h1>
+    <h1>Sign-in failed</h1>
     <p>Return to Agentdesktop and try again. Details are available in the daemon logs.</p>
   </main>
 </body>
@@ -100,12 +100,12 @@ struct CallbackQuery {
 }
 
 #[derive(Deserialize)]
-struct TokenResponse {
-    access_token: String,
-    id_token: Option<String>,
-    refresh_token: Option<String>,
-    expires_in: u64,
-    token_type: String,
+pub(crate) struct TokenResponse {
+    pub(crate) access_token: String,
+    pub(crate) id_token: Option<String>,
+    pub(crate) refresh_token: Option<String>,
+    pub(crate) expires_in: u64,
+    pub(crate) token_type: String,
 }
 
 pub async fn enroll(
@@ -113,8 +113,7 @@ pub async fn enroll(
     enrollment: &EnrollmentState,
     callback_listen: Option<SocketAddr>,
 ) -> anyhow::Result<Identity> {
-    let verifier = random_secret();
-    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+    let (verifier, challenge) = pkce();
     let mut client = remote::client(controller, None).await?;
     let device_key = KeyPair::generate().context("generate device TLS private key")?;
     let mut certificate_params = CertificateParams::new(Vec::<String>::new())?;
@@ -133,44 +132,16 @@ pub async fn enroll(
         .into_inner();
 
     let redirect_uri = Url::parse(&begin.redirect_uri).context("parse OIDC redirect URI")?;
-    let listener = bind_callback(&redirect_uri, callback_listen).await?;
-    let (result_sender, result_receiver) = oneshot::channel();
-    let state = CallbackState {
-        expected_state: begin.state,
-        result: Arc::new(Mutex::new(Some(result_sender))),
-    };
-    let callback_path = redirect_uri.path().to_owned();
-    let app = Router::new()
-        .route(&callback_path, get(callback))
-        .with_state(state);
-    let (shutdown_sender, shutdown_receiver) = oneshot::channel::<()>();
-    let server = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                let _ = shutdown_receiver.await;
-            })
-            .await
-            .context("serve OIDC callback")
-    });
-
     enrollment
         .awaiting_authentication(begin.authorization_url.clone())
         .await;
-    tracing::info!(
-        authorization_url = %begin.authorization_url,
-        "open this URL to enroll the device"
-    );
-    println!(
-        "Open this URL to enroll Agentdesktop:\n{}",
-        begin.authorization_url
-    );
-
-    let authorization_code = tokio::time::timeout(CALLBACK_TIMEOUT, result_receiver)
-        .await
-        .context("timed out waiting for OIDC callback")?
-        .context("OIDC callback server stopped")??;
-    let _ = shutdown_sender.send(());
-    server.await.context("join OIDC callback server")??;
+    let authorization_code = wait_for_authorization_code(
+        &begin.authorization_url,
+        &redirect_uri,
+        begin.state,
+        callback_listen,
+    )
+    .await?;
     enrollment.set("enrolling").await;
 
     let tokens = exchange_authorization_code(
@@ -228,7 +199,7 @@ pub async fn enroll(
     })
 }
 
-async fn exchange_authorization_code(
+pub(crate) async fn exchange_authorization_code(
     token_endpoint: &str,
     client_id: &str,
     redirect_uri: &str,
@@ -262,12 +233,21 @@ pub async fn refresh(identity: &mut Identity) -> anyhow::Result<()> {
     let endpoint = &identity.oauth_token_endpoint;
     let client_id = &identity.oauth_client_id;
     let current = &identity.oauth;
+    let response = refresh_access_token(endpoint, client_id, &current.refresh_token).await?;
+    apply_refreshed_tokens(identity, response)
+}
+
+pub(crate) async fn refresh_access_token(
+    endpoint: &str,
+    client_id: &str,
+    refresh_token: &str,
+) -> anyhow::Result<TokenResponse> {
     let response = reqwest::Client::new()
         .post(endpoint)
         .form(&[
             ("grant_type", "refresh_token"),
-            ("refresh_token", current.refresh_token.as_str()),
-            ("client_id", client_id.as_str()),
+            ("refresh_token", refresh_token),
+            ("client_id", client_id),
         ])
         .send()
         .await
@@ -277,7 +257,10 @@ pub async fn refresh(identity: &mut Identity) -> anyhow::Result<()> {
         .json::<TokenResponse>()
         .await
         .context("decode refreshed OIDC token response")?;
-    apply_refreshed_tokens(identity, response)
+    if !response.token_type.eq_ignore_ascii_case("Bearer") {
+        bail!("OIDC token endpoint returned unsupported token type");
+    }
+    Ok(response)
 }
 
 fn apply_refreshed_tokens(identity: &mut Identity, response: TokenResponse) -> anyhow::Result<()> {
@@ -298,6 +281,47 @@ fn unix_time_seconds() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+pub(crate) async fn wait_for_authorization_code(
+    authorization_url: &str,
+    redirect_uri: &Url,
+    expected_state: String,
+    callback_listen: Option<SocketAddr>,
+) -> anyhow::Result<String> {
+    let listener = bind_callback(redirect_uri, callback_listen).await?;
+    let (result_sender, result_receiver) = oneshot::channel();
+    let state = CallbackState {
+        expected_state,
+        result: Arc::new(Mutex::new(Some(result_sender))),
+    };
+    let callback_path = redirect_uri.path().to_owned();
+    let app = Router::new()
+        .route(&callback_path, get(callback))
+        .with_state(state);
+    let (shutdown_sender, shutdown_receiver) = oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_receiver.await;
+            })
+            .await
+            .context("serve OIDC callback")
+    });
+
+    tracing::info!(%authorization_url, "opening browser for OIDC sign-in");
+    println!("Open this URL to sign in to Agentdesktop:\n{authorization_url}");
+    if let Err(error) = open::that(authorization_url) {
+        tracing::warn!(%error, "could not open the browser automatically");
+    }
+
+    let authorization_code = tokio::time::timeout(CALLBACK_TIMEOUT, result_receiver)
+        .await
+        .context("timed out waiting for OIDC callback")?
+        .context("OIDC callback server stopped")??;
+    let _ = shutdown_sender.send(());
+    server.await.context("join OIDC callback server")??;
+    Ok(authorization_code)
 }
 
 async fn bind_callback(
@@ -369,10 +393,16 @@ async fn callback(
     }
 }
 
-fn random_secret() -> String {
+pub(crate) fn random_secret() -> String {
     let mut bytes = [0_u8; 32];
     rand::rng().fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
+}
+
+pub(crate) fn pkce() -> (String, String) {
+    let verifier = random_secret();
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+    (verifier, challenge)
 }
 
 #[cfg(test)]

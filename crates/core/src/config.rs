@@ -58,6 +58,31 @@ pub enum InferenceGatewayAuthentication {
         #[serde(rename = "allowedClientIds")]
         allowed_client_ids: BTreeSet<String>,
     },
+    /// Sign the local user in with OIDC and send the resulting access token.
+    Oidc {
+        /// Exact OpenID Connect issuer URL.
+        #[cfg_attr(feature = "schema", schemars(with = "String"))]
+        issuer: Url,
+        /// Public OpenID Connect client identifier.
+        #[serde(rename = "clientId")]
+        client_id: String,
+        /// Loopback redirect URI registered for the native client.
+        #[serde(rename = "redirectUri", default = "default_oidc_redirect_uri")]
+        redirect_uri: String,
+        /// Scopes requested during sign-in.
+        #[serde(default = "default_gateway_oidc_scopes")]
+        scopes: Vec<String>,
+        /// Permit loopback HTTP endpoints for isolated local development.
+        #[serde(rename = "allowInsecure", default)]
+        allow_insecure: bool,
+    },
+}
+
+impl InferenceGatewayAuthentication {
+    /// Returns whether this authentication mode uses the local credential helper.
+    pub fn uses_credential_helper(&self) -> bool {
+        true
+    }
 }
 
 /// Telemetry events collected from managed developer tools.
@@ -272,6 +297,10 @@ fn default_controller_database_url() -> String {
 
 fn default_oidc_redirect_uri() -> String {
     "http://127.0.0.1:5555/callback".to_owned()
+}
+
+fn default_gateway_oidc_scopes() -> Vec<String> {
+    vec!["openid".to_owned(), "offline_access".to_owned()]
 }
 
 fn default_daemon_config_revision() -> u64 {
@@ -520,22 +549,67 @@ fn validate_daemon(
         if gateway.url.query().is_some() || gateway.url.fragment().is_some() {
             anyhow::bail!("inference gateway URL cannot include a query or fragment");
         }
-        if let Some(InferenceGatewayAuthentication::ControllerJwt {
-            audience,
-            allowed_client_ids,
-        }) = &gateway.authentication
-        {
-            if audience.trim().is_empty() {
-                anyhow::bail!("inference gateway JWT audience cannot be empty");
-            }
-            if allowed_client_ids.is_empty() {
-                anyhow::bail!("inference gateway JWT allowedClientIds cannot be empty");
-            }
-            if let Some(client_id) = allowed_client_ids
-                .iter()
-                .find(|client_id| !valid_client_id(client_id))
-            {
-                anyhow::bail!("invalid inference gateway client ID {client_id}");
+        if let Some(authentication) = &gateway.authentication {
+            match authentication {
+                InferenceGatewayAuthentication::ControllerJwt {
+                    audience,
+                    allowed_client_ids,
+                } => {
+                    if audience.trim().is_empty() {
+                        anyhow::bail!("inference gateway JWT audience cannot be empty");
+                    }
+                    if allowed_client_ids.is_empty() {
+                        anyhow::bail!("inference gateway JWT allowedClientIds cannot be empty");
+                    }
+                    if let Some(client_id) = allowed_client_ids
+                        .iter()
+                        .find(|client_id| !valid_client_id(client_id))
+                    {
+                        anyhow::bail!("invalid inference gateway client ID {client_id}");
+                    }
+                }
+                InferenceGatewayAuthentication::Oidc {
+                    issuer,
+                    client_id,
+                    redirect_uri,
+                    scopes,
+                    allow_insecure,
+                } => {
+                    if issuer.host().is_none() {
+                        anyhow::bail!("inference gateway OIDC issuer must include a host");
+                    }
+                    match issuer.scheme() {
+                        "https" => {}
+                        "http" if *allow_insecure && issuer.host_str().is_some_and(is_loopback) => {
+                        }
+                        "http" if *allow_insecure => anyhow::bail!(
+                            "inference gateway OIDC allowInsecure only permits loopback issuers"
+                        ),
+                        "http" => anyhow::bail!(
+                            "inference gateway OIDC issuer must use HTTPS; allowInsecure is only for isolated loopback development"
+                        ),
+                        scheme => anyhow::bail!(
+                            "inference gateway OIDC issuer must use HTTPS, got {scheme}"
+                        ),
+                    }
+                    if !issuer.username().is_empty()
+                        || issuer.password().is_some()
+                        || issuer.query().is_some()
+                        || issuer.fragment().is_some()
+                    {
+                        anyhow::bail!(
+                            "inference gateway OIDC issuer cannot contain credentials, a query, or a fragment"
+                        );
+                    }
+                    if client_id.trim().is_empty() {
+                        anyhow::bail!("inference gateway OIDC clientId cannot be empty");
+                    }
+                    Url::parse(redirect_uri)
+                        .context("parse inference gateway OIDC redirectUri URL")?;
+                    if scopes.is_empty() || scopes.iter().any(|scope| scope.trim().is_empty()) {
+                        anyhow::bail!("inference gateway OIDC scopes cannot be empty");
+                    }
+                }
             }
         }
     }
@@ -554,6 +628,10 @@ fn validate_daemon(
         }
     }
     Ok(())
+}
+
+fn is_loopback(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
 }
 
 /// Returns whether a caller-provided inference-gateway client identifier is valid.
@@ -575,7 +653,7 @@ fn is_true(value: &bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_controller, parse_daemon};
+    use super::{InferenceGatewayAuthentication, parse_controller, parse_daemon};
 
     #[test]
     fn daemon_configuration_supports_local_and_managed_options() {
@@ -643,6 +721,53 @@ oidc:
             .expect("controller-connected daemon example");
         parse_daemon(include_str!("../../../examples/claude/claude-code.yaml"))
             .expect("Claude Code daemon configuration example");
+        parse_daemon(include_str!("../../../examples/standalone/config.yaml"))
+            .expect("standalone daemon configuration example");
+    }
+
+    #[test]
+    fn standalone_oidc_uses_simple_native_client_defaults() {
+        let daemon = parse_daemon(
+            r#"
+inferenceGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: oidc
+    issuer: https://login.example.com
+    clientId: agentdesktop
+"#,
+        )
+        .expect("valid standalone OIDC configuration");
+
+        assert!(daemon.controller.is_none());
+        let Some(InferenceGatewayAuthentication::Oidc {
+            redirect_uri,
+            scopes,
+            ..
+        }) = daemon
+            .inference_gateway
+            .and_then(|gateway| gateway.authentication)
+        else {
+            panic!("expected OIDC authentication");
+        };
+        assert_eq!(redirect_uri, "http://127.0.0.1:5555/callback");
+        assert_eq!(scopes, ["openid", "offline_access"]);
+
+        let remote_plaintext = r#"
+inferenceGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: oidc
+    issuer: http://login.example.com
+    clientId: agentdesktop
+    allowInsecure: true
+"#;
+        assert!(
+            parse_daemon(remote_plaintext)
+                .unwrap_err()
+                .to_string()
+                .contains("loopback")
+        );
     }
 
     #[test]

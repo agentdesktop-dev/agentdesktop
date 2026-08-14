@@ -3,6 +3,7 @@ pub mod cli;
 pub mod daemon;
 pub mod discovery;
 pub mod enrollment;
+pub mod gateway_oidc;
 pub mod identity;
 pub mod oidc;
 pub mod reconcile;

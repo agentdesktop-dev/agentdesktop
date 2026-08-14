@@ -51,6 +51,7 @@ serde_json_path_to_error = "0.1"
 serde-transcode = "1.1"
 serde_yaml = "0.9"
 sha2 = "0.11"
+similar = "2.7"
 sqlx = { version = "0.9", default-features = false, features = ["any", "macros", "migrate", "postgres", "runtime-tokio", "sqlite", "tls-rustls-aws-lc-rs"] }
 tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream = "0.1"

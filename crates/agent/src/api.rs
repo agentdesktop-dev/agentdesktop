@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{net::SocketAddr, path::PathBuf};
 
 use axum::{
     Json, Router,
@@ -10,13 +10,13 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
 use agentdesktop_core::{
-    config::DaemonConfig,
+    config::{DaemonConfig, InferenceGatewayAuthentication, valid_client_id},
     model::{
         Discovery, EnrollmentStatus, InferenceGatewayCredential, TelemetryEvent, TelemetryEventKind,
     },
 };
 
-use crate::{enrollment::EnrollmentState, remote};
+use crate::{enrollment::EnrollmentState, gateway_oidc, remote};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -24,6 +24,7 @@ pub struct AppState {
     pub discovery: Discovery,
     pub enrollment: EnrollmentState,
     pub state_dir: PathBuf,
+    pub oidc_callback_listen: Option<SocketAddr>,
     pub telemetry: Option<mpsc::Sender<TelemetryEvent>>,
     pub logout: Option<mpsc::Sender<remote::LogoutRequest>>,
 }
@@ -210,16 +211,50 @@ async fn inference_gateway_credential(
     State(state): State<AppState>,
     Query(query): Query<CredentialQuery>,
 ) -> Result<Json<InferenceGatewayCredential>, (StatusCode, String)> {
-    let controller = state.config.controller.as_ref().ok_or_else(|| {
+    if !valid_client_id(&query.client_id) {
+        return Err((StatusCode::BAD_REQUEST, "invalid client ID".to_owned()));
+    }
+    let gateway = state.config.inference_gateway.as_ref().ok_or_else(|| {
         (
             StatusCode::FAILED_DEPENDENCY,
-            "daemon has no controller configured".to_string(),
+            "daemon has no inference gateway configured".to_owned(),
         )
     })?;
-    // Local transport permissions authenticate the user, not the calling
-    // process. The client ID selects an allowed policy within that boundary.
-    remote::inference_gateway_credential(controller, &state.state_dir, &query.client_id)
-        .await
-        .map(Json)
-        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("{error:#}")))
+    match gateway.authentication.as_ref() {
+        Some(InferenceGatewayAuthentication::ControllerJwt { .. }) => {
+            let controller = state.config.controller.as_ref().ok_or_else(|| {
+                (
+                    StatusCode::FAILED_DEPENDENCY,
+                    "controller JWT authentication requires a controller".to_owned(),
+                )
+            })?;
+            // Local transport permissions authenticate the user, not the calling
+            // process. The client ID selects an allowed policy within that boundary.
+            remote::inference_gateway_credential(controller, &state.state_dir, &query.client_id)
+                .await
+        }
+        Some(InferenceGatewayAuthentication::Oidc {
+            issuer,
+            client_id,
+            redirect_uri,
+            scopes,
+            allow_insecure,
+        }) => {
+            gateway_oidc::credential(
+                issuer,
+                client_id,
+                redirect_uri,
+                scopes,
+                *allow_insecure,
+                &state.state_dir,
+                state.oidc_callback_listen,
+            )
+            .await
+        }
+        None => Err(anyhow::anyhow!(
+            "inference gateway has no authentication configured"
+        )),
+    }
+    .map(Json)
+    .map_err(|error| (StatusCode::BAD_GATEWAY, format!("{error:#}")))
 }

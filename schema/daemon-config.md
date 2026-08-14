@@ -11,6 +11,12 @@
 |`inferenceGateway.authentication.allowedClientIds`|[]string|Client identifiers permitted to request credentials for this gateway.|
 |`inferenceGateway.authentication.audience`|string|Audience placed in the issued JWT. This must match the gateway's expected audience.|
 |`inferenceGateway.authentication.type`|enum|Possible values: `controllerJwt`.|
+|`inferenceGateway.authentication.allowInsecure`|boolean|Permit loopback HTTP endpoints for isolated local development.|
+|`inferenceGateway.authentication.clientId`|string|Public OpenID Connect client identifier.|
+|`inferenceGateway.authentication.issuer`|string|Exact OpenID Connect issuer URL.|
+|`inferenceGateway.authentication.redirectUri`|string|Loopback redirect URI registered for the native client.|
+|`inferenceGateway.authentication.scopes`|[]string|Scopes requested during sign-in.|
+|`inferenceGateway.authentication.type`|enum|Possible values: `oidc`.|
 |`inferenceGateway.url`|string|Base HTTP or HTTPS URL of the inference gateway.<br><br>The URL must include a host and cannot include credentials, a query, or a fragment.|
 |`programs`|object|Per-program settings reconciled on this device.|
 |`programs.claudeCode`|object|Claude Code managed-settings configuration. Arbitrary keys are passed through directly.|

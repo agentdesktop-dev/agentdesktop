@@ -1,0 +1,20 @@
+services:
+  dex:
+    image: ghcr.io/dexidp/dex:v2.45.1
+    command: dex serve /etc/dex/config.yaml
+    ports:
+    - 127.0.0.1:5557:5557
+    volumes:
+    - ./dex.yaml:/etc/dex/config.yaml:ro
+
+  agentgateway:
+    image: cr.agentgateway.dev/agentgateway:v1.4.1
+    command: -f /etc/agentgateway/config.yaml
+    depends_on:
+    - dex
+    ports:
+    - 127.0.0.1:4001:4001
+    environment:
+      ANTHROPIC_API_KEY:
+    volumes:
+    - ./agentgateway.yaml:/etc/agentgateway/config.yaml:ro

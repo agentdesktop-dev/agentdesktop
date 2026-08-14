@@ -131,6 +131,51 @@
             "audience",
             "allowedClientIds"
           ]
+        },
+        {
+          "description": "Sign the local user in with OIDC and send the resulting access token.",
+          "type": "object",
+          "properties": {
+            "allowInsecure": {
+              "description": "Permit loopback HTTP endpoints for isolated local development.",
+              "type": "boolean",
+              "default": false
+            },
+            "clientId": {
+              "description": "Public OpenID Connect client identifier.",
+              "type": "string"
+            },
+            "issuer": {
+              "description": "Exact OpenID Connect issuer URL.",
+              "type": "string"
+            },
+            "redirectUri": {
+              "description": "Loopback redirect URI registered for the native client.",
+              "type": "string",
+              "default": "http://127.0.0.1:5555/callback"
+            },
+            "scopes": {
+              "description": "Scopes requested during sign-in.",
+              "type": "array",
+              "default": [
+                "openid",
+                "offline_access"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "oidc"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "issuer",
+            "clientId"
+          ]
         }
       ]
     },

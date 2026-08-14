@@ -1,0 +1,46 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+frontendPolicies:
+  logging:
+    add:
+      oauth.client: jwt.aud
+      user: jwt.email
+
+gateways:
+  gateway:
+    port: 4001
+
+routes:
+- name: reachability
+  gateways: gateway
+  matches:
+  - method: HEAD
+    path:
+      exact: /
+  policies:
+    directResponse:
+      status: 200
+
+llm:
+  gateways: gateway
+  policies:
+    jwtAuth:
+      mode: strict
+      issuer: http://127.0.0.1:5557/dex
+      audiences: [agentdesktop-local]
+      jwks:
+        url: http://dex:5557/dex/keys
+  models:
+  # Claude desktop requires an explicit model
+  - name: "claude-haiku-4-5"
+    provider: anthropic
+    params:
+      apiKey: $ANTHROPIC_API_KEY
+  - name: "claude-sonnet-4-5"
+    provider: anthropic
+    params:
+      apiKey: $ANTHROPIC_API_KEY
+  # Claude code will not query our models and is fine with passthrough
+  - name: "*"
+    provider: anthropic
+    params:
+      apiKey: $ANTHROPIC_API_KEY

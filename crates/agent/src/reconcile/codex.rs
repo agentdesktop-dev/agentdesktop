@@ -9,7 +9,7 @@ use tracing::info;
 
 use crate::secure_fs;
 
-use super::{deep_merge, responses_base_url};
+use super::{ReconcileMode, deep_merge, responses_base_url};
 
 const MANAGED_HEADER: &str = "# Managed by Agentdesktop. Manual changes will be replaced.\n";
 
@@ -18,9 +18,10 @@ pub fn apply(
     credential_helper: &Path,
     socket: &Path,
     config: Option<(&CodexConfig, Option<&InferenceGatewayConfig>)>,
+    mode: ReconcileMode,
 ) -> anyhow::Result<()> {
     let Some((config, gateway)) = config else {
-        return remove(path);
+        return remove(path, mode);
     };
 
     let settings = managed_config(config, gateway, credential_helper, socket)?;
@@ -34,41 +35,71 @@ pub fn apply(
         contents.push(b'\n');
     }
 
-    let action = match fs::read(path) {
-        Ok(existing) if existing == contents => {
-            info!(
-                program = "codex",
-                action = "unchanged",
-                path = %path.display(),
-                "managed configuration already current"
-            );
-            return Ok(());
-        }
-        Ok(_) => "update",
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "create",
+    let existing = match fs::read(path) {
+        Ok(existing) => Some(existing),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
             return Err(error).with_context(|| {
                 format!("read Codex managed configuration from {}", path.display())
             });
         }
     };
+    let action = match existing.as_deref() {
+        Some(existing) if existing == contents => {
+            info!(
+                program = "codex",
+                action = "unchanged",
+                path = %path.display(),
+                "managed configuration already current"
+            );
+            mode.record("codex", "configuration", "unchanged", path);
+            return Ok(());
+        }
+        Some(existing) if existing.starts_with(MANAGED_HEADER.as_bytes()) => "update",
+        Some(existing) if mode.is_dry_run() => {
+            mode.record_diff(
+                "codex",
+                "configuration",
+                "conflict",
+                path,
+                Some(existing),
+                Some(&contents),
+            );
+            return Ok(());
+        }
+        Some(_) => anyhow::bail!(
+            "refusing to replace Codex configuration not owned by Agentdesktop at {}",
+            path.display()
+        ),
+        None => "create",
+    };
 
-    let directory = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(directory).with_context(|| {
-        format!(
-            "create Codex configuration directory {}",
-            directory.display()
-        )
-    })?;
-    secure_fs::atomic_write(path, &contents, 0o644)?;
+    if mode.writes() {
+        let directory = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(directory).with_context(|| {
+            format!(
+                "create Codex configuration directory {}",
+                directory.display()
+            )
+        })?;
+        secure_fs::atomic_write(path, &contents, 0o644)?;
+    }
     info!(
         program = "codex",
         action,
         path = %path.display(),
         "reconciled managed configuration"
+    );
+    mode.record_diff(
+        "codex",
+        "configuration",
+        action,
+        path,
+        existing.as_deref(),
+        Some(&contents),
     );
     Ok(())
 }
@@ -91,10 +122,15 @@ fn managed_config(
         "base_url": responses_base_url(gateway),
         "wire_api": "responses",
     });
-    if matches!(
-        gateway.authentication,
-        Some(InferenceGatewayAuthentication::ControllerJwt { .. })
-    ) {
+    if gateway
+        .authentication
+        .as_ref()
+        .is_some_and(InferenceGatewayAuthentication::uses_credential_helper)
+    {
+        let timeout_ms = match gateway.authentication {
+            Some(InferenceGatewayAuthentication::Oidc { .. }) => 600_000,
+            _ => 5_000,
+        };
         provider["auth"] = json!({
             "command": credential_helper.to_string_lossy(),
             "args": [
@@ -104,7 +140,7 @@ fn managed_config(
                 "--client-id",
                 "codex",
             ],
-            "timeout_ms": 5000,
+            "timeout_ms": timeout_ms,
             "refresh_interval_ms": 60000,
         });
     }
@@ -118,18 +154,21 @@ fn managed_config(
     Ok(settings)
 }
 
-fn remove(path: &Path) -> anyhow::Result<()> {
+fn remove(path: &Path, mode: ReconcileMode) -> anyhow::Result<()> {
     match fs::read(path) {
         Ok(contents) if contents.starts_with(MANAGED_HEADER.as_bytes()) => {
-            fs::remove_file(path).with_context(|| {
-                format!("remove Codex managed configuration at {}", path.display())
-            })?;
+            if mode.writes() {
+                fs::remove_file(path).with_context(|| {
+                    format!("remove Codex managed configuration at {}", path.display())
+                })?;
+            }
             info!(
                 program = "codex",
                 action = "remove",
                 path = %path.display(),
                 "reconciled managed configuration"
             );
+            mode.record("codex", "configuration", "remove", path);
             Ok(())
         }
         Ok(_) => {
@@ -139,6 +178,7 @@ fn remove(path: &Path) -> anyhow::Result<()> {
                 path = %path.display(),
                 "preserving managed configuration not owned by Agentdesktop"
             );
+            mode.record("codex", "configuration", "unchanged", path);
             Ok(())
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -148,6 +188,7 @@ fn remove(path: &Path) -> anyhow::Result<()> {
                 path = %path.display(),
                 "managed configuration already absent"
             );
+            mode.record("codex", "configuration", "unchanged", path);
             Ok(())
         }
         Err(error) => Err(error)
