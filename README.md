@@ -63,6 +63,8 @@ Choose the setup that fits your environment:
   identity.
 - [Controller-managed Claude Code](./examples/claude) runs the complete local
   fleet-management example with OIDC enrollment and Agentgateway.
+- [Kubernetes controller with Dex](./examples/kubernetes) installs the
+  controller Helm chart with development Dex and PostgreSQL dependencies.
 
 ## Configuration
 

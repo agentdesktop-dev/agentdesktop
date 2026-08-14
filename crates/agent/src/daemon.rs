@@ -46,7 +46,7 @@ pub struct DaemonArgs {
     #[arg(long)]
     once: bool,
 
-    /// Preview reconciliation actions without changing files. Implies --once.
+    /// Preview reconciliation of local configuration without changing files. Implies --once.
     #[arg(long)]
     dry_run: bool,
 
@@ -234,6 +234,7 @@ pub async fn run(args: DaemonArgs, socket: PathBuf) -> anyhow::Result<()> {
     );
     if args.once {
         if args.dry_run {
+            validate_dry_run(&config)?;
             reconciler
                 .dry_run(&config)
                 .context("preview daemon configuration")?;
@@ -393,6 +394,15 @@ fn start_gateway_oidc(
             ),
         }
     });
+}
+
+fn validate_dry_run(config: &agentdesktop_core::config::DaemonConfig) -> anyhow::Result<()> {
+    if config.controller.is_some() {
+        bail!(
+            "--dry-run only previews local configuration; controller-managed configuration is received after enrollment while the daemon is running; run without --dry-run to enroll and apply it"
+        );
+    }
+    Ok(())
 }
 
 fn validate_one_shot(config: &agentdesktop_core::config::DaemonConfig) -> anyhow::Result<()> {
@@ -624,7 +634,7 @@ fn effective_uid() -> u32 {
 mod tests {
     use agentdesktop_core::config::parse_daemon;
 
-    use super::validate_one_shot;
+    use super::{validate_dry_run, validate_one_shot};
 
     #[test]
     fn one_shot_accepts_static_settings_and_rejects_runtime_services() {
@@ -672,5 +682,33 @@ telemetry:
                 .to_string()
                 .contains("telemetry")
         );
+    }
+
+    #[test]
+    fn dry_run_rejects_controller_managed_configuration() {
+        let managed = parse_daemon(
+            r#"
+controller:
+  address: https://controller.example.com
+"#,
+        )
+        .expect("valid managed configuration");
+
+        let error = validate_dry_run(&managed).expect_err("managed dry run must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("only previews local configuration")
+        );
+
+        let local = parse_daemon(
+            r#"
+programs:
+  claudeCode:
+    companyAnnouncements: [Managed locally]
+"#,
+        )
+        .expect("valid local configuration");
+        validate_dry_run(&local).expect("local dry run works");
     }
 }

@@ -1,0 +1,5 @@
+# yaml-language-server: $schema=../../schema/daemon-config.json
+controller:
+  address: https://agentdesktop.agentdesktop.svc.cluster.local
+  caCertificatePath: /tmp/agentdesktop-kubernetes-device-ca.pem
+  heartbeatInterval: 30s

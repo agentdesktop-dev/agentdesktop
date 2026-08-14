@@ -2,15 +2,17 @@
 
 FROM docker.io/library/node:24.17.0-bookworm AS ui
 WORKDIR /app/frontend
+ENV CI=true
 COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
 COPY frontend/controller/package.json controller/package.json
 COPY frontend/desktop/package.json desktop/package.json
 COPY frontend/ui/package.json ui/package.json
-RUN corepack enable
+RUN corepack enable && pnpm config set store-dir /pnpm/store
 RUN --mount=type=cache,id=agentdesktop-pnpm,target=/pnpm/store \
-    pnpm install --frozen-lockfile --store-dir=/pnpm/store
+    pnpm install --frozen-lockfile
 COPY frontend/ ./
-RUN pnpm --filter @agentdesktop/controller-web build
+RUN --mount=type=cache,id=agentdesktop-pnpm,target=/pnpm/store \
+    pnpm --filter @agentdesktop/controller-web build
 
 FROM docker.io/library/rust:1.97.0-trixie AS builder
 WORKDIR /app

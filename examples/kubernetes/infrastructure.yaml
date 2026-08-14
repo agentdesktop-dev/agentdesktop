@@ -1,0 +1,147 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentdesktop
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres
+  namespace: agentdesktop
+type: Opaque
+stringData:
+  POSTGRES_DB: agentdesktop
+  POSTGRES_USER: agentdesktop
+  POSTGRES_PASSWORD: agentdesktop
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: agentdesktop
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: docker.io/library/postgres:17-alpine
+        envFrom:
+        - secretRef:
+            name: postgres
+        ports:
+        - name: postgres
+          containerPort: 5432
+        readinessProbe:
+          exec:
+            command:
+            - pg_isready
+            - --username=agentdesktop
+            - --dbname=agentdesktop
+          initialDelaySeconds: 2
+          periodSeconds: 2
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+      volumes:
+      - name: data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: agentdesktop
+spec:
+  selector:
+    app: postgres
+  ports:
+  - name: postgres
+    port: 5432
+    targetPort: postgres
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dex
+  namespace: agentdesktop
+data:
+  config.yaml: |
+    issuer: http://dex.agentdesktop.svc.cluster.local:5556/dex
+    storage:
+      type: memory
+    web:
+      http: 0.0.0.0:5556
+    oauth2:
+      skipApprovalScreen: true
+    staticClients:
+    - id: agentdesktop-kubernetes
+      name: Agentdesktop Kubernetes example
+      public: true
+      redirectURIs:
+      - http://127.0.0.1:51327/callback
+    enablePasswordDB: true
+    staticPasswords:
+    - email: admin@example.com
+      username: admin
+      userID: local-admin
+      hash: $2y$10$cA5xff5AaaAoxB8VZjwXUeXZIlH8V0sLf/JkIBXHip6gnQsyKJiHW
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dex
+  namespace: agentdesktop
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dex
+  template:
+    metadata:
+      labels:
+        app: dex
+    spec:
+      containers:
+      - name: dex
+        image: ghcr.io/dexidp/dex:v2.45.1
+        args:
+        - dex
+        - serve
+        - /etc/dex/config.yaml
+        ports:
+        - name: http
+          containerPort: 5556
+        readinessProbe:
+          tcpSocket:
+            port: http
+          initialDelaySeconds: 2
+          periodSeconds: 2
+        volumeMounts:
+        - name: config
+          mountPath: /etc/dex
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: dex
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dex
+  namespace: agentdesktop
+spec:
+  type: LoadBalancer
+  selector:
+    app: dex
+  ports:
+  - name: http
+    port: 5556
+    targetPort: http

@@ -1,0 +1,12 @@
+databaseUrl: postgresql://agentdesktop:agentdesktop@postgres:5432/agentdesktop?sslmode=disable
+oidc:
+  issuer: http://dex.agentdesktop.svc.cluster.local:5556/dex
+  clientId: agentdesktop-kubernetes
+  redirectUri: http://127.0.0.1:51327/callback
+allowInsecureDev: true
+daemonConfig:
+  programs:
+    claudeCode:
+      companyAnnouncements:
+      - Managed by Agentdesktop
+tlsSecretName: agentdesktop-controller-tls

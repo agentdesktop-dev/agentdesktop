@@ -10,28 +10,31 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
-controller:
-  # This chart does not deploy PostgreSQL. Point this URL at an existing
-  # database. Prefer existingConfigSecret when the URL contains credentials.
-  databaseUrl: ""
-  oidc:
-    issuer: https://id.example.com
-    clientId: agentdesktop
-    redirectUri: http://127.0.0.1:51327/callback
-  allowInsecureDev: false
+# This chart does not deploy PostgreSQL. Point this URL at an existing
+# database. Prefer existingConfigSecret when the URL contains credentials.
+databaseUrl: ""
+oidc:
+  issuer: https://id.example.com
+  clientId: agentdesktop
+  redirectUri: http://127.0.0.1:51327/callback
+allowInsecureDev: false
 
-  # When set, this Secret is mounted instead of the generated ConfigMap. It
-  # must contain a complete controller configuration at configSecretKey.
-  existingConfigSecret: ""
-  configSecretKey: controller.yaml
+# Daemon configuration distributed to enrolled devices. Leave empty to
+# disable managed configuration.
+daemonConfig: {}
 
-  # Existing Secret containing controller.pem, controller-key.pem,
-  # device-ca.pem, and device-ca-key.pem.
-  tlsSecretName: agentdesktop-controller-tls
+# When set, this Secret is mounted instead of the generated ConfigMap. It
+# must contain a complete controller configuration at configSecretKey.
+existingConfigSecret: ""
+configSecretKey: controller.yaml
+
+# Existing Secret containing controller.pem, controller-key.pem,
+# device-ca.pem, and device-ca-key.pem.
+tlsSecretName: agentdesktop-controller-tls
 
 service:
-  type: ClusterIP
-  port: 8443
+  type: LoadBalancer
+  port: 443
 
 resources: {}
 

@@ -31,7 +31,7 @@ spec:
         imagePullPolicy: {{ .Values.image.pullPolicy }}
         args:
         - --config
-        - /etc/agentdesktop/controller.yaml
+        - /etc/agentdesktop/config/controller.yaml
         ports:
         - name: fleet
           containerPort: 8443
@@ -48,19 +48,18 @@ spec:
           {{- toYaml .Values.resources | nindent 10 }}
         volumeMounts:
         - name: config
-          mountPath: /etc/agentdesktop/controller.yaml
-          subPath: controller.yaml
+          mountPath: /etc/agentdesktop/config
           readOnly: true
         - name: tls
           mountPath: /etc/agentdesktop/tls
           readOnly: true
       volumes:
       - name: config
-        {{- if .Values.controller.existingConfigSecret }}
+        {{- if .Values.existingConfigSecret }}
         secret:
-          secretName: {{ .Values.controller.existingConfigSecret }}
+          secretName: {{ .Values.existingConfigSecret }}
           items:
-          - key: {{ .Values.controller.configSecretKey }}
+          - key: {{ .Values.configSecretKey }}
             path: controller.yaml
         {{- else }}
         configMap:
@@ -68,7 +67,7 @@ spec:
         {{- end }}
       - name: tls
         secret:
-          secretName: {{ required "controller.tlsSecretName is required" .Values.controller.tlsSecretName }}
+          secretName: {{ required "tlsSecretName is required" .Values.tlsSecretName }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
