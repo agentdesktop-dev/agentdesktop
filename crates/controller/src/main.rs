@@ -70,6 +70,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("inference gateway JWT issuance enabled");
     }
     let gateway_jwks = gateway_jwt_issuer.as_ref().map(GatewayJwtIssuer::jwks);
+    let admin_gateway_jwks = gateway_jwks.clone();
     let admin_state = AdminState::new(
         database.clone(),
         daemon_config.clone(),
@@ -131,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
             .await
             .context("serve fleet gRPC API")
     };
-    let admin = admin::serve(admin_listen, admin_state);
+    let admin = admin::serve(admin_listen, admin_state, admin_gateway_jwks);
     tokio::try_join!(fleet, admin)?;
     Ok(())
 }
