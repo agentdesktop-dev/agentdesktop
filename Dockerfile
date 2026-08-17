@@ -14,7 +14,7 @@ COPY frontend/ ./
 RUN --mount=type=cache,id=agentdesktop-pnpm,target=/pnpm/store \
     pnpm --filter @agentdesktop/controller-web build
 
-FROM docker.io/library/rust:1.97.0-trixie AS builder
+FROM docker.io/library/rust:1.97.1-trixie AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
