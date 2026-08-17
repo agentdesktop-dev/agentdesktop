@@ -17,6 +17,7 @@ use agentdesktop_core::config::DaemonConfig;
 use crate::{
     daemon_config::DaemonConfigStore,
     database::{Database, DeviceDetail, DeviceSummary},
+    gateway_jwt::{self, GatewayJwks},
 };
 
 #[derive(Clone)]
@@ -63,7 +64,11 @@ struct Overview {
     recent_devices: Vec<DeviceSummary>,
 }
 
-pub async fn serve(address: SocketAddr, state: AdminState) -> anyhow::Result<()> {
+pub async fn serve(
+    address: SocketAddr,
+    state: AdminState,
+    gateway_jwks: Option<GatewayJwks>,
+) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/api/v1/overview", get(overview))
         .route("/api/v1/devices", get(devices))
@@ -74,7 +79,8 @@ pub async fn serve(address: SocketAddr, state: AdminState) -> anyhow::Result<()>
         )
         .route("/api/v1/settings", get(settings))
         .fallback(get(asset))
-        .with_state(state);
+        .with_state(state)
+        .merge(gateway_jwt::routes(gateway_jwks));
     let listener = tokio::net::TcpListener::bind(address).await?;
     info!(listen = %address, "controller admin UI listening");
     axum::serve(listener, app).await?;

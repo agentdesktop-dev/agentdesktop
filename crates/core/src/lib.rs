@@ -10,10 +10,34 @@ pub const DEFAULT_CONTROLLER_CONFIG_PATH: &str = "/etc/agentdesktop/controller.y
 /// Default directory for the device identity and other persistent daemon state.
 pub const DEFAULT_STATE_DIR: &str = "/var/lib/agentdesktop";
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 /// Default Unix socket exposed by the daemon to local clients.
 pub const DEFAULT_SOCKET_PATH: &str = "/run/agentdesktop/agentdesktop.sock";
+
+#[cfg(target_os = "macos")]
+/// Default Unix socket exposed by the daemon to local clients.
+pub const DEFAULT_SOCKET_PATH: &str = "/var/run/agentdesktop/agentdesktop.sock";
 
 #[cfg(windows)]
 /// Default Windows named pipe exposed by the daemon to local clients.
 pub const DEFAULT_SOCKET_PATH: &str = r"\\.\pipe\agentdesktop";
+
+#[cfg(test)]
+mod tests {
+    use super::DEFAULT_SOCKET_PATH;
+
+    #[test]
+    fn default_socket_uses_platform_runtime_directory() {
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            DEFAULT_SOCKET_PATH,
+            "/var/run/agentdesktop/agentdesktop.sock"
+        );
+
+        #[cfg(all(unix, not(target_os = "macos")))]
+        assert_eq!(DEFAULT_SOCKET_PATH, "/run/agentdesktop/agentdesktop.sock");
+
+        #[cfg(windows)]
+        assert_eq!(DEFAULT_SOCKET_PATH, r"\\.\pipe\agentdesktop");
+    }
+}

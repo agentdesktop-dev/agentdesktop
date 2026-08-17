@@ -17,11 +17,18 @@ type LocalStream = UnixStream;
 #[cfg(windows)]
 type LocalStream = NamedPipeClient;
 
+fn connect_error(endpoint: &Path) -> String {
+    format!(
+        "connect to {}\nCheck that the Agentdesktop daemon is running.",
+        endpoint.display()
+    )
+}
+
 #[cfg(unix)]
 async fn connect(endpoint: &Path) -> anyhow::Result<LocalStream> {
     UnixStream::connect(endpoint)
         .await
-        .with_context(|| format!("connect to {}", endpoint.display()))
+        .with_context(|| connect_error(endpoint))
 }
 
 #[cfg(windows)]
@@ -37,7 +44,7 @@ async fn connect(endpoint: &Path) -> anyhow::Result<LocalStream> {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
             Err(error) => {
-                return Err(error).with_context(|| format!("connect to {}", endpoint.display()));
+                return Err(error).with_context(|| connect_error(endpoint));
             }
         }
     }
@@ -119,4 +126,21 @@ where
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::connect_error;
+
+    #[test]
+    fn connection_error_suggests_checking_the_daemon() {
+        let endpoint = Path::new("/tmp/agentdesktop.sock");
+
+        assert_eq!(
+            connect_error(endpoint),
+            "connect to /tmp/agentdesktop.sock\nCheck that the Agentdesktop daemon is running."
+        );
+    }
 }
