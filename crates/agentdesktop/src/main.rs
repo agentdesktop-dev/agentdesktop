@@ -31,9 +31,9 @@ const TRAY_OFFLINE_ICON: &[u8] =
 #[derive(Parser)]
 #[command(about = "Agent Desktop UI, daemon, and command-line tools")]
 struct Args {
-    /// Local endpoint exposed by the daemon (Unix socket or Windows named pipe).
-    #[arg(long, default_value = DEFAULT_SOCKET_PATH, global = true)]
-    socket: PathBuf,
+    /// Override the local endpoint exposed by the daemon (Unix socket or Windows named pipe).
+    #[arg(long, global = true)]
+    socket: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -417,14 +417,20 @@ fn run_desktop() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_command(command: Command, socket: PathBuf) -> anyhow::Result<()> {
+fn run_command(command: Command, socket: Option<PathBuf>) -> anyhow::Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
         .block_on(async move {
             match command {
-                Command::Daemon(args) => daemon::run(*args, socket).await,
-                Command::Client(command) => cli::run(command, socket).await,
+                Command::Daemon(args) => {
+                    let socket = socket.unwrap_or_else(|| DEFAULT_SOCKET_PATH.into());
+                    daemon::run(*args, socket).await
+                }
+                Command::Client(command) => {
+                    let socket = socket.unwrap_or_else(socket_path);
+                    cli::run(command, socket).await
+                }
             }
         })
 }
