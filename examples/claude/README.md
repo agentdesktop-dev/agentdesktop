@@ -2,47 +2,25 @@
 
 This scenario runs Agentdesktop with Dex, Claude Code, and Agentgateway.
 
-Generate all local controller key material in one directory. The TLS directory
-shorthand recognizes `controller.pem`, `controller-key.pem`, `device-ca.pem`,
-and `device-ca-key.pem`; the same directory also holds the inference-gateway
-JWT signing key:
+From the repository root, generate the development TLS and JWT keys used by the
+checked-in configuration:
 
 ```console
-mkdir -p /tmp/agentdesktop-keys
-
-openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
-  -out /tmp/agentdesktop-keys/gateway-jwt-key.pem
-
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
-  -keyout /tmp/agentdesktop-keys/device-ca-key.pem \
-  -out /tmp/agentdesktop-keys/device-ca.pem \
-  -days 365 -sha256 -subj /CN=Agentdesktop-local-device-CA \
-  -addext basicConstraints=critical,CA:TRUE \
-  -addext keyUsage=critical,keyCertSign,cRLSign
-
-openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
-  -keyout /tmp/agentdesktop-keys/controller-key.pem \
-  -out /tmp/agentdesktop-controller.csr \
-  -subj /CN=localhost \
-  -addext subjectAltName=DNS:localhost,IP:127.0.0.1 \
-  -addext extendedKeyUsage=serverAuth
-
-openssl x509 -req -in /tmp/agentdesktop-controller.csr \
-  -CA /tmp/agentdesktop-keys/device-ca.pem \
-  -CAkey /tmp/agentdesktop-keys/device-ca-key.pem \
-  -set_serial 1 -days 30 -sha256 -copy_extensions copy \
-  -out /tmp/agentdesktop-keys/controller.pem
-
-rm /tmp/agentdesktop-controller.csr
-chmod 600 /tmp/agentdesktop-keys/controller-key.pem \
-  /tmp/agentdesktop-keys/device-ca-key.pem \
-  /tmp/agentdesktop-keys/gateway-jwt-key.pem
+./examples/claude/create-keys.sh
 ```
+
+The script creates five files under `/tmp/agentdesktop-keys`: the controller
+certificate and private key, the device CA certificate and private key, and the
+gateway JWT signing key. It refuses to overwrite an existing key set.
 
 Start Dex:
 
 ```console
 docker compose -f examples/claude/compose.yaml up -d dex
+curl --fail --silent --show-error \
+  --retry 10 --retry-all-errors --retry-delay 1 \
+  http://127.0.0.1:5556/dex/.well-known/openid-configuration \
+  > /dev/null
 ```
 
 Start the controller:
@@ -53,9 +31,19 @@ agentdesktop-controller --config examples/claude/controller.yaml
 
 Start Agentgateway:
 
+On Docker Desktop, first enable host networking under **Settings > Resources >
+Network**. Linux supports host networking directly.
+
 ```console
- export ANTHROPIC_API_KEY=...
+export ANTHROPIC_API_KEY=...
 docker compose -f examples/claude/compose.yaml up -d agentgateway
+```
+
+Confirm that Agentgateway remains running and answers its reachability route:
+
+```console
+docker compose -f examples/claude/compose.yaml ps agentgateway
+curl --fail --head http://127.0.0.1:4000/
 ```
 
 Run the installed local daemon. Typically, this would run on a different
@@ -81,3 +69,12 @@ agentdesktop
 
 Now that agentdesktop is running, Claude Code can be run.
 It will show the configured `Managed by Agentdesktop` and direct traffic through the gateway.
+
+## Stop the scenario
+
+Stop the foreground daemon and controller with Ctrl-C, then stop Dex and
+Agentgateway:
+
+```console
+docker compose -f examples/claude/compose.yaml down
+```
