@@ -15,9 +15,10 @@
     "test-storybook": "vitest run --project=storybook",
     "start": "node scripts/tauri.mjs dev",
     "tauri": "node scripts/tauri.mjs",
+    "test:package-windows": "node --test scripts/package-windows.test.mjs",
     "dist": "node scripts/tauri.mjs build",
     "dist:mac": "node scripts/tauri.mjs build --bundles app,dmg",
-    "dist:win": "node scripts/tauri.mjs build --bundles nsis"
+    "dist:win": "node scripts/package-windows.mjs"
   },
   "engines": {
     "node": ">=20"

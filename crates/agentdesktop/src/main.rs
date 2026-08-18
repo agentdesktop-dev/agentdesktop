@@ -6,7 +6,7 @@ use agentdesktop_agent::{
 };
 use agentdesktop_client as client;
 use agentdesktop_core::{
-    DEFAULT_SOCKET_PATH,
+    DEFAULT_SOCKET_PATH, VERSION,
     config::DaemonConfig,
     model::{Discovery, EnrollmentStatus, Health},
 };
@@ -225,7 +225,7 @@ async fn read_connector_status() -> ConnectorSnapshot {
         state,
         detail: None,
         runtime: Some(ConnectorRuntime {
-            version: env!("CARGO_PKG_VERSION"),
+            version: VERSION,
             mode: if managed { "managed" } else { "standalone" },
             gateway,
             platform: PlatformCapabilities {

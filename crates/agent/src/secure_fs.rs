@@ -20,6 +20,40 @@ pub fn ensure_private_dir(path: &Path) -> anyhow::Result<()> {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))
             .with_context(|| format!("restrict private directory {}", path.display()))?;
     }
+    #[cfg(windows)]
+    restrict_windows_directory(path)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn restrict_windows_directory(path: &Path) -> anyhow::Result<()> {
+    use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
+
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SetFileSecurityW,
+    };
+
+    use crate::windows_security::SecurityDescriptor;
+
+    // Inherited full access only for SYSTEM, Administrators, and the owner.
+    const PRIVATE_DIRECTORY_SDDL: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)";
+    let descriptor = SecurityDescriptor::from_sddl(PRIVATE_DIRECTORY_SDDL)?;
+    let path = OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: path is null-terminated and descriptor remains valid for the
+    // duration of SetFileSecurityW.
+    let secured = unsafe {
+        SetFileSecurityW(
+            path.as_ptr(),
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            descriptor.as_ptr(),
+        )
+    };
+    if secured == 0 {
+        return Err(std::io::Error::last_os_error()).context("restrict private Windows directory");
+    }
     Ok(())
 }
 

@@ -3,6 +3,13 @@ pub mod model;
 pub mod serdes;
 pub mod telemetry;
 
+/// Version reported by endpoint processes. Release builds can override the
+/// workspace package version without rewriting Cargo manifests.
+pub const VERSION: &str = match option_env!("AGENTDESKTOP_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 /// Default location of the daemon's YAML configuration file.
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/agentdesktop/config.yaml";
 /// Default location of the controller's YAML configuration file.

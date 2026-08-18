@@ -10,3 +10,6 @@ pub mod reconcile;
 pub mod remote;
 pub mod secret_store;
 pub mod secure_fs;
+
+#[cfg(windows)]
+mod windows_security;

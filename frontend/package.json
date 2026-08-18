@@ -4,7 +4,7 @@
   "packageManager": "pnpm@11.3.0",
   "scripts": {
     "build": "pnpm --filter @agentdesktop/controller-web build && pnpm --filter @agentdesktop/desktop-web build",
-    "check": "pnpm --filter @agentdesktop/controller-web check && pnpm --filter @agentdesktop/controller-web exec biome check ../desktop && pnpm --filter @agentdesktop/desktop-web build && pnpm test:storybook",
+  "check": "pnpm --filter @agentdesktop/controller-web check && pnpm --filter @agentdesktop/controller-web exec biome check ../desktop && pnpm --filter @agentdesktop/desktop-web test:package-windows && pnpm --filter @agentdesktop/desktop-web build && pnpm test:storybook",
     "dev:controller": "pnpm --filter @agentdesktop/controller-web dev",
     "dev:desktop": "pnpm --filter @agentdesktop/desktop-web dev:desktop",
     "storybook": "pnpm --parallel --filter @agentdesktop/desktop-web --filter @agentdesktop/controller-web run storybook",

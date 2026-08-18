@@ -58,5 +58,13 @@ pnpm --filter @agentdesktop/desktop-web dist:mac
 pnpm --filter @agentdesktop/desktop-web dist:win
 ```
 
+The Windows command builds a per-machine MSI containing the desktop application,
+a headless Windows service, and a default machine configuration under
+`%ProgramData%\AgentDesktop`. It must run on Windows with WiX's VBSCRIPT
+prerequisite enabled. The release workflow installs and exercises unsigned MSIs
+as CI artifacts; production distribution still requires Authenticode signing.
+See [WINDOWS_INSTALLER.md](WINDOWS_INSTALLER.md) for prerequisites, build,
+installation, CI, and signing instructions.
+
 Production distribution requires the relevant Apple or Windows signing setup.
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the native/webview boundary.

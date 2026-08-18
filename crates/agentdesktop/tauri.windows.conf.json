@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": "msi",
+    "windows": {
+      "allowDowngrades": false,
+      "webviewInstallMode": {
+        "type": "embedBootstrapper",
+        "silent": true
+      },
+      "wix": {
+        "upgradeCode": "b90e038c-7777-4aa6-ab02-9675fe051e83",
+        "fragmentPaths": ["windows/installer.wxs"],
+        "componentRefs": [
+          "AgentDesktopService",
+          "AgentDesktopConfig",
+          "AgentDesktopStartup"
+        ]
+      }
+    }
+  }
+}
