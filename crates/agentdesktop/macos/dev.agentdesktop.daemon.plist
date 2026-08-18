@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.agentdesktop.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Applications/agentdesktop.app/Contents/MacOS/agentdesktop</string>
+    <string>daemon</string>
+    <string>--config</string>
+    <string>/etc/agentdesktop/config.yaml</string>
+    <string>--state-dir</string>
+    <string>/var/lib/agentdesktop</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>WorkingDirectory</key>
+  <string>/var/lib/agentdesktop</string>
+</dict>
+</plist>

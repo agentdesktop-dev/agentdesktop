@@ -1,5 +1,10 @@
 use std::{env, fs, io::ErrorKind, path::PathBuf, time::Duration};
 
+#[cfg(target_os = "macos")]
+use std::{ffi::OsString, io::Write, os::unix::fs::OpenOptionsExt, path::Path, process::Stdio};
+
+#[cfg(target_os = "macos")]
+use agentdesktop_agent::secure_fs;
 use agentdesktop_agent::{
     cli::{self, ClientCommand},
     daemon::{self, DaemonArgs},
@@ -22,6 +27,10 @@ use tauri::{
 const OPEN_MENU_ID: &str = "open";
 const QUIT_MENU_ID: &str = "quit";
 const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(5);
+#[cfg(target_os = "macos")]
+const SYSTEM_LAUNCH_DAEMON_PATH: &str = "/Library/LaunchDaemons/dev.agentdesktop.daemon.plist";
+#[cfg(target_os = "macos")]
+const USER_LAUNCH_AGENT_LABEL: &str = "dev.agentdesktop.daemon.user";
 const TRAY_READY_ICON: &[u8] = include_bytes!("../../../frontend/desktop/assets/tray-icon@2x.png");
 const TRAY_ATTENTION_ICON: &[u8] =
     include_bytes!("../../../frontend/desktop/assets/tray-icon-attention.png");
@@ -156,6 +165,214 @@ fn user_socket_path() -> Option<PathBuf> {
 #[cfg(windows)]
 fn user_socket_path() -> Option<PathBuf> {
     None
+}
+
+#[cfg(target_os = "macos")]
+struct UserDaemonPaths {
+    config: PathBuf,
+    state_directory: PathBuf,
+    socket: PathBuf,
+    launch_agent: PathBuf,
+    log: PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct UserLaunchAgent {
+    label: &'static str,
+    program_arguments: Vec<String>,
+    run_at_load: bool,
+    keep_alive: bool,
+    process_type: &'static str,
+    standard_out_path: String,
+    standard_error_path: String,
+}
+
+#[cfg(target_os = "macos")]
+fn user_daemon_paths() -> anyhow::Result<UserDaemonPaths> {
+    let home = env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("cannot start user daemon without HOME"))?;
+    let config_home = env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"));
+    let state_home = env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/state"));
+    let state_directory = state_home.join("agentdesktop");
+    let socket = env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state_directory.clone())
+        .join("agentdesktop.sock");
+
+    Ok(UserDaemonPaths {
+        config: config_home.join("agentdesktop/config.yaml"),
+        state_directory,
+        socket,
+        launch_agent: home
+            .join("Library/LaunchAgents")
+            .join(format!("{USER_LAUNCH_AGENT_LABEL}.plist")),
+        log: home.join("Library/Logs/Agentdesktop/daemon.log"),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn path_string(path: &Path) -> anyhow::Result<String> {
+    path.to_str()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("path is not valid UTF-8: {}", path.display()))
+}
+
+#[cfg(target_os = "macos")]
+fn user_launch_agent(
+    paths: &UserDaemonPaths,
+    executable: &Path,
+) -> anyhow::Result<UserLaunchAgent> {
+    let log = path_string(&paths.log)?;
+    Ok(UserLaunchAgent {
+        label: USER_LAUNCH_AGENT_LABEL,
+        program_arguments: vec![
+            path_string(executable)?,
+            "--socket".to_owned(),
+            path_string(&paths.socket)?,
+            "daemon".to_owned(),
+            "--user".to_owned(),
+            "--config".to_owned(),
+            path_string(&paths.config)?,
+            "--state-dir".to_owned(),
+            path_string(&paths.state_directory)?,
+        ],
+        run_at_load: true,
+        keep_alive: true,
+        process_type: "Background",
+        standard_out_path: log.clone(),
+        standard_error_path: log,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_user_daemon_files(paths: &UserDaemonPaths) -> anyhow::Result<()> {
+    let config_directory = paths
+        .config
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("user daemon config has no parent directory"))?;
+    secure_fs::ensure_private_dir(config_directory)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+    match options.open(&paths.config) {
+        Ok(mut file) => {
+            file.write_all(b"{}\n")?;
+            file.sync_all()?;
+        }
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    let launch_agent_directory = paths
+        .launch_agent
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("user LaunchAgent has no parent directory"))?;
+    fs::create_dir_all(launch_agent_directory)?;
+    let log_directory = paths
+        .log
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("user daemon log has no parent directory"))?;
+    secure_fs::ensure_private_dir(log_directory)?;
+
+    let executable = env::current_exe()?;
+    let launch_agent = user_launch_agent(paths, &executable)?;
+    let mut contents = Vec::new();
+    plist::to_writer_xml(&mut contents, &launch_agent)?;
+    secure_fs::atomic_write(&paths.launch_agent, &contents, 0o600)
+}
+
+#[cfg(target_os = "macos")]
+async fn run_launchctl(arguments: Vec<OsString>) -> anyhow::Result<()> {
+    let output = tokio::process::Command::new("/bin/launchctl")
+        .args(&arguments)
+        .stdin(Stdio::null())
+        .output()
+        .await?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "launchctl {} failed: {}",
+            arguments
+                .first()
+                .map(|argument| argument.to_string_lossy())
+                .unwrap_or_default(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+async fn remove_user_launch_agent(paths: &UserDaemonPaths) {
+    let uid = unsafe { libc::getuid() };
+    let target = format!("gui/{uid}/{USER_LAUNCH_AGENT_LABEL}");
+    let _ = tokio::process::Command::new("/bin/launchctl")
+        .args(["bootout", &target])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
+    if let Err(error) = fs::remove_file(&paths.launch_agent)
+        && error.kind() != ErrorKind::NotFound
+    {
+        eprintln!("could not remove user LaunchAgent: {error}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn ensure_desktop_daemon() -> anyhow::Result<()> {
+    if env::var_os("AGENTDESKTOP_SOCKET").is_some() {
+        return Ok(());
+    }
+
+    let paths = user_daemon_paths()?;
+    if Path::new(SYSTEM_LAUNCH_DAEMON_PATH).exists() {
+        remove_user_launch_agent(&paths).await;
+        return Ok(());
+    }
+    if client::get::<Health>(&socket_path(), "/v1/health")
+        .await
+        .is_ok()
+    {
+        return Ok(());
+    }
+
+    ensure_user_daemon_files(&paths)?;
+    let uid = unsafe { libc::getuid() };
+    let domain = format!("gui/{uid}");
+    let target = format!("{domain}/{USER_LAUNCH_AGENT_LABEL}");
+    let _ = tokio::process::Command::new("/bin/launchctl")
+        .args(["bootout", &target])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
+    run_launchctl(vec!["enable".into(), target.clone().into()]).await?;
+    run_launchctl(vec![
+        "bootstrap".into(),
+        domain.into(),
+        paths.launch_agent.clone().into_os_string(),
+    ])
+    .await?;
+    run_launchctl(vec!["kickstart".into(), target.into()]).await?;
+
+    for _ in 0..25 {
+        if client::get::<Health>(&paths.socket, "/v1/health")
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    anyhow::bail!("user daemon did not become ready")
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -349,6 +566,13 @@ fn run_desktop() -> anyhow::Result<()> {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+            #[cfg(target_os = "macos")]
+            tauri::async_runtime::spawn(async {
+                if let Err(error) = ensure_desktop_daemon().await {
+                    eprintln!("could not start Agent Desktop daemon: {error:#}");
+                }
+            });
+
             let open =
                 MenuItem::with_id(app, OPEN_MENU_ID, "Open Agent Desktop", true, None::<&str>)?;
             let separator = PredefinedMenuItem::separator(app)?;
@@ -459,5 +683,47 @@ fn main() -> anyhow::Result<()> {
             prepare_desktop_process();
             run_desktop()
         }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use std::path::Path;
+
+    use super::{USER_LAUNCH_AGENT_LABEL, UserDaemonPaths, user_launch_agent};
+
+    #[test]
+    fn user_launch_agent_runs_the_bundled_daemon_in_user_mode() {
+        let paths = UserDaemonPaths {
+            config: "/Users/test/.config/agentdesktop/config.yaml".into(),
+            state_directory: "/Users/test/.local/state/agentdesktop".into(),
+            socket: "/Users/test/.local/state/agentdesktop/agentdesktop.sock".into(),
+            launch_agent: "/Users/test/Library/LaunchAgents/dev.agentdesktop.daemon.user.plist"
+                .into(),
+            log: "/Users/test/Library/Logs/Agentdesktop/daemon.log".into(),
+        };
+        let launch_agent = user_launch_agent(
+            &paths,
+            Path::new("/Applications/agentdesktop.app/Contents/MacOS/agentdesktop"),
+        )
+        .unwrap();
+
+        assert_eq!(launch_agent.label, USER_LAUNCH_AGENT_LABEL);
+        assert!(launch_agent.run_at_load);
+        assert!(launch_agent.keep_alive);
+        assert_eq!(
+            launch_agent.program_arguments,
+            [
+                "/Applications/agentdesktop.app/Contents/MacOS/agentdesktop",
+                "--socket",
+                "/Users/test/.local/state/agentdesktop/agentdesktop.sock",
+                "daemon",
+                "--user",
+                "--config",
+                "/Users/test/.config/agentdesktop/config.yaml",
+                "--state-dir",
+                "/Users/test/.local/state/agentdesktop",
+            ]
+        );
     }
 }

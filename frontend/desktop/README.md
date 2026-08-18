@@ -6,6 +6,8 @@ Linux desktop. Closing its window hides it; the tray menu reopens or quits it.
 The application is a client of the installed Agent Desktop daemon. It shows
 daemon, enrollment, managed configuration, gateway, and discovered-tool state.
 The daemon remains responsible for all privileged and policy-sensitive work.
+On macOS, launching an app-only installation starts a per-user daemon through
+launchd. The PKG installation uses its privileged system LaunchDaemon instead.
 
 ## Development
 
@@ -57,6 +59,11 @@ cd frontend
 pnpm --filter @agentdesktop/desktop-web dist:mac
 pnpm --filter @agentdesktop/desktop-web dist:win
 ```
+
+The macOS package installs the application and a privileged LaunchDaemon while
+preserving machine configuration across upgrades. See
+[MACOS_INSTALLER.md](MACOS_INSTALLER.md) for building, MDM configuration,
+signing, installation, and removal.
 
 The Windows command builds a per-machine MSI containing the desktop application,
 a headless Windows service, and a default machine configuration under

@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+LABEL="dev.agentdesktop.daemon"
+LEGACY_APPLICATION="/Applications/Agent Desktop.app"
+
+/bin/launchctl bootout "system/${LABEL}" >/dev/null 2>&1 || true
+
+if [ -d "${LEGACY_APPLICATION}" ]; then
+	legacy_identifier=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" \
+		"${LEGACY_APPLICATION}/Contents/Info.plist" 2>/dev/null || true)
+	if [ "${legacy_identifier}" = "dev.agentdesktop.tray" ]; then
+		/bin/rm -rf "${LEGACY_APPLICATION}"
+	fi
+fi
+
+exit 0

@@ -1,0 +1,73 @@
+#!/bin/sh
+set -eu
+
+LABEL="dev.agentdesktop.daemon"
+USER_LAUNCH_AGENT_LABEL="dev.agentdesktop.daemon.user"
+GROUP_NAME="agentdesktop"
+PLIST_PATH="/Library/LaunchDaemons/${LABEL}.plist"
+CONFIG_DIRECTORY="/etc/agentdesktop"
+CONFIG_PATH="${CONFIG_DIRECTORY}/config.yaml"
+STATE_DIRECTORY="/var/lib/agentdesktop"
+
+add_user_to_group() {
+  username="$1"
+  if ! /usr/sbin/dseditgroup -q -o edit -n . -a "${username}" -t user "${GROUP_NAME}"; then
+    echo "warning: could not add ${username} to ${GROUP_NAME}" >&2
+  fi
+}
+
+remove_user_launch_agent() {
+  username="$1"
+  uid=$(/usr/bin/id -u "${username}" 2>/dev/null || true)
+  if [ -n "${uid}" ]; then
+    /bin/launchctl bootout "gui/${uid}/${USER_LAUNCH_AGENT_LABEL}" >/dev/null 2>&1 || true
+  fi
+  home_directory=$(/usr/bin/dscl . -read "/Users/${username}" NFSHomeDirectory 2>/dev/null |
+    /usr/bin/cut -d ' ' -f 2- || true)
+  if [ -n "${home_directory}" ]; then
+    /bin/rm -f "${home_directory}/Library/LaunchAgents/${USER_LAUNCH_AGENT_LABEL}.plist"
+  fi
+}
+
+if ! /usr/sbin/dseditgroup -q -o read -n . "${GROUP_NAME}" >/dev/null 2>&1; then
+  /usr/sbin/dseditgroup -q -o create -n . \
+    -r "Agent Desktop local API users" "${GROUP_NAME}"
+fi
+
+/usr/bin/dscl . -list /Users UniqueID | /usr/bin/awk '$2 >= 500 && $2 < 65534 { print $1 }' |
+  while IFS= read -r username; do
+    remove_user_launch_agent "${username}"
+    add_user_to_group "${username}"
+  done
+
+console_user=$(/usr/bin/stat -f "%Su" /dev/console)
+case "${console_user}" in
+  "" | root | loginwindow | _mbsetupuser) ;;
+  *)
+    remove_user_launch_agent "${console_user}"
+    add_user_to_group "${console_user}"
+    ;;
+esac
+
+/usr/bin/install -d -o root -g wheel -m 0755 "${CONFIG_DIRECTORY}"
+if [ -e "${CONFIG_PATH}" ] && [ ! -f "${CONFIG_PATH}" ]; then
+  echo "refusing to replace non-file configuration at ${CONFIG_PATH}" >&2
+  exit 1
+fi
+if [ ! -e "${CONFIG_PATH}" ]; then
+  umask 077
+  printf '{}\n' >"${CONFIG_PATH}"
+fi
+/usr/sbin/chown root:wheel "${CONFIG_PATH}"
+/bin/chmod 0600 "${CONFIG_PATH}"
+
+/usr/bin/install -d -o root -g wheel -m 0700 "${STATE_DIRECTORY}"
+/usr/sbin/chown root:wheel "${PLIST_PATH}"
+/bin/chmod 0644 "${PLIST_PATH}"
+
+/bin/launchctl bootout "system/${LABEL}" >/dev/null 2>&1 || true
+/bin/launchctl bootstrap system "${PLIST_PATH}"
+/bin/launchctl enable "system/${LABEL}"
+/bin/launchctl kickstart -k "system/${LABEL}"
+
+exit 0

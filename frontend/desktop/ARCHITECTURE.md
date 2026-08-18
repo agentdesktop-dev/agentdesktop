@@ -10,6 +10,12 @@ single-instance handling, desktop preferences, CLI dispatch, and daemon mode.
 Its Tauri commands use the shared `agentdesktop-client` crate to call the daemon
 over the local Unix socket or Windows named pipe.
 
+On macOS, the native host ensures a daemon is available when it launches. A PKG
+installation uses the privileged system LaunchDaemon. If the system service is
+not installed, the host creates an empty user configuration when needed and
+registers a per-user LaunchAgent for the bundled daemon command. Installing the
+PKG removes that fallback before starting the system service.
+
 The native host does not implement enrollment, discovery, reconciliation,
 credential storage, gateway policy, or traffic forwarding. Those operations
 belong to the daemon. Only redacted, purpose-specific data is returned to the
