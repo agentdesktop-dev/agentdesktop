@@ -52,4 +52,6 @@ docker:
 clean:
 	cargo clean
 	rm -rf frontend/controller/dist
+	rm -rf frontend/controller/storybook-static
 	rm -rf frontend/desktop/dist
+	rm -rf frontend/desktop/storybook-static
