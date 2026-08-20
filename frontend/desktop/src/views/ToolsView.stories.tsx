@@ -29,13 +29,18 @@ type Story = StoryObj<typeof meta>;
 export const Populated: Story = {
   play: async ({ canvas }) => {
     await userEvent.click(canvas.getByText("VS Code"));
+    canvas.getByRole("tab", { name: "MCP servers 8" }).focus();
+    await userEvent.keyboard("{ArrowRight}");
     await expect(
-      canvas.getAllByRole("heading", { name: "Skills" })[0],
+      await canvas.findByRole("tabpanel", { name: "Skills 12" }),
     ).toBeVisible();
+    await expect(
+      canvas.getByRole("tab", { name: "Skills 12" }),
+    ).toHaveAttribute("aria-selected", "true");
     await userEvent.click(
       canvas.getByRole("button", { name: "Next Skills page" }),
     );
-    await expect(canvas.getByText("Workflow 6")).toBeVisible();
+    await expect(canvas.getByText("Performance diagnosis")).toBeVisible();
   },
 };
 
@@ -48,11 +53,16 @@ export const Unavailable: Story = {
 };
 
 export const ReflowAt320: Story = {
-  args: { discovery: emptyDiscovery },
+  args: { discovery: populatedDiscovery },
   globals: {
     viewport: { value: "reflow", isRotated: false },
   },
-  play: async ({ canvasElement }) => {
+  play: async ({ canvas, canvasElement }) => {
+    await userEvent.click(canvas.getByText("VS Code"));
+    await userEvent.click(canvas.getByRole("tab", { name: "Skills 12" }));
+    await expect(
+      await canvas.findByRole("tabpanel", { name: "Skills 12" }),
+    ).toBeVisible();
     const documentElement = canvasElement.ownerDocument.documentElement;
     const viewportWidth = canvasElement.ownerDocument.defaultView?.innerWidth;
     await expect(documentElement.scrollWidth).toBeLessThanOrEqual(

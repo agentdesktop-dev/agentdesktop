@@ -5,7 +5,7 @@ import {
   Server,
   Sparkles,
 } from "lucide-react";
-import { useState } from "react";
+import { useId, useRef, useState } from "react";
 import claudeCodeIcon from "./assets/claude-code.svg";
 import claudeDesktopIcon from "./assets/claude-desktop.svg";
 import codexIcon from "./assets/codex.svg";
@@ -70,28 +70,41 @@ function frontMatterText(value: unknown) {
   return typeof value === "string" && value.trim() ? value : null;
 }
 
-function CapabilitySection({
-  icon,
+function CapabilityPanel({
+  id,
+  labelledBy,
+  hidden,
   title,
+  count,
   page,
   pages,
   onPageChange,
   children,
 }: React.PropsWithChildren<{
-  icon: React.ReactNode;
+  id: string;
+  labelledBy: string;
+  hidden: boolean;
   title: string;
+  count: number;
   page: number;
   pages: number;
   onPageChange: (page: number) => void;
 }>) {
+  const firstItem = page * 5 + 1;
+  const lastItem = Math.min((page + 1) * 5, count);
   return (
-    <section className="capability-section">
-      <div className="capability-heading">
-        <h4>
-          {icon}
-          {title}
-        </h4>
-        {pages > 1 ? (
+    <section
+      className="capability-panel"
+      id={id}
+      role="tabpanel"
+      aria-labelledby={labelledBy}
+      hidden={hidden}
+    >
+      {pages > 1 ? (
+        <div className="capability-pagination">
+          <span>
+            {firstItem}–{lastItem} of {count}
+          </span>
           <nav className="mini-pager" aria-label={`${title} pages`}>
             <button
               type="button"
@@ -101,9 +114,6 @@ function CapabilitySection({
             >
               <ChevronLeft size={12} />
             </button>
-            <span>
-              {page + 1}/{pages}
-            </span>
             <button
               type="button"
               aria-label={`Next ${title} page`}
@@ -113,8 +123,8 @@ function CapabilitySection({
               <ChevronRight size={12} />
             </button>
           </nav>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
       {children}
     </section>
   );
@@ -129,6 +139,30 @@ export function ToolInventory({ discovery }: { discovery: ToolDiscovery }) {
   const skillPages = Math.max(1, Math.ceil(skills.length / 5));
   const visibleServerPage = Math.min(serverPage, serverPages - 1);
   const visibleSkillPage = Math.min(skillPage, skillPages - 1);
+  const [activeTab, setActiveTab] = useState<"mcp" | "skills">(
+    servers.length > 0 || skills.length === 0 ? "mcp" : "skills",
+  );
+  const tabId = useId();
+  const mcpTab = useRef<HTMLButtonElement>(null);
+  const skillsTab = useRef<HTMLButtonElement>(null);
+
+  function selectAdjacentTab(event: React.KeyboardEvent, tab: "mcp" | "skills") {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+      return;
+    }
+    event.preventDefault();
+    const nextTab =
+      event.key === "Home"
+        ? "mcp"
+        : event.key === "End"
+          ? "skills"
+          : tab === "mcp"
+            ? "skills"
+            : "mcp";
+    setActiveTab(nextTab);
+    (nextTab === "mcp" ? mcpTab : skillsTab).current?.focus();
+  }
+
   return (
     <details className="tool-inventory-item">
       <summary>
@@ -149,10 +183,49 @@ export function ToolInventory({ discovery }: { discovery: ToolDiscovery }) {
           aria-hidden="true"
         />
       </summary>
-      <div className="capability-grid">
-        <CapabilitySection
-          icon={<Server size={14} />}
+      <div className="capability-stack">
+        <div
+          className="capability-tabs"
+          role="tablist"
+          aria-label={`${friendlyTool(discovery.kind)} capabilities`}
+        >
+          <button
+            ref={mcpTab}
+            id={`${tabId}-mcp-tab`}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "mcp"}
+            aria-controls={`${tabId}-mcp-panel`}
+            tabIndex={activeTab === "mcp" ? 0 : -1}
+            onClick={() => setActiveTab("mcp")}
+            onKeyDown={(event) => selectAdjacentTab(event, "mcp")}
+          >
+            <Server size={14} />
+            MCP servers
+            <span>{servers.length}</span>
+          </button>
+          <button
+            ref={skillsTab}
+            id={`${tabId}-skills-tab`}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "skills"}
+            aria-controls={`${tabId}-skills-panel`}
+            tabIndex={activeTab === "skills" ? 0 : -1}
+            onClick={() => setActiveTab("skills")}
+            onKeyDown={(event) => selectAdjacentTab(event, "skills")}
+          >
+            <Sparkles size={14} />
+            Skills
+            <span>{skills.length}</span>
+          </button>
+        </div>
+        <CapabilityPanel
+          id={`${tabId}-mcp-panel`}
+          labelledBy={`${tabId}-mcp-tab`}
+          hidden={activeTab !== "mcp"}
           title="MCP servers"
+          count={servers.length}
           page={visibleServerPage}
           pages={serverPages}
           onPageChange={setServerPage}
@@ -181,10 +254,13 @@ export function ToolInventory({ discovery }: { discovery: ToolDiscovery }) {
           ) : (
             <p className="capability-empty">No MCP servers reported.</p>
           )}
-        </CapabilitySection>
-        <CapabilitySection
-          icon={<Sparkles size={14} />}
+        </CapabilityPanel>
+        <CapabilityPanel
+          id={`${tabId}-skills-panel`}
+          labelledBy={`${tabId}-skills-tab`}
+          hidden={activeTab !== "skills"}
           title="Skills"
+          count={skills.length}
           page={visibleSkillPage}
           pages={skillPages}
           onPageChange={setSkillPage}
@@ -209,7 +285,7 @@ export function ToolInventory({ discovery }: { discovery: ToolDiscovery }) {
           ) : (
             <p className="capability-empty">No skills reported.</p>
           )}
-        </CapabilitySection>
+        </CapabilityPanel>
       </div>
     </details>
   );
