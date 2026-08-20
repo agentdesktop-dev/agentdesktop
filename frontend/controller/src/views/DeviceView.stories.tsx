@@ -37,6 +37,26 @@ type Story = StoryObj<typeof meta>;
 
 export const Healthy: Story = {};
 
+export const BrowsesDiscoveredCapabilities: Story = {
+  play: async ({ canvas }) => {
+    await userEvent.click(
+      canvas.getByText("VS Code", { selector: ".tool-inventory-item strong" }),
+    );
+    await expect(
+      canvas.getByRole("tab", { name: "MCP servers 7" }),
+    ).toHaveAttribute("aria-selected", "true");
+    await userEvent.click(canvas.getByRole("tab", { name: "Skills 11" }));
+    const skillsPanel = within(
+      await canvas.findByRole("tabpanel", { name: "Skills 11" }),
+    );
+    await expect(skillsPanel.getByText("Release workflow")).toBeVisible();
+    await userEvent.click(
+      skillsPanel.getByRole("button", { name: "Next Skills page" }),
+    );
+    await expect(skillsPanel.getByText("Performance diagnosis")).toBeVisible();
+  },
+};
+
 export const ConfigurationFailed: Story = {
   args: { device: failedDeviceDetail },
 };

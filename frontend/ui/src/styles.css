@@ -131,41 +131,89 @@
   white-space: nowrap;
 }
 
-.capability-grid {
+.capability-stack {
   padding: 0 15px 15px 39px;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 24px;
 }
 
-.capability-heading {
-  margin: 0;
-  padding: 8px 0;
+.capability-tabs {
+  min-height: 45px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 22px;
   border-bottom: 1px solid var(--border-soft);
 }
 
-.capability-section h4 {
-  margin: 0;
+.capability-tabs button {
+  position: relative;
+  min-height: 45px;
+  padding: 0 1px;
   display: flex;
   align-items: center;
   gap: 6px;
-  color: #57606a;
+  color: var(--muted);
+  background: transparent;
+  border-bottom: 2px solid transparent;
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.capability-tabs button:hover {
+  color: #24292f;
+}
+
+.capability-tabs button[aria-selected="true"] {
+  color: #24292f;
+  border-bottom-color: var(--accent);
+}
+
+.capability-tabs button:focus-visible {
+  outline: 3px solid rgb(95 67 178 / 18%);
+  outline-offset: 2px;
+}
+
+.capability-tabs button > span {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  background: var(--surface);
+  border-radius: 999px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.capability-tabs button[aria-selected="true"] > span {
+  color: var(--accent);
+  background: #f1edfb;
+}
+
+.capability-panel[hidden] {
+  display: none;
+}
+
+.capability-pagination {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.capability-pagination > span {
+  color: var(--subtle);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
 }
 
 .mini-pager {
   display: flex;
   align-items: center;
   gap: 3px;
-  color: var(--subtle);
-  font-size: 9px;
 }
 
 .mini-pager button {
@@ -265,8 +313,17 @@
     grid-column: 1 / -1;
   }
 
-  .capability-grid {
-    grid-template-columns: 1fr;
+  .capability-stack {
     padding-left: 35px;
+  }
+}
+
+@media (max-width: 430px) {
+  .capability-stack {
+    padding: 0 12px 12px;
+  }
+
+  .capability-tabs {
+    gap: 14px;
   }
 }
