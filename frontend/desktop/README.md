@@ -22,6 +22,25 @@ pnpm dev:desktop
 Set `AGENTDESKTOP_SOCKET` to override the default Unix socket or Windows named
 pipe used by the native client.
 
+### Storybook
+
+The desktop views have deterministic Storybook states for development,
+interaction tests, responsive checks, and automated accessibility checks. The
+browser install is required once per Playwright version:
+
+```sh
+cd frontend
+pnpm --filter @agentdesktop/desktop-web exec playwright install chromium
+pnpm storybook:desktop
+```
+
+Run the browser-based story tests or build the static Storybook with:
+
+```sh
+pnpm test:storybook
+pnpm build:storybook
+```
+
 ## Verification and packaging
 
 From the repository root:

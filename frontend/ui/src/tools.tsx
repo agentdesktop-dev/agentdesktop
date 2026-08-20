@@ -143,6 +143,11 @@ export function ToolInventory({ discovery }: { discovery: ToolDiscovery }) {
         <span className="capability-counts">
           {servers.length} MCP · {skills.length} skills
         </span>
+        <ChevronRight
+          className="tool-disclosure"
+          size={16}
+          aria-hidden="true"
+        />
       </summary>
       <div className="capability-grid">
         <CapabilitySection

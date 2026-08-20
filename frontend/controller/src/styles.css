@@ -6,7 +6,7 @@
   background: #ffffff;
   font-synthesis: none;
   --muted: #656d76;
-  --subtle: #8c959f;
+  --subtle: #6b737c;
   --border: #d8dee4;
   --border-soft: #eaeef2;
   --surface: #f6f8fa;
@@ -283,6 +283,7 @@ a {
 }
 
 .table-scroll {
+  position: relative;
   overflow-x: auto;
 }
 

@@ -1,7 +1,14 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.5.8/schema.json",
   "files": {
-    "includes": ["controller/**", "desktop/**", "ui/**", "!**/dist", "!**/node_modules"]
+    "includes": [
+      "controller/**",
+      "desktop/**",
+      "ui/**",
+      "!**/dist",
+      "!**/node_modules",
+      "!**/storybook-static"
+    ]
   },
   "formatter": {
     "enabled": true,

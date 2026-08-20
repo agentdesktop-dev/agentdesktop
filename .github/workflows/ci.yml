@@ -39,6 +39,10 @@ jobs:
           corepack enable
           pnpm install --frozen-lockfile
 
+      - name: Install Storybook test browser
+        working-directory: frontend
+        run: pnpm --filter @agentdesktop/desktop-web exec playwright install --with-deps chromium
+
       - name: Install Linux desktop dependencies
         run: |
           sudo apt-get update
