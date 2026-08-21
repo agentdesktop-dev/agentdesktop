@@ -4,9 +4,15 @@
   "version": "0.1.0",
   "identifier": "dev.agentdesktop.tray",
   "build": {
-    "beforeDevCommand": "pnpm --dir ../frontend --filter @agentdesktop/desktop-web dev",
+    "beforeDevCommand": {
+      "cwd": "../../frontend",
+      "script": "pnpm --filter @agentdesktop/desktop-web dev"
+    },
     "devUrl": "http://127.0.0.1:1420",
-    "beforeBuildCommand": "pnpm --dir ../frontend --filter @agentdesktop/desktop-web build",
+    "beforeBuildCommand": {
+      "cwd": "../../frontend",
+      "script": "pnpm --filter @agentdesktop/desktop-web build"
+    },
     "frontendDist": "../../frontend/desktop/dist"
   },
   "app": {

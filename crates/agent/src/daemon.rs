@@ -1,4 +1,5 @@
 use std::{
+    future::Future,
     net::SocketAddr,
     path::{Path, PathBuf},
 };
@@ -20,7 +21,11 @@ use tokio::net::UnixListener;
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::mpsc;
+#[cfg(windows)]
+use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 
+#[cfg(windows)]
+use crate::windows_security::SecurityDescriptor;
 use crate::{
     api, discovery, enrollment::EnrollmentState, gateway_oidc, reconcile, remote, secure_fs,
 };
@@ -204,7 +209,7 @@ fn user_socket_path(_state_dir: &std::path::Path) -> PathBuf {
     PathBuf::from(DEFAULT_SOCKET_PATH)
 }
 
-fn user_claude_desktop_settings(_home: &Path, config_home: &Path) -> PathBuf {
+fn user_claude_desktop_settings(_home: &Path, _config_home: &Path) -> PathBuf {
     #[cfg(target_os = "macos")]
     return _home.join("Library/Application Support/Claude/claude_desktop_config.json");
     #[cfg(target_os = "windows")]
@@ -213,10 +218,27 @@ fn user_claude_desktop_settings(_home: &Path, config_home: &Path) -> PathBuf {
         .unwrap_or_else(|| _home.join("AppData/Roaming"))
         .join("Claude/claude_desktop_config.json");
     #[cfg(target_os = "linux")]
-    return config_home.join("Claude/claude_desktop_config.json");
+    return _config_home.join("Claude/claude_desktop_config.json");
 }
 
 pub async fn run(args: DaemonArgs, socket: PathBuf) -> anyhow::Result<()> {
+    run_until_shutdown(args, socket, async {
+        tokio::signal::ctrl_c()
+            .await
+            .context("wait for shutdown signal")
+    })
+    .await
+}
+
+/// Serves the local API until the `shutdown` future resolves or fails.
+pub async fn run_until_shutdown<F>(
+    args: DaemonArgs,
+    socket: PathBuf,
+    shutdown: F,
+) -> anyhow::Result<()>
+where
+    F: Future<Output = anyhow::Result<()>> + Send,
+{
     let args = args.resolve(socket)?;
     let _log_flush = telemetry::setup_logging(if args.once { "warn" } else { "info" }, false);
     let socket = args.socket.clone();
@@ -343,9 +365,9 @@ pub async fn run(args: DaemonArgs, socket: PathBuf) -> anyhow::Result<()> {
 
     tracing::info!(socket = %socket.display(), "agent daemon listening");
     #[cfg(unix)]
-    serve_unix(&socket, local_api_access()?, app).await?;
+    serve_unix(&socket, local_api_access()?, app, shutdown).await?;
     #[cfg(windows)]
-    serve_named_pipe(&socket, app).await?;
+    serve_named_pipe(&socket, app, shutdown).await?;
 
     Ok(())
 }
@@ -455,8 +477,10 @@ async fn serve_unix(
     socket: &Path,
     access: LocalApiAccess,
     app: axum::Router,
+    shutdown: impl Future<Output = anyhow::Result<()>> + Send,
 ) -> anyhow::Result<()> {
     let listener = bind_unix(socket, access)?;
+    tokio::pin!(shutdown);
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -473,8 +497,8 @@ async fn serve_unix(
                     }
                 });
             }
-            result = tokio::signal::ctrl_c() => {
-                result.context("wait for shutdown signal")?;
+            result = &mut shutdown => {
+                result?;
                 break;
             }
         }
@@ -487,8 +511,13 @@ async fn serve_unix(
 }
 
 #[cfg(windows)]
-async fn serve_named_pipe(socket: &std::path::Path, app: axum::Router) -> anyhow::Result<()> {
+async fn serve_named_pipe(
+    socket: &std::path::Path,
+    app: axum::Router,
+    shutdown: impl Future<Output = anyhow::Result<()>> + Send,
+) -> anyhow::Result<()> {
     let mut server = bind_named_pipe(socket, true)?;
+    tokio::pin!(shutdown);
     loop {
         tokio::select! {
             connected = server.connect() => {
@@ -508,8 +537,8 @@ async fn serve_named_pipe(socket: &std::path::Path, app: axum::Router) -> anyhow
                     }
                 });
             }
-            result = tokio::signal::ctrl_c() => {
-                result.context("wait for shutdown signal")?;
+            result = &mut shutdown => {
+                result?;
                 break;
             }
         }
@@ -519,13 +548,28 @@ async fn serve_named_pipe(socket: &std::path::Path, app: axum::Router) -> anyhow
 
 #[cfg(windows)]
 fn bind_named_pipe(path: &std::path::Path, first: bool) -> anyhow::Result<NamedPipeServer> {
+    // Full access for SYSTEM and Administrators, read/write for interactive users.
+    const PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)";
+
     let mut options = ServerOptions::new();
     options
         .first_pipe_instance(first)
         .reject_remote_clients(true);
-    options
-        .create(path.as_os_str())
-        .with_context(|| format!("bind named pipe {}", path.display()))
+    let descriptor = SecurityDescriptor::from_sddl(PIPE_SDDL)?;
+    let mut attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.as_ptr(),
+        bInheritHandle: 0,
+    };
+    // SAFETY: attributes and its descriptor remain valid for the duration of
+    // CreateNamedPipeW and are released only after the call returns.
+    unsafe {
+        options.create_with_security_attributes_raw(
+            path.as_os_str(),
+            (&mut attributes as *mut SECURITY_ATTRIBUTES).cast(),
+        )
+    }
+    .with_context(|| format!("bind named pipe {}", path.display()))
 }
 
 fn agentdesktop_executable() -> anyhow::Result<PathBuf> {

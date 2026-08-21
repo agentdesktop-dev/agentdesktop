@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="TARGETDIR">
+      <Directory Id="CommonAppDataFolder">
+        <Directory Id="AgentDesktopDataFolder" Name="AgentDesktop" />
+      </Directory>
+    </DirectoryRef>
+  </Fragment>
+
+  <Fragment>
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="AgentDesktopService" Guid="66e82f72-41f7-42f6-9e49-ed43a589ec57" Win64="yes">
+        <File Id="AgentDesktopServiceExe" Source="$(env.TAURI_AGENTDESKTOP_SERVICE_EXE)" Name="agentdesktop-service.exe" KeyPath="yes" Checksum="yes" />
+        <ServiceInstall
+          Id="AgentDesktopServiceInstall"
+          Name="AgentDesktop"
+          DisplayName="agentdesktop"
+          Description="Applies managed AI agent configuration and connects this device to agentdesktop."
+          Arguments="--config &quot;[AgentDesktopDataFolder]config.yaml&quot; --state-dir &quot;[AgentDesktopDataFolder]state&quot;"
+          Type="ownProcess"
+          Start="auto"
+          ErrorControl="normal"
+          Vital="yes" />
+        <ServiceControl
+          Id="AgentDesktopServiceControl"
+          Name="AgentDesktop"
+          Start="install"
+          Stop="both"
+          Remove="uninstall"
+          Wait="yes" />
+      </Component>
+
+      <Component Id="AgentDesktopStartup" Guid="f12d2012-6059-48a4-9761-50971ce1be52" Win64="yes">
+        <RegistryKey Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Run">
+          <RegistryValue Id="AgentDesktopStartupValue" Name="AgentDesktop" Type="string" Value="&quot;[INSTALLDIR]agentdesktop.exe&quot;" KeyPath="yes" />
+        </RegistryKey>
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+
+  <Fragment>
+    <DirectoryRef Id="AgentDesktopDataFolder">
+      <Component Id="AgentDesktopConfig" Guid="bcf03823-6a5b-4d4f-9a72-294572503cca" Win64="yes" Permanent="yes" NeverOverwrite="yes">
+        <File Id="AgentDesktopConfigFile" Source="$(env.TAURI_AGENTDESKTOP_DEFAULT_CONFIG)" Name="config.yaml" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+</Wix>

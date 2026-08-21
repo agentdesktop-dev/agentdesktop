@@ -291,6 +291,256 @@ jobs:
           path: release/agentdesktop-*
           if-no-files-found: error
 
+  build-macos-installers:
+    needs: setup
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - arch: arm64
+            target: aarch64-apple-darwin
+            runner: macos-26
+    env:
+      AGENTDESKTOP_VERSION: ${{ needs.setup.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: frontend/.nvmrc
+
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
+        with:
+          toolchain: "1.97"
+          targets: ${{ matrix.target }}
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        shell: bash
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+
+      # Production signing placeholder: import the Developer ID Application and
+      # Developer ID Installer certificates into a temporary keychain here.
+      # Store the certificates and keychain password as GitHub Actions secrets.
+      # - name: Import Apple signing certificates
+      #   shell: bash
+      #   env:
+      #     APPLE_APPLICATION_CERTIFICATE: ${{ secrets.APPLE_APPLICATION_CERTIFICATE }}
+      #     APPLE_INSTALLER_CERTIFICATE: ${{ secrets.APPLE_INSTALLER_CERTIFICATE }}
+      #     APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      #   run: |
+      #     # Create a temporary keychain and import both certificates here.
+
+      - name: Build PKG
+        working-directory: frontend
+        shell: bash
+        # Production signing placeholder: expose the imported identities to
+        # Tauri and package-macos.mjs when certificate import is implemented.
+        # env:
+        #   APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_APPLICATION_SIGNING_IDENTITY }}
+        #   APPLE_INSTALLER_SIGNING_IDENTITY: ${{ secrets.APPLE_INSTALLER_SIGNING_IDENTITY }}
+        #   APPLE_INSTALLER_KEYCHAIN: ${{ runner.temp }}/agentdesktop-signing.keychain-db
+        run: pnpm --filter @agentdesktop/desktop-web dist:mac -- --target "${{ matrix.target }}"
+
+      - name: Stage PKG
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
+          OUTPUT_NAME: agentdesktop-macos-${{ matrix.arch }}.pkg
+        run: |
+          source_path="target/${TARGET}/release/bundle/pkg/Agent Desktop_${AGENTDESKTOP_VERSION}_${ARCH}.pkg"
+          test -f "${source_path}"
+          mkdir -p release
+          cp "${source_path}" "release/${OUTPUT_NAME}"
+
+      # Production notarization placeholder: notarize and staple the signed
+      # package here, before calculating its checksum or smoke-testing it.
+      # - name: Notarize and staple PKG
+      #   shell: bash
+      #   env:
+      #     OUTPUT_NAME: agentdesktop-macos-${{ matrix.arch }}.pkg
+      #     APPLE_ID: ${{ secrets.APPLE_ID }}
+      #     APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      #     APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      #   run: |
+      #     xcrun notarytool submit "release/${OUTPUT_NAME}" \
+      #       --apple-id "${APPLE_ID}" \
+      #       --password "${APPLE_APP_SPECIFIC_PASSWORD}" \
+      #       --team-id "${APPLE_TEAM_ID}" \
+      #       --wait
+      #     xcrun stapler staple "release/${OUTPUT_NAME}"
+
+      - name: Checksum PKG
+        shell: bash
+        env:
+          OUTPUT_NAME: agentdesktop-macos-${{ matrix.arch }}.pkg
+        run: |
+          (cd release && shasum -a 256 "${OUTPUT_NAME}" > "${OUTPUT_NAME}.sha256")
+
+      - name: Smoke test PKG
+        shell: bash
+        env:
+          OUTPUT_NAME: agentdesktop-macos-${{ matrix.arch }}.pkg
+        run: |
+          sudo installer -pkg "release/${OUTPUT_NAME}" -target /
+          sudo launchctl print system/dev.agentdesktop.daemon > /dev/null
+          deadline=$((SECONDS + 30))
+          until sudo "/Applications/agentdesktop.app/Contents/MacOS/agentdesktop" status; do
+            if (( SECONDS >= deadline )); then
+              echo "Installed CLI could not reach the Agent Desktop daemon" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+
+      - name: Remove smoke-test installation
+        if: always()
+        shell: bash
+        run: |
+          sudo launchctl bootout system/dev.agentdesktop.daemon || true
+          sudo rm -f /Library/LaunchDaemons/dev.agentdesktop.daemon.plist
+          sudo rm -rf "/Applications/agentdesktop.app"
+          sudo rm -rf /etc/agentdesktop /var/lib/agentdesktop /var/run/agentdesktop
+          sudo pkgutil --forget dev.agentdesktop.installer || true
+
+      - name: Upload unsigned PKG
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: unsigned-macos-installer-${{ matrix.arch }}
+          path: release/agentdesktop-macos-*
+          if-no-files-found: error
+
+  build-windows-installers:
+    needs: setup
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-pc-windows-msvc
+            runner: windows-2025
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+    env:
+      AGENTDESKTOP_VERSION: ${{ needs.setup.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: frontend/.nvmrc
+
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
+        with:
+          toolchain: "1.97"
+          targets: ${{ matrix.target }}
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        shell: bash
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+
+      - name: Build MSI
+        working-directory: frontend
+        shell: bash
+        run: pnpm --filter @agentdesktop/desktop-web dist:win -- --target "${{ matrix.target }}"
+
+      - name: Stage MSI
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          OUTPUT_NAME: agentdesktop-windows-${{ matrix.arch }}.msi
+        run: |
+          $installers = @(Get-ChildItem "target/$env:TARGET/release/bundle/msi" -Filter *.msi)
+          if ($installers.Count -ne 1) {
+            throw "Expected one MSI, found $($installers.Count)"
+          }
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item $installers[0].FullName "release/$env:OUTPUT_NAME"
+
+      # Production signing placeholder: sign the staged MSI here with the
+      # selected Authenticode provider before checksumming or smoke-testing it.
+      # - name: Sign MSI
+      #   shell: pwsh
+      #   env:
+      #     AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      #     AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      #     AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      #     OUTPUT_NAME: agentdesktop-windows-${{ matrix.arch }}.msi
+      #   run: |
+      #     # Invoke Azure Artifact Signing or signtool for release/$env:OUTPUT_NAME here.
+
+      - name: Checksum MSI
+        shell: pwsh
+        env:
+          OUTPUT_NAME: agentdesktop-windows-${{ matrix.arch }}.msi
+        run: |
+          $hash = (Get-FileHash "release/$env:OUTPUT_NAME" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $env:OUTPUT_NAME" | Set-Content "release/$env:OUTPUT_NAME.sha256" -Encoding ascii
+
+      - name: Smoke test MSI
+        shell: pwsh
+        env:
+          OUTPUT_NAME: agentdesktop-windows-${{ matrix.arch }}.msi
+        run: |
+          $installer = (Resolve-Path "release/$env:OUTPUT_NAME").Path
+          $install = Start-Process msiexec.exe -ArgumentList @("/i", "`"$installer`"", "/qn", "/norestart") -Wait -PassThru
+          if ($install.ExitCode -ne 0) {
+            throw "MSI installation failed with exit code $($install.ExitCode)"
+          }
+          $service = Get-Service AgentDesktop
+          $service.WaitForStatus("Running", [TimeSpan]::FromSeconds(30))
+          $deadline = (Get-Date).AddSeconds(30)
+          do {
+            & "$env:ProgramFiles\Agent Desktop\agentdesktop.exe" status
+            if ($LASTEXITCODE -eq 0) {
+              break
+            }
+            Start-Sleep -Seconds 1
+          } while ((Get-Date) -lt $deadline)
+          if ($LASTEXITCODE -ne 0) {
+            throw "Installed CLI could not reach the Agent Desktop service"
+          }
+          $uninstall = Start-Process msiexec.exe -ArgumentList @("/x", "`"$installer`"", "/qn", "/norestart") -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) {
+            throw "MSI uninstall failed with exit code $($uninstall.ExitCode)"
+          }
+          if (Get-Service AgentDesktop -ErrorAction SilentlyContinue) {
+            throw "Agent Desktop service remains after uninstall"
+          }
+
+      - name: Upload unsigned MSI
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: unsigned-windows-installer-${{ matrix.arch }}
+          path: release/agentdesktop-windows-*
+          if-no-files-found: error
+
   release:
     if: github.event_name == 'push' || !inputs.skip_github_release
     needs:
@@ -298,6 +548,8 @@ jobs:
       - push-controller-image
       - push-helm-chart
       - build-binaries
+      - build-macos-installers
+      - build-windows-installers
     runs-on: ubuntu-24.04
     permissions:
       contents: write

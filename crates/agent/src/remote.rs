@@ -244,7 +244,7 @@ async fn connect(
             hostname: hostname(),
             os: std::env::consts::OS.to_string(),
             architecture: std::env::consts::ARCH.to_string(),
-            agent_version: env!("CARGO_PKG_VERSION").to_string(),
+            agent_version: agentdesktop_core::VERSION.to_string(),
         }),
     )
     .await?;

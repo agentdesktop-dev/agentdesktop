@@ -25,3 +25,7 @@ serde_json.workspace = true
 tauri = { version = "2", features = ["image-png", "tray-icon"] }
 tauri-plugin-single-instance = "2"
 tokio.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true
+plist = "1.10"
