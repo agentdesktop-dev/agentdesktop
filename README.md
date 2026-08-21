@@ -1,37 +1,41 @@
-<p align="center">
-  <img src="images/agentdesktop.svg" width="96" alt="Agentdesktop logo">
-</p>
+# agentdesktop
 
-# Agentdesktop
+![agentdesktop](images/logo.svg)
 
 **The open-source control plane for AI developer tools.**
 
-MDM can install applications and push files. Agentdesktop manages the agent
-layer: which tools are running, what they can connect to, how they are
-configured, who is using them, and what they are doing.
+MDM manages the device, but each AI developer tool has its own settings, MCP
+connections, skills, and gateway configuration. agentdesktop manages those
+tools as a fleet: see what is installed, apply managed configuration, and
+connect each device to your inference gateway.
 
-Agentdesktop brings discovery, policy, identity, gateway access, and telemetry
+agentdesktop brings discovery, policy, identity, gateway access, and telemetry
 into one fully open-source system. Keep developers in Claude, Codex, OpenCode,
 and VS Code while giving platform teams a fleet-wide management experience
-built for AI agents - not retrofitted from device management scripts.
+built for AI developer tools, not retrofitted from device management scripts.
+
+[Website](https://agentdesktop.io) ·
+[Documentation](https://agentdesktop.io/docs/) ·
+[Releases](https://github.com/agentdesktop-dev/agentdesktop/releases)
 
 ## What you can do
 
-- See which AI agents are installed on each device, including their versions.
-- Inventory MCP servers and skills without collecting MCP credentials, command
-  arguments, environment variables, or skill bodies.
-- Configure a shared inference gateway to send agent traffic through.
+- See which AI developer tools are installed on each device and their versions.
+- Inventory MCP servers and skills without collecting MCP command arguments,
+  environment variables, HTTP headers, or skill bodies.
+- Preview and reconcile managed settings for supported tools.
+- Connect supported tools directly to a shared inference gateway.
 - Enroll devices through OIDC and associate them with the signed-in user.
 - Issue short-lived controller-signed JWTs for an inference gateway such as
-  Agentgateway.
-- Collect selected events such as new sessions and tool use.
+  agentgateway.
+- Collect selected session and tool-use events when telemetry is enabled.
 
 ## Fleet management UI
 
 Inspect device health, configuration state, recent agent activity, installed
-tools, MCP servers, and skills from one local management console.
+tools, MCP servers, and skills from the fleet management UI.
 
-![Agentdesktop device details](images/device-details.png)
+![agentdesktop device details](images/device-details.png)
 
 ## Supported tools
 
@@ -41,9 +45,9 @@ tools, MCP servers, and skills from one local management console.
 | Claude Desktop | Yes | Yes | MCP |
 | Codex | Yes | Yes | MCP and skills |
 | OpenCode | Yes | Yes | MCP |
-| VS Code | Yes | Not yet | — |
+| VS Code | Yes | Not yet | Not yet |
 
-Agentdesktop targets Linux, macOS, and Windows.
+The project targets Linux, macOS, and Windows.
 
 ## Architecture
 
@@ -52,19 +56,25 @@ can receive desired configuration from the controller, or read the same YAML
 directly in standalone mode. Developer tools continue to run locally and can
 request short-lived credentials for the inference gateway through the daemon.
 
-![Agentdesktop architecture](images/overview.svg)
+![agentdesktop architecture](images/overview.svg)
 
 ## Get started
 
-Choose the setup that fits your environment:
+Start with [Build and install](https://agentdesktop.io/docs/getting-started/build/)
+when working from source, then choose the setup that fits your environment:
 
-- [Standalone mode](./examples/standalone) reads local YAML and can authenticate
-  directly to an inference gateway with OIDC. It needs no controller or device
-  identity.
-- [Controller-managed Claude Code](./examples/claude) runs the complete local
-  fleet-management example with OIDC enrollment and Agentgateway.
-- [Kubernetes controller with Dex](./examples/kubernetes) installs the
-  controller Helm chart with development Dex and PostgreSQL dependencies.
+- [Standalone mode](https://agentdesktop.io/docs/getting-started/standalone/)
+  reads local YAML and can authenticate directly to an inference gateway with
+  OIDC. It needs no controller or device identity. The repository includes a
+  [local standalone example](./examples/standalone).
+- [Controller-managed mode](https://agentdesktop.io/docs/getting-started/managed/)
+  enrolls users and devices, distributes versioned configuration, and can issue
+  short-lived gateway JWTs. The [local managed example](./examples/claude) uses
+  Dex and agentgateway.
+- [Production deployment](https://agentdesktop.io/docs/operations/production/)
+  covers Kubernetes, certificates, MDM, and endpoint enrollment. The
+  [Kubernetes example](./examples/kubernetes) includes development Dex and
+  PostgreSQL dependencies.
 
 ## Configuration
 
@@ -119,7 +129,7 @@ agentdesktop daemon --user
 
 The daemon opens the browser for sign-in when it starts. `--user` stores daemon
 state in your home directory and manages user-level tool settings. For Claude
-Code, Agentdesktop merges its values into `~/.claude/settings.json` and preserves
+Code, agentdesktop merges its values into `~/.claude/settings.json` and preserves
 unrelated settings. Explicit path options shown by `agentdesktop daemon --help`
 override the defaults.
 
@@ -137,7 +147,6 @@ is used to authenticate the device to the controller.
 OIDC also authenticates the device user. Standalone mode uses a simpler native
 OIDC flow and sends the resulting access token directly to the configured
 inference gateway; it creates no device key or certificate.
-
 
 ## Telemetry
 

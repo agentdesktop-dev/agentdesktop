@@ -61,16 +61,17 @@ a {
   padding: 0 8px;
   display: flex;
   align-items: center;
-  gap: 9px;
-  color: #17191c;
-  font-size: 14px;
-  font-weight: 650;
 }
 
-.brand-mark {
-  width: 26px;
-  height: 26px;
+.brand-logo {
+  width: 100%;
+  max-width: 164px;
+  height: auto;
   display: block;
+}
+
+.brand-icon {
+  display: none;
 }
 
 .primary-nav {
@@ -1291,9 +1292,28 @@ code {
     margin-right: 12px;
   }
 
-  .brand > span:last-child,
   .nav-item span {
     display: none;
+  }
+
+  .brand {
+    width: 34px;
+    padding: 0;
+    justify-content: center;
+    overflow: hidden;
+    background: #8023c3;
+    border-radius: 5px;
+  }
+
+  .brand-logo {
+    display: none;
+  }
+
+  .brand-icon {
+    width: 34px;
+    height: 34px;
+    display: block;
+    transform: scale(1.35);
   }
 
   .primary-nav {

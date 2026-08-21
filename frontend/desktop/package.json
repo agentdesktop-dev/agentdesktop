@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "generate:icons": "node scripts/generate-icons.mjs",
-    "icons": "pnpm generate:icons && node scripts/tauri.mjs icon ../../frontend/desktop/assets/app-icon.png",
+    "icons": "pnpm generate:icons && node scripts/tauri.mjs icon ../../frontend/desktop/assets/app-icon.png && node scripts/generate-icons.mjs --finalize",
     "dev:desktop": "node scripts/tauri.mjs dev",
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
@@ -30,6 +30,7 @@
     "react-dom": "^19.2.8"
   },
   "devDependencies": {
+    "@resvg/resvg-js": "2.6.2",
     "@storybook/addon-a11y": "^10.5.9",
     "@storybook/addon-vitest": "^10.5.9",
     "@storybook/react-vite": "^10.5.9",

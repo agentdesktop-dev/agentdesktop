@@ -25,65 +25,38 @@ use crate::{
 };
 
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-const SUCCESS_PAGE: &str = r##"<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sign-in complete · Agentdesktop</title>
-  <style>
-    :root { color-scheme: light; font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #fff; color: #18181b; }
-    main { width: min(100% - 40px, 380px); padding: 32px; }
-    svg { display: block; width: 42px; height: 42px; margin-bottom: 24px; }
-    h1 { margin: 0 0 8px; font-size: 20px; line-height: 1.35; font-weight: 600; letter-spacing: -.01em; }
-    p { margin: 0; color: #71717a; font-size: 14px; line-height: 1.55; }
-  </style>
-</head>
-<body>
-  <main>
-    <svg viewBox="0 0 256 256" fill="none" aria-label="Agentdesktop">
-      <path d="M72 61v134M184 61v134M72 94h112M72 162h112" stroke="#8023C3" stroke-width="22" stroke-linecap="round"/>
-      <circle cx="72" cy="61" r="20" fill="#8023C3"/>
-      <circle cx="184" cy="195" r="20" fill="#8023C3"/>
-      <circle cx="128" cy="128" r="18" fill="#5B168E"/>
-    </svg>
-    <h1>Sign-in complete</h1>
-    <p>You can close this window and return to Agentdesktop.</p>
-  </main>
-</body>
-</html>"##;
+const BRAND_MARK_SVG: &str = include_str!("../../../images/mark.svg");
 
-const FAILURE_PAGE: &str = r##"<!doctype html>
+fn callback_page(title: &str, message: &str) -> String {
+    format!(
+        r##"<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sign-in failed · Agentdesktop</title>
+    <title>{title} · Agentdesktop</title>
   <style>
-    :root { color-scheme: light; font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #fff; color: #18181b; }
-    main { width: min(100% - 40px, 380px); padding: 32px; }
-    svg { display: block; width: 42px; height: 42px; margin-bottom: 24px; }
-    h1 { margin: 0 0 8px; font-size: 20px; line-height: 1.35; font-weight: 600; letter-spacing: -.01em; }
-    p { margin: 0; color: #71717a; font-size: 14px; line-height: 1.55; }
+        :root {{ color-scheme: light; font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+        * {{ box-sizing: border-box; }}
+        body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: #fff; color: #18181b; }}
+        main {{ width: min(100% - 40px, 380px); padding: 32px; }}
+    .brand-mark {{ width: 48px; height: 48px; margin-bottom: 24px; overflow: hidden; background: #8023c3; border-radius: 8px; }}
+    .brand-mark svg {{ display: block; width: 100%; height: 100%; }}
+        h1 {{ margin: 0 0 8px; font-size: 20px; line-height: 1.35; font-weight: 600; letter-spacing: -.01em; }}
+        p {{ margin: 0; color: #71717a; font-size: 14px; line-height: 1.55; }}
   </style>
 </head>
 <body>
   <main>
-    <svg viewBox="0 0 256 256" fill="none" aria-label="Agentdesktop">
-      <path d="M72 61v134M184 61v134M72 94h112M72 162h112" stroke="#8023C3" stroke-width="22" stroke-linecap="round"/>
-      <circle cx="72" cy="61" r="20" fill="#8023C3"/>
-      <circle cx="184" cy="195" r="20" fill="#8023C3"/>
-      <circle cx="128" cy="128" r="18" fill="#5B168E"/>
-    </svg>
-    <h1>Sign-in failed</h1>
-    <p>Return to Agentdesktop and try again. Details are available in the daemon logs.</p>
+        <div class="brand-mark" role="img" aria-label="Agentdesktop">{brand_mark}</div>
+        <h1>{title}</h1>
+        <p>{message}</p>
   </main>
 </body>
-</html>"##;
+</html>"##,
+        brand_mark = BRAND_MARK_SVG,
+    )
+}
 
 #[derive(Clone)]
 struct CallbackState {
@@ -387,9 +360,20 @@ async fn callback(
     }
 
     if succeeded {
-        Html(SUCCESS_PAGE).into_response()
+        Html(callback_page(
+            "Sign-in complete",
+            "You can close this window and return to Agentdesktop.",
+        ))
+        .into_response()
     } else {
-        (StatusCode::BAD_REQUEST, Html(FAILURE_PAGE)).into_response()
+        (
+            StatusCode::BAD_REQUEST,
+            Html(callback_page(
+                "Sign-in failed",
+                "Return to Agentdesktop and try again. Details are available in the daemon logs.",
+            )),
+        )
+            .into_response()
     }
 }
 

@@ -1,6 +1,7 @@
+import agentdesktopLogo from "@brand/logo.svg";
+import agentdesktopMark from "@brand/mark.svg";
 import { Gauge, Laptop, LoaderCircle, RefreshCw } from "lucide-react";
 import type { ReactNode } from "react";
-import agentdesktopIcon from "../../../ui/assets/app-icon.svg";
 
 import type { Notice, View } from "../useDesktopModel";
 
@@ -34,8 +35,12 @@ export function DesktopShell({
       {!fullWidth ? (
         <aside className="desktop-sidebar">
           <div className="desktop-brand">
-            <img src={agentdesktopIcon} alt="" />
-            <span>Agentdesktop</span>
+            <img
+              className="desktop-brand-logo"
+              src={agentdesktopLogo}
+              alt="Agentdesktop"
+            />
+            <img className="desktop-brand-icon" src={agentdesktopMark} alt="" />
           </div>
           <nav className="desktop-nav" aria-label="Application">
             <button
