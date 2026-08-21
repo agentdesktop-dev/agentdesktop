@@ -1,3 +1,5 @@
+import agentdesktopLogo from "@brand/logo.svg";
+import agentdesktopMark from "@brand/mark.svg";
 import {
   Gauge,
   Laptop,
@@ -6,7 +8,6 @@ import {
   SlidersHorizontal,
 } from "lucide-react";
 import type { ReactNode } from "react";
-import agentdesktopIcon from "../../../ui/assets/app-icon.svg";
 
 import { Link } from "../router";
 
@@ -34,8 +35,12 @@ export function ControllerShell({
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <img className="brand-mark" src={agentdesktopIcon} alt="" />
-          <span>Agentdesktop</span>
+          <img
+            className="brand-logo"
+            src={agentdesktopLogo}
+            alt="Agentdesktop"
+          />
+          <img className="brand-icon" src={agentdesktopMark} alt="" />
         </div>
         <nav className="primary-nav" aria-label="Primary navigation">
           {navigation.map((item) => {

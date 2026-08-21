@@ -11,15 +11,17 @@ RUN corepack enable && pnpm config set store-dir /pnpm/store
 RUN --mount=type=cache,id=agentdesktop-pnpm,target=/pnpm/store \
     pnpm install --frozen-lockfile
 COPY frontend/ ./
+COPY images/ /app/images/
 RUN --mount=type=cache,id=agentdesktop-pnpm,target=/pnpm/store \
     pnpm --filter @agentdesktop/controller-web build
 
 FROM docker.io/library/rust:1.97.1-trixie AS builder
+ARG TARGETARCH
 WORKDIR /app
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 COPY --from=ui /app/frontend/controller/dist frontend/controller/dist
-RUN --mount=type=cache,id=agentdesktop-target,target=/app/target \
+RUN --mount=type=cache,id=agentdesktop-target-${TARGETARCH},target=/app/target \
     --mount=type=cache,id=agentdesktop-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=agentdesktop-cargo-git,target=/usr/local/cargo/git \
     cargo build --locked --release --package agentdesktop-controller && \

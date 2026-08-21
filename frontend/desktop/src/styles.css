@@ -87,16 +87,17 @@ p {
   padding: 0 8px;
   display: flex;
   align-items: center;
-  gap: 9px;
-  color: #17191c;
-  font-size: 14px;
-  font-weight: 650;
 }
 
-.desktop-brand img {
-  width: 26px;
-  height: 26px;
+.desktop-brand-logo {
+  width: 100%;
+  max-width: 156px;
+  height: auto;
   display: block;
+}
+
+.desktop-brand-icon {
+  display: none;
 }
 
 .desktop-nav {
@@ -912,8 +913,24 @@ p {
     padding: 0 4px;
   }
 
-  .desktop-brand span {
+  .desktop-brand {
+    width: 34px;
+    padding: 0;
+    justify-content: center;
+    overflow: hidden;
+    background: #8023c3;
+    border-radius: 5px;
+  }
+
+  .desktop-brand-logo {
     display: none;
+  }
+
+  .desktop-brand-icon {
+    width: 34px;
+    height: 34px;
+    display: block;
+    transform: scale(1.35);
   }
 
   .desktop-nav {
