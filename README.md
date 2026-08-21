@@ -56,7 +56,7 @@ can receive desired configuration from the controller, or read the same YAML
 directly in standalone mode. Developer tools continue to run locally and can
 request short-lived credentials for the inference gateway through the daemon.
 
-![agentdesktop architecture](images/overview.svg)
+![agentdesktop architecture](images/overview.png)
 
 ## Get started
 
