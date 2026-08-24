@@ -41,6 +41,17 @@
       "description": "Settings reconciled into Claude Code's managed configuration.\n\nArbitrary keys are written directly to Agentdesktop's managed-settings\ndrop-in. Generated gateway settings take precedence when values overlap.",
       "type": "object",
       "properties": {
+        "auth": {
+          "description": "Upstream authentication used by this agent.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProgramAuthentication"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "useInferenceGateway": {
           "description": "Whether this program uses the top-level inference gateway.",
           "type": "boolean"
@@ -52,6 +63,17 @@
       "description": "Settings reconciled into Claude Desktop's managed configuration.\n\nArbitrary keys are written directly to the managed settings file. Generated\ngateway settings take precedence when values overlap.",
       "type": "object",
       "properties": {
+        "auth": {
+          "description": "Upstream authentication used by this agent.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProgramAuthentication"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "useInferenceGateway": {
           "description": "Whether this program uses the top-level inference gateway.",
           "type": "boolean"
@@ -231,6 +253,16 @@
         }
       },
       "additionalProperties": false
+    },
+    "ProgramAuthentication": {
+      "description": "Upstream authentication selected by a managed agent.",
+      "oneOf": [
+        {
+          "description": "Offer the model provider subscription associated with the local user.\nThe user may skip it and continue with gateway identity only.",
+          "type": "string",
+          "const": "subscription"
+        }
+      ]
     },
     "ProgramsConfig": {
       "description": "Settings for developer tools managed by Agentdesktop.",

@@ -127,9 +127,13 @@ fn managed_config(
         .as_ref()
         .is_some_and(InferenceGatewayAuthentication::uses_credential_helper)
     {
-        let timeout_ms = match gateway.authentication {
-            Some(InferenceGatewayAuthentication::Oidc { .. }) => 600_000,
-            _ => 5_000,
+        let timeout_ms = if matches!(
+            gateway.authentication,
+            Some(InferenceGatewayAuthentication::Oidc { .. })
+        ) {
+            600_000
+        } else {
+            5_000
         };
         provider["auth"] = json!({
             "command": credential_helper.to_string_lossy(),

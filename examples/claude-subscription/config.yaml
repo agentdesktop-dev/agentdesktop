@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=../../schema/daemon-config.json
+
+inferenceGateway:
+  url: http://127.0.0.1:4000
+  authentication:
+    type: oidc
+    issuer: http://127.0.0.1:5556/dex
+    clientId: local-public
+    scopes: [openid, email, offline_access]
+    allowInsecure: true
+
+programs:
+  claudeCode:
+    auth: subscription
+    companyAnnouncements:
+    - Using a Claude subscription through Agentdesktop

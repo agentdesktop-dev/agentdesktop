@@ -10,13 +10,15 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
 use agentdesktop_core::{
-    config::{DaemonConfig, InferenceGatewayAuthentication, valid_client_id},
+    config::{
+        DaemonConfig, InferenceGatewayAuthentication, ProgramAuthentication, valid_client_id,
+    },
     model::{
         Discovery, EnrollmentStatus, InferenceGatewayCredential, TelemetryEvent, TelemetryEventKind,
     },
 };
 
-use crate::{enrollment::EnrollmentState, gateway_oidc, remote};
+use crate::{enrollment::EnrollmentState, gateway_oidc, remote, subscription};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -152,6 +154,9 @@ fn load_effective_config(
     config: &DaemonConfig,
     state_dir: &std::path::Path,
 ) -> anyhow::Result<DaemonConfig> {
+    if config.controller.is_none() {
+        return Ok(config.clone());
+    }
     let path = state_dir.join("remote-config.yaml");
     match std::fs::read_to_string(&path) {
         Ok(contents) => agentdesktop_core::config::parse_daemon(&contents)
@@ -231,7 +236,8 @@ async fn inference_gateway_credential(
             "daemon has no inference gateway configured".to_owned(),
         )
     })?;
-    match gateway.authentication.as_ref() {
+    let uses_subscription = program_uses_subscription(&effective, &query.client_id);
+    let (identity, continue_in_browser) = match gateway.authentication.as_ref() {
         Some(InferenceGatewayAuthentication::ControllerJwt { .. }) => {
             let controller = state.config.controller.as_ref().ok_or_else(|| {
                 (
@@ -243,6 +249,7 @@ async fn inference_gateway_credential(
             // process. The client ID selects an allowed policy within that boundary.
             remote::inference_gateway_credential(controller, &state.state_dir, &query.client_id)
                 .await
+                .map(|credential| (credential, false))
         }
         Some(InferenceGatewayAuthentication::Oidc {
             issuer,
@@ -250,24 +257,59 @@ async fn inference_gateway_credential(
             redirect_uri,
             scopes,
             allow_insecure,
-        }) => {
-            gateway_oidc::credential(
-                issuer,
-                client_id,
-                redirect_uri,
-                scopes,
-                *allow_insecure,
-                &state.state_dir,
-                state.oidc_callback_listen,
+        }) => gateway_oidc::credential(
+            issuer,
+            client_id,
+            redirect_uri,
+            scopes,
+            *allow_insecure,
+            &state.state_dir,
+            gateway_oidc::LoginOptions {
+                callback_listen: state.oidc_callback_listen,
+                subscription_available: uses_subscription,
+            },
+        )
+        .await
+        .map(|acquired| {
+            (
+                acquired.credential,
+                acquired.interactive && uses_subscription,
             )
-            .await
-        }
+        }),
         None => Err(anyhow::anyhow!(
             "inference gateway has no authentication configured"
         )),
     }
+    .map_err(|error| (StatusCode::BAD_GATEWAY, format!("{error:#}")))?;
+    if uses_subscription {
+        subscription::compose(
+            identity,
+            &state.state_dir,
+            state.oidc_callback_listen,
+            continue_in_browser,
+        )
+        .await
+    } else {
+        Ok(identity)
+    }
     .map(Json)
     .map_err(|error| (StatusCode::BAD_GATEWAY, format!("{error:#}")))
+}
+
+fn program_uses_subscription(config: &DaemonConfig, client_id: &str) -> bool {
+    match client_id {
+        "claude-code" => config
+            .programs
+            .claude_code
+            .as_ref()
+            .is_some_and(|program| program.auth == Some(ProgramAuthentication::Subscription)),
+        "claude-desktop" => config
+            .programs
+            .claude_desktop
+            .as_ref()
+            .is_some_and(|program| program.auth == Some(ProgramAuthentication::Subscription)),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -276,7 +318,29 @@ mod tests {
 
     use agentdesktop_core::config::parse_daemon;
 
-    use super::load_effective_config;
+    use super::{load_effective_config, program_uses_subscription};
+
+    #[test]
+    fn subscription_is_selected_by_requesting_agent() {
+        let config = parse_daemon(
+            r#"
+inferenceGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: oidc
+    issuer: https://login.example.com
+    clientId: agentdesktop
+programs:
+  claudeCode:
+    auth: subscription
+  claudeDesktop: {}
+"#,
+        )
+        .unwrap();
+        assert!(program_uses_subscription(&config, "claude-code"));
+        assert!(!program_uses_subscription(&config, "claude-desktop"));
+        assert!(!program_uses_subscription(&config, "codex"));
+    }
 
     #[test]
     fn controller_configuration_is_the_effective_gateway_configuration() {
@@ -312,6 +376,50 @@ inferenceGateway:
             effective.inference_gateway.unwrap().url.as_str(),
             "https://gateway.example.com/"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn standalone_configuration_ignores_stale_remote_configuration() {
+        let root = std::env::temp_dir().join(format!(
+            "agentdesktop-api-standalone-config-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let local = parse_daemon(
+            r#"
+inferenceGateway:
+  url: http://127.0.0.1:4001
+  authentication:
+    type: oidc
+    issuer: http://127.0.0.1:5557/dex
+    clientId: agentdesktop-local
+    allowInsecure: true
+"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("remote-config.yaml"),
+            r#"
+inferenceGateway:
+  url: https://stale.example.com
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
+    allowedClientIds: [claude-code]
+"#,
+        )
+        .unwrap();
+
+        let effective = load_effective_config(&local, &root).unwrap();
+
+        let gateway = effective.inference_gateway.unwrap();
+        assert_eq!(gateway.url.as_str(), "http://127.0.0.1:4001/");
+        assert!(matches!(
+            gateway.authentication,
+            Some(agentdesktop_core::config::InferenceGatewayAuthentication::Oidc { .. })
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 }

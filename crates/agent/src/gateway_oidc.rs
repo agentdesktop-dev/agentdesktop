@@ -14,6 +14,17 @@ const SECRET_SERVICE: &str = "dev.agentdesktop.gateway-oidc";
 const EXPIRY_SKEW_SECONDS: u64 = 60;
 static LOGIN: Mutex<()> = Mutex::const_new(());
 
+#[derive(Clone, Copy)]
+pub struct LoginOptions {
+    pub callback_listen: Option<SocketAddr>,
+    pub subscription_available: bool,
+}
+
+pub struct CredentialAcquisition {
+    pub credential: InferenceGatewayCredential,
+    pub interactive: bool,
+}
+
 #[derive(Deserialize)]
 struct ProviderMetadata {
     authorization_endpoint: Url,
@@ -36,8 +47,8 @@ pub async fn credential(
     scopes: &[String],
     allow_insecure: bool,
     state_dir: &Path,
-    callback_listen: Option<SocketAddr>,
-) -> anyhow::Result<InferenceGatewayCredential> {
+    login: LoginOptions,
+) -> anyhow::Result<CredentialAcquisition> {
     let issuer = issuer.clone();
     let client_id = client_id.to_owned();
     let redirect_uri = redirect_uri.to_owned();
@@ -51,7 +62,7 @@ pub async fn credential(
             &scopes,
             allow_insecure,
             &state_dir,
-            callback_listen,
+            login,
         )
         .await
     })
@@ -66,8 +77,8 @@ async fn credential_inner(
     scopes: &[String],
     allow_insecure: bool,
     state_dir: &Path,
-    callback_listen: Option<SocketAddr>,
-) -> anyhow::Result<InferenceGatewayCredential> {
+    login: LoginOptions,
+) -> anyhow::Result<CredentialAcquisition> {
     let _login = LOGIN.lock().await;
     let store = SecretStore::new(state_dir)?;
     let account = account(issuer, client_id);
@@ -76,7 +87,10 @@ async fn credential_inner(
     if let Some(tokens) = stored.as_ref()
         && tokens.expires_at_unix_seconds > now().saturating_add(EXPIRY_SKEW_SECONDS)
     {
-        return Ok(as_credential(tokens));
+        return Ok(CredentialAcquisition {
+            credential: as_credential(tokens),
+            interactive: false,
+        });
     }
 
     if let Some(tokens) = stored.as_mut()
@@ -88,7 +102,10 @@ async fn credential_inner(
                 tokens.refresh_token = refreshed.refresh_token.or(tokens.refresh_token.take());
                 tokens.expires_at_unix_seconds = now().saturating_add(refreshed.expires_in);
                 save(&store, &account, tokens)?;
-                return Ok(as_credential(tokens));
+                return Ok(CredentialAcquisition {
+                    credential: as_credential(tokens),
+                    interactive: false,
+                });
             }
             Err(error) => tracing::warn!(%error, "OIDC token refresh failed; signing in again"),
         }
@@ -106,13 +123,18 @@ async fn credential_inner(
         &state,
         &challenge,
     );
-    let authorization_code = oidc::wait_for_authorization_code(
+    let authorization_code = oidc::wait_for_authorization_code_with_page(
         authorization_url.as_str(),
         &redirect_uri,
         state,
-        callback_listen,
+        login.callback_listen,
+        oidc::AuthorizationPage::Identity {
+            subscription_available: login.subscription_available,
+        },
+        true,
     )
-    .await?;
+    .await?
+    .context("required identity authorization was skipped")?;
     let tokens = oidc::exchange_authorization_code(
         metadata.token_endpoint.as_str(),
         client_id,
@@ -128,7 +150,10 @@ async fn credential_inner(
         token_endpoint: metadata.token_endpoint.to_string(),
     };
     save(&store, &account, &stored)?;
-    Ok(as_credential(&stored))
+    Ok(CredentialAcquisition {
+        credential: as_credential(&stored),
+        interactive: true,
+    })
 }
 
 async fn discover(issuer: &Url, allow_insecure: bool) -> anyhow::Result<ProviderMetadata> {
