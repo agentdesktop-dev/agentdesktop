@@ -34,6 +34,11 @@ test("package installs the app at a fixed location", () => {
   );
 
   assert.match(component, /<key>BundleIsRelocatable<\/key>\s*<false\/>/);
+  assert.match(component, /<key>BundleIsVersionChecked<\/key>\s*<true\/>/);
+  assert.match(
+    component,
+    /<key>BundleOverwriteAction<\/key>\s*<string>upgrade<\/string>/,
+  );
   assert.ok(
     component.includes("<string>Applications/agentdesktop.app</string>"),
   );
@@ -58,7 +63,7 @@ test("LaunchDaemon runs the bundled binary with system paths", () => {
   assert.match(plist, /<key>KeepAlive<\/key>\s*<true\/>/);
 });
 
-test("installer hooks preserve configuration and manage daemon access", () => {
+test("installer hooks replace running processes without losing state", () => {
   const preinstall = readFileSync(
     path.join(macosDirectory, "scripts", "preinstall"),
     "utf8",
@@ -69,6 +74,14 @@ test("installer hooks preserve configuration and manage daemon access", () => {
   );
 
   assert.match(preinstall, /launchctl bootout/);
+  assert.match(preinstall, /dev\.agentdesktop\.daemon\.user/);
+  assert.match(preinstall, /launchctl bootout "gui\/\$\{uid\}/);
+  assert.match(preinstall, /application_pids/);
+  assert.match(preinstall, /application_user_ids/);
+  assert.match(preinstall, /sort -un/);
+  assert.match(preinstall, /kill -TERM/);
+  assert.match(preinstall, /kill -KILL/);
+  assert.match(preinstall, /agentdesktop-relaunch/);
   assert.match(preinstall, /\/Applications\/Agent Desktop\.app/);
   assert.match(preinstall, /dev\.agentdesktop\.tray/);
   assert.match(postinstall, /dseditgroup .* -o create/);
@@ -79,4 +92,9 @@ test("installer hooks preserve configuration and manage daemon access", () => {
   assert.doesNotMatch(postinstall, /rm .*CONFIG_PATH/);
   assert.match(postinstall, /launchctl bootstrap system/);
   assert.match(postinstall, /launchctl kickstart -k/);
+  assert.match(postinstall, /agentdesktop-relaunch/);
+  assert.match(postinstall, /launchctl asuser/);
+  assert.match(postinstall, /sudo -u/);
+  assert.match(postinstall, /open -g/);
+  assert.match(postinstall, /for uid in \$\{user_ids\}/);
 });

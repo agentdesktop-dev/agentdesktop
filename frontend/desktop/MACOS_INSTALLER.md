@@ -62,6 +62,27 @@ If the application is distributed without the PKG, launching it registers a
 per-user LaunchAgent and starts the daemon in user mode. Installing the PKG
 later removes that fallback before starting the privileged service.
 
+## Upgrade behavior
+
+The PKG owns process handling for in-place upgrades; MDM does not need a custom
+process-kill script. Before replacing the application, `preinstall` stops the
+system LaunchDaemon and any per-user fallback LaunchAgents, then asks a running
+menu-bar application to terminate. If it does not exit within 10 seconds, the
+installer terminates it so the bundle can be replaced safely.
+
+After installing the new payload, `postinstall` starts the system LaunchDaemon.
+If the menu-bar application was open before the upgrade and its user is still
+logged in, the installer relaunches the new version in that same user session.
+This also handles multiple active sessions during fast user switching. An
+application that was closed before the upgrade remains closed.
+
+Configuration under `/etc/agentdesktop` and state under `/var/lib/agentdesktop`
+are preserved. A silent MDM upgrade can use the same command as installation:
+
+```sh
+sudo installer -pkg "Agent Desktop.pkg" -target /
+```
+
 ## Configure through MDM
 
 Deploy a root-owned configuration to `/etc/agentdesktop/config.yaml`. The

@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+<Wix
+  xmlns="http://schemas.microsoft.com/wix/2006/wi"
+  xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
   <Fragment>
     <DirectoryRef Id="TARGETDIR">
       <Directory Id="CommonAppDataFolder">
@@ -9,6 +11,16 @@
   </Fragment>
 
   <Fragment>
+    <util:CloseApplication
+      Id="CloseAgentDesktop"
+      Target="agentdesktop.exe"
+      Description="Agent Desktop must close before it can be updated."
+      CloseMessage="yes"
+      ElevatedCloseMessage="yes"
+      Timeout="15"
+      TerminateProcess="1"
+      RebootPrompt="no" />
+
     <DirectoryRef Id="INSTALLDIR">
       <Component Id="AgentDesktopService" Guid="66e82f72-41f7-42f6-9e49-ed43a589ec57" Win64="yes">
         <File Id="AgentDesktopServiceExe" Source="$(env.TAURI_AGENTDESKTOP_SERVICE_EXE)" Name="agentdesktop-service.exe" KeyPath="yes" Checksum="yes" />

@@ -8,6 +8,8 @@ PLIST_PATH="/Library/LaunchDaemons/${LABEL}.plist"
 CONFIG_DIRECTORY="/etc/agentdesktop"
 CONFIG_PATH="${CONFIG_DIRECTORY}/config.yaml"
 STATE_DIRECTORY="/var/lib/agentdesktop"
+APPLICATION="/Applications/agentdesktop.app"
+RELAUNCH_MARKER="/var/run/agentdesktop-relaunch"
 
 add_user_to_group() {
   username="$1"
@@ -27,6 +29,39 @@ remove_user_launch_agent() {
   if [ -n "${home_directory}" ]; then
     /bin/rm -f "${home_directory}/Library/LaunchAgents/${USER_LAUNCH_AGENT_LABEL}.plist"
   fi
+}
+
+relaunch_application_for_user() {
+  uid="$1"
+  case "${uid}" in
+    "" | *[!0-9]*)
+      echo "warning: invalid Agent Desktop relaunch user" >&2
+      return
+      ;;
+  esac
+
+  username=$(/usr/bin/id -nu "${uid}" 2>/dev/null || true)
+  if [ -z "${username}" ] || ! /bin/launchctl print "gui/${uid}" >/dev/null 2>&1; then
+    echo "warning: cannot relaunch Agent Desktop because user ${uid} is no longer logged in" >&2
+    return
+  fi
+
+  if ! /bin/launchctl asuser "${uid}" /usr/bin/sudo -u "${username}" \
+    /usr/bin/open -g "${APPLICATION}"; then
+    echo "warning: could not relaunch Agent Desktop for user ${uid}" >&2
+  fi
+}
+
+relaunch_applications() {
+  if [ ! -f "${RELAUNCH_MARKER}" ]; then
+    return
+  fi
+
+  user_ids=$(/bin/cat "${RELAUNCH_MARKER}" 2>/dev/null || true)
+  /bin/rm -f "${RELAUNCH_MARKER}"
+  for uid in ${user_ids}; do
+    relaunch_application_for_user "${uid}"
+  done
 }
 
 if ! /usr/sbin/dseditgroup -q -o read -n . "${GROUP_NAME}" >/dev/null 2>&1; then
@@ -69,5 +104,7 @@ fi
 /bin/launchctl bootstrap system "${PLIST_PATH}"
 /bin/launchctl enable "system/${LABEL}"
 /bin/launchctl kickstart -k "system/${LABEL}"
+
+relaunch_applications
 
 exit 0
