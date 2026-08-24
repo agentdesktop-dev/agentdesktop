@@ -2,6 +2,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Code2,
+  Cpu,
   Server,
   Sparkles,
 } from "lucide-react";
@@ -10,6 +11,7 @@ import claudeCodeIcon from "./assets/claude-code.svg";
 import claudeDesktopIcon from "./assets/claude-desktop.svg";
 import codexIcon from "./assets/codex.svg";
 import copilotIcon from "./assets/copilot.svg";
+import ollamaIcon from "./assets/ollama.svg";
 import openCodeIcon from "./assets/opencode.svg";
 
 export interface ToolMcpServer {
@@ -34,6 +36,11 @@ export interface ToolDiscovery {
   skills?: ToolSkill[];
 }
 
+export interface ModelRuntimeDiscovery {
+  kind: string;
+  models: Array<{ name: string }>;
+}
+
 const toolIcons: Record<string, string> = {
   codex: codexIcon,
   "claude-code": claudeCodeIcon,
@@ -55,6 +62,55 @@ export function friendlyTool(kind: string) {
     vscode: "VS Code",
   };
   return names[kind.toLowerCase()] ?? kind;
+}
+
+export function friendlyModelRuntime(kind: string) {
+  const names: Record<string, string> = {
+    ollama: "Ollama",
+  };
+  return names[kind.toLowerCase()] ?? kind;
+}
+
+function ModelRuntimeIcon({ kind }: { kind: string }) {
+  return kind.toLowerCase() === "ollama" ? (
+    <img
+      className="model-runtime-icon"
+      src={ollamaIcon}
+      alt=""
+      aria-hidden="true"
+    />
+  ) : (
+    <Cpu className="model-runtime-icon" size={18} aria-hidden="true" />
+  );
+}
+
+export function ModelRuntimeInventory({
+  runtime,
+}: {
+  runtime: ModelRuntimeDiscovery;
+}) {
+  return (
+    <div className="model-runtime-item">
+      <div className="model-runtime-heading">
+        <span className="tool-cell">
+          <ModelRuntimeIcon kind={runtime.kind} />
+          <strong>{friendlyModelRuntime(runtime.kind)}</strong>
+        </span>
+        <span>
+          {runtime.models.length} model{runtime.models.length === 1 ? "" : "s"}
+        </span>
+      </div>
+      {runtime.models.length ? (
+        <div className="model-name-list">
+          {runtime.models.map((model) => (
+            <code key={model.name}>{model.name}</code>
+          ))}
+        </div>
+      ) : (
+        <p className="model-runtime-empty">No models installed.</p>
+      )}
+    </div>
+  );
 }
 
 export function ToolIcon({ kind }: { kind: string }) {
@@ -146,7 +202,10 @@ export function ToolInventory({ discovery }: { discovery: ToolDiscovery }) {
   const mcpTab = useRef<HTMLButtonElement>(null);
   const skillsTab = useRef<HTMLButtonElement>(null);
 
-  function selectAdjacentTab(event: React.KeyboardEvent, tab: "mcp" | "skills") {
+  function selectAdjacentTab(
+    event: React.KeyboardEvent,
+    tab: "mcp" | "skills",
+  ) {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
       return;
     }

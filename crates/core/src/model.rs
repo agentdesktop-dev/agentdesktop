@@ -3,8 +3,26 @@ use std::{collections::BTreeMap, path::PathBuf};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Discovery {
     pub agents: Vec<Agent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_runtimes: Vec<ModelRuntime>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRuntime {
+    /// Local runtime that owns the discovered models.
+    pub kind: String,
+    pub models: Vec<LocalModel>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalModel {
+    /// Runtime-scoped name used for inference requests.
+    pub name: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

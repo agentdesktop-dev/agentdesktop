@@ -35,7 +35,12 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const Healthy: Story = {};
+export const Healthy: Story = {
+  play: async ({ canvas }) => {
+    await expect(canvas.getByText("Ollama")).toBeVisible();
+    await expect(canvas.getByText("qwen3:8b")).toBeVisible();
+  },
+};
 
 export const BrowsesDiscoveredCapabilities: Story = {
   play: async ({ canvas }) => {

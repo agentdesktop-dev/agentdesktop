@@ -2,7 +2,7 @@ use anyhow::Context;
 use sqlx::{AnyPool, any::AnyPoolOptions};
 use std::{collections::BTreeMap, path::PathBuf};
 
-use agentdesktop_core::model::{McpServer, Skill};
+use agentdesktop_core::model::{LocalModel, McpServer, ModelRuntime, Skill};
 use agentdesktop_proto::fleet::{ConfigStatus, Hello, Inventory, TelemetryEvent, telemetry_event};
 use serde::Serialize;
 
@@ -114,7 +114,26 @@ pub struct DeviceDetail {
     #[serde(flatten)]
     pub device: DeviceSummary,
     pub discoveries: Vec<DeviceDiscovery>,
+    pub model_runtimes: Vec<ModelRuntime>,
     pub recent_events: Vec<TelemetryEventRecord>,
+}
+
+#[derive(sqlx::FromRow)]
+struct ModelRuntimeRow {
+    kind: String,
+    models_json: String,
+}
+
+impl TryFrom<ModelRuntimeRow> for ModelRuntime {
+    type Error = anyhow::Error;
+
+    fn try_from(row: ModelRuntimeRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            kind: row.kind,
+            models: serde_json::from_str(&row.models_json)
+                .context("decode discovered local models")?,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -279,6 +298,18 @@ impl Database {
             .into_iter()
             .map(DeviceDiscovery::try_from)
             .collect::<anyhow::Result<_>>()?;
+        let rows: Vec<ModelRuntimeRow> = sqlx::query_as(
+            "SELECT kind, models_json FROM model_runtimes
+             WHERE device_id = $1 ORDER BY kind ASC",
+        )
+        .bind(device_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("load discovered model runtimes")?;
+        let model_runtimes = rows
+            .into_iter()
+            .map(ModelRuntime::try_from)
+            .collect::<anyhow::Result<_>>()?;
         let mut device: DeviceSummary = device.into();
         device.installed_tools = discoveries
             .iter()
@@ -288,6 +319,7 @@ impl Database {
         Ok(Some(DeviceDetail {
             device,
             discoveries,
+            model_runtimes,
             recent_events,
         }))
     }
@@ -377,6 +409,30 @@ impl Database {
             .bind(&discovery.path)
             .bind(mcp_servers_json)
             .bind(skills_json)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        sqlx::query("DELETE FROM model_runtimes WHERE device_id = $1")
+            .bind(device_id)
+            .execute(&mut *transaction)
+            .await?;
+        for runtime in &inventory.model_runtimes {
+            let models = runtime
+                .models
+                .iter()
+                .map(|model| LocalModel {
+                    name: model.name.clone(),
+                })
+                .collect::<Vec<_>>();
+            let models_json =
+                serde_json::to_string(&models).context("encode discovered local models")?;
+            sqlx::query(
+                "INSERT INTO model_runtimes (device_id, kind, models_json)
+                 VALUES ($1, $2, $3)",
+            )
+            .bind(device_id)
+            .bind(&runtime.kind)
+            .bind(models_json)
             .execute(&mut *transaction)
             .await?;
         }
@@ -514,7 +570,8 @@ mod tests {
     use std::{collections::BTreeMap, path::PathBuf};
 
     use agentdesktop_proto::fleet::{
-        Discovery, Inventory, McpServer, Skill, TelemetryEvent, ToolUseEvent, telemetry_event,
+        Discovery, Inventory, LocalModel, McpServer, ModelRuntime, Skill, TelemetryEvent,
+        ToolUseEvent, telemetry_event,
     };
 
     use super::Database;
@@ -561,6 +618,12 @@ mod tests {
                             front_matter_json: serde_json::to_vec(&front_matter).unwrap(),
                         }],
                     }],
+                    model_runtimes: vec![ModelRuntime {
+                        kind: "ollama".to_owned(),
+                        models: vec![LocalModel {
+                            name: "qwen3:8b".to_owned(),
+                        }],
+                    }],
                 },
             )
             .await
@@ -598,6 +661,8 @@ mod tests {
             device.discoveries[0].skills[0].front_matter["name"],
             "llm-research"
         );
+        assert_eq!(device.model_runtimes[0].kind, "ollama");
+        assert_eq!(device.model_runtimes[0].models[0].name, "qwen3:8b");
         assert_eq!(device.recent_events.len(), 1);
         assert_eq!(device.recent_events[0].event_type, "tool.use");
         assert_eq!(device.recent_events[0].payload["toolName"], "Bash");

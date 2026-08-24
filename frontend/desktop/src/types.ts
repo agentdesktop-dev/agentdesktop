@@ -56,4 +56,8 @@ export interface DiscoveredAgent {
 
 export interface Discovery {
   agents: DiscoveredAgent[];
+  modelRuntimes?: Array<{
+    kind: string;
+    models: Array<{ name: string }>;
+  }>;
 }
