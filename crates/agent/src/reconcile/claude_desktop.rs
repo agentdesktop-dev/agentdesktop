@@ -9,7 +9,9 @@ use tracing::info;
 
 use crate::secure_fs;
 
-use super::{ReconcileMode, deep_merge, json_merge, shell_quote};
+#[cfg(any(not(windows), test))]
+use super::shell_quote;
+use super::{ReconcileMode, deep_merge, json_merge};
 
 const OWNER_MARKER: &[u8] = b"Agentdesktop\n";
 
@@ -50,15 +52,11 @@ pub fn apply(
             .is_some_and(InferenceGatewayAuthentication::uses_credential_helper)
     });
     if uses_credential_helper {
-        let script = format!(
-            "#!/bin/sh\nexec {} --socket {} credential --client-id claude-desktop\n",
-            shell_quote(&credential_binary.to_string_lossy()),
-            shell_quote(&socket.to_string_lossy())
-        );
+        let script = credential_helper_contents(credential_binary, socket)?;
         write_owned(
             helper_path,
             &helper_owner,
-            script.as_bytes(),
+            &script,
             0o755,
             "credential helper",
             mode,
@@ -84,6 +82,50 @@ pub fn apply(
         "managed settings",
         mode,
     )
+}
+
+fn credential_helper_contents(credential_binary: &Path, socket: &Path) -> anyhow::Result<Vec<u8>> {
+    #[cfg(windows)]
+    return windows_credential_helper_contents(
+        &credential_binary.to_string_lossy(),
+        &socket.to_string_lossy(),
+    );
+    #[cfg(not(windows))]
+    return Ok(posix_credential_helper_contents(
+        &credential_binary.to_string_lossy(),
+        &socket.to_string_lossy(),
+    ));
+}
+
+#[cfg(any(not(windows), test))]
+fn posix_credential_helper_contents(credential_binary: &str, socket: &str) -> Vec<u8> {
+    format!(
+        "#!/bin/sh\nexec {} --socket {} credential --client-id claude-desktop\n",
+        shell_quote(credential_binary),
+        shell_quote(socket)
+    )
+    .into_bytes()
+}
+
+#[cfg(any(windows, test))]
+fn windows_credential_helper_contents(
+    credential_binary: &str,
+    socket: &str,
+) -> anyhow::Result<Vec<u8>> {
+    Ok(format!(
+        "@echo off\r\n{} --socket {} credential --client-id claude-desktop\r\n",
+        batch_quote(credential_binary)?,
+        batch_quote(socket)?
+    )
+    .into_bytes())
+}
+
+#[cfg(any(windows, test))]
+fn batch_quote(value: &str) -> anyhow::Result<String> {
+    if value.contains(['"', '\r', '\n']) {
+        anyhow::bail!("Windows helper argument contains an unsupported quote or newline");
+    }
+    Ok(format!("\"{}\"", value.replace('%', "%%")))
 }
 
 fn managed_settings(
@@ -235,9 +277,42 @@ fn remove_owner_marker(path: &Path) -> anyhow::Result<()> {
 mod tests {
     use std::path::Path;
 
+    use super::{
+        batch_quote, managed_settings, posix_credential_helper_contents,
+        windows_credential_helper_contents,
+    };
     use agentdesktop_core::config::parse_daemon;
 
-    use super::managed_settings;
+    #[test]
+    fn generates_platform_specific_credential_helpers() {
+        let binary = r"C:\Program Files\Agent Desktop\agentdesktop.exe";
+        let socket = r"\\.\pipe\agentdesktop";
+
+        let windows = windows_credential_helper_contents(binary, socket).expect("Windows helper");
+        assert_eq!(
+            String::from_utf8(windows).unwrap(),
+            "@echo off\r\n\"C:\\Program Files\\Agent Desktop\\agentdesktop.exe\" --socket \"\\\\.\\pipe\\agentdesktop\" credential --client-id claude-desktop\r\n"
+        );
+
+        let posix = posix_credential_helper_contents(
+            "/opt/Agent Desktop/agentdesktop",
+            "/run/agentdesktop.sock",
+        );
+        assert_eq!(
+            String::from_utf8(posix).unwrap(),
+            "#!/bin/sh\nexec '/opt/Agent Desktop/agentdesktop' --socket '/run/agentdesktop.sock' credential --client-id claude-desktop\n"
+        );
+    }
+
+    #[test]
+    fn escapes_batch_expansion_and_rejects_unrepresentable_arguments() {
+        assert_eq!(
+            batch_quote(r"C:\Agent%TEMP%\agentdesktop.exe").unwrap(),
+            r#""C:\Agent%%TEMP%%\agentdesktop.exe""#
+        );
+        assert!(batch_quote("bad\"path").is_err());
+        assert!(batch_quote("bad\npath").is_err());
+    }
 
     #[test]
     fn gateway_settings_override_pass_through_values() {
