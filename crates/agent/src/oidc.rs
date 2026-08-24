@@ -6,8 +6,8 @@ use anyhow::{Context, bail};
 use axum::{
     Router,
     extract::{Query, State},
-    http::StatusCode,
-    response::{Html, IntoResponse, Response},
+    http::{StatusCode, header},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::get,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -27,7 +27,7 @@ use crate::{
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const BRAND_MARK_SVG: &str = include_str!("../../../images/mark.svg");
 
-fn callback_page(title: &str, message: &str) -> String {
+fn page(title: &str, content: &str) -> String {
     format!(
         r##"<!doctype html>
 <html lang="en">
@@ -44,13 +44,26 @@ fn callback_page(title: &str, message: &str) -> String {
     .brand-mark svg {{ display: block; width: 100%; height: 100%; }}
         h1 {{ margin: 0 0 8px; font-size: 20px; line-height: 1.35; font-weight: 600; letter-spacing: -.01em; }}
         p {{ margin: 0; color: #71717a; font-size: 14px; line-height: 1.55; }}
+        .steps {{ display: grid; gap: 10px; margin: 24px 0; }}
+        .step {{ display: grid; grid-template-columns: 22px 1fr; gap: 11px; padding: 14px; border: 1px solid #e4e4e7; border-radius: 8px; }}
+        .check {{ position: relative; width: 20px; height: 20px; margin-top: 1px; border: 1.5px solid #d4d4d8; border-radius: 6px; background: linear-gradient(#fff, #fafafa); box-shadow: inset 0 0 0 1px rgba(255,255,255,.7), 0 1px 2px rgba(24,24,27,.06); }}
+        .check.complete {{ border-color: #8023c3; background: linear-gradient(145deg, #9333d1, #7020ad); box-shadow: 0 2px 6px rgba(128,35,195,.24); }}
+        .check.complete::after {{ content: ""; position: absolute; left: 6px; top: 3px; width: 5px; height: 9px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg); }}
+        .check.skipped {{ border-color: #d4d4d8; background: #f4f4f5; }}
+        .check.skipped::after {{ content: ""; position: absolute; left: 5px; right: 5px; top: 8px; height: 2px; border-radius: 2px; background: #a1a1aa; }}
+        .step strong {{ display: block; margin-bottom: 3px; font-size: 14px; }}
+        .step span {{ color: #71717a; font-size: 13px; line-height: 1.45; }}
+        .tag {{ float: right; color: #71717a; font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: .04em; }}
+        .actions {{ display: flex; align-items: center; gap: 16px; margin-top: 24px; }}
+        .button {{ display: inline-block; padding: 10px 15px; border-radius: 7px; background: #8023c3; color: #fff; font-size: 14px; font-weight: 600; text-decoration: none; }}
+        .skip {{ color: #52525b; font-size: 14px; text-decoration: none; }}
   </style>
 </head>
 <body>
   <main>
         <div class="brand-mark" role="img" aria-label="Agentdesktop">{brand_mark}</div>
         <h1>{title}</h1>
-        <p>{message}</p>
+        {content}
   </main>
 </body>
 </html>"##,
@@ -58,10 +71,157 @@ fn callback_page(title: &str, message: &str) -> String {
     )
 }
 
+fn callback_page(title: &str, message: &str) -> String {
+    page(title, &format!("<p>{message}</p>"))
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum AuthorizationPage {
+    Identity { subscription_available: bool },
+    Subscription,
+}
+
+impl AuthorizationPage {
+    fn html(self) -> String {
+        match self {
+            Self::Identity {
+                subscription_available,
+            } => page(
+                "Connect Agentdesktop",
+                &format!(
+                    r#"<p>Agentdesktop needs your identity before it can issue credentials to configured agents.</p>
+{}
+<div class="actions"><a class="button" href="/continue">Continue to sign in</a></div>"#,
+                    checklist(false, subscription_available, SubscriptionState::Pending)
+                ),
+            ),
+            Self::Subscription => page(
+                "Connect Agentdesktop",
+                &format!(
+                    r#"<p>Your organization identity is connected. You can optionally add the model provider subscription configured for this agent.</p>
+{}
+<div class="actions"><a class="button" href="/continue">Connect subscription</a><a class="skip" href="/skip">Skip</a></div>"#,
+                    checklist(true, true, SubscriptionState::Pending)
+                ),
+            ),
+        }
+    }
+
+    fn success_html(self) -> String {
+        match self {
+            Self::Identity {
+                subscription_available: true,
+            } => page(
+                "Connect Agentdesktop",
+                &format!(
+                    r#"<p>Organization sign-in is complete. Preparing the optional subscription step…</p>
+{}
+<script>
+const advance = async () => {{
+  try {{
+    const response = await fetch('http://localhost:51327/flow-ready', {{ cache: 'no-store' }});
+    if (response.ok) {{ location.replace('http://localhost:51327/'); return; }}
+  }} catch (_) {{}}
+  setTimeout(advance, 400);
+}};
+setTimeout(advance, 400);
+</script>"#,
+                    checklist(true, true, SubscriptionState::Pending)
+                ),
+            ),
+            Self::Identity {
+                subscription_available: false,
+            } => page(
+                "Agentdesktop connected",
+                &format!(
+                    "<p>Organization sign-in is complete. You can close this window.</p>{}",
+                    checklist(true, false, SubscriptionState::Pending)
+                ),
+            ),
+            Self::Subscription => page(
+                "Agentdesktop connected",
+                &format!(
+                    "<p>All configured connections are complete. You can close this window.</p>{}",
+                    checklist(true, true, SubscriptionState::Connected)
+                ),
+            ),
+        }
+    }
+
+    fn skipped_html(self) -> String {
+        page(
+            "Agentdesktop connected",
+            &format!(
+                "<p>The optional subscription was skipped. You can close this window.</p>{}",
+                checklist(true, true, SubscriptionState::Skipped)
+            ),
+        )
+    }
+
+    fn optional(self) -> bool {
+        matches!(self, Self::Subscription)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SubscriptionState {
+    Pending,
+    Connected,
+    Skipped,
+}
+
+fn checklist(
+    identity_connected: bool,
+    subscription_available: bool,
+    subscription_state: SubscriptionState,
+) -> String {
+    let identity_state = if identity_connected { " complete" } else { "" };
+    let subscription = if subscription_available {
+        let (state, status, description) = match subscription_state {
+            SubscriptionState::Pending => (
+                "",
+                "Optional",
+                "Connect the model provider subscription configured for this agent.",
+            ),
+            SubscriptionState::Connected => (
+                " complete",
+                "Complete",
+                "The configured model provider subscription is connected.",
+            ),
+            SubscriptionState::Skipped => (
+                " skipped",
+                "Skipped",
+                "Agentdesktop will use your organization identity credential only.",
+            ),
+        };
+        format!(
+            r#"<div class="step"><span class="check{state}" aria-hidden="true"></span><div><span class="tag">{status}</span><strong>Model provider subscription</strong><span>{description}</span></div></div>"#
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        r#"<div class="steps">
+  <div class="step"><span class="check{identity_state}" aria-hidden="true"></span><div><span class="tag">Required</span><strong>Organization sign-in</strong><span>Authenticate with the configured identity provider.</span></div></div>
+  {subscription}
+</div>"#
+    )
+}
+
 #[derive(Clone)]
 struct CallbackState {
     expected_state: String,
-    result: Arc<Mutex<Option<oneshot::Sender<anyhow::Result<String>>>>>,
+    authorization_url: String,
+    page: AuthorizationPage,
+    result: Arc<Mutex<Option<AuthorizationResultSender>>>,
+}
+
+type AuthorizationResultSender = oneshot::Sender<anyhow::Result<Option<String>>>;
+
+#[derive(Clone)]
+struct ContinuedPageState {
+    html: String,
+    viewed: Arc<Mutex<Option<oneshot::Sender<()>>>>,
 }
 
 #[derive(Deserialize)]
@@ -262,14 +422,42 @@ pub(crate) async fn wait_for_authorization_code(
     expected_state: String,
     callback_listen: Option<SocketAddr>,
 ) -> anyhow::Result<String> {
+    wait_for_authorization_code_with_page(
+        authorization_url,
+        redirect_uri,
+        expected_state,
+        callback_listen,
+        AuthorizationPage::Identity {
+            subscription_available: false,
+        },
+        true,
+    )
+    .await?
+    .context("required authorization was skipped")
+}
+
+pub(crate) async fn wait_for_authorization_code_with_page(
+    authorization_url: &str,
+    redirect_uri: &Url,
+    expected_state: String,
+    callback_listen: Option<SocketAddr>,
+    page: AuthorizationPage,
+    open_browser: bool,
+) -> anyhow::Result<Option<String>> {
     let listener = bind_callback(redirect_uri, callback_listen).await?;
     let (result_sender, result_receiver) = oneshot::channel();
     let state = CallbackState {
         expected_state,
+        authorization_url: authorization_url.to_owned(),
+        page,
         result: Arc::new(Mutex::new(Some(result_sender))),
     };
     let callback_path = redirect_uri.path().to_owned();
     let app = Router::new()
+        .route("/", get(authorization_prompt))
+        .route("/continue", get(continue_authorization))
+        .route("/skip", get(skip_authorization))
+        .route("/flow-ready", get(flow_ready))
         .route(&callback_path, get(callback))
         .with_state(state);
     let (shutdown_sender, shutdown_receiver) = oneshot::channel::<()>();
@@ -282,10 +470,18 @@ pub(crate) async fn wait_for_authorization_code(
             .context("serve OIDC callback")
     });
 
-    tracing::info!(%authorization_url, "opening browser for OIDC sign-in");
-    println!("Open this URL to sign in to Agentdesktop:\n{authorization_url}");
-    if let Err(error) = open::that(authorization_url) {
-        tracing::warn!(%error, "could not open the browser automatically");
+    let mut prompt_url = redirect_uri.clone();
+    prompt_url.set_path("/");
+    prompt_url.set_query(None);
+    prompt_url.set_fragment(None);
+    println!("Open this URL to connect Agentdesktop:\n{prompt_url}");
+    if open_browser {
+        tracing::info!(%authorization_url, %prompt_url, "opening Agentdesktop authorization page");
+        if let Err(error) = open::that(prompt_url.as_str()) {
+            tracing::warn!(%error, "could not open the browser automatically");
+        }
+    } else {
+        tracing::info!(%authorization_url, %prompt_url, "continuing in existing Agentdesktop authorization page");
     }
 
     let authorization_code = tokio::time::timeout(CALLBACK_TIMEOUT, result_receiver)
@@ -295,6 +491,85 @@ pub(crate) async fn wait_for_authorization_code(
     let _ = shutdown_sender.send(());
     server.await.context("join OIDC callback server")??;
     Ok(authorization_code)
+}
+
+async fn authorization_prompt(State(state): State<CallbackState>) -> Html<String> {
+    Html(state.page.html())
+}
+
+async fn continue_authorization(State(state): State<CallbackState>) -> Redirect {
+    Redirect::temporary(&state.authorization_url)
+}
+
+async fn skip_authorization(State(state): State<CallbackState>) -> Response {
+    if !state.page.optional() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if let Some(sender) = state.result.lock().await.take() {
+        let _ = sender.send(Ok(None));
+    }
+    Html(state.page.skipped_html()).into_response()
+}
+
+async fn flow_ready(State(state): State<CallbackState>) -> Response {
+    let status = if state.page == AuthorizationPage::Subscription {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    };
+    let mut response = status.into_response();
+    response
+        .headers_mut()
+        .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".parse().unwrap());
+    response
+}
+
+pub(crate) async fn continue_subscription_page(
+    redirect_uri: &Url,
+    callback_listen: Option<SocketAddr>,
+    connected: bool,
+) -> anyhow::Result<()> {
+    let listener = bind_callback(redirect_uri, callback_listen).await?;
+    let (viewed_sender, viewed_receiver) = oneshot::channel();
+    let html = if connected {
+        AuthorizationPage::Subscription.success_html()
+    } else {
+        AuthorizationPage::Subscription.skipped_html()
+    };
+    let state = ContinuedPageState {
+        html,
+        viewed: Arc::new(Mutex::new(Some(viewed_sender))),
+    };
+    let app = Router::new()
+        .route("/", get(continued_page))
+        .route("/flow-ready", get(continued_flow_ready))
+        .with_state(state);
+    tokio::spawn(async move {
+        let result = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = tokio::time::timeout(CALLBACK_TIMEOUT, viewed_receiver).await;
+            })
+            .await;
+        if let Err(error) = result {
+            tracing::warn!(%error, "serve continued Agentdesktop authorization page");
+        }
+    });
+    Ok(())
+}
+
+async fn continued_page(State(state): State<ContinuedPageState>) -> Html<String> {
+    if let Some(sender) = state.viewed.lock().await.take() {
+        let _ = sender.send(());
+    }
+    Html(state.html)
+}
+
+async fn continued_flow_ready() -> Response {
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response
+        .headers_mut()
+        .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".parse().unwrap());
+    response
 }
 
 async fn bind_callback(
@@ -353,6 +628,7 @@ async fn callback(
         query
             .code
             .context("OIDC callback has no authorization code")
+            .map(Some)
     };
     let succeeded = result.is_ok();
     if let Some(sender) = state.result.lock().await.take() {
@@ -360,11 +636,7 @@ async fn callback(
     }
 
     if succeeded {
-        Html(callback_page(
-            "Sign-in complete",
-            "You can close this window and return to Agentdesktop.",
-        ))
-        .into_response()
+        Html(state.page.success_html()).into_response()
     } else {
         (
             StatusCode::BAD_REQUEST,
@@ -391,8 +663,62 @@ pub(crate) fn pkce() -> (String, String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{TokenResponse, apply_refreshed_tokens};
+    use super::{AuthorizationPage, TokenResponse, apply_refreshed_tokens};
     use crate::identity::{Identity, OAuthCredentials};
+
+    #[test]
+    fn identity_page_only_mentions_subscription_when_configured() {
+        let without_subscription = AuthorizationPage::Identity {
+            subscription_available: false,
+        }
+        .html();
+        assert!(without_subscription.contains("Organization sign-in"));
+        assert!(!without_subscription.contains("Model provider subscription"));
+
+        let with_subscription = AuthorizationPage::Identity {
+            subscription_available: true,
+        }
+        .html();
+        assert!(with_subscription.contains("Organization sign-in"));
+        assert!(with_subscription.contains("Model provider subscription"));
+        assert!(with_subscription.contains("Optional"));
+    }
+
+    #[test]
+    fn subscription_page_can_be_skipped() {
+        let html = AuthorizationPage::Subscription.html();
+        assert!(html.contains("You can optionally add"));
+        assert!(html.contains("href=\"/skip\""));
+        assert!(html.contains("Organization sign-in"));
+        assert!(html.contains("class=\"check complete\""));
+    }
+
+    #[test]
+    fn completed_subscription_page_checks_both_steps() {
+        let html = AuthorizationPage::Subscription.success_html();
+        assert_eq!(html.matches("class=\"check complete\"").count(), 2);
+        assert!(html.contains("All configured connections are complete"));
+    }
+
+    #[test]
+    fn identity_completion_advances_same_tab_and_skip_preserves_checklist() {
+        let identity_complete = AuthorizationPage::Identity {
+            subscription_available: true,
+        }
+        .success_html();
+        assert_eq!(
+            identity_complete
+                .matches("class=\"check complete\"")
+                .count(),
+            1
+        );
+        assert!(identity_complete.contains("location.replace('http://localhost:51327/')"));
+
+        let skipped = AuthorizationPage::Subscription.skipped_html();
+        assert_eq!(skipped.matches("class=\"check complete\"").count(), 1);
+        assert!(skipped.contains("class=\"check skipped\""));
+        assert!(skipped.contains("Skipped"));
+    }
 
     #[test]
     fn refresh_replaces_rotated_oauth_credentials() {

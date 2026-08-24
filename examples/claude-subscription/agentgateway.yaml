@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+
+llm:
+  port: 4000
+  policies:
+    # Agentdesktop sends agentdesktop:<subscription>:<identity>. Validate the
+    # OIDC token in the third component as the caller identity.
+    jwtAuth:
+      mode: permissive
+      location:
+        expression: |
+          request.headers["authorization"].split(" ")[1].with(credential,
+            credential.split(":").with(parts,
+              parts[0] == "agentdesktop" ? parts[2] : credential
+            )
+          )
+      issuer: http://127.0.0.1:5556/dex
+      audiences:
+      - local-public
+      jwks:
+        url: http://127.0.0.1:5556/dex/keys
+
+    # Send the subscription credential in the first component upstream to
+    # Anthropic instead of the composite credential.
+    transformations:
+      request:
+        set:
+          authorization: |
+            "Bearer " + request.headers["authorization"].split(" ")[1].with(credential,
+              credential.split(":").with(parts,
+                parts[0] == "agentdesktop" ? parts[1] : credential
+              )
+            )
+
+  models:
+  - name: "*"
+    provider: anthropic

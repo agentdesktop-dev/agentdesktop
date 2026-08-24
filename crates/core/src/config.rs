@@ -362,6 +362,9 @@ pub struct ClaudeCodeConfig {
     /// Whether this program uses the top-level inference gateway.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub use_inference_gateway: bool,
+    /// Upstream authentication used by this agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<ProgramAuthentication>,
     /// Arbitrary Claude Code managed-settings values, flattened into this object.
     #[serde(default, flatten)]
     pub settings: BTreeMap<String, serde_json::Value>,
@@ -378,6 +381,9 @@ pub struct ClaudeDesktopConfig {
     /// Whether this program uses the top-level inference gateway.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub use_inference_gateway: bool,
+    /// Upstream authentication used by this agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<ProgramAuthentication>,
     /// Arbitrary Claude Desktop managed-settings values, flattened into this object.
     #[serde(default, flatten)]
     pub settings: BTreeMap<String, serde_json::Value>,
@@ -429,6 +435,16 @@ pub struct OpenCodeConfig {
     /// Arbitrary values written to OpenCode's system-managed configuration.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub managed_config: BTreeMap<String, serde_json::Value>,
+}
+
+/// Upstream authentication selected by a managed agent.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum ProgramAuthentication {
+    /// Offer the model provider subscription associated with the local user.
+    /// The user may skip it and continue with gateway identity only.
+    Subscription,
 }
 
 /// Loads and validates a daemon YAML configuration file from `path`.
@@ -614,6 +630,43 @@ fn validate_daemon(
         }
     }
 
+    for (name, subscription, uses_gateway) in
+        [
+            (
+                "claudeCode",
+                programs.claude_code.as_ref().is_some_and(|program| {
+                    program.auth == Some(ProgramAuthentication::Subscription)
+                }),
+                programs
+                    .claude_code
+                    .as_ref()
+                    .is_some_and(|program| program.use_inference_gateway),
+            ),
+            (
+                "claudeDesktop",
+                programs.claude_desktop.as_ref().is_some_and(|program| {
+                    program.auth == Some(ProgramAuthentication::Subscription)
+                }),
+                programs
+                    .claude_desktop
+                    .as_ref()
+                    .is_some_and(|program| program.use_inference_gateway),
+            ),
+        ]
+    {
+        if subscription && (!uses_gateway || inference_gateway.is_none()) {
+            anyhow::bail!(
+                "programs.{name}.auth subscription requires that program to use an inference gateway"
+            );
+        }
+        if subscription && inference_gateway.is_some_and(|gateway| gateway.authentication.is_none())
+        {
+            anyhow::bail!(
+                "programs.{name}.auth subscription requires oidc or controllerJwt gateway authentication"
+            );
+        }
+    }
+
     if let Some(open_code) = &programs.open_code
         && inference_gateway.is_some()
         && open_code.use_inference_gateway
@@ -721,6 +774,10 @@ oidc:
             .expect("controller-connected daemon example");
         parse_daemon(include_str!("../../../examples/claude/claude-code.yaml"))
             .expect("Claude Code daemon configuration example");
+        parse_daemon(include_str!(
+            "../../../examples/claude-subscription/config.yaml"
+        ))
+        .expect("Claude subscription user configuration example");
         parse_daemon(include_str!("../../../examples/standalone/config.yaml"))
             .expect("standalone daemon configuration example");
     }
@@ -767,6 +824,83 @@ inferenceGateway:
                 .unwrap_err()
                 .to_string()
                 .contains("loopback")
+        );
+    }
+
+    #[test]
+    fn claude_subscription_composes_with_oidc() {
+        let daemon = parse_daemon(
+            r#"
+inferenceGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: oidc
+    issuer: https://login.example.com
+    clientId: agentdesktop
+programs:
+  claudeCode:
+    auth: subscription
+"#,
+        )
+        .expect("valid Claude subscription and OIDC configuration");
+
+        let gateway = daemon.inference_gateway.expect("inference gateway");
+        let Some(InferenceGatewayAuthentication::Oidc {
+            redirect_uri,
+            scopes,
+            ..
+        }) = gateway.authentication
+        else {
+            panic!("expected OIDC authentication");
+        };
+        assert_eq!(redirect_uri, "http://127.0.0.1:51327/callback");
+        assert_eq!(scopes, ["openid", "offline_access"]);
+        assert_eq!(
+            daemon.programs.claude_code.unwrap().auth,
+            Some(super::ProgramAuthentication::Subscription)
+        );
+    }
+
+    #[test]
+    fn subscription_requires_gateway_identity_authentication() {
+        let error = parse_daemon(
+            r#"
+inferenceGateway:
+  url: https://gateway.example.com
+programs:
+  claudeCode:
+    auth: subscription
+"#,
+        )
+        .expect_err("subscription without identity must fail");
+        assert!(format!("{error:#}").contains("requires oidc or controllerJwt"));
+    }
+
+    #[test]
+    fn claude_subscription_composes_with_controller_jwt() {
+        let daemon = parse_daemon(
+            r#"
+inferenceGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
+    allowedClientIds: [claude-code]
+programs:
+  claudeCode:
+    auth: subscription
+"#,
+        )
+        .expect("valid Claude subscription and controller JWT configuration");
+
+        let gateway = daemon.inference_gateway.expect("inference gateway");
+        assert!(matches!(
+            gateway.authentication,
+            Some(InferenceGatewayAuthentication::ControllerJwt { .. })
+        ));
+        assert_eq!(
+            daemon.programs.claude_code.unwrap().auth,
+            Some(super::ProgramAuthentication::Subscription)
         );
     }
 

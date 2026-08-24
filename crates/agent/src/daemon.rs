@@ -271,7 +271,7 @@ where
     }
 
     secure_fs::ensure_private_dir(&args.state_dir)?;
-    start_gateway_oidc(&config, args.state_dir.clone(), args.oidc_callback_listen);
+    start_gateway_authentication(&config, args.state_dir.clone(), args.oidc_callback_listen);
     let enrollment = EnrollmentState::new(config.controller.is_some());
     let local_config = config.clone();
     let cached_remote_path = args.state_dir.join("remote-config.yaml");
@@ -372,48 +372,73 @@ where
     Ok(())
 }
 
-fn start_gateway_oidc(
+fn start_gateway_authentication(
     config: &agentdesktop_core::config::DaemonConfig,
     state_dir: PathBuf,
     callback_listen: Option<SocketAddr>,
 ) {
-    let Some(agentdesktop_core::config::InferenceGatewayAuthentication::Oidc {
-        issuer,
-        client_id,
-        redirect_uri,
-        scopes,
-        allow_insecure,
-    }) = config
-        .inference_gateway
-        .as_ref()
-        .and_then(|gateway| gateway.authentication.as_ref())
-    else {
+    let Some(gateway) = config.inference_gateway.as_ref() else {
         return;
     };
-    let issuer = issuer.clone();
-    let client_id = client_id.clone();
-    let redirect_uri = redirect_uri.clone();
-    let scopes = scopes.clone();
-    let allow_insecure = *allow_insecure;
+    let authentication = gateway.authentication.clone();
+    let subscription = config.programs.claude_code.as_ref().is_some_and(|program| {
+        program.auth == Some(agentdesktop_core::config::ProgramAuthentication::Subscription)
+    }) || config
+        .programs
+        .claude_desktop
+        .as_ref()
+        .is_some_and(|program| {
+            program.auth == Some(agentdesktop_core::config::ProgramAuthentication::Subscription)
+        });
+    if authentication.is_none() && !subscription {
+        return;
+    }
     tokio::spawn(async move {
-        tracing::info!(%issuer, "starting inference gateway OIDC authentication");
-        match gateway_oidc::credential(
-            &issuer,
-            &client_id,
-            &redirect_uri,
-            &scopes,
-            allow_insecure,
-            &state_dir,
-            callback_listen,
-        )
-        .await
-        {
-            Ok(_) => tracing::info!(%issuer, "inference gateway OIDC authentication ready"),
-            Err(error) => tracing::error!(
+        let result: anyhow::Result<()> = async {
+            let mut continue_in_browser = false;
+            if let Some(agentdesktop_core::config::InferenceGatewayAuthentication::Oidc {
+                issuer,
+                client_id,
+                redirect_uri,
+                scopes,
+                allow_insecure,
+            }) = authentication
+            {
+                tracing::info!(%issuer, "starting inference gateway OIDC authentication");
+                let acquired = gateway_oidc::credential(
+                    &issuer,
+                    &client_id,
+                    &redirect_uri,
+                    &scopes,
+                    allow_insecure,
+                    &state_dir,
+                    gateway_oidc::LoginOptions {
+                        callback_listen,
+                        subscription_available: subscription,
+                    },
+                )
+                .await?;
+                continue_in_browser = acquired.interactive && subscription;
+                tracing::info!(%issuer, "inference gateway OIDC authentication ready");
+            }
+            if subscription {
+                tracing::info!("starting Anthropic subscription authentication");
+                crate::anthropic_oauth::credential(
+                    &state_dir,
+                    callback_listen,
+                    !continue_in_browser,
+                )
+                .await?;
+                tracing::info!("Anthropic subscription authentication ready");
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            tracing::error!(
                 error = %format!("{error:#}"),
-                %issuer,
-                "inference gateway OIDC authentication failed"
-            ),
+                "inference gateway authentication failed"
+            );
         }
     });
 }

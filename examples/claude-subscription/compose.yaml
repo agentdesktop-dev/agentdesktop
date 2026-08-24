@@ -1,0 +1,15 @@
+services:
+  dex:
+    image: ghcr.io/dexidp/dex:v2.45.1
+    command: dex serve /etc/dex/config.yaml
+    ports:
+    - 127.0.0.1:5556:5556
+    volumes:
+    - ./dex.yaml:/etc/dex/config.yaml:ro
+
+  agentgateway:
+    image: cr.agentgateway.dev/agentgateway:v1.4.1
+    command: -f /etc/agentgateway/config.yaml
+    network_mode: host
+    volumes:
+    - ./agentgateway.yaml:/etc/agentgateway/config.yaml:ro
