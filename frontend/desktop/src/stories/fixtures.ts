@@ -253,6 +253,12 @@ export const populatedDiscovery: Discovery = {
       skills: skills.slice(8),
     },
   ],
+  modelRuntimes: [
+    {
+      kind: "ollama",
+      models: [{ name: "gemma3:4b" }, { name: "qwen3:8b" }],
+    },
+  ],
 };
 
 export const emptyDiscovery: Discovery = { agents: [] };

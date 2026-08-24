@@ -459,10 +459,16 @@ async fn handle_agent_message(
                 .iter()
                 .map(|discovery| discovery.skills.len())
                 .sum::<usize>();
+            let model_runtimes = inventory.model_runtimes.len();
+            let models = inventory
+                .model_runtimes
+                .iter()
+                .map(|runtime| runtime.models.len())
+                .sum::<usize>();
             database.replace_inventory(device_id, &inventory).await?;
             info!(
                 device_id,
-                discoveries, mcp_servers, skills, "stored device inventory"
+                discoveries, mcp_servers, skills, model_runtimes, models, "stored device inventory"
             );
         }
         Some(agent_message::Message::ConfigStatus(status)) => {

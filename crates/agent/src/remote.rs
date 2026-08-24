@@ -336,11 +336,26 @@ async fn connect(
                         .collect(),
                 })
                 .collect(),
+            model_runtimes: discovered
+                .model_runtimes
+                .iter()
+                .map(|runtime| agentdesktop_proto::fleet::ModelRuntime {
+                    kind: runtime.kind.clone(),
+                    models: runtime
+                        .models
+                        .iter()
+                        .map(|model| agentdesktop_proto::fleet::LocalModel {
+                            name: model.name.clone(),
+                        })
+                        .collect(),
+                })
+                .collect(),
         }),
     )
     .await?;
     info!(
         discoveries = discovered.agents.len(),
+        model_runtimes = discovered.model_runtimes.len(),
         "reported inventory to controller"
     );
 

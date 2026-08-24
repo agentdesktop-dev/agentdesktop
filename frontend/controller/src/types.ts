@@ -34,6 +34,10 @@ export type DeviceDetail = Device & {
       frontMatter: Record<string, unknown>;
     }>;
   }>;
+  model_runtimes: Array<{
+    kind: string;
+    models: Array<{ name: string }>;
+  }>;
   recent_events: Array<{
     id: string;
     timestamp_unix_ms: number;

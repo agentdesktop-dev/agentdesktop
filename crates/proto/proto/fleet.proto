@@ -113,6 +113,16 @@ message Heartbeat {
 
 message Inventory {
   repeated Discovery discoveries = 1;
+  repeated ModelRuntime model_runtimes = 2;
+}
+
+message ModelRuntime {
+  string kind = 1;
+  repeated LocalModel models = 2;
+}
+
+message LocalModel {
+  string name = 1;
 }
 
 message Discovery {

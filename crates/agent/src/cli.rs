@@ -65,8 +65,8 @@ pub async fn run(command: ClientCommand, socket: PathBuf) -> anyhow::Result<()> 
         }
         ClientCommand::Discover => {
             let discovery: Discovery = client::get(&socket, "/v1/discovery").await?;
-            if discovery.agents.is_empty() {
-                println!("No agents discovered");
+            if discovery.agents.is_empty() && discovery.model_runtimes.is_empty() {
+                println!("No agents or models discovered");
             }
             for agent in discovery.agents {
                 let version = agent.version.as_deref().unwrap_or("unknown version");
@@ -76,6 +76,11 @@ pub async fn run(command: ClientCommand, socket: PathBuf) -> anyhow::Result<()> 
                     version,
                     agent.executable.display()
                 );
+            }
+            for runtime in discovery.model_runtimes {
+                for model in runtime.models {
+                    println!("{}\tmodel\t{}", runtime.kind, model.name);
+                }
             }
         }
         ClientCommand::Config => {

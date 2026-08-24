@@ -1,10 +1,11 @@
 import {
   CardHeader,
   friendlyTool,
+  ModelRuntimeInventory,
   ToolIcon,
   ToolInventory,
 } from "@agentdesktop/ui";
-import { ArrowLeft, Box, CircleAlert, Code2, Trash2 } from "lucide-react";
+import { ArrowLeft, Box, CircleAlert, Code2, Cpu, Trash2 } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 import {
@@ -40,6 +41,10 @@ export function DeviceView({
   onDeleteConfirm,
   onDeleteRequest,
 }: DeviceViewProps) {
+  const modelCount = device.model_runtimes.reduce(
+    (total, runtime) => total + runtime.models.length,
+    0,
+  );
   return (
     <div className="stack">
       <Link href="/devices" className="back-link">
@@ -157,6 +162,24 @@ export function DeviceView({
           <div className="empty-inline">
             <Box size={20} />
             <span>No tools have been reported by this device.</span>
+          </div>
+        )}
+      </section>
+      <section className="card table-card">
+        <CardHeader
+          title="Local models"
+          description={`${modelCount} model${modelCount === 1 ? "" : "s"} reported`}
+        />
+        {device.model_runtimes.length ? (
+          <div className="model-runtime-inventory">
+            {device.model_runtimes.map((runtime) => (
+              <ModelRuntimeInventory key={runtime.kind} runtime={runtime} />
+            ))}
+          </div>
+        ) : (
+          <div className="empty-inline">
+            <Cpu size={20} />
+            <span>No local models have been reported by this device.</span>
           </div>
         )}
       </section>

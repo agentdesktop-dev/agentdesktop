@@ -1,5 +1,9 @@
-import { CardHeader, ToolInventory } from "@agentdesktop/ui";
-import { AlertCircle, Box } from "lucide-react";
+import {
+  CardHeader,
+  ModelRuntimeInventory,
+  ToolInventory,
+} from "@agentdesktop/ui";
+import { AlertCircle, Box, Cpu } from "lucide-react";
 
 import type { Discovery } from "../types";
 
@@ -10,6 +14,11 @@ export interface ToolsViewProps {
 
 export function ToolsView({ discovery, unavailable }: ToolsViewProps) {
   const agents = discovery?.agents ?? [];
+  const modelRuntimes = discovery?.modelRuntimes ?? [];
+  const modelCount = modelRuntimes.reduce(
+    (total, runtime) => total + runtime.models.length,
+    0,
+  );
   const mcpCount = agents.reduce(
     (total, agent) => total + (agent.mcpServers?.length ?? 0),
     0,
@@ -29,7 +38,7 @@ export function ToolsView({ discovery, unavailable }: ToolsViewProps) {
           </p>
         </div>
       </div>
-      {agents.length ? (
+      {agents.length || modelCount ? (
         <div className="stat-grid">
           <div className="stat-card">
             <strong>{agents.length}</strong>
@@ -42,6 +51,10 @@ export function ToolsView({ discovery, unavailable }: ToolsViewProps) {
           <div className="stat-card">
             <strong>{skillCount}</strong>
             <span>Skills</span>
+          </div>
+          <div className="stat-card">
+            <strong>{modelCount}</strong>
+            <span>Local models</span>
           </div>
         </div>
       ) : null}
@@ -90,6 +103,29 @@ export function ToolsView({ discovery, unavailable }: ToolsViewProps) {
           </div>
         )}
       </section>
+      {!unavailable ? (
+        <section className="card table-card">
+          <CardHeader
+            title="Local models"
+            description={`${modelCount} model${modelCount === 1 ? "" : "s"} across ${modelRuntimes.length} runtime${modelRuntimes.length === 1 ? "" : "s"}`}
+          />
+          {modelRuntimes.length ? (
+            <div className="model-runtime-inventory">
+              {modelRuntimes.map((runtime) => (
+                <ModelRuntimeInventory key={runtime.kind} runtime={runtime} />
+              ))}
+            </div>
+          ) : (
+            <div className="empty-inline">
+              <Cpu size={20} />
+              <div>
+                <strong>No local models found</strong>
+                <span>Start Ollama before restarting Agent Desktop.</span>
+              </div>
+            </div>
+          )}
+        </section>
+      ) : null}
     </div>
   );
 }

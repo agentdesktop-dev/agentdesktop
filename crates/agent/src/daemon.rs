@@ -324,6 +324,13 @@ where
             "discovered program"
         );
     }
+    for runtime in &discovery.model_runtimes {
+        tracing::info!(
+            kind = %runtime.kind,
+            models = runtime.models.len(),
+            "discovered model runtime"
+        );
+    }
     let (telemetry_sender, telemetry_receiver) = mpsc::channel(256);
     let telemetry = config.controller.as_ref().map(|_| telemetry_sender.clone());
     let (logout_sender, logout_receiver) = mpsc::channel(1);

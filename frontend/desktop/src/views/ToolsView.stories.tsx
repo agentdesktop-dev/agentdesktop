@@ -28,6 +28,8 @@ type Story = StoryObj<typeof meta>;
 
 export const Populated: Story = {
   play: async ({ canvas }) => {
+    await expect(canvas.getByText("Ollama")).toBeVisible();
+    await expect(canvas.getByText("qwen3:8b")).toBeVisible();
     await userEvent.click(canvas.getByText("VS Code"));
     canvas.getByRole("tab", { name: "MCP servers 8" }).focus();
     await userEvent.keyboard("{ArrowRight}");

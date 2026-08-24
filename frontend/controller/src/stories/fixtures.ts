@@ -224,6 +224,12 @@ export const deviceDetail: DeviceDetail = {
       skills: deviceSkills.slice(0, 5),
     },
   ],
+  model_runtimes: [
+    {
+      kind: "ollama",
+      models: [{ name: "gemma3:4b" }, { name: "qwen3:8b" }],
+    },
+  ],
   recent_events: [
     {
       id: "event-session",
@@ -253,6 +259,7 @@ export const failedDeviceDetail: DeviceDetail = {
 export const emptyDeviceDetail: DeviceDetail = {
   ...deviceDetail,
   discoveries: [],
+  model_runtimes: [],
   recent_events: [],
 };
 
