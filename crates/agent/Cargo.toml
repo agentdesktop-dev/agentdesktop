@@ -40,10 +40,12 @@ url.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
-[target.'cfg(any(target_os = "macos", windows))'.dependencies]
-keyring.workspace = true
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store.workspace = true
+keyring-core.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+keyring.workspace = true
 windows-service = "0.8.1"
 windows-sys = { version = "0.59", features = [
 	"Win32_Foundation",
