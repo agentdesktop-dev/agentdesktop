@@ -1,4 +1,5 @@
 use std::{
+    future::Future,
     net::SocketAddr,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -40,6 +41,8 @@ use crate::{
 };
 
 static OAUTH_REFRESH_MUTEX: Mutex<()> = Mutex::const_new(());
+const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
 
 pub struct LogoutRequest {
     pub completion: oneshot::Sender<Result<(), String>>,
@@ -71,14 +74,14 @@ pub async fn run(
                 identity
             }
             None => {
-                let identity = tokio::select! {
-                    result = oidc::enroll(&controller, &enrollment, oidc_callback_listen) => result?,
-                    Some(request) = logout.recv() => {
-                        enrollment.set("starting").await;
-                        let _ = request.completion.send(Ok(()));
-                        continue;
-                    }
-                };
+                let identity = enroll_with_retry(
+                    &controller.address,
+                    &enrollment,
+                    &mut logout,
+                    INITIAL_RETRY_DELAY,
+                    || oidc::enroll(&controller, &enrollment, oidc_callback_listen),
+                )
+                .await;
                 identity::save(&identity_path, &identity)?;
                 enrollment.set("enrolled").await;
                 info!(device_id = %identity.device_id, "enrolled device");
@@ -86,7 +89,7 @@ pub async fn run(
             }
         };
 
-        let mut delay = Duration::from_secs(1);
+        let mut delay = INITIAL_RETRY_DELAY;
         loop {
             let refresh_result = tokio::select! {
                 result = refresh_oauth_if_needed(&mut identity, &identity_path) => result,
@@ -165,9 +168,60 @@ pub async fn run(
             if logged_out {
                 break;
             }
-            delay = (delay * 2).min(Duration::from_secs(60));
+            delay = next_retry_delay(delay);
         }
     }
+}
+
+async fn enroll_with_retry<F, Fut, T>(
+    controller: &str,
+    enrollment: &EnrollmentState,
+    logout: &mut mpsc::Receiver<LogoutRequest>,
+    mut delay: Duration,
+    mut enroll: F,
+) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = anyhow::Result<T>>,
+{
+    loop {
+        let result = tokio::select! {
+            result = enroll() => result,
+            Some(request) = logout.recv() => {
+                complete_unenrolled_logout(request, enrollment).await;
+                continue;
+            }
+        };
+        match result {
+            Ok(identity) => return identity,
+            Err(error) => {
+                enrollment.set("starting").await;
+                warn!(
+                    controller,
+                    retry_in_seconds = delay.as_secs(),
+                    error = %format!("{error:#}"),
+                    "controller enrollment failed"
+                );
+            }
+        }
+
+        tokio::select! {
+            _ = time::sleep(delay) => {}
+            Some(request) = logout.recv() => {
+                complete_unenrolled_logout(request, enrollment).await;
+            }
+        }
+        delay = next_retry_delay(delay);
+    }
+}
+
+async fn complete_unenrolled_logout(request: LogoutRequest, enrollment: &EnrollmentState) {
+    enrollment.set("starting").await;
+    let _ = request.completion.send(Ok(()));
+}
+
+fn next_retry_delay(delay: Duration) -> Duration {
+    (delay * 2).min(MAX_RETRY_DELAY)
 }
 
 async fn complete_logout(
@@ -548,12 +602,60 @@ pub(crate) fn hostname() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::is_unauthenticated;
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+
+    use tokio::sync::mpsc;
+
+    use super::{MAX_RETRY_DELAY, enroll_with_retry, is_unauthenticated, next_retry_delay};
+    use crate::enrollment::EnrollmentState;
 
     #[test]
     fn recognizes_contextualized_unauthenticated_status() {
         let error = anyhow::Error::new(tonic::Status::unauthenticated("rejected"))
             .context("open controller stream");
         assert!(is_unauthenticated(&error));
+    }
+
+    #[test]
+    fn retry_delay_doubles_until_capped() {
+        assert_eq!(
+            next_retry_delay(Duration::from_secs(1)),
+            Duration::from_secs(2)
+        );
+        assert_eq!(next_retry_delay(MAX_RETRY_DELAY), MAX_RETRY_DELAY);
+    }
+
+    #[tokio::test]
+    async fn failed_enrollment_is_retried() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let enrollment = EnrollmentState::new(true);
+        let (_logout_sender, mut logout) = mpsc::channel(1);
+
+        let identity = enroll_with_retry(
+            "https://controller.example",
+            &enrollment,
+            &mut logout,
+            Duration::ZERO,
+            || {
+                let attempts = attempts.clone();
+                async move {
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Err(anyhow::anyhow!("controller unavailable"))
+                    } else {
+                        Ok("identity")
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(identity, "identity");
     }
 }
