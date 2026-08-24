@@ -1,4 +1,4 @@
-use std::{env, fs, io::ErrorKind, path::PathBuf, time::Duration};
+use std::{env, fs, future::Future, io::ErrorKind, path::PathBuf, time::Duration};
 
 #[cfg(target_os = "macos")]
 use std::{ffi::OsString, io::Write, os::unix::fs::OpenOptionsExt, path::Path, process::Stdio};
@@ -27,6 +27,8 @@ use tauri::{
 const OPEN_MENU_ID: &str = "open";
 const QUIT_MENU_ID: &str = "quit";
 const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const ENROLLMENT_URL_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const ENROLLMENT_URL_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(target_os = "macos")]
 const SYSTEM_LAUNCH_DAEMON_PATH: &str = "/Library/LaunchDaemons/dev.agentdesktop.daemon.plist";
 #[cfg(target_os = "macos")]
@@ -547,13 +549,39 @@ async fn logout_managed_device() -> Result<(), String> {
         .map_err(|error| format!("{error:#}"))
 }
 
+async fn open_enrollment_url<GetStatus, StatusFuture, OpenUrl>(
+    mut get_status: GetStatus,
+    mut open_url: OpenUrl,
+) -> Result<EnrollmentStatus, String>
+where
+    GetStatus: FnMut() -> StatusFuture,
+    StatusFuture: Future<Output = Result<EnrollmentStatus, String>>,
+    OpenUrl: FnMut(&str) -> Result<(), String>,
+{
+    tokio::time::timeout(ENROLLMENT_URL_WAIT_TIMEOUT, async {
+        loop {
+            let status = get_status().await?;
+            if let Some(url) = status.authorization_url.as_deref() {
+                open_url(url)?;
+                return Ok(status);
+            }
+            if status.status != "starting" {
+                return Ok(status);
+            }
+            tokio::time::sleep(ENROLLMENT_URL_POLL_INTERVAL).await;
+        }
+    })
+    .await
+    .map_err(|_| "timed out waiting for the enrollment sign-in URL".to_owned())?
+}
+
 #[tauri::command]
 async fn setup_managed_device() -> Result<ManagedDeviceSnapshot, String> {
     let config = daemon_config().await?;
-    let status = enrollment_status().await?;
-    if let Some(url) = status.authorization_url.as_deref() {
-        open::that(url).map_err(|error| format!("could not open enrollment URL: {error}"))?;
-    }
+    let status = open_enrollment_url(enrollment_status, |url| {
+        open::that(url).map_err(|error| format!("could not open enrollment URL: {error}"))
+    })
+    .await?;
     Ok(managed_snapshot(config.controller.is_some(), Some(&status)))
 }
 
@@ -683,6 +711,43 @@ fn main() -> anyhow::Result<()> {
             prepare_desktop_process();
             run_desktop()
         }
+    }
+}
+
+#[cfg(test)]
+mod enrollment_tests {
+    use std::{collections::VecDeque, future::ready};
+
+    use agentdesktop_core::model::EnrollmentStatus;
+
+    use super::open_enrollment_url;
+
+    #[tokio::test]
+    async fn waits_for_authorization_url_before_opening_browser() {
+        let mut statuses = VecDeque::from([
+            EnrollmentStatus {
+                status: "starting".to_owned(),
+                authorization_url: None,
+            },
+            EnrollmentStatus {
+                status: "awaitingAuthentication".to_owned(),
+                authorization_url: Some("https://login.example/authorize".to_owned()),
+            },
+        ]);
+        let mut opened = Vec::new();
+
+        let status = open_enrollment_url(
+            || ready(Ok(statuses.pop_front().expect("next enrollment status"))),
+            |url| {
+                opened.push(url.to_owned());
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(status.status, "awaitingAuthentication");
+        assert_eq!(opened, ["https://login.example/authorize"]);
     }
 }
 
