@@ -1,4 +1,5 @@
 IMAGE ?= agentdesktop-controller:dev
+BUILD_PROFILE ?= release
 
 .PHONY: build install test check lint frontend frontend-check desktop desktop-check format gen generate-schema docker clean
 
@@ -47,7 +48,7 @@ generate-schema:
 	cargo xtask schema
 
 docker:
-	docker build --tag $(IMAGE) .
+	docker build --build-arg BUILD_PROFILE=$(BUILD_PROFILE) --tag $(IMAGE) .
 
 clean:
 	cargo clean

@@ -103,4 +103,4 @@ jobs:
         with:
           persist-credentials: false
       - name: Build controller image
-        run: make docker
+        run: make docker BUILD_PROFILE=debug

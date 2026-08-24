@@ -17,6 +17,7 @@ RUN --mount=type=cache,id=agentdesktop-pnpm,target=/pnpm/store \
 
 FROM docker.io/library/rust:1.97.1-trixie AS builder
 ARG TARGETARCH
+ARG BUILD_PROFILE=release
 WORKDIR /app
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
@@ -24,8 +25,12 @@ COPY --from=ui /app/frontend/controller/dist frontend/controller/dist
 RUN --mount=type=cache,id=agentdesktop-target-${TARGETARCH},target=/app/target \
     --mount=type=cache,id=agentdesktop-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=agentdesktop-cargo-git,target=/usr/local/cargo/git \
-    cargo build --locked --release --package agentdesktop-controller && \
-    cp target/release/agentdesktop-controller /agentdesktop-controller
+    case "${BUILD_PROFILE}" in \
+      release) cargo build --locked --release --package agentdesktop-controller ;; \
+      debug) cargo build --locked --package agentdesktop-controller ;; \
+      *) echo "unsupported BUILD_PROFILE: ${BUILD_PROFILE}" >&2; exit 1 ;; \
+    esac && \
+    cp "target/${BUILD_PROFILE}/agentdesktop-controller" /agentdesktop-controller
 
 FROM cgr.dev/chainguard/glibc-dynamic:latest
 COPY --from=builder /agentdesktop-controller /agentdesktop-controller
