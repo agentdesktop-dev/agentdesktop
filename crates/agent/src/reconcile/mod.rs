@@ -11,8 +11,25 @@ use std::{
 };
 
 use agentdesktop_core::config::{DaemonConfig, InferenceGatewayConfig};
+#[cfg(any(windows, test))]
+use base64::{Engine as _, prelude::BASE64_STANDARD};
 use serde_json::Value;
 use similar::TextDiff;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CommandSpec {
+    program: String,
+    args: Vec<String>,
+}
+
+impl CommandSpec {
+    fn new(program: &Path, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            program: program.to_string_lossy().into_owned(),
+            args: args.into_iter().map(Into::into).collect(),
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 enum ReconcileMode<'a> {
@@ -242,8 +259,8 @@ impl Reconciler {
             &self.claude_code_settings_path,
             self.merge_user_settings,
             &self.claude_credential_helper_command(),
-            tool_use_hook.as_deref(),
-            session_new_hook.as_deref(),
+            tool_use_hook.as_ref(),
+            session_new_hook.as_ref(),
             claude_code,
             mode,
         )?;
@@ -295,36 +312,85 @@ impl Reconciler {
     }
 
     fn claude_credential_helper_command(&self) -> String {
-        format!(
-            "{} --socket {} credential --client-id claude-code",
-            shell_quote(&self.credential_helper.to_string_lossy()),
-            shell_quote(&self.socket.to_string_lossy())
-        )
+        render_command(&CommandSpec::new(
+            &self.credential_helper,
+            [
+                "--socket".to_owned(),
+                self.socket.to_string_lossy().into_owned(),
+                "credential".to_owned(),
+                "--client-id".to_owned(),
+                "claude-code".to_owned(),
+            ],
+        ))
     }
 
-    fn claude_hook_command(&self, include_input: bool) -> String {
-        let mut command = format!(
-            "{} --socket {} hook claude-pre-tool-use",
-            shell_quote(&self.credential_helper.to_string_lossy()),
-            shell_quote(&self.socket.to_string_lossy())
-        );
+    fn claude_hook_command(&self, include_input: bool) -> CommandSpec {
+        let mut args = vec![
+            "--socket".to_owned(),
+            self.socket.to_string_lossy().into_owned(),
+            "hook".to_owned(),
+            "claude-pre-tool-use".to_owned(),
+        ];
         if include_input {
-            command.push_str(" --include-input");
+            args.push("--include-input".to_owned());
         }
-        command
+        CommandSpec::new(&self.credential_helper, args)
     }
 
-    fn claude_session_hook_command(&self) -> String {
-        format!(
-            "{} --socket {} hook claude-session-start",
-            shell_quote(&self.credential_helper.to_string_lossy()),
-            shell_quote(&self.socket.to_string_lossy())
+    fn claude_session_hook_command(&self) -> CommandSpec {
+        CommandSpec::new(
+            &self.credential_helper,
+            [
+                "--socket".to_owned(),
+                self.socket.to_string_lossy().into_owned(),
+                "hook".to_owned(),
+                "claude-session-start".to_owned(),
+            ],
         )
     }
 }
 
+#[cfg(any(not(windows), test))]
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(any(windows, test))]
+fn powershell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn render_command(command: &CommandSpec) -> String {
+    #[cfg(windows)]
+    return render_windows_command(command);
+    #[cfg(not(windows))]
+    return render_posix_command(command);
+}
+
+#[cfg(any(not(windows), test))]
+fn render_posix_command(command: &CommandSpec) -> String {
+    std::iter::once(command.program.as_str())
+        .chain(command.args.iter().map(String::as_str))
+        .map(shell_quote)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(any(windows, test))]
+fn render_windows_command(command: &CommandSpec) -> String {
+    let script = std::iter::once(command.program.as_str())
+        .chain(command.args.iter().map(String::as_str))
+        .map(powershell_quote)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let encoded = format!("& {script}")
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    format!(
+        "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
+        BASE64_STANDARD.encode(encoded)
+    )
 }
 
 fn deep_merge(base: &mut Value, overlay: Value) {
@@ -364,7 +430,13 @@ pub fn default_claude_desktop_managed_settings_path() -> PathBuf {
 
 /// Returns the path of Agentdesktop's Claude Desktop credential helper.
 pub fn default_claude_desktop_credential_helper_path() -> PathBuf {
-    PathBuf::from("/etc/claude-desktop/agentdesktop-credential-helper")
+    #[cfg(windows)]
+    return std::env::var_os("ProgramData")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+        .join("AgentDesktop/claude-desktop-credential-helper.cmd");
+    #[cfg(not(windows))]
+    return PathBuf::from("/etc/claude-desktop/agentdesktop-credential-helper");
 }
 
 /// Returns the system-wide OpenCode managed configuration path.
@@ -392,11 +464,116 @@ pub fn default_claude_code_managed_settings_dir() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path};
+    use std::{fs, path::Path, path::PathBuf};
 
     use agentdesktop_core::config::parse_daemon;
+    use base64::{Engine as _, prelude::BASE64_STANDARD};
 
-    use super::{DryRunReport, Reconciler};
+    use super::{
+        CommandSpec, DryRunReport, Reconciler, default_claude_desktop_credential_helper_path,
+        render_posix_command, render_windows_command,
+    };
+
+    #[test]
+    fn renders_posix_commands_with_each_argument_quoted() {
+        let command = CommandSpec::new(
+            Path::new("/Applications/Agent Desktop/agentdesktop"),
+            ["--socket", "/tmp/agent's socket", "credential"],
+        );
+
+        assert_eq!(
+            render_posix_command(&command),
+            "'/Applications/Agent Desktop/agentdesktop' '--socket' '/tmp/agent'\\''s socket' 'credential'"
+        );
+    }
+
+    #[test]
+    fn renders_windows_commands_as_shell_neutral_encoded_powershell() {
+        let command = CommandSpec::new(
+            Path::new(r"C:\Program Files\Agent Desktop\agentdesktop.exe"),
+            [
+                "--socket",
+                r"\\.\pipe\agentdesktop",
+                "credential",
+                "--client-id",
+                "claude-code",
+            ],
+        );
+
+        let rendered = render_windows_command(&command);
+        let encoded = rendered
+            .strip_prefix("powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ")
+            .expect("explicit PowerShell launcher");
+        let bytes = BASE64_STANDARD.decode(encoded).expect("valid base64");
+        let utf16 = bytes
+            .chunks_exact(2)
+            .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+            .collect::<Vec<_>>();
+        let script = String::from_utf16(&utf16).expect("valid UTF-16LE");
+
+        assert_eq!(
+            script,
+            r"& 'C:\Program Files\Agent Desktop\agentdesktop.exe' '--socket' '\\.\pipe\agentdesktop' 'credential' '--client-id' 'claude-code'"
+        );
+    }
+
+    #[test]
+    fn claude_hooks_keep_the_executable_and_arguments_separate() {
+        let reconciler = Reconciler::new(
+            false,
+            PathBuf::new(),
+            PathBuf::new(),
+            PathBuf::new(),
+            PathBuf::new(),
+            PathBuf::new(),
+            PathBuf::new(),
+            PathBuf::from(r"C:\Program Files\Agent Desktop\agentdesktop.exe"),
+            PathBuf::from(r"\\.\pipe\agentdesktop"),
+        );
+
+        let tool = reconciler.claude_hook_command(true);
+        assert_eq!(
+            tool.program,
+            r"C:\Program Files\Agent Desktop\agentdesktop.exe"
+        );
+        assert_eq!(
+            tool.args,
+            [
+                "--socket",
+                r"\\.\pipe\agentdesktop",
+                "hook",
+                "claude-pre-tool-use",
+                "--include-input",
+            ]
+        );
+        assert_eq!(
+            reconciler.claude_session_hook_command().args,
+            [
+                "--socket",
+                r"\\.\pipe\agentdesktop",
+                "hook",
+                "claude-session-start",
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_desktop_helper_default_matches_the_native_script_type() {
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                default_claude_desktop_credential_helper_path().extension(),
+                Some(std::ffi::OsStr::new("cmd"))
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                default_claude_desktop_credential_helper_path(),
+                PathBuf::from("/etc/claude-desktop/agentdesktop-credential-helper")
+            );
+        }
+    }
 
     #[test]
     fn dry_run_report_shows_changes_and_hides_unchanged_files() {

@@ -10,7 +10,7 @@ use tracing::info;
 
 use crate::secure_fs;
 
-use super::{ReconcileMode, deep_merge, json_merge};
+use super::{CommandSpec, ReconcileMode, deep_merge, json_merge};
 
 const OWNER_MARKER: &[u8] = b"Agentdesktop\n";
 
@@ -18,8 +18,8 @@ pub fn apply(
     path: &Path,
     merge_existing: bool,
     credential_helper: &str,
-    tool_use_hook: Option<&str>,
-    session_new_hook: Option<&str>,
+    tool_use_hook: Option<&CommandSpec>,
+    session_new_hook: Option<&CommandSpec>,
     config: Option<(&ClaudeCodeConfig, Option<&InferenceGatewayConfig>)>,
     mode: ReconcileMode,
 ) -> anyhow::Result<()> {
@@ -153,8 +153,8 @@ fn managed_settings(
     config: &ClaudeCodeConfig,
     gateway: Option<&InferenceGatewayConfig>,
     credential_helper: &str,
-    tool_use_hook: Option<&str>,
-    session_new_hook: Option<&str>,
+    tool_use_hook: Option<&CommandSpec>,
+    session_new_hook: Option<&CommandSpec>,
 ) -> anyhow::Result<Value> {
     let mut settings = serde_json::to_value(&config.settings)
         .context("serialize Claude Code pass-through settings")?;
@@ -185,7 +185,11 @@ fn managed_settings(
     Ok(settings)
 }
 
-fn append_hook(settings: &mut Value, event: &str, hook_command: &str) -> anyhow::Result<()> {
+fn append_hook(
+    settings: &mut Value,
+    event: &str,
+    hook_command: &CommandSpec,
+) -> anyhow::Result<()> {
     let settings = settings
         .as_object_mut()
         .context("Claude Code managed settings must be an object")?;
@@ -199,23 +203,21 @@ fn append_hook(settings: &mut Value, event: &str, hook_command: &str) -> anyhow:
         .or_insert_with(|| Value::Array(Vec::new()))
         .as_array_mut()
         .with_context(|| format!("Claude Code {event} hooks must be an array"))?;
+    let generated_hook = json!({
+        "type": "command",
+        "command": hook_command.program,
+        "args": hook_command.args,
+    });
     let already_present = event_hooks.iter().any(|group| {
         group
             .get("hooks")
             .and_then(Value::as_array)
-            .is_some_and(|hooks| {
-                hooks
-                    .iter()
-                    .any(|hook| hook.get("command").and_then(Value::as_str) == Some(hook_command))
-            })
+            .is_some_and(|hooks| hooks.contains(&generated_hook))
     });
     if !already_present {
         event_hooks.push(json!({
             "matcher": "",
-            "hooks": [{
-                "type": "command",
-                "command": hook_command,
-            }],
+            "hooks": [generated_hook],
         }));
     }
     Ok(())
@@ -289,12 +291,12 @@ fn remove_owner_marker(owner_path: &Path) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, path::Path};
 
     use agentdesktop_core::config::parse_daemon;
     use serde_json::{Value, json};
 
-    use super::{ReconcileMode, apply, json_merge, managed_settings};
+    use super::{CommandSpec, ReconcileMode, apply, json_merge, managed_settings};
 
     #[test]
     fn pass_through_settings_are_deep_merged_with_managed_gateway_values() {
@@ -319,12 +321,13 @@ programs:
         .expect("valid daemon configuration");
         let claude = config.programs.claude_code.as_ref().unwrap();
         let gateway = config.inference_gateway.as_ref().unwrap();
+        let hook = CommandSpec::new(Path::new("agentdesktop"), ["hook", "claude-pre-tool-use"]);
 
         let settings = managed_settings(
             claude,
             Some(gateway),
             "agentdesktop credential",
-            Some("agentdesktop hook claude-pre-tool-use"),
+            Some(&hook),
             None,
         )
         .expect("merged settings");
@@ -342,7 +345,11 @@ programs:
         assert_eq!(settings["permissions"], json!({ "defaultMode": "plan" }));
         assert_eq!(
             settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
-            "agentdesktop hook claude-pre-tool-use"
+            "agentdesktop"
+        );
+        assert_eq!(
+            settings["hooks"]["PreToolUse"][0]["hooks"][0]["args"],
+            json!(["hook", "claude-pre-tool-use"])
         );
     }
 

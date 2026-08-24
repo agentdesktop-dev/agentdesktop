@@ -251,7 +251,7 @@ where
         args.codex_managed_config.clone(),
         args.open_code_managed_config.clone(),
         args.open_code_plugin.clone(),
-        agentdesktop_executable()?,
+        agentdesktop_client_executable()?,
         socket.clone(),
     );
     if args.once {
@@ -572,8 +572,19 @@ fn bind_named_pipe(path: &std::path::Path, first: bool) -> anyhow::Result<NamedP
     .with_context(|| format!("bind named pipe {}", path.display()))
 }
 
-fn agentdesktop_executable() -> anyhow::Result<PathBuf> {
-    std::env::current_exe().context("locate agentdesktop executable")
+fn agentdesktop_client_executable() -> anyhow::Result<PathBuf> {
+    let executable = std::env::current_exe().context("locate agentdesktop executable")?;
+    Ok(client_executable_for_daemon(&executable))
+}
+
+fn client_executable_for_daemon(executable: &Path) -> PathBuf {
+    if executable.file_name().is_some_and(|name| {
+        name.to_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case("agentdesktop-service.exe"))
+    }) {
+        return executable.with_file_name("agentdesktop.exe");
+    }
+    executable.to_owned()
 }
 
 #[cfg(unix)]
@@ -676,9 +687,25 @@ fn effective_uid() -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use agentdesktop_core::config::parse_daemon;
 
-    use super::{validate_dry_run, validate_one_shot};
+    use super::{client_executable_for_daemon, validate_dry_run, validate_one_shot};
+
+    #[test]
+    fn windows_service_uses_the_sibling_client_executable() {
+        assert_eq!(
+            client_executable_for_daemon(Path::new(
+                "/Program Files/Agent Desktop/agentdesktop-service.exe"
+            )),
+            Path::new("/Program Files/Agent Desktop/agentdesktop.exe")
+        );
+        assert_eq!(
+            client_executable_for_daemon(Path::new("/usr/bin/agentdesktop")),
+            Path::new("/usr/bin/agentdesktop")
+        );
+    }
 
     #[test]
     fn one_shot_accepts_static_settings_and_rejects_runtime_services() {
