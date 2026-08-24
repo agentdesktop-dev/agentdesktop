@@ -391,21 +391,48 @@ jobs:
         run: |
           (cd release && shasum -a 256 "${OUTPUT_NAME}" > "${OUTPUT_NAME}.sha256")
 
-      - name: Smoke test PKG
+      - name: Smoke test PKG install and replacement
         shell: bash
         env:
           OUTPUT_NAME: agentdesktop-macos-${{ matrix.arch }}.pkg
         run: |
+          wait_for_daemon() {
+            deadline=$((SECONDS + 30))
+            until sudo "/Applications/agentdesktop.app/Contents/MacOS/agentdesktop" status; do
+              if (( SECONDS >= deadline )); then
+                echo "Installed CLI could not reach the Agent Desktop daemon" >&2
+                return 1
+              fi
+              sleep 1
+            done
+          }
+
+          daemon_pid() {
+            sudo launchctl print system/dev.agentdesktop.daemon |
+              awk '$1 == "pid" && $2 == "=" { print $3; exit }'
+          }
+
           sudo installer -pkg "release/${OUTPUT_NAME}" -target /
           sudo launchctl print system/dev.agentdesktop.daemon > /dev/null
-          deadline=$((SECONDS + 30))
-          until sudo "/Applications/agentdesktop.app/Contents/MacOS/agentdesktop" status; do
-            if (( SECONDS >= deadline )); then
-              echo "Installed CLI could not reach the Agent Desktop daemon" >&2
-              exit 1
-            fi
-            sleep 1
-          done
+          wait_for_daemon
+
+          first_pid="$(daemon_pid)"
+          test -n "${first_pid}"
+          config_hash="$(sudo shasum -a 256 /etc/agentdesktop/config.yaml | awk '{ print $1 }')"
+          sudo touch /var/lib/agentdesktop/upgrade-smoke-marker
+
+          sudo installer -pkg "release/${OUTPUT_NAME}" -target /
+          sudo launchctl print system/dev.agentdesktop.daemon > /dev/null
+          wait_for_daemon
+
+          second_pid="$(daemon_pid)"
+          test -n "${second_pid}"
+          if [ "${first_pid}" = "${second_pid}" ]; then
+            echo "Agent Desktop daemon was not restarted during package replacement" >&2
+            exit 1
+          fi
+          test "${config_hash}" = "$(sudo shasum -a 256 /etc/agentdesktop/config.yaml | awk '{ print $1 }')"
+          sudo test -f /var/lib/agentdesktop/upgrade-smoke-marker
 
       - name: Remove smoke-test installation
         if: always()
@@ -415,6 +442,7 @@ jobs:
           sudo rm -f /Library/LaunchDaemons/dev.agentdesktop.daemon.plist
           sudo rm -rf "/Applications/agentdesktop.app"
           sudo rm -rf /etc/agentdesktop /var/lib/agentdesktop /var/run/agentdesktop
+          sudo rm -f /var/run/agentdesktop-relaunch
           sudo pkgutil --forget dev.agentdesktop.installer || true
 
       - name: Upload unsigned PKG
@@ -503,33 +531,72 @@ jobs:
           $hash = (Get-FileHash "release/$env:OUTPUT_NAME" -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $env:OUTPUT_NAME" | Set-Content "release/$env:OUTPUT_NAME.sha256" -Encoding ascii
 
-      - name: Smoke test MSI
+      - name: Smoke test MSI install and replacement
         shell: pwsh
         env:
           OUTPUT_NAME: agentdesktop-windows-${{ matrix.arch }}.msi
         run: |
-          $installer = (Resolve-Path "release/$env:OUTPUT_NAME").Path
-          $install = Start-Process msiexec.exe -ArgumentList @("/i", "`"$installer`"", "/qn", "/norestart") -Wait -PassThru
-          if ($install.ExitCode -ne 0) {
-            throw "MSI installation failed with exit code $($install.ExitCode)"
-          }
-          $service = Get-Service AgentDesktop
-          $service.WaitForStatus("Running", [TimeSpan]::FromSeconds(30))
-          $deadline = (Get-Date).AddSeconds(30)
-          do {
-            & "$env:ProgramFiles\Agent Desktop\agentdesktop.exe" status
-            if ($LASTEXITCODE -eq 0) {
-              break
+          function Assert-MsiSuccess($process, $operation) {
+            if ($process.ExitCode -notin @(0, 3010)) {
+              throw "MSI $operation failed with exit code $($process.ExitCode)"
             }
-            Start-Sleep -Seconds 1
-          } while ((Get-Date) -lt $deadline)
-          if ($LASTEXITCODE -ne 0) {
+          }
+
+          function Wait-ForAgentDesktopService {
+            $service = Get-Service AgentDesktop
+            $service.WaitForStatus("Running", [TimeSpan]::FromSeconds(30))
+            $deadline = (Get-Date).AddSeconds(30)
+            do {
+              & "$env:ProgramFiles\Agent Desktop\agentdesktop.exe" status
+              if ($LASTEXITCODE -eq 0) {
+                return
+              }
+              Start-Sleep -Seconds 1
+            } while ((Get-Date) -lt $deadline)
             throw "Installed CLI could not reach the Agent Desktop service"
           }
-          $uninstall = Start-Process msiexec.exe -ArgumentList @("/x", "`"$installer`"", "/qn", "/norestart") -Wait -PassThru
-          if ($uninstall.ExitCode -ne 0) {
-            throw "MSI uninstall failed with exit code $($uninstall.ExitCode)"
+
+          $installer = (Resolve-Path "release/$env:OUTPUT_NAME").Path
+          $install = Start-Process msiexec.exe -ArgumentList @("/i", "`"$installer`"", "/qn", "/norestart") -Wait -PassThru
+          Assert-MsiSuccess $install "installation"
+          Wait-ForAgentDesktopService
+
+          $configPath = "$env:ProgramData\AgentDesktop\config.yaml"
+          $stateMarker = "$env:ProgramData\AgentDesktop\state\upgrade-smoke-marker"
+          $configHash = (Get-FileHash $configPath -Algorithm SHA256).Hash
+          New-Item -ItemType Directory -Force (Split-Path $stateMarker) | Out-Null
+          New-Item -ItemType File -Force $stateMarker | Out-Null
+
+          $tray = Start-Process "$env:ProgramFiles\Agent Desktop\agentdesktop.exe" -PassThru
+          Start-Sleep -Seconds 3
+          if ($tray.HasExited) {
+            throw "Agent Desktop tray process exited before replacement"
           }
+
+          $replace = Start-Process msiexec.exe -ArgumentList @(
+            "/i",
+            "`"$installer`"",
+            "/qn",
+            "/norestart",
+            "REINSTALL=ALL",
+            "REINSTALLMODE=vomus"
+          ) -Wait -PassThru
+          Assert-MsiSuccess $replace "replacement"
+          $tray.Refresh()
+          if (-not $tray.HasExited) {
+            throw "Agent Desktop tray process remains after replacement"
+          }
+
+          Wait-ForAgentDesktopService
+          if ((Get-FileHash $configPath -Algorithm SHA256).Hash -ne $configHash) {
+            throw "Agent Desktop configuration changed during replacement"
+          }
+          if (-not (Test-Path $stateMarker)) {
+            throw "Agent Desktop state was removed during replacement"
+          }
+
+          $uninstall = Start-Process msiexec.exe -ArgumentList @("/x", "`"$installer`"", "/qn", "/norestart") -Wait -PassThru
+          Assert-MsiSuccess $uninstall "uninstall"
           if (Get-Service AgentDesktop -ErrorAction SilentlyContinue) {
             throw "Agent Desktop service remains after uninstall"
           }

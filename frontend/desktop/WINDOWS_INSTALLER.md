@@ -159,6 +159,29 @@ Get-Service AgentDesktop
 The service should report `Running`, and the status command should exit
 successfully.
 
+## Upgrade behavior
+
+The MSI owns process handling for in-place upgrades; MDM does not need a
+custom process-kill script. WiX asks every running `agentdesktop.exe` tray
+process to close, waits up to 15 seconds, and terminates any remaining process
+before replacing files. The existing `ServiceControl` entry stops the
+`AgentDesktop` service, waits for shutdown, and starts the new service after the
+upgrade.
+
+The MSI does not relaunch the tray application from an MDM deployment running
+as `SYSTEM`, because that could put a GUI in the wrong user session. The tray
+application starts at the user's next sign-in through its existing Run entry, or
+the user can open it manually. Configuration and state under
+`%ProgramData%\AgentDesktop` are preserved.
+
+Deploy upgrades silently with:
+
+```powershell
+msiexec.exe /i .\agentdesktop.msi /qn /norestart
+```
+
+Treat exit code `0` as success and `3010` as success with a reboot required.
+
 ## Configure the installed service
 
 The installer creates this default configuration:

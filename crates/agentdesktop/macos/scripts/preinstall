@@ -2,9 +2,129 @@
 set -eu
 
 LABEL="dev.agentdesktop.daemon"
+USER_LAUNCH_AGENT_LABEL="dev.agentdesktop.daemon.user"
+APPLICATION="/Applications/agentdesktop.app"
 LEGACY_APPLICATION="/Applications/Agent Desktop.app"
+RELAUNCH_MARKER="/var/run/agentdesktop-relaunch"
+
+remove_user_launch_agent() {
+	username="$1"
+	uid=$(/usr/bin/id -u "${username}" 2>/dev/null || true)
+	if [ -n "${uid}" ]; then
+		/bin/launchctl bootout "gui/${uid}/${USER_LAUNCH_AGENT_LABEL}" >/dev/null 2>&1 || true
+	fi
+	home_directory=$(/usr/bin/dscl . -read "/Users/${username}" NFSHomeDirectory 2>/dev/null |
+		/usr/bin/cut -d ' ' -f 2- || true)
+	if [ -n "${home_directory}" ]; then
+		/bin/rm -f "${home_directory}/Library/LaunchAgents/${USER_LAUNCH_AGENT_LABEL}.plist"
+	fi
+}
+
+bundle_executable() {
+	application="$1"
+	if [ -d "${application}" ]; then
+		executable_name=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" \
+			"${application}/Contents/Info.plist" 2>/dev/null || true)
+		if [ -n "${executable_name}" ]; then
+			printf '%s/Contents/MacOS/%s\n' "${application}" "${executable_name}"
+		fi
+	fi
+	return 0
+}
+
+application_pids() {
+	executable="$1"
+	/bin/ps -axo pid=,command= | /usr/bin/awk -v executable="${executable}" '
+		{
+			pid = $1
+			$1 = ""
+			sub(/^[[:space:]]+/, "", $0)
+			if ($0 == executable || index($0, executable " -psn_") == 1) print pid
+		}'
+}
+
+application_user_ids() {
+	executable="$1"
+	for pid in $(application_pids "${executable}"); do
+		uid=$(/bin/ps -p "${pid}" -o uid= 2>/dev/null | /usr/bin/awk '{ print $1 }')
+		case "${uid}" in
+			"" | *[!0-9]*) ;;
+			*)
+				if [ "${uid}" -ge 500 ] && [ "${uid}" -lt 65534 ]; then
+					printf '%s\n' "${uid}"
+				fi
+				;;
+		esac
+	done
+}
+
+stop_application() {
+	executable="$1"
+	pids=$(application_pids "${executable}")
+	if [ -z "${pids}" ]; then
+		return
+	fi
+
+	for pid in ${pids}; do
+		/bin/kill -TERM "${pid}" >/dev/null 2>&1 || true
+	done
+
+	attempt=0
+	while [ "${attempt}" -lt 10 ]; do
+		if [ -z "$(application_pids "${executable}")" ]; then
+			return
+		fi
+		/bin/sleep 1
+		attempt=$((attempt + 1))
+	done
+
+	for pid in $(application_pids "${executable}"); do
+		/bin/kill -KILL "${pid}" >/dev/null 2>&1 || true
+	done
+}
+
+/bin/rm -f "${RELAUNCH_MARKER}"
+
+console_user=$(/usr/bin/stat -f "%Su" /dev/console)
+console_uid=""
+case "${console_user}" in
+	"" | root | loginwindow | _mbsetupuser) ;;
+	*) console_uid=$(/usr/bin/id -u "${console_user}" 2>/dev/null || true) ;;
+esac
+
+relaunch_uids=$(
+	for application in "${APPLICATION}" "${LEGACY_APPLICATION}"; do
+		executable=$(bundle_executable "${application}")
+		if [ -n "${executable}" ]; then
+			application_user_ids "${executable}"
+		fi
+	done | /usr/bin/sort -un
+)
+
+if [ -n "${relaunch_uids}" ]; then
+	(
+		umask 077
+		printf '%s\n' "${relaunch_uids}" >"${RELAUNCH_MARKER}"
+	)
+fi
 
 /bin/launchctl bootout "system/${LABEL}" >/dev/null 2>&1 || true
+
+/usr/bin/dscl . -list /Users UniqueID | /usr/bin/awk '$2 >= 500 && $2 < 65534 { print $1 }' |
+	while IFS= read -r username; do
+		remove_user_launch_agent "${username}"
+	done
+
+if [ -n "${console_uid}" ]; then
+	remove_user_launch_agent "${console_user}"
+fi
+
+for application in "${APPLICATION}" "${LEGACY_APPLICATION}"; do
+	executable=$(bundle_executable "${application}")
+	if [ -n "${executable}" ]; then
+		stop_application "${executable}"
+	fi
+done
 
 if [ -d "${LEGACY_APPLICATION}" ]; then
 	legacy_identifier=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" \
