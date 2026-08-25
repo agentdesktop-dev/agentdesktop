@@ -7,7 +7,9 @@ It does not run a controller or use an Anthropic API key.
 Start Dex and Agentgateway with this example's Compose file:
 
 ```console
-docker compose -f examples/claude-subscription/compose.yaml up -d
+docker compose -f examples/claude-subscription/compose.yaml up -d dex
+# start agentgateway after dex is up running as agentgateway config refers to dex as the issuer
+docker compose -f examples/claude-subscription/compose.yaml up -d agentgateway
 ```
 
 Run Agentdesktop directly as the current user:
@@ -36,3 +38,12 @@ The Agentgateway policy extracts the OIDC token for caller validation and
 replaces the upstream Authorization header with the subscription token. The
 example uses permissive JWT mode for local experimentation; do not treat it as
 a production authentication policy.
+
+## Stop the scenario
+
+Stop the foreground daemon with Ctrl-C, then stop Dex and
+Agentgateway:
+
+```console
+docker compose -f examples/claude-subscription/compose.yaml down
+```
