@@ -609,10 +609,23 @@ fn unix_time_seconds() -> u64 {
 }
 
 pub(crate) fn hostname() -> String {
-    std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("COMPUTERNAME"))
-        .or_else(|_| std::fs::read_to_string("/etc/hostname").map(|value| value.trim().to_string()))
-        .unwrap_or_else(|_| "unknown".to_string())
+    hostname::get()
+        .ok()
+        .and_then(normalize_hostname)
+        .or_else(|| std::env::var_os("HOSTNAME").and_then(normalize_hostname))
+        .or_else(|| std::env::var_os("COMPUTERNAME").and_then(normalize_hostname))
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .and_then(normalize_hostname)
+        })
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+fn normalize_hostname(value: impl AsRef<std::ffi::OsStr>) -> Option<String> {
+    let value = value.as_ref().to_string_lossy();
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 #[cfg(test)]
@@ -627,7 +640,10 @@ mod tests {
 
     use tokio::sync::mpsc;
 
-    use super::{MAX_RETRY_DELAY, enroll_with_retry, is_unauthenticated, next_retry_delay};
+    use super::{
+        MAX_RETRY_DELAY, enroll_with_retry, is_unauthenticated, next_retry_delay,
+        normalize_hostname,
+    };
     use crate::enrollment::EnrollmentState;
 
     #[test]
@@ -644,6 +660,15 @@ mod tests {
             Duration::from_secs(2)
         );
         assert_eq!(next_retry_delay(MAX_RETRY_DELAY), MAX_RETRY_DELAY);
+    }
+
+    #[test]
+    fn normalizes_native_hostname() {
+        assert_eq!(
+            normalize_hostname(" postaguest1\n"),
+            Some("postaguest1".to_owned())
+        );
+        assert_eq!(normalize_hostname(" \n\t"), None);
     }
 
     #[tokio::test]
