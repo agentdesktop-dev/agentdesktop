@@ -18,8 +18,11 @@ use x509_parser::{extensions::GeneralName, parse_x509_certificate};
 use agentdesktop_core::config::InferenceGatewayAuthentication;
 
 use crate::{
-    daemon_config::DaemonConfigStore, database::Database, device_ca::DeviceCertificateIssuer,
-    gateway_jwt::GatewayJwtIssuer, oidc::OidcProvider,
+    daemon_config::DaemonConfigStore,
+    database::{Database, DevicePrincipal},
+    device_ca::DeviceCertificateIssuer,
+    gateway_jwt::GatewayJwtIssuer,
+    oidc::{OidcPrincipal, OidcProvider},
 };
 
 #[derive(Clone)]
@@ -235,8 +238,9 @@ impl FleetAgent for FleetAgentService {
         let database = self.database.clone();
         let auth_sender = sender.clone();
         tokio::spawn(async move {
-            let expected_subject = match database.device_principal(&authenticated_device_id).await {
-                Ok(principal) => principal.subject,
+            let enrolled_principal = match database.device_principal(&authenticated_device_id).await
+            {
+                Ok(principal) => principal,
                 Err(error) => {
                     error!(%error, device_id = %authenticated_device_id, "failed to load stream identity");
                     return;
@@ -249,11 +253,11 @@ impl FleetAgent for FleetAgentService {
                 _ = auth_interval.tick() => {
                     let (oidc, access_token) = &oauth_revalidation;
                     match oidc.authenticate_access_token(access_token).await {
-                        Ok(subject) if subject == expected_subject => {}
+                        Ok(principal) if oidc_principals_match(&principal, &enrolled_principal) => {}
                         Ok(_) => {
-                            warn!(device_id = %authenticated_device_id, "closing stream after OIDC subject changed");
+                            warn!(device_id = %authenticated_device_id, "closing stream after OIDC principal changed");
                             let _ = auth_sender
-                                .send(Err(Status::permission_denied("OIDC subject changed")))
+                                .send(Err(Status::permission_denied("OIDC principal changed")))
                                 .await;
                             break;
                         }
@@ -324,18 +328,18 @@ impl FleetAgentService {
         let oidc = self.oidc.as_ref().ok_or_else(|| {
             Status::failed_precondition("OIDC access-token validation is disabled")
         })?;
-        let access_subject = oidc
+        let access_principal = oidc
             .authenticate_access_token(access_token)
             .await
             .map_err(invalid_access_token)?;
-        self.authenticate_device_certificate_identity(device_id, &access_subject)
+        self.authenticate_device_certificate_identity(device_id, &access_principal)
             .await
     }
 
     async fn authenticate_device_certificate_identity(
         &self,
         device_id: &str,
-        access_subject: &str,
+        access_principal: &OidcPrincipal,
     ) -> Result<String, Status> {
         let principal = self
             .database
@@ -345,9 +349,9 @@ impl FleetAgentService {
                 warn!(%error, device_id, "certificate references an unknown device");
                 Status::unauthenticated("unrecognized device certificate")
             })?;
-        if access_subject != principal.subject {
+        if !oidc_principals_match(access_principal, &principal) {
             return Err(Status::permission_denied(
-                "access token subject does not match enrolled device user",
+                "access token principal does not match enrolled device user",
             ));
         }
         Ok(device_id.to_owned())
@@ -392,6 +396,13 @@ impl FleetAgentService {
             client_certificate_expires_at_unix_seconds: issued_certificate.expires_at_unix_seconds,
         }))
     }
+}
+
+fn oidc_principals_match(authenticated: &OidcPrincipal, enrolled: &DevicePrincipal) -> bool {
+    !enrolled.issuer.is_empty()
+        && !enrolled.subject.is_empty()
+        && authenticated.issuer == enrolled.issuer
+        && authenticated.subject == enrolled.subject
 }
 
 fn peer_certificate_device_id<T>(request: &Request<T>) -> Result<Option<String>, Status> {
@@ -542,12 +553,13 @@ fn invalid_access_token(err: anyhow::Error) -> Status {
 #[cfg(test)]
 mod tests {
     use rcgen::{CertificateParams, KeyPair};
+    use tonic::Code;
 
     use super::{FleetAgentService, device_id_from_certificate};
-    use crate::{daemon_config::DaemonConfigStore, database::Database};
+    use crate::{daemon_config::DaemonConfigStore, database::Database, oidc::OidcPrincipal};
 
     #[tokio::test]
-    async fn certificate_device_and_matching_user_authenticate() {
+    async fn device_authentication_binds_oidc_issuer_and_subject() {
         let device_id = "7ca03414-bb20-4c80-98ef-7b0538b988ba";
         let path = std::env::temp_dir().join(format!(
             "agentdesktop-mtls-{}-{}.db",
@@ -563,28 +575,72 @@ mod tests {
             .expect("enroll device");
         let service =
             FleetAgentService::new(None, database, DaemonConfigStore::new(None), None, None);
+        let principal = |issuer: &str, subject: &str| OidcPrincipal {
+            issuer: issuer.to_owned(),
+            subject: subject.to_owned(),
+        };
         assert_eq!(
             service
-                .authenticate_device_certificate_identity(device_id, "subject")
+                .authenticate_device_certificate_identity(
+                    device_id,
+                    &principal("issuer", "subject"),
+                )
                 .await
                 .unwrap(),
             device_id
         );
-        assert!(
-            service
-                .authenticate_device_certificate_identity(
-                    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-                    "subject",
-                )
+
+        for mismatched in [
+            principal("issuer", "other-subject"),
+            principal("other-issuer", "subject"),
+            principal("other-issuer", "other-subject"),
+        ] {
+            let status = service
+                .authenticate_device_certificate_identity(device_id, &mismatched)
                 .await
-                .is_err()
-        );
-        assert!(
-            service
-                .authenticate_device_certificate_identity(device_id, "other-user")
-                .await
-                .is_err()
-        );
+                .expect_err("mismatched OIDC principal must fail");
+            assert_eq!(status.code(), Code::PermissionDenied);
+        }
+
+        let status = service
+            .authenticate_device_certificate_identity(
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                &principal("issuer", "subject"),
+            )
+            .await
+            .expect_err("unknown device certificate must fail");
+        assert_eq!(status.code(), Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn legacy_device_without_enrolled_issuer_fails_closed() {
+        let device_id = "7ca03414-bb20-4c80-98ef-7b0538b988ba";
+        let path = std::env::temp_dir().join(format!(
+            "agentdesktop-empty-issuer-{}-{}.db",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let database = Database::connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .await
+            .expect("connect database");
+        database
+            .enroll_device(device_id, "host", "", "subject", None)
+            .await
+            .expect("enroll legacy device");
+        let service =
+            FleetAgentService::new(None, database, DaemonConfigStore::new(None), None, None);
+
+        let status = service
+            .authenticate_device_certificate_identity(
+                device_id,
+                &OidcPrincipal {
+                    issuer: String::new(),
+                    subject: "subject".to_owned(),
+                },
+            )
+            .await
+            .expect_err("empty enrolled issuer must fail closed");
+        assert_eq!(status.code(), Code::PermissionDenied);
     }
 
     #[test]
