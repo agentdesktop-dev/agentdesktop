@@ -61,6 +61,13 @@ pub struct CompletedEnrollment {
     pub idp_claims: BTreeMap<String, serde_json::Value>,
 }
 
+/// Stable identity authenticated by one OIDC provider.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OidcPrincipal {
+    pub issuer: String,
+    pub subject: String,
+}
+
 #[derive(Deserialize)]
 struct DiscoveryDocument {
     issuer: String,
@@ -217,8 +224,8 @@ impl OidcProvider {
         if claims.nonce != pending.nonce {
             bail!("OIDC nonce mismatch");
         }
-        let access_subject = self.authenticate_access_token(access_token).await?;
-        if access_subject != claims.sub {
+        let access_principal = self.authenticate_access_token(access_token).await?;
+        if access_principal.subject != claims.sub {
             bail!("access token and ID token subjects do not match");
         }
 
@@ -228,13 +235,16 @@ impl OidcProvider {
 
         Ok(CompletedEnrollment {
             hostname: pending.hostname,
-            issuer: self.inner.issuer.clone(),
-            subject: claims.sub,
+            issuer: access_principal.issuer,
+            subject: access_principal.subject,
             idp_claims,
         })
     }
 
-    pub async fn authenticate_access_token(&self, access_token: &str) -> anyhow::Result<String> {
+    pub async fn authenticate_access_token(
+        &self,
+        access_token: &str,
+    ) -> anyhow::Result<OidcPrincipal> {
         if access_token.is_empty() {
             bail!("access token is required");
         }
@@ -254,7 +264,10 @@ impl OidcProvider {
         if user.sub.is_empty() {
             bail!("OIDC UserInfo response has no subject");
         }
-        Ok(user.sub)
+        Ok(OidcPrincipal {
+            issuer: self.inner.issuer.clone(),
+            subject: user.sub,
+        })
     }
 }
 
