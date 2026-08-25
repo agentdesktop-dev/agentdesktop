@@ -78,14 +78,33 @@ pub(super) fn version_after_component(executable: &Path, component: &str) -> Opt
 }
 
 pub(super) fn json_version(path: &Path) -> Option<String> {
+    json_package_metadata(path).map(|metadata| metadata.version)
+}
+
+pub(super) fn json_package_version(path: &Path, expected_name: &str) -> Option<String> {
+    let metadata = json_package_metadata(path)?;
+    (metadata.name.as_deref() == Some(expected_name)).then_some(metadata.version)
+}
+
+struct PackageMetadata {
+    name: Option<String>,
+    version: String,
+}
+
+fn json_package_metadata(path: &Path) -> Option<PackageMetadata> {
     #[derive(Deserialize)]
-    struct PackageMetadata {
+    struct JsonPackageMetadata {
+        #[serde(default)]
+        name: Option<String>,
         version: String,
     }
 
     let contents = fs::read(path).ok()?;
-    let metadata: PackageMetadata = serde_json::from_slice(&contents).ok()?;
-    Some(metadata.version).filter(|version| !version.is_empty())
+    let metadata: JsonPackageMetadata = serde_json::from_slice(&contents).ok()?;
+    (!metadata.version.is_empty()).then_some(PackageMetadata {
+        name: metadata.name,
+        version: metadata.version,
+    })
 }
 
 /// Reads an Electron application's version from its packaged root `package.json`.

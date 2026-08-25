@@ -10,12 +10,7 @@ use super::metadata;
 
 pub(super) fn discover() -> Option<Agent> {
     let executable = metadata::find_executable("codex", executable_candidates())?;
-    let version = metadata::version_after_component(&executable, "releases").and_then(|release| {
-        let target_marker = format!("-{}-", std::env::consts::ARCH);
-        release
-            .split_once(&target_marker)
-            .map(|(version, _)| version.to_owned())
-    });
+    let version = standalone_version(&executable).or_else(|| npm_version(&executable));
     Some(Agent {
         version,
         executable,
@@ -23,6 +18,34 @@ pub(super) fn discover() -> Option<Agent> {
         mcp_servers: discover_mcp_servers(),
         skills: metadata::discover_skills(skill_roots()),
     })
+}
+
+fn standalone_version(executable: &Path) -> Option<String> {
+    metadata::version_after_component(executable, "releases").and_then(|release| {
+        let target_marker = format!("-{}-", std::env::consts::ARCH);
+        release
+            .split_once(&target_marker)
+            .map(|(version, _)| version.to_owned())
+    })
+}
+
+fn npm_version(executable: &Path) -> Option<String> {
+    let mut candidates = BTreeSet::new();
+    for executable in [
+        Some(executable.to_path_buf()),
+        executable.canonicalize().ok(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for directory in executable.parent()?.ancestors().take(4) {
+            candidates.insert(directory.join("package.json"));
+            candidates.insert(directory.join("node_modules/@openai/codex/package.json"));
+        }
+    }
+    candidates
+        .into_iter()
+        .find_map(|path| metadata::json_package_version(&path, "@openai/codex"))
 }
 
 fn executable_candidates() -> Vec<PathBuf> {
@@ -149,7 +172,25 @@ fn mcp_servers_from_toml(path: &Path) -> Vec<McpServer> {
 mod tests {
     use std::{fs, path::PathBuf};
 
-    use super::mcp_servers_from_toml;
+    use super::{mcp_servers_from_toml, npm_version};
+
+    #[test]
+    fn reads_version_from_npm_package() {
+        let root = temporary("codex-npm-version");
+        let package = root.join("node_modules/@openai/codex");
+        let executable = package.join("bin/codex.js");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, "#!/usr/bin/env node\n").unwrap();
+        fs::write(
+            package.join("package.json"),
+            r#"{"name":"@openai/codex","version":"0.129.0"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(npm_version(&executable).as_deref(), Some("0.129.0"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn reads_stdio_and_http_servers_without_secrets() {
