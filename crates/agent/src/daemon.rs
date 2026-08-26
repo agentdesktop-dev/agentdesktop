@@ -504,6 +504,21 @@ fn validate_one_shot(config: &agentdesktop_core::config::DaemonConfig) -> anyhow
     Ok(())
 }
 
+async fn serve_local_connection<I>(stream: I, app: axum::Router) -> Result<(), hyper::Error>
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let service = TowerToHyperService::new(app);
+    hyper::server::conn::http1::Builder::new()
+        .serve_connection(TokioIo::new(stream), service)
+        // Local clients use one connection per request and may close as soon
+        // as the response body is complete. Drop the IPC handle instead of
+        // redundantly shutting down an already-closed socket or pipe.
+        .without_shutdown()
+        .await
+        .map(|_| ())
+}
+
 #[cfg(unix)]
 async fn serve_unix(
     socket: &Path,
@@ -519,12 +534,9 @@ async fn serve_unix(
                 let (stream, _) = accepted.context("accept connection")?;
                 let peer = stream.peer_cred().context("inspect local API peer credentials")?;
                 tracing::debug!(peer_uid = peer.uid(), peer_pid = peer.pid(), "accepted local API connection");
-                let service = TowerToHyperService::new(app.clone());
+                let app = app.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = hyper::server::conn::http1::Builder::new()
-                        .serve_connection(TokioIo::new(stream), service)
-                        .await
-                    {
+                    if let Err(error) = serve_local_connection(stream, app).await {
                         tracing::warn!(%error, "failed to serve local API connection");
                     }
                 });
@@ -559,12 +571,9 @@ async fn serve_named_pipe(
                 // connection is being served. Without this, clients can see a
                 // transient pipe-not-found error between connections.
                 server = bind_named_pipe(socket, false)?;
-                let service = TowerToHyperService::new(app.clone());
+                let app = app.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = hyper::server::conn::http1::Builder::new()
-                        .serve_connection(TokioIo::new(connected), service)
-                        .await
-                    {
+                    if let Err(error) = serve_local_connection(connected, app).await {
                         tracing::warn!(%error, "failed to serve local API connection");
                     }
                 });
@@ -719,11 +728,89 @@ fn effective_uid() -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{
+        io,
+        path::Path,
+        pin::Pin,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        task::{Context, Poll},
+    };
 
     use agentdesktop_core::config::parse_daemon;
+    use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
-    use super::{client_executable_for_daemon, validate_dry_run, validate_one_shot};
+    use super::{
+        client_executable_for_daemon, serve_local_connection, validate_dry_run, validate_one_shot,
+    };
+
+    struct ShutdownRejectingStream {
+        inner: tokio::io::DuplexStream,
+        shutdown_called: Arc<AtomicBool>,
+    }
+
+    impl AsyncRead for ShutdownRejectingStream {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+            buffer: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_read(context, buffer)
+        }
+    }
+
+    impl AsyncWrite for ShutdownRejectingStream {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+            buffer: &[u8],
+        ) -> Poll<Result<usize, io::Error>> {
+            Pin::new(&mut self.inner).poll_write(context, buffer)
+        }
+
+        fn poll_flush(
+            mut self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+        ) -> Poll<Result<(), io::Error>> {
+            Pin::new(&mut self.inner).poll_flush(context)
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Result<(), io::Error>> {
+            self.shutdown_called.store(true, Ordering::SeqCst);
+            Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "socket is not connected",
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn local_connection_drops_ipc_stream_without_shutting_it_down() {
+        let (mut client, server) = tokio::io::duplex(4096);
+        let shutdown_called = Arc::new(AtomicBool::new(false));
+        let stream = ShutdownRejectingStream {
+            inner: server,
+            shutdown_called: shutdown_called.clone(),
+        };
+        let app = axum::Router::new().route("/health", axum::routing::get(|| async { "ok" }));
+        let connection = tokio::spawn(serve_local_connection(stream, app));
+
+        client
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+
+        connection.await.unwrap().unwrap();
+        assert!(String::from_utf8_lossy(&response).ends_with("\r\n\r\nok"));
+        assert!(!shutdown_called.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn windows_service_uses_the_sibling_client_executable() {
