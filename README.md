@@ -14,8 +14,8 @@ into one fully open-source system. Keep developers in Claude, Codex, OpenCode,
 and VS Code while giving platform teams a fleet-wide management experience
 built for AI developer tools, not retrofitted from device management scripts.
 
-[Website](https://agentdesktop.io) ·
-[Documentation](https://agentdesktop.io/docs/) ·
+[Website](https://agentdesktop.dev) ·
+[Documentation](https://agentdesktop.dev/docs/) ·
 [Releases](https://github.com/agentdesktop-dev/agentdesktop/releases)
 
 ## What you can do
@@ -60,18 +60,18 @@ request short-lived credentials for the inference gateway through the daemon.
 
 ## Get started
 
-Start with [Build and install](https://agentdesktop.io/docs/getting-started/build/)
+Start with [Build and install](https://agentdesktop.dev/docs/getting-started/build/)
 when working from source, then choose the setup that fits your environment:
 
-- [Standalone mode](https://agentdesktop.io/docs/getting-started/standalone/)
+- [Standalone mode](https://agentdesktop.dev/docs/getting-started/standalone/)
   reads local YAML and can authenticate directly to an inference gateway with
   OIDC. It needs no controller or device identity. The repository includes a
   [local standalone example](./examples/standalone).
-- [Controller-managed mode](https://agentdesktop.io/docs/getting-started/managed/)
+- [Controller-managed mode](https://agentdesktop.dev/docs/getting-started/managed/)
   enrolls users and devices, distributes versioned configuration, and can issue
   short-lived gateway JWTs. The [local managed example](./examples/claude) uses
   Dex and agentgateway.
-- [Production deployment](https://agentdesktop.io/docs/operations/production/)
+- [Production deployment](https://agentdesktop.dev/docs/operations/production/)
   covers Kubernetes, certificates, MDM, and endpoint enrollment. The
   [Kubernetes example](./examples/kubernetes) includes development Dex and
   PostgreSQL dependencies.
