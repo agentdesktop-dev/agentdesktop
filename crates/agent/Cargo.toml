@@ -48,7 +48,7 @@ keyring-core.workspace = true
 [target.'cfg(windows)'.dependencies]
 keyring.workspace = true
 windows-service = "0.8.1"
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61", features = [
 	"Win32_Foundation",
 	"Win32_Security",
 	"Win32_Security_Authorization",
