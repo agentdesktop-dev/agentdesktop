@@ -208,6 +208,7 @@
   gap: 6px;
   color: var(--muted);
   background: transparent;
+  border: 0;
   border-bottom: 2px solid transparent;
   font-size: 11px;
   font-weight: 600;

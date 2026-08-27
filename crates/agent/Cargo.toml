@@ -21,6 +21,7 @@ clap.workspace = true
 hostname.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+json5.workspace = true
 memchr.workspace = true
 open.workspace = true
 rand.workspace = true
