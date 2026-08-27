@@ -24,6 +24,40 @@ pnpm dev:desktop
 Set `AGENTDESKTOP_SOCKET` to override the default Unix socket or Windows named
 pipe used by the native client.
 
+### Run the daemon and UI from source
+
+To test daemon and desktop changes together without building an installer, use
+a disposable user-mode state directory and a separate socket. Build the desktop
+assets once, then run the daemon in the first terminal:
+
+```sh
+export AGENTDESKTOP_DEV_STATE="${XDG_STATE_HOME:-$HOME/.local/state}/agentdesktop-dev"
+export AGENTDESKTOP_SOCKET="$AGENTDESKTOP_DEV_STATE/agentdesktop.sock"
+
+rm -rf "$AGENTDESKTOP_DEV_STATE"
+pnpm --dir frontend --filter @agentdesktop/desktop-web build
+cargo run -p agentdesktop -- daemon \
+	--user \
+	--socket "$AGENTDESKTOP_SOCKET" \
+	--config "$HOME/.config/agentdesktop/config.yaml" \
+	--state-dir "$AGENTDESKTOP_DEV_STATE"
+```
+
+The configuration file must exist and contain the controller-managed or
+standalone configuration to test. Removing the disposable state directory
+forces a fresh enrollment; omit that line to preserve the development identity.
+
+In a second terminal, point the Tauri development client at the same socket:
+
+```sh
+AGENTDESKTOP_SOCKET="${XDG_STATE_HOME:-$HOME/.local/state}/agentdesktop-dev/agentdesktop.sock" \
+	pnpm --dir frontend dev:desktop
+```
+
+The installed system daemon can remain running because the custom socket keeps
+the source-built processes isolated from it. Stop and rerun the first command
+after daemon-side Rust changes; Tauri reloads frontend changes automatically.
+
 ### Storybook
 
 The desktop views have deterministic Storybook states for development,
