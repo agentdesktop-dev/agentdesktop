@@ -1,6 +1,5 @@
 import type {
   ControllerSettings,
-  DaemonConfigDocument,
   Device,
   DeviceDetail,
   Overview,
@@ -271,14 +270,21 @@ export const controllerSettings: ControllerSettings = {
   gateway_jwt_enabled: true,
 };
 
-export const activeDaemonConfig: DaemonConfigDocument = {
-  llmGateway: {
-    url: "https://gateway.example.internal",
-    authentication: { type: "controllerJwt", audience: "agentgateway" },
-  },
-  telemetry: { events: ["session.new", "tool.use.input"] },
-  programs: {
-    claudeCode: { permissions: { defaultMode: "plan" } },
-    openCode: { useLlmGateway: false, autoupdate: false },
-  },
-};
+export const fleetConfigurationYaml = `llmGateway:
+  url: https://gateway.example.internal
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
+    allowedClientIds: [claude-code]
+
+telemetry:
+  events: [session.new, tool.use.input]
+
+programs:
+  claudeCode:
+    permissions:
+      defaultMode: plan
+  openCode:
+    useLlmGateway: false
+    autoupdate: false
+`;

@@ -5,10 +5,10 @@ import { ControllerShell } from "./components/ControllerShell";
 import { ErrorState, NotFound, PageSkeleton } from "./components/ViewStates";
 import { navigate, usePath } from "./router";
 import type {
-  ActiveDaemonConfig,
   ControllerSettings,
   Device,
   DeviceDetail,
+  FleetConfigurationResponse,
   Overview,
 } from "./types";
 import { ConfigurationView } from "./views/ConfigurationView";
@@ -101,8 +101,37 @@ function DevicePage({ id }: { id: string }) {
 }
 
 function ConfigurationPage() {
-  const query = useApi<ActiveDaemonConfig>("/api/v1/daemon-config");
-  return <ConfigurationView initialConfig={query.data?.config} />;
+  const query = useApi<FleetConfigurationResponse>(
+    "/api/v1/fleet-configuration",
+  );
+  if (query.loading) return <PageSkeleton />;
+  if (query.error || !query.data) return <ErrorState message={query.error} />;
+
+  async function saveConfiguration(yaml: string, version: string) {
+    const response = await fetch("/api/v1/fleet-configuration", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ yaml, version }),
+    });
+    if (response.status === 409) {
+      throw new Error(
+        "The fleet configuration changed on the server. Refresh the page and reapply your edits.",
+      );
+    }
+    if (!response.ok) throw new Error(await response.text());
+    return response.json() as Promise<FleetConfigurationResponse>;
+  }
+
+  return (
+    <ConfigurationView
+      initialYaml={query.data.yaml}
+      initialRevision={query.data.revision}
+      initialVersion={query.data.version}
+      sourceError={query.data.sourceError}
+      writable={query.data.writable}
+      onSave={saveConfiguration}
+    />
+  );
 }
 
 function SettingsPage() {

@@ -20,4 +20,6 @@ daemonConfig:
     claudeCode:
       companyAnnouncements:
       - Managed by Agentdesktop
+fleetConfiguration:
+  enabled: true
 tlsSecretName: agentdesktop-controller-tls

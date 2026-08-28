@@ -78,11 +78,13 @@ export type AgentDraft = {
 };
 
 export type DaemonConfigDocument = {
+  controller?: Record<string, unknown>;
   llmGateway?: {
     url: string;
-    authentication?: {
+    authentication?: Record<string, unknown> & {
       type: string;
       audience?: string;
+      allowedClientIds?: string[];
     };
   };
   telemetry?: {
@@ -91,6 +93,11 @@ export type DaemonConfigDocument = {
   programs?: Partial<Record<AgentKind, Record<string, unknown>>>;
 };
 
-export type ActiveDaemonConfig = {
-  config: DaemonConfigDocument | null;
+export type FleetConfigurationResponse = {
+  yaml: string | null;
+  revision: number | null;
+  version: string | null;
+  source: "file" | "configMap" | null;
+  sourceError: string | null;
+  writable: boolean;
 };

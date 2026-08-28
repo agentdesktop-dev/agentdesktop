@@ -62,6 +62,57 @@
   ],
   "$defs": {
     "ControllerDaemonConfig": {
+      "description": "Source of the daemon configuration distributed by the controller.",
+      "anyOf": [
+        {
+          "description": "Read-only configuration loaded from a watched file.",
+          "$ref": "#/$defs/ControllerDaemonFileConfig"
+        },
+        {
+          "description": "Writable configuration stored in a dedicated Kubernetes ConfigMap.",
+          "type": "object",
+          "properties": {
+            "configMap": {
+              "$ref": "#/$defs/ControllerDaemonConfigMap"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "configMap"
+          ]
+        }
+      ]
+    },
+    "ControllerDaemonConfigMap": {
+      "description": "Kubernetes ConfigMap containing writable fleet configuration.",
+      "type": "object",
+      "properties": {
+        "dataKey": {
+          "description": "Data key containing daemon configuration YAML.",
+          "type": "string",
+          "default": "daemon.yaml"
+        },
+        "name": {
+          "description": "Name of the ConfigMap.",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "Namespace containing the ConfigMap.",
+          "type": "string"
+        },
+        "revisionKey": {
+          "description": "Data key containing the positive numeric fleet revision.",
+          "type": "string",
+          "default": "revision"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "namespace",
+        "name"
+      ]
+    },
+    "ControllerDaemonFileConfig": {
       "description": "Controller-owned daemon configuration file and its revision.",
       "type": "object",
       "properties": {

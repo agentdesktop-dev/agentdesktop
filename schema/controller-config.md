@@ -7,6 +7,11 @@
 |`daemonConfig`|object|Daemon configuration distributed to enrolled devices.|
 |`daemonConfig.path`|string|Path to the watched YAML configuration distributed to enrolled devices.<br><br>Relative paths are resolved from the controller configuration directory.<br>Valid file changes are published to connected devices automatically.|
 |`daemonConfig.revision`|integer|Monotonically increasing revision assigned to the daemon configuration.|
+|`daemonConfig.configMap`|object|Writable configuration stored in a dedicated Kubernetes ConfigMap.<br>Kubernetes ConfigMap containing writable fleet configuration.|
+|`daemonConfig.configMap.dataKey`|string|Data key containing daemon configuration YAML.|
+|`daemonConfig.configMap.name`|string|Name of the ConfigMap.|
+|`daemonConfig.configMap.namespace`|string|Namespace containing the ConfigMap.|
+|`daemonConfig.configMap.revisionKey`|string|Data key containing the positive numeric fleet revision.|
 |`databaseUrl`|string|SQLite or PostgreSQL URL used for controller state.|
 |`fleetListen`|string|Address on which the device-facing gRPC fleet API listens.|
 |`gatewayJwt`|object|LLM gateway JWT signing settings.|

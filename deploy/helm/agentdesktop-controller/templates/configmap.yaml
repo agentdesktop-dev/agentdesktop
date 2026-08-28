@@ -20,12 +20,19 @@ data:
     gatewayJwt:
 {{ toYaml . | indent 6 }}
     {{- end }}
+    {{- if .Values.fleetConfiguration.enabled }}
+    daemonConfig:
+      configMap:
+        namespace: {{ .Release.Namespace | quote }}
+        name: {{ include "agentdesktop-controller.fleetConfigurationName" . | quote }}
+    {{- else }}
     {{- with .Values.daemonConfig }}
     daemonConfig:
       path: /etc/agentdesktop/config/daemon.yaml
     {{- end }}
-  {{- with .Values.daemonConfig }}
+    {{- end }}
+  {{- if and (not .Values.fleetConfiguration.enabled) .Values.daemonConfig }}
   daemon.yaml: |
-{{ toYaml . | indent 4 }}
+{{ toYaml .Values.daemonConfig | indent 4 }}
   {{- end }}
 {{- end }}

@@ -1,17 +1,36 @@
 import { ToolIcon } from "@agentdesktop/ui";
-import { Check, ChevronRight, Copy, Plus, Trash2 } from "lucide-react";
+import { Check, ChevronRight, Copy, Plus, Save, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { parse, stringify } from "yaml";
 
-import type { AgentDraft, AgentKind, DaemonConfigDocument } from "../types";
+import type {
+  AgentDraft,
+  AgentKind,
+  DaemonConfigDocument,
+  FleetConfigurationResponse,
+} from "../types";
 
 export interface ConfigurationViewProps {
-  initialConfig?: DaemonConfigDocument | null;
+  initialYaml?: string | null;
+  initialRevision?: number | null;
+  initialVersion?: string | null;
+  sourceError?: string | null;
+  writable?: boolean;
   onCopy?: (yaml: string) => Promise<void> | void;
+  onSave?: (
+    yaml: string,
+    version: string,
+  ) => Promise<FleetConfigurationResponse>;
 }
 
 export function ConfigurationView({
-  initialConfig,
+  initialYaml,
+  initialRevision,
+  initialVersion,
+  sourceError,
+  writable = false,
   onCopy,
+  onSave,
 }: ConfigurationViewProps) {
   const addAgentMenu = useRef<HTMLDetailsElement>(null);
   const initializedFromController = useRef(false);
@@ -19,6 +38,18 @@ export function ConfigurationView({
   const [gatewayUrl, setGatewayUrl] = useState("https://gateway.example.com");
   const [controllerJwt, setControllerJwt] = useState(true);
   const [audience, setAudience] = useState("agentgateway");
+  const [allowedClientIds, setAllowedClientIds] = useState([
+    "claude-code",
+    "claude-desktop",
+    "codex",
+    "opencode",
+  ]);
+  const [preservedAuthentication, setPreservedAuthentication] = useState<
+    Record<string, unknown> | undefined
+  >();
+  const [preservedController, setPreservedController] = useState<
+    Record<string, unknown> | undefined
+  >();
   const [sessionNewTelemetry, setSessionNewTelemetry] = useState(false);
   const [toolUseTelemetry, setToolUseTelemetry] = useState(false);
   const [toolInputTelemetry, setToolInputTelemetry] = useState(false);
@@ -26,11 +57,20 @@ export function ConfigurationView({
     { kind: "claudeCode", useGateway: true, settings: "" },
   ]);
   const [copied, setCopied] = useState(false);
+  const [version, setVersion] = useState(initialVersion ?? null);
+  const [revision, setRevision] = useState(initialRevision ?? null);
+  const [saving, setSaving] = useState(false);
+  const [hydrated, setHydrated] = useState(initialYaml === undefined);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [savedYaml, setSavedYaml] = useState<string | null>(null);
   const yaml = daemonConfigYaml({
     gateway,
     gatewayUrl,
     controllerJwt,
     audience,
+    allowedClientIds,
+    preservedAuthentication,
+    preservedController,
     sessionNewTelemetry,
     toolUseTelemetry,
     toolInputTelemetry,
@@ -41,25 +81,39 @@ export function ConfigurationView({
   );
 
   useEffect(() => {
-    if (initializedFromController.current || initialConfig === undefined) {
+    if (initializedFromController.current || initialYaml === undefined) {
       return;
     }
     initializedFromController.current = true;
-    if (!initialConfig) return;
+    const document = initialYaml
+      ? (parse(initialYaml, { intAsBigInt: true }) as DaemonConfigDocument)
+      : null;
+    if (!document) {
+      setHydrated(true);
+      return;
+    }
 
-    const llmGateway = initialConfig.llmGateway;
-    const events = new Set(initialConfig.telemetry?.events ?? []);
+    setPreservedController(document.controller);
+    const llmGateway = document.llmGateway;
+    const events = new Set(document.telemetry?.events ?? []);
     setGateway(Boolean(llmGateway));
     if (llmGateway) {
       setGatewayUrl(llmGateway.url);
       setControllerJwt(llmGateway.authentication?.type === "controllerJwt");
       setAudience(llmGateway.authentication?.audience ?? "agentgateway");
+      if (llmGateway.authentication?.type === "controllerJwt") {
+        setAllowedClientIds(llmGateway.authentication.allowedClientIds ?? []);
+        setPreservedAuthentication(undefined);
+      } else {
+        setPreservedAuthentication(llmGateway.authentication);
+      }
     }
     setSessionNewTelemetry(events.has("session.new"));
     setToolUseTelemetry(events.has("tool.use") || events.has("tool.use.input"));
     setToolInputTelemetry(events.has("tool.use.input"));
-    setAgents(agentDrafts(initialConfig.programs));
-  }, [initialConfig]);
+    setAgents(agentDrafts(document.programs));
+    setHydrated(true);
+  }, [initialYaml]);
 
   useEffect(() => {
     const closeMenu = (event: PointerEvent) => {
@@ -80,6 +134,23 @@ export function ConfigurationView({
     }
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1500);
+  }
+
+  async function saveYaml() {
+    if (!onSave || !version) return;
+    setSaving(true);
+    setSaveError(null);
+    setSavedYaml(null);
+    try {
+      const result = await onSave(yaml, version);
+      setVersion(result.version);
+      setRevision(result.revision);
+      setSavedYaml(yaml);
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "Save failed");
+    } finally {
+      setSaving(false);
+    }
   }
 
   function updateAgent(kind: AgentKind, update: Partial<AgentDraft>) {
@@ -109,9 +180,15 @@ export function ConfigurationView({
       <section className="section-intro">
         <div>
           <h2>Build a configuration</h2>
-          <p>Choose the settings to manage, then copy the generated YAML.</p>
+          <p>Choose the settings to manage, then review the generated YAML.</p>
         </div>
       </section>
+      {sourceError && (
+        <p className="error-callout" role="alert">
+          The active configuration is shown, but its source is unavailable:{" "}
+          {sourceError}
+        </p>
+      )}
       <div className="configuration-builder">
         <section className="card wizard-card">
           <details className="wizard-section" open={gateway}>
@@ -343,20 +420,55 @@ export function ConfigurationView({
           <div className="output-heading">
             <div>
               <h3>Generated YAML</h3>
-              <p>Copy this into the daemon configuration file.</p>
+              <p>
+                {writable
+                  ? "Save these settings to roll them out to the fleet."
+                  : "Copy this into the daemon configuration file."}
+              </p>
             </div>
-            <button
-              type="button"
-              className="button secondary"
-              onClick={copyYaml}
-            >
-              {copied ? <Check size={14} /> : <Copy size={14} />}
-              {copied ? "Copied" : "Copy"}
-            </button>
+            <div className="output-actions">
+              <button
+                type="button"
+                className="button secondary"
+                onClick={copyYaml}
+              >
+                {copied ? <Check size={14} /> : <Copy size={14} />}
+                {copied ? "Copied" : "Copy"}
+              </button>
+              {writable && (
+                <button
+                  type="button"
+                  className="button primary"
+                  disabled={saving || !version || !hydrated}
+                  onClick={saveYaml}
+                >
+                  {savedYaml === yaml ? (
+                    <Check size={14} />
+                  ) : (
+                    <Save size={14} />
+                  )}
+                  {saving ? "Saving…" : "Save and roll out"}
+                </button>
+              )}
+            </div>
           </div>
-          <pre>
-            <code>{yaml}</code>
-          </pre>
+          {saveError && (
+            <p className="configuration-save-message error" role="alert">
+              {saveError}
+            </p>
+          )}
+          {savedYaml === yaml && revision !== null && (
+            <p className="configuration-save-message success" role="status">
+              Revision {revision} saved and queued for rollout.
+            </p>
+          )}
+          <textarea
+            aria-label="Generated fleet configuration"
+            className="configuration-yaml-preview"
+            readOnly
+            spellCheck={false}
+            value={yaml}
+          />
         </section>
       </div>
     </div>
@@ -403,12 +515,18 @@ function daemonConfigYaml(options: {
   gatewayUrl: string;
   controllerJwt: boolean;
   audience: string;
+  allowedClientIds: string[];
+  preservedAuthentication?: Record<string, unknown>;
+  preservedController?: Record<string, unknown>;
   sessionNewTelemetry: boolean;
   toolUseTelemetry: boolean;
   toolInputTelemetry: boolean;
   agents: AgentDraft[];
 }) {
   const lines: string[] = [];
+  if (options.preservedController) {
+    lines.push("controller:", ...yamlBlock(options.preservedController, 2), "");
+  }
   if (options.gateway) {
     lines.push("llmGateway:", `  url: ${yamlString(options.gatewayUrl)}`);
     if (options.controllerJwt) {
@@ -416,7 +534,12 @@ function daemonConfigYaml(options: {
         "  authentication:",
         "    type: controllerJwt",
         `    audience: ${yamlString(options.audience)}`,
-        "    allowedClientIds: [claude-code, claude-desktop, codex, opencode]",
+        `    allowedClientIds: [${options.allowedClientIds.map(yamlString).join(", ")}]`,
+      );
+    } else if (options.preservedAuthentication) {
+      lines.push(
+        "  authentication:",
+        ...yamlBlock(options.preservedAuthentication, 4),
       );
     }
     lines.push("");
@@ -466,59 +589,16 @@ function agentDrafts(programs: DaemonConfigDocument["programs"]): AgentDraft[] {
       {
         kind,
         useGateway: useLlmGateway !== false,
-        settings: objectYaml(settings),
+        settings: stringify(settings, { lineWidth: 0 }).trimEnd(),
       },
     ];
   });
 }
 
-function objectYaml(value: Record<string, unknown>) {
-  return yamlLines(value, 0).join("\n");
-}
-
-function yamlLines(value: unknown, indent: number): string[] {
+function yamlBlock(value: unknown, indent: number): string[] {
   const padding = " ".repeat(indent);
-  if (Array.isArray(value)) {
-    if (value.length === 0) return [`${padding}[]`];
-    return value.flatMap((item) => {
-      if (isNonEmptyCollection(item)) {
-        return [`${padding}-`, ...yamlLines(item, indent + 2)];
-      }
-      return [`${padding}- ${yamlScalar(item)}`];
-    });
-  }
-  if (value !== null && typeof value === "object") {
-    const entries = Object.entries(value);
-    if (entries.length === 0) return [`${padding}{}`];
-    return entries.flatMap(([key, item]) => {
-      const yamlKey = /^[A-Za-z_][A-Za-z0-9_.-]*$/.test(key)
-        ? key
-        : yamlString(key);
-      if (isNonEmptyCollection(item)) {
-        return [`${padding}${yamlKey}:`, ...yamlLines(item, indent + 2)];
-      }
-      return [`${padding}${yamlKey}: ${yamlScalar(item)}`];
-    });
-  }
-  return [`${padding}${yamlScalar(value)}`];
-}
-
-function isNonEmptyCollection(value: unknown) {
-  return (
-    (Array.isArray(value) && value.length > 0) ||
-    (value !== null &&
-      typeof value === "object" &&
-      Object.keys(value).length > 0)
-  );
-}
-
-function yamlScalar(value: unknown) {
-  if (typeof value === "string") return yamlString(value);
-  if (value === null) return "null";
-  if (typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-  if (Array.isArray(value)) return "[]";
-  if (typeof value === "object") return "{}";
-  return yamlString(String(value));
+  return stringify(value, { lineWidth: 0 })
+    .trimEnd()
+    .split("\n")
+    .map((line) => padding + line);
 }

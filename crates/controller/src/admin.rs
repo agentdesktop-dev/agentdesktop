@@ -9,13 +9,11 @@ use axum::{
     routing::get,
 };
 use rust_embed::RustEmbed;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use agentdesktop_core::config::DaemonConfig;
-
 use crate::{
-    daemon_config::DaemonConfigStore,
+    daemon_config::{ActiveFleetConfiguration, FleetConfiguration, ReplaceFleetConfigurationError},
     database::{Database, DeviceDetail, DeviceSummary},
     gateway_jwt::{self, GatewayJwks},
 };
@@ -23,7 +21,7 @@ use crate::{
 #[derive(Clone)]
 pub struct AdminState {
     database: Database,
-    daemon_config: DaemonConfigStore,
+    fleet_configuration: FleetConfiguration,
     settings: ControllerSettings,
 }
 
@@ -39,12 +37,12 @@ pub struct ControllerSettings {
 impl AdminState {
     pub fn new(
         database: Database,
-        daemon_config: DaemonConfigStore,
+        fleet_configuration: FleetConfiguration,
         settings: ControllerSettings,
     ) -> Self {
         Self {
             database,
-            daemon_config,
+            fleet_configuration,
             settings,
         }
     }
@@ -72,7 +70,10 @@ pub async fn serve(
     let app = Router::new()
         .route("/api/v1/overview", get(overview))
         .route("/api/v1/devices", get(devices))
-        .route("/api/v1/daemon-config", get(daemon_config))
+        .route(
+            "/api/v1/fleet-configuration",
+            get(fleet_configuration).put(replace_fleet_configuration),
+        )
         .route(
             "/api/v1/devices/{device_id}",
             get(device).delete(delete_device),
@@ -107,7 +108,11 @@ async fn overview(State(state): State<AdminState>) -> Result<Json<Overview>, Adm
         online_devices,
         offline_devices: devices.len() - online_devices,
         config_failures,
-        active_revision: state.daemon_config.current().map(|config| config.revision),
+        active_revision: state
+            .fleet_configuration
+            .store()
+            .current()
+            .map(|config| config.revision),
         recent_devices: devices.into_iter().take(5).collect(),
     }))
 }
@@ -144,22 +149,69 @@ async fn settings(State(state): State<AdminState>) -> Json<ControllerSettings> {
 }
 
 #[derive(Serialize)]
-struct ActiveDaemonConfig {
-    config: Option<DaemonConfig>,
+#[serde(rename_all = "camelCase")]
+struct FleetConfigurationResponse {
+    yaml: Option<String>,
+    revision: Option<u64>,
+    version: Option<String>,
+    source: Option<&'static str>,
+    source_error: Option<String>,
+    writable: bool,
 }
 
-async fn daemon_config(
+async fn fleet_configuration(
     State(state): State<AdminState>,
-) -> Result<Json<ActiveDaemonConfig>, AdminError> {
-    let config = state
-        .daemon_config
-        .current()
-        .map(|active| {
-            let yaml = std::str::from_utf8(&active.yaml).context("daemon config is not UTF-8")?;
-            agentdesktop_core::config::parse_daemon(yaml)
-        })
-        .transpose()?;
-    Ok(Json(ActiveDaemonConfig { config }))
+) -> Result<Json<FleetConfigurationResponse>, AdminError> {
+    let active = state.fleet_configuration.resolve().await;
+    fleet_configuration_response(&state.fleet_configuration, active).map(Json)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReplaceFleetConfiguration {
+    version: String,
+    yaml: String,
+}
+
+async fn replace_fleet_configuration(
+    State(state): State<AdminState>,
+    Json(request): Json<ReplaceFleetConfiguration>,
+) -> Result<Json<FleetConfigurationResponse>, AdminError> {
+    let snapshot = state
+        .fleet_configuration
+        .replace(&request.version, request.yaml)
+        .await?;
+    fleet_configuration_response(
+        &state.fleet_configuration,
+        ActiveFleetConfiguration {
+            daemon: Some(snapshot.daemon),
+            version: Some(snapshot.version),
+            source_error: None,
+        },
+    )
+    .map(Json)
+}
+
+fn fleet_configuration_response(
+    fleet: &FleetConfiguration,
+    active: ActiveFleetConfiguration,
+) -> Result<FleetConfigurationResponse, AdminError> {
+    let (yaml, revision) = match active.daemon {
+        Some(daemon) => (
+            Some(String::from_utf8(daemon.yaml).context("daemon configuration is not UTF-8")?),
+            Some(daemon.revision),
+        ),
+        None => (None, None),
+    };
+    let writable = active.version.is_some() && fleet.writable();
+    Ok(FleetConfigurationResponse {
+        yaml,
+        revision,
+        version: active.version,
+        source: fleet.kind(),
+        source_error: active.source_error,
+        writable,
+    })
 }
 
 async fn asset(uri: Uri) -> Response {
@@ -196,9 +248,13 @@ fn unix_time_seconds() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
+#[derive(Debug)]
 enum AdminError {
     Internal(anyhow::Error),
     NotFound,
+    ReadOnly,
+    Conflict,
+    Invalid(anyhow::Error),
 }
 
 impl From<anyhow::Error> for AdminError {
@@ -207,10 +263,36 @@ impl From<anyhow::Error> for AdminError {
     }
 }
 
+impl From<ReplaceFleetConfigurationError> for AdminError {
+    fn from(error: ReplaceFleetConfigurationError) -> Self {
+        match error {
+            ReplaceFleetConfigurationError::ReadOnly => Self::ReadOnly,
+            ReplaceFleetConfigurationError::Conflict => Self::Conflict,
+            ReplaceFleetConfigurationError::Invalid(error) => Self::Invalid(error),
+            ReplaceFleetConfigurationError::Backend(error) => Self::Internal(error),
+        }
+    }
+}
+
 impl IntoResponse for AdminError {
     fn into_response(self) -> Response {
         match self {
             Self::NotFound => (StatusCode::NOT_FOUND, "device not found").into_response(),
+            Self::ReadOnly => (
+                StatusCode::METHOD_NOT_ALLOWED,
+                "fleet configuration source is read-only",
+            )
+                .into_response(),
+            Self::Conflict => (
+                StatusCode::CONFLICT,
+                "fleet configuration changed; reload and retry",
+            )
+                .into_response(),
+            Self::Invalid(error) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("invalid fleet configuration: {error:#}"),
+            )
+                .into_response(),
             Self::Internal(error) => {
                 tracing::error!(%error, "admin API operation failed");
                 (StatusCode::INTERNAL_SERVER_ERROR, "controller state error").into_response()

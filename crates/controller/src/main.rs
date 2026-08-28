@@ -2,14 +2,18 @@ use std::path::PathBuf;
 
 use agentdesktop_controller::{
     admin::{self, AdminState, ControllerSettings},
-    daemon_config::{self, DaemonConfigStore},
+    daemon_config::FleetConfiguration,
     database::Database,
     device_ca::DeviceCertificateIssuer,
     gateway_jwt::{self, GatewayJwtIssuer},
     oidc::OidcProvider,
     service::FleetAgentService,
 };
-use agentdesktop_core::{DEFAULT_CONTROLLER_CONFIG_PATH, config, telemetry};
+use agentdesktop_core::{
+    DEFAULT_CONTROLLER_CONFIG_PATH,
+    config::{self, ControllerDaemonConfig, ControllerDaemonConfigMap},
+    telemetry,
+};
 use agentdesktop_proto::fleet::fleet_agent_server::FleetAgentServer;
 use anyhow::Context;
 use clap::Parser;
@@ -24,6 +28,12 @@ struct Args {
     /// Path to the controller YAML configuration file.
     #[arg(long, default_value = DEFAULT_CONTROLLER_CONFIG_PATH)]
     config: PathBuf,
+    /// Namespace containing the writable fleet-configuration ConfigMap.
+    #[arg(long, requires = "daemon_config_map_name")]
+    daemon_config_map_namespace: Option<String>,
+    /// Name of the writable fleet-configuration ConfigMap.
+    #[arg(long, requires = "daemon_config_map_namespace")]
+    daemon_config_map_name: Option<String>,
 }
 
 #[tokio::main]
@@ -32,14 +42,16 @@ async fn main() -> anyhow::Result<()> {
     let _log_flush = telemetry::setup_logging("info", false);
     let config = config::load_controller(&args.config)?;
     let tls = config.tls.files();
-    let daemon_config = match &config.daemon_config {
-        Some(daemon) => Some(daemon_config::load(&daemon.path, daemon.revision)?),
-        None => None,
-    };
-    let daemon_config = DaemonConfigStore::new(daemon_config);
-    if let Some(daemon) = &config.daemon_config {
-        daemon_config::watch(daemon.path.clone(), daemon.revision, daemon_config.clone())?;
-    }
+    let daemon_config_override = args
+        .daemon_config_map_namespace
+        .zip(args.daemon_config_map_name)
+        .map(|(namespace, name)| ControllerDaemonConfig::ConfigMap {
+            config_map: ControllerDaemonConfigMap::new(namespace, name),
+        });
+    let daemon_config_definition = daemon_config_override
+        .as_ref()
+        .or(config.daemon_config.as_ref());
+    let fleet_configuration = FleetConfiguration::open(daemon_config_definition).await?;
     let database = Database::connect(&config.database_url).await?;
     let oidc = &config.oidc;
     if oidc.issuer.starts_with("http://") {
@@ -73,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
     let admin_gateway_jwks = gateway_jwks.clone();
     let admin_state = AdminState::new(
         database.clone(),
-        daemon_config.clone(),
+        fleet_configuration.clone(),
         ControllerSettings {
             fleet_listen: config.fleet_listen.to_string(),
             admin_listen: config.admin_listen.to_string(),
@@ -97,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
     let service = FleetAgentService::new(
         Some(oidc),
         database,
-        daemon_config,
+        fleet_configuration.store().clone(),
         gateway_jwt_issuer,
         Some(device_certificate_issuer),
     );

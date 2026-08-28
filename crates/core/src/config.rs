@@ -197,11 +197,25 @@ pub struct ControllerOidcConfig {
     pub redirect_uri: String,
 }
 
+/// Source of the daemon configuration distributed by the controller.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(untagged, deny_unknown_fields)]
+pub enum ControllerDaemonConfig {
+    /// Read-only configuration loaded from a watched file.
+    File(ControllerDaemonFileConfig),
+    /// Writable configuration stored in a dedicated Kubernetes ConfigMap.
+    ConfigMap {
+        #[serde(rename = "configMap")]
+        config_map: ControllerDaemonConfigMap,
+    },
+}
+
 /// Controller-owned daemon configuration file and its revision.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ControllerDaemonConfig {
+pub struct ControllerDaemonFileConfig {
     /// Path to the watched YAML configuration distributed to enrolled devices.
     ///
     /// Relative paths are resolved from the controller configuration directory.
@@ -210,6 +224,35 @@ pub struct ControllerDaemonConfig {
     /// Monotonically increasing revision assigned to the daemon configuration.
     #[serde(default = "default_daemon_config_revision")]
     pub revision: u64,
+}
+
+/// Kubernetes ConfigMap containing writable fleet configuration.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerDaemonConfigMap {
+    /// Namespace containing the ConfigMap.
+    pub namespace: String,
+    /// Name of the ConfigMap.
+    pub name: String,
+    /// Data key containing daemon configuration YAML.
+    #[serde(default = "default_daemon_config_data_key")]
+    pub data_key: String,
+    /// Data key containing the positive numeric fleet revision.
+    #[serde(default = "default_daemon_config_revision_key")]
+    pub revision_key: String,
+}
+
+impl ControllerDaemonConfigMap {
+    /// References a ConfigMap using the default data keys.
+    pub fn new(namespace: String, name: String) -> Self {
+        Self {
+            namespace,
+            name,
+            data_key: default_daemon_config_data_key(),
+            revision_key: default_daemon_config_revision_key(),
+        }
+    }
 }
 
 /// Settings for issuing short-lived LLM gateway JWTs.
@@ -305,6 +348,14 @@ fn default_gateway_oidc_scopes() -> Vec<String> {
 
 fn default_daemon_config_revision() -> u64 {
     1
+}
+
+fn default_daemon_config_data_key() -> String {
+    "daemon.yaml".to_owned()
+}
+
+fn default_daemon_config_revision_key() -> String {
+    "revision".to_owned()
 }
 
 fn default_gateway_jwt_issuer() -> String {
@@ -461,7 +512,7 @@ pub fn load_controller(path: &Path) -> anyhow::Result<ControllerConfig> {
     let mut config = parse_controller(&contents)
         .with_context(|| format!("parse controller configuration from {}", path.display()))?;
     let directory = path.parent().unwrap_or_else(|| Path::new("."));
-    if let Some(daemon) = &mut config.daemon_config {
+    if let Some(ControllerDaemonConfig::File(daemon)) = &mut config.daemon_config {
         resolve_relative(&mut daemon.path, directory);
     }
     if let Some(gateway) = &mut config.gateway_jwt {
@@ -500,10 +551,32 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
         scheme => anyhow::bail!("oidc.issuer must use HTTPS, got {scheme}"),
     }
     Url::parse(&oidc.redirect_uri).context("parse oidc.redirectUri URL")?;
-    if let Some(daemon) = &config.daemon_config
-        && daemon.revision == 0
-    {
-        anyhow::bail!("daemonConfig.revision must be greater than zero");
+    if let Some(daemon) = &config.daemon_config {
+        match daemon {
+            ControllerDaemonConfig::File(daemon) if daemon.revision == 0 => {
+                anyhow::bail!("daemonConfig.revision must be greater than zero");
+            }
+            ControllerDaemonConfig::ConfigMap { config_map } => {
+                if config_map.namespace.trim().is_empty() {
+                    anyhow::bail!("daemonConfig.configMap.namespace cannot be empty");
+                }
+                if config_map.name.trim().is_empty() {
+                    anyhow::bail!("daemonConfig.configMap.name cannot be empty");
+                }
+                if config_map.data_key.trim().is_empty() {
+                    anyhow::bail!("daemonConfig.configMap.dataKey cannot be empty");
+                }
+                if config_map.revision_key.trim().is_empty() {
+                    anyhow::bail!("daemonConfig.configMap.revisionKey cannot be empty");
+                }
+                if config_map.data_key == config_map.revision_key {
+                    anyhow::bail!(
+                        "daemonConfig.configMap.dataKey and revisionKey must be different"
+                    );
+                }
+            }
+            ControllerDaemonConfig::File(_) => {}
+        }
     }
     if let Some(gateway) = &config.gateway_jwt {
         if gateway.issuer.trim().is_empty() {
@@ -704,7 +777,7 @@ fn is_true(value: &bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{LlmGatewayAuthentication, parse_controller, parse_daemon};
+    use super::{ControllerDaemonConfig, LlmGatewayAuthentication, parse_controller, parse_daemon};
 
     #[test]
     fn daemon_configuration_supports_local_and_managed_options() {
@@ -762,6 +835,59 @@ oidc:
             controller.tls.files().certificate,
             std::path::PathBuf::from("/etc/agentdesktop/tls/controller.pem")
         );
+    }
+
+    #[test]
+    fn controller_daemon_configuration_supports_file_and_config_map_sources() {
+        let file = parse_controller(
+            r#"
+tls: /etc/agentdesktop/tls
+oidc:
+    issuer: https://idp.example.com
+    clientId: agentdesktop
+daemonConfig:
+    path: daemon.yaml
+    revision: 4
+"#,
+        )
+        .expect("file-backed daemon configuration");
+        assert!(matches!(
+            file.daemon_config,
+            Some(ControllerDaemonConfig::File(_))
+        ));
+
+        let config_map = parse_controller(
+            r#"
+tls: /etc/agentdesktop/tls
+oidc:
+    issuer: https://idp.example.com
+    clientId: agentdesktop
+daemonConfig:
+    configMap:
+        namespace: agentdesktop
+        name: agentdesktop-fleet-configuration
+"#,
+        )
+        .expect("ConfigMap-backed daemon configuration");
+        let Some(ControllerDaemonConfig::ConfigMap { config_map }) = config_map.daemon_config
+        else {
+            panic!("expected ConfigMap-backed daemon configuration");
+        };
+        assert_eq!(config_map.data_key, "daemon.yaml");
+        assert_eq!(config_map.revision_key, "revision");
+
+        let mixed = r#"
+tls: /etc/agentdesktop/tls
+oidc:
+    issuer: https://idp.example.com
+    clientId: agentdesktop
+daemonConfig:
+    path: daemon.yaml
+    configMap:
+        namespace: agentdesktop
+        name: agentdesktop-fleet-configuration
+"#;
+        assert!(parse_controller(mixed).is_err());
     }
 
     #[test]

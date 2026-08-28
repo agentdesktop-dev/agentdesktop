@@ -21,6 +21,7 @@ agentdesktop-client = { path = "crates/client" }
 agentdesktop-core = { path = "crates/core" }
 agentdesktop-proto = { path = "crates/proto" }
 anyhow = "1"
+async-trait = "0.1"
 apple-native-keyring-store = { version = "1", features = ["keychain"] }
 aws-lc-rs = "1.18"
 axum = "0.8"
@@ -28,6 +29,7 @@ base64 = "0.23"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 futures-core = "0.3"
+futures = "0.3"
 http-body-util = "0.1"
 humantime-serde = "1"
 hostname = "0.4"
@@ -40,6 +42,8 @@ jsonwebtoken = { version = "11.0", features = ["aws_lc_rs"] }
 json5 = "0.4"
 keyring = "4.1"
 keyring-core = "1"
+k8s-openapi = { version = "0.28", features = ["v1_32"] }
+kube = { version = "4.2", default-features = false, features = ["aws-lc-rs", "client", "runtime", "rustls-tls"] }
 libc = "0.2"
 open = "5.4"
 pem-rfc7468 = { version = "1", features = ["alloc"] }
