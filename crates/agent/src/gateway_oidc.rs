@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, path::Path};
 
-use agentdesktop_core::model::InferenceGatewayCredential;
+use agentdesktop_core::model::LlmGatewayCredential;
 use anyhow::{Context, bail};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ pub struct LoginOptions {
 }
 
 pub struct CredentialAcquisition {
-    pub credential: InferenceGatewayCredential,
+    pub credential: LlmGatewayCredential,
     pub interactive: bool,
 }
 
@@ -228,8 +228,8 @@ fn account(issuer: &Url, client_id: &str) -> String {
     URL_SAFE_NO_PAD.encode(digest)
 }
 
-fn as_credential(tokens: &StoredTokens) -> InferenceGatewayCredential {
-    InferenceGatewayCredential {
+fn as_credential(tokens: &StoredTokens) -> LlmGatewayCredential {
+    LlmGatewayCredential {
         credential: tokens.access_token.clone(),
         expires_at_unix_seconds: tokens.expires_at_unix_seconds,
     }

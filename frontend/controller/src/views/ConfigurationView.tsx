@@ -47,15 +47,13 @@ export function ConfigurationView({
     initializedFromController.current = true;
     if (!initialConfig) return;
 
-    const inferenceGateway = initialConfig.inferenceGateway;
+    const llmGateway = initialConfig.llmGateway;
     const events = new Set(initialConfig.telemetry?.events ?? []);
-    setGateway(Boolean(inferenceGateway));
-    if (inferenceGateway) {
-      setGatewayUrl(inferenceGateway.url);
-      setControllerJwt(
-        inferenceGateway.authentication?.type === "controllerJwt",
-      );
-      setAudience(inferenceGateway.authentication?.audience ?? "agentgateway");
+    setGateway(Boolean(llmGateway));
+    if (llmGateway) {
+      setGatewayUrl(llmGateway.url);
+      setControllerJwt(llmGateway.authentication?.type === "controllerJwt");
+      setAudience(llmGateway.authentication?.audience ?? "agentgateway");
     }
     setSessionNewTelemetry(events.has("session.new"));
     setToolUseTelemetry(events.has("tool.use") || events.has("tool.use.input"));
@@ -119,7 +117,7 @@ export function ConfigurationView({
           <details className="wizard-section" open={gateway}>
             <summary className="wizard-section-summary">
               <span className="wizard-section-title">
-                <strong>Inference gateway</strong>
+                <strong>LLM gateway</strong>
                 <small>Shared connection settings for managed agents.</small>
               </span>
               <ChevronRight size={15} />
@@ -127,7 +125,7 @@ export function ConfigurationView({
             <div className="wizard-section-content">
               <label className="toggle-row">
                 <span>
-                  <strong>Enable inference gateway</strong>
+                  <strong>Enable LLM gateway</strong>
                   <small>Agents can opt into these shared settings.</small>
                 </span>
                 <input
@@ -298,7 +296,7 @@ export function ConfigurationView({
                       </div>
                       <label className="toggle-row compact">
                         <span>
-                          <strong>Use inference gateway</strong>
+                          <strong>Use LLM gateway</strong>
                           <small>
                             Apply the general gateway settings above.
                           </small>
@@ -412,7 +410,7 @@ function daemonConfigYaml(options: {
 }) {
   const lines: string[] = [];
   if (options.gateway) {
-    lines.push("inferenceGateway:", `  url: ${yamlString(options.gatewayUrl)}`);
+    lines.push("llmGateway:", `  url: ${yamlString(options.gatewayUrl)}`);
     if (options.controllerJwt) {
       lines.push(
         "  authentication:",
@@ -445,7 +443,7 @@ function daemonConfigYaml(options: {
         continue;
       }
       lines.push(`  ${agent.kind}:`);
-      if (disablesGateway) lines.push("    useInferenceGateway: false");
+      if (disablesGateway) lines.push("    useLlmGateway: false");
       if (settings) {
         lines.push(...settings.split("\n").map((line) => `    ${line}`));
       }
@@ -463,11 +461,11 @@ function agentDrafts(programs: DaemonConfigDocument["programs"]): AgentDraft[] {
   return configurableAgents.flatMap(({ kind }) => {
     const program = programs[kind];
     if (!program) return [];
-    const { useInferenceGateway, ...settings } = program;
+    const { useLlmGateway, ...settings } = program;
     return [
       {
         kind,
-        useGateway: useInferenceGateway !== false,
+        useGateway: useLlmGateway !== false,
         settings: objectYaml(settings),
       },
     ];

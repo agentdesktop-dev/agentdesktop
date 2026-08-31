@@ -65,9 +65,9 @@ async fn main() -> anyhow::Result<()> {
             )
         })
         .transpose()
-        .context("initialize inference gateway JWT issuer")?;
+        .context("initialize LLM gateway JWT issuer")?;
     if gateway_jwt_issuer.is_some() {
-        tracing::info!("inference gateway JWT issuance enabled");
+        tracing::info!("LLM gateway JWT issuance enabled");
     }
     let gateway_jwks = gateway_jwt_issuer.as_ref().map(GatewayJwtIssuer::jwks);
     let admin_gateway_jwks = gateway_jwks.clone();

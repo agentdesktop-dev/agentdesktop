@@ -19,9 +19,9 @@ pub struct DaemonConfig {
     /// Controller connection settings. Omit this field to run without fleet management.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub controller: Option<ControllerConnectionConfig>,
-    /// Inference gateway used by managed developer tools.
+    /// LLM gateway used by managed developer tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inference_gateway: Option<InferenceGatewayConfig>,
+    pub llm_gateway: Option<LlmGatewayConfig>,
     /// Telemetry collected from managed developer tools.
     #[serde(default, skip_serializing_if = "TelemetryConfig::is_empty")]
     pub telemetry: TelemetryConfig,
@@ -30,26 +30,26 @@ pub struct DaemonConfig {
     pub programs: ProgramsConfig,
 }
 
-/// Connection and authentication settings for an inference gateway.
+/// Connection and authentication settings for an LLM gateway.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct InferenceGatewayConfig {
-    /// Base HTTP or HTTPS URL of the inference gateway.
+pub struct LlmGatewayConfig {
+    /// Base HTTP or HTTPS URL of the LLM gateway.
     ///
     /// The URL must include a host and cannot include credentials, a query, or a fragment.
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub url: Url,
     /// Authentication mechanism used when connecting to this gateway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub authentication: Option<InferenceGatewayAuthentication>,
+    pub authentication: Option<LlmGatewayAuthentication>,
 }
 
-/// Authentication mechanisms supported by an inference gateway.
+/// Authentication mechanisms supported by an LLM gateway.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
-pub enum InferenceGatewayAuthentication {
+pub enum LlmGatewayAuthentication {
     /// Request a short-lived JWT from the controller using the device identity.
     ControllerJwt {
         /// Audience placed in the issued JWT. This must match the gateway's expected audience.
@@ -78,7 +78,7 @@ pub enum InferenceGatewayAuthentication {
     },
 }
 
-impl InferenceGatewayAuthentication {
+impl LlmGatewayAuthentication {
     /// Returns whether this authentication mode uses the local credential helper.
     pub fn uses_credential_helper(&self) -> bool {
         true
@@ -168,7 +168,7 @@ pub struct ControllerConfig {
     /// Daemon configuration distributed to enrolled devices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daemon_config: Option<ControllerDaemonConfig>,
-    /// Inference-gateway JWT signing settings.
+    /// LLM gateway JWT signing settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_jwt: Option<ControllerGatewayJwtConfig>,
     /// TLS identities used by the device-facing fleet API.
@@ -212,7 +212,7 @@ pub struct ControllerDaemonConfig {
     pub revision: u64,
 }
 
-/// Settings for issuing short-lived inference-gateway JWTs.
+/// Settings for issuing short-lived LLM gateway JWTs.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -359,9 +359,9 @@ impl ProgramsConfig {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeCodeConfig {
-    /// Whether this program uses the top-level inference gateway.
+    /// Whether this program uses the top-level LLM gateway.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub use_inference_gateway: bool,
+    pub use_llm_gateway: bool,
     /// Upstream authentication used by this agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<ProgramAuthentication>,
@@ -378,9 +378,9 @@ pub struct ClaudeCodeConfig {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeDesktopConfig {
-    /// Whether this program uses the top-level inference gateway.
+    /// Whether this program uses the top-level LLM gateway.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub use_inference_gateway: bool,
+    pub use_llm_gateway: bool,
     /// Upstream authentication used by this agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<ProgramAuthentication>,
@@ -392,15 +392,15 @@ pub struct ClaudeDesktopConfig {
 /// Settings reconciled into Codex's organization-managed configuration.
 ///
 /// Values under `managedConfig` are written to Codex's `managed_config.toml`.
-/// When generated inference-gateway settings overlap with those values,
+/// When generated LLM-gateway settings overlap with those values,
 /// Agentdesktop's generated values take precedence.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CodexConfig {
-    /// Whether this program uses the top-level inference gateway.
+    /// Whether this program uses the top-level LLM gateway.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub use_inference_gateway: bool,
+    pub use_llm_gateway: bool,
     /// Arbitrary values written to Codex's organization-managed TOML configuration.
     ///
     /// Use Codex's native snake_case configuration keys. TOML has no null value,
@@ -412,24 +412,24 @@ pub struct CodexConfig {
 /// Settings reconciled into OpenCode's system-managed configuration.
 ///
 /// Values under `managedConfig` are written to OpenCode's managed JSONC file.
-/// When generated inference-gateway settings overlap with those values,
+/// When generated LLM gateway settings overlap with those values,
 /// Agentdesktop's generated values take precedence.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OpenCodeConfig {
-    /// Whether this program uses the top-level inference gateway.
+    /// Whether this program uses the top-level LLM gateway.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub use_inference_gateway: bool,
-    /// Model ID selected from `models` when using the inference gateway.
+    pub use_llm_gateway: bool,
+    /// Model ID selected from `models` when using the LLM gateway.
     ///
-    /// This is required when a top-level `inferenceGateway` is configured.
+    /// This is required when a top-level `llmGateway` is configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Models exposed by the managed inference-gateway provider, keyed by model ID.
+    /// Models exposed by the managed LLM gateway provider, keyed by model ID.
     ///
     /// Each value is an arbitrary OpenCode model configuration object. At least
-    /// one model is required when a top-level `inferenceGateway` is configured.
+    /// one model is required when a top-level `llmGateway` is configured.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub models: BTreeMap<String, serde_json::Value>,
     /// Arbitrary values written to OpenCode's system-managed configuration.
@@ -534,57 +534,57 @@ pub fn parse_daemon(contents: &str) -> anyhow::Result<DaemonConfig> {
     {
         anyhow::bail!("controller address must use HTTPS");
     }
-    validate_daemon(config.inference_gateway.as_ref(), &config.programs)?;
+    validate_daemon(config.llm_gateway.as_ref(), &config.programs)?;
     Ok(config)
 }
 
 impl DaemonConfig {
     /// Returns whether this configuration manages no gateway or developer tools.
     pub fn is_empty(&self) -> bool {
-        self.inference_gateway.is_none() && self.telemetry.is_empty() && self.programs.is_empty()
+        self.llm_gateway.is_none() && self.telemetry.is_empty() && self.programs.is_empty()
     }
 }
 
 fn validate_daemon(
-    inference_gateway: Option<&InferenceGatewayConfig>,
+    llm_gateway: Option<&LlmGatewayConfig>,
     programs: &ProgramsConfig,
 ) -> anyhow::Result<()> {
-    if let Some(gateway) = inference_gateway {
+    if let Some(gateway) = llm_gateway {
         if !matches!(gateway.url.scheme(), "http" | "https") {
             anyhow::bail!(
-                "inference gateway URL must use HTTP or HTTPS, got {}",
+                "LLM gateway URL must use HTTP or HTTPS, got {}",
                 gateway.url.scheme()
             );
         }
         if gateway.url.host().is_none() {
-            anyhow::bail!("inference gateway URL must include a host");
+            anyhow::bail!("LLM gateway URL must include a host");
         }
         if !gateway.url.username().is_empty() || gateway.url.password().is_some() {
-            anyhow::bail!("inference gateway URL cannot include credentials");
+            anyhow::bail!("LLM gateway URL cannot include credentials");
         }
         if gateway.url.query().is_some() || gateway.url.fragment().is_some() {
-            anyhow::bail!("inference gateway URL cannot include a query or fragment");
+            anyhow::bail!("LLM gateway URL cannot include a query or fragment");
         }
         if let Some(authentication) = &gateway.authentication {
             match authentication {
-                InferenceGatewayAuthentication::ControllerJwt {
+                LlmGatewayAuthentication::ControllerJwt {
                     audience,
                     allowed_client_ids,
                 } => {
                     if audience.trim().is_empty() {
-                        anyhow::bail!("inference gateway JWT audience cannot be empty");
+                        anyhow::bail!("LLM gateway JWT audience cannot be empty");
                     }
                     if allowed_client_ids.is_empty() {
-                        anyhow::bail!("inference gateway JWT allowedClientIds cannot be empty");
+                        anyhow::bail!("LLM gateway JWT allowedClientIds cannot be empty");
                     }
                     if let Some(client_id) = allowed_client_ids
                         .iter()
                         .find(|client_id| !valid_client_id(client_id))
                     {
-                        anyhow::bail!("invalid inference gateway client ID {client_id}");
+                        anyhow::bail!("invalid LLM gateway client ID {client_id}");
                     }
                 }
-                InferenceGatewayAuthentication::Oidc {
+                LlmGatewayAuthentication::Oidc {
                     issuer,
                     client_id,
                     redirect_uri,
@@ -592,21 +592,21 @@ fn validate_daemon(
                     allow_insecure,
                 } => {
                     if issuer.host().is_none() {
-                        anyhow::bail!("inference gateway OIDC issuer must include a host");
+                        anyhow::bail!("LLM gateway OIDC issuer must include a host");
                     }
                     match issuer.scheme() {
                         "https" => {}
                         "http" if *allow_insecure && issuer.host_str().is_some_and(is_loopback) => {
                         }
                         "http" if *allow_insecure => anyhow::bail!(
-                            "inference gateway OIDC allowInsecure only permits loopback issuers"
+                            "LLM gateway OIDC allowInsecure only permits loopback issuers"
                         ),
                         "http" => anyhow::bail!(
-                            "inference gateway OIDC issuer must use HTTPS; allowInsecure is only for isolated loopback development"
+                            "LLM gateway OIDC issuer must use HTTPS; allowInsecure is only for isolated loopback development"
                         ),
-                        scheme => anyhow::bail!(
-                            "inference gateway OIDC issuer must use HTTPS, got {scheme}"
-                        ),
+                        scheme => {
+                            anyhow::bail!("LLM gateway OIDC issuer must use HTTPS, got {scheme}")
+                        }
                     }
                     if !issuer.username().is_empty()
                         || issuer.password().is_some()
@@ -614,16 +614,15 @@ fn validate_daemon(
                         || issuer.fragment().is_some()
                     {
                         anyhow::bail!(
-                            "inference gateway OIDC issuer cannot contain credentials, a query, or a fragment"
+                            "LLM gateway OIDC issuer cannot contain credentials, a query, or a fragment"
                         );
                     }
                     if client_id.trim().is_empty() {
-                        anyhow::bail!("inference gateway OIDC clientId cannot be empty");
+                        anyhow::bail!("LLM gateway OIDC clientId cannot be empty");
                     }
-                    Url::parse(redirect_uri)
-                        .context("parse inference gateway OIDC redirectUri URL")?;
+                    Url::parse(redirect_uri).context("parse LLM gateway OIDC redirectUri URL")?;
                     if scopes.is_empty() || scopes.iter().any(|scope| scope.trim().is_empty()) {
-                        anyhow::bail!("inference gateway OIDC scopes cannot be empty");
+                        anyhow::bail!("LLM gateway OIDC scopes cannot be empty");
                     }
                 }
             }
@@ -640,7 +639,7 @@ fn validate_daemon(
                 programs
                     .claude_code
                     .as_ref()
-                    .is_some_and(|program| program.use_inference_gateway),
+                    .is_some_and(|program| program.use_llm_gateway),
             ),
             (
                 "claudeDesktop",
@@ -650,17 +649,16 @@ fn validate_daemon(
                 programs
                     .claude_desktop
                     .as_ref()
-                    .is_some_and(|program| program.use_inference_gateway),
+                    .is_some_and(|program| program.use_llm_gateway),
             ),
         ]
     {
-        if subscription && (!uses_gateway || inference_gateway.is_none()) {
+        if subscription && (!uses_gateway || llm_gateway.is_none()) {
             anyhow::bail!(
-                "programs.{name}.auth subscription requires that program to use an inference gateway"
+                "programs.{name}.auth subscription requires that program to use an LLM gateway"
             );
         }
-        if subscription && inference_gateway.is_some_and(|gateway| gateway.authentication.is_none())
-        {
+        if subscription && llm_gateway.is_some_and(|gateway| gateway.authentication.is_none()) {
             anyhow::bail!(
                 "programs.{name}.auth subscription requires oidc or controllerJwt gateway authentication"
             );
@@ -668,14 +666,14 @@ fn validate_daemon(
     }
 
     if let Some(open_code) = &programs.open_code
-        && inference_gateway.is_some()
-        && open_code.use_inference_gateway
+        && llm_gateway.is_some()
+        && open_code.use_llm_gateway
     {
         let model = open_code
             .model
             .as_deref()
             .filter(|model| !model.trim().is_empty())
-            .context("OpenCode requires model when inferenceGateway is configured")?;
+            .context("OpenCode requires model when llmGateway is configured")?;
         if !open_code.models.contains_key(model) {
             anyhow::bail!("OpenCode model {model} is not declared in models");
         }
@@ -687,7 +685,7 @@ fn is_loopback(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
 }
 
-/// Returns whether a caller-provided inference-gateway client identifier is valid.
+/// Returns whether a caller-provided LLM gateway client identifier is valid.
 pub fn valid_client_id(client_id: &str) -> bool {
     !client_id.is_empty()
         && client_id.len() <= 64
@@ -706,22 +704,22 @@ fn is_true(value: &bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{InferenceGatewayAuthentication, parse_controller, parse_daemon};
+    use super::{LlmGatewayAuthentication, parse_controller, parse_daemon};
 
     #[test]
     fn daemon_configuration_supports_local_and_managed_options() {
         let document = r#"
 controller:
   address: https://127.0.0.1:8443
-inferenceGateway:
+llmGateway:
   url: http://127.0.0.1:8080
-programs:
-  claudeCode: {}
+programs: { claudeCode: { useLlmGateway: false } }
 "#;
 
         let daemon = parse_daemon(document).expect("valid daemon configuration");
         assert!(daemon.controller.is_some());
-        assert!(daemon.inference_gateway.is_some());
+        assert!(daemon.llm_gateway.is_some());
+        assert!(!daemon.programs.claude_code.unwrap().use_llm_gateway);
     }
 
     #[test]
@@ -786,7 +784,7 @@ oidc:
     fn standalone_oidc_uses_simple_native_client_defaults() {
         let daemon = parse_daemon(
             r#"
-inferenceGateway:
+llmGateway:
   url: https://gateway.example.com
   authentication:
     type: oidc
@@ -797,12 +795,12 @@ inferenceGateway:
         .expect("valid standalone OIDC configuration");
 
         assert!(daemon.controller.is_none());
-        let Some(InferenceGatewayAuthentication::Oidc {
+        let Some(LlmGatewayAuthentication::Oidc {
             redirect_uri,
             scopes,
             ..
         }) = daemon
-            .inference_gateway
+            .llm_gateway
             .and_then(|gateway| gateway.authentication)
         else {
             panic!("expected OIDC authentication");
@@ -810,8 +808,7 @@ inferenceGateway:
         assert_eq!(redirect_uri, "http://127.0.0.1:51327/callback");
         assert_eq!(scopes, ["openid", "offline_access"]);
 
-        let remote_plaintext = r#"
-inferenceGateway:
+        let remote_plaintext = r#"llmGateway:
   url: https://gateway.example.com
   authentication:
     type: oidc
@@ -831,7 +828,7 @@ inferenceGateway:
     fn claude_subscription_composes_with_oidc() {
         let daemon = parse_daemon(
             r#"
-inferenceGateway:
+llmGateway:
   url: https://gateway.example.com
   authentication:
     type: oidc
@@ -844,8 +841,8 @@ programs:
         )
         .expect("valid Claude subscription and OIDC configuration");
 
-        let gateway = daemon.inference_gateway.expect("inference gateway");
-        let Some(InferenceGatewayAuthentication::Oidc {
+        let gateway = daemon.llm_gateway.expect("LLM gateway");
+        let Some(LlmGatewayAuthentication::Oidc {
             redirect_uri,
             scopes,
             ..
@@ -865,7 +862,7 @@ programs:
     fn subscription_requires_gateway_identity_authentication() {
         let error = parse_daemon(
             r#"
-inferenceGateway:
+llmGateway:
   url: https://gateway.example.com
 programs:
   claudeCode:
@@ -880,7 +877,7 @@ programs:
     fn claude_subscription_composes_with_controller_jwt() {
         let daemon = parse_daemon(
             r#"
-inferenceGateway:
+llmGateway:
   url: https://gateway.example.com
   authentication:
     type: controllerJwt
@@ -893,10 +890,10 @@ programs:
         )
         .expect("valid Claude subscription and controller JWT configuration");
 
-        let gateway = daemon.inference_gateway.expect("inference gateway");
+        let gateway = daemon.llm_gateway.expect("LLM gateway");
         assert!(matches!(
             gateway.authentication,
-            Some(InferenceGatewayAuthentication::ControllerJwt { .. })
+            Some(LlmGatewayAuthentication::ControllerJwt { .. })
         ));
         assert_eq!(
             daemon.programs.claude_code.unwrap().auth,
@@ -907,7 +904,7 @@ programs:
     #[test]
     fn controller_jwt_requires_an_explicit_valid_client_allowlist() {
         let missing = r#"
-inferenceGateway:
+llmGateway:
   url: https://gateway.example.com
   authentication:
     type: controllerJwt
@@ -916,8 +913,7 @@ inferenceGateway:
         let error = parse_daemon(missing).expect_err("missing allowlist must fail");
         assert!(format!("{error:#}").contains("allowedClientIds"));
 
-        let invalid = r#"
-inferenceGateway:
+        let invalid = r#"llmGateway:
   url: https://gateway.example.com
   authentication:
     type: controllerJwt
@@ -925,7 +921,7 @@ inferenceGateway:
     allowedClientIds: ["not a client"]
 "#;
         let error = parse_daemon(invalid).expect_err("invalid allowlist entry must fail");
-        assert!(format!("{error:#}").contains("invalid inference gateway client ID"));
+        assert!(format!("{error:#}").contains("invalid LLM gateway client ID"));
     }
 
     #[test]
@@ -956,10 +952,10 @@ oidc:
     }
 
     #[test]
-    fn rejects_an_invalid_inference_gateway_url() {
+    fn rejects_an_invalid_llm_gateway_url() {
         let error = parse_daemon(
             r#"
-inferenceGateway:
+llmGateway:
   url: ftp://gateway.example.com
 "#,
         )
@@ -972,7 +968,7 @@ inferenceGateway:
     fn open_code_requires_a_declared_gateway_model() {
         let error = parse_daemon(
             r#"
-inferenceGateway:
+llmGateway:
   url: https://gateway.example.com
 programs:
   openCode:

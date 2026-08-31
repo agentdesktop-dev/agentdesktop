@@ -1,5 +1,5 @@
 # yaml-language-server: $schema=../../schema/daemon-config.json
-inferenceGateway:
+llmGateway:
   url: http://127.0.0.1:4001
   authentication:
     type: oidc
@@ -10,8 +10,8 @@ inferenceGateway:
 
 programs:
   claudeCode:
-    useInferenceGateway: true
+    useLlmGateway: true
     companyAnnouncements: ["Using the local Agentgateway through Agentdesktop"]
 #    Claude desktop cannot run with --user. Uncomment to enable
   claudeDesktop:
-    useInferenceGateway: true
+    useLlmGateway: true

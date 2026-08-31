@@ -10,7 +10,7 @@ gatewayJwt:
   keyId: agentdesktop
   lifetime: 5m
 daemonConfig:
-  inferenceGateway:
+  llmGateway:
     url: http://agentgateway-proxy.agentgateway-system.svc.cluster.local
     authentication:
       type: controllerJwt

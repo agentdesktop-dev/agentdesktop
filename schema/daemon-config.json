@@ -15,11 +15,11 @@
         }
       ]
     },
-    "inferenceGateway": {
-      "description": "Inference gateway used by managed developer tools.",
+    "llmGateway": {
+      "description": "LLM gateway used by managed developer tools.",
       "anyOf": [
         {
-          "$ref": "#/$defs/InferenceGatewayConfig"
+          "$ref": "#/$defs/LlmGatewayConfig"
         },
         {
           "type": "null"
@@ -52,8 +52,8 @@
             }
           ]
         },
-        "useInferenceGateway": {
-          "description": "Whether this program uses the top-level inference gateway.",
+        "useLlmGateway": {
+          "description": "Whether this program uses the top-level LLM gateway.",
           "type": "boolean"
         }
       },
@@ -74,15 +74,15 @@
             }
           ]
         },
-        "useInferenceGateway": {
-          "description": "Whether this program uses the top-level inference gateway.",
+        "useLlmGateway": {
+          "description": "Whether this program uses the top-level LLM gateway.",
           "type": "boolean"
         }
       },
       "additionalProperties": true
     },
     "CodexConfig": {
-      "description": "Settings reconciled into Codex's organization-managed configuration.\n\nValues under `managedConfig` are written to Codex's `managed_config.toml`.\nWhen generated inference-gateway settings overlap with those values,\nAgentdesktop's generated values take precedence.",
+      "description": "Settings reconciled into Codex's organization-managed configuration.\n\nValues under `managedConfig` are written to Codex's `managed_config.toml`.\nWhen generated LLM-gateway settings overlap with those values,\nAgentdesktop's generated values take precedence.",
       "type": "object",
       "properties": {
         "managedConfig": {
@@ -90,8 +90,8 @@
           "type": "object",
           "additionalProperties": true
         },
-        "useInferenceGateway": {
-          "description": "Whether this program uses the top-level inference gateway.",
+        "useLlmGateway": {
+          "description": "Whether this program uses the top-level LLM gateway.",
           "type": "boolean"
         }
       },
@@ -123,8 +123,8 @@
         "address"
       ]
     },
-    "InferenceGatewayAuthentication": {
-      "description": "Authentication mechanisms supported by an inference gateway.",
+    "LlmGatewayAuthentication": {
+      "description": "Authentication mechanisms supported by an LLM gateway.",
       "oneOf": [
         {
           "description": "Request a short-lived JWT from the controller using the device identity.",
@@ -201,15 +201,15 @@
         }
       ]
     },
-    "InferenceGatewayConfig": {
-      "description": "Connection and authentication settings for an inference gateway.",
+    "LlmGatewayConfig": {
+      "description": "Connection and authentication settings for an LLM gateway.",
       "type": "object",
       "properties": {
         "authentication": {
           "description": "Authentication mechanism used when connecting to this gateway.",
           "anyOf": [
             {
-              "$ref": "#/$defs/InferenceGatewayAuthentication"
+              "$ref": "#/$defs/LlmGatewayAuthentication"
             },
             {
               "type": "null"
@@ -217,7 +217,7 @@
           ]
         },
         "url": {
-          "description": "Base HTTP or HTTPS URL of the inference gateway.\n\nThe URL must include a host and cannot include credentials, a query, or a fragment.",
+          "description": "Base HTTP or HTTPS URL of the LLM gateway.\n\nThe URL must include a host and cannot include credentials, a query, or a fragment.",
           "type": "string"
         }
       },
@@ -227,7 +227,7 @@
       ]
     },
     "OpenCodeConfig": {
-      "description": "Settings reconciled into OpenCode's system-managed configuration.\n\nValues under `managedConfig` are written to OpenCode's managed JSONC file.\nWhen generated inference-gateway settings overlap with those values,\nAgentdesktop's generated values take precedence.",
+      "description": "Settings reconciled into OpenCode's system-managed configuration.\n\nValues under `managedConfig` are written to OpenCode's managed JSONC file.\nWhen generated LLM gateway settings overlap with those values,\nAgentdesktop's generated values take precedence.",
       "type": "object",
       "properties": {
         "managedConfig": {
@@ -236,19 +236,19 @@
           "additionalProperties": true
         },
         "model": {
-          "description": "Model ID selected from `models` when using the inference gateway.\n\nThis is required when a top-level `inferenceGateway` is configured.",
+          "description": "Model ID selected from `models` when using the LLM gateway.\n\nThis is required when a top-level `llmGateway` is configured.",
           "type": [
             "string",
             "null"
           ]
         },
         "models": {
-          "description": "Models exposed by the managed inference-gateway provider, keyed by model ID.\n\nEach value is an arbitrary OpenCode model configuration object. At least\none model is required when a top-level `inferenceGateway` is configured.",
+          "description": "Models exposed by the managed LLM gateway provider, keyed by model ID.\n\nEach value is an arbitrary OpenCode model configuration object. At least\none model is required when a top-level `llmGateway` is configured.",
           "type": "object",
           "additionalProperties": true
         },
-        "useInferenceGateway": {
-          "description": "Whether this program uses the top-level inference gateway.",
+        "useLlmGateway": {
+          "description": "Whether this program uses the top-level LLM gateway.",
           "type": "boolean"
         }
       },

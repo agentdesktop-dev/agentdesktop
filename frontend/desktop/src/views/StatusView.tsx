@@ -161,7 +161,7 @@ export function StatusView({
             <Waypoints size={17} />
           </span>
           <div>
-            <strong>Inference gateway</strong>
+            <strong>LLM gateway</strong>
             <span>Optional routing for managed AI traffic</span>
           </div>
           <span

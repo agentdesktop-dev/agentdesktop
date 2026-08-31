@@ -2,9 +2,7 @@ use std::{fs, path::Path};
 
 use anyhow::Context;
 
-use agentdesktop_core::config::{
-    ClaudeCodeConfig, InferenceGatewayAuthentication, InferenceGatewayConfig,
-};
+use agentdesktop_core::config::{ClaudeCodeConfig, LlmGatewayAuthentication, LlmGatewayConfig};
 use serde_json::{Value, json};
 use tracing::info;
 
@@ -20,7 +18,7 @@ pub fn apply(
     credential_helper: &str,
     tool_use_hook: Option<&CommandSpec>,
     session_new_hook: Option<&CommandSpec>,
-    config: Option<(&ClaudeCodeConfig, Option<&InferenceGatewayConfig>)>,
+    config: Option<(&ClaudeCodeConfig, Option<&LlmGatewayConfig>)>,
     mode: ReconcileMode,
 ) -> anyhow::Result<()> {
     let owner_path = owner_path(path);
@@ -151,7 +149,7 @@ fn owner_path(path: &Path) -> std::path::PathBuf {
 
 fn managed_settings(
     config: &ClaudeCodeConfig,
-    gateway: Option<&InferenceGatewayConfig>,
+    gateway: Option<&LlmGatewayConfig>,
     credential_helper: &str,
     tool_use_hook: Option<&CommandSpec>,
     session_new_hook: Option<&CommandSpec>,
@@ -176,7 +174,7 @@ fn managed_settings(
     if gateway
         .authentication
         .as_ref()
-        .is_some_and(InferenceGatewayAuthentication::uses_credential_helper)
+        .is_some_and(LlmGatewayAuthentication::uses_credential_helper)
     {
         generated["env"]["CLAUDE_CODE_API_KEY_HELPER_TTL_MS"] = json!("60000");
         generated["apiKeyHelper"] = json!(credential_helper);
@@ -302,7 +300,7 @@ mod tests {
     fn pass_through_settings_are_deep_merged_with_managed_gateway_values() {
         let config = parse_daemon(
             r#"
-inferenceGateway:
+llmGateway:
   url: https://gateway.example.com
   authentication:
     type: controllerJwt
@@ -320,7 +318,7 @@ programs:
         )
         .expect("valid daemon configuration");
         let claude = config.programs.claude_code.as_ref().unwrap();
-        let gateway = config.inference_gateway.as_ref().unwrap();
+        let gateway = config.llm_gateway.as_ref().unwrap();
         let hook = CommandSpec::new(Path::new("agentdesktop"), ["hook", "claude-pre-tool-use"]);
 
         let settings = managed_settings(

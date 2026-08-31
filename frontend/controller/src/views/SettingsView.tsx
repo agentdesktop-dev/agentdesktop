@@ -28,7 +28,7 @@ export function SettingsView({ data }: { data: ControllerSettings }) {
         />
         <SettingRow
           title="Gateway JWT issuer"
-          description="Short-lived inference gateway credentials"
+          description="Short-lived LLM gateway credentials"
           enabled={data.gateway_jwt_enabled}
         />
       </section>

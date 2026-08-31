@@ -4,7 +4,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use agentdesktop_core::model::InferenceGatewayCredential;
+use agentdesktop_core::model::LlmGatewayCredential;
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -56,7 +56,7 @@ pub async fn credential(
     state_dir: &Path,
     callback_listen: Option<SocketAddr>,
     open_browser: bool,
-) -> anyhow::Result<Option<InferenceGatewayCredential>> {
+) -> anyhow::Result<Option<LlmGatewayCredential>> {
     let state_dir = state_dir.to_owned();
     tokio::spawn(async move { credential_inner(&state_dir, callback_listen, open_browser).await })
         .await
@@ -67,7 +67,7 @@ async fn credential_inner(
     state_dir: &Path,
     callback_listen: Option<SocketAddr>,
     open_browser: bool,
-) -> anyhow::Result<Option<InferenceGatewayCredential>> {
+) -> anyhow::Result<Option<LlmGatewayCredential>> {
     let _login = LOGIN.lock().await;
     let store = SecretStore::new(state_dir)?;
     let redirect_uri = Url::parse(REDIRECT_URI).expect("static Anthropic redirect URI is valid");
@@ -171,8 +171,8 @@ fn save(store: &SecretStore, token: &StoredToken) -> anyhow::Result<()> {
     )
 }
 
-fn as_credential(token: &StoredToken) -> InferenceGatewayCredential {
-    InferenceGatewayCredential {
+fn as_credential(token: &StoredToken) -> LlmGatewayCredential {
+    LlmGatewayCredential {
         credential: token.access_token.clone(),
         expires_at_unix_seconds: token.expires_at_unix_seconds,
     }

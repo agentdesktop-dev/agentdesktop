@@ -78,7 +78,7 @@ export type AgentDraft = {
 };
 
 export type DaemonConfigDocument = {
-  inferenceGateway?: {
+  llmGateway?: {
     url: string;
     authentication?: {
       type: string;

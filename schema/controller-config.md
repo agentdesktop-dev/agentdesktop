@@ -9,7 +9,7 @@
 |`daemonConfig.revision`|integer|Monotonically increasing revision assigned to the daemon configuration.|
 |`databaseUrl`|string|SQLite or PostgreSQL URL used for controller state.|
 |`fleetListen`|string|Address on which the device-facing gRPC fleet API listens.|
-|`gatewayJwt`|object|Inference-gateway JWT signing settings.|
+|`gatewayJwt`|object|LLM gateway JWT signing settings.|
 |`gatewayJwt.issuer`|string|Issuer claim placed in generated JWTs.|
 |`gatewayJwt.keyId`|string|Key identifier placed in generated JWT headers.|
 |`gatewayJwt.lifetime`|string|Lifetime of generated JWTs. Defaults to `5m`.|

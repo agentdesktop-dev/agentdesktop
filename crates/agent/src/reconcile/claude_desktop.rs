@@ -1,8 +1,6 @@
 use std::{fs, path::Path};
 
-use agentdesktop_core::config::{
-    ClaudeDesktopConfig, InferenceGatewayAuthentication, InferenceGatewayConfig,
-};
+use agentdesktop_core::config::{ClaudeDesktopConfig, LlmGatewayAuthentication, LlmGatewayConfig};
 use anyhow::Context;
 use serde_json::{Value, json};
 use tracing::info;
@@ -21,7 +19,7 @@ pub fn apply(
     helper_path: &Path,
     credential_binary: &Path,
     socket: &Path,
-    config: Option<(&ClaudeDesktopConfig, Option<&InferenceGatewayConfig>)>,
+    config: Option<(&ClaudeDesktopConfig, Option<&LlmGatewayConfig>)>,
     mode: ReconcileMode,
 ) -> anyhow::Result<()> {
     let settings_owner = owner_path(settings_path);
@@ -49,7 +47,7 @@ pub fn apply(
         gateway
             .authentication
             .as_ref()
-            .is_some_and(InferenceGatewayAuthentication::uses_credential_helper)
+            .is_some_and(LlmGatewayAuthentication::uses_credential_helper)
     });
     if uses_credential_helper {
         let script = credential_helper_contents(credential_binary, socket)?;
@@ -130,7 +128,7 @@ fn batch_quote(value: &str) -> anyhow::Result<String> {
 
 fn managed_settings(
     config: &ClaudeDesktopConfig,
-    gateway: Option<&InferenceGatewayConfig>,
+    gateway: Option<&LlmGatewayConfig>,
     helper_path: &Path,
 ) -> anyhow::Result<Value> {
     let mut settings = serde_json::to_value(&config.settings)
@@ -145,7 +143,7 @@ fn managed_settings(
     if gateway
         .authentication
         .as_ref()
-        .is_some_and(InferenceGatewayAuthentication::uses_credential_helper)
+        .is_some_and(LlmGatewayAuthentication::uses_credential_helper)
     {
         generated["inferenceCredentialKind"] = json!("helper-script");
         generated["inferenceCredentialHelper"] = json!(helper_path);
@@ -318,7 +316,7 @@ mod tests {
     fn gateway_settings_override_pass_through_values() {
         let config = parse_daemon(
             r#"
-inferenceGateway:
+llmGateway:
   url: https://gateway.example.com
   authentication:
     type: controllerJwt
@@ -332,12 +330,8 @@ programs:
         )
         .unwrap();
         let desktop = config.programs.claude_desktop.as_ref().unwrap();
-        let settings = managed_settings(
-            desktop,
-            config.inference_gateway.as_ref(),
-            Path::new("/helper"),
-        )
-        .unwrap();
+        let settings =
+            managed_settings(desktop, config.llm_gateway.as_ref(), Path::new("/helper")).unwrap();
         assert_eq!(settings["isLocalDevMcpEnabled"], true);
         assert_eq!(settings["inferenceProvider"], "gateway");
         assert_eq!(settings["inferenceCredentialHelper"], "/helper");

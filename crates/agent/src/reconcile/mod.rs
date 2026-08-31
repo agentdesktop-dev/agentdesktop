@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use agentdesktop_core::config::{DaemonConfig, InferenceGatewayConfig};
+use agentdesktop_core::config::{DaemonConfig, LlmGatewayConfig};
 #[cfg(any(windows, test))]
 use base64::{Engine as _, prelude::BASE64_STANDARD};
 use serde_json::Value;
@@ -250,9 +250,9 @@ impl Reconciler {
             .then(|| self.claude_session_hook_command());
         let claude_code = config.programs.claude_code.as_ref().map(|claude_code| {
             let gateway = config
-                .inference_gateway
+                .llm_gateway
                 .as_ref()
-                .filter(|_| claude_code.use_inference_gateway);
+                .filter(|_| claude_code.use_llm_gateway);
             (claude_code, gateway)
         });
         claude_code::apply(
@@ -266,9 +266,9 @@ impl Reconciler {
         )?;
         let claude_desktop = config.programs.claude_desktop.as_ref().map(|desktop| {
             let gateway = config
-                .inference_gateway
+                .llm_gateway
                 .as_ref()
-                .filter(|_| desktop.use_inference_gateway);
+                .filter(|_| desktop.use_llm_gateway);
             (desktop, gateway)
         });
         claude_desktop::apply(
@@ -282,9 +282,9 @@ impl Reconciler {
         )?;
         let codex = config.programs.codex.as_ref().map(|codex| {
             let gateway = config
-                .inference_gateway
+                .llm_gateway
                 .as_ref()
-                .filter(|_| codex.use_inference_gateway);
+                .filter(|_| codex.use_llm_gateway);
             (codex, gateway)
         });
         codex::apply(
@@ -296,9 +296,9 @@ impl Reconciler {
         )?;
         let open_code = config.programs.open_code.as_ref().map(|open_code| {
             let gateway = config
-                .inference_gateway
+                .llm_gateway
                 .as_ref()
-                .filter(|_| open_code.use_inference_gateway);
+                .filter(|_| open_code.use_llm_gateway);
             (open_code, gateway)
         });
         open_code::apply(
@@ -404,7 +404,7 @@ fn deep_merge(base: &mut Value, overlay: Value) {
     }
 }
 
-fn responses_base_url(gateway: &InferenceGatewayConfig) -> String {
+fn responses_base_url(gateway: &LlmGatewayConfig) -> String {
     let mut url = gateway.url.clone();
     let path = url.path().trim_end_matches('/');
     if !path.ends_with("/v1") {

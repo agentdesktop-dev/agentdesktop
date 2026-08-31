@@ -84,7 +84,7 @@ pub struct EnrollmentStatus {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct InferenceGatewayCredential {
+pub struct LlmGatewayCredential {
     pub credential: String,
     pub expires_at_unix_seconds: u64,
 }

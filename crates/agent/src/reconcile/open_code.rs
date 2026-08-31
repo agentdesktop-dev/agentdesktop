@@ -1,8 +1,6 @@
 use std::{fs, path::Path};
 
-use agentdesktop_core::config::{
-    InferenceGatewayAuthentication, InferenceGatewayConfig, OpenCodeConfig,
-};
+use agentdesktop_core::config::{LlmGatewayAuthentication, LlmGatewayConfig, OpenCodeConfig};
 use anyhow::Context;
 use serde_json::{Value, json};
 use tracing::info;
@@ -20,7 +18,7 @@ pub fn apply(
     plugin_path: &Path,
     credential_helper: &Path,
     socket: &Path,
-    config: Option<(&OpenCodeConfig, Option<&InferenceGatewayConfig>)>,
+    config: Option<(&OpenCodeConfig, Option<&LlmGatewayConfig>)>,
     mode: ReconcileMode,
 ) -> anyhow::Result<()> {
     let Some((config, gateway)) = config else {
@@ -29,15 +27,15 @@ pub fn apply(
     };
 
     let authentication = gateway.and_then(|gateway| gateway.authentication.as_ref());
-    let plugin_url =
-        if authentication.is_some_and(InferenceGatewayAuthentication::uses_credential_helper) {
-            let source = credential_plugin(credential_helper, socket)?;
-            reconcile_file(plugin_path, source.as_bytes(), "credential plugin", mode)?;
-            Some(file_url(plugin_path)?)
-        } else {
-            remove_owned(plugin_path, "credential plugin", mode)?;
-            None
-        };
+    let plugin_url = if authentication.is_some_and(LlmGatewayAuthentication::uses_credential_helper)
+    {
+        let source = credential_plugin(credential_helper, socket)?;
+        reconcile_file(plugin_path, source.as_bytes(), "credential plugin", mode)?;
+        Some(file_url(plugin_path)?)
+    } else {
+        remove_owned(plugin_path, "credential plugin", mode)?;
+        None
+    };
 
     let settings = managed_config(config, gateway, plugin_url.as_deref())?;
     let mut contents = MANAGED_HEADER.as_bytes().to_vec();
@@ -52,7 +50,7 @@ pub fn apply(
 
 fn managed_config(
     config: &OpenCodeConfig,
-    gateway: Option<&InferenceGatewayConfig>,
+    gateway: Option<&LlmGatewayConfig>,
     plugin_url: Option<&str>,
 ) -> anyhow::Result<Value> {
     let mut settings = serde_json::to_value(&config.managed_config)
@@ -296,7 +294,7 @@ mod tests {
     fn pass_through_settings_are_merged_with_gateway_and_plugin() {
         let config = parse_daemon(
             r#"
-inferenceGateway:
+llmGateway:
   url: https://gateway.example.com/proxy
   authentication:
     type: controllerJwt
@@ -322,7 +320,7 @@ programs:
         )
         .expect("valid daemon configuration");
         let open_code = config.programs.open_code.as_ref().unwrap();
-        let gateway = config.inference_gateway.as_ref().unwrap();
+        let gateway = config.llm_gateway.as_ref().unwrap();
         let settings = managed_config(
             open_code,
             Some(gateway),

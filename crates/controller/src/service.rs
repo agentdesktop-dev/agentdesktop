@@ -2,9 +2,8 @@ use std::pin::Pin;
 
 use agentdesktop_proto::fleet::{
     AgentMessage, BeginEnrollmentRequest, BeginEnrollmentResponse, CompleteEnrollmentRequest,
-    ControllerMessage, DeviceCertificateResponse, EnrollResponse,
-    InferenceGatewayCredentialRequest, InferenceGatewayCredentialResponse,
-    RenewDeviceCertificateRequest, agent_message, controller_message,
+    ControllerMessage, DeviceCertificateResponse, EnrollResponse, LlmGatewayCredentialRequest,
+    LlmGatewayCredentialResponse, RenewDeviceCertificateRequest, agent_message, controller_message,
     fleet_agent_server::FleetAgent,
 };
 use futures_core::Stream;
@@ -15,7 +14,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 use x509_parser::{extensions::GeneralName, parse_x509_certificate};
 
-use agentdesktop_core::config::InferenceGatewayAuthentication;
+use agentdesktop_core::config::LlmGatewayAuthentication;
 
 use crate::{
     daemon_config::DaemonConfigStore,
@@ -118,10 +117,10 @@ impl FleetAgent for FleetAgentService {
         }))
     }
 
-    async fn get_inference_gateway_credential(
+    async fn get_llm_gateway_credential(
         &self,
-        request: Request<InferenceGatewayCredentialRequest>,
-    ) -> Result<Response<InferenceGatewayCredentialResponse>, Status> {
+        request: Request<LlmGatewayCredentialRequest>,
+    ) -> Result<Response<LlmGatewayCredentialResponse>, Status> {
         let device_id = self.authenticate_device(&request).await?;
         let client_id = request.into_inner().client_id;
         if !agentdesktop_core::config::valid_client_id(&client_id) {
@@ -135,24 +134,24 @@ impl FleetAgent for FleetAgentService {
             .map_err(|_| Status::internal("daemon configuration is not UTF-8"))?;
         let config = agentdesktop_core::config::parse_daemon(yaml).map_err(internal)?;
         let gateway = config
-            .inference_gateway
+            .llm_gateway
             .as_ref()
-            .ok_or_else(|| Status::not_found("inference gateway is not configured"))?;
+            .ok_or_else(|| Status::not_found("LLM gateway is not configured"))?;
         let (audience, allowed_client_ids) = match gateway.authentication.as_ref() {
-            Some(InferenceGatewayAuthentication::ControllerJwt {
+            Some(LlmGatewayAuthentication::ControllerJwt {
                 audience,
                 allowed_client_ids,
             }) => (audience, allowed_client_ids),
-            Some(InferenceGatewayAuthentication::Oidc { .. }) | None => {
+            Some(LlmGatewayAuthentication::Oidc { .. }) | None => {
                 return Err(Status::failed_precondition(
-                    "inference gateway does not use controller JWT authentication",
+                    "LLM gateway does not use controller JWT authentication",
                 ));
             }
         };
         if !allowed_client_ids.contains(&client_id) {
             warn!(
                 device_id,
-                client_id, "rejected disallowed inference gateway client"
+                client_id, "rejected disallowed LLM gateway client"
             );
             return Err(Status::permission_denied("client_id is not allowed"));
         }
@@ -183,9 +182,9 @@ impl FleetAgent for FleetAgentService {
             expires_at_unix_seconds,
             enrolled_by_issuer = principal.issuer,
             client_id,
-            "issued inference gateway credential"
+            "issued LLM gateway credential"
         );
-        Ok(Response::new(InferenceGatewayCredentialResponse {
+        Ok(Response::new(LlmGatewayCredentialResponse {
             credential,
             expires_at_unix_seconds,
         }))

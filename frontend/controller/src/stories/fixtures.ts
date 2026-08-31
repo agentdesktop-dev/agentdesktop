@@ -272,13 +272,13 @@ export const controllerSettings: ControllerSettings = {
 };
 
 export const activeDaemonConfig: DaemonConfigDocument = {
-  inferenceGateway: {
+  llmGateway: {
     url: "https://gateway.example.internal",
     authentication: { type: "controllerJwt", audience: "agentgateway" },
   },
   telemetry: { events: ["session.new", "tool.use.input"] },
   programs: {
     claudeCode: { permissions: { defaultMode: "plan" } },
-    openCode: { useInferenceGateway: false, autoupdate: false },
+    openCode: { useLlmGateway: false, autoupdate: false },
   },
 };

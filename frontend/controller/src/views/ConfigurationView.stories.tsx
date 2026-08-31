@@ -37,6 +37,7 @@ export const BuildsYaml: Story = {
     await userEvent.click(canvas.getByText("Telemetry"));
     await userEvent.click(canvas.getByText("New session"));
     const output = canvasElement.querySelector(".output-card code");
+    await expect(output).toHaveTextContent("llmGateway:");
     await expect(output).toHaveTextContent("https://gateway.changed.example");
     await expect(output).toHaveTextContent("session.new");
   },
