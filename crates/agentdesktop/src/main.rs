@@ -430,7 +430,7 @@ async fn read_connector_status() -> ConnectorSnapshot {
         .ok();
     let organization_access_ready =
         !managed || enrollment.is_some_and(|value| value.status == "enrolled");
-    let gateway = if effective_config.inference_gateway.is_some() {
+    let gateway = if effective_config.llm_gateway.is_some() {
         "configured"
     } else {
         "not-configured"

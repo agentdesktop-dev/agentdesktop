@@ -26,10 +26,10 @@ use agentdesktop_core::{
     },
 };
 use agentdesktop_proto::fleet::{
-    AgentMessage, ConfigState, ConfigStatus, Discovery, Heartbeat, Hello,
-    InferenceGatewayCredentialRequest, Inventory, RenewDeviceCertificateRequest, SessionNewEvent,
-    TelemetryEvent, ToolUseEvent, agent_message, controller_message,
-    fleet_agent_client::FleetAgentClient, telemetry_event,
+    AgentMessage, ConfigState, ConfigStatus, Discovery, Heartbeat, Hello, Inventory,
+    LlmGatewayCredentialRequest, RenewDeviceCertificateRequest, SessionNewEvent, TelemetryEvent,
+    ToolUseEvent, agent_message, controller_message, fleet_agent_client::FleetAgentClient,
+    telemetry_event,
 };
 
 use crate::{
@@ -247,26 +247,26 @@ fn is_unauthenticated(error: &anyhow::Error) -> bool {
         .is_some_and(|status| status.code() == tonic::Code::Unauthenticated)
 }
 
-pub async fn inference_gateway_credential(
+pub async fn llm_gateway_credential(
     controller: &ControllerConnectionConfig,
     state_dir: &Path,
     client_id: &str,
-) -> anyhow::Result<agentdesktop_core::model::InferenceGatewayCredential> {
+) -> anyhow::Result<agentdesktop_core::model::LlmGatewayCredential> {
     let mut identity =
         identity::load(&state_dir.join("identity.json"))?.context("device is not enrolled")?;
     let identity_path = state_dir.join("identity.json");
     refresh_oauth_if_needed(&mut identity, &identity_path).await?;
     let mut client = client(controller, Some(&identity)).await?;
-    let mut request = Request::new(InferenceGatewayCredentialRequest {
+    let mut request = Request::new(LlmGatewayCredentialRequest {
         client_id: client_id.to_owned(),
     });
     authenticate_request(&identity, &mut request)?;
     let response = client
-        .get_inference_gateway_credential(request)
+        .get_llm_gateway_credential(request)
         .await
-        .context("request inference gateway credential")?
+        .context("request LLM gateway credential")?
         .into_inner();
-    Ok(agentdesktop_core::model::InferenceGatewayCredential {
+    Ok(agentdesktop_core::model::LlmGatewayCredential {
         credential: response.credential,
         expires_at_unix_seconds: response.expires_at_unix_seconds,
     })

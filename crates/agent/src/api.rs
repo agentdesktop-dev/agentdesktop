@@ -10,11 +10,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
 use agentdesktop_core::{
-    config::{
-        DaemonConfig, InferenceGatewayAuthentication, ProgramAuthentication, valid_client_id,
-    },
+    config::{DaemonConfig, LlmGatewayAuthentication, ProgramAuthentication, valid_client_id},
     model::{
-        Discovery, EnrollmentStatus, InferenceGatewayCredential, TelemetryEvent, TelemetryEventKind,
+        Discovery, EnrollmentStatus, LlmGatewayCredential, TelemetryEvent, TelemetryEventKind,
     },
 };
 
@@ -51,10 +49,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/enrollment", get(enrollment))
         .route("/v1/logout", post(logout))
         .route("/v1/telemetry", post(telemetry))
-        .route(
-            "/v1/inference-gateway/credential",
-            get(inference_gateway_credential),
-        )
+        .route("/v1/llm-gateway/credential", get(llm_gateway_credential))
         .with_state(state)
 }
 
@@ -217,10 +212,10 @@ async fn logout(State(state): State<AppState>) -> Result<StatusCode, (StatusCode
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn inference_gateway_credential(
+async fn llm_gateway_credential(
     State(state): State<AppState>,
     Query(query): Query<CredentialQuery>,
-) -> Result<Json<InferenceGatewayCredential>, (StatusCode, String)> {
+) -> Result<Json<LlmGatewayCredential>, (StatusCode, String)> {
     if !valid_client_id(&query.client_id) {
         return Err((StatusCode::BAD_REQUEST, "invalid client ID".to_owned()));
     }
@@ -230,15 +225,15 @@ async fn inference_gateway_credential(
             format!("read applied configuration: {error:#}"),
         )
     })?;
-    let gateway = effective.inference_gateway.as_ref().ok_or_else(|| {
+    let gateway = effective.llm_gateway.as_ref().ok_or_else(|| {
         (
             StatusCode::FAILED_DEPENDENCY,
-            "daemon has no inference gateway configured".to_owned(),
+            "daemon has no LLM gateway configured".to_owned(),
         )
     })?;
     let uses_subscription = program_uses_subscription(&effective, &query.client_id);
     let (identity, continue_in_browser) = match gateway.authentication.as_ref() {
-        Some(InferenceGatewayAuthentication::ControllerJwt { .. }) => {
+        Some(LlmGatewayAuthentication::ControllerJwt { .. }) => {
             let controller = state.config.controller.as_ref().ok_or_else(|| {
                 (
                     StatusCode::FAILED_DEPENDENCY,
@@ -247,11 +242,11 @@ async fn inference_gateway_credential(
             })?;
             // Local transport permissions authenticate the user, not the calling
             // process. The client ID selects an allowed policy within that boundary.
-            remote::inference_gateway_credential(controller, &state.state_dir, &query.client_id)
+            remote::llm_gateway_credential(controller, &state.state_dir, &query.client_id)
                 .await
                 .map(|credential| (credential, false))
         }
-        Some(InferenceGatewayAuthentication::Oidc {
+        Some(LlmGatewayAuthentication::Oidc {
             issuer,
             client_id,
             redirect_uri,
@@ -277,7 +272,7 @@ async fn inference_gateway_credential(
             )
         }),
         None => Err(anyhow::anyhow!(
-            "inference gateway has no authentication configured"
+            "LLM gateway has no authentication configured"
         )),
     }
     .map_err(|error| (StatusCode::BAD_GATEWAY, format!("{error:#}")))?;
@@ -324,7 +319,7 @@ mod tests {
     fn subscription_is_selected_by_requesting_agent() {
         let config = parse_daemon(
             r#"
-inferenceGateway:
+llmGateway:
   url: https://gateway.example.com
   authentication:
     type: oidc
@@ -360,7 +355,7 @@ controller:
         fs::write(
             root.join("remote-config.yaml"),
             r#"
-inferenceGateway:
+llmGateway:
   url: https://gateway.example.com
   authentication:
     type: controllerJwt
@@ -373,7 +368,7 @@ inferenceGateway:
         let effective = load_effective_config(&local, &root).unwrap();
 
         assert_eq!(
-            effective.inference_gateway.unwrap().url.as_str(),
+            effective.llm_gateway.unwrap().url.as_str(),
             "https://gateway.example.com/"
         );
         fs::remove_dir_all(root).unwrap();
@@ -389,7 +384,7 @@ inferenceGateway:
         fs::create_dir_all(&root).unwrap();
         let local = parse_daemon(
             r#"
-inferenceGateway:
+llmGateway:
   url: http://127.0.0.1:4001
   authentication:
     type: oidc
@@ -402,7 +397,7 @@ inferenceGateway:
         fs::write(
             root.join("remote-config.yaml"),
             r#"
-inferenceGateway:
+llmGateway:
   url: https://stale.example.com
   authentication:
     type: controllerJwt
@@ -414,11 +409,11 @@ inferenceGateway:
 
         let effective = load_effective_config(&local, &root).unwrap();
 
-        let gateway = effective.inference_gateway.unwrap();
+        let gateway = effective.llm_gateway.unwrap();
         assert_eq!(gateway.url.as_str(), "http://127.0.0.1:4001/");
         assert!(matches!(
             gateway.authentication,
-            Some(agentdesktop_core::config::InferenceGatewayAuthentication::Oidc { .. })
+            Some(agentdesktop_core::config::LlmGatewayAuthentication::Oidc { .. })
         ));
         fs::remove_dir_all(root).unwrap();
     }

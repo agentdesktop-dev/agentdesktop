@@ -7,7 +7,7 @@
 MDM manages the device, but each AI developer tool has its own settings, MCP
 connections, skills, and gateway configuration. agentdesktop manages those
 tools as a fleet: see what is installed, apply managed configuration, and
-connect each device to your inference gateway.
+connect each device to your LLM gateway.
 
 agentdesktop brings discovery, policy, identity, gateway access, and telemetry
 into one fully open-source system. Keep developers in Claude, Codex, OpenCode,
@@ -24,9 +24,9 @@ built for AI developer tools, not retrofitted from device management scripts.
 - Inventory MCP servers and skills without collecting MCP command arguments,
   environment variables, HTTP headers, or skill bodies.
 - Preview and reconcile managed settings for supported tools.
-- Connect supported tools directly to a shared inference gateway.
+- Connect supported tools directly to a shared LLM gateway.
 - Enroll devices through OIDC and associate them with the signed-in user.
-- Issue short-lived controller-signed JWTs for an inference gateway such as
+- Issue short-lived controller-signed JWTs for an LLM gateway such as
   agentgateway.
 - Collect selected session and tool-use events when telemetry is enabled.
 
@@ -54,7 +54,7 @@ The project targets Linux, macOS, and Windows.
 The daemon runs on each device and reconciles developer-tool configuration. It
 can receive desired configuration from the controller, or read the same YAML
 directly in standalone mode. Developer tools continue to run locally and can
-request short-lived credentials for the inference gateway through the daemon.
+request short-lived credentials for the LLM gateway through the daemon.
 
 ![agentdesktop architecture](images/overview.png)
 
@@ -64,7 +64,7 @@ Start with [Build and install](https://agentdesktop.dev/docs/getting-started/bui
 when working from source, then choose the setup that fits your environment:
 
 - [Standalone mode](https://agentdesktop.dev/docs/getting-started/standalone/)
-  reads local YAML and can authenticate directly to an inference gateway with
+  reads local YAML and can authenticate directly to an LLM gateway with
   OIDC. It needs no controller or device identity. The repository includes a
   [local standalone example](./examples/standalone).
 - [Controller-managed mode](https://agentdesktop.dev/docs/getting-started/managed/)
@@ -84,7 +84,7 @@ standalone daemon can apply it from a local file.
 A small configuration can manage a shared gateway, telemetry, and agents. For example:
 
 ```yaml
-inferenceGateway:
+llmGateway:
   url: https://gateway.example.com
   authentication:
     type: controllerJwt
@@ -108,7 +108,7 @@ programs:
 For a controller-free setup, omit `controller` and configure OIDC directly:
 
 ```yaml
-inferenceGateway:
+llmGateway:
   url: https://gateway.example.com
   authentication:
     type: oidc
@@ -146,7 +146,7 @@ is used to authenticate the device to the controller.
 
 OIDC also authenticates the device user. Standalone mode uses a simpler native
 OIDC flow and sends the resulting access token directly to the configured
-inference gateway; it creates no device key or certificate.
+LLM gateway; it creates no device key or certificate.
 
 ## Telemetry
 

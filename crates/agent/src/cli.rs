@@ -3,7 +3,7 @@ use std::{io::Read, path::PathBuf};
 use agentdesktop_client as client;
 use agentdesktop_core::{
     config::DaemonConfig,
-    model::{Discovery, Health, InferenceGatewayCredential, TelemetryEventKind},
+    model::{Discovery, Health, LlmGatewayCredential, TelemetryEventKind},
 };
 use clap::Subcommand;
 use serde::Deserialize;
@@ -18,7 +18,7 @@ pub enum ClientCommand {
     Discover,
     /// Print the daemon's local startup configuration.
     Config,
-    /// Print a short-lived credential for an inference gateway.
+    /// Print a short-lived credential for an LLM gateway.
     Credential {
         /// Developer tool requesting the credential.
         #[arg(long, default_value = "agentdesktop")]
@@ -93,9 +93,9 @@ pub async fn run(command: ClientCommand, socket: PathBuf) -> anyhow::Result<()> 
         ClientCommand::Credential { client_id } => {
             let client_id: String =
                 url::form_urlencoded::byte_serialize(client_id.as_bytes()).collect();
-            let response: InferenceGatewayCredential = client::get(
+            let response: LlmGatewayCredential = client::get(
                 &socket,
-                &format!("/v1/inference-gateway/credential?client_id={client_id}"),
+                &format!("/v1/llm-gateway/credential?client_id={client_id}"),
             )
             .await?;
             println!("{}", response.credential);

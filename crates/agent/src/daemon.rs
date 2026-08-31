@@ -384,7 +384,7 @@ fn start_gateway_authentication(
     state_dir: PathBuf,
     callback_listen: Option<SocketAddr>,
 ) {
-    let Some(gateway) = config.inference_gateway.as_ref() else {
+    let Some(gateway) = config.llm_gateway.as_ref() else {
         return;
     };
     let authentication = gateway.authentication.clone();
@@ -403,7 +403,7 @@ fn start_gateway_authentication(
     tokio::spawn(async move {
         let result: anyhow::Result<()> = async {
             let mut continue_in_browser = false;
-            if let Some(agentdesktop_core::config::InferenceGatewayAuthentication::Oidc {
+            if let Some(agentdesktop_core::config::LlmGatewayAuthentication::Oidc {
                 issuer,
                 client_id,
                 redirect_uri,
@@ -411,7 +411,7 @@ fn start_gateway_authentication(
                 allow_insecure,
             }) = authentication
             {
-                tracing::info!(%issuer, "starting inference gateway OIDC authentication");
+                tracing::info!(%issuer, "starting LLM gateway OIDC authentication");
                 let acquired = gateway_oidc::credential(
                     &issuer,
                     &client_id,
@@ -426,7 +426,7 @@ fn start_gateway_authentication(
                 )
                 .await?;
                 continue_in_browser = acquired.interactive && subscription;
-                tracing::info!(%issuer, "inference gateway OIDC authentication ready");
+                tracing::info!(%issuer, "LLM gateway OIDC authentication ready");
             }
             if subscription {
                 tracing::info!("starting Anthropic subscription authentication");
@@ -444,7 +444,7 @@ fn start_gateway_authentication(
         if let Err(error) = result {
             tracing::error!(
                 error = %format!("{error:#}"),
-                "inference gateway authentication failed"
+                "LLM gateway authentication failed"
             );
         }
     });
@@ -469,7 +469,7 @@ fn validate_one_shot(config: &agentdesktop_core::config::DaemonConfig) -> anyhow
         bail!("--once cannot collect telemetry because hooks require the daemon to remain running");
     }
     let authenticated_gateway_is_used = config
-        .inference_gateway
+        .llm_gateway
         .as_ref()
         .is_some_and(|gateway| gateway.authentication.is_some())
         && [
@@ -477,28 +477,28 @@ fn validate_one_shot(config: &agentdesktop_core::config::DaemonConfig) -> anyhow
                 .programs
                 .claude_code
                 .as_ref()
-                .is_some_and(|program| program.use_inference_gateway),
+                .is_some_and(|program| program.use_llm_gateway),
             config
                 .programs
                 .claude_desktop
                 .as_ref()
-                .is_some_and(|program| program.use_inference_gateway),
+                .is_some_and(|program| program.use_llm_gateway),
             config
                 .programs
                 .codex
                 .as_ref()
-                .is_some_and(|program| program.use_inference_gateway),
+                .is_some_and(|program| program.use_llm_gateway),
             config
                 .programs
                 .open_code
                 .as_ref()
-                .is_some_and(|program| program.use_inference_gateway),
+                .is_some_and(|program| program.use_llm_gateway),
         ]
         .into_iter()
         .any(|used| used);
     if authenticated_gateway_is_used {
         bail!(
-            "--once cannot configure an authenticated inference gateway because credential helpers require the daemon to remain running"
+            "--once cannot configure an authenticated LLM gateway because credential helpers require the daemon to remain running"
         );
     }
     Ok(())
@@ -841,7 +841,7 @@ programs:
 
         let oidc = parse_daemon(
             r#"
-inferenceGateway:
+llmGateway:
   url: https://gateway.example.com
   authentication:
     type: oidc

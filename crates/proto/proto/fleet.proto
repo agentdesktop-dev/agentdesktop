@@ -6,7 +6,7 @@ service FleetAgent {
   rpc BeginEnrollment(BeginEnrollmentRequest) returns (BeginEnrollmentResponse);
   rpc CompleteEnrollment(CompleteEnrollmentRequest) returns (EnrollResponse);
   rpc RenewDeviceCertificate(RenewDeviceCertificateRequest) returns (DeviceCertificateResponse);
-  rpc GetInferenceGatewayCredential(InferenceGatewayCredentialRequest) returns (InferenceGatewayCredentialResponse);
+  rpc GetLlmGatewayCredential(LlmGatewayCredentialRequest) returns (LlmGatewayCredentialResponse);
   rpc Connect(stream AgentMessage) returns (stream ControllerMessage);
 }
 
@@ -49,12 +49,12 @@ message DeviceCertificateResponse {
   uint64 expires_at_unix_seconds = 2;
 }
 
-message InferenceGatewayCredentialRequest {
+message LlmGatewayCredentialRequest {
   reserved 1;
   string client_id = 2;
 }
 
-message InferenceGatewayCredentialResponse {
+message LlmGatewayCredentialResponse {
   string credential = 1;
   uint64 expires_at_unix_seconds = 2;
 }
