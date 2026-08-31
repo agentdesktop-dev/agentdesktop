@@ -22,12 +22,51 @@ pub struct DaemonConfig {
     /// LLM gateway used by managed developer tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_gateway: Option<LlmGatewayConfig>,
+    /// Local execution sandbox required for managed developer tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<SandboxConfig>,
     /// Telemetry collected from managed developer tools.
     #[serde(default, skip_serializing_if = "TelemetryConfig::is_empty")]
     pub telemetry: TelemetryConfig,
     /// Per-program settings reconciled on this device.
     #[serde(default, skip_serializing_if = "ProgramsConfig::is_empty")]
     pub programs: ProgramsConfig,
+}
+
+/// Local execution restrictions applied to managed developer tools.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SandboxConfig {
+    /// Network destinations available to sandboxed commands.
+    #[serde(default)]
+    pub network: SandboxNetworkConfig,
+    /// Filesystem access available to sandboxed commands.
+    #[serde(default)]
+    pub filesystem: SandboxFilesystemConfig,
+}
+
+/// Network restrictions for sandboxed commands.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SandboxNetworkConfig {
+    /// Domains sandboxed commands may contact. An empty set disables network access.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub allowed_domains: BTreeSet<String>,
+}
+
+/// Filesystem restrictions for sandboxed commands.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SandboxFilesystemConfig {
+    /// Additional paths sandboxed commands may modify.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writable: Vec<PathBuf>,
+    /// Paths sandboxed commands may neither read nor modify.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub denied: Vec<PathBuf>,
 }
 
 /// Connection and authentication settings for an LLM gateway.
@@ -534,21 +573,37 @@ pub fn parse_daemon(contents: &str) -> anyhow::Result<DaemonConfig> {
     {
         anyhow::bail!("controller address must use HTTPS");
     }
-    validate_daemon(config.llm_gateway.as_ref(), &config.programs)?;
+    validate_daemon(
+        config.llm_gateway.as_ref(),
+        config.sandbox.as_ref(),
+        &config.programs,
+    )?;
     Ok(config)
 }
 
 impl DaemonConfig {
     /// Returns whether this configuration manages no gateway or developer tools.
     pub fn is_empty(&self) -> bool {
-        self.llm_gateway.is_none() && self.telemetry.is_empty() && self.programs.is_empty()
+        self.llm_gateway.is_none()
+            && self.sandbox.is_none()
+            && self.telemetry.is_empty()
+            && self.programs.is_empty()
     }
 }
 
 fn validate_daemon(
     llm_gateway: Option<&LlmGatewayConfig>,
+    sandbox: Option<&SandboxConfig>,
     programs: &ProgramsConfig,
 ) -> anyhow::Result<()> {
+    if sandbox.is_some() {
+        if programs.claude_desktop.is_some() {
+            anyhow::bail!("sandbox is not supported for Claude Desktop");
+        }
+        if programs.open_code.is_some() {
+            anyhow::bail!("sandbox is not supported for OpenCode");
+        }
+    }
     if let Some(gateway) = llm_gateway {
         if !matches!(gateway.url.scheme(), "http" | "https") {
             anyhow::bail!(

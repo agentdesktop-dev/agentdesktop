@@ -1,6 +1,8 @@
 use std::{fs, path::Path};
 
-use agentdesktop_core::config::{CodexConfig, LlmGatewayAuthentication, LlmGatewayConfig};
+use agentdesktop_core::config::{
+    CodexConfig, LlmGatewayAuthentication, LlmGatewayConfig, SandboxConfig,
+};
 use anyhow::Context;
 use serde_json::{Value, json};
 use tracing::info;
@@ -15,6 +17,7 @@ pub fn apply(
     path: &Path,
     credential_helper: &Path,
     socket: &Path,
+    sandbox: Option<&SandboxConfig>,
     config: Option<(&CodexConfig, Option<&LlmGatewayConfig>)>,
     mode: ReconcileMode,
 ) -> anyhow::Result<()> {
@@ -22,7 +25,7 @@ pub fn apply(
         return remove(path, mode);
     };
 
-    let settings = managed_config(config, gateway, credential_helper, socket)?;
+    let settings = managed_config(config, gateway, credential_helper, socket, sandbox)?;
     let mut contents = MANAGED_HEADER.as_bytes().to_vec();
     contents.extend_from_slice(
         toml::to_string_pretty(&settings)
@@ -107,9 +110,45 @@ fn managed_config(
     gateway: Option<&LlmGatewayConfig>,
     credential_helper: &Path,
     socket: &Path,
+    sandbox: Option<&SandboxConfig>,
 ) -> anyhow::Result<Value> {
     let mut settings = serde_json::to_value(&config.managed_config)
         .context("serialize Codex pass-through managed configuration")?;
+    if let Some(sandbox) = sandbox {
+        let mut filesystem = serde_json::Map::from_iter([
+            (":root".to_owned(), json!("read")),
+            (":project_roots".to_owned(), json!("write")),
+        ]);
+        for path in &sandbox.filesystem.writable {
+            filesystem.insert(path.to_string_lossy().into_owned(), json!("write"));
+        }
+        for path in &sandbox.filesystem.denied {
+            filesystem.insert(path.to_string_lossy().into_owned(), json!("deny"));
+        }
+
+        let mut domains = serde_json::Map::new();
+        for domain in &sandbox.network.allowed_domains {
+            domains.insert(domain.clone(), json!("allow"));
+        }
+        let network_enabled = !domains.is_empty();
+        let mut generated = json!({
+            "default_permissions": "agentdesktop",
+            "permissions": {
+                "agentdesktop": {
+                    "filesystem": filesystem,
+                    "network": {
+                        "enabled": network_enabled,
+                        "mode": "limited",
+                        "domains": domains,
+                    },
+                },
+            },
+        });
+        if network_enabled {
+            generated["features"] = json!({ "network_proxy": true });
+        }
+        deep_merge(&mut settings, generated);
+    }
     let Some(gateway) = gateway else {
         return Ok(settings);
     };
@@ -237,6 +276,7 @@ programs:
             Some(gateway),
             Path::new("/usr/local/bin/agentdesktop"),
             Path::new("/run/agentdesktop/agentdesktop.sock"),
+            None,
         )
         .expect("merged settings");
 
@@ -259,5 +299,55 @@ programs:
         let serialized = toml::to_string_pretty(&settings).expect("valid TOML");
         let parsed: toml::Value = toml::from_str(&serialized).expect("parse generated TOML");
         assert_eq!(parsed["model_provider"].as_str(), Some("agentdesktop"));
+    }
+
+    #[test]
+    fn sandbox_configures_a_required_permission_profile() {
+        let config = parse_daemon(
+            r#"
+sandbox:
+  network:
+    allowedDomains: [github.com]
+  filesystem:
+    writable: [/var/cache/company]
+    denied: [/home/example/.ssh]
+programs:
+  codex: {}
+"#,
+        )
+        .expect("valid daemon configuration");
+
+        let settings = managed_config(
+            config.programs.codex.as_ref().unwrap(),
+            None,
+            Path::new("agentdesktop"),
+            Path::new("agentdesktop.sock"),
+            config.sandbox.as_ref(),
+        )
+        .expect("sandbox settings");
+
+        assert_eq!(settings["default_permissions"], "agentdesktop");
+        assert_eq!(settings["features"]["network_proxy"], true);
+        assert_eq!(
+            settings["permissions"]["agentdesktop"]["filesystem"][":root"],
+            "read"
+        );
+        assert!(settings["permissions"]["agentdesktop"]["filesystem"][":project_roots"] == "write");
+        assert_eq!(
+            settings["permissions"]["agentdesktop"]["filesystem"]["/var/cache/company"],
+            "write"
+        );
+        assert_eq!(
+            settings["permissions"]["agentdesktop"]["filesystem"]["/home/example/.ssh"],
+            "deny"
+        );
+        assert_eq!(
+            settings["permissions"]["agentdesktop"]["network"]["enabled"],
+            true
+        );
+        assert_eq!(
+            settings["permissions"]["agentdesktop"]["network"]["domains"]["github.com"],
+            "allow"
+        );
     }
 }

@@ -261,6 +261,7 @@ impl Reconciler {
             &self.claude_credential_helper_command(),
             tool_use_hook.as_ref(),
             session_new_hook.as_ref(),
+            config.sandbox.as_ref(),
             claude_code,
             mode,
         )?;
@@ -291,6 +292,7 @@ impl Reconciler {
             &self.codex_managed_config_path,
             &self.credential_helper,
             &self.socket,
+            config.sandbox.as_ref(),
             codex,
             mode,
         )?;

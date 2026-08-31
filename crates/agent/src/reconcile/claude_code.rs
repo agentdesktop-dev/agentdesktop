@@ -2,7 +2,9 @@ use std::{fs, path::Path};
 
 use anyhow::Context;
 
-use agentdesktop_core::config::{ClaudeCodeConfig, LlmGatewayAuthentication, LlmGatewayConfig};
+use agentdesktop_core::config::{
+    ClaudeCodeConfig, LlmGatewayAuthentication, LlmGatewayConfig, SandboxConfig,
+};
 use serde_json::{Value, json};
 use tracing::info;
 
@@ -18,6 +20,7 @@ pub fn apply(
     credential_helper: &str,
     tool_use_hook: Option<&CommandSpec>,
     session_new_hook: Option<&CommandSpec>,
+    sandbox: Option<&SandboxConfig>,
     config: Option<(&ClaudeCodeConfig, Option<&LlmGatewayConfig>)>,
     mode: ReconcileMode,
 ) -> anyhow::Result<()> {
@@ -48,6 +51,7 @@ pub fn apply(
         credential_helper,
         tool_use_hook,
         session_new_hook,
+        sandbox,
     )?;
     if merge_existing {
         json_merge::apply(
@@ -153,6 +157,7 @@ fn managed_settings(
     credential_helper: &str,
     tool_use_hook: Option<&CommandSpec>,
     session_new_hook: Option<&CommandSpec>,
+    sandbox: Option<&SandboxConfig>,
 ) -> anyhow::Result<Value> {
     let mut settings = serde_json::to_value(&config.settings)
         .context("serialize Claude Code pass-through settings")?;
@@ -161,6 +166,27 @@ fn managed_settings(
     }
     if let Some(command) = session_new_hook {
         append_hook(&mut settings, "SessionStart", command)?;
+    }
+    if let Some(sandbox) = sandbox {
+        let writable = &sandbox.filesystem.writable;
+        let denied = &sandbox.filesystem.denied;
+        let allowed_domains = &sandbox.network.allowed_domains;
+        let generated = json!({
+            "sandbox": {
+                "enabled": true,
+                "failIfUnavailable": true,
+                "allowUnsandboxedCommands": false,
+                "filesystem": {
+                    "allowWrite": writable,
+                    "denyRead": denied,
+                    "denyWrite": denied,
+                },
+                "network": {
+                    "allowedDomains": allowed_domains,
+                },
+            },
+        });
+        deep_merge(&mut settings, generated);
     }
     let Some(gateway) = gateway else {
         return Ok(settings);
@@ -327,6 +353,7 @@ programs:
             "agentdesktop credential",
             Some(&hook),
             None,
+            None,
         )
         .expect("merged settings");
 
@@ -391,6 +418,7 @@ programs:
             "agentdesktop credential",
             None,
             None,
+            None,
             Some((claude, None)),
             ReconcileMode::Apply,
         )
@@ -412,6 +440,7 @@ programs:
             None,
             None,
             None,
+            None,
             ReconcileMode::Apply,
         )
         .unwrap();
@@ -430,5 +459,54 @@ programs:
         );
         assert!(!json_merge::state_path(&path).exists());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sandbox_settings_override_pass_through_values() {
+        let config = parse_daemon(
+            r#"
+sandbox:
+  network:
+    allowedDomains: [github.com]
+  filesystem:
+    writable: [/var/cache/company]
+    denied: [~/.ssh]
+programs:
+  claudeCode:
+    sandbox:
+      enabled: false
+"#,
+        )
+        .expect("valid daemon configuration");
+
+        let settings = managed_settings(
+            config.programs.claude_code.as_ref().unwrap(),
+            None,
+            "agentdesktop credential",
+            None,
+            None,
+            config.sandbox.as_ref(),
+        )
+        .expect("sandbox settings");
+
+        assert_eq!(settings["sandbox"]["enabled"], true);
+        assert_eq!(settings["sandbox"]["failIfUnavailable"], true);
+        assert_eq!(settings["sandbox"]["allowUnsandboxedCommands"], false);
+        assert_eq!(
+            settings["sandbox"]["network"]["allowedDomains"],
+            json!(["github.com"])
+        );
+        assert_eq!(
+            settings["sandbox"]["filesystem"]["allowWrite"],
+            json!(["/var/cache/company"])
+        );
+        assert_eq!(
+            settings["sandbox"]["filesystem"]["denyRead"],
+            json!(["~/.ssh"])
+        );
+        assert_eq!(
+            settings["sandbox"]["filesystem"]["denyWrite"],
+            json!(["~/.ssh"])
+        );
     }
 }
