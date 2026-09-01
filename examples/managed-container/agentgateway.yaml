@@ -1,0 +1,41 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+frontendPolicies:
+  logging:
+    add:
+      llm.client: jwt.client_id
+      user: jwt.email
+
+config:
+  adminAddr: "off"
+  readinessAddr: "off"
+  statsAddr: "off"
+
+gateways:
+  gateway:
+    port: 14000
+
+routes:
+- name: reachability
+  gateways: gateway
+  matches:
+  - method: HEAD
+    path:
+      exact: /
+  policies:
+    directResponse:
+      status: 200
+
+llm:
+  gateways: gateway
+  policies:
+    jwtAuth:
+      mode: strict
+      issuer: agentdesktop-controller
+      audiences: [agentgateway]
+      jwks:
+        url: http://127.0.0.1:18080/.well-known/jwks.json
+  models:
+  - name: "*"
+    provider: anthropic
+    params:
+      apiKey: $ANTHROPIC_API_KEY

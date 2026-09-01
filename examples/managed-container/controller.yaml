@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=../../schema/controller-config.json
+fleetListen: 127.0.0.1:18443
+adminListen: 127.0.0.1:18080
+allowInsecureDev: true
+databaseUrl: sqlite:///state/agentdesktop-controller.db?mode=rwc
+tls: /keys
+
+oidc:
+  issuer: http://127.0.0.1:5556/dex
+  clientId: local-public
+
+daemonConfig:
+  path: /demo/claude-code.yaml
+
+gatewayJwt:
+  privateKey: /keys/gateway-jwt-key.pem

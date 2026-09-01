@@ -1,0 +1,37 @@
+services:
+  dex:
+    image: ghcr.io/dexidp/dex:v2.45.1
+    command: dex serve /etc/dex/config.yaml
+    ports:
+      - 127.0.0.1:5557:5557
+    volumes:
+      - ./dex.yaml:/etc/dex/config.yaml:ro
+
+  agentgateway:
+    image: cr.agentgateway.dev/agentgateway:v1.4.1
+    command: -f /etc/agentgateway/config.yaml
+    depends_on:
+      - dex
+    ports:
+      - 127.0.0.1:4001:4001
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?Set ANTHROPIC_API_KEY in your environment}
+    volumes:
+      - ./agentgateway.yaml:/etc/agentgateway/config.yaml:ro
+
+  agentdesktop:
+    build:
+      context: ../..
+      dockerfile: examples/standalone-container/Dockerfile
+    depends_on:
+      - dex
+      - agentgateway
+    environment:
+      HOME: /home/agentdesktop
+    network_mode: host
+    volumes:
+      - agentdesktop-home:/home/agentdesktop
+      - ./config.yaml:/demo/config.yaml:ro
+
+volumes:
+  agentdesktop-home:

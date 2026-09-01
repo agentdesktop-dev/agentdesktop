@@ -1,0 +1,11 @@
+# yaml-language-server: $schema=../../schema/daemon-config.json
+llmGateway:
+  url: http://127.0.0.1:14000
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
+    allowedClientIds: [claude-code, claude-desktop, codex, opencode]
+
+programs:
+  claudeCode:
+    companyAnnouncements: ["Managed by Agentdesktop"]

@@ -21,6 +21,7 @@ ARG BUILD_PROFILE=release
 WORKDIR /app
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
+COPY images/ /app/images/
 COPY --from=ui /app/frontend/controller/dist frontend/controller/dist
 RUN --mount=type=cache,id=agentdesktop-target-${TARGETARCH},target=/app/target \
     --mount=type=cache,id=agentdesktop-cargo-registry,target=/usr/local/cargo/registry \

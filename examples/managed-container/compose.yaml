@@ -1,0 +1,70 @@
+services:
+  keys:
+    image: docker.io/library/alpine:3.22
+    entrypoint: ["/bin/sh", "/demo/generate-keys.sh"]
+    volumes:
+      - managed-keys:/keys
+      - ./generate-keys.sh:/demo/generate-keys.sh:ro
+
+  dex:
+    image: ghcr.io/dexidp/dex:v2.45.1
+    command: dex serve /etc/dex/config.yaml
+    ports:
+      - 127.0.0.1:5556:5556
+    volumes:
+      - ./dex.yaml:/etc/dex/config.yaml:ro
+
+  controller:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    command: ["--config", "/demo/controller.yaml"]
+    depends_on:
+      keys:
+        condition: service_completed_successfully
+      dex:
+        condition: service_started
+    network_mode: host
+    user: "0:0"
+    volumes:
+      - managed-keys:/keys:ro
+      - controller-state:/state
+      - ./controller.yaml:/demo/controller.yaml:ro
+      - ./claude-code.yaml:/demo/claude-code.yaml:ro
+
+  agentgateway:
+    image: cr.agentgateway.dev/agentgateway:v1.4.1
+    command: -f /etc/agentgateway/config.yaml
+    depends_on:
+      controller:
+        condition: service_started
+    network_mode: host
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?Set ANTHROPIC_API_KEY in your environment}
+    volumes:
+      - ./agentgateway.yaml:/etc/agentgateway/config.yaml:ro
+
+  agentdesktop:
+    build:
+      context: ../..
+      dockerfile: examples/standalone-container/Dockerfile
+    depends_on:
+      keys:
+        condition: service_completed_successfully
+      controller:
+        condition: service_started
+      agentgateway:
+        condition: service_started
+    environment:
+      HOME: /home/agentdesktop
+    entrypoint: ["/usr/local/bin/managed-demo-daemon"]
+    network_mode: host
+    volumes:
+      - managed-keys:/keys:ro
+      - device-state:/home/agentdesktop
+      - ./agentdesktop.yaml:/demo/agentdesktop.yaml:ro
+
+volumes:
+  managed-keys:
+  controller-state:
+  device-state:
