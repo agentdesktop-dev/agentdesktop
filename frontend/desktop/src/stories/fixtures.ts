@@ -1,4 +1,5 @@
 import type {
+  AccessReport,
   Bootstrap,
   ConnectorSnapshot,
   Discovery,
@@ -246,11 +247,25 @@ export const populatedDiscovery: Discovery = {
       skills: skills.slice(0, 6),
     },
     {
+      kind: "claude-desktop",
+      executable: "/Applications/Claude.app/Contents/MacOS/Claude",
+      version: "1.25927.0",
+      mcpServers: [],
+      skills: [],
+    },
+    {
       kind: "codex",
       executable: "/opt/homebrew/bin/codex",
       version: "0.42.0",
       mcpServers: mcpServers.slice(6),
       skills: skills.slice(8),
+    },
+    {
+      kind: "opencode",
+      executable: "/Users/developer/.local/bin/opencode",
+      version: "1.1.1",
+      mcpServers: [],
+      skills: [],
     },
   ],
   modelRuntimes: [
@@ -262,6 +277,541 @@ export const populatedDiscovery: Discovery = {
 };
 
 export const emptyDiscovery: Discovery = { agents: [] };
+
+export const populatedAccessReport: AccessReport = {
+  generatedAtUnixMs: 1788220800000,
+  status: "ready",
+  agents: [
+    {
+      kind: "vscode",
+      executable:
+        "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
+      version: "1.104.0",
+      userHome: "/Users/developer",
+      capabilities: [
+        {
+          category: "filesystem",
+          resource: "active workspace",
+          operations: ["read"],
+          decision: "allow",
+          enforcement: "harness",
+          source: { kind: "default" },
+          detail: "VS Code agent workspace access",
+        },
+        {
+          category: "execution",
+          resource: "cargo test",
+          operations: ["execute"],
+          decision: "allow",
+          enforcement: "harness",
+          source: {
+            kind: "configuration",
+            path: "/Users/developer/Library/Application Support/Code/User/settings.json",
+          },
+          detail: "VS Code terminal auto-approval",
+        },
+        {
+          category: "execution",
+          resource: "recorded terminal commands",
+          operations: ["execute"],
+          decision: "allow",
+          enforcement: "sandbox",
+          source: { kind: "history" },
+          detail: "VS Code recorded sandbox-wrapped terminal execution",
+        },
+        {
+          category: "execution",
+          resource: "shell commands",
+          operations: ["execute"],
+          decision: "ask",
+          enforcement: "unknown",
+          source: { kind: "default" },
+          detail:
+            "Terminal containment depends on session and VS Code settings",
+        },
+        {
+          category: "network",
+          resource: "URL tools",
+          operations: ["connect"],
+          decision: "ask",
+          enforcement: "harness",
+          source: { kind: "default" },
+          detail: "Unmatched URL tool requests require approval",
+        },
+        {
+          category: "network",
+          resource: "*.githubusercontent.com",
+          operations: ["connect"],
+          decision: "allow",
+          enforcement: "harness",
+          source: {
+            kind: "configuration",
+            path: "/Users/developer/Library/Application Support/Code/User/settings.json",
+          },
+          detail: "VS Code URL tool auto-approval",
+        },
+        {
+          category: "network",
+          resource: "*.amazon.com",
+          operations: ["connect"],
+          decision: "allow",
+          enforcement: "harness",
+          source: {
+            kind: "configuration",
+            path: "/Users/developer/Library/Application Support/Code/User/settings.json",
+          },
+          detail: "VS Code URL tool auto-approval",
+        },
+        {
+          category: "network",
+          resource: "*.apple.com",
+          operations: ["connect"],
+          decision: "allow",
+          enforcement: "harness",
+          source: {
+            kind: "configuration",
+            path: "/Users/developer/Library/Application Support/Code/User/settings.json",
+          },
+          detail: "VS Code URL tool auto-approval",
+        },
+        {
+          category: "network",
+          resource: "*.cilium.io",
+          operations: ["connect"],
+          decision: "allow",
+          enforcement: "harness",
+          source: {
+            kind: "configuration",
+            path: "/Users/developer/Library/Application Support/Code/User/settings.json",
+          },
+          detail: "VS Code URL tool auto-approval",
+        },
+        {
+          category: "network",
+          resource: "api.github.com",
+          operations: ["connect"],
+          decision: "allow",
+          enforcement: "harness",
+          source: {
+            kind: "configuration",
+            path: "/Users/developer/Library/Application Support/Code/User/settings.json",
+          },
+          detail: "VS Code URL tool auto-approval",
+        },
+        {
+          category: "externalService",
+          resource: "mcp:github",
+          operations: ["use"],
+          decision: "unknown",
+          enforcement: "harness",
+          source: {
+            kind: "mcp",
+            path: "/Users/developer/Library/Application Support/Code/User/mcp.json",
+          },
+          detail:
+            "Configured and enabled; per-tool approval depends on the harness",
+        },
+        {
+          category: "externalService",
+          resource: "mcp:linear",
+          operations: ["use"],
+          decision: "unknown",
+          enforcement: "harness",
+          source: {
+            kind: "mcp",
+            path: "/Users/developer/Library/Application Support/Code/User/mcp.json",
+          },
+          detail:
+            "Configured and enabled; per-tool approval depends on the harness",
+        },
+        {
+          category: "externalService",
+          resource: "mcp:sentry",
+          operations: ["use"],
+          decision: "unknown",
+          enforcement: "harness",
+          source: {
+            kind: "mcp",
+            path: "/Users/developer/Library/Application Support/Code/User/mcp.json",
+          },
+          detail:
+            "Configured and enabled; per-tool approval depends on the harness",
+        },
+      ],
+      observations: [
+        {
+          category: "filesystem",
+          resource:
+            "/Users/developer/projects/agentdesktop/frontend/desktop/src/components/AgentToolInventory.tsx",
+          operation: "read",
+          workspace: "/Users/developer/projects/agentdesktop",
+          count: 12,
+          evidenceUpdatedAtUnixMs: 1788134400000,
+          confidence: "high",
+          source: {
+            kind: "history",
+            path: "/Users/developer/Library/Application Support/Code/User/workspaceStorage/session/chatSessions/access.jsonl",
+          },
+        },
+        {
+          category: "network",
+          resource: "docs.rs",
+          operation: "connect",
+          workspace: "/Users/developer/projects/agentdesktop",
+          count: 3,
+          evidenceUpdatedAtUnixMs: 1788134400000,
+          confidence: "high",
+          source: {
+            kind: "history",
+            path: "/Users/developer/Library/Application Support/Code/User/workspaceStorage/session/chatSessions/access.jsonl",
+          },
+        },
+        {
+          category: "browser",
+          resource: "localhost",
+          operation: "connect",
+          workspace: "/Users/developer/projects/agentdesktop",
+          count: 4,
+          evidenceUpdatedAtUnixMs: 1788134400000,
+          confidence: "high",
+          source: {
+            kind: "history",
+            path: "/Users/developer/Library/Application Support/Code/User/workspaceStorage/session/chatSessions/access.jsonl",
+          },
+        },
+      ],
+      findings: [
+        {
+          severity: "warning",
+          title: "4 wildcard network rules",
+          detail:
+            "4 wildcard domain rules each allow every matching subdomain; review the Network rules",
+          category: "network",
+          source: {
+            kind: "configuration",
+            path: "/Users/developer/Library/Application Support/Code/User/settings.json",
+          },
+        },
+      ],
+      coverage: [
+        {
+          source: "configuration",
+          status: "partial",
+          detail:
+            "Inspected 1 VS Code settings file; profile and workspace settings are not assessed",
+        },
+        {
+          source: "mcp",
+          status: "partial",
+          detail:
+            "Inspected 3 discovered MCP servers; project-scoped definitions outside the daemon working directory may be omitted",
+        },
+        {
+          source: "history",
+          status: "partial",
+          detail: "Inspected 41 of 252 history files, bounded to 64 MiB",
+        },
+      ],
+    },
+    {
+      kind: "claude-code",
+      executable: "/Users/developer/.local/bin/claude",
+      version: "2.1.250",
+      userHome: "/Users/developer",
+      capabilities: [
+        {
+          category: "filesystem",
+          resource: "/Users/developer/projects/agentdesktop",
+          operations: ["read"],
+          decision: "allow",
+          enforcement: "harness",
+          workspace: "/Users/developer/projects/agentdesktop",
+          source: {
+            kind: "configuration",
+            path: "/Users/developer/.claude.json",
+          },
+          detail: "Trusted Claude workspace",
+        },
+        {
+          category: "network",
+          resource: "*.github.com",
+          operations: ["connect"],
+          decision: "allow",
+          enforcement: "sandbox",
+          source: {
+            kind: "configuration",
+            path: "/Users/developer/.claude/settings.json",
+          },
+          detail: "Claude sandbox network rule",
+        },
+        {
+          category: "credential",
+          resource: "ANTHROPIC_API_KEY",
+          operations: ["use"],
+          decision: "unknown",
+          enforcement: "none",
+          source: {
+            kind: "configuration",
+            path: "/Users/developer/.claude/settings.json",
+          },
+          detail: "Environment variable configured; value omitted",
+        },
+        {
+          category: "externalService",
+          resource: "mcp:github-enterprise",
+          operations: ["use"],
+          decision: "unknown",
+          enforcement: "harness",
+          source: {
+            kind: "mcp",
+            path: "/Users/developer/.claude.json",
+          },
+          detail:
+            "Configured and enabled; per-tool approval depends on the harness",
+        },
+      ],
+      observations: [
+        {
+          category: "filesystem",
+          resource:
+            "/Users/developer/projects/agentdesktop/crates/agent/src/access/configuration.rs",
+          operation: "read",
+          workspace: "/Users/developer/projects/agentdesktop",
+          count: 7,
+          evidenceUpdatedAtUnixMs: 1788134400000,
+          confidence: "high",
+          source: {
+            kind: "history",
+            path: "/Users/developer/.claude/projects/agentdesktop/session.jsonl",
+          },
+        },
+        {
+          category: "network",
+          resource: "registry.npmjs.org",
+          operation: "connect",
+          workspace: "/Users/developer/projects/agentdesktop",
+          count: 2,
+          evidenceUpdatedAtUnixMs: 1788134400000,
+          confidence: "heuristic",
+          source: {
+            kind: "history",
+            path: "/Users/developer/.claude/projects/agentdesktop/session.jsonl",
+          },
+        },
+      ],
+      findings: [
+        {
+          severity: "warning",
+          title: "Wildcard network rule",
+          detail:
+            "*.github.com allows every matching subdomain, not one exact host",
+          category: "network",
+          source: {
+            kind: "configuration",
+            path: "/Users/developer/.claude/settings.json",
+          },
+        },
+        {
+          severity: "notice",
+          title: "Local MCP process",
+          detail:
+            "github-enterprise starts a local MCP process whose host access is not described by MCP configuration",
+          category: "externalService",
+          source: {
+            kind: "mcp",
+            path: "/Users/developer/.claude.json",
+          },
+        },
+      ],
+      coverage: [
+        {
+          source: "configuration",
+          status: "partial",
+          detail:
+            "Inspected 3 Claude configuration files; session and plugin settings may add access",
+        },
+        {
+          source: "mcp",
+          status: "partial",
+          detail:
+            "Inspected 1 discovered MCP server; project-scoped definitions outside the daemon working directory may be omitted",
+        },
+        {
+          source: "history",
+          status: "partial",
+          detail: "Inspected 96 of 142 history files, bounded to 64 MiB",
+        },
+      ],
+    },
+    {
+      kind: "claude-desktop",
+      executable: "/Applications/Claude.app/Contents/MacOS/Claude",
+      version: "1.25927.0",
+      userHome: "/Users/developer",
+      capabilities: [
+        {
+          category: "network",
+          resource: "hosted web search",
+          operations: ["use"],
+          decision: "allow",
+          enforcement: "harness",
+          source: {
+            kind: "configuration",
+            path: "/Users/developer/Library/Application Support/Claude/claude_desktop_config.json",
+          },
+          detail: "Claude Desktop Cowork web search enabled",
+        },
+      ],
+      observations: [],
+      findings: [],
+      coverage: [
+        {
+          source: "configuration",
+          status: "partial",
+          detail:
+            "Inspected Claude Desktop settings; per-session computer and Cowork grants may not be persisted here",
+        },
+        {
+          source: "mcp",
+          status: "partial",
+          detail:
+            "Inspected 0 discovered MCP servers; project-scoped, custom, or agent-specific definitions may be omitted",
+        },
+        {
+          source: "history",
+          status: "partial",
+          detail:
+            "Inspected 5 local agent-mode artifacts; computer-use grants may be stored elsewhere",
+        },
+      ],
+    },
+    {
+      kind: "codex",
+      executable: "/opt/homebrew/bin/codex",
+      version: "0.129.0",
+      userHome: "/Users/developer",
+      capabilities: [
+        {
+          category: "filesystem",
+          resource: "workspace",
+          operations: ["read", "write"],
+          decision: "allow",
+          enforcement: "sandbox",
+          source: {
+            kind: "configuration",
+            path: "/Users/developer/.codex/config.toml",
+          },
+          detail: "Codex workspace-write sandbox",
+        },
+        {
+          category: "network",
+          resource: "*",
+          operations: ["connect"],
+          decision: "deny",
+          enforcement: "sandbox",
+          source: {
+            kind: "configuration",
+            path: "/Users/developer/.codex/config.toml",
+          },
+          detail: "Codex workspace-write network policy",
+        },
+      ],
+      observations: [],
+      findings: [],
+      coverage: [
+        {
+          source: "configuration",
+          status: "partial",
+          detail:
+            "Inspected 1 Codex configuration file; named profiles and requirements are not assessed",
+        },
+        {
+          source: "mcp",
+          status: "partial",
+          detail:
+            "Inspected 0 discovered MCP servers; project-scoped, custom, or agent-specific definitions may be omitted",
+        },
+        {
+          source: "history",
+          status: "unavailable",
+          detail: "No local Codex history store was found",
+        },
+      ],
+    },
+    {
+      kind: "opencode",
+      executable: "/Users/developer/.local/bin/opencode",
+      version: "1.1.1",
+      userHome: "/Users/developer",
+      capabilities: [
+        {
+          category: "filesystem",
+          resource: "workspace",
+          operations: ["read", "write"],
+          decision: "allow",
+          enforcement: "harness",
+          source: { kind: "default" },
+          detail: "OpenCode permits most workspace operations by default",
+        },
+        {
+          category: "execution",
+          resource: "*",
+          operations: ["execute"],
+          decision: "allow",
+          enforcement: "none",
+          source: { kind: "default" },
+          detail: "OpenCode permits shell operations by default",
+        },
+        {
+          category: "network",
+          resource: "web tools",
+          operations: ["connect", "use"],
+          decision: "allow",
+          enforcement: "harness",
+          source: { kind: "default" },
+          detail: "OpenCode permits web tools by default",
+        },
+      ],
+      observations: [],
+      findings: [
+        {
+          severity: "critical",
+          title: "Uncontained command execution",
+          detail:
+            "Commands can run without a declared sandbox boundary. Require approval or configure a sandbox",
+          category: "execution",
+        },
+      ],
+      coverage: [
+        {
+          source: "configuration",
+          status: "partial",
+          detail:
+            "Inspected 1 OpenCode configuration file; custom and agent-specific configuration may add access",
+        },
+        {
+          source: "mcp",
+          status: "partial",
+          detail:
+            "Inspected 0 discovered MCP servers; project-scoped, custom, or agent-specific definitions may be omitted",
+        },
+        {
+          source: "history",
+          status: "unsupported",
+          detail: "No structured history adapter is available for opencode",
+        },
+      ],
+    },
+  ],
+};
+
+export const unavailableAccessReport: AccessReport = {
+  generatedAtUnixMs: 1788220800000,
+  status: "unavailable",
+  detail:
+    "The calling operating-system user could not be identified for this assessment.",
+  agents: [],
+};
 
 export const remoteConfig = `organization: Acme Engineering
 gateway:

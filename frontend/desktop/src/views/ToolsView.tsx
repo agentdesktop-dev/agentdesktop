@@ -1,18 +1,194 @@
 import {
   CardHeader,
+  friendlyTool,
   ModelRuntimeInventory,
-  ToolInventory,
+  ToolIcon,
 } from "@agentdesktop/ui";
-import { AlertCircle, Box, Cpu } from "lucide-react";
+import {
+  AlertCircle,
+  Box,
+  ChevronRight,
+  CircleAlert,
+  Cpu,
+  Info,
+  LoaderCircle,
+  ShieldAlert,
+  ShieldCheck,
+} from "lucide-react";
+import { useState } from "react";
 
-import type { Discovery } from "../types";
+import { AgentToolInventory } from "../components/AgentToolInventory";
+import type {
+  AccessReport,
+  AgentAccessReport,
+  DiscoveredAgent,
+  Discovery,
+} from "../types";
+import { agentAccessStatus } from "./AccessView";
 
-export interface ToolsViewProps {
+interface ToolsViewProps {
+  accessLoaded: boolean;
+  accessLoading: boolean;
+  accessReport: AccessReport | null;
+  accessStale: boolean;
   discovery: Discovery | null;
+  onOpenAccessSource?: (path: string) => void | Promise<void>;
   unavailable: boolean;
 }
 
-export function ToolsView({ discovery, unavailable }: ToolsViewProps) {
+function accessForAgent(
+  report: AccessReport | null,
+  agent: DiscoveredAgent,
+): AgentAccessReport | undefined {
+  return (
+    report?.agents.find(
+      (candidate) =>
+        candidate.kind === agent.kind &&
+        candidate.executable === agent.executable,
+    ) ?? report?.agents.find((candidate) => candidate.kind === agent.kind)
+  );
+}
+
+function formatAuditTime(timestamp: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(timestamp));
+}
+
+function AuditOverview({
+  agents,
+  loaded,
+  loading,
+  onSelectAgent,
+  report,
+  stale,
+}: {
+  agents: DiscoveredAgent[];
+  loaded: boolean;
+  loading: boolean;
+  onSelectAgent: (agentKind: string) => void;
+  report: AccessReport | null;
+  stale: boolean;
+}) {
+  const ready = report?.status === "ready";
+  const statuses = ready
+    ? agents
+        .map((agent) => ({
+          agent: accessForAgent(report, agent),
+          discovery: agent,
+        }))
+        .map(({ agent, discovery }) => ({
+          agent: discovery,
+          status: agentAccessStatus(agent),
+        }))
+    : [];
+  const issues = statuses
+    .filter(({ status }) => status.issueCount > 0)
+    .sort(
+      (left, right) =>
+        Number(right.status.tone === "critical") -
+        Number(left.status.tone === "critical"),
+    );
+  const limited = statuses.filter(({ status }) => status.limited).length;
+  const issueCount = issues.reduce(
+    (total, item) => total + item.status.issueCount,
+    0,
+  );
+  const hasCritical = issues.some(({ status }) => status.tone === "critical");
+  const tone = !ready
+    ? loading || !loaded
+      ? "loading"
+      : "limited"
+    : issueCount
+      ? hasCritical
+        ? "critical"
+        : "warning"
+      : limited
+        ? "limited"
+        : "clear";
+  const iconProperties = { size: 18, "aria-hidden": true as const };
+  const icon =
+    tone === "critical" ? (
+      <ShieldAlert {...iconProperties} />
+    ) : tone === "warning" ? (
+      <CircleAlert {...iconProperties} />
+    ) : tone === "clear" ? (
+      <ShieldCheck {...iconProperties} />
+    ) : tone === "loading" ? (
+      <LoaderCircle className="spin" {...iconProperties} />
+    ) : (
+      <Info {...iconProperties} />
+    );
+  const title = !ready
+    ? loading || !loaded
+      ? "Checking local access"
+      : "Local access audit unavailable"
+    : issueCount
+      ? `${issueCount} access ${issueCount === 1 ? "issue needs" : "issues need"} review`
+      : limited
+        ? "No risks found in checked sources"
+        : "No current access risks found";
+  const detail = !ready
+    ? loading || !loaded
+      ? "Inventory is ready while settings and session evidence are checked."
+      : (report?.detail ?? "Use Refresh to retry the local audit.")
+    : issueCount
+      ? null
+      : limited
+        ? `${limited} ${limited === 1 ? "agent has" : "agents have"} incomplete or unsupported evidence.`
+        : "Supported evidence sources show no current configuration risks.";
+
+  return (
+    <section className={`tools-audit-overview ${tone}`}>
+      <div className="tools-audit-heading">
+        {icon}
+        <div>
+          <strong>{title}</strong>
+          {detail ? <span>{detail}</span> : null}
+        </div>
+        {ready ? (
+          <small className={stale ? "stale" : undefined}>
+            {stale ? "Last successful check" : "Checked"}{" "}
+            {formatAuditTime(report.generatedAtUnixMs)}
+          </small>
+        ) : null}
+      </div>
+      {issues.length ? (
+        <div className="tools-audit-queue">
+          {issues.map(({ agent, status }) => (
+            <button
+              key={`${agent.kind}-${agent.executable}`}
+              onClick={() => onSelectAgent(agent.kind)}
+              type="button"
+            >
+              <ToolIcon kind={agent.kind} />
+              <span>
+                <strong>{friendlyTool(agent.kind)}</strong>
+                <small>
+                  {status.tone === "critical"
+                    ? `${status.issueCount} critical ${status.issueCount === 1 ? "issue" : "issues"}`
+                    : `${status.issueCount} access ${status.issueCount === 1 ? "issue" : "issues"}`}
+                </small>
+              </span>
+              <ChevronRight size={14} aria-hidden="true" />
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+export function ToolsView({
+  accessLoaded,
+  accessLoading,
+  accessReport,
+  accessStale,
+  discovery,
+  onOpenAccessSource,
+  unavailable,
+}: ToolsViewProps) {
   const agents = discovery?.agents ?? [];
   const modelRuntimes = discovery?.modelRuntimes ?? [];
   const modelCount = modelRuntimes.reduce(
@@ -27,44 +203,37 @@ export function ToolsView({ discovery, unavailable }: ToolsViewProps) {
     (total, agent) => total + (agent.skills?.length ?? 0),
     0,
   );
+  const [accessTarget, setAccessTarget] = useState({ kind: "", request: 0 });
+  function selectAgentAccess(kind: string) {
+    setAccessTarget((current) => ({ kind, request: current.request + 1 }));
+  }
   return (
     <div className="page-stack">
       <div className="page-heading">
         <div>
-          <h2>Discovered tools</h2>
+          <h2>Local tools</h2>
           <p>
-            Developer tools and capabilities found locally by the Agent Desktop
-            daemon.
+            Review each agent’s access, MCP servers, and skills in one place.
           </p>
         </div>
       </div>
-      {agents.length || modelCount ? (
-        <div className="stat-grid">
-          <div className="stat-card">
-            <strong>{agents.length}</strong>
-            <span>Developer tools</span>
-          </div>
-          <div className="stat-card">
-            <strong>{mcpCount}</strong>
-            <span>MCP servers</span>
-          </div>
-          <div className="stat-card">
-            <strong>{skillCount}</strong>
-            <span>Skills</span>
-          </div>
-          <div className="stat-card">
-            <strong>{modelCount}</strong>
-            <span>Local models</span>
-          </div>
-        </div>
+      {!unavailable && agents.length ? (
+        <AuditOverview
+          agents={agents}
+          loaded={accessLoaded}
+          loading={accessLoading}
+          onSelectAgent={selectAgentAccess}
+          report={accessReport}
+          stale={accessStale}
+        />
       ) : null}
       <section className="card table-card">
         <CardHeader
-          title="Local inventory"
+          title="Agents"
           description={
             unavailable
               ? "Inventory unavailable"
-              : `${agents.length} installation${agents.length === 1 ? "" : "s"} discovered`
+              : `${agents.length} agent${agents.length === 1 ? "" : "s"} · ${mcpCount} MCP · ${skillCount} skills`
           }
         />
         {unavailable ? (
@@ -78,15 +247,19 @@ export function ToolsView({ discovery, unavailable }: ToolsViewProps) {
         ) : agents.length ? (
           <div className="tool-inventory">
             {agents.map((agent) => (
-              <ToolInventory
+              <AgentToolInventory
+                access={accessForAgent(accessReport, agent)}
+                accessLoading={accessLoading && !accessReport}
+                accessStale={accessStale}
+                activateAccessRequest={
+                  accessTarget.kind === agent.kind
+                    ? accessTarget.request
+                    : undefined
+                }
+                agent={agent}
                 key={`${agent.kind}-${agent.executable}`}
-                discovery={{
-                  kind: agent.kind,
-                  version: agent.version,
-                  path: agent.executable,
-                  mcp_servers: agent.mcpServers,
-                  skills: agent.skills,
-                }}
+                onOpenAccessSource={onOpenAccessSource}
+                unavailableDetail={accessReport?.detail}
               />
             ))}
           </div>

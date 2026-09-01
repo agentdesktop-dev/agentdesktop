@@ -1,16 +1,25 @@
-import { startTransition, useEffect, useState, useTransition } from "react";
+import {
+  startTransition,
+  useEffect,
+  useRef,
+  useState,
+  useTransition,
+} from "react";
 
 import {
+  getAccessReport,
   getBootstrap,
   getConnectorStatus,
   getDiscovery,
   getManagedDeviceStatus,
   getRemoteConfig,
   logoutManagedDevice,
+  openAccessSource,
   saveSettings,
   setupManagedDevice,
 } from "./backend";
 import type {
+  AccessReport,
   Bootstrap,
   ConnectorSnapshot,
   Discovery,
@@ -25,6 +34,7 @@ type StatusSource =
   | "connector"
   | "managedDevice"
   | "discovery"
+  | "access"
   | "remoteConfig";
 type StatusErrors = Partial<Record<StatusSource, string>>;
 type StatusUpdate = {
@@ -40,6 +50,7 @@ const statusSourceLabels: Record<StatusSource, string> = {
   connector: "local daemon status",
   managedDevice: "organization status",
   discovery: "tool inventory",
+  access: "local access audit",
   remoteConfig: "advanced configuration",
 };
 
@@ -56,6 +67,23 @@ async function getStatusUpdate(): Promise<StatusUpdate> {
       getRemoteConfig(),
     ]);
   return { connector, managedDevice, discovery, remoteConfig };
+}
+
+function updateStatusError(
+  errors: StatusErrors,
+  source: StatusSource,
+  result: PromiseSettledResult<unknown>,
+) {
+  if (result.status === "fulfilled") {
+    delete errors[source];
+  } else {
+    errors[source] = errorMessage(result.reason);
+  }
+}
+
+async function getAccessUpdate(): Promise<PromiseSettledResult<AccessReport>> {
+  const [result] = await Promise.allSettled([getAccessReport()]);
+  return result;
 }
 
 function statusErrorMessage(errors: StatusErrors): string | null {
@@ -75,44 +103,76 @@ export function useDesktopModel() {
   const [managedDevice, setManagedDevice] =
     useState<ManagedDeviceSnapshot | null>(null);
   const [discovery, setDiscovery] = useState<Discovery | null>(null);
+  const [accessReport, setAccessReport] = useState<AccessReport | null>(null);
+  const [accessStale, setAccessStale] = useState(false);
   const [remoteConfig, setRemoteConfig] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
   const [statusErrors, setStatusErrors] = useState<StatusErrors>({});
   const [hasLoadedStatus, setHasLoadedStatus] = useState(false);
+  const [hasLoadedAccess, setHasLoadedAccess] = useState(false);
   const [isRefreshing, startRefreshing] = useTransition();
+  const [isAssessing, startAssessing] = useTransition();
   const [isManaging, startManaging] = useTransition();
   const [isSaving, startSaving] = useTransition();
   const [isLoggingOut, startLoggingOut] = useTransition();
+  const accessRequestId = useRef(0);
   const needsEnrollment = Boolean(
     managedDevice?.configured && managedDevice.enrollment !== "approved",
   );
 
   function applyStatusUpdate(update: StatusUpdate) {
-    const nextErrors: StatusErrors = {};
     startTransition(() => {
       if (update.connector.status === "fulfilled") {
         setConnector(update.connector.value);
-      } else {
-        nextErrors.connector = errorMessage(update.connector.reason);
       }
       if (update.managedDevice.status === "fulfilled") {
         setManagedDevice(update.managedDevice.value);
-      } else {
-        nextErrors.managedDevice = errorMessage(update.managedDevice.reason);
       }
       if (update.discovery.status === "fulfilled") {
         setDiscovery(update.discovery.value);
-      } else {
-        nextErrors.discovery = errorMessage(update.discovery.reason);
       }
       if (update.remoteConfig.status === "fulfilled") {
         setRemoteConfig(update.remoteConfig.value);
-      } else {
-        nextErrors.remoteConfig = errorMessage(update.remoteConfig.reason);
       }
-      setStatusErrors(nextErrors);
+      setStatusErrors((current) => {
+        const next = { ...current };
+        updateStatusError(next, "connector", update.connector);
+        updateStatusError(next, "managedDevice", update.managedDevice);
+        updateStatusError(next, "discovery", update.discovery);
+        updateStatusError(next, "remoteConfig", update.remoteConfig);
+        return next;
+      });
       setHasLoadedStatus(true);
     });
+  }
+
+  function applyAccessUpdate(update: PromiseSettledResult<AccessReport>) {
+    startTransition(() => {
+      if (update.status === "fulfilled") {
+        setAccessReport(update.value);
+        setAccessStale(false);
+      } else {
+        setAccessStale(true);
+      }
+      setStatusErrors((current) => {
+        const next = { ...current };
+        updateStatusError(next, "access", update);
+        return next;
+      });
+      setHasLoadedAccess(true);
+    });
+  }
+
+  async function loadAccess() {
+    const requestId = ++accessRequestId.current;
+    const update = await getAccessUpdate();
+    if (requestId === accessRequestId.current) {
+      applyAccessUpdate(update);
+    }
+  }
+
+  function assessAccess() {
+    startAssessing(loadAccess);
   }
 
   useEffect(() => {
@@ -239,7 +299,9 @@ export function useDesktopModel() {
   function refresh() {
     setNotice(null);
     startRefreshing(async () => {
+      const access = view === "tools" ? loadAccess() : null;
       applyStatusUpdate(await getStatusUpdate());
+      if (access) await access;
     });
   }
 
@@ -330,10 +392,25 @@ export function useDesktopModel() {
     }
   }
 
+  async function openAccessSettings(path: string) {
+    try {
+      await openAccessSource(path);
+    } catch (error: unknown) {
+      setNotice({ tone: "error", message: errorMessage(error) });
+      throw error;
+    }
+  }
+
   function navigate(nextView: View) {
     setView(nextView);
     setNotice(null);
+    if (nextView === "tools" && view !== "tools" && !isAssessing) {
+      assessAccess();
+    }
   }
+
+  const visibleStatusErrors = { ...statusErrors };
+  if (view !== "tools") delete visibleStatusErrors.access;
 
   const pageTitle = needsEnrollment
     ? "Enrollment"
@@ -342,6 +419,8 @@ export function useDesktopModel() {
       : "Tools";
 
   return {
+    accessReport,
+    accessStale,
     bootstrap,
     connector,
     copyDiagnostics,
@@ -349,6 +428,8 @@ export function useDesktopModel() {
     discovery,
     enroll,
     hasLoadedStatus,
+    hasLoadedAccess,
+    isAssessing,
     isLoggingOut,
     isManaging,
     isRefreshing,
@@ -358,9 +439,10 @@ export function useDesktopModel() {
     navigate,
     needsEnrollment,
     notice,
+    openAccessSettings,
     pageTitle,
     refresh,
-    refreshError: statusErrorMessage(statusErrors),
+    refreshError: statusErrorMessage(visibleStatusErrors),
     remoteConfig,
     setOpenOnStartup,
     settings,

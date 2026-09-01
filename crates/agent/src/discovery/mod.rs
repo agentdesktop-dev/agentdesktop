@@ -1,7 +1,7 @@
 mod claude_code;
 mod claude_desktop;
 mod codex;
-mod metadata;
+pub(crate) mod metadata;
 mod ollama;
 mod opencode;
 mod vscode;

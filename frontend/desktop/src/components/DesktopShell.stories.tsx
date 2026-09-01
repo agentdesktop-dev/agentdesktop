@@ -32,6 +32,9 @@ export const CheckingStatus: Story = {
     ).toBeVisible();
     await userEvent.click(canvas.getByRole("button", { name: "Tools" }));
     await expect(args.onNavigate).toHaveBeenCalledWith("tools");
+    await expect(
+      canvas.queryByRole("button", { name: "Access" }),
+    ).not.toBeInTheDocument();
   },
 };
 

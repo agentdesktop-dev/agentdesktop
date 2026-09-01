@@ -6,14 +6,16 @@ use std::{ffi::OsString, io::Write, os::unix::fs::OpenOptionsExt, path::Path, pr
 #[cfg(target_os = "macos")]
 use agentdesktop_agent::secure_fs;
 use agentdesktop_agent::{
+    access,
     cli::{self, ClientCommand},
     daemon::{self, DaemonArgs},
+    discovery,
 };
 use agentdesktop_client as client;
 use agentdesktop_core::{
     DEFAULT_SOCKET_PATH, VERSION,
     config::DaemonConfig,
-    model::{Discovery, EnrollmentStatus, Health},
+    model::{AccessReport, AccessSourceKind, Discovery, EnrollmentStatus, Health},
 };
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -29,6 +31,7 @@ const QUIT_MENU_ID: &str = "quit";
 const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const ENROLLMENT_URL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const ENROLLMENT_URL_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
+static LOCAL_ACCESS_SCAN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 #[cfg(target_os = "macos")]
 const SYSTEM_LAUNCH_DAEMON_PATH: &str = "/Library/LaunchDaemons/dev.agentdesktop.daemon.plist";
 #[cfg(target_os = "macos")]
@@ -141,15 +144,32 @@ struct ManagedDeviceSnapshot {
 }
 
 fn socket_path() -> PathBuf {
-    env::var_os("AGENTDESKTOP_SOCKET")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let system = PathBuf::from(DEFAULT_SOCKET_PATH);
-            if system.exists() {
-                return system;
-            }
-            user_socket_path().unwrap_or(system)
-        })
+    let system = PathBuf::from(DEFAULT_SOCKET_PATH);
+    #[cfg(target_os = "macos")]
+    let system_daemon_installed = Path::new(SYSTEM_LAUNCH_DAEMON_PATH).exists();
+    #[cfg(not(target_os = "macos"))]
+    let system_daemon_installed = system.exists();
+    preferred_socket_path(
+        env::var_os("AGENTDESKTOP_SOCKET").map(PathBuf::from),
+        system,
+        system_daemon_installed,
+        user_socket_path(),
+    )
+}
+
+fn preferred_socket_path(
+    explicit: Option<PathBuf>,
+    system: PathBuf,
+    system_daemon_installed: bool,
+    user: Option<PathBuf>,
+) -> PathBuf {
+    explicit.unwrap_or_else(|| {
+        if system_daemon_installed {
+            system
+        } else {
+            user.unwrap_or(system)
+        }
+    })
 }
 
 #[cfg(unix)]
@@ -536,6 +556,254 @@ async fn get_discovery() -> Result<Discovery, String> {
 }
 
 #[tauri::command]
+async fn get_access_report() -> Result<AccessReport, String> {
+    local_access_report()
+        .await
+        .map_err(|error| format!("{error:#}"))
+}
+
+async fn local_access_report() -> anyhow::Result<AccessReport> {
+    let _scan = LOCAL_ACCESS_SCAN.lock().await;
+    let user_home = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("cannot assess local access without a user home"))?;
+    let discovery = discovery::discover().await;
+    tokio::task::spawn_blocking(move || access::assess(&discovery, &user_home))
+        .await
+        .map_err(|error| anyhow::anyhow!("local access assessment failed: {error}"))
+}
+
+fn report_allows_access_source(report: &AccessReport, path: &PathBuf) -> bool {
+    let Ok(path) = fs::canonicalize(path) else {
+        return false;
+    };
+    report.agents.iter().any(|agent| {
+        let capability_source = agent
+            .capabilities
+            .iter()
+            .filter(|capability| capability.source.kind == AccessSourceKind::Configuration)
+            .filter_map(|capability| capability.source.path.as_ref())
+            .filter_map(|source| fs::canonicalize(source).ok())
+            .any(|source| source == path);
+        let finding_source = agent
+            .findings
+            .iter()
+            .filter_map(|finding| finding.source.as_ref())
+            .filter(|source| source.kind == AccessSourceKind::Configuration)
+            .filter_map(|source| source.path.as_ref())
+            .filter_map(|source| fs::canonicalize(source).ok())
+            .any(|source| source == path);
+        capability_source || finding_source
+    })
+}
+
+async fn open_access_source_with<Load, LoadFuture, Open>(
+    path: PathBuf,
+    load_report: Load,
+    open_path: Open,
+) -> Result<(), String>
+where
+    Load: FnOnce() -> LoadFuture,
+    LoadFuture: Future<Output = Result<AccessReport, String>>,
+    Open: FnOnce(&PathBuf) -> Result<(), String>,
+{
+    if !path.is_absolute() {
+        return Err("Access source must be an existing absolute regular file".to_owned());
+    }
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|_| "Access source must be an existing absolute regular file".to_owned())?;
+    if !metadata.file_type().is_file() {
+        return Err("Access source must be an existing absolute regular file".to_owned());
+    }
+    let canonical = fs::canonicalize(&path)
+        .map_err(|_| "Access source must be an existing absolute regular file".to_owned())?;
+    if !canonical.is_file() {
+        return Err("Access source must be an existing absolute regular file".to_owned());
+    }
+    let report = load_report().await?;
+    if !report_allows_access_source(&report, &canonical) {
+        return Err("File is not a source in the current access report".to_owned());
+    }
+    open_path(&canonical)
+}
+
+#[tauri::command]
+async fn open_access_source(path: PathBuf) -> Result<(), String> {
+    open_access_source_with(
+        path,
+        || async {
+            local_access_report()
+                .await
+                .map_err(|error| format!("{error:#}"))
+        },
+        |path| {
+            open::that_detached(path)
+                .map_err(|error| format!("could not open access source: {error}"))
+        },
+    )
+    .await
+}
+
+#[cfg(test)]
+mod access_source_tests {
+    use std::{future::ready, path::PathBuf};
+
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+
+    use agentdesktop_core::model::{
+        AccessCapability, AccessCategory, AccessDecision, AccessEnforcement, AccessFinding,
+        AccessOperation, AccessReport, AccessReportStatus, AccessSeverity, AccessSource,
+        AccessSourceKind, AgentAccessReport,
+    };
+
+    use super::{open_access_source_with, report_allows_access_source};
+
+    fn report_with_source(kind: AccessSourceKind, path: PathBuf) -> AccessReport {
+        AccessReport {
+            generated_at_unix_ms: 0,
+            status: AccessReportStatus::Ready,
+            detail: None,
+            agents: vec![AgentAccessReport {
+                kind: "vscode".to_owned(),
+                executable: PathBuf::from("/Applications/Visual Studio Code.app"),
+                version: None,
+                user_home: PathBuf::from("/Users/developer"),
+                capabilities: vec![AccessCapability {
+                    category: AccessCategory::Network,
+                    resource: "example.com".to_owned(),
+                    operations: vec![AccessOperation::Connect],
+                    decision: AccessDecision::Allow,
+                    enforcement: AccessEnforcement::Harness,
+                    workspace: None,
+                    source: AccessSource {
+                        kind,
+                        path: Some(path),
+                    },
+                    detail: None,
+                }],
+                observations: Vec::new(),
+                findings: Vec::new(),
+                coverage: Vec::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn opens_only_explicit_configuration_sources() {
+        let path = std::env::temp_dir().join(format!(
+            "agentdesktop-access-source-kinds-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, "{}\n").unwrap();
+
+        assert!(report_allows_access_source(
+            &report_with_source(AccessSourceKind::Configuration, path.clone()),
+            &path
+        ));
+        assert!(!report_allows_access_source(
+            &report_with_source(AccessSourceKind::Mcp, path.clone()),
+            &path
+        ));
+        assert!(!report_allows_access_source(
+            &report_with_source(AccessSourceKind::History, path.clone()),
+            &path
+        ));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn opens_configuration_sources_attached_only_to_findings() {
+        let path = std::env::temp_dir().join(format!(
+            "agentdesktop-access-finding-source-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, "{}\n").unwrap();
+        let mut report = report_with_source(AccessSourceKind::History, path.clone());
+        report.agents[0].capabilities.clear();
+        report.agents[0].findings.push(AccessFinding {
+            severity: AccessSeverity::Critical,
+            title: "Unsafe setting".to_owned(),
+            detail: "Review this setting".to_owned(),
+            category: AccessCategory::Execution,
+            workspace: None,
+            source: Some(AccessSource {
+                kind: AccessSourceKind::Configuration,
+                path: Some(path.clone()),
+            }),
+        });
+
+        assert!(report_allows_access_source(&report, &path));
+        report.agents[0].findings[0].source = Some(AccessSource {
+            kind: AccessSourceKind::History,
+            path: Some(path.clone()),
+        });
+        assert!(!report_allows_access_source(&report, &path));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn opens_a_configured_existing_source() {
+        let path = std::env::temp_dir().join(format!(
+            "agentdesktop-access-source-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, "{}\n").unwrap();
+        let canonical = std::fs::canonicalize(&path).unwrap();
+        let report = report_with_source(AccessSourceKind::Configuration, path.clone());
+        let mut opened = None;
+
+        open_access_source_with(
+            path.clone(),
+            || ready(Ok(report)),
+            |source| {
+                opened = Some(source.clone());
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(opened.as_ref(), Some(&canonical));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_a_symlinked_access_source() {
+        let directory = std::env::temp_dir().join(format!(
+            "agentdesktop-access-source-link-{}",
+            std::process::id()
+        ));
+        let target = directory.join("settings.json");
+        let link = directory.join("current-settings.json");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(&target, "{}\n").unwrap();
+        symlink(&target, &link).unwrap();
+        let report = report_with_source(AccessSourceKind::Configuration, link.clone());
+        let mut opened = None;
+
+        let error = open_access_source_with(
+            link,
+            || ready(Ok(report)),
+            |source| {
+                opened = Some(source.clone());
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(error.contains("regular file"));
+        assert!(opened.is_none());
+    }
+}
+
+#[tauri::command]
 async fn get_remote_config() -> Result<Option<String>, String> {
     client::get(&socket_path(), "/v1/remote-config")
         .await
@@ -661,6 +929,8 @@ fn run_desktop() -> anyhow::Result<()> {
             get_connector_status,
             get_managed_device_status,
             get_discovery,
+            get_access_report,
+            open_access_source,
             get_remote_config,
             logout_managed_device,
             setup_managed_device
@@ -755,7 +1025,22 @@ mod enrollment_tests {
 mod tests {
     use std::path::Path;
 
-    use super::{USER_LAUNCH_AGENT_LABEL, UserDaemonPaths, user_launch_agent};
+    use super::{
+        USER_LAUNCH_AGENT_LABEL, UserDaemonPaths, preferred_socket_path, user_launch_agent,
+    };
+
+    #[test]
+    fn stale_system_socket_does_not_override_user_socket() {
+        assert_eq!(
+            preferred_socket_path(
+                None,
+                "/var/run/agentdesktop/agentdesktop.sock".into(),
+                false,
+                Some("/Users/test/.local/state/agentdesktop/agentdesktop.sock".into()),
+            ),
+            Path::new("/Users/test/.local/state/agentdesktop/agentdesktop.sock")
+        );
+    }
 
     #[test]
     fn user_launch_agent_runs_the_bundled_daemon_in_user_mode() {
