@@ -33,5 +33,11 @@
 |`programs.openCode.model`|string|Model ID selected from `models` when using the LLM gateway.<br><br>This is required when a top-level `llmGateway` is configured.|
 |`programs.openCode.models`|object|Models exposed by the managed LLM gateway provider, keyed by model ID.<br><br>Each value is an arbitrary OpenCode model configuration object. At least<br>one model is required when a top-level `llmGateway` is configured.|
 |`programs.openCode.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
+|`sandbox`|object|Local execution sandbox required for managed developer tools.|
+|`sandbox.filesystem`|object|Filesystem access available to sandboxed commands.|
+|`sandbox.filesystem.denied`|[]string|Paths sandboxed commands may neither read nor modify.|
+|`sandbox.filesystem.writable`|[]string|Additional paths sandboxed commands may modify.|
+|`sandbox.network`|object|Network destinations available to sandboxed commands.|
+|`sandbox.network.allowedDomains`|[]string|Domains sandboxed commands may contact. An empty set disables network access.|
 |`telemetry`|object|Telemetry collected from managed developer tools.|
 |`telemetry.events`|[]enum|Event names to collect. `tool.use.input` implies `tool.use` and includes tool arguments.<br>Possible values: `session.new`, `tool.use`, `tool.use.input`.|

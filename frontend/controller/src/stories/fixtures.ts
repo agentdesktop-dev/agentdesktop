@@ -282,3 +282,19 @@ export const activeDaemonConfig: DaemonConfigDocument = {
     openCode: { useLlmGateway: false, autoupdate: false },
   },
 };
+
+export const sandboxDaemonConfig: DaemonConfigDocument = {
+  sandbox: {
+    network: {
+      allowedDomains: ["api.github.com", "registry.npmjs.org"],
+    },
+    filesystem: {
+      writable: ["/tmp/build-cache", "/opt/project/output"],
+      denied: ["~/.ssh", "~/.aws"],
+    },
+  },
+  programs: {
+    claudeCode: {},
+    codex: {},
+  },
+};

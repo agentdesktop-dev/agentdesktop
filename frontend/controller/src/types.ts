@@ -77,6 +77,16 @@ export type AgentDraft = {
   settings: string;
 };
 
+export type SandboxConfigDocument = {
+  network?: {
+    allowedDomains?: string[];
+  };
+  filesystem?: {
+    writable?: string[];
+    denied?: string[];
+  };
+};
+
 export type DaemonConfigDocument = {
   llmGateway?: {
     url: string;
@@ -85,6 +95,7 @@ export type DaemonConfigDocument = {
       audience?: string;
     };
   };
+  sandbox?: SandboxConfigDocument;
   telemetry?: {
     events?: string[];
   };

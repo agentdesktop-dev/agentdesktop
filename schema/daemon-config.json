@@ -30,6 +30,17 @@
       "description": "Per-program settings reconciled on this device.",
       "$ref": "#/$defs/ProgramsConfig"
     },
+    "sandbox": {
+      "description": "Local execution sandbox required for managed developer tools.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SandboxConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "telemetry": {
       "description": "Telemetry collected from managed developer tools.",
       "$ref": "#/$defs/TelemetryConfig"
@@ -311,6 +322,59 @@
               "type": "null"
             }
           ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "SandboxConfig": {
+      "description": "Local execution restrictions applied to managed developer tools.",
+      "type": "object",
+      "properties": {
+        "filesystem": {
+          "description": "Filesystem access available to sandboxed commands.",
+          "$ref": "#/$defs/SandboxFilesystemConfig",
+          "default": {}
+        },
+        "network": {
+          "description": "Network destinations available to sandboxed commands.",
+          "$ref": "#/$defs/SandboxNetworkConfig",
+          "default": {}
+        }
+      },
+      "additionalProperties": false
+    },
+    "SandboxFilesystemConfig": {
+      "description": "Filesystem restrictions for sandboxed commands.",
+      "type": "object",
+      "properties": {
+        "denied": {
+          "description": "Paths sandboxed commands may neither read nor modify.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "writable": {
+          "description": "Additional paths sandboxed commands may modify.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "SandboxNetworkConfig": {
+      "description": "Network restrictions for sandboxed commands.",
+      "type": "object",
+      "properties": {
+        "allowedDomains": {
+          "description": "Domains sandboxed commands may contact. An empty set disables network access.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
         }
       },
       "additionalProperties": false

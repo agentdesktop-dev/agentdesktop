@@ -880,6 +880,29 @@ code {
   accent-color: var(--accent);
 }
 
+.sandbox-fields {
+  margin-top: 16px;
+}
+
+.sandbox-compatibility {
+  margin: 12px 0 0;
+  padding: 9px 10px;
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  color: #7a4b00;
+  background: #fff8e6;
+  border: 1px solid #e7c56d;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.sandbox-compatibility svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
 .telemetry-options {
   border: 1px solid var(--border);
   border-radius: 5px;
