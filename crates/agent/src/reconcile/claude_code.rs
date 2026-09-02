@@ -14,12 +14,28 @@ use super::{CommandSpec, ReconcileMode, deep_merge, json_merge};
 
 const OWNER_MARKER: &[u8] = b"Agentdesktop\n";
 
+pub(super) struct Hooks<'a> {
+    tool_use: Option<&'a CommandSpec>,
+    session_new: Option<&'a CommandSpec>,
+}
+
+impl<'a> Hooks<'a> {
+    pub(super) fn new(
+        tool_use: Option<&'a CommandSpec>,
+        session_new: Option<&'a CommandSpec>,
+    ) -> Self {
+        Self {
+            tool_use,
+            session_new,
+        }
+    }
+}
+
 pub fn apply(
     path: &Path,
     merge_existing: bool,
     credential_helper: &str,
-    tool_use_hook: Option<&CommandSpec>,
-    session_new_hook: Option<&CommandSpec>,
+    hooks: Hooks<'_>,
     sandbox: Option<&SandboxConfig>,
     config: Option<(&ClaudeCodeConfig, Option<&LlmGatewayConfig>)>,
     mode: ReconcileMode,
@@ -45,14 +61,7 @@ pub fn apply(
         return remove(path, &owner_path, mode);
     };
 
-    let settings = managed_settings(
-        config,
-        gateway,
-        credential_helper,
-        tool_use_hook,
-        session_new_hook,
-        sandbox,
-    )?;
+    let settings = managed_settings(config, gateway, credential_helper, hooks, sandbox)?;
     if merge_existing {
         json_merge::apply(
             path,
@@ -155,16 +164,15 @@ fn managed_settings(
     config: &ClaudeCodeConfig,
     gateway: Option<&LlmGatewayConfig>,
     credential_helper: &str,
-    tool_use_hook: Option<&CommandSpec>,
-    session_new_hook: Option<&CommandSpec>,
+    hooks: Hooks<'_>,
     sandbox: Option<&SandboxConfig>,
 ) -> anyhow::Result<Value> {
     let mut settings = serde_json::to_value(&config.settings)
         .context("serialize Claude Code pass-through settings")?;
-    if let Some(command) = tool_use_hook {
+    if let Some(command) = hooks.tool_use {
         append_hook(&mut settings, "PreToolUse", command)?;
     }
-    if let Some(command) = session_new_hook {
+    if let Some(command) = hooks.session_new {
         append_hook(&mut settings, "SessionStart", command)?;
     }
     if let Some(sandbox) = sandbox {
@@ -320,7 +328,7 @@ mod tests {
     use agentdesktop_core::config::parse_daemon;
     use serde_json::{Value, json};
 
-    use super::{CommandSpec, ReconcileMode, apply, json_merge, managed_settings};
+    use super::{CommandSpec, Hooks, ReconcileMode, apply, json_merge, managed_settings};
 
     #[test]
     fn pass_through_settings_are_deep_merged_with_managed_gateway_values() {
@@ -351,8 +359,7 @@ programs:
             claude,
             Some(gateway),
             "agentdesktop credential",
-            Some(&hook),
-            None,
+            Hooks::new(Some(&hook), None),
             None,
         )
         .expect("merged settings");
@@ -416,8 +423,7 @@ programs:
             &path,
             true,
             "agentdesktop credential",
-            None,
-            None,
+            Hooks::new(None, None),
             None,
             Some((claude, None)),
             ReconcileMode::Apply,
@@ -437,8 +443,7 @@ programs:
             &path,
             true,
             "agentdesktop credential",
-            None,
-            None,
+            Hooks::new(None, None),
             None,
             None,
             ReconcileMode::Apply,
@@ -483,8 +488,7 @@ programs:
             config.programs.claude_code.as_ref().unwrap(),
             None,
             "agentdesktop credential",
-            None,
-            None,
+            Hooks::new(None, None),
             config.sandbox.as_ref(),
         )
         .expect("sandbox settings");
