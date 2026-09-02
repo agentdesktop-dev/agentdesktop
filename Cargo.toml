@@ -29,7 +29,6 @@ base64 = "0.23"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 futures-core = "0.3"
-futures = "0.3"
 http-body-util = "0.1"
 humantime-serde = "1"
 hostname = "0.4"
@@ -42,8 +41,6 @@ jsonwebtoken = { version = "11.0", features = ["aws_lc_rs"] }
 json5 = "0.4"
 keyring = "4.1"
 keyring-core = "1"
-k8s-openapi = { version = "0.28", features = ["v1_32"] }
-kube = { version = "4.2", default-features = false, features = ["aws-lc-rs", "client", "runtime", "rustls-tls"] }
 libc = "0.2"
 open = "5.4"
 pem-rfc7468 = { version = "1", features = ["alloc"] }

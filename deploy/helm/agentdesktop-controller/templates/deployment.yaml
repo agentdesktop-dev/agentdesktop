@@ -16,9 +16,6 @@ spec:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
-      {{- if .Values.fleetConfiguration.enabled }}
-      serviceAccountName: {{ include "agentdesktop-controller.serviceAccountName" . }}
-      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -35,12 +32,6 @@ spec:
         args:
         - --config
         - /etc/agentdesktop/config/controller.yaml
-        {{- if .Values.fleetConfiguration.enabled }}
-        - --daemon-config-map-namespace
-        - {{ .Release.Namespace | quote }}
-        - --daemon-config-map-name
-        - {{ include "agentdesktop-controller.fleetConfigurationName" . | quote }}
-        {{- end }}
         ports:
         - name: fleet
           containerPort: 8443

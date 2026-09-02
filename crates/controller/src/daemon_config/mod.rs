@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 
-mod config_map;
+mod database;
 mod file;
 
 const MAX_DAEMON_CONFIG_BYTES: usize = 256 * 1024;
@@ -69,13 +69,15 @@ pub trait FleetConfigurationSource: Send + Sync {
 
 async fn open_source(
     config: &ControllerDaemonConfig,
+    controller_database: &crate::database::Database,
 ) -> anyhow::Result<Arc<dyn FleetConfigurationSource>> {
     match config {
         ControllerDaemonConfig::File(config) => {
             Ok(Arc::new(file::FileConfigurationSource::new(config.clone())))
         }
-        ControllerDaemonConfig::ConfigMap { config_map } => Ok(Arc::new(
-            config_map::ConfigMapConfigurationSource::connect(config_map.clone()).await?,
+        ControllerDaemonConfig::Database { database } => Ok(Arc::new(
+            database::DatabaseConfigurationSource::connect(controller_database.clone(), database)
+                .await?,
         )),
     }
 }
@@ -103,9 +105,12 @@ impl FleetConfiguration {
     }
 
     /// Opens the configured source, loads the initial configuration, and starts its watch.
-    pub async fn open(definition: Option<&ControllerDaemonConfig>) -> anyhow::Result<Self> {
+    pub async fn open(
+        definition: Option<&ControllerDaemonConfig>,
+        database: &crate::database::Database,
+    ) -> anyhow::Result<Self> {
         let source = match definition {
-            Some(definition) => Some(open_source(definition).await?),
+            Some(definition) => Some(open_source(definition, database).await?),
             None => None,
         };
         let initial = match &source {
@@ -143,10 +148,10 @@ impl FleetConfiguration {
             };
         };
         let result = source.snapshot().await.and_then(|snapshot| {
-            // Reads repair the store after missed watch events; a rejected
-            // publication means the source is stale, not the store.
             if source.writable() {
                 self.store.publish_monotonic(snapshot.daemon.clone())?;
+            } else {
+                self.store.publish(snapshot.daemon.clone());
             }
             Ok(snapshot)
         });
@@ -338,6 +343,7 @@ mod tests {
 
     struct TestConfigurationSource {
         snapshot: Mutex<FleetConfigurationSnapshot>,
+        writable: bool,
     }
 
     #[async_trait]
@@ -373,11 +379,11 @@ mod tests {
         }
 
         fn writable(&self) -> bool {
-            true
+            self.writable
         }
 
         fn kind(&self) -> &'static str {
-            "configMap"
+            if self.writable { "database" } else { "file" }
         }
     }
 
@@ -393,6 +399,7 @@ mod tests {
                 },
                 version: "1".to_owned(),
             }),
+            writable: true,
         });
         let store = DaemonConfigStore::new(Some(DaemonConfig {
             revision: 1,
@@ -409,5 +416,32 @@ mod tests {
         assert_eq!(snapshot.daemon.revision, 2);
         assert_eq!(snapshot.version, "2");
         assert_eq!(store.current().expect("published config").revision, 2);
+    }
+
+    #[tokio::test]
+    async fn resolving_file_configuration_repairs_a_missed_watch_event() {
+        let initial = compile(b"programs: {}\n".to_vec(), 7).expect("initial config");
+        let replacement =
+            compile(b"programs:\n  codex: {}\n".to_vec(), 7).expect("replacement config");
+        let source: Arc<dyn FleetConfigurationSource> = Arc::new(TestConfigurationSource {
+            snapshot: Mutex::new(FleetConfigurationSnapshot {
+                daemon: replacement.clone(),
+                version: "file:7".to_owned(),
+            }),
+            writable: false,
+        });
+        let store = DaemonConfigStore::new(Some(initial));
+        let fleet = FleetConfiguration::new(store.clone(), Some(source));
+
+        let active = fleet.resolve().await;
+
+        assert_eq!(
+            active.daemon.expect("active config").sha256,
+            replacement.sha256
+        );
+        assert_eq!(
+            store.current().expect("repaired config").sha256,
+            replacement.sha256
+        );
     }
 }

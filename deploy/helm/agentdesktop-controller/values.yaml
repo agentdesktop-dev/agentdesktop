@@ -22,33 +22,18 @@ allowInsecureDev: false
 # Optional short-lived JWT issuer for authenticated LLM gateways.
 gatewayJwt: {}
 
-# Daemon configuration document distributed to enrolled devices. Leave empty
-# to disable managed configuration. With fleetConfiguration disabled this is
-# the read-only distributed content; with it enabled this is only the initial
-# seed and the UI owns the document afterwards.
+# Daemon configuration document distributed to enrolled devices. In read-only
+# file mode, leave this empty to disable managed configuration. In database
+# mode, this is only the initial seed; empty initializes to `programs: {}`.
 daemonConfig: {}
 
-# Where the daemonConfig document is stored: a dedicated ConfigMap that the
-# controller watches and the management UI can update and roll out. When
-# disabled, the document is distributed from a read-only file instead.
+# Store daemonConfig in the controller database so the management UI can update
+# and roll it out. When disabled, daemonConfig is read from a watched file and
+# the UI is read-only.
 fleetConfiguration:
   enabled: false
-  # The ConfigMap is seeded only when it does not already exist; Helm never
-  # modifies it afterwards. Set false when an offline renderer such as
-  # Argo CD would reapply the seed. Create it once outside that renderer
-  # instead.
-  create: true
-  # Defaults to <release>-fleet-configuration when empty.
-  name: ""
-
-serviceAccount:
-  create: true
-  annotations: {}
-  # Defaults to the release name when empty.
-  name: ""
-
-rbac:
-  create: true
+  # Used only when the database has no fleet configuration yet.
+  seedRevision: 1
 
 # When set, this Secret is mounted instead of the generated ConfigMap. It
 # must contain a complete controller configuration at configSecretKey.

@@ -22,15 +22,3 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
 app.kubernetes.io/name: {{ include "agentdesktop-controller.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
-
-{{- define "agentdesktop-controller.serviceAccountName" -}}
-{{- if .Values.serviceAccount.create }}
-{{- default (include "agentdesktop-controller.fullname" .) .Values.serviceAccount.name }}
-{{- else }}
-{{- required "serviceAccount.name is required when serviceAccount.create is false" .Values.serviceAccount.name }}
-{{- end }}
-{{- end }}
-
-{{- define "agentdesktop-controller.fleetConfigurationName" -}}
-{{- default (printf "%s-fleet-configuration" (include "agentdesktop-controller.fullname" .)) .Values.fleetConfiguration.name | trunc 63 | trimSuffix "-" }}
-{{- end }}

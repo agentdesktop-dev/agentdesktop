@@ -986,6 +986,21 @@ code {
   box-shadow: 0 0 0 2px rgb(95 67 178 / 12%);
 }
 
+.field textarea[aria-invalid="true"] {
+  border-color: #cf222e;
+}
+
+.field .field-error {
+  color: #9a222b;
+}
+
+.configuration-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .agent-list-heading {
   display: flex;
   align-items: center;

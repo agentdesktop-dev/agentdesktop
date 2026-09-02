@@ -69,48 +69,40 @@
           "$ref": "#/$defs/ControllerDaemonFileConfig"
         },
         {
-          "description": "Writable configuration stored in a dedicated Kubernetes ConfigMap.",
+          "description": "Writable configuration stored in the controller database.",
           "type": "object",
           "properties": {
-            "configMap": {
-              "$ref": "#/$defs/ControllerDaemonConfigMap"
+            "database": {
+              "$ref": "#/$defs/ControllerDaemonDatabaseConfig"
             }
           },
           "additionalProperties": false,
           "required": [
-            "configMap"
+            "database"
           ]
         }
       ]
     },
-    "ControllerDaemonConfigMap": {
-      "description": "Kubernetes ConfigMap containing writable fleet configuration.",
+    "ControllerDaemonDatabaseConfig": {
+      "description": "Initial values for database-backed fleet configuration.",
       "type": "object",
       "properties": {
-        "dataKey": {
-          "description": "Data key containing daemon configuration YAML.",
-          "type": "string",
-          "default": "daemon.yaml"
+        "seedPath": {
+          "description": "Optional YAML file used only when the database has no fleet configuration.\n\nRelative paths are resolved from the controller configuration directory.\nWhen omitted, the database is initialized with an empty programs map.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
-        "name": {
-          "description": "Name of the ConfigMap.",
-          "type": "string"
-        },
-        "namespace": {
-          "description": "Namespace containing the ConfigMap.",
-          "type": "string"
-        },
-        "revisionKey": {
-          "description": "Data key containing the positive numeric fleet revision.",
-          "type": "string",
-          "default": "revision"
+        "seedRevision": {
+          "description": "Initial fleet revision assigned when seeding the database.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 1,
+          "minimum": 1
         }
       },
-      "additionalProperties": false,
-      "required": [
-        "namespace",
-        "name"
-      ]
+      "additionalProperties": false
     },
     "ControllerDaemonFileConfig": {
       "description": "Controller-owned daemon configuration file and its revision.",
@@ -125,7 +117,7 @@
           "type": "integer",
           "format": "uint64",
           "default": 1,
-          "minimum": 0
+          "minimum": 1
         }
       },
       "additionalProperties": false,

@@ -24,6 +24,20 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
+const commentedFleetConfigurationYaml = `# Fleet-wide defaults
+llmGateway:
+  # Keep this endpoint private
+  url: https://gateway.example.internal # production
+telemetry:
+  events: [tool.use, session.new]
+programs:
+  claudeCode:
+    useLlmGateway: true
+    # Native Claude setting
+    permissions:
+      defaultMode: plan
+`;
+
 export const Defaults: Story = {};
 
 export const ActiveConfiguration: Story = {
@@ -64,7 +78,7 @@ export const SavesYaml: Story = {
       yaml: "programs: {}\n",
       revision: 4,
       version: "18",
-      source: "configMap" as const,
+      source: "database" as const,
       sourceError: null,
       writable: true,
     })),
@@ -78,7 +92,9 @@ export const SavesYaml: Story = {
     );
     await expect(args.onSave).toHaveBeenCalledOnce();
     await expect(args.onSave).toHaveBeenCalledWith(
-      expect.stringContaining('allowedClientIds: ["claude-code"]'),
+      expect.stringMatching(
+        /allowedClientIds:\s*\[(?:"|')?claude-code(?:"|')?\]/,
+      ),
       "17",
     );
     await expect(
@@ -102,7 +118,7 @@ programs:
   claudeCode: {}
 `,
   },
-  play: async ({ canvasElement }) => {
+  play: async ({ canvas, canvasElement }) => {
     const output = canvasElement.querySelector<HTMLTextAreaElement>(
       ".configuration-yaml-preview",
     );
@@ -116,6 +132,104 @@ programs:
       clientId: "agentdesktop",
       scopes: ["openid", "offline_access"],
     });
+    await expect(
+      await canvas.findByText("Existing OIDC authentication is preserved."),
+    ).toBeVisible();
+  },
+};
+
+export const PreservesCommentsOnNoopSave: Story = {
+  args: {
+    initialYaml: commentedFleetConfigurationYaml,
+    initialRevision: 3,
+    initialVersion: "3",
+    writable: true,
+    onSave: fn(async (yaml: string, version: string) => ({
+      yaml,
+      revision: 3,
+      version,
+      source: "database" as const,
+      sourceError: null,
+      writable: true,
+    })),
+  },
+  play: async ({ args, canvas }) => {
+    await expect(
+      canvas.getByLabelText("Generated fleet configuration"),
+    ).toHaveValue(commentedFleetConfigurationYaml);
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Save and roll out" }),
+    );
+    await expect(args.onSave).toHaveBeenCalledWith(
+      commentedFleetConfigurationYaml,
+      "3",
+    );
+    await expect(canvas.getByText("No changes to roll out.")).toBeVisible();
+  },
+};
+
+export const PreservesCommentsWhileEditing: Story = {
+  args: { initialYaml: commentedFleetConfigurationYaml },
+  play: async ({ canvas }) => {
+    const gatewayUrl = canvas.getByLabelText("Gateway URL");
+    await userEvent.clear(gatewayUrl);
+    await userEvent.type(gatewayUrl, "https://gateway.changed.example");
+    const output = canvas.getByLabelText(
+      "Generated fleet configuration",
+    ) as HTMLTextAreaElement;
+    await expect(output.value).toContain("# Fleet-wide defaults");
+    await expect(output.value).toContain("# Keep this endpoint private");
+    await expect(output.value).toContain("# Native Claude setting");
+    await expect(output.value).toContain("https://gateway.changed.example");
+  },
+};
+
+export const RejectsInvalidAgentSettings: Story = {
+  args: {
+    initialRevision: 1,
+    initialVersion: "1",
+    writable: true,
+    onSave: fn(async () => ({
+      yaml: null,
+      revision: 1,
+      version: "1",
+      source: "database" as const,
+      sourceError: null,
+      writable: true,
+    })),
+  },
+  play: async ({ args, canvas, canvasElement }) => {
+    const settings = canvasElement.querySelector<HTMLTextAreaElement>(
+      ".agent-draft textarea",
+    );
+    if (!settings)
+      throw new Error("Claude Code settings editor was not rendered");
+    await userEvent.click(settings);
+    await userEvent.paste("permissions: [");
+    await expect(canvas.getByText(/^Claude Code:/)).toBeVisible();
+    await expect(
+      canvas.getByRole("button", { name: "Save and roll out" }),
+    ).toBeDisabled();
+    await expect(args.onSave).not.toHaveBeenCalled();
+  },
+};
+
+export const RejectsInvalidSourceYaml: Story = {
+  args: {
+    initialYaml: "programs: [",
+    initialRevision: 1,
+    initialVersion: "1",
+    writable: true,
+    onSave: fn(),
+  },
+  play: async ({ args, canvas }) => {
+    await expect(
+      await canvas.findByText(/The active configuration cannot be edited:/),
+    ).toBeVisible();
+    await expect(
+      canvas.getByRole("button", { name: "Save and roll out" }),
+    ).toBeDisabled();
+    await expect(args.onSave).not.toHaveBeenCalled();
   },
 };
 
@@ -130,7 +244,7 @@ export const PreservesLargeIntegers: Story = {
       yaml: null,
       revision: 4,
       version: "18",
-      source: "configMap" as const,
+      source: "database" as const,
       sourceError: null,
       writable: true,
     })),

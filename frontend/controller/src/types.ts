@@ -97,7 +97,7 @@ export type FleetConfigurationResponse = {
   yaml: string | null;
   revision: number | null;
   version: string | null;
-  source: "file" | "configMap" | null;
+  source: "file" | "database" | null;
   sourceError: string | null;
   writable: boolean;
 };

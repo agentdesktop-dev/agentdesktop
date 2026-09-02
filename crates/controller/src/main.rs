@@ -9,11 +9,7 @@ use agentdesktop_controller::{
     oidc::OidcProvider,
     service::FleetAgentService,
 };
-use agentdesktop_core::{
-    DEFAULT_CONTROLLER_CONFIG_PATH,
-    config::{self, ControllerDaemonConfig, ControllerDaemonConfigMap},
-    telemetry,
-};
+use agentdesktop_core::{DEFAULT_CONTROLLER_CONFIG_PATH, config, telemetry};
 use agentdesktop_proto::fleet::fleet_agent_server::FleetAgentServer;
 use anyhow::Context;
 use clap::Parser;
@@ -28,12 +24,6 @@ struct Args {
     /// Path to the controller YAML configuration file.
     #[arg(long, default_value = DEFAULT_CONTROLLER_CONFIG_PATH)]
     config: PathBuf,
-    /// Namespace containing the writable fleet-configuration ConfigMap.
-    #[arg(long, requires = "daemon_config_map_name")]
-    daemon_config_map_namespace: Option<String>,
-    /// Name of the writable fleet-configuration ConfigMap.
-    #[arg(long, requires = "daemon_config_map_namespace")]
-    daemon_config_map_name: Option<String>,
 }
 
 #[tokio::main]
@@ -42,17 +32,9 @@ async fn main() -> anyhow::Result<()> {
     let _log_flush = telemetry::setup_logging("info", false);
     let config = config::load_controller(&args.config)?;
     let tls = config.tls.files();
-    let daemon_config_override = args
-        .daemon_config_map_namespace
-        .zip(args.daemon_config_map_name)
-        .map(|(namespace, name)| ControllerDaemonConfig::ConfigMap {
-            config_map: ControllerDaemonConfigMap::new(namespace, name),
-        });
-    let daemon_config_definition = daemon_config_override
-        .as_ref()
-        .or(config.daemon_config.as_ref());
-    let fleet_configuration = FleetConfiguration::open(daemon_config_definition).await?;
     let database = Database::connect(&config.database_url).await?;
+    let fleet_configuration =
+        FleetConfiguration::open(config.daemon_config.as_ref(), &database).await?;
     let oidc = &config.oidc;
     if oidc.issuer.starts_with("http://") {
         tracing::warn!(issuer = %oidc.issuer, "allowing insecure OIDC issuer for development");
