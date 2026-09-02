@@ -15,7 +15,7 @@ COPY images/ /app/images/
 RUN --mount=type=cache,id=agentdesktop-pnpm,target=/pnpm/store \
     pnpm --filter @agentdesktop/controller-web build
 
-FROM docker.io/library/rust:1.97.1-trixie AS builder
+FROM docker.io/library/rust:1.98.0-trixie AS builder
 ARG TARGETARCH
 ARG BUILD_PROFILE=release
 WORKDIR /app
