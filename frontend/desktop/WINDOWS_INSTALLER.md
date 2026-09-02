@@ -34,7 +34,7 @@ Use Windows 10 or Windows 11 and install:
 1. Visual Studio 2022 Build Tools with the **Desktop development with C++**
    workload and a Windows SDK.
 2. Rust through `rustup`.
-3. Node.js 24.17.0, as specified by `frontend/.nvmrc`.
+3. Node.js 26.8.1, as specified by `frontend/.nvmrc`.
 4. Git.
 5. The VBSCRIPT Windows optional feature, when it is not already enabled.
 
@@ -60,10 +60,10 @@ Open PowerShell and change to the repository root:
 ```powershell
 cd C:\projects\agentdesktop
 
-rustup toolchain install 1.97
-rustup target add x86_64-pc-windows-msvc --toolchain 1.97
+rustup toolchain install 1.98
+rustup target add x86_64-pc-windows-msvc --toolchain 1.98
 
-corepack enable
+npm install --global pnpm@11.25.0
 cd frontend
 pnpm --version
 pnpm install --frozen-lockfile
@@ -99,7 +99,7 @@ target\x86_64-pc-windows-msvc\release\bundle\msi\
 On Windows ARM64, or on a Windows build host with the ARM64 C++ tools installed:
 
 ```powershell
-rustup target add aarch64-pc-windows-msvc --toolchain 1.97
+rustup target add aarch64-pc-windows-msvc --toolchain 1.98
 
 $env:AGENTDESKTOP_VERSION = "0.1.0"
 

@@ -507,8 +507,10 @@ mod tests {
             .expect("explicit PowerShell launcher");
         let bytes = BASE64_STANDARD.decode(encoded).expect("valid base64");
         let utf16 = bytes
-            .chunks_exact(2)
-            .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|bytes| u16::from_le_bytes(*bytes))
             .collect::<Vec<_>>();
         let script = String::from_utf16(&utf16).expect("valid UTF-16LE");
 
