@@ -13,5 +13,5 @@ programs:
     useLlmGateway: true
     companyAnnouncements: ["Using the local Agentgateway through Agentdesktop"]
 #    Claude desktop cannot run with --user. Uncomment to enable
-  claudeDesktop:
-    useLlmGateway: true
+#  claudeDesktop:
+#    useLlmGateway: true

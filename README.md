@@ -1,159 +1,181 @@
-# agentdesktop
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/logo-light.svg">
+  <img src="images/logo.svg" alt="Agentdesktop" width="520">
+</picture>
 
-![agentdesktop](images/logo.svg)
+# Open-source visibility and control for AI tools across your desktop fleet
 
-**The open-source control plane for AI developer tools.**
+[![CI](https://github.com/agentdesktop-dev/agentdesktop/actions/workflows/ci.yml/badge.svg)](https://github.com/agentdesktop-dev/agentdesktop/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/agentdesktop-dev/agentdesktop?display_name=tag&sort=semver)](https://github.com/agentdesktop-dev/agentdesktop/releases/latest)
+[![License](https://img.shields.io/github/license/agentdesktop-dev/agentdesktop)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/agentdesktop-dev/agentdesktop?style=flat&logo=github)](https://github.com/agentdesktop-dev/agentdesktop)
 
-MDM manages the device, but each AI developer tool has its own settings, MCP
-connections, skills, and gateway configuration. agentdesktop manages those
-tools as a fleet: see what is installed, apply managed configuration, and
-connect each device to your LLM gateway.
+Agentdesktop discovers AI developer tools, inventories MCP servers and skills,
+applies tool-native configuration and sandbox policy, and connects each device
+to an LLM gateway with user and device identity.
 
-agentdesktop brings discovery, policy, identity, gateway access, and telemetry
-into one fully open-source system. Keep developers in Claude, Codex, OpenCode,
-and VS Code while giving platform teams a fleet-wide management experience
-built for AI developer tools, not retrofitted from device management scripts.
+Keep developers in Claude Code, Codex, OpenCode, and VS Code while giving
+platform teams one place to understand and manage the fleet.
 
 [Website](https://agentdesktop.dev) ·
 [Documentation](https://agentdesktop.dev/docs/) ·
+[Announcement](https://agentdesktop.dev/blog/2026/09/introducing-agentdesktop/) ·
 [Releases](https://github.com/agentdesktop-dev/agentdesktop/releases)
 
-## What you can do
+## Why Agentdesktop?
 
-- See which AI developer tools are installed on each device and their versions.
-- Inventory MCP servers and skills without collecting MCP command arguments,
-  environment variables, HTTP headers, or skill bodies.
-- Preview and reconcile managed settings for supported tools.
-- Connect supported tools directly to a shared LLM gateway.
-- Enroll devices through OIDC and associate them with the signed-in user.
-- Issue short-lived controller-signed JWTs for an LLM gateway such as
-  agentgateway.
-- Collect selected session and tool-use events when telemetry is enabled.
+AI agents increasingly run on employee workstations, but the controls around
+them are fragmented across tool-specific settings, MCP connections, skills,
+provider credentials, and local configuration files.
 
-## Fleet management UI
+MDM remains the right layer for enrolling devices, deploying software, and
+enforcing OS posture. Agentdesktop adds the AI-tool-aware layer above it.
 
-Inspect device health, configuration state, recent agent activity, installed
-tools, MCP servers, and skills from the fleet management UI.
+| See what is running | Manage tools natively | Control model access |
+| --- | --- | --- |
+| Discover supported tools and versions, then inventory MCP servers, skills, and models without collecting their secrets or contents. | Define configuration and sandbox intent once. Agentdesktop translates it into each supported tool's native format and reports whether it was applied. | Route tools through your LLM gateway with short-lived credentials carrying user, device, and allowed client context. Provider API keys remain at the gateway. |
 
-![agentdesktop device details](images/device-details.png)
+![How MDM, Agentdesktop, and an LLM gateway work together](images/layers.png)
+
+## Start on one workstation
+
+Try the same endpoint daemon used in a managed fleet without deploying a
+controller.
+
+### 1. Install Agentdesktop
+
+Download the current device binary from
+[GitHub Releases](https://github.com/agentdesktop-dev/agentdesktop/releases), or
+build it from source:
+
+```sh
+git clone https://github.com/agentdesktop-dev/agentdesktop.git
+cd agentdesktop
+corepack enable
+make install
+```
+
+### 2. Preview the standalone example
+
+The repository includes a working standalone configuration for Claude Code,
+OIDC, and Agentgateway. Preview every proposed file action without changing
+tool configuration:
+
+```sh
+agentdesktop daemon \
+  --config examples/standalone/config.yaml \
+  --user \
+  --dry-run
+```
+
+### 3. Run and inspect
+
+Remove `--dry-run` to reconcile the configuration and leave the daemon
+running:
+
+```sh
+export ANTHROPIC_API_KEY=sk-ant-...
+docker compose -f examples/standalone/compose.yaml up -d
+
+agentdesktop daemon \
+  --config examples/standalone/config.yaml \
+  --user
+```
+
+In another terminal, check the daemon and list discovered tools and models:
+
+```sh
+agentdesktop status
+agentdesktop discover
+```
+
+The desktop and fleet interfaces also expose the MCP server and skill
+inventory. See the [standalone quickstart](https://agentdesktop.dev/docs/getting-started/standalone/)
+for prerequisites, test credentials, and a walkthrough of the local services.
+
+## Start locally, grow into a fleet
+
+Agentdesktop uses the same daemon and tool-native configuration model at every
+stage.
+
+| Standalone | Controller-managed |
+| --- | --- |
+| Read policy from local YAML, discover and configure tools on one workstation, and authenticate the user directly to a compatible LLM gateway. No controller or device identity is required. | Centrally inventory a fleet, distribute versioned configuration, enroll users and devices, report reconciliation status, and issue short-lived gateway credentials. |
+| [Run the standalone quickstart](https://agentdesktop.dev/docs/getting-started/standalone/) | [Run the managed quickstart](https://agentdesktop.dev/docs/getting-started/managed/) |
+
+![Agentdesktop controller device inventory](images/controller-ui.png)
+
+## Core capabilities
+
+- **AI tool discovery:** detect supported developer tools and their versions
+  across Linux, macOS, and Windows.
+- **Secret-minimizing inventory:** report configured MCP servers and skills
+  without collecting MCP command arguments, environment variables, HTTP
+  headers, or skill bodies.
+- **Tool-native configuration:** safely merge managed values into the formats
+  expected by each tool while preserving unrelated user settings.
+- **Shared sandbox policy:** translate filesystem and network restrictions into
+  the native sandbox configuration supported by Claude Code and Codex.
+- **User and device identity:** bind a locally generated device key and
+  certificate to the user who enrolled the workstation through OIDC.
+- **Runtime credentials:** give supported tools short-lived credentials instead
+  of distributing long-lived provider keys to workstations.
+- **Identity-aware gateway integration:** attach user, device, and allowed client
+  context for gateway routing, policy, logging, and usage attribution.
+- **Opt-in telemetry:** collect selected session and tool-use events when an
+  organization enables them.
 
 ## Supported tools
 
-| Tool | Discovery | Managed configuration | MCP and skills |
-| --- | --- | --- | --- |
-| Claude Code | Yes | Yes | MCP and skills |
-| Claude Desktop | Yes | Yes | MCP |
-| Codex | Yes | Yes | MCP and skills |
-| OpenCode | Yes | Yes | MCP |
-| VS Code | Yes | Not yet | Not yet |
+| Tool | Discovery | Managed configuration | MCP and skills inventory | Sandbox policy |
+| --- | --- | --- | --- | --- |
+| Claude Code | Yes | Yes | MCP and skills | Yes |
+| Claude Desktop | Yes | Yes | MCP | — |
+| Codex | Yes | Yes | MCP and skills | Yes |
+| OpenCode | Yes | Yes | MCP | — |
+| VS Code | Yes | — | MCP and skills | — |
 
-The project targets Linux, macOS, and Windows.
+> **Don't see your tool?** We're actively expanding this list and would love
+> your help. [Open an integration request](https://github.com/agentdesktop-dev/agentdesktop/issues/new)
+> to tell us what you use, or contribute discovery and configuration support
+> for another AI developer tool or harness.
 
-## Architecture
+The project targets Linux, macOS, and Windows. Support varies where a tool or
+operating system does not expose an equivalent native configuration surface.
 
-The daemon runs on each device and reconciles developer-tool configuration. It
-can receive desired configuration from the controller, or read the same YAML
-directly in standalone mode. Developer tools continue to run locally and can
-request short-lived credentials for the LLM gateway through the daemon.
+## How it works
 
-![agentdesktop architecture](images/overview.png)
+The daemon runs on each workstation and reconciles developer-tool
+configuration. It can receive desired configuration from the controller or
+read the same YAML directly in standalone mode. Managed tools continue to run
+locally and can request credentials for an LLM gateway through the daemon.
 
-## Get started
+![Agentdesktop controller, workstation daemon, and LLM gateway architecture](images/overview.png)
 
-Start with [Build and install](https://agentdesktop.dev/docs/getting-started/build/)
-when working from source, then choose the setup that fits your environment:
+In controller-managed mode, the daemon generates its private device key on the
+workstation and sends only a certificate signing request to the controller.
+After enrollment, protected controller operations require the device
+certificate and a valid token for the user who enrolled it.
 
-- [Standalone mode](https://agentdesktop.dev/docs/getting-started/standalone/)
-  reads local YAML and can authenticate directly to an LLM gateway with
-  OIDC. It needs no controller or device identity. The repository includes a
-  [local standalone example](./examples/standalone).
-- [Controller-managed mode](https://agentdesktop.dev/docs/getting-started/managed/)
-  enrolls users and devices, distributes versioned configuration, and can issue
-  short-lived gateway JWTs. The [local managed example](./examples/claude) uses
-  Dex and agentgateway.
-- [Production deployment](https://agentdesktop.dev/docs/operations/production/)
-  covers Kubernetes, certificates, MDM, and endpoint enrollment. The
-  [Kubernetes example](./examples/kubernetes) includes development Dex and
-  PostgreSQL dependencies.
+When a supported tool requests gateway access, the controller can issue a
+short-lived JWT containing the user, device ID, allowed client label, audience,
+issuer, and expiry. The client label is asserted by the local helper; it is
+useful for policy and attribution, but it is not cryptographic proof of the
+calling executable.
 
-## Configuration
+Read the [announcement](https://agentdesktop.dev/blog/2026/09/introducing-agentdesktop/)
+for a deeper walkthrough of standalone mode, enrollment, and short-lived tool
+credentials.
 
-The controller can distribute daemon configuration to connected devices, or a
-standalone daemon can apply it from a local file.
+## Project and community
 
-A small configuration can manage a shared gateway, telemetry, and agents. For example:
+Agentdesktop is fully open source under the [Apache License 2.0](LICENSE).
 
-```yaml
-llmGateway:
-  url: https://gateway.example.com
-  authentication:
-    type: controllerJwt
-    audience: agentgateway
-    allowedClientIds: [claude-code, claude-desktop, codex, opencode]
+- Read the [documentation](https://agentdesktop.dev/docs/).
+- Browse or report [issues](https://github.com/agentdesktop-dev/agentdesktop/issues).
+- Help us [add support for another AI developer tool](https://github.com/agentdesktop-dev/agentdesktop/issues/new).
+- Review the [Code of Conduct](CODE_OF_CONDUCT.md) before contributing.
+- See the [production guide](https://agentdesktop.dev/docs/operations/production/)
+  for Kubernetes, certificates, MDM, and endpoint enrollment.
 
-telemetry:
-  events:
-  - session.new
-  - tool.use
-
-programs:
-  claudeCode:
-    permissions:
-      defaultMode: plan
-    companyAnnouncements: ["Managed by Agentdesktop"]
-  claudeDesktop:
-    isLocalDevMcpEnabled: true
-```
-
-For a controller-free setup, omit `controller` and configure OIDC directly:
-
-```yaml
-llmGateway:
-  url: https://gateway.example.com
-  authentication:
-    type: oidc
-    issuer: https://login.example.com
-    clientId: agentdesktop
-
-programs:
-  claudeCode: {}
-  codex: {}
-```
-
-Save this as `~/.config/agentdesktop/config.yaml`, register
-`http://127.0.0.1:51327/callback` with the OIDC provider, and run:
-
-```sh
-agentdesktop daemon --user
-```
-
-The daemon opens the browser for sign-in when it starts. `--user` stores daemon
-state in your home directory and manages user-level tool settings. For Claude
-Code, agentdesktop merges its values into `~/.claude/settings.json` and preserves
-unrelated settings. Explicit path options shown by `agentdesktop daemon --help`
-override the defaults.
-
-Use `--dry-run` to preview file actions without writing anything; an unsafe
-target is reported as a `conflict` instead of failing the preview. Use `--once`
-to apply static settings once and exit; controller connectivity, telemetry, and
-authenticated gateways require the daemon to remain running.
-
-## Enrollment and identity
-
-Controller-managed devices are enrolled through a dual-authentication scheme.
-A private key is bound to a device and never leaves that device. The public key
-is used to authenticate the device to the controller.
-
-OIDC also authenticates the device user. Standalone mode uses a simpler native
-OIDC flow and sends the resulting access token directly to the configured
-LLM gateway; it creates no device key or certificate.
-
-## Telemetry
-
-Selected events from agents on managed devices, such as tool use and session
-creation, can be reported to the controller. Telemetry is opt-in.
-
-## Project policy
-
-Agentdesktop is available under the [Apache License 2.0](LICENSE). Please read
-the [Code of Conduct](CODE_OF_CONDUCT.md) before participating.
+<!-- markdownlint-disable-file first-line-heading no-inline-html -->

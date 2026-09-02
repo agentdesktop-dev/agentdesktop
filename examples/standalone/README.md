@@ -2,7 +2,7 @@
 
 This example runs Dex and Agentgateway locally, then configures Agentdesktop to
 send Claude traffic through the gateway.
-Dex issues the user's OAuth access token directly to Agentdesktop. 
+Dex issues the user's OAuth access token directly to Agentdesktop.
 Agentgateway verifies that token against Dex's JWKS before forwarding the request to Anthropic.
 
 This example runs without a controller, and is useful for simple configuration on a single machine.
@@ -54,9 +54,10 @@ Summary: 1 change, 5 unchanged
 ```
 
 Then we can run the daemon, which will actually configure Claude Code:
+
 ```sh
 $ agentdesktop daemon --config examples/standalone/config.yaml --user
-````
+```
 
 When we run `claude`, we can now see the message we programmed (`Using the local Agentgateway through Agentdesktop`),
 and messages we send will traverse Agentgateway.
