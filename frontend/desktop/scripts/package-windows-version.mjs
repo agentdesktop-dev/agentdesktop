@@ -11,10 +11,11 @@ export function createTauriVersionConfig(version) {
     };
   }
 
-  // Inline JSON for --config loses its quotes in cmd.exe, so pass a file instead.
+  // Inline configuration loses its quotes in cmd.exe, so pass a TOML file.
+  // Tauri parses file-based `--config` overrides as TOML.
   const directory = mkdtempSync(path.join(tmpdir(), "agentdesktop-tauri-"));
-  const configPath = path.join(directory, "release.json");
-  writeFileSync(configPath, `${JSON.stringify({ version })}\n`, "utf8");
+  const configPath = path.join(directory, "release.toml");
+  writeFileSync(configPath, `version = ${JSON.stringify(version)}\n`, "utf8");
 
   return {
     arguments: ["--config", configPath],

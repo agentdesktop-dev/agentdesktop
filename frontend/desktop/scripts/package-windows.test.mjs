@@ -30,9 +30,8 @@ test("writes the Tauri release version to a temporary config file", () => {
 
   try {
     assert.deepEqual(config.arguments, ["--config", config.path]);
-    assert.deepEqual(JSON.parse(readFileSync(config.path, "utf8")), {
-      version: "0.1.0",
-    });
+    assert.equal(path.extname(config.path), ".toml");
+    assert.equal(readFileSync(config.path, "utf8"), 'version = "0.1.0"\n');
     assert.equal(
       config.arguments.some((argument) => argument.includes("{")),
       false,
