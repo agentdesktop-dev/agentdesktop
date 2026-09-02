@@ -36,7 +36,7 @@ jobs:
       - name: Install UI dependencies
         working-directory: frontend
         run: |
-          corepack enable
+          npm install --global pnpm@11.25.0
           pnpm install --frozen-lockfile
 
       - name: Install Storybook test browser
@@ -80,12 +80,12 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
-          toolchain: "1.97"
+          toolchain: "1.98"
 
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: ci-windows
           cache-workspace-crates: true

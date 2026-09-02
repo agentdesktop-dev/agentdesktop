@@ -1,13 +1,13 @@
-# syntax=docker/dockerfile:1.11
+# syntax=docker/dockerfile:1.26
 
-FROM docker.io/library/node:24.17.0-bookworm AS ui
+FROM docker.io/library/node:26.8.1-bookworm AS ui
 WORKDIR /app/frontend
 ENV CI=true
 COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
 COPY frontend/controller/package.json controller/package.json
 COPY frontend/desktop/package.json desktop/package.json
 COPY frontend/ui/package.json ui/package.json
-RUN corepack enable && pnpm config set store-dir /pnpm/store
+RUN npm install --global pnpm@11.25.0 && pnpm config set store-dir /pnpm/store
 RUN --mount=type=cache,id=agentdesktop-pnpm,target=/pnpm/store \
     pnpm install --frozen-lockfile
 COPY frontend/ ./
@@ -15,7 +15,7 @@ COPY images/ /app/images/
 RUN --mount=type=cache,id=agentdesktop-pnpm,target=/pnpm/store \
     pnpm --filter @agentdesktop/controller-web build
 
-FROM docker.io/library/rust:1.97.1-trixie AS builder
+FROM docker.io/library/rust:1.98.0-trixie AS builder
 ARG TARGETARCH
 ARG BUILD_PROFILE=release
 WORKDIR /app
