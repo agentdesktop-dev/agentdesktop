@@ -1,67 +1,63 @@
+//! Read-only fleet configuration loaded from a watched local file.
+
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::Arc,
     time::Duration,
 };
 
+use agentdesktop_core::config::ControllerDaemonFileConfig;
 use agentdesktop_proto::fleet::DaemonConfig;
 use anyhow::Context;
+use async_trait::async_trait;
 use notify::{Event, EventKind, RecursiveMode};
-use sha2::{Digest, Sha256};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
-/// Live, last-known-good daemon configuration shared by controller surfaces.
+use super::{
+    DaemonConfigStore, FleetConfigurationSnapshot, FleetConfigurationSource,
+    ReplaceFleetConfigurationError, compile,
+};
+
 #[derive(Clone)]
-pub struct DaemonConfigStore {
-    sender: watch::Sender<Option<DaemonConfig>>,
-    reload_error: Arc<RwLock<Option<String>>>,
+pub(super) struct FileConfigurationSource {
+    config: ControllerDaemonFileConfig,
 }
 
-impl DaemonConfigStore {
-    pub fn new(initial: Option<DaemonConfig>) -> Self {
-        let (sender, _) = watch::channel(initial);
-        Self {
-            sender,
-            reload_error: Arc::new(RwLock::new(None)),
-        }
+impl FileConfigurationSource {
+    pub(super) fn new(config: ControllerDaemonFileConfig) -> Self {
+        Self { config }
+    }
+}
+
+#[async_trait]
+impl FleetConfigurationSource for FileConfigurationSource {
+    async fn snapshot(&self) -> anyhow::Result<FleetConfigurationSnapshot> {
+        let daemon = load(&self.config.path, self.config.revision)?;
+        Ok(FleetConfigurationSnapshot {
+            version: format!("file:{}", self.config.revision),
+            daemon,
+        })
     }
 
-    pub fn current(&self) -> Option<DaemonConfig> {
-        self.sender.borrow().clone()
+    async fn replace(
+        &self,
+        _expected_version: &str,
+        _yaml: String,
+    ) -> Result<FleetConfigurationSnapshot, ReplaceFleetConfigurationError> {
+        Err(ReplaceFleetConfigurationError::ReadOnly)
     }
 
-    pub fn subscribe(&self) -> watch::Receiver<Option<DaemonConfig>> {
-        self.sender.subscribe()
+    fn start_watch(self: Arc<Self>, store: DaemonConfigStore) -> anyhow::Result<()> {
+        watch(self.config.path.clone(), self.config.revision, store)
     }
 
-    pub fn reload_error(&self) -> Option<String> {
-        self.reload_error
-            .read()
-            .expect("daemon-config reload status lock poisoned")
-            .clone()
+    fn writable(&self) -> bool {
+        false
     }
 
-    fn publish(&self, next: DaemonConfig) -> bool {
-        let unchanged = self.sender.borrow().as_ref().is_some_and(|current| {
-            current.revision == next.revision && current.sha256 == next.sha256
-        });
-        *self
-            .reload_error
-            .write()
-            .expect("daemon-config reload status lock poisoned") = None;
-        if unchanged {
-            return false;
-        }
-        self.sender.send_replace(Some(next));
-        true
-    }
-
-    fn record_error(&self, error: &anyhow::Error) {
-        *self
-            .reload_error
-            .write()
-            .expect("daemon-config reload status lock poisoned") = Some(format!("{error:#}"));
+    fn kind(&self) -> &'static str {
+        "file"
     }
 }
 
@@ -70,7 +66,7 @@ impl DaemonConfigStore {
 /// The parent directory is always watched so atomic replacement continues to
 /// work after an inode watch is invalidated. Each debounced batch also
 /// re-resolves symlinks, covering Kubernetes projected-volume rotations.
-pub fn watch(path: PathBuf, revision: u64, store: DaemonConfigStore) -> anyhow::Result<()> {
+fn watch(path: PathBuf, revision: u64, store: DaemonConfigStore) -> anyhow::Result<()> {
     let path = normalize_watch_path(&path)?;
     let parent = path
         .parent()
@@ -137,17 +133,10 @@ pub fn watch(path: PathBuf, revision: u64, store: DaemonConfigStore) -> anyhow::
     Ok(())
 }
 
-pub fn load(path: &Path, revision: u64) -> anyhow::Result<DaemonConfig> {
+fn load(path: &Path, revision: u64) -> anyhow::Result<DaemonConfig> {
     let yaml = std::fs::read(path)
         .with_context(|| format!("read daemon configuration from {}", path.display()))?;
-    let text = std::str::from_utf8(&yaml).context("daemon configuration is not UTF-8")?;
-    agentdesktop_core::config::parse_daemon(text).context("validate daemon configuration")?;
-    let sha256 = Sha256::digest(&yaml).to_vec();
-    Ok(DaemonConfig {
-        revision,
-        yaml,
-        sha256,
-    })
+    compile(yaml, revision)
 }
 
 fn directory_structure_changed(event: &Event, parent: &Path) -> bool {

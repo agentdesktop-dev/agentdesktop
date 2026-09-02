@@ -1,3 +1,6 @@
+{{- if and .Values.existingConfigSecret (or .Values.fleetConfiguration.enabled (not (empty .Values.daemonConfig))) }}
+{{- fail "fleetConfiguration and daemonConfig values cannot be used with existingConfigSecret; configure daemonConfig in the Secret's controller.yaml" }}
+{{- end }}
 {{- if not .Values.existingConfigSecret }}
 apiVersion: v1
 kind: ConfigMap
@@ -20,9 +23,18 @@ data:
     gatewayJwt:
 {{ toYaml . | indent 6 }}
     {{- end }}
+    {{- if .Values.fleetConfiguration.enabled }}
+    daemonConfig:
+      database:
+        seedRevision: {{ .Values.fleetConfiguration.seedRevision }}
+        {{- with .Values.daemonConfig }}
+        seedPath: /etc/agentdesktop/config/daemon.yaml
+        {{- end }}
+    {{- else }}
     {{- with .Values.daemonConfig }}
     daemonConfig:
       path: /etc/agentdesktop/config/daemon.yaml
+    {{- end }}
     {{- end }}
   {{- with .Values.daemonConfig }}
   daemon.yaml: |

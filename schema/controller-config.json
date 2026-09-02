@@ -62,6 +62,49 @@
   ],
   "$defs": {
     "ControllerDaemonConfig": {
+      "description": "Source of the daemon configuration distributed by the controller.",
+      "anyOf": [
+        {
+          "description": "Read-only configuration loaded from a watched file.",
+          "$ref": "#/$defs/ControllerDaemonFileConfig"
+        },
+        {
+          "description": "Writable configuration stored in the controller database.",
+          "type": "object",
+          "properties": {
+            "database": {
+              "$ref": "#/$defs/ControllerDaemonDatabaseConfig"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "database"
+          ]
+        }
+      ]
+    },
+    "ControllerDaemonDatabaseConfig": {
+      "description": "Initial values for database-backed fleet configuration.",
+      "type": "object",
+      "properties": {
+        "seedPath": {
+          "description": "Optional YAML file used only when the database has no fleet configuration.\n\nRelative paths are resolved from the controller configuration directory.\nWhen omitted, the database is initialized with an empty programs map.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "seedRevision": {
+          "description": "Initial fleet revision assigned when seeding the database.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 1,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "ControllerDaemonFileConfig": {
       "description": "Controller-owned daemon configuration file and its revision.",
       "type": "object",
       "properties": {
@@ -74,7 +117,7 @@
           "type": "integer",
           "format": "uint64",
           "default": 1,
-          "minimum": 0
+          "minimum": 1
         }
       },
       "additionalProperties": false,

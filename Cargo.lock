@@ -100,6 +100,7 @@ dependencies = [
  "agentdesktop-core",
  "agentdesktop-proto",
  "anyhow",
+ "async-trait",
  "aws-lc-rs",
  "axum",
  "base64 0.23.1",

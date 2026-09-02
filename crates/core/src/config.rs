@@ -197,11 +197,24 @@ pub struct ControllerOidcConfig {
     pub redirect_uri: String,
 }
 
+/// Source of the daemon configuration distributed by the controller.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(untagged, deny_unknown_fields)]
+pub enum ControllerDaemonConfig {
+    /// Read-only configuration loaded from a watched file.
+    File(ControllerDaemonFileConfig),
+    /// Writable configuration stored in the controller database.
+    Database {
+        database: ControllerDaemonDatabaseConfig,
+    },
+}
+
 /// Controller-owned daemon configuration file and its revision.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ControllerDaemonConfig {
+pub struct ControllerDaemonFileConfig {
     /// Path to the watched YAML configuration distributed to enrolled devices.
     ///
     /// Relative paths are resolved from the controller configuration directory.
@@ -209,7 +222,25 @@ pub struct ControllerDaemonConfig {
     pub path: PathBuf,
     /// Monotonically increasing revision assigned to the daemon configuration.
     #[serde(default = "default_daemon_config_revision")]
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub revision: u64,
+}
+
+/// Initial values for database-backed fleet configuration.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerDaemonDatabaseConfig {
+    /// Optional YAML file used only when the database has no fleet configuration.
+    ///
+    /// Relative paths are resolved from the controller configuration directory.
+    /// When omitted, the database is initialized with an empty programs map.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_path: Option<PathBuf>,
+    /// Initial fleet revision assigned when seeding the database.
+    #[serde(default = "default_daemon_config_revision")]
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
+    pub seed_revision: u64,
 }
 
 /// Settings for issuing short-lived LLM gateway JWTs.
@@ -462,7 +493,16 @@ pub fn load_controller(path: &Path) -> anyhow::Result<ControllerConfig> {
         .with_context(|| format!("parse controller configuration from {}", path.display()))?;
     let directory = path.parent().unwrap_or_else(|| Path::new("."));
     if let Some(daemon) = &mut config.daemon_config {
-        resolve_relative(&mut daemon.path, directory);
+        match daemon {
+            ControllerDaemonConfig::File(daemon) => {
+                resolve_relative(&mut daemon.path, directory);
+            }
+            ControllerDaemonConfig::Database { database } => {
+                if let Some(seed_path) = &mut database.seed_path {
+                    resolve_relative(seed_path, directory);
+                }
+            }
+        }
     }
     if let Some(gateway) = &mut config.gateway_jwt {
         resolve_relative(&mut gateway.private_key, directory);
@@ -500,10 +540,16 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
         scheme => anyhow::bail!("oidc.issuer must use HTTPS, got {scheme}"),
     }
     Url::parse(&oidc.redirect_uri).context("parse oidc.redirectUri URL")?;
-    if let Some(daemon) = &config.daemon_config
-        && daemon.revision == 0
-    {
-        anyhow::bail!("daemonConfig.revision must be greater than zero");
+    if let Some(daemon) = &config.daemon_config {
+        match daemon {
+            ControllerDaemonConfig::File(daemon) if daemon.revision == 0 => {
+                anyhow::bail!("daemonConfig.revision must be greater than zero");
+            }
+            ControllerDaemonConfig::Database { database } if database.seed_revision == 0 => {
+                anyhow::bail!("daemonConfig.database.seedRevision must be greater than zero");
+            }
+            ControllerDaemonConfig::File(_) | ControllerDaemonConfig::Database { .. } => {}
+        }
     }
     if let Some(gateway) = &config.gateway_jwt {
         if gateway.issuer.trim().is_empty() {
@@ -704,7 +750,10 @@ fn is_true(value: &bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{LlmGatewayAuthentication, parse_controller, parse_daemon};
+    use super::{
+        ControllerDaemonConfig, LlmGatewayAuthentication, load_controller, parse_controller,
+        parse_daemon,
+    };
 
     #[test]
     fn daemon_configuration_supports_local_and_managed_options() {
@@ -762,6 +811,91 @@ oidc:
             controller.tls.files().certificate,
             std::path::PathBuf::from("/etc/agentdesktop/tls/controller.pem")
         );
+    }
+
+    #[test]
+    fn controller_daemon_configuration_supports_file_and_database_sources() {
+        let file = parse_controller(
+            r#"
+tls: /etc/agentdesktop/tls
+oidc:
+    issuer: https://idp.example.com
+    clientId: agentdesktop
+daemonConfig:
+    path: daemon.yaml
+    revision: 4
+"#,
+        )
+        .expect("file-backed daemon configuration");
+        assert!(matches!(
+            file.daemon_config,
+            Some(ControllerDaemonConfig::File(_))
+        ));
+
+        let database = parse_controller(
+            r#"
+tls: /etc/agentdesktop/tls
+oidc:
+    issuer: https://idp.example.com
+    clientId: agentdesktop
+daemonConfig:
+    database:
+        seedPath: daemon.yaml
+        seedRevision: 4
+"#,
+        )
+        .expect("database-backed daemon configuration");
+        let Some(ControllerDaemonConfig::Database { database }) = database.daemon_config else {
+            panic!("expected database-backed daemon configuration");
+        };
+        assert_eq!(
+            database.seed_path,
+            Some(std::path::PathBuf::from("daemon.yaml"))
+        );
+        assert_eq!(database.seed_revision, 4);
+
+        let mixed = r#"
+tls: /etc/agentdesktop/tls
+oidc:
+    issuer: https://idp.example.com
+    clientId: agentdesktop
+daemonConfig:
+    path: daemon.yaml
+    database: {}
+"#;
+        assert!(parse_controller(mixed).is_err());
+    }
+
+    #[test]
+    fn controller_database_seed_path_is_relative_to_controller_config() {
+        let directory = std::env::temp_dir().join(format!(
+            "agentdesktop-controller-config-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("create controller config directory");
+        let config_path = directory.join("controller.yaml");
+        std::fs::write(
+            &config_path,
+            r#"
+tls: tls
+oidc:
+    issuer: https://idp.example.com
+    clientId: agentdesktop
+daemonConfig:
+    database:
+        seedPath: fleet.yaml
+"#,
+        )
+        .expect("write controller configuration");
+
+        let config = load_controller(&config_path).expect("load controller configuration");
+        let Some(ControllerDaemonConfig::Database { database }) = config.daemon_config else {
+            panic!("expected database-backed daemon configuration");
+        };
+        assert_eq!(database.seed_path, Some(directory.join("fleet.yaml")));
+
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]

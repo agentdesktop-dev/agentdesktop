@@ -7,6 +7,9 @@
 |`daemonConfig`|object|Daemon configuration distributed to enrolled devices.|
 |`daemonConfig.path`|string|Path to the watched YAML configuration distributed to enrolled devices.<br><br>Relative paths are resolved from the controller configuration directory.<br>Valid file changes are published to connected devices automatically.|
 |`daemonConfig.revision`|integer|Monotonically increasing revision assigned to the daemon configuration.|
+|`daemonConfig.database`|object|Writable configuration stored in the controller database.<br>Initial values for database-backed fleet configuration.|
+|`daemonConfig.database.seedPath`|string|Optional YAML file used only when the database has no fleet configuration.<br><br>Relative paths are resolved from the controller configuration directory.<br>When omitted, the database is initialized with an empty programs map.|
+|`daemonConfig.database.seedRevision`|integer|Initial fleet revision assigned when seeding the database.|
 |`databaseUrl`|string|SQLite or PostgreSQL URL used for controller state.|
 |`fleetListen`|string|Address on which the device-facing gRPC fleet API listens.|
 |`gatewayJwt`|object|LLM gateway JWT signing settings.|

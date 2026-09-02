@@ -11,6 +11,19 @@ pub struct Database {
     pool: AnyPool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FleetConfigurationRecord {
+    pub yaml: String,
+    pub revision: u64,
+}
+
+#[derive(Debug)]
+pub(crate) enum FleetConfigurationReplacement {
+    Unchanged(FleetConfigurationRecord),
+    Replaced(FleetConfigurationRecord),
+    Conflict,
+}
+
 pub struct DevicePrincipal {
     pub issuer: String,
     pub subject: String,
@@ -178,6 +191,75 @@ impl Database {
             .await
             .context("run database migrations")?;
         Ok(Self { pool })
+    }
+
+    pub(crate) async fn initialize_fleet_configuration(
+        &self,
+        yaml: String,
+        revision: u64,
+    ) -> anyhow::Result<FleetConfigurationRecord> {
+        let revision = database_revision(revision)?;
+        sqlx::query(
+            "INSERT INTO fleet_configuration (singleton, yaml, revision)
+             VALUES (1, $1, $2)
+             ON CONFLICT (singleton) DO NOTHING",
+        )
+        .bind(yaml)
+        .bind(revision)
+        .execute(&self.pool)
+        .await
+        .context("initialize fleet configuration")?;
+        self.fleet_configuration()
+            .await?
+            .context("fleet configuration missing after initialization")
+    }
+
+    pub(crate) async fn fleet_configuration(
+        &self,
+    ) -> anyhow::Result<Option<FleetConfigurationRecord>> {
+        let row: Option<(String, i64)> =
+            sqlx::query_as("SELECT yaml, revision FROM fleet_configuration WHERE singleton = 1")
+                .fetch_optional(&self.pool)
+                .await
+                .context("read fleet configuration")?;
+        row.map(fleet_configuration_record).transpose()
+    }
+
+    pub(crate) async fn replace_fleet_configuration(
+        &self,
+        expected_revision: u64,
+        yaml: String,
+    ) -> anyhow::Result<FleetConfigurationReplacement> {
+        let expected_database_revision = database_revision(expected_revision)?;
+        let revision = expected_revision
+            .checked_add(1)
+            .context("fleet configuration revision is exhausted")?;
+        let next_database_revision = database_revision(revision)?;
+        let result = sqlx::query(
+            "UPDATE fleet_configuration
+             SET yaml = $1, revision = $2
+             WHERE singleton = 1 AND revision = $3 AND yaml <> $1",
+        )
+        .bind(&yaml)
+        .bind(next_database_revision)
+        .bind(expected_database_revision)
+        .execute(&self.pool)
+        .await
+        .context("replace fleet configuration")?;
+        if result.rows_affected() == 1 {
+            return Ok(FleetConfigurationReplacement::Replaced(
+                FleetConfigurationRecord { yaml, revision },
+            ));
+        }
+        let current = self
+            .fleet_configuration()
+            .await?
+            .context("fleet configuration is not initialized")?;
+        if current.revision == expected_revision && current.yaml == yaml {
+            Ok(FleetConfigurationReplacement::Unchanged(current))
+        } else {
+            Ok(FleetConfigurationReplacement::Conflict)
+        }
     }
 
     pub async fn enroll_device(
@@ -556,6 +638,25 @@ impl Database {
     }
 }
 
+fn database_revision(revision: u64) -> anyhow::Result<i64> {
+    let revision =
+        i64::try_from(revision).context("fleet configuration revision exceeds BIGINT")?;
+    if revision < 1 {
+        anyhow::bail!("fleet configuration revision must be positive");
+    }
+    Ok(revision)
+}
+
+fn fleet_configuration_record(
+    (yaml, revision): (String, i64),
+) -> anyhow::Result<FleetConfigurationRecord> {
+    let revision = u64::try_from(revision).context("fleet configuration revision is negative")?;
+    if revision == 0 {
+        anyhow::bail!("fleet configuration revision must be positive");
+    }
+    Ok(FleetConfigurationRecord { yaml, revision })
+}
+
 fn unix_time_seconds() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -574,7 +675,92 @@ mod tests {
         ToolUseEvent, telemetry_event,
     };
 
-    use super::Database;
+    use super::{Database, FleetConfigurationReplacement};
+
+    #[tokio::test]
+    async fn persists_fleet_configuration_with_optimistic_concurrency() {
+        let path = std::env::temp_dir().join(format!(
+            "agentdesktop-fleet-configuration-test-{}.db",
+            std::process::id()
+        ));
+        let database = Database::connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .await
+            .expect("connect test database");
+
+        let initial = database
+            .initialize_fleet_configuration("programs: {}\n".to_owned(), 4)
+            .await
+            .expect("initialize fleet configuration");
+        assert_eq!(initial.revision, 4);
+        let existing = database
+            .initialize_fleet_configuration("telemetry: {}\n".to_owned(), 1)
+            .await
+            .expect("leave existing fleet configuration unchanged");
+        assert_eq!(existing, initial);
+
+        let stale = database
+            .replace_fleet_configuration(3, "programs: { claudeCode: {} }\n".to_owned())
+            .await
+            .expect("reject stale revision");
+        assert!(matches!(stale, FleetConfigurationReplacement::Conflict));
+
+        let unchanged = database
+            .replace_fleet_configuration(4, initial.yaml.clone())
+            .await
+            .expect("accept unchanged fleet configuration");
+        assert!(matches!(
+            unchanged,
+            FleetConfigurationReplacement::Unchanged(record) if record == initial
+        ));
+
+        let replacement = database
+            .replace_fleet_configuration(4, "programs: { claudeCode: {} }\n".to_owned())
+            .await
+            .expect("replace fleet configuration");
+        let FleetConfigurationReplacement::Replaced(replacement) = replacement else {
+            panic!("expected fleet configuration replacement");
+        };
+        assert_eq!(replacement.revision, 5);
+        assert_eq!(
+            database
+                .fleet_configuration()
+                .await
+                .expect("read fleet configuration"),
+            Some(replacement.clone())
+        );
+
+        let mut concurrent_writes = tokio::task::JoinSet::new();
+        for candidate in 0..8 {
+            let database = database.clone();
+            concurrent_writes.spawn(async move {
+                database
+                    .replace_fleet_configuration(
+                        replacement.revision,
+                        format!("programs: {{ codex: {{ candidate: {candidate} }} }}\n"),
+                    )
+                    .await
+            });
+        }
+        let mut replaced = 0;
+        let mut conflicts = 0;
+        while let Some(result) = concurrent_writes.join_next().await {
+            match result
+                .expect("concurrent save task")
+                .expect("concurrent save")
+            {
+                FleetConfigurationReplacement::Replaced(_) => replaced += 1,
+                FleetConfigurationReplacement::Conflict => conflicts += 1,
+                FleetConfigurationReplacement::Unchanged(_) => {
+                    panic!("concurrent candidates are unique")
+                }
+            }
+        }
+        assert_eq!(replaced, 1);
+        assert_eq!(conflicts, 7);
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
 
     #[tokio::test]
     async fn persists_device_inventory_and_telemetry() {

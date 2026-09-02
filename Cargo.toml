@@ -21,6 +21,7 @@ agentdesktop-client = { path = "crates/client" }
 agentdesktop-core = { path = "crates/core" }
 agentdesktop-proto = { path = "crates/proto" }
 anyhow = "1"
+async-trait = "0.1"
 apple-native-keyring-store = { version = "1", features = ["keychain"] }
 aws-lc-rs = "1.18"
 axum = "0.8"

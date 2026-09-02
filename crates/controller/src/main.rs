@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use agentdesktop_controller::{
     admin::{self, AdminState, ControllerSettings},
-    daemon_config::{self, DaemonConfigStore},
+    daemon_config::FleetConfiguration,
     database::Database,
     device_ca::DeviceCertificateIssuer,
     gateway_jwt::{self, GatewayJwtIssuer},
@@ -32,15 +32,9 @@ async fn main() -> anyhow::Result<()> {
     let _log_flush = telemetry::setup_logging("info", false);
     let config = config::load_controller(&args.config)?;
     let tls = config.tls.files();
-    let daemon_config = match &config.daemon_config {
-        Some(daemon) => Some(daemon_config::load(&daemon.path, daemon.revision)?),
-        None => None,
-    };
-    let daemon_config = DaemonConfigStore::new(daemon_config);
-    if let Some(daemon) = &config.daemon_config {
-        daemon_config::watch(daemon.path.clone(), daemon.revision, daemon_config.clone())?;
-    }
     let database = Database::connect(&config.database_url).await?;
+    let fleet_configuration =
+        FleetConfiguration::open(config.daemon_config.as_ref(), &database).await?;
     let oidc = &config.oidc;
     if oidc.issuer.starts_with("http://") {
         tracing::warn!(issuer = %oidc.issuer, "allowing insecure OIDC issuer for development");
@@ -73,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
     let admin_gateway_jwks = gateway_jwks.clone();
     let admin_state = AdminState::new(
         database.clone(),
-        daemon_config.clone(),
+        fleet_configuration.clone(),
         ControllerSettings {
             fleet_listen: config.fleet_listen.to_string(),
             admin_listen: config.admin_listen.to_string(),
@@ -97,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
     let service = FleetAgentService::new(
         Some(oidc),
         database,
-        daemon_config,
+        fleet_configuration.store().clone(),
         gateway_jwt_issuer,
         Some(device_certificate_issuer),
     );

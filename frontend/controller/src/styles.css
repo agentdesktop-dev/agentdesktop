@@ -548,6 +548,16 @@ code {
   border: 1px solid var(--border);
 }
 
+.button.primary {
+  color: #fff;
+  background: #24292f;
+  border: 1px solid #24292f;
+}
+
+.button.primary:hover {
+  background: #343a40;
+}
+
 .search-box {
   width: min(280px, 100%);
   height: 34px;
@@ -976,6 +986,21 @@ code {
   box-shadow: 0 0 0 2px rgb(95 67 178 / 12%);
 }
 
+.field textarea[aria-invalid="true"] {
+  border-color: #cf222e;
+}
+
+.field .field-error {
+  color: #9a222b;
+}
+
+.configuration-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .agent-list-heading {
   display: flex;
   align-items: center;
@@ -1133,15 +1158,46 @@ code {
   cursor: pointer;
 }
 
-.output-card pre {
+.output-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.configuration-save-message {
+  margin: 0;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 12px;
+}
+
+.configuration-save-message.success {
+  color: var(--green);
+  background: #f2fbf6;
+}
+
+.configuration-save-message.error {
+  color: var(--red);
+  background: #fff8f8;
+}
+
+.configuration-yaml-preview {
+  width: 100%;
+  height: 490px;
   max-height: 490px;
   margin: 0;
   padding: 18px;
   overflow: auto;
   color: #24292f;
   background: #f7f7f5;
+  border: 0;
+  border-radius: 0 0 6px 6px;
+  outline-offset: -2px;
+  resize: none;
+  font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 12px;
   line-height: 1.65;
+  white-space: pre;
 }
 
 .settings-list {
