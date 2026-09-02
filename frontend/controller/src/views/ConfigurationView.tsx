@@ -1,5 +1,12 @@
 import { ToolIcon } from "@agentdesktop/ui";
-import { Check, ChevronRight, Copy, Plus, Trash2 } from "lucide-react";
+import {
+  Check,
+  ChevronRight,
+  CircleAlert,
+  Copy,
+  Plus,
+  Trash2,
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import type { AgentDraft, AgentKind, DaemonConfigDocument } from "../types";
@@ -22,15 +29,31 @@ export function ConfigurationView({
   const [sessionNewTelemetry, setSessionNewTelemetry] = useState(false);
   const [toolUseTelemetry, setToolUseTelemetry] = useState(false);
   const [toolInputTelemetry, setToolInputTelemetry] = useState(false);
+  const [sandboxEnabled, setSandboxEnabled] = useState(false);
+  const [allowedDomains, setAllowedDomains] = useState("");
+  const [writablePaths, setWritablePaths] = useState("");
+  const [deniedPaths, setDeniedPaths] = useState("");
   const [agents, setAgents] = useState<AgentDraft[]>([
     { kind: "claudeCode", useGateway: true, settings: "" },
   ]);
   const [copied, setCopied] = useState(false);
+  const incompatibleSandboxAgentNames = agents.flatMap((agent) => {
+    if (!sandboxUnsupportedAgents.has(agent.kind)) return [];
+    const definition = configurableAgents.find(
+      (candidate) => candidate.kind === agent.kind,
+    );
+    return [definition?.label ?? agent.kind];
+  });
+  const sandboxUnavailable = incompatibleSandboxAgentNames.length > 0;
   const yaml = daemonConfigYaml({
     gateway,
     gatewayUrl,
     controllerJwt,
     audience,
+    sandboxEnabled,
+    allowedDomains,
+    writablePaths,
+    deniedPaths,
     sessionNewTelemetry,
     toolUseTelemetry,
     toolInputTelemetry,
@@ -58,6 +81,16 @@ export function ConfigurationView({
     setSessionNewTelemetry(events.has("session.new"));
     setToolUseTelemetry(events.has("tool.use") || events.has("tool.use.input"));
     setToolInputTelemetry(events.has("tool.use.input"));
+    setSandboxEnabled(Boolean(initialConfig.sandbox));
+    setAllowedDomains(
+      (initialConfig.sandbox?.network?.allowedDomains ?? []).join("\n"),
+    );
+    setWritablePaths(
+      (initialConfig.sandbox?.filesystem?.writable ?? []).join("\n"),
+    );
+    setDeniedPaths(
+      (initialConfig.sandbox?.filesystem?.denied ?? []).join("\n"),
+    );
     setAgents(agentDrafts(initialConfig.programs));
   }, [initialConfig]);
 
@@ -91,6 +124,7 @@ export function ConfigurationView({
   }
 
   function addAgent(selectedAgent: AgentKind) {
+    if (sandboxEnabled && sandboxUnsupportedAgents.has(selectedAgent)) return;
     const definition = configurableAgents.find(
       (candidate) => candidate.kind === selectedAgent,
     );
@@ -165,6 +199,86 @@ export function ConfigurationView({
                       />
                     </label>
                   )}
+                </div>
+              )}
+            </div>
+          </details>
+          <details className="wizard-section" open={sandboxEnabled}>
+            <summary className="wizard-section-summary">
+              <span className="wizard-section-title">
+                <strong>Sandbox</strong>
+                <small>
+                  Restrict local command execution for managed agents.
+                </small>
+              </span>
+              <ChevronRight size={15} />
+            </summary>
+            <div className="wizard-section-content">
+              <label className="toggle-row">
+                <span>
+                  <strong>Require sandbox</strong>
+                  <small>
+                    Commands fail closed when sandboxing is unavailable.
+                  </small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={sandboxEnabled}
+                  disabled={sandboxUnavailable}
+                  aria-describedby={
+                    sandboxUnavailable ? "sandbox-compatibility" : undefined
+                  }
+                  onChange={(event) => setSandboxEnabled(event.target.checked)}
+                />
+              </label>
+              {sandboxUnavailable && (
+                <p className="sandbox-compatibility" id="sandbox-compatibility">
+                  <CircleAlert size={14} />
+                  Remove {incompatibleSandboxAgentNames.join(" and ")} to enable
+                  sandboxing.
+                </p>
+              )}
+              {sandboxEnabled && (
+                <div className="form-grid sandbox-fields">
+                  <label className="field full-width">
+                    <span>Allowed domains</span>
+                    <textarea
+                      rows={4}
+                      spellCheck={false}
+                      placeholder={"api.github.com\nregistry.npmjs.org"}
+                      value={allowedDomains}
+                      onChange={(event) =>
+                        setAllowedDomains(event.target.value)
+                      }
+                    />
+                    <small>
+                      One domain per line. Leave empty to block network access.
+                    </small>
+                  </label>
+                  <label className="field full-width">
+                    <span>Writable paths</span>
+                    <textarea
+                      rows={4}
+                      spellCheck={false}
+                      placeholder={"/tmp/build-cache\n/opt/project/output"}
+                      value={writablePaths}
+                      onChange={(event) => setWritablePaths(event.target.value)}
+                    />
+                    <small>One additional writable path per line.</small>
+                  </label>
+                  <label className="field full-width">
+                    <span>Denied paths</span>
+                    <textarea
+                      rows={4}
+                      spellCheck={false}
+                      placeholder={"~/.ssh\n~/.aws"}
+                      value={deniedPaths}
+                      onChange={(event) => setDeniedPaths(event.target.value)}
+                    />
+                    <small>
+                      One path per line. Denied paths cannot be read or changed.
+                    </small>
+                  </label>
                 </div>
               )}
             </div>
@@ -250,6 +364,16 @@ export function ConfigurationView({
                         <button
                           type="button"
                           key={agent.kind}
+                          disabled={
+                            sandboxEnabled &&
+                            sandboxUnsupportedAgents.has(agent.kind)
+                          }
+                          title={
+                            sandboxEnabled &&
+                            sandboxUnsupportedAgents.has(agent.kind)
+                              ? "Unavailable while sandboxing is enabled"
+                              : undefined
+                          }
                           onClick={(event) => {
                             addAgent(agent.kind);
                             event.currentTarget
@@ -398,11 +522,20 @@ const configurableAgents: Array<{
   },
 ];
 
+const sandboxUnsupportedAgents = new Set<AgentKind>([
+  "claudeDesktop",
+  "openCode",
+]);
+
 function daemonConfigYaml(options: {
   gateway: boolean;
   gatewayUrl: string;
   controllerJwt: boolean;
   audience: string;
+  sandboxEnabled: boolean;
+  allowedDomains: string;
+  writablePaths: string;
+  deniedPaths: string;
   sessionNewTelemetry: boolean;
   toolUseTelemetry: boolean;
   toolInputTelemetry: boolean;
@@ -420,6 +553,17 @@ function daemonConfigYaml(options: {
       );
     }
     lines.push("");
+  }
+  if (options.sandboxEnabled) {
+    lines.push(
+      "sandbox:",
+      "  network:",
+      ...yamlStringList("allowedDomains", textList(options.allowedDomains), 4),
+      "  filesystem:",
+      ...yamlStringList("writable", textList(options.writablePaths), 4),
+      ...yamlStringList("denied", textList(options.deniedPaths), 4),
+      "",
+    );
   }
   if (options.sessionNewTelemetry || options.toolUseTelemetry) {
     lines.push("telemetry:", "  events:");
@@ -454,6 +598,21 @@ function daemonConfigYaml(options: {
 
 function yamlString(value: string) {
   return JSON.stringify(value);
+}
+
+function textList(value: string) {
+  return [...new Set(value.split(/\r?\n/).map((item) => item.trim()))].filter(
+    Boolean,
+  );
+}
+
+function yamlStringList(key: string, values: string[], indent: number) {
+  const padding = " ".repeat(indent);
+  if (values.length === 0) return [`${padding}${key}: []`];
+  return [
+    `${padding}${key}:`,
+    ...values.map((value) => `${padding}  - ${yamlString(value)}`),
+  ];
 }
 
 function agentDrafts(programs: DaemonConfigDocument["programs"]): AgentDraft[] {
