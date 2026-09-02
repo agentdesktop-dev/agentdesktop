@@ -556,7 +556,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ObservationCollector, RuntimeCollector, hosts_from_text, runtime_capability, visit_value,
+        ObservationCollector, RuntimeCollector, hosts_from_text, normalized_tool_path,
+        runtime_capability, visit_value,
     };
     use crate::access::history_scan::HistoryAdapter;
 
@@ -580,12 +581,13 @@ mod tests {
 
     #[test]
     fn extracts_only_normalized_resources_from_tool_calls() {
+        let workspace = std::env::temp_dir().join("agentdesktop-history-workspace");
         let value = json!({
             "toolCalls": [
                 {
                     "id": "read-1",
                     "name": "read_file",
-                    "arguments": "{\"filePath\":\"src/main.rs\"}"
+                    "arguments": "{\"filePath\":\"src/../src/main.rs\"}"
                 },
                 {
                     "id": "shell-1",
@@ -598,7 +600,7 @@ mod tests {
         visit_value(
             &test_adapter(),
             &value,
-            Some(Path::new("/workspace")),
+            Some(&workspace),
             Path::new("history.jsonl"),
             Some(10),
             &mut BTreeSet::new(),
@@ -606,19 +608,34 @@ mod tests {
             &mut RuntimeCollector::default(),
         );
         let (observations, _) = observations.finish();
+        let expected_path = workspace.join("src").join("main.rs");
+        let filesystem = observations
+            .iter()
+            .find(|observation| {
+                observation.category == AccessCategory::Filesystem
+                    && observation.operation == AccessOperation::Read
+                    && observation.confidence == AccessConfidence::High
+            })
+            .expect("read_file should produce a high-confidence filesystem observation");
 
-        assert!(observations.iter().any(|observation| {
-            observation.category == AccessCategory::Filesystem
-                && observation.resource == "/workspace/src/main.rs"
-                && observation.operation == AccessOperation::Read
-                && observation.confidence == AccessConfidence::High
-        }));
+        assert_eq!(Path::new(&filesystem.resource), expected_path.as_path());
         assert!(observations.iter().any(|observation| {
             observation.category == AccessCategory::Network
                 && observation.resource == "api.example.com"
                 && observation.confidence == AccessConfidence::Heuristic
         }));
         assert!(!format!("{observations:?}").contains("super-secret"));
+    }
+
+    #[test]
+    fn normalizes_relative_tool_paths_with_target_separators() {
+        let workspace = std::env::temp_dir().join("agentdesktop-history-workspace");
+        let expected = workspace.join("src").join("main.rs");
+
+        assert_eq!(
+            normalized_tool_path("src/../src/main.rs", Some(&workspace)).as_deref(),
+            Some(expected.as_path())
+        );
     }
 
     #[test]
