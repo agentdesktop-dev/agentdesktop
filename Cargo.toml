@@ -37,7 +37,7 @@ memchr = "2.8"
 notify = "8.2"
 notify-debouncer-full = "0.7"
 jsonwebtoken = { version = "11.0", features = ["aws_lc_rs"] }
-json5 = "0.4"
+json5 = "1.3"
 keyring = "4.1"
 keyring-core = "1"
 libc = "0.2"
