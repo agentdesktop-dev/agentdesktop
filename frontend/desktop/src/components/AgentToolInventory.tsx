@@ -7,7 +7,11 @@ import {
   ShieldCheck,
 } from "lucide-react";
 
-import type { AgentAccessReport, DiscoveredAgent } from "../types";
+import type {
+  AgentAccessReport,
+  DiscoveredAgent,
+  NetworkRuleChange,
+} from "../types";
 import { AgentAccessPanel, agentAccessStatus } from "../views/AccessView";
 
 interface AgentToolInventoryProps {
@@ -16,7 +20,9 @@ interface AgentToolInventoryProps {
   accessStale: boolean;
   activateAccessRequest?: number;
   agent: DiscoveredAgent;
+  onApplyNetworkRuleChange?: (change: NetworkRuleChange) => Promise<void>;
   onOpenAccessSource?: (path: string) => void | Promise<void>;
+  allowAccessEditing: boolean;
   unavailableDetail?: string;
 }
 
@@ -42,10 +48,16 @@ export function AgentToolInventory({
   accessStale,
   activateAccessRequest,
   agent,
+  allowAccessEditing,
+  onApplyNetworkRuleChange,
   onOpenAccessSource,
   unavailableDetail,
 }: AgentToolInventoryProps) {
   const status = agentAccessStatus(access, accessLoading);
+  const canEditAccess =
+    allowAccessEditing &&
+    (agent.kind === "claude-code" || agent.kind === "vscode") &&
+    Boolean(onApplyNetworkRuleChange);
   return (
     <ToolInventory
       activateLeadingTabRequest={activateAccessRequest}
@@ -63,7 +75,9 @@ export function AgentToolInventory({
         content: (
           <AgentAccessPanel
             agent={access}
+            allowAccessEditing={canEditAccess}
             loading={accessLoading}
+            onApplyNetworkRuleChange={onApplyNetworkRuleChange}
             onOpenSource={onOpenAccessSource}
             stale={accessStale}
             unavailableDetail={unavailableDetail}

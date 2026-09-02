@@ -6,7 +6,8 @@ use std::{
 
 use agentdesktop_core::model::{
     AccessCapability, AccessCategory, AccessCoverage, AccessCoverageStatus, AccessDecision,
-    AccessEnforcement, AccessFinding, AccessOperation, AccessSeverity, AccessSourceKind,
+    AccessEnforcement, AccessFinding, AccessOperation, AccessRuleMechanism, AccessSeverity,
+    AccessSourceKind,
 };
 use serde_json::Value;
 
@@ -14,7 +15,7 @@ use super::{
     CollectedAccess,
     configuration::{capability, default_capability},
     history_scan::{HistoryAdapter, RuntimeCollector, permission_mode, runtime_capability},
-    host_pattern, plural_suffix, safe_command_identifier, source,
+    host_pattern, network_rule_ref, plural_suffix, safe_command_identifier, source,
 };
 
 pub(super) fn history_adapter(home: &Path) -> HistoryAdapter {
@@ -52,21 +53,27 @@ pub(super) fn inspect_configuration(home: &Path) -> CollectedAccess {
     let state_path = home.join(".claude.json");
     let project_roots = inspect_state(&state_path, &mut collected);
     let mut settings = BTreeSet::new();
-    settings.insert((config_dir(home).join("settings.json"), None));
-    settings.extend(managed_settings().into_iter().map(|path| (path, None)));
+    settings.insert((config_dir(home).join("settings.json"), None, true));
+    settings.extend(
+        managed_settings()
+            .into_iter()
+            .map(|path| (path, None, false)),
+    );
     for workspace in project_roots {
         settings.insert((
             workspace.join(".claude/settings.json"),
             Some(workspace.clone()),
+            true,
         ));
         settings.insert((
             workspace.join(".claude/settings.local.json"),
             Some(workspace),
+            true,
         ));
     }
 
     let mut inspected = usize::from(state_path.is_file());
-    for (path, workspace) in settings {
+    for (path, workspace, editable) in settings {
         let Ok(contents) = fs::read(&path) else {
             continue;
         };
@@ -74,7 +81,13 @@ pub(super) fn inspect_configuration(home: &Path) -> CollectedAccess {
             continue;
         };
         inspected += 1;
-        parse_settings(&document, &path, workspace.as_deref(), &mut collected);
+        parse_settings(
+            &document,
+            &path,
+            workspace.as_deref(),
+            editable,
+            &mut collected,
+        );
     }
     collected.capabilities.extend([
         default_capability(
@@ -168,6 +181,7 @@ fn inspect_state(path: &Path, collected: &mut CollectedAccess) -> Vec<PathBuf> {
                     enforcement: AccessEnforcement::Harness,
                     workspace: Some(workspace.clone()),
                     source: source.clone(),
+                    rule: None,
                     detail: Some("Trusted Claude workspace".to_owned()),
                 },
                 AccessCapability {
@@ -178,6 +192,7 @@ fn inspect_state(path: &Path, collected: &mut CollectedAccess) -> Vec<PathBuf> {
                     enforcement: AccessEnforcement::Harness,
                     workspace: Some(workspace.clone()),
                     source,
+                    rule: None,
                     detail: Some(
                         "Trusted workspace; edit gating depends on permission mode".to_owned(),
                     ),
@@ -188,8 +203,10 @@ fn inspect_state(path: &Path, collected: &mut CollectedAccess) -> Vec<PathBuf> {
                     parse_rule(
                         rule,
                         AccessDecision::Allow,
+                        None,
                         path,
                         Some(&workspace),
+                        false,
                         collected,
                     );
                 }
@@ -203,6 +220,7 @@ fn parse_settings(
     document: &Value,
     path: &Path,
     workspace: Option<&Path>,
+    editable: bool,
     collected: &mut CollectedAccess,
 ) {
     if let Some(permissions) = document.get("permissions").and_then(Value::as_object) {
@@ -213,7 +231,15 @@ fn parse_settings(
         ] {
             if let Some(rules) = permissions.get(key).and_then(Value::as_array) {
                 for rule in rules.iter().filter_map(Value::as_str) {
-                    parse_rule(rule, decision.clone(), path, workspace, collected);
+                    parse_rule(
+                        rule,
+                        decision.clone(),
+                        Some(key),
+                        path,
+                        workspace,
+                        editable,
+                        collected,
+                    );
                 }
             }
         }
@@ -277,15 +303,17 @@ fn parse_settings(
         }
     }
     if let Some(sandbox) = document.get("sandbox").and_then(Value::as_object) {
-        parse_sandbox(sandbox, path, workspace, collected);
+        parse_sandbox(sandbox, path, workspace, editable, collected);
     }
 }
 
 fn parse_rule(
     rule: &str,
     decision: AccessDecision,
+    list: Option<&str>,
     path: &Path,
     workspace: Option<&Path>,
+    editable: bool,
     collected: &mut CollectedAccess,
 ) {
     let (tool, specifier) = rule
@@ -325,7 +353,7 @@ fn parse_rule(
         ),
         _ => return,
     };
-    collected.capabilities.push(capability(
+    let mut capability = capability(
         category,
         &resource,
         operations,
@@ -334,13 +362,26 @@ fn parse_rule(
         path,
         workspace,
         "Claude permission rule",
-    ));
+    );
+    if editable
+        && tool == "WebFetch"
+        && let Some(list) = list
+        && rule == format!("WebFetch(domain:{resource})")
+    {
+        capability.rule = Some(network_rule_ref(
+            AccessRuleMechanism::ClaudePermission,
+            path,
+            &format!("permissions.{list}\0{rule}"),
+        ));
+    }
+    collected.capabilities.push(capability);
 }
 
 fn parse_sandbox(
     sandbox: &serde_json::Map<String, Value>,
     path: &Path,
     workspace: Option<&Path>,
+    editable: bool,
     collected: &mut CollectedAccess,
 ) {
     if sandbox.get("enabled").and_then(Value::as_bool) == Some(true) {
@@ -414,7 +455,7 @@ fn parse_sandbox(
             ("deniedDomains", AccessDecision::Deny),
         ] {
             for resource in string_array(network.get(key)) {
-                collected.capabilities.push(capability(
+                let mut capability = capability(
                     AccessCategory::Network,
                     resource,
                     vec![AccessOperation::Connect],
@@ -423,7 +464,15 @@ fn parse_sandbox(
                     path,
                     workspace,
                     "Claude sandbox network rule",
-                ));
+                );
+                if editable && host_pattern(resource).as_deref() == Some(resource) {
+                    capability.rule = Some(network_rule_ref(
+                        AccessRuleMechanism::ClaudeSandboxDomain,
+                        path,
+                        &format!("sandbox.network.{key}\0{resource}"),
+                    ));
+                }
+                collected.capabilities.push(capability);
             }
         }
     }
@@ -473,7 +522,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use agentdesktop_core::model::{
-        AccessCategory, AccessDecision, AccessEnforcement, AccessSourceKind,
+        AccessCategory, AccessDecision, AccessEnforcement, AccessRuleMechanism, AccessSourceKind,
     };
     use serde_json::json;
 
@@ -497,6 +546,7 @@ mod tests {
             }),
             Path::new("settings.json"),
             Some(Path::new("/workspace")),
+            true,
             &mut collected,
         );
 
@@ -511,6 +561,20 @@ mod tests {
             capability.enforcement == AccessEnforcement::Sandbox
                 && capability.resource == "docs.example.com"
         }));
+        let editable_network_rules: Vec<_> = collected
+            .capabilities
+            .iter()
+            .filter(|capability| capability.resource == "docs.example.com")
+            .filter_map(|capability| capability.rule.as_ref())
+            .collect();
+        assert_eq!(editable_network_rules.len(), 2);
+        assert!(editable_network_rules.iter().any(|rule| {
+            rule.mechanism == AccessRuleMechanism::ClaudePermission && rule.id.len() == 64
+        }));
+        assert!(editable_network_rules.iter().any(|rule| {
+            rule.mechanism == AccessRuleMechanism::ClaudeSandboxDomain && rule.id.len() == 64
+        }));
+        assert_ne!(editable_network_rules[0].id, editable_network_rules[1].id);
         assert!(!format!("{:?}", collected.capabilities).contains("super-secret"));
     }
 

@@ -47,6 +47,7 @@ pub(super) fn capability(
         enforcement,
         workspace: workspace.map(Path::to_path_buf),
         source: source(AccessSourceKind::Configuration, Some(path.to_path_buf())),
+        rule: None,
         detail: Some(detail.to_owned()),
     }
 }
@@ -67,6 +68,7 @@ pub(super) fn default_capability(
         enforcement,
         workspace: None,
         source: source(AccessSourceKind::Default, None),
+        rule: None,
         detail: Some(detail.to_owned()),
     }
 }

@@ -23,10 +23,14 @@ import {
 import type {
   AccessCapability,
   AccessCategory,
+  AccessDecision,
   AccessFinding,
   AccessObservation,
+  AccessOperation,
   AgentAccessReport,
+  NetworkRuleChange,
 } from "../types";
+import { AgentAccessEditor } from "./PolicyView";
 
 type ReviewFinding = AccessFinding & { severity: "warning" | "critical" };
 
@@ -57,7 +61,6 @@ const categoryOrder: UnifiedAccessCategory[] = [
   "execution",
   "filesystem",
 ];
-
 function unifiedCategory(
   category: AccessCategory,
 ): UnifiedAccessCategory | null {
@@ -182,6 +185,62 @@ function capabilityDescription(capability: AccessCapability): string {
     case "unknown":
       return "Depends on the session settings";
   }
+}
+
+const operationOrder: AccessOperation[] = [
+  "read",
+  "write",
+  "execute",
+  "connect",
+  "use",
+];
+
+const operationLabels: Record<AccessOperation, string> = {
+  read: "Read",
+  write: "Write",
+  execute: "Run",
+  connect: "Connect",
+  use: "Use",
+};
+
+const decisionLabels: Record<AccessDecision, string> = {
+  allow: "allowed",
+  ask: "requires approval",
+  deny: "blocked",
+  autoReview: "reviewed automatically",
+  unknown: "depends on session",
+};
+
+function groupedCapabilityDescription(
+  capabilities: AccessCapability[],
+): string {
+  const [representative] = capabilities;
+  if (!representative) return "";
+  if (capabilities.length === 1) return capabilityDescription(representative);
+
+  const decisions = new Set(
+    capabilities.map((capability) => capability.decision),
+  );
+  const operations = operationOrder.filter((operation) =>
+    capabilities.some((capability) =>
+      capability.operations.includes(operation),
+    ),
+  );
+  if (decisions.size === 1) {
+    return capabilityDescription({ ...representative, operations });
+  }
+
+  return operations
+    .map((operation) => {
+      const capability = capabilities.find((candidate) =>
+        candidate.operations.includes(operation),
+      );
+      return capability
+        ? `${operationLabels[operation]} ${decisionLabels[capability.decision]}`
+        : null;
+    })
+    .filter((description): description is string => Boolean(description))
+    .join(" · ");
 }
 
 function enforcementDescription(capability: AccessCapability): string | null {
@@ -413,22 +472,61 @@ function SourceFilter({
   );
 }
 
-function CapabilityRow({ capability }: { capability: AccessCapability }) {
-  const origin = capabilityOrigin(capability);
+function ReadOnlyDetail({ detail }: { detail?: string | null }) {
+  if (!detail) return null;
+  const advancedPrefix = "Advanced:";
+  const advanced = detail.startsWith(advancedPrefix);
+  return (
+    <small className="access-read-only-detail">
+      {advanced ? (
+        <span className="access-advanced-badge">Advanced</span>
+      ) : null}
+      <span>
+        {advanced ? detail.slice(advancedPrefix.length).trim() : detail}
+      </span>
+    </small>
+  );
+}
+
+function readOnlyAccessDescription(
+  detail: string | null | undefined,
+  fallback: string,
+): string {
+  return detail?.startsWith("Advanced:")
+    ? "Custom request and response approvals"
+    : fallback;
+}
+
+function CapabilityRow({ capabilities }: { capabilities: AccessCapability[] }) {
+  const [representative] = capabilities;
+  if (!representative) return null;
+  const origin = capabilityOrigin(representative);
   if (!origin) return null;
-  const broadGrant = isBroadGrant(capability);
-  const riskLabel = networkRiskLabel(capability);
-  const enforcement = enforcementDescription(capability);
+  const broadGrant = capabilities.some(isBroadGrant);
+  const riskLabel = capabilities.map(networkRiskLabel).find(Boolean) ?? null;
+  const enforcement = enforcementDescription(representative);
   const sourcePath =
-    origin === "configured" ? capability.source.path : undefined;
+    origin === "configured" ? representative.source.path : undefined;
+  const readOnlyDetail =
+    origin === "configured" &&
+    representative.category === "network" &&
+    !representative.rule
+      ? representative.detail
+      : null;
   return (
     <div
       className={`access-setting-row${broadGrant ? " access-setting-row-risk" : ""}`}
     >
       <div className="access-resource-main">
-        <code title={capability.resource}>{capability.resource}</code>
-        <span>{capabilityDescription(capability)}</span>
+        <code title={representative.resource}>{representative.resource}</code>
+        <span>
+          {readOnlyAccessDescription(
+            readOnlyDetail,
+            groupedCapabilityDescription(capabilities),
+          )}
+        </span>
         {enforcement ? <small>{enforcement}</small> : null}
+        <ReadOnlyDetail detail={readOnlyDetail} />
       </div>
       <div className="access-row-meta">
         {riskLabel ? <span className="access-risk">{riskLabel}</span> : null}
@@ -443,6 +541,52 @@ interface WildcardRuleGroup {
   origin: EvidenceOrigin;
   sourcePath?: string;
   capabilities: AccessCapability[];
+}
+
+interface CapabilityRowGroup {
+  key: string;
+  capabilities: AccessCapability[];
+  origin: EvidenceOrigin;
+}
+
+function capabilityRowGroups(
+  capabilities: AccessCapability[],
+): CapabilityRowGroup[] {
+  const groupsByKey = new Map<string, CapabilityRowGroup[]>();
+  for (const capability of capabilities) {
+    const origin = capabilityOrigin(capability);
+    if (!origin) continue;
+    const baseKey = JSON.stringify([
+      capability.category,
+      capability.resource,
+      origin,
+      capability.source.path ?? null,
+      capability.workspace ?? null,
+      capability.enforcement,
+    ]);
+    const groups = groupsByKey.get(baseKey) ?? [];
+    const group =
+      capability.operations.length > 0
+        ? groups.find((candidate) =>
+            candidate.capabilities.every((existing) =>
+              existing.operations.every(
+                (operation) => !capability.operations.includes(operation),
+              ),
+            ),
+          )
+        : undefined;
+    if (group) {
+      group.capabilities.push(capability);
+    } else {
+      groups.push({
+        key: `${baseKey}:${groups.length}`,
+        capabilities: [capability],
+        origin,
+      });
+      groupsByKey.set(baseKey, groups);
+    }
+  }
+  return [...groupsByKey.values()].flat();
 }
 
 function wildcardRuleGroups(
@@ -487,13 +631,24 @@ function WildcardRules({
   const [representative] = capabilities;
   if (!representative) return null;
   const enforcement = enforcementDescription(representative);
+  const readOnlyDetail =
+    origin === "configured" &&
+    capabilities.every((capability) => !capability.rule)
+      ? representative.detail
+      : null;
   return (
     <div className="access-wildcard-group access-setting-row-risk">
       <div className="access-wildcard-summary">
         <div className="access-resource-main">
           <strong>{capabilities.length} wildcard domains</strong>
-          <span>{capabilityDescription(representative)}</span>
+          <span>
+            {readOnlyAccessDescription(
+              readOnlyDetail,
+              capabilityDescription(representative),
+            )}
+          </span>
           {enforcement ? <small>{enforcement}</small> : null}
+          <ReadOnlyDetail detail={readOnlyDetail} />
         </div>
         <div className="access-row-meta">
           <OriginBadge origin={origin} sourcePath={sourcePath} />
@@ -521,6 +676,9 @@ function CategoryResourceList({
   const groupedCapabilities = new Set(
     wildcardGroups.flatMap((wildcardGroup) => wildcardGroup.capabilities),
   );
+  const capabilityGroups = capabilityRowGroups(
+    capabilities.filter((capability) => !groupedCapabilities.has(capability)),
+  );
   const items = [
     ...wildcardGroups.map((group) => ({
       kind: "wildcard" as const,
@@ -528,21 +686,12 @@ function CategoryResourceList({
       sortKey: group.capabilities[0]?.resource ?? group.key,
       group,
     })),
-    ...capabilities
-      .filter((capability) => !groupedCapabilities.has(capability))
-      .flatMap((capability, index) => {
-        const origin = capabilityOrigin(capability);
-        return origin
-          ? [
-              {
-                kind: "capability" as const,
-                origin,
-                sortKey: `${capability.resource}:${index}`,
-                capability,
-              },
-            ]
-          : [];
-      }),
+    ...capabilityGroups.map((group) => ({
+      kind: "capability" as const,
+      origin: group.origin,
+      sortKey: `${group.capabilities[0]?.resource}:${group.key}`,
+      group,
+    })),
     ...observations.map((observation, index) => ({
       kind: "observation" as const,
       origin: "session" as const,
@@ -568,7 +717,7 @@ function CategoryResourceList({
           case "capability":
             return (
               <CapabilityRow
-                capability={item.capability}
+                capabilities={item.group.capabilities}
                 key={`capability:${item.sortKey}`}
               />
             );
@@ -586,6 +735,30 @@ function CategoryResourceList({
   );
 }
 
+function capabilityRowCount(capabilities: AccessCapability[]): number {
+  const wildcardGroups = wildcardRuleGroups(capabilities);
+  const wildcardCapabilities = new Set(
+    wildcardGroups.flatMap((group) => group.capabilities),
+  );
+  return (
+    wildcardGroups.length +
+    capabilityRowGroups(
+      capabilities.filter(
+        (capability) => !wildcardCapabilities.has(capability),
+      ),
+    ).length
+  );
+}
+
+function categoryCapabilityCount(
+  category: UnifiedAccessCategory,
+  capabilities: AccessCapability[],
+): number {
+  return category === "network"
+    ? capabilities.length
+    : capabilityRowCount(capabilities);
+}
+
 function categoryCountLabel(
   category: UnifiedAccessCategory,
   count: number,
@@ -598,28 +771,38 @@ function categoryCountLabel(
 
 function ObservationRow({ observation }: { observation: AccessObservation }) {
   const observed = formatObservedDate(observation.evidenceUpdatedAtUnixMs);
+  const operation = observation.operations.includes("read")
+    ? observation.operations.includes("write")
+      ? "read/write accesses"
+      : "reads"
+    : observation.operations.includes("write")
+      ? "writes"
+      : observation.operations.includes("execute")
+        ? "runs"
+        : observation.operations.includes("connect")
+          ? "connections"
+          : "uses";
   return (
     <div className="access-resource-row">
       <div className="access-resource-main">
         <code title={observation.resource}>{observation.resource}</code>
         <span>
-          {observation.count} recorded request
-          {observation.count === 1 ? "" : "s"}
-          {observed ? ` · history updated ${observed}` : ""}
+          {observation.count} {operation} across {observation.sessionCount}{" "}
+          {observation.sessionCount === 1 ? "session" : "sessions"}
+          {observation.resourceCount > 1
+            ? ` · ${observation.resourceCount} paths`
+            : ""}
+          {observation.workspaceCount > 1
+            ? ` · ${observation.workspaceCount} workspaces`
+            : ""}
+          {observed ? ` · latest ${observed}` : ""}
         </span>
-        {observation.workspace ? (
+        {observation.workspace &&
+        observation.workspace !== observation.resource ? (
           <small title={observation.workspace}>{observation.workspace}</small>
         ) : null}
       </div>
       <div className="access-row-meta">
-        {observation.confidence === "heuristic" ? (
-          <small
-            className="access-inferred"
-            title="Inferred from command text; the history does not prove that a connection succeeded"
-          >
-            Inferred from command
-          </small>
-        ) : null}
         <OriginBadge origin="session" />
       </div>
     </div>
@@ -627,13 +810,17 @@ function ObservationRow({ observation }: { observation: AccessObservation }) {
 }
 
 function UnifiedCategory({
+  alwaysVisibleCount = 0,
   category,
   capabilities,
+  editor,
   observations,
   visibleOrigins,
 }: {
+  alwaysVisibleCount?: number;
   category: UnifiedAccessCategory;
   capabilities: AccessCapability[];
+  editor?: ReactNode;
   observations: AccessObservation[];
   visibleOrigins: Record<EvidenceOrigin, boolean>;
 }) {
@@ -642,12 +829,19 @@ function UnifiedCategory({
     return origin ? visibleOrigins[origin] : false;
   });
   const visibleObservations = visibleOrigins.session ? observations : [];
-  const count = visibleCapabilities.length + visibleObservations.length;
-  const totalCount = capabilities.length + observations.length;
+  const count =
+    alwaysVisibleCount +
+    categoryCapabilityCount(category, visibleCapabilities) +
+    visibleObservations.length;
+  const totalCount =
+    alwaysVisibleCount +
+    categoryCapabilityCount(category, capabilities) +
+    observations.length;
   const [expanded, setExpanded] = useState(
-    category !== "execution" &&
-      count > 0 &&
-      count <= DEFAULT_EXPANDED_RESOURCE_LIMIT,
+    Boolean(editor) ||
+      (category !== "execution" &&
+        count > 0 &&
+        count <= DEFAULT_EXPANDED_RESOURCE_LIMIT),
   );
   return (
     <details
@@ -671,12 +865,21 @@ function UnifiedCategory({
       </summary>
       {expanded ? (
         <div className="access-category-body">
-          {count ? (
-            <CategoryResourceList
-              capabilities={visibleCapabilities}
-              observations={visibleObservations}
-            />
-          ) : (
+          {editor}
+          {visibleCapabilities.length || visibleObservations.length ? (
+            <>
+              {editor ? (
+                <div className="access-network-evidence-heading">
+                  <strong>Other network access</strong>
+                  <span>Read-only settings, defaults, and recent activity</span>
+                </div>
+              ) : null}
+              <CategoryResourceList
+                capabilities={visibleCapabilities}
+                observations={visibleObservations}
+              />
+            </>
+          ) : editor ? null : (
             <p className="access-category-empty">No matching access.</p>
           )}
         </div>
@@ -688,6 +891,7 @@ function UnifiedCategory({
 function UnifiedAccess({
   capabilities,
   configurationSources,
+  networkEditor,
   observations,
   openingSource,
   onOpenSource,
@@ -695,6 +899,7 @@ function UnifiedAccess({
 }: {
   capabilities: AccessCapability[];
   configurationSources: string[];
+  networkEditor?: ReactNode;
   observations: AccessObservation[];
   openingSource: string | null;
   onOpenSource?: (path: string) => void | Promise<void>;
@@ -718,20 +923,32 @@ function UnifiedAccess({
         />
       </div>
       <div className="access-category-stack">
-        {categoryOrder.map((category) => (
-          <UnifiedCategory
-            capabilities={capabilities.filter(
-              (capability) => unifiedCategory(capability.category) === category,
-            )}
-            category={category}
-            key={category}
-            observations={observations.filter(
-              (observation) =>
-                unifiedCategory(observation.category) === category,
-            )}
-            visibleOrigins={visibleOrigins}
-          />
-        ))}
+        {categoryOrder.map((category) => {
+          const categoryCapabilities = capabilities.filter(
+            (capability) => unifiedCategory(capability.category) === category,
+          );
+          const editableCapabilities =
+            category === "network" && networkEditor
+              ? categoryCapabilities.filter((capability) => capability.rule)
+              : [];
+          const evidenceCapabilities = editableCapabilities.length
+            ? categoryCapabilities.filter((capability) => !capability.rule)
+            : categoryCapabilities;
+          return (
+            <UnifiedCategory
+              alwaysVisibleCount={editableCapabilities.length}
+              capabilities={evidenceCapabilities}
+              category={category}
+              editor={category === "network" ? networkEditor : undefined}
+              key={category}
+              observations={observations.filter(
+                (observation) =>
+                  unifiedCategory(observation.category) === category,
+              )}
+              visibleOrigins={visibleOrigins}
+            />
+          );
+        })}
       </div>
     </>
   );
@@ -739,17 +956,21 @@ function UnifiedAccess({
 
 interface AgentAccessPanelProps {
   agent?: AgentAccessReport;
+  allowAccessEditing?: boolean;
   loading?: boolean;
   stale?: boolean;
   unavailableDetail?: string;
+  onApplyNetworkRuleChange?: (change: NetworkRuleChange) => Promise<void>;
   onOpenSource?: (path: string) => void | Promise<void>;
 }
 
 export function AgentAccessPanel({
   agent,
+  allowAccessEditing = false,
   loading = false,
   stale = false,
   unavailableDetail,
+  onApplyNetworkRuleChange,
   onOpenSource,
 }: AgentAccessPanelProps) {
   const [openingSource, setOpeningSource] = useState<string | null>(null);
@@ -841,6 +1062,14 @@ export function AgentAccessPanel({
         <UnifiedAccess
           capabilities={visibleCapabilities}
           configurationSources={configurationSources}
+          networkEditor={
+            allowAccessEditing ? (
+              <AgentAccessEditor
+                agent={agent}
+                onApplyNetworkRuleChange={onApplyNetworkRuleChange}
+              />
+            ) : undefined
+          }
           observations={observations}
           onOpenSource={onOpenSource ? openSource : undefined}
           openedSource={openedSource}

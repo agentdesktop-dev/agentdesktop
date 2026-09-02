@@ -1,7 +1,13 @@
-use std::{env, fs, future::Future, io::ErrorKind, path::PathBuf, time::Duration};
+use std::{
+    env, fs,
+    future::Future,
+    io::ErrorKind,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 #[cfg(target_os = "macos")]
-use std::{ffi::OsString, io::Write, os::unix::fs::OpenOptionsExt, path::Path, process::Stdio};
+use std::{ffi::OsString, io::Write, os::unix::fs::OpenOptionsExt, process::Stdio};
 
 #[cfg(target_os = "macos")]
 use agentdesktop_agent::secure_fs;
@@ -25,6 +31,8 @@ use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
 };
+
+mod network_policy;
 
 const OPEN_MENU_ID: &str = "open";
 const QUIT_MENU_ID: &str = "quit";
@@ -574,6 +582,30 @@ async fn local_access_report() -> anyhow::Result<AccessReport> {
         .map_err(|error| anyhow::anyhow!("local access assessment failed: {error}"))
 }
 
+#[tauri::command]
+async fn apply_network_rule_change(
+    request: network_policy::NetworkRuleChangeRequest,
+) -> Result<AccessReport, String> {
+    let config = daemon_config().await?;
+    let _scan = LOCAL_ACCESS_SCAN.lock().await;
+    let user_home = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .ok_or_else(|| "Cannot change local network rules without a user home".to_owned())?;
+    let discovery = discovery::discover().await;
+    let initial_discovery = discovery.clone();
+    let initial_home = user_home.clone();
+    let report =
+        tokio::task::spawn_blocking(move || access::assess(&initial_discovery, &initial_home))
+            .await
+            .map_err(|error| format!("Local access assessment failed: {error}"))?;
+    network_policy::apply(&config, &report, &user_home, &request)
+        .map_err(|error| format!("{error:#}"))?;
+    tokio::task::spawn_blocking(move || access::assess(&discovery, &user_home))
+        .await
+        .map_err(|error| format!("Local access assessment failed: {error}"))
+}
+
 fn report_allows_access_source(report: &AccessReport, path: &PathBuf) -> bool {
     let Ok(path) = fs::canonicalize(path) else {
         return false;
@@ -681,6 +713,7 @@ mod access_source_tests {
                         kind,
                         path: Some(path),
                     },
+                    rule: None,
                     detail: None,
                 }],
                 observations: Vec::new(),
@@ -930,6 +963,7 @@ fn run_desktop() -> anyhow::Result<()> {
             get_managed_device_status,
             get_discovery,
             get_access_report,
+            apply_network_rule_change,
             open_access_source,
             get_remote_config,
             logout_managed_device,

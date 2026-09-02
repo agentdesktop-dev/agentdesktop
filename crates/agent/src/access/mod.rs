@@ -8,14 +8,17 @@ mod vscode;
 
 use std::{
     collections::BTreeMap,
+    fmt::Write as _,
     path::{Path, PathBuf},
 };
 
 use agentdesktop_core::model::{
     AccessCapability, AccessCategory, AccessCoverage, AccessCoverageStatus, AccessDecision,
     AccessEnforcement, AccessFinding, AccessOperation, AccessReport, AccessReportStatus,
-    AccessSeverity, AccessSource, AccessSourceKind, Agent, AgentAccessReport, Discovery,
+    AccessRuleMechanism, AccessRuleRef, AccessSeverity, AccessSource, AccessSourceKind, Agent,
+    AgentAccessReport, Discovery,
 };
+use sha2::{Digest, Sha256};
 
 pub fn assess(discovery: &Discovery, user_home: &Path) -> AccessReport {
     let mut homes = crate::discovery::metadata::user_home_dirs();
@@ -134,6 +137,7 @@ fn add_mcp_capabilities(
             enforcement: AccessEnforcement::Harness,
             workspace: None,
             source: source(AccessSourceKind::Mcp, Some(server.source.clone())),
+            rule: None,
             detail: Some(if server.enabled {
                 "Configured and enabled; per-tool approval depends on the harness".to_owned()
             } else {
@@ -154,6 +158,7 @@ fn add_mcp_capabilities(
                 enforcement: AccessEnforcement::Harness,
                 workspace: None,
                 source: source(AccessSourceKind::Mcp, Some(server.source.clone())),
+                rule: None,
                 detail: Some(format!("Endpoint for MCP server {}", server.name)),
             });
         } else if let Some(command) = server.command.as_deref() {
@@ -165,6 +170,7 @@ fn add_mcp_capabilities(
                 enforcement: AccessEnforcement::Harness,
                 workspace: None,
                 source: source(AccessSourceKind::Mcp, Some(server.source.clone())),
+                rule: None,
                 detail: Some(format!("Local process for MCP server {}", server.name)),
             });
             collected.findings.push(AccessFinding {
@@ -291,6 +297,44 @@ pub(super) fn source(kind: AccessSourceKind, path: Option<PathBuf>) -> AccessSou
     AccessSource { kind, path }
 }
 
+pub fn network_rule_id(
+    mechanism: &AccessRuleMechanism,
+    path: &Path,
+    native_identity: &str,
+) -> String {
+    let mechanism = match mechanism {
+        AccessRuleMechanism::VscodeUrlAutoApprove => "vscode-url-auto-approve",
+        AccessRuleMechanism::ClaudePermission => "claude-permission",
+        AccessRuleMechanism::ClaudeSandboxDomain => "claude-sandbox-domain",
+    };
+    let mut hasher = Sha256::new();
+    for value in [
+        "agentdesktop-network-rule-v1",
+        mechanism,
+        &path.to_string_lossy(),
+        native_identity,
+    ] {
+        hasher.update(value.as_bytes());
+        hasher.update([0]);
+    }
+    let mut id = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        write!(&mut id, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    id
+}
+
+pub(super) fn network_rule_ref(
+    mechanism: AccessRuleMechanism,
+    path: &Path,
+    native_identity: &str,
+) -> AccessRuleRef {
+    AccessRuleRef {
+        id: network_rule_id(&mechanism, path, native_identity),
+        mechanism,
+    }
+}
+
 pub(super) fn host_from_url(value: &str) -> Option<String> {
     url::Url::parse(value)
         .ok()
@@ -314,6 +358,10 @@ pub(super) fn host_pattern(value: &str) -> Option<String> {
         .and_then(|rest| rest.split_once(']').map(|(host, _)| host))
         .unwrap_or_else(|| authority.split(':').next().unwrap_or(authority));
     (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+pub fn normalize_network_resource(value: &str) -> Option<String> {
+    host_pattern(value)
 }
 
 pub(super) fn safe_command_identifier(command: &str) -> String {
@@ -407,6 +455,7 @@ mod tests {
                     enforcement: AccessEnforcement::Harness,
                     workspace: Some(PathBuf::from("/workspace")),
                     source: source(AccessSourceKind::Configuration, None),
+                    rule: None,
                     detail: None,
                 })
                 .collect(),
@@ -434,6 +483,7 @@ mod tests {
             enforcement: AccessEnforcement::Harness,
             workspace: None,
             source: source(AccessSourceKind::Configuration, None),
+            rule: None,
             detail: None,
         });
 
@@ -455,6 +505,7 @@ mod tests {
             enforcement: AccessEnforcement::None,
             workspace: Some(PathBuf::from("/workspace")),
             source: source(AccessSourceKind::History, None),
+            rule: None,
             detail: Some("Recorded full-access session".to_owned()),
         });
 

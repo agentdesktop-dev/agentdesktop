@@ -5,15 +5,16 @@ use std::{
 
 use agentdesktop_core::model::{
     AccessCapability, AccessCategory, AccessCoverage, AccessCoverageStatus, AccessDecision,
-    AccessEnforcement, AccessOperation, AccessSourceKind,
+    AccessEnforcement, AccessOperation, AccessRuleMechanism, AccessSourceKind,
 };
+use jsonc_parser::ParseOptions;
 use serde_json::Value;
 
 use super::{
     CollectedAccess,
     configuration::default_capability,
     history_scan::{HistoryAdapter, RuntimeCollector, permission_mode, runtime_capability},
-    host_pattern, plural_suffix, safe_command_identifier, source,
+    host_pattern, network_rule_ref, plural_suffix, safe_command_identifier, source,
 };
 
 pub(super) fn history_adapter(home: &Path) -> HistoryAdapter {
@@ -100,7 +101,8 @@ pub(super) fn inspect_configuration(home: &Path) -> CollectedAccess {
             continue;
         };
         inspected += 1;
-        parse_settings(&document, &path, &mut collected);
+        let editable = jsonc_parser::parse_to_value(&contents, &jsonc_options()).is_ok();
+        parse_settings(&document, &path, editable, &mut collected);
     }
     collected.capabilities.extend([
         default_capability(
@@ -155,7 +157,19 @@ pub(super) fn inspect_configuration(home: &Path) -> CollectedAccess {
     collected
 }
 
-fn parse_settings(document: &Value, path: &Path, collected: &mut CollectedAccess) {
+fn jsonc_options() -> ParseOptions {
+    ParseOptions {
+        allow_comments: true,
+        allow_loose_object_property_names: false,
+        allow_trailing_commas: true,
+        allow_missing_commas: false,
+        allow_single_quoted_strings: false,
+        allow_hexadecimal_numbers: false,
+        allow_unary_plus_numbers: false,
+    }
+}
+
+fn parse_settings(document: &Value, path: &Path, editable: bool, collected: &mut CollectedAccess) {
     if let Some(rules) = document
         .get("chat.tools.urls.autoApprove")
         .and_then(Value::as_object)
@@ -163,6 +177,20 @@ fn parse_settings(document: &Value, path: &Path, collected: &mut CollectedAccess
         for (pattern, value) in rules {
             let Some(resource) = host_pattern(pattern) else {
                 continue;
+            };
+            let editable_rule =
+                editable && value.is_boolean() && is_editable_url_pattern(pattern, &resource);
+            let rule = editable_rule.then(|| {
+                network_rule_ref(AccessRuleMechanism::VscodeUrlAutoApprove, path, pattern)
+            });
+            let detail = if editable_rule {
+                "VS Code URL tool auto-approval"
+            } else if !editable {
+                "Read-only because this settings file uses syntax Agentdesktop cannot safely rewrite"
+            } else if !value.is_boolean() {
+                "Advanced: request and response approvals are configured separately. Edit this rule in the configuration file"
+            } else {
+                "Read-only because this VS Code URL rule includes a path, port, or other advanced pattern"
             };
             collected.capabilities.push(AccessCapability {
                 category: AccessCategory::Network,
@@ -172,7 +200,8 @@ fn parse_settings(document: &Value, path: &Path, collected: &mut CollectedAccess
                 enforcement: AccessEnforcement::Harness,
                 workspace: None,
                 source: source(AccessSourceKind::Configuration, Some(path.to_path_buf())),
-                detail: Some("VS Code URL tool auto-approval".to_owned()),
+                rule,
+                detail: Some(detail.to_owned()),
             });
         }
     }
@@ -189,10 +218,18 @@ fn parse_settings(document: &Value, path: &Path, collected: &mut CollectedAccess
                 enforcement: AccessEnforcement::Harness,
                 workspace: None,
                 source: source(AccessSourceKind::Configuration, Some(path.to_path_buf())),
+                rule: None,
                 detail: Some("VS Code terminal auto-approval".to_owned()),
             });
         }
     }
+}
+
+fn is_editable_url_pattern(pattern: &str, resource: &str) -> bool {
+    let pattern = pattern.trim();
+    pattern.eq_ignore_ascii_case(resource)
+        || pattern.eq_ignore_ascii_case(&format!("https://{resource}"))
+        || pattern.eq_ignore_ascii_case(&format!("http://{resource}"))
 }
 
 fn approval(value: &Value) -> AccessDecision {
@@ -231,7 +268,7 @@ mod tests {
     use std::path::Path;
 
     use agentdesktop_core::model::{
-        AccessCategory, AccessDecision, AccessEnforcement, AccessSourceKind,
+        AccessCategory, AccessDecision, AccessEnforcement, AccessRuleMechanism, AccessSourceKind,
     };
     use serde_json::json;
 
@@ -244,13 +281,15 @@ mod tests {
         parse_settings(
             &json!({
                 "chat.tools.urls.autoApprove": {
-                    "https://*.example.com/private?token=secret": true
+                    "https://*.example.com/private?token=secret": true,
+                    "api.example.com": true
                 },
                 "chat.tools.terminal.autoApprove": {
                     "TOKEN=secret kubectl get pods": true
                 }
             }),
             Path::new("settings.json"),
+            true,
             &mut collected,
         );
 
@@ -258,9 +297,84 @@ mod tests {
             capability.category == AccessCategory::Network && capability.resource == "*.example.com"
         }));
         assert!(collected.capabilities.iter().any(|capability| {
+            capability.resource == "*.example.com" && capability.rule.is_none()
+        }));
+        assert!(collected.capabilities.iter().any(|capability| {
+            capability.resource == "api.example.com"
+                && capability.rule.as_ref().is_some_and(|rule| {
+                    rule.mechanism == AccessRuleMechanism::VscodeUrlAutoApprove
+                        && rule.id.len() == 64
+                })
+        }));
+        assert!(collected.capabilities.iter().any(|capability| {
             capability.category == AccessCategory::Execution && capability.resource == "kubectl get"
         }));
         assert!(!format!("{:?}", collected.capabilities).contains("secret"));
+    }
+
+    #[test]
+    fn json5_only_sources_do_not_expose_edit_handles() {
+        let mut collected = CollectedAccess::default();
+        parse_settings(
+            &json!({
+                "chat.tools.urls.autoApprove": {
+                    "api.example.com": true
+                }
+            }),
+            Path::new("settings.json"),
+            false,
+            &mut collected,
+        );
+
+        assert!(
+            collected
+                .capabilities
+                .iter()
+                .all(|capability| capability.rule.is_none())
+        );
+    }
+
+    #[test]
+    fn simple_origin_url_rules_expose_edit_handles() {
+        let mut collected = CollectedAccess::default();
+        parse_settings(
+            &json!({
+                "chat.tools.urls.autoApprove": {
+                    "https://api.example.com": true,
+                    "https://*.example.org": false,
+                    "https://request.example.net": { "approveRequest": true },
+                    "https://response.example.net": { "approveResponse": true },
+                    "https://api.example.net/private": true,
+                    "https://advanced.example.com": { "allow": true }
+                }
+            }),
+            Path::new("settings.json"),
+            true,
+            &mut collected,
+        );
+
+        for resource in ["api.example.com", "*.example.org"] {
+            assert!(collected.capabilities.iter().any(|capability| {
+                capability.resource == resource && capability.rule.is_some()
+            }));
+        }
+        for resource in [
+            "request.example.net",
+            "response.example.net",
+            "api.example.net",
+            "advanced.example.com",
+        ] {
+            assert!(collected.capabilities.iter().any(|capability| {
+                capability.resource == resource && capability.rule.is_none()
+            }));
+        }
+        assert!(collected.capabilities.iter().any(|capability| {
+            capability.resource == "request.example.net"
+                && capability
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.starts_with("Advanced:"))
+        }));
     }
 
     #[test]

@@ -93,6 +93,7 @@ pub(in crate::access) fn runtime_capability(
         enforcement,
         workspace: workspace.map(Path::to_path_buf),
         source: source(AccessSourceKind::History, None),
+        rule: None,
         detail: Some(detail.to_owned()),
     }
 }
@@ -464,15 +465,18 @@ pub(super) fn workspace_from_record(value: &Value) -> Option<PathBuf> {
 struct ObservationKey {
     category: AccessCategory,
     resource: String,
-    operation: AccessOperation,
+    operation: Option<AccessOperation>,
     workspace: Option<PathBuf>,
-    confidence: AccessConfidence,
 }
 
 struct ObservationValue {
     count: u64,
+    confidence: AccessConfidence,
     evidence_updated_at_unix_ms: Option<u64>,
-    source: PathBuf,
+    operations: BTreeSet<AccessOperation>,
+    resources: BTreeSet<String>,
+    sources: BTreeSet<PathBuf>,
+    workspaces: BTreeSet<PathBuf>,
 }
 
 #[derive(Default)]
@@ -493,12 +497,25 @@ impl ObservationCollector {
         source_path: &Path,
         timestamp: Option<u64>,
     ) {
+        let category = match category {
+            AccessCategory::Browser => AccessCategory::Network,
+            category => category,
+        };
+        let heuristic = confidence == AccessConfidence::Heuristic;
+        let grouped = matches!(
+            category,
+            AccessCategory::Execution | AccessCategory::Filesystem
+        );
+        let grouped_resource = if category == AccessCategory::Filesystem {
+            filesystem_group(&resource, workspace.as_deref())
+        } else {
+            resource.clone()
+        };
         let key = ObservationKey {
             category,
-            resource,
-            operation,
-            workspace,
-            confidence,
+            resource: grouped_resource,
+            operation: (!grouped).then(|| operation.clone()),
+            workspace: (!grouped).then(|| workspace.clone()).flatten(),
         };
         if !self.values.contains_key(&key) && self.values.len() >= MAX_HISTORY_OBSERVATIONS {
             self.limited = true;
@@ -506,11 +523,24 @@ impl ObservationCollector {
         }
         let entry = self.values.entry(key).or_insert_with(|| ObservationValue {
             count: 0,
+            confidence,
             evidence_updated_at_unix_ms: timestamp,
-            source: source_path.to_path_buf(),
+            operations: BTreeSet::new(),
+            resources: BTreeSet::new(),
+            sources: BTreeSet::new(),
+            workspaces: BTreeSet::new(),
         });
         entry.count = entry.count.saturating_add(1);
+        if heuristic {
+            entry.confidence = AccessConfidence::Heuristic;
+        }
         entry.evidence_updated_at_unix_ms = entry.evidence_updated_at_unix_ms.max(timestamp);
+        entry.operations.insert(operation);
+        entry.resources.insert(resource);
+        entry.sources.insert(source_path.to_path_buf());
+        if let Some(workspace) = workspace {
+            entry.workspaces.insert(workspace);
+        }
     }
 
     pub(super) fn finish(self) -> (Vec<AccessObservation>, bool) {
@@ -522,15 +552,28 @@ impl ObservationCollector {
         let mut observations: Vec<_> = self
             .values
             .into_iter()
-            .map(|(key, value)| AccessObservation {
-                category: key.category,
-                resource: key.resource,
-                operation: key.operation,
-                workspace: key.workspace,
-                count: value.count,
-                evidence_updated_at_unix_ms: value.evidence_updated_at_unix_ms,
-                confidence: key.confidence,
-                source: source(AccessSourceKind::History, Some(value.source)),
+            .map(|(key, value)| {
+                let workspace = if value.workspaces.len() == 1 {
+                    value.workspaces.first().cloned()
+                } else {
+                    key.workspace
+                };
+                let source_path = (value.sources.len() == 1)
+                    .then(|| value.sources.first().cloned())
+                    .flatten();
+                AccessObservation {
+                    category: key.category,
+                    resource: key.resource,
+                    operations: value.operations.into_iter().collect(),
+                    workspace,
+                    count: value.count,
+                    session_count: value.sources.len().try_into().unwrap_or(u64::MAX),
+                    resource_count: value.resources.len().try_into().unwrap_or(u64::MAX),
+                    workspace_count: value.workspaces.len().try_into().unwrap_or(u64::MAX),
+                    evidence_updated_at_unix_ms: value.evidence_updated_at_unix_ms,
+                    confidence: value.confidence,
+                    source: source(AccessSourceKind::History, source_path),
+                }
             })
             .collect();
         observations.sort_by(|left, right| {
@@ -546,9 +589,26 @@ impl ObservationCollector {
     }
 }
 
+fn filesystem_group(resource: &str, workspace: Option<&Path>) -> String {
+    let path = Path::new(resource);
+    if let Some(workspace) = workspace
+        && path.starts_with(workspace)
+    {
+        return workspace.display().to_string();
+    }
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, path::Path};
+    use std::{
+        collections::BTreeSet,
+        path::{Path, PathBuf},
+    };
 
     use agentdesktop_core::model::{
         AccessCategory, AccessConfidence, AccessDecision, AccessEnforcement, AccessOperation,
@@ -608,17 +668,17 @@ mod tests {
             &mut RuntimeCollector::default(),
         );
         let (observations, _) = observations.finish();
-        let expected_path = workspace.join("src").join("main.rs");
         let filesystem = observations
             .iter()
             .find(|observation| {
                 observation.category == AccessCategory::Filesystem
-                    && observation.operation == AccessOperation::Read
+                    && observation.operations.contains(&AccessOperation::Read)
                     && observation.confidence == AccessConfidence::High
             })
             .expect("read_file should produce a high-confidence filesystem observation");
 
-        assert_eq!(Path::new(&filesystem.resource), expected_path.as_path());
+        assert_eq!(Path::new(&filesystem.resource), workspace.as_path());
+        assert_eq!(filesystem.resource_count, 1);
         assert!(observations.iter().any(|observation| {
             observation.category == AccessCategory::Network
                 && observation.resource == "api.example.com"
@@ -653,9 +713,9 @@ mod tests {
         let mut observations = ObservationCollector::default();
         for (index, timestamp) in [10, 30, 20].into_iter().enumerate() {
             observations.record(
-                AccessCategory::Filesystem,
-                format!("/workspace/{index}"),
-                AccessOperation::Read,
+                AccessCategory::Network,
+                format!("host-{index}.example.com"),
+                AccessOperation::Connect,
                 None,
                 AccessConfidence::High,
                 Path::new("history.jsonl"),
@@ -672,13 +732,135 @@ mod tests {
     }
 
     #[test]
+    fn groups_commands_across_sessions_and_filesystem_by_workspace() {
+        let workspace = PathBuf::from("/workspace/project");
+        let other_workspace = PathBuf::from("/workspace/other");
+        let mut observations = ObservationCollector::default();
+        observations.record(
+            AccessCategory::Execution,
+            "cd".to_owned(),
+            AccessOperation::Execute,
+            Some(workspace.clone()),
+            AccessConfidence::High,
+            Path::new("session-1.jsonl"),
+            Some(10),
+        );
+        observations.record(
+            AccessCategory::Execution,
+            "cd".to_owned(),
+            AccessOperation::Execute,
+            Some(other_workspace),
+            AccessConfidence::High,
+            Path::new("session-2.jsonl"),
+            Some(20),
+        );
+        observations.record(
+            AccessCategory::Filesystem,
+            workspace.join("src/a.rs").display().to_string(),
+            AccessOperation::Read,
+            Some(workspace.clone()),
+            AccessConfidence::High,
+            Path::new("session-1.jsonl"),
+            Some(10),
+        );
+        observations.record(
+            AccessCategory::Filesystem,
+            workspace.join("src/b.rs").display().to_string(),
+            AccessOperation::Write,
+            Some(workspace.clone()),
+            AccessConfidence::High,
+            Path::new("session-2.jsonl"),
+            Some(20),
+        );
+
+        let (observations, limited) = observations.finish();
+
+        assert!(!limited);
+        assert_eq!(observations.len(), 2);
+        let command = observations
+            .iter()
+            .find(|observation| observation.category == AccessCategory::Execution)
+            .unwrap();
+        assert_eq!(command.resource, "cd");
+        assert_eq!(command.operations, vec![AccessOperation::Execute]);
+        assert_eq!(command.count, 2);
+        assert_eq!(command.session_count, 2);
+        assert_eq!(command.resource_count, 1);
+        assert_eq!(command.workspace_count, 2);
+        assert!(command.workspace.is_none());
+        assert!(command.source.path.is_none());
+
+        let filesystem = observations
+            .iter()
+            .find(|observation| observation.category == AccessCategory::Filesystem)
+            .unwrap();
+        assert_eq!(Path::new(&filesystem.resource), workspace);
+        assert_eq!(
+            filesystem.operations,
+            vec![AccessOperation::Read, AccessOperation::Write]
+        );
+        assert_eq!(filesystem.count, 2);
+        assert_eq!(filesystem.session_count, 2);
+        assert_eq!(filesystem.resource_count, 2);
+        assert_eq!(filesystem.workspace_count, 1);
+        assert_eq!(filesystem.workspace.as_deref(), Some(workspace.as_path()));
+        assert!(filesystem.source.path.is_none());
+    }
+
+    #[test]
+    fn groups_browser_and_network_observations_by_host_and_workspace() {
+        let workspace = PathBuf::from("/workspace/project");
+        let mut observations = ObservationCollector::default();
+        for (category, confidence, source) in [
+            (
+                AccessCategory::Network,
+                AccessConfidence::Heuristic,
+                "session-1.jsonl",
+            ),
+            (
+                AccessCategory::Browser,
+                AccessConfidence::High,
+                "session-1.jsonl",
+            ),
+            (
+                AccessCategory::Browser,
+                AccessConfidence::High,
+                "session-2.jsonl",
+            ),
+        ] {
+            observations.record(
+                category,
+                "localhost".to_owned(),
+                AccessOperation::Connect,
+                Some(workspace.clone()),
+                confidence,
+                Path::new(source),
+                Some(20),
+            );
+        }
+
+        let (observations, limited) = observations.finish();
+
+        assert!(!limited);
+        assert_eq!(observations.len(), 1);
+        let localhost = &observations[0];
+        assert_eq!(localhost.category, AccessCategory::Network);
+        assert_eq!(localhost.resource, "localhost");
+        assert_eq!(localhost.operations, vec![AccessOperation::Connect]);
+        assert_eq!(localhost.count, 3);
+        assert_eq!(localhost.session_count, 2);
+        assert_eq!(localhost.workspace_count, 1);
+        assert_eq!(localhost.confidence, AccessConfidence::Heuristic);
+    }
+
+    #[test]
     fn observation_collection_is_bounded_while_scanning() {
         let mut observations = ObservationCollector::default();
         for index in 0..=super::MAX_HISTORY_OBSERVATIONS {
             observations.record(
-                AccessCategory::Filesystem,
-                format!("/workspace/{index}"),
-                AccessOperation::Read,
+                AccessCategory::Network,
+                format!("host-{index}.example.com"),
+                AccessOperation::Connect,
                 None,
                 AccessConfidence::High,
                 Path::new("history.jsonl"),

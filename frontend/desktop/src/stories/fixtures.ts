@@ -299,6 +299,15 @@ export const populatedAccessReport: AccessReport = {
           detail: "VS Code agent workspace access",
         },
         {
+          category: "filesystem",
+          resource: "active workspace",
+          operations: ["write"],
+          decision: "ask",
+          enforcement: "harness",
+          source: { kind: "default" },
+          detail: "Write approval depends on the session permission level",
+        },
+        {
           category: "execution",
           resource: "cargo test",
           operations: ["execute"],
@@ -348,6 +357,10 @@ export const populatedAccessReport: AccessReport = {
             kind: "configuration",
             path: "/Users/developer/Library/Application Support/Code/User/settings.json",
           },
+          rule: {
+            id: "vscode-url-githubusercontent",
+            mechanism: "vscodeUrlAutoApprove",
+          },
           detail: "VS Code URL tool auto-approval",
         },
         {
@@ -359,6 +372,10 @@ export const populatedAccessReport: AccessReport = {
           source: {
             kind: "configuration",
             path: "/Users/developer/Library/Application Support/Code/User/settings.json",
+          },
+          rule: {
+            id: "vscode-url-amazon",
+            mechanism: "vscodeUrlAutoApprove",
           },
           detail: "VS Code URL tool auto-approval",
         },
@@ -372,6 +389,10 @@ export const populatedAccessReport: AccessReport = {
             kind: "configuration",
             path: "/Users/developer/Library/Application Support/Code/User/settings.json",
           },
+          rule: {
+            id: "vscode-url-apple",
+            mechanism: "vscodeUrlAutoApprove",
+          },
           detail: "VS Code URL tool auto-approval",
         },
         {
@@ -384,6 +405,10 @@ export const populatedAccessReport: AccessReport = {
             kind: "configuration",
             path: "/Users/developer/Library/Application Support/Code/User/settings.json",
           },
+          rule: {
+            id: "vscode-url-cilium",
+            mechanism: "vscodeUrlAutoApprove",
+          },
           detail: "VS Code URL tool auto-approval",
         },
         {
@@ -395,6 +420,10 @@ export const populatedAccessReport: AccessReport = {
           source: {
             kind: "configuration",
             path: "/Users/developer/Library/Application Support/Code/User/settings.json",
+          },
+          rule: {
+            id: "vscode-url-api-github",
+            mechanism: "vscodeUrlAutoApprove",
           },
           detail: "VS Code URL tool auto-approval",
         },
@@ -441,11 +470,38 @@ export const populatedAccessReport: AccessReport = {
       observations: [
         {
           category: "filesystem",
-          resource:
-            "/Users/developer/projects/agentdesktop/frontend/desktop/src/components/AgentToolInventory.tsx",
-          operation: "read",
+          resource: "/Users/developer/projects/agentdesktop",
+          operations: ["read", "write"],
           workspace: "/Users/developer/projects/agentdesktop",
-          count: 12,
+          count: 42,
+          sessionCount: 8,
+          resourceCount: 31,
+          workspaceCount: 1,
+          evidenceUpdatedAtUnixMs: 1788134400000,
+          confidence: "high",
+          source: { kind: "history" },
+        },
+        {
+          category: "execution",
+          resource: "cd",
+          operations: ["execute"],
+          count: 18,
+          sessionCount: 7,
+          resourceCount: 1,
+          workspaceCount: 3,
+          evidenceUpdatedAtUnixMs: 1788134400000,
+          confidence: "high",
+          source: { kind: "history" },
+        },
+        {
+          category: "network",
+          resource: "docs.rs",
+          operations: ["connect"],
+          workspace: "/Users/developer/projects/agentdesktop",
+          count: 3,
+          sessionCount: 2,
+          resourceCount: 1,
+          workspaceCount: 1,
           evidenceUpdatedAtUnixMs: 1788134400000,
           confidence: "high",
           source: {
@@ -455,23 +511,13 @@ export const populatedAccessReport: AccessReport = {
         },
         {
           category: "network",
-          resource: "docs.rs",
-          operation: "connect",
-          workspace: "/Users/developer/projects/agentdesktop",
-          count: 3,
-          evidenceUpdatedAtUnixMs: 1788134400000,
-          confidence: "high",
-          source: {
-            kind: "history",
-            path: "/Users/developer/Library/Application Support/Code/User/workspaceStorage/session/chatSessions/access.jsonl",
-          },
-        },
-        {
-          category: "browser",
           resource: "localhost",
-          operation: "connect",
+          operations: ["connect"],
           workspace: "/Users/developer/projects/agentdesktop",
           count: 4,
+          sessionCount: 2,
+          resourceCount: 1,
+          workspaceCount: 1,
           evidenceUpdatedAtUnixMs: 1788134400000,
           confidence: "high",
           source: {
@@ -542,6 +588,10 @@ export const populatedAccessReport: AccessReport = {
             kind: "configuration",
             path: "/Users/developer/.claude/settings.json",
           },
+          rule: {
+            id: "claude-sandbox-github",
+            mechanism: "claudeSandboxDomain",
+          },
           detail: "Claude sandbox network rule",
         },
         {
@@ -575,9 +625,12 @@ export const populatedAccessReport: AccessReport = {
           category: "filesystem",
           resource:
             "/Users/developer/projects/agentdesktop/crates/agent/src/access/configuration.rs",
-          operation: "read",
+          operations: ["read"],
           workspace: "/Users/developer/projects/agentdesktop",
           count: 7,
+          sessionCount: 3,
+          resourceCount: 5,
+          workspaceCount: 1,
           evidenceUpdatedAtUnixMs: 1788134400000,
           confidence: "high",
           source: {
@@ -588,9 +641,12 @@ export const populatedAccessReport: AccessReport = {
         {
           category: "network",
           resource: "registry.npmjs.org",
-          operation: "connect",
+          operations: ["connect"],
           workspace: "/Users/developer/projects/agentdesktop",
           count: 2,
+          sessionCount: 2,
+          resourceCount: 1,
+          workspaceCount: 1,
           evidenceUpdatedAtUnixMs: 1788134400000,
           confidence: "heuristic",
           source: {

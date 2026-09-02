@@ -91,8 +91,26 @@ pub struct AccessCapability {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<PathBuf>,
     pub source: AccessSource,
+    /// Opaque identity for a configured rule that the local policy editor can change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<AccessRuleRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessRuleRef {
+    pub id: String,
+    pub mechanism: AccessRuleMechanism,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase")]
+pub enum AccessRuleMechanism {
+    VscodeUrlAutoApprove,
+    ClaudePermission,
+    ClaudeSandboxDomain,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -100,10 +118,17 @@ pub struct AccessCapability {
 pub struct AccessObservation {
     pub category: AccessCategory,
     pub resource: String,
-    pub operation: AccessOperation,
+    pub operations: Vec<AccessOperation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<PathBuf>,
+    /// Total matching tool calls found in session history.
     pub count: u64,
+    /// Distinct session history files containing this observation.
+    pub session_count: u64,
+    /// Distinct underlying resources represented by this row.
+    pub resource_count: u64,
+    /// Distinct workspaces containing this observation.
+    pub workspace_count: u64,
     /// Latest modification time among history files containing this observation.
     /// This is evidence freshness, not necessarily the event's execution time.
     #[serde(default, skip_serializing_if = "Option::is_none")]

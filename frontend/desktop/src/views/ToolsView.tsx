@@ -23,6 +23,7 @@ import type {
   AgentAccessReport,
   DiscoveredAgent,
   Discovery,
+  NetworkRuleChange,
 } from "../types";
 import { agentAccessStatus } from "./AccessView";
 
@@ -32,7 +33,9 @@ interface ToolsViewProps {
   accessReport: AccessReport | null;
   accessStale: boolean;
   discovery: Discovery | null;
+  onApplyNetworkRuleChange?: (change: NetworkRuleChange) => Promise<void>;
   onOpenAccessSource?: (path: string) => void | Promise<void>;
+  allowAccessEditing: boolean;
   unavailable: boolean;
 }
 
@@ -185,7 +188,9 @@ export function ToolsView({
   accessLoading,
   accessReport,
   accessStale,
+  allowAccessEditing,
   discovery,
+  onApplyNetworkRuleChange,
   onOpenAccessSource,
   unavailable,
 }: ToolsViewProps) {
@@ -257,7 +262,9 @@ export function ToolsView({
                     : undefined
                 }
                 agent={agent}
+                allowAccessEditing={allowAccessEditing}
                 key={`${agent.kind}-${agent.executable}`}
+                onApplyNetworkRuleChange={onApplyNetworkRuleChange}
                 onOpenAccessSource={onOpenAccessSource}
                 unavailableDetail={accessReport?.detail}
               />
