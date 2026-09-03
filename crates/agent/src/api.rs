@@ -1,18 +1,19 @@
-use std::{net::SocketAddr, path::PathBuf};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Query, State},
     http::StatusCode,
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 use agentdesktop_core::{
     config::{DaemonConfig, LlmGatewayAuthentication, ProgramAuthentication, valid_client_id},
     model::{
-        Discovery, EnrollmentStatus, LlmGatewayCredential, TelemetryEvent, TelemetryEventKind,
+        AccessReport, Discovery, EnrollmentStatus, LlmGatewayCredential, TelemetryEvent,
+        TelemetryEventKind,
     },
 };
 
@@ -22,12 +23,17 @@ use crate::{enrollment::EnrollmentState, gateway_oidc, remote, subscription};
 pub struct AppState {
     pub config: DaemonConfig,
     pub discovery: Discovery,
+    pub access_user_home: Option<PathBuf>,
+    pub access_scan: Arc<Mutex<()>>,
     pub enrollment: EnrollmentState,
     pub state_dir: PathBuf,
     pub oidc_callback_listen: Option<SocketAddr>,
     pub telemetry: Option<mpsc::Sender<TelemetryEvent>>,
     pub logout: Option<mpsc::Sender<remote::LogoutRequest>>,
 }
+
+#[derive(Clone)]
+pub(crate) struct AccessUserHome(pub PathBuf);
 
 #[derive(Serialize)]
 struct Health {
@@ -46,6 +52,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/effective-config", get(effective_config))
         .route("/v1/remote-config", get(remote_config))
         .route("/v1/discovery", get(discover))
+        .route("/v1/access", get(access))
         .route("/v1/enrollment", get(enrollment))
         .route("/v1/logout", post(logout))
         .route("/v1/telemetry", post(telemetry))
@@ -177,6 +184,31 @@ async fn remote_config(
 
 async fn discover(State(state): State<AppState>) -> Json<Discovery> {
     Json(state.discovery)
+}
+
+async fn access(
+    State(state): State<AppState>,
+    peer_home: Option<Extension<AccessUserHome>>,
+) -> Result<Json<AccessReport>, (StatusCode, String)> {
+    let user_home = state
+        .access_user_home
+        .or_else(|| peer_home.map(|Extension(home)| home.0));
+    let Some(user_home) = user_home else {
+        return Ok(Json(crate::access::unavailable(
+            "Local access audit is unavailable because the local API could not identify the calling OS user",
+        )));
+    };
+    let _scan = state.access_scan.lock().await;
+    let discovery = crate::discovery::discover().await;
+    tokio::task::spawn_blocking(move || crate::access::assess(&discovery, &user_home))
+        .await
+        .map(Json)
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("collect local access audit: {error}"),
+            )
+        })
 }
 
 async fn enrollment(State(state): State<AppState>) -> Json<EnrollmentStatus> {

@@ -1,3 +1,4 @@
+pub mod access;
 pub mod anthropic_oauth;
 pub mod api;
 pub mod cli;

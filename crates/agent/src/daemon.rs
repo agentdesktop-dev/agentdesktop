@@ -2,6 +2,7 @@ use std::{
     future::Future,
     net::SocketAddr,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 #[cfg(unix)]
@@ -20,7 +21,7 @@ use hyper_util::{rt::TokioIo, service::TowerToHyperService};
 use tokio::net::UnixListener;
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 #[cfg(windows)]
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 
@@ -331,6 +332,17 @@ where
             "discovered model runtime"
         );
     }
+    #[cfg(not(windows))]
+    let access_user_home = if args.user {
+        Some(
+            discovery::metadata::home_dir()
+                .context("collect local access audit without a user home")?,
+        )
+    } else {
+        None
+    };
+    #[cfg(windows)]
+    let access_user_home = None;
     let (telemetry_sender, telemetry_receiver) = mpsc::channel(256);
     let telemetry = config.controller.as_ref().map(|_| telemetry_sender.clone());
     let (logout_sender, logout_receiver) = mpsc::channel(1);
@@ -363,6 +375,8 @@ where
     let app = api::router(api::AppState {
         config,
         discovery,
+        access_user_home,
+        access_scan: Arc::new(Mutex::new(())),
         enrollment,
         state_dir: args.state_dir,
         oidc_callback_listen: args.oidc_callback_listen,
@@ -534,7 +548,9 @@ async fn serve_unix(
                 let (stream, _) = accepted.context("accept connection")?;
                 let peer = stream.peer_cred().context("inspect local API peer credentials")?;
                 tracing::debug!(peer_uid = peer.uid(), peer_pid = peer.pid(), "accepted local API connection");
-                let app = app.clone();
+                let app = crate::discovery::metadata::home_dir_for_uid(peer.uid())
+                    .map(|home| app.clone().layer(axum::Extension(api::AccessUserHome(home))))
+                    .unwrap_or_else(|| app.clone());
                 tokio::spawn(async move {
                     if let Err(error) = serve_local_connection(stream, app).await {
                         tracing::warn!(%error, "failed to serve local API connection");

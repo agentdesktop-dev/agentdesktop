@@ -5,6 +5,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(unix)]
+use std::{ffi::CStr, os::unix::ffi::OsStringExt};
+
 use agentdesktop_core::model::Skill;
 use serde::Deserialize;
 
@@ -158,7 +161,7 @@ pub(super) fn electron_asar_version(path: &Path, product_name: &str) -> Option<S
         .then_some(metadata.version)
 }
 
-pub(super) fn home_dir() -> Option<PathBuf> {
+pub(crate) fn home_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
         if let Some(profile) = env_path("USERPROFILE") {
@@ -175,6 +178,37 @@ pub(super) fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+#[cfg(unix)]
+pub(crate) fn home_dir_for_uid(uid: u32) -> Option<PathBuf> {
+    let suggested = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
+    let size = if suggested > 0 {
+        usize::try_from(suggested).ok()?.min(1024 * 1024)
+    } else {
+        16 * 1024
+    };
+    let mut buffer = vec![0_u8; size];
+    let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+    let mut result = std::ptr::null_mut();
+    let status = unsafe {
+        libc::getpwuid_r(
+            uid,
+            entry.as_mut_ptr(),
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            &mut result,
+        )
+    };
+    if status != 0 || result.is_null() {
+        return None;
+    }
+    let entry = unsafe { entry.assume_init() };
+    if entry.pw_dir.is_null() {
+        return None;
+    }
+    let bytes = unsafe { CStr::from_ptr(entry.pw_dir) }.to_bytes();
+    (!bytes.is_empty()).then(|| PathBuf::from(std::ffi::OsString::from_vec(bytes.to_vec())))
+}
+
 #[cfg(windows)]
 pub(super) fn env_path(name: &str) -> Option<PathBuf> {
     env::var_os(name)
@@ -186,7 +220,7 @@ pub(super) fn env_path(name: &str) -> Option<PathBuf> {
 ///
 /// The daemon commonly runs as root or in a container, so its own `HOME` is
 /// not necessarily the home of the users whose tools it discovers.
-pub(super) fn user_home_dirs() -> Vec<PathBuf> {
+pub(crate) fn user_home_dirs() -> Vec<PathBuf> {
     let mut homes = BTreeSet::new();
     homes.extend(home_dir());
 
@@ -306,6 +340,9 @@ fn skill_front_matter(contents: &str) -> Option<BTreeMap<String, serde_json::Val
 mod tests {
     use super::skill_front_matter;
 
+    #[cfg(unix)]
+    use super::home_dir_for_uid;
+
     #[test]
     fn reads_only_skill_front_matter() {
         let front_matter = skill_front_matter(
@@ -317,5 +354,15 @@ mod tests {
         assert_eq!(front_matter["description"], "Deploy safely");
         assert_eq!(front_matter["allowed-tools"][0], "Bash");
         assert!(!front_matter.contains_key("body"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_the_current_users_home_from_their_uid() {
+        let uid = unsafe { libc::geteuid() };
+        let home = home_dir_for_uid(uid).expect("current user has a passwd entry");
+
+        assert!(home.is_absolute());
+        assert!(home.is_dir());
     }
 }
