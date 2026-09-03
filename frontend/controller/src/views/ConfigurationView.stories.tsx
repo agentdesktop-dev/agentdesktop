@@ -102,6 +102,7 @@ export const BuildsSandboxYaml: Story = {
     await expect(
       canvas.getByRole("button", { name: /OpenCode/ }),
     ).toBeDisabled();
+    await expect(canvas.getByRole("button", { name: /Goose/ })).toBeDisabled();
     await expect(canvas.getByRole("button", { name: /Codex/ })).toBeEnabled();
   },
 };

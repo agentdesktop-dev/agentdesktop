@@ -83,6 +83,14 @@ pub struct DaemonArgs {
     #[arg(long)]
     codex_managed_config: Option<PathBuf>,
 
+    /// Path to Goose's YAML configuration.
+    #[arg(long)]
+    goose_config: Option<PathBuf>,
+
+    /// Path to Agentdesktop's Goose provider definition.
+    #[arg(long)]
+    goose_provider: Option<PathBuf>,
+
     /// Path to OpenCode's system-managed JSONC configuration.
     #[arg(long)]
     open_code_managed_config: Option<PathBuf>,
@@ -102,6 +110,8 @@ struct ResolvedDaemonArgs {
     claude_desktop_managed_settings: PathBuf,
     claude_desktop_credential_helper: PathBuf,
     codex_managed_config: PathBuf,
+    goose_config: PathBuf,
+    goose_provider: PathBuf,
     open_code_managed_config: PathBuf,
     open_code_plugin: PathBuf,
     once: bool,
@@ -130,6 +140,12 @@ impl DaemonArgs {
                 codex_managed_config: self
                     .codex_managed_config
                     .unwrap_or_else(reconcile::default_codex_managed_config_path),
+                goose_config: self
+                    .goose_config
+                    .unwrap_or_else(reconcile::default_goose_config_path),
+                goose_provider: self
+                    .goose_provider
+                    .unwrap_or_else(reconcile::default_goose_provider_path),
                 open_code_managed_config: self
                     .open_code_managed_config
                     .unwrap_or_else(reconcile::default_open_code_managed_config_path),
@@ -157,6 +173,15 @@ impl DaemonArgs {
             socket
         };
         let claude_desktop_settings = user_claude_desktop_settings(&home, &config_home);
+        let goose_config = self
+            .goose_config
+            .unwrap_or_else(|| user_goose_config(&home, &config_home));
+        let goose_provider = self.goose_provider.unwrap_or_else(|| {
+            goose_config
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("custom_providers/agentdesktop.json")
+        });
         Ok(ResolvedDaemonArgs {
             user: true,
             config: self
@@ -177,6 +202,8 @@ impl DaemonArgs {
             codex_managed_config: self
                 .codex_managed_config
                 .unwrap_or_else(|| home.join(".codex/config.toml")),
+            goose_config,
+            goose_provider,
             open_code_managed_config: self
                 .open_code_managed_config
                 .unwrap_or_else(|| config_home.join("opencode/opencode.json")),
@@ -221,6 +248,16 @@ fn user_claude_desktop_settings(_home: &Path, _config_home: &Path) -> PathBuf {
     return _config_home.join("Claude/claude_desktop_config.json");
 }
 
+fn user_goose_config(_home: &Path, _config_home: &Path) -> PathBuf {
+    #[cfg(not(windows))]
+    return _config_home.join("goose/config.yaml");
+    #[cfg(windows)]
+    return std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| _home.join("AppData/Roaming"))
+        .join("Block/goose/config/config.yaml");
+}
+
 pub async fn run(args: DaemonArgs, socket: PathBuf) -> anyhow::Result<()> {
     run_until_shutdown(args, socket, async {
         tokio::signal::ctrl_c()
@@ -249,6 +286,8 @@ where
         args.claude_desktop_managed_settings.clone(),
         args.claude_desktop_credential_helper.clone(),
         args.codex_managed_config.clone(),
+        args.goose_config.clone(),
+        args.goose_provider.clone(),
         args.open_code_managed_config.clone(),
         args.open_code_plugin.clone(),
         agentdesktop_client_executable()?,
@@ -486,6 +525,11 @@ fn validate_one_shot(config: &agentdesktop_core::config::DaemonConfig) -> anyhow
             config
                 .programs
                 .codex
+                .as_ref()
+                .is_some_and(|program| program.use_llm_gateway),
+            config
+                .programs
+                .goose
                 .as_ref()
                 .is_some_and(|program| program.use_llm_gateway),
             config

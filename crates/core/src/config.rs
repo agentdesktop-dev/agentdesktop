@@ -376,6 +376,9 @@ pub struct ProgramsConfig {
     /// Codex managed configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex: Option<CodexConfig>,
+    /// Goose managed configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goose: Option<GooseConfig>,
     /// OpenCode managed configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_code: Option<OpenCodeConfig>,
@@ -386,6 +389,7 @@ impl ProgramsConfig {
         self.claude_code.is_none()
             && self.claude_desktop.is_none()
             && self.codex.is_none()
+            && self.goose.is_none()
             && self.open_code.is_none()
     }
 }
@@ -444,6 +448,28 @@ pub struct CodexConfig {
     ///
     /// Use Codex's native snake_case configuration keys. TOML has no null value,
     /// so null values cannot be reconciled.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub managed_config: BTreeMap<String, serde_json::Value>,
+}
+
+/// Settings reconciled into Goose's user configuration.
+///
+/// Values under `managedConfig` are written to Goose's `config.yaml`.
+/// When generated LLM-gateway settings overlap with those values,
+/// Agentdesktop's generated values take precedence.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GooseConfig {
+    /// Whether this program uses the top-level LLM gateway.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub use_llm_gateway: bool,
+    /// Model ID used by Goose when connecting to the LLM gateway.
+    ///
+    /// This is required when a top-level `llmGateway` is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Arbitrary values merged into Goose's YAML configuration.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub managed_config: BTreeMap<String, serde_json::Value>,
 }
@@ -603,6 +629,9 @@ fn validate_daemon(
         if programs.open_code.is_some() {
             anyhow::bail!("sandbox is not supported for OpenCode");
         }
+        if programs.goose.is_some() {
+            anyhow::bail!("sandbox is not supported for Goose");
+        }
     }
     if let Some(gateway) = llm_gateway {
         if !matches!(gateway.url.scheme(), "http" | "https") {
@@ -732,6 +761,16 @@ fn validate_daemon(
         if !open_code.models.contains_key(model) {
             anyhow::bail!("OpenCode model {model} is not declared in models");
         }
+    }
+    if let Some(goose) = &programs.goose
+        && llm_gateway.is_some()
+        && goose.use_llm_gateway
+    {
+        goose
+            .model
+            .as_deref()
+            .filter(|model| !model.trim().is_empty())
+            .context("Goose requires model when llmGateway is configured")?;
     }
     Ok(())
 }
@@ -1038,6 +1077,25 @@ programs:
             error
                 .to_string()
                 .contains("OpenCode model missing is not declared in models")
+        );
+    }
+
+    #[test]
+    fn goose_requires_a_gateway_model() {
+        let error = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  goose: {}
+"#,
+        )
+        .expect_err("missing Goose model must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Goose requires model when llmGateway is configured")
         );
     }
 }

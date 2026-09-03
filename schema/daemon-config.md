@@ -28,6 +28,10 @@
 |`programs.codex`|object|Codex managed configuration.|
 |`programs.codex.managedConfig`|object|Arbitrary values written to Codex's organization-managed TOML configuration.<br><br>Use Codex's native snake_case configuration keys. TOML has no null value,<br>so null values cannot be reconciled.|
 |`programs.codex.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
+|`programs.goose`|object|Goose managed configuration.|
+|`programs.goose.managedConfig`|object|Arbitrary values merged into Goose's YAML configuration.|
+|`programs.goose.model`|string|Model ID used by Goose when connecting to the LLM gateway.<br><br>This is required when a top-level `llmGateway` is configured.|
+|`programs.goose.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
 |`programs.openCode`|object|OpenCode managed configuration.|
 |`programs.openCode.managedConfig`|object|Arbitrary values written to OpenCode's system-managed configuration.|
 |`programs.openCode.model`|string|Model ID selected from `models` when using the LLM gateway.<br><br>This is required when a top-level `llmGateway` is configured.|

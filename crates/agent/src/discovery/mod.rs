@@ -1,6 +1,7 @@
 mod claude_code;
 mod claude_desktop;
 mod codex;
+mod goose;
 mod metadata;
 mod ollama;
 mod opencode;
@@ -10,8 +11,9 @@ use agentdesktop_core::model::Discovery;
 
 pub async fn discover() -> Discovery {
     let ollama = ollama::discover().await;
-    let (codex, opencode, claude_code, claude_desktop, vscode) = (
+    let (codex, goose, opencode, claude_code, claude_desktop, vscode) = (
         codex::discover(),
+        goose::discover(),
         opencode::discover(),
         claude_code::discover(),
         claude_desktop::discover(),
@@ -19,7 +21,7 @@ pub async fn discover() -> Discovery {
     );
 
     Discovery {
-        agents: [codex, opencode, claude_code, claude_desktop, vscode]
+        agents: [codex, goose, opencode, claude_code, claude_desktop, vscode]
             .into_iter()
             .flatten()
             .collect(),

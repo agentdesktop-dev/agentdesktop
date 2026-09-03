@@ -1,6 +1,7 @@
 mod claude_code;
 mod claude_desktop;
 mod codex;
+mod goose;
 mod json_merge;
 mod open_code;
 
@@ -179,6 +180,7 @@ fn program_name(program: &str) -> &str {
         "claude-code" => "Claude Code",
         "claude-desktop" => "Claude Desktop",
         "codex" => "Codex",
+        "goose" => "Goose",
         "opencode" => "OpenCode",
         program => program,
     }
@@ -191,6 +193,8 @@ pub struct Reconciler {
     claude_desktop_managed_settings_path: PathBuf,
     claude_desktop_credential_helper_path: PathBuf,
     codex_managed_config_path: PathBuf,
+    goose_config_path: PathBuf,
+    goose_provider_path: PathBuf,
     open_code_managed_config_path: PathBuf,
     open_code_plugin_path: PathBuf,
     credential_helper: PathBuf,
@@ -205,6 +209,8 @@ impl Reconciler {
         claude_desktop_managed_settings_path: PathBuf,
         claude_desktop_credential_helper_path: PathBuf,
         codex_managed_config_path: PathBuf,
+        goose_config_path: PathBuf,
+        goose_provider_path: PathBuf,
         open_code_managed_config_path: PathBuf,
         open_code_plugin_path: PathBuf,
         credential_helper: PathBuf,
@@ -216,6 +222,8 @@ impl Reconciler {
             claude_desktop_managed_settings_path,
             claude_desktop_credential_helper_path,
             codex_managed_config_path,
+            goose_config_path,
+            goose_provider_path,
             open_code_managed_config_path,
             open_code_plugin_path,
             credential_helper,
@@ -238,6 +246,11 @@ impl Reconciler {
         if self.merge_user_settings && config.programs.claude_desktop.is_some() {
             anyhow::bail!(
                 "Claude Desktop does not read inference settings from its user preferences; remove programs.claudeDesktop or run Agentdesktop without --user as root so it can manage /etc/claude-desktop/managed-settings.json"
+            );
+        }
+        if !self.merge_user_settings && config.programs.goose.is_some() {
+            anyhow::bail!(
+                "Goose custom providers are user scoped; remove programs.goose or run Agentdesktop with --user"
             );
         }
         let tool_use_hook = config
@@ -293,6 +306,21 @@ impl Reconciler {
             &self.socket,
             config.sandbox.as_ref(),
             codex,
+            mode,
+        )?;
+        let goose = config.programs.goose.as_ref().map(|goose| {
+            let gateway = config
+                .llm_gateway
+                .as_ref()
+                .filter(|_| goose.use_llm_gateway);
+            (goose, gateway)
+        });
+        goose::apply(
+            &self.goose_config_path,
+            &self.goose_provider_path,
+            &self.credential_helper,
+            &self.socket,
+            goose,
             mode,
         )?;
         let open_code = config.programs.open_code.as_ref().map(|open_code| {
@@ -424,6 +452,25 @@ pub fn default_codex_managed_config_path() -> PathBuf {
     PathBuf::from("/etc/codex/managed_config.toml")
 }
 
+/// Returns Goose's system configuration path.
+pub fn default_goose_config_path() -> PathBuf {
+    #[cfg(windows)]
+    return std::env::var_os("ProgramData")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+        .join("goose/config.yaml");
+    #[cfg(not(windows))]
+    return PathBuf::from("/etc/goose/config.yaml");
+}
+
+/// Returns Agentdesktop's system-level Goose provider definition path.
+pub fn default_goose_provider_path() -> PathBuf {
+    default_goose_config_path()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("custom_providers/agentdesktop.json")
+}
+
 /// Returns Claude Desktop's system-managed settings path.
 pub fn default_claude_desktop_managed_settings_path() -> PathBuf {
     PathBuf::from("/etc/claude-desktop/managed-settings.json")
@@ -530,6 +577,8 @@ mod tests {
             PathBuf::new(),
             PathBuf::new(),
             PathBuf::new(),
+            PathBuf::new(),
+            PathBuf::new(),
             PathBuf::from(r"C:\Program Files\Agent Desktop\agentdesktop.exe"),
             PathBuf::from(r"\\.\pipe\agentdesktop"),
         );
@@ -626,6 +675,8 @@ programs:
             root.join("claude-desktop/settings.json"),
             root.join("claude-desktop/helper"),
             root.join("codex/config.toml"),
+            root.join("goose/config.yaml"),
+            root.join("goose/custom_providers/agentdesktop.json"),
             root.join("opencode/config.json"),
             root.join("opencode/plugin.js"),
             root.join("bin/agentdesktop"),
@@ -639,6 +690,44 @@ programs:
                 .to_string()
                 .contains("/etc/claude-desktop/managed-settings.json")
         );
+        assert!(!root.exists(), "preflight failure must not write any files");
+    }
+
+    #[test]
+    fn system_mode_rejects_goose_before_writing_other_settings() {
+        let root = std::env::temp_dir().join(format!(
+            "agentdesktop-reconcile-system-goose-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let config = parse_daemon(
+            r#"
+programs:
+  claudeCode: {}
+  goose:
+    useLlmGateway: false
+"#,
+        )
+        .expect("valid configuration");
+        let reconciler = Reconciler::new(
+            false,
+            root.join("claude/settings.json"),
+            root.join("claude-desktop/settings.json"),
+            root.join("claude-desktop/helper"),
+            root.join("codex/config.toml"),
+            root.join("goose/config.yaml"),
+            root.join("goose/custom_providers/agentdesktop.json"),
+            root.join("opencode/config.json"),
+            root.join("opencode/plugin.js"),
+            root.join("bin/agentdesktop"),
+            root.join("agentdesktop.sock"),
+        );
+
+        let error = reconciler
+            .apply(&config)
+            .expect_err("system mode must fail");
+
+        assert!(error.to_string().contains("run Agentdesktop with --user"));
         assert!(!root.exists(), "preflight failure must not write any files");
     }
 
@@ -676,6 +765,8 @@ programs:
             root.join("claude-desktop/settings.json"),
             root.join("claude-desktop/helper"),
             root.join("codex/config.toml"),
+            root.join("goose/config.yaml"),
+            root.join("goose/custom_providers/agentdesktop.json"),
             root.join("opencode/config.json"),
             root.join("opencode/plugin.js"),
             root.join("bin/agentdesktop"),

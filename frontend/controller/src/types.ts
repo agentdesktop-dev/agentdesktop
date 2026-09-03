@@ -69,7 +69,12 @@ export type ControllerSettings = {
   gateway_jwt_enabled: boolean;
 };
 
-export type AgentKind = "claudeCode" | "claudeDesktop" | "codex" | "openCode";
+export type AgentKind =
+  | "claudeCode"
+  | "claudeDesktop"
+  | "codex"
+  | "goose"
+  | "openCode";
 
 export type AgentDraft = {
   kind: AgentKind;

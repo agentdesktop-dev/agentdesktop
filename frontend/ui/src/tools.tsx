@@ -11,6 +11,7 @@ import claudeCodeIcon from "./assets/claude-code.svg";
 import claudeDesktopIcon from "./assets/claude-desktop.svg";
 import codexIcon from "./assets/codex.svg";
 import copilotIcon from "./assets/copilot.svg";
+import gooseIcon from "./assets/goose.svg";
 import ollamaIcon from "./assets/ollama.svg";
 import openCodeIcon from "./assets/opencode.svg";
 
@@ -47,6 +48,7 @@ const toolIcons: Record<string, string> = {
   claude_code: claudeCodeIcon,
   "claude-desktop": claudeDesktopIcon,
   claude_desktop: claudeDesktopIcon,
+  goose: gooseIcon,
   opencode: openCodeIcon,
   vscode: copilotIcon,
 };
@@ -58,6 +60,7 @@ export function friendlyTool(kind: string) {
     "claude-code": "Claude Code",
     claude_desktop: "Claude Desktop",
     "claude-desktop": "Claude Desktop",
+    goose: "Goose",
     opencode: "OpenCode",
     vscode: "VS Code",
   };

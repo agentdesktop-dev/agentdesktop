@@ -478,7 +478,8 @@ export function ConfigurationView({
               {copied ? "Copied" : "Copy"}
             </button>
           </div>
-          <pre>
+          {/* biome-ignore lint/a11y/noNoninteractiveTabindex: keyboard users must be able to scroll generated YAML */}
+          <pre tabIndex={0}>
             <code>{yaml}</code>
           </pre>
         </section>
@@ -513,6 +514,13 @@ const configurableAgents: Array<{
     placeholder: "managedConfig:\n  model_reasoning_effort: high",
   },
   {
+    kind: "goose",
+    label: "Goose",
+    iconKind: "goose",
+    placeholder: "managedConfig:\n  GOOSE_MODE: smart_approve",
+    initialSettings: "model: gpt-5.6-terra",
+  },
+  {
     kind: "openCode",
     label: "OpenCode",
     iconKind: "opencode",
@@ -524,6 +532,7 @@ const configurableAgents: Array<{
 
 const sandboxUnsupportedAgents = new Set<AgentKind>([
   "claudeDesktop",
+  "goose",
   "openCode",
 ]);
 
@@ -549,7 +558,7 @@ function daemonConfigYaml(options: {
         "  authentication:",
         "    type: controllerJwt",
         `    audience: ${yamlString(options.audience)}`,
-        "    allowedClientIds: [claude-code, claude-desktop, codex, opencode]",
+        "    allowedClientIds: [claude-code, claude-desktop, codex, goose, opencode]",
       );
     }
     lines.push("");
