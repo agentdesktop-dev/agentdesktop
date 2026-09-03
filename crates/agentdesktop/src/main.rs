@@ -1,13 +1,7 @@
-use std::{
-    env, fs,
-    future::Future,
-    io::ErrorKind,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{env, fs, future::Future, io::ErrorKind, path::PathBuf, time::Duration};
 
 #[cfg(target_os = "macos")]
-use std::{ffi::OsString, io::Write, os::unix::fs::OpenOptionsExt, process::Stdio};
+use std::{ffi::OsString, io::Write, os::unix::fs::OpenOptionsExt, path::Path, process::Stdio};
 
 #[cfg(target_os = "macos")]
 use agentdesktop_agent::secure_fs;
