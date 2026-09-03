@@ -2,7 +2,10 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 
-import { createTauriVersionConfig } from "./package-windows-version.mjs";
+import {
+  createTauriVersionConfig,
+  normalizeTauriArguments,
+} from "./package-tauri.mjs";
 
 if (process.platform !== "win32") {
   throw new Error("Windows MSI packages must be built on Windows");
@@ -15,7 +18,7 @@ const nativeDirectory = path.join(
   "crates",
   "agentdesktop",
 );
-const forwardedArguments = process.argv.slice(2);
+const forwardedArguments = normalizeTauriArguments(process.argv.slice(2));
 const targetIndex = forwardedArguments.indexOf("--target");
 const target =
   targetIndex === -1 ? undefined : forwardedArguments[targetIndex + 1];

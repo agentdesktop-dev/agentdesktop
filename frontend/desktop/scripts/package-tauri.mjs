@@ -2,6 +2,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+export function normalizeTauriArguments(arguments_) {
+  return arguments_[0] === "--" ? arguments_.slice(1) : arguments_;
+}
+
 export function createTauriVersionConfig(version) {
   if (!version) {
     return {

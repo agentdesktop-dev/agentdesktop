@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { createTauriVersionConfig } from "./package-windows-version.mjs";
+import { createTauriVersionConfig } from "./package-tauri.mjs";
 
 test("keeps a stable MSI upgrade identity", () => {
   const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
