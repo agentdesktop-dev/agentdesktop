@@ -1,6 +1,7 @@
 mod claude_code;
 mod claude_desktop;
 mod codex;
+mod grok;
 mod json_merge;
 mod open_code;
 
@@ -180,6 +181,7 @@ fn program_name(program: &str) -> &str {
         "claude-desktop" => "Claude Desktop",
         "codex" => "Codex",
         "opencode" => "OpenCode",
+        "grok" => "Grok Build",
         program => program,
     }
 }
@@ -193,6 +195,7 @@ pub struct Reconciler {
     codex_managed_config_path: PathBuf,
     open_code_managed_config_path: PathBuf,
     open_code_plugin_path: PathBuf,
+    grok_managed_config_path: PathBuf,
     credential_helper: PathBuf,
     socket: PathBuf,
 }
@@ -207,6 +210,7 @@ impl Reconciler {
         codex_managed_config_path: PathBuf,
         open_code_managed_config_path: PathBuf,
         open_code_plugin_path: PathBuf,
+        grok_managed_config_path: PathBuf,
         credential_helper: PathBuf,
         socket: PathBuf,
     ) -> Self {
@@ -218,6 +222,7 @@ impl Reconciler {
             codex_managed_config_path,
             open_code_managed_config_path,
             open_code_plugin_path,
+            grok_managed_config_path,
             credential_helper,
             socket,
         }
@@ -308,6 +313,17 @@ impl Reconciler {
             &self.credential_helper,
             &self.socket,
             open_code,
+            mode,
+        )?;
+        let grok = config.programs.grok.as_ref().map(|grok| {
+            let gateway = config.llm_gateway.as_ref().filter(|_| grok.use_llm_gateway);
+            (grok, gateway)
+        });
+        grok::apply(
+            &self.grok_managed_config_path,
+            &self.credential_helper,
+            &self.socket,
+            grok,
             mode,
         )
     }
@@ -450,6 +466,11 @@ pub fn default_open_code_plugin_path() -> PathBuf {
     PathBuf::from("/etc/opencode/plugins/agentdesktop.js")
 }
 
+/// Returns the system-wide Grok Build managed configuration path.
+pub fn default_grok_managed_config_path() -> PathBuf {
+    PathBuf::from("/etc/grok/managed_config.toml")
+}
+
 #[cfg(target_os = "macos")]
 pub fn default_claude_code_managed_settings_dir() -> PathBuf {
     PathBuf::from("/Library/Application Support/ClaudeCode/managed-settings.d")
@@ -524,6 +545,7 @@ mod tests {
     fn claude_hooks_keep_the_executable_and_arguments_separate() {
         let reconciler = Reconciler::new(
             false,
+            PathBuf::new(),
             PathBuf::new(),
             PathBuf::new(),
             PathBuf::new(),
@@ -628,6 +650,7 @@ programs:
             root.join("codex/config.toml"),
             root.join("opencode/config.json"),
             root.join("opencode/plugin.js"),
+            root.join("grok/managed_config.toml"),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
@@ -678,6 +701,7 @@ programs:
             root.join("codex/config.toml"),
             root.join("opencode/config.json"),
             root.join("opencode/plugin.js"),
+            root.join("grok/managed_config.toml"),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );

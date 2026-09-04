@@ -135,7 +135,7 @@ stage.
 | Codex | Yes | Yes | MCP and skills | Yes |
 | OpenCode | Yes | Yes | MCP | — |
 | VS Code | Yes | — | MCP and skills | — |
-| Grok Build | Yes | — | MCP and skills | — |
+| Grok Build | Yes | Yes | MCP and skills | — |
 
 > **Don't see your tool?** We're actively expanding this list and would love
 > your help. [Open an integration request](https://github.com/agentdesktop-dev/agentdesktop/issues/new)

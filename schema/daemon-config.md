@@ -28,6 +28,11 @@
 |`programs.codex`|object|Codex managed configuration.|
 |`programs.codex.managedConfig`|object|Arbitrary values written to Codex's organization-managed TOML configuration.<br><br>Use Codex's native snake_case configuration keys. TOML has no null value,<br>so null values cannot be reconciled.|
 |`programs.codex.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
+|`programs.grok`|object|Grok Build managed configuration.|
+|`programs.grok.managedConfig`|object|Arbitrary values written to Grok's organization-managed TOML configuration.<br><br>Use Grok's native snake_case configuration keys. TOML has no null value,<br>so null values cannot be reconciled.|
+|`programs.grok.model`|string|Catalog ID and API model used when pointing Grok at the LLM gateway.<br><br>This is required when a top-level `llmGateway` is configured. If `models`<br>is empty, Agentdesktop creates a catalog entry with this ID.|
+|`programs.grok.models`|object|Extra Grok `[model.<id>]` catalog entries, keyed by catalog ID.<br><br>Each value is an arbitrary Grok model object. Generated gateway<br>`base_url` and `auth_provider` values take precedence. When this map is<br>non-empty, `model` must name one of its keys.|
+|`programs.grok.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
 |`programs.openCode`|object|OpenCode managed configuration.|
 |`programs.openCode.managedConfig`|object|Arbitrary values written to OpenCode's system-managed configuration.|
 |`programs.openCode.model`|string|Model ID selected from `models` when using the LLM gateway.<br><br>This is required when a top-level `llmGateway` is configured.|
