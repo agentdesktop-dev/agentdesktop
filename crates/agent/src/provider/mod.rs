@@ -12,6 +12,7 @@ pub mod claude_code;
 pub mod claude_desktop;
 pub mod codex;
 pub mod cursor;
+pub mod grok;
 mod json_merge;
 mod metadata;
 pub mod ollama;

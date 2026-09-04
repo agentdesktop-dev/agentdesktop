@@ -4,7 +4,7 @@ pub use plan::ReconcilePlan;
 
 use crate::provider::{
     Provider, ReconcileContext, claude_code::ClaudeCode, claude_desktop::ClaudeDesktop,
-    codex::Codex, cursor::Cursor, ollama::Ollama, opencode::OpenCode, vscode::VsCode,
+    codex::Codex, cursor::Cursor, grok::Grok, ollama::Ollama, opencode::OpenCode, vscode::VsCode,
 };
 use agentdesktop_core::{config::DaemonConfig, model::Discovery};
 use serde_json::Value;
@@ -68,6 +68,7 @@ impl Reconciler {
                 }),
                 Box::new(VsCode),
                 Box::new(Cursor),
+                Box::new(Grok),
                 Box::new(Ollama),
             ]),
         }
