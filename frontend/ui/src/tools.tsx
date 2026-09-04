@@ -60,6 +60,7 @@ export function friendlyTool(kind: string) {
     "claude-desktop": "Claude Desktop",
     opencode: "OpenCode",
     vscode: "VS Code",
+    cursor: "Cursor",
   };
   return names[kind.toLowerCase()] ?? kind;
 }
