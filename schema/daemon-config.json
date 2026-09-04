@@ -15,6 +15,11 @@
         }
       ]
     },
+    "inventoryInterval": {
+      "description": "Interval between inventory refreshes. Defaults to `15m`.\n\nDiscovery walks user home directories and developer-tool configuration\nfiles, so this trades inventory freshness against local disk activity.",
+      "type": "string",
+      "default": "15m"
+    },
     "llmGateway": {
       "description": "LLM gateway used by managed developer tools.",
       "anyOf": [

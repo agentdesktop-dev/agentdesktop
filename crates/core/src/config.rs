@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 /// Configuration for an Agentdesktop daemon.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DaemonConfig {
@@ -31,6 +31,26 @@ pub struct DaemonConfig {
     /// Per-program settings reconciled on this device.
     #[serde(default, skip_serializing_if = "ProgramsConfig::is_empty")]
     pub programs: ProgramsConfig,
+    /// Interval between inventory refreshes. Defaults to `15m`.
+    ///
+    /// Discovery walks user home directories and developer-tool configuration
+    /// files, so this trades inventory freshness against local disk activity.
+    #[serde(default = "default_inventory_interval", with = "humantime_serde")]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub inventory_interval: Duration,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            controller: None,
+            llm_gateway: None,
+            sandbox: None,
+            telemetry: TelemetryConfig::default(),
+            programs: ProgramsConfig::default(),
+            inventory_interval: default_inventory_interval(),
+        }
+    }
 }
 
 /// Local execution restrictions applied to managed developer tools.
@@ -356,6 +376,10 @@ fn default_gateway_jwt_key_id() -> String {
 
 fn default_gateway_jwt_lifetime() -> Duration {
     Duration::from_secs(5 * 60)
+}
+
+fn default_inventory_interval() -> Duration {
+    Duration::from_secs(15 * 60)
 }
 
 fn default_heartbeat_interval() -> Duration {
@@ -759,7 +783,7 @@ fn is_true(value: &bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{LlmGatewayAuthentication, parse_controller, parse_daemon};
+    use super::{DaemonConfig, LlmGatewayAuthentication, parse_controller, parse_daemon};
 
     #[test]
     fn daemon_configuration_supports_local_and_managed_options() {
@@ -775,6 +799,25 @@ programs: { claudeCode: { useLlmGateway: false } }
         assert!(daemon.controller.is_some());
         assert!(daemon.llm_gateway.is_some());
         assert!(!daemon.programs.claude_code.unwrap().use_llm_gateway);
+    }
+
+    #[test]
+    fn daemon_inventory_interval_defaults_and_parses_durations() {
+        let default = parse_daemon("programs: {}").expect("valid daemon configuration");
+        assert_eq!(
+            default.inventory_interval,
+            std::time::Duration::from_secs(15 * 60)
+        );
+        assert_eq!(
+            DaemonConfig::default().inventory_interval,
+            default.inventory_interval
+        );
+
+        let configured = parse_daemon("inventoryInterval: 2m").expect("valid daemon configuration");
+        assert_eq!(
+            configured.inventory_interval,
+            std::time::Duration::from_secs(120)
+        );
     }
 
     #[test]
