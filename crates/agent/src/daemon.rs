@@ -2,6 +2,8 @@ use std::{
     future::Future,
     net::SocketAddr,
     path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
 };
 
 #[cfg(unix)]
@@ -20,7 +22,10 @@ use hyper_util::{rt::TokioIo, service::TowerToHyperService};
 use tokio::net::UnixListener;
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
-use tokio::sync::mpsc;
+use tokio::{
+    sync::{mpsc, watch},
+    time,
+};
 #[cfg(windows)]
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 
@@ -314,29 +319,18 @@ where
         );
     }
     let discovery = discovery::discover().await;
-    for agent in &discovery.agents {
-        tracing::info!(
-            kind = %agent.kind,
-            executable = %agent.executable.display(),
-            version = agent.version.as_deref().unwrap_or("unknown"),
-            mcps = agent.mcp_servers.len(),
-            skills = agent.skills.len(),
-            "discovered program"
-        );
-    }
-    for runtime in &discovery.model_runtimes {
-        tracing::info!(
-            kind = %runtime.kind,
-            models = runtime.models.len(),
-            "discovered model runtime"
-        );
-    }
+    log_discovery(&discovery);
+    let (inventory_sender, inventory) = watch::channel(Arc::new(discovery));
+    tokio::spawn(refresh_inventory(
+        inventory_sender,
+        config.inventory_interval,
+    ));
     let (telemetry_sender, telemetry_receiver) = mpsc::channel(256);
     let telemetry = config.controller.as_ref().map(|_| telemetry_sender.clone());
     let (logout_sender, logout_receiver) = mpsc::channel(1);
     let logout = config.controller.as_ref().map(|_| logout_sender);
     if let Some(controller) = config.controller.clone() {
-        let remote_discovery = discovery.clone();
+        let remote_discovery = inventory.clone();
         let state_dir = args.state_dir.clone();
         let oidc_callback_listen = args.oidc_callback_listen;
         let remote_enrollment = enrollment.clone();
@@ -362,7 +356,7 @@ where
     }
     let app = api::router(api::AppState {
         config,
-        discovery,
+        discovery: inventory,
         enrollment,
         state_dir: args.state_dir,
         oidc_callback_listen: args.oidc_callback_listen,
@@ -377,6 +371,65 @@ where
     serve_named_pipe(&socket, app, shutdown).await?;
 
     Ok(())
+}
+
+fn log_discovery(discovery: &agentdesktop_core::model::Discovery) {
+    for agent in &discovery.agents {
+        tracing::info!(
+            kind = %agent.kind,
+            executable = %agent.executable.display(),
+            version = agent.version.as_deref().unwrap_or("unknown"),
+            mcps = agent.mcp_servers.len(),
+            skills = agent.skills.len(),
+            "discovered program"
+        );
+    }
+    for runtime in &discovery.model_runtimes {
+        tracing::info!(
+            kind = %runtime.kind,
+            models = runtime.models.len(),
+            "discovered model runtime"
+        );
+    }
+}
+
+/// Re-runs discovery on an interval so the inventory reflects tools installed,
+/// removed, or reconfigured after the daemon started.
+///
+/// The snapshot is published only when it differs from the previous one, so
+/// idle devices neither log nor wake the controller stream.
+async fn refresh_inventory(
+    sender: watch::Sender<Arc<agentdesktop_core::model::Discovery>>,
+    interval: Duration,
+) {
+    refresh_inventory_with(sender, interval, discovery::discover).await;
+}
+
+async fn refresh_inventory_with<F, Fut>(
+    sender: watch::Sender<Arc<agentdesktop_core::model::Discovery>>,
+    interval: Duration,
+    mut discover: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = agentdesktop_core::model::Discovery>,
+{
+    let mut ticker = time::interval_at(time::Instant::now() + interval, interval);
+    ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        if sender.is_closed() {
+            return;
+        }
+        let discovery = discover().await;
+        if **sender.borrow() == discovery {
+            continue;
+        }
+        tracing::info!("inventory changed");
+        log_discovery(&discovery);
+        if sender.send(Arc::new(discovery)).is_err() {
+            return;
+        }
+    }
 }
 
 fn start_gateway_authentication(
@@ -734,12 +787,87 @@ mod tests {
         pin::Pin,
         sync::{
             Arc,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         task::{Context, Poll},
+        time::Duration,
     };
 
     use agentdesktop_core::config::parse_daemon;
+    use agentdesktop_core::model::{Agent, Discovery};
+    use tokio::sync::watch;
+
+    fn discovery(kinds: &[&str]) -> Discovery {
+        Discovery {
+            agents: kinds
+                .iter()
+                .map(|kind| Agent {
+                    kind: (*kind).to_owned(),
+                    executable: Path::new("/usr/bin").join(kind),
+                    version: None,
+                    mcp_servers: Vec::new(),
+                    skills: Vec::new(),
+                })
+                .collect(),
+            model_runtimes: Vec::new(),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn publishes_inventory_only_when_it_changes() {
+        let (sender, mut receiver) = watch::channel(Arc::new(discovery(&["codex"])));
+        let scans = Arc::new(AtomicUsize::new(0));
+        let refresher = tokio::spawn({
+            let scans = Arc::clone(&scans);
+            super::refresh_inventory_with(sender, Duration::from_secs(60), move || {
+                let scan = scans.fetch_add(1, Ordering::SeqCst);
+                // The first scan repeats the boot snapshot; every later scan
+                // reports a newly installed tool.
+                async move {
+                    if scan == 0 {
+                        discovery(&["codex"])
+                    } else {
+                        discovery(&["codex", "cursor"])
+                    }
+                }
+            })
+        });
+
+        // Paused time auto-advances between ticks, so this resolves on the
+        // first scan that actually differs rather than on the first tick.
+        receiver.changed().await.unwrap();
+        assert_eq!(receiver.borrow_and_update().agents.len(), 2);
+        assert!(
+            scans.load(Ordering::SeqCst) >= 2,
+            "an unchanged scan should not have published a snapshot"
+        );
+
+        // Repeating that same state does not republish it.
+        assert!(
+            tokio::time::timeout(Duration::from_secs(600), receiver.changed())
+                .await
+                .is_err()
+        );
+        refresher.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stops_refreshing_once_every_reader_is_gone() {
+        let (sender, receiver) = watch::channel(Arc::new(discovery(&["codex"])));
+        let refresher = tokio::spawn(super::refresh_inventory_with(
+            sender,
+            Duration::from_secs(60),
+            || async { discovery(&["codex", "cursor"]) },
+        ));
+        drop(receiver);
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(600), refresher)
+                .await
+                .is_ok()
+        );
+    }
+
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
     use super::{

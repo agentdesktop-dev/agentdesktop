@@ -6,6 +6,7 @@
 |`controller.address`|string|HTTPS address of the controller's fleet API.|
 |`controller.caCertificatePath`|string|Path to a PEM-encoded CA certificate used to verify the controller.<br><br>Omit this field to use the operating system's trusted certificate roots.|
 |`controller.heartbeatInterval`|string|Interval between device heartbeats. Defaults to `30s`.|
+|`inventoryInterval`|string|Interval between inventory refreshes. Defaults to `15m`.<br><br>Discovery walks user home directories and developer-tool configuration<br>files, so this trades inventory freshness against local disk activity.|
 |`llmGateway`|object|LLM gateway used by managed developer tools.|
 |`llmGateway.authentication`|object|Authentication mechanism used when connecting to this gateway.|
 |`llmGateway.authentication.allowedClientIds`|[]string|Client identifiers permitted to request credentials for this gateway.|

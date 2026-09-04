@@ -2,6 +2,7 @@ use std::{
     future::Future,
     net::SocketAddr,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -9,7 +10,7 @@ use anyhow::{Context, bail};
 use rcgen::{CertificateParams, ExtendedKeyUsagePurpose, KeyPair, KeyUsagePurpose};
 use sha2::{Digest, Sha256};
 use tokio::{
-    sync::{Mutex, mpsc, oneshot},
+    sync::{Mutex, mpsc, oneshot, watch},
     time,
 };
 use tokio_stream::wrappers::ReceiverStream;
@@ -55,7 +56,7 @@ pub struct Requests {
 
 pub async fn run(
     controller: ControllerConnectionConfig,
-    discovered: AgentDiscovery,
+    mut discovered: watch::Receiver<Arc<AgentDiscovery>>,
     state_dir: PathBuf,
     oidc_callback_listen: Option<SocketAddr>,
     reconciler: Reconciler,
@@ -118,7 +119,7 @@ pub async fn run(
                 result = connect(
                     &controller,
                     &identity,
-                    &discovered,
+                    &mut discovered,
                     &state_dir,
                     &reconciler,
                     &mut telemetry,
@@ -275,7 +276,7 @@ pub async fn llm_gateway_credential(
 async fn connect(
     controller: &ControllerConnectionConfig,
     identity: &Identity,
-    discovered: &AgentDiscovery,
+    discovered: &mut watch::Receiver<Arc<AgentDiscovery>>,
     state_dir: &Path,
     reconciler: &Reconciler,
     telemetry: &mut mpsc::Receiver<ModelTelemetryEvent>,
@@ -303,61 +304,8 @@ async fn connect(
     )
     .await?;
 
-    send(
-        &sender,
-        agent_message::Message::Inventory(Inventory {
-            discoveries: discovered
-                .agents
-                .iter()
-                .map(|agent| Discovery {
-                    kind: agent.kind.clone(),
-                    version: agent.version.clone().unwrap_or_default(),
-                    path: agent.executable.display().to_string(),
-                    mcp_servers: agent
-                        .mcp_servers
-                        .iter()
-                        .map(|server| agentdesktop_proto::fleet::McpServer {
-                            name: server.name.clone(),
-                            transport: server.transport.clone(),
-                            command: server.command.clone().unwrap_or_default(),
-                            url: server.url.clone().unwrap_or_default(),
-                            enabled: server.enabled,
-                            source: server.source.display().to_string(),
-                        })
-                        .collect(),
-                    skills: agent
-                        .skills
-                        .iter()
-                        .map(|skill| agentdesktop_proto::fleet::Skill {
-                            path: skill.path.display().to_string(),
-                            front_matter_json: serde_json::to_vec(&skill.front_matter)
-                                .expect("skill front matter is JSON-compatible"),
-                        })
-                        .collect(),
-                })
-                .collect(),
-            model_runtimes: discovered
-                .model_runtimes
-                .iter()
-                .map(|runtime| agentdesktop_proto::fleet::ModelRuntime {
-                    kind: runtime.kind.clone(),
-                    models: runtime
-                        .models
-                        .iter()
-                        .map(|model| agentdesktop_proto::fleet::LocalModel {
-                            name: model.name.clone(),
-                        })
-                        .collect(),
-                })
-                .collect(),
-        }),
-    )
-    .await?;
-    info!(
-        discoveries = discovered.agents.len(),
-        model_runtimes = discovered.model_runtimes.len(),
-        "reported inventory to controller"
-    );
+    let snapshot = discovered.borrow_and_update().clone();
+    send_inventory(&sender, &snapshot).await?;
 
     info!(address = %controller.address, "connected to controller");
     let mut heartbeat = time::interval(controller.heartbeat_interval);
@@ -382,6 +330,9 @@ async fn connect(
             }
             Some(event) = telemetry.recv() => {
                 send(&sender, agent_message::Message::Telemetry(telemetry_to_proto(event))).await?;
+            }
+            snapshot = next_inventory(discovered) => {
+                send_inventory(&sender, &snapshot).await?;
             }
             message = inbound.message() => {
                 let Some(message) = message.context("read controller stream")? else {
@@ -482,6 +433,84 @@ fn apply_daemon_config(
             error: format!("{error:#}"),
         },
     }
+}
+
+/// Sends the current inventory snapshot to the controller.
+///
+/// The controller replaces a device's stored inventory on each message, so
+/// resending a refreshed snapshot is safe and is how post-boot changes reach
+/// the fleet view.
+async fn send_inventory(
+    sender: &mpsc::Sender<AgentMessage>,
+    discovered: &AgentDiscovery,
+) -> anyhow::Result<()> {
+    send(
+        sender,
+        agent_message::Message::Inventory(Inventory {
+            discoveries: discovered
+                .agents
+                .iter()
+                .map(|agent| Discovery {
+                    kind: agent.kind.clone(),
+                    version: agent.version.clone().unwrap_or_default(),
+                    path: agent.executable.display().to_string(),
+                    mcp_servers: agent
+                        .mcp_servers
+                        .iter()
+                        .map(|server| agentdesktop_proto::fleet::McpServer {
+                            name: server.name.clone(),
+                            transport: server.transport.clone(),
+                            command: server.command.clone().unwrap_or_default(),
+                            url: server.url.clone().unwrap_or_default(),
+                            enabled: server.enabled,
+                            source: server.source.display().to_string(),
+                        })
+                        .collect(),
+                    skills: agent
+                        .skills
+                        .iter()
+                        .map(|skill| agentdesktop_proto::fleet::Skill {
+                            path: skill.path.display().to_string(),
+                            front_matter_json: serde_json::to_vec(&skill.front_matter)
+                                .expect("skill front matter is JSON-compatible"),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            model_runtimes: discovered
+                .model_runtimes
+                .iter()
+                .map(|runtime| agentdesktop_proto::fleet::ModelRuntime {
+                    kind: runtime.kind.clone(),
+                    models: runtime
+                        .models
+                        .iter()
+                        .map(|model| agentdesktop_proto::fleet::LocalModel {
+                            name: model.name.clone(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }),
+    )
+    .await?;
+    info!(
+        discoveries = discovered.agents.len(),
+        model_runtimes = discovered.model_runtimes.len(),
+        "reported inventory to controller"
+    );
+    Ok(())
+}
+
+/// Resolves with the next inventory snapshot, and never resolves once the
+/// refresher has stopped, so the controller stream keeps running without it.
+async fn next_inventory(
+    discovered: &mut watch::Receiver<Arc<AgentDiscovery>>,
+) -> Arc<AgentDiscovery> {
+    if discovered.changed().await.is_err() {
+        std::future::pending::<()>().await;
+    }
+    discovered.borrow_and_update().clone()
 }
 
 async fn send(
@@ -641,10 +670,47 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        MAX_RETRY_DELAY, enroll_with_retry, is_unauthenticated, next_retry_delay,
+        MAX_RETRY_DELAY, enroll_with_retry, is_unauthenticated, next_inventory, next_retry_delay,
         normalize_hostname,
     };
     use crate::enrollment::EnrollmentState;
+    use agentdesktop_core::model::Discovery as AgentDiscovery;
+    use tokio::{sync::watch, time};
+
+    fn empty_inventory() -> AgentDiscovery {
+        AgentDiscovery {
+            agents: Vec::new(),
+            model_runtimes: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn reports_each_refreshed_inventory_snapshot() {
+        let (sender, mut receiver) = watch::channel(Arc::new(empty_inventory()));
+        let mut refreshed = empty_inventory();
+        refreshed
+            .model_runtimes
+            .push(agentdesktop_core::model::ModelRuntime {
+                kind: "ollama".to_owned(),
+                models: Vec::new(),
+            });
+        sender.send(Arc::new(refreshed)).unwrap();
+
+        let snapshot = next_inventory(&mut receiver).await;
+        assert_eq!(snapshot.model_runtimes.len(), 1);
+    }
+
+    /// A stopped refresher must not turn the controller stream into a busy loop.
+    #[tokio::test(start_paused = true)]
+    async fn never_reports_again_once_the_refresher_stops() {
+        let (sender, mut receiver) = watch::channel(Arc::new(empty_inventory()));
+        drop(sender);
+        assert!(
+            time::timeout(Duration::from_secs(3600), next_inventory(&mut receiver))
+                .await
+                .is_err()
+        );
+    }
 
     #[test]
     fn recognizes_contextualized_unauthenticated_status() {
