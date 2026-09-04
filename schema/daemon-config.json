@@ -134,6 +134,34 @@
         "address"
       ]
     },
+    "GrokConfig": {
+      "description": "Settings reconciled into Grok Build's organization-managed configuration.\n\nValues under `managedConfig` are written to Grok's `managed_config.toml`.\nWhen generated LLM-gateway settings overlap with those values,\nAgentdesktop's generated values take precedence.",
+      "type": "object",
+      "properties": {
+        "managedConfig": {
+          "description": "Arbitrary values written to Grok's organization-managed TOML configuration.\n\nUse Grok's native snake_case configuration keys. TOML has no null value,\nso null values cannot be reconciled.",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "model": {
+          "description": "Catalog ID and API model used when pointing Grok at the LLM gateway.\n\nThis is required when a top-level `llmGateway` is configured. If `models`\nis empty, Agentdesktop creates a catalog entry with this ID.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "models": {
+          "description": "Extra Grok `[model.<id>]` catalog entries, keyed by catalog ID.\n\nEach value is an arbitrary Grok model object. Generated gateway\n`base_url` and `auth_provider` values take precedence. When this map is\nnon-empty, `model` must name one of its keys.",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "useLlmGateway": {
+          "description": "Whether this program uses the top-level LLM gateway.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
     "LlmGatewayAuthentication": {
       "description": "Authentication mechanisms supported by an LLM gateway.",
       "oneOf": [
@@ -306,6 +334,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/CodexConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "grok": {
+          "description": "Grok Build managed configuration.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GrokConfig"
             },
             {
               "type": "null"

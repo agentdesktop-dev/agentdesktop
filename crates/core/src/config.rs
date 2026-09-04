@@ -379,6 +379,9 @@ pub struct ProgramsConfig {
     /// OpenCode managed configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_code: Option<OpenCodeConfig>,
+    /// Grok Build managed configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grok: Option<GrokConfig>,
 }
 
 impl ProgramsConfig {
@@ -387,6 +390,7 @@ impl ProgramsConfig {
             && self.claude_desktop.is_none()
             && self.codex.is_none()
             && self.open_code.is_none()
+            && self.grok.is_none()
     }
 }
 
@@ -472,6 +476,39 @@ pub struct OpenCodeConfig {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub models: BTreeMap<String, serde_json::Value>,
     /// Arbitrary values written to OpenCode's system-managed configuration.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub managed_config: BTreeMap<String, serde_json::Value>,
+}
+
+/// Settings reconciled into Grok Build's organization-managed configuration.
+///
+/// Values under `managedConfig` are written to Grok's `managed_config.toml`.
+/// When generated LLM-gateway settings overlap with those values,
+/// Agentdesktop's generated values take precedence.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GrokConfig {
+    /// Whether this program uses the top-level LLM gateway.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub use_llm_gateway: bool,
+    /// Catalog ID and API model used when pointing Grok at the LLM gateway.
+    ///
+    /// This is required when a top-level `llmGateway` is configured. If `models`
+    /// is empty, Agentdesktop creates a catalog entry with this ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Extra Grok `[model.<id>]` catalog entries, keyed by catalog ID.
+    ///
+    /// Each value is an arbitrary Grok model object. Generated gateway
+    /// `base_url` and `auth_provider` values take precedence. When this map is
+    /// non-empty, `model` must name one of its keys.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<String, serde_json::Value>,
+    /// Arbitrary values written to Grok's organization-managed TOML configuration.
+    ///
+    /// Use Grok's native snake_case configuration keys. TOML has no null value,
+    /// so null values cannot be reconciled.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub managed_config: BTreeMap<String, serde_json::Value>,
 }
@@ -603,6 +640,9 @@ fn validate_daemon(
         if programs.open_code.is_some() {
             anyhow::bail!("sandbox is not supported for OpenCode");
         }
+        if programs.grok.is_some() {
+            anyhow::bail!("sandbox is not supported for Grok Build");
+        }
     }
     if let Some(gateway) = llm_gateway {
         if !matches!(gateway.url.scheme(), "http" | "https") {
@@ -731,6 +771,19 @@ fn validate_daemon(
             .context("OpenCode requires model when llmGateway is configured")?;
         if !open_code.models.contains_key(model) {
             anyhow::bail!("OpenCode model {model} is not declared in models");
+        }
+    }
+    if let Some(grok) = &programs.grok
+        && llm_gateway.is_some()
+        && grok.use_llm_gateway
+    {
+        let model = grok
+            .model
+            .as_deref()
+            .filter(|model| !model.trim().is_empty())
+            .context("Grok Build requires model when llmGateway is configured")?;
+        if !grok.models.is_empty() && !grok.models.contains_key(model) {
+            anyhow::bail!("Grok Build model {model} is not declared in models");
         }
     }
     Ok(())
@@ -1038,6 +1091,47 @@ programs:
             error
                 .to_string()
                 .contains("OpenCode model missing is not declared in models")
+        );
+    }
+
+    #[test]
+    fn grok_requires_a_model_when_using_the_gateway() {
+        let error = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  grok: {}
+"#,
+        )
+        .expect_err("Grok without a model should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Grok Build requires model when llmGateway is configured")
+        );
+    }
+
+    #[test]
+    fn grok_requires_a_declared_gateway_model_when_models_are_listed() {
+        let error = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  grok:
+    model: missing
+    models:
+      available: {}
+"#,
+        )
+        .expect_err("undeclared Grok model should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Grok Build model missing is not declared in models")
         );
     }
 }
