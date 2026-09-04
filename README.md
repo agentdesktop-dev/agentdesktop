@@ -15,8 +15,8 @@ Agentdesktop discovers AI developer tools, inventories MCP servers and skills,
 applies tool-native configuration and sandbox policy, and connects each device
 to an LLM gateway with user and device identity.
 
-Keep developers in Claude Code, Codex, OpenCode, and VS Code while giving
-platform teams one place to understand and manage the fleet.
+Keep developers in Claude Code, Codex, OpenCode, VS Code, and Grok Build while
+giving platform teams one place to understand and manage the fleet.
 
 [Website](https://agentdesktop.dev) ·
 [Documentation](https://agentdesktop.dev/docs/) ·
@@ -135,6 +135,7 @@ stage.
 | Codex | Yes | Yes | MCP and skills | Yes |
 | OpenCode | Yes | Yes | MCP | — |
 | VS Code | Yes | — | MCP and skills | — |
+| Grok Build | Yes | — | MCP and skills | — |
 
 > **Don't see your tool?** We're actively expanding this list and would love
 > your help. [Open an integration request](https://github.com/agentdesktop-dev/agentdesktop/issues/new)
