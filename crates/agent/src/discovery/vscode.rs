@@ -9,11 +9,21 @@ use serde_json::Value;
 
 use super::metadata;
 
+/// Product name recorded in Visual Studio Code's packaged `package.json`.
+const PRODUCT_NAME: &str = "Code";
+
 pub(super) fn discover() -> Option<Agent> {
-    let executable = metadata::find_executable("code", executable_candidates())?;
+    let executable = metadata::find_in_path("code")
+        .into_iter()
+        .chain(
+            executable_candidates()
+                .into_iter()
+                .filter(|candidate| candidate.is_file()),
+        )
+        .find(|candidate| is_visual_studio_code(candidate))?;
     let version = version_candidates(&executable)
         .into_iter()
-        .find_map(|path| metadata::json_version(&path));
+        .find_map(|path| metadata::json_package_version(&path, PRODUCT_NAME));
     Some(Agent {
         version,
         executable,
@@ -21,6 +31,20 @@ pub(super) fn discover() -> Option<Agent> {
         mcp_servers: discover_mcp_servers(),
         skills: metadata::discover_skills(skill_roots()),
     })
+}
+
+/// Visual Studio Code forks such as Cursor and Windsurf ship their own `code`
+/// launcher, so finding one on `PATH` does not prove it is Visual Studio Code.
+///
+/// A candidate is rejected only when its packaged manifest positively names a
+/// different product, so a fork's launcher on `PATH` is skipped in favour of a
+/// real install. Layouts that expose no manifest are still accepted, which
+/// keeps detection working for packaging this module does not model.
+fn is_visual_studio_code(executable: &Path) -> bool {
+    metadata::packaged_manifest_candidates(executable)
+        .into_iter()
+        .find_map(|path| metadata::json_package_name(&path))
+        .is_none_or(|name| name == PRODUCT_NAME)
 }
 
 fn discover_mcp_servers() -> Vec<McpServer> {
@@ -68,7 +92,7 @@ fn user_profile_root(home: &Path) -> PathBuf {
     home.join("AppData/Roaming/Code/User")
 }
 
-fn mcp_servers_from_json(path: &Path) -> Vec<McpServer> {
+pub(super) fn mcp_servers_from_json(path: &Path) -> Vec<McpServer> {
     let Ok(contents) = fs::read_to_string(path) else {
         return Vec::new();
     };
@@ -78,7 +102,7 @@ fn mcp_servers_from_json(path: &Path) -> Vec<McpServer> {
     mcp_servers_from_value(&document, path)
 }
 
-fn mcp_servers_from_value(document: &Value, source: &Path) -> Vec<McpServer> {
+pub(super) fn mcp_servers_from_value(document: &Value, source: &Path) -> Vec<McpServer> {
     let Some(servers) = document
         .get("servers")
         .or_else(|| document.get("mcpServers"))
@@ -171,20 +195,9 @@ fn executable_candidates() -> Vec<PathBuf> {
 }
 
 fn version_candidates(executable: &Path) -> Vec<PathBuf> {
-    let mut candidates = BTreeSet::new();
-    for executable in [
-        Some(executable.to_path_buf()),
-        executable.canonicalize().ok(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if let Some(directory) = executable.parent() {
-            candidates.insert(directory.join("resources/app/package.json"));
-            candidates.insert(directory.join("../resources/app/package.json"));
-            candidates.insert(directory.join("../../package.json"));
-        }
-    }
+    let mut candidates: BTreeSet<PathBuf> = metadata::packaged_manifest_candidates(executable)
+        .into_iter()
+        .collect();
     candidates.extend([
         PathBuf::from("/usr/share/code/resources/app/package.json"),
         PathBuf::from("/usr/lib/code/resources/app/package.json"),
@@ -206,7 +219,46 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{mcp_servers_from_json, mcp_servers_from_value};
+    use super::{is_visual_studio_code, mcp_servers_from_json, mcp_servers_from_value};
+
+    /// Builds an Electron editor install tree and returns its `bin` launcher.
+    fn packaged_editor(name: &str, product: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "agentdesktop-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("resources/app")).unwrap();
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::write(
+            root.join("resources/app/package.json"),
+            json!({ "name": product, "version": "1.2.3" }).to_string(),
+        )
+        .unwrap();
+        let launcher = root.join("bin/code");
+        fs::write(&launcher, "").unwrap();
+        launcher
+    }
+
+    #[test]
+    fn rejects_a_code_launcher_belonging_to_a_fork() {
+        let launcher = packaged_editor("fork", "Cursor");
+        assert!(!is_visual_studio_code(&launcher));
+        let _ = fs::remove_dir_all(launcher.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn accepts_a_code_launcher_belonging_to_visual_studio_code() {
+        let launcher = packaged_editor("vscode", "Code");
+        assert!(is_visual_studio_code(&launcher));
+        let _ = fs::remove_dir_all(launcher.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn accepts_an_install_layout_without_a_manifest() {
+        assert!(is_visual_studio_code(Path::new("/usr/bin/code")));
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
