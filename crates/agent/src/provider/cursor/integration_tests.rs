@@ -39,7 +39,7 @@ async fn headless_discovery() -> anyhow::Result<()> {
         info!("Checking Cursor discovery and VS Code fork rejection");
         let output = container.exec(&["curl", "--fail", "--silent", "--unix-socket", DEFAULT_SOCKET_PATH, "http://localhost/v1/discovery"]).await?;
         let discovery: Discovery = serde_json::from_str(&output)?;
-        ensure!(!discovery.agents.iter().any(|agent| agent.kind == "vscode"), "Cursor was also reported as VS Code");
+        ensure!(!discovery.agents.iter().any(|agent| agent.kind == "vscode"), "Cursor was also reported as VS Code; discovery: {output}");
         let agent = discovery.agents.iter().find(|agent| agent.kind == "cursor").context("Cursor was not discovered")?;
         ensure!(agent.version.as_deref() == Some(VERSION), "incorrect discovered version: {:?}", agent.version);
         ensure!(agent.mcp_servers.len() == 2, "unexpected MCP servers: {:?}", agent.mcp_servers);

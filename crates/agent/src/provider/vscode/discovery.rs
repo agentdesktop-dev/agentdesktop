@@ -43,10 +43,14 @@ pub(super) fn discover() -> Option<Agent> {
 /// real install. Layouts that expose no manifest are still accepted, which
 /// keeps detection working for packaging this module does not model.
 fn is_visual_studio_code(executable: &Path) -> bool {
-    metadata::packaged_manifest_candidates(executable)
+    let manifest = metadata::packaged_manifest_candidates(executable)
         .into_iter()
-        .find_map(|path| metadata::json_package_name(&path))
-        .is_none_or(|name| name == PRODUCT_NAME)
+        .find_map(|path| metadata::json_package_name(&path).map(|name| (path, name)));
+    let accepted = manifest
+        .as_ref()
+        .is_none_or(|(_, name)| name == PRODUCT_NAME);
+    tracing::debug!(executable = %executable.display(), ?manifest, accepted, "Checking VS Code candidate");
+    accepted
 }
 
 fn discover_mcp_servers() -> Vec<McpServer> {
