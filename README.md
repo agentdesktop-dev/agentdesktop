@@ -5,6 +5,7 @@
 
 # Open-source visibility and control for AI tools across your desktop fleet
 
+
 [![CI](https://github.com/agentdesktop-dev/agentdesktop/actions/workflows/ci.yml/badge.svg)](https://github.com/agentdesktop-dev/agentdesktop/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/agentdesktop-dev/agentdesktop?display_name=tag&sort=semver)](https://github.com/agentdesktop-dev/agentdesktop/releases/latest)
 [![License](https://img.shields.io/github/license/agentdesktop-dev/agentdesktop)](LICENSE)
