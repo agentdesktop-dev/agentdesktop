@@ -1,0 +1,83 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+config:
+  adminAddr: 0.0.0.0:15000
+  database:
+    url: sqlite:///data/requests.db?mode=rwc
+  storage:
+    mode: readOnly
+  modelCatalog:
+  - file: /etc/agentgateway/costs.json
+
+frontendPolicies:
+  accessLog:
+    add:
+      llm.client: jwt.client_id
+      user: jwt.email
+      # Enrolled device asserted by the controller; the usage report groups and
+      # filters on this attribute.
+      device_id: jwt.device_id
+    database:
+      llm: metadata
+
+gateways:
+  gateway:
+    port: 4000
+
+routes:
+- name: reachability
+  gateways: gateway
+  matches:
+  - method: HEAD
+    path:
+      exact: /
+  policies:
+    directResponse:
+      status: 200
+
+llm:
+  gateways: gateway
+  policies:
+    jwtAuth:
+      mode: strict
+      issuer: agentdesktop-controller
+      audiences: [agentgateway]
+      jwks:
+        url: http://host.docker.internal:8081/.well-known/jwks.json
+  models:
+  # Codex defaults to OpenAI models; list them before the Anthropic catch-all.
+  - name: "gpt-5.6"
+    provider: openai
+    params:
+      apiKey: $OPENAI_API_KEY
+  - name: "gpt-5.5"
+    provider: openai
+    params:
+      apiKey: $OPENAI_API_KEY
+  - name: "gpt-5.4"
+    provider: openai
+    params:
+      apiKey: $OPENAI_API_KEY
+  - name: "gpt-5.4-mini"
+    provider: openai
+    params:
+      apiKey: $OPENAI_API_KEY
+  - name: "gpt-5.3-codex"
+    provider: openai
+    params:
+      apiKey: $OPENAI_API_KEY
+  - name: "gpt-5.2"
+    provider: openai
+    params:
+      apiKey: $OPENAI_API_KEY
+  - name: "claude-haiku-4-5"
+    provider: anthropic
+    params:
+      apiKey: $ANTHROPIC_API_KEY
+  - name: "claude-sonnet-4-5"
+    provider: anthropic
+    params:
+      apiKey: $ANTHROPIC_API_KEY
+  - name: "*"
+    provider: anthropic
+    params:
+      apiKey: $ANTHROPIC_API_KEY

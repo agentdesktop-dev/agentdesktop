@@ -74,6 +74,8 @@ struct Claims<'a> {
     iat: u64,
     exp: u64,
     act: Actor<'a>,
+    /// Flat copy of `act.sub` so gateway CEL can read `jwt.device_id`.
+    device_id: &'a str,
     client_id: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     email: Option<&'a str>,
@@ -137,6 +139,7 @@ impl GatewayJwtIssuer {
                 iat: issued_at,
                 exp: expires_at,
                 act: Actor { sub: device_id },
+                device_id,
                 client_id,
                 email: idp
                     .and_then(|claims| claims.get("email"))
@@ -245,6 +248,7 @@ mod tests {
             iat: 100,
             exp: 200,
             act: Actor { sub: "device-123" },
+            device_id: "device-123",
             client_id: "codex",
             email: Some("john@example.com"),
             email_verified: Some(true),
@@ -256,8 +260,8 @@ mod tests {
         assert_eq!(claims["email"], "john@example.com");
         assert_eq!(claims["email_verified"], true);
         assert_eq!(claims["act"]["sub"], "device-123");
+        assert_eq!(claims["device_id"], "device-123");
         assert_eq!(claims["client_id"], "codex");
         assert_eq!(claims["idp"]["groups"][0], "engineering");
-        assert!(claims.get("device_id").is_none());
     }
 }

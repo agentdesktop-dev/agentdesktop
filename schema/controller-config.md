@@ -14,6 +14,7 @@
 |`gatewayJwt.keyId`|string|Key identifier placed in generated JWT headers.|
 |`gatewayJwt.lifetime`|string|Lifetime of generated JWTs. Defaults to `5m`.|
 |`gatewayJwt.privateKey`|string|Path to the PEM-encoded RSA private signing key.<br><br>Relative paths are resolved from the controller configuration directory.|
+|`llmGatewayUsageUrl`|string|Exact URL of the Agentgateway analytics summary endpoint used for fleet usage reports.<br><br>This must be a cluster-internal address that only the controller can reach; the<br>controller is the authorization boundary for every usage query.|
 |`oidc`|object|OpenID Connect settings used for device enrollment and authorization.|
 |`oidc.clientId`|string|Public OpenID Connect client identifier.|
 |`oidc.issuer`|string|Exact OpenID Connect issuer URL.|

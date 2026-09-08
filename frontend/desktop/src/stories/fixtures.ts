@@ -43,37 +43,38 @@ export const offlineConnector: ConnectorSnapshot = {
 export const llmUsage: LlmUsageSummary = {
   from: "2026-09-02T12:00:00Z",
   to: "2026-09-03T12:00:00Z",
+  currency: "USD",
   requests: 50,
   totalTokens: 394_714,
-  estimatedCostUsd: 1.3097,
+  estimatedCost: 1.3097,
   breakdown: [
     {
       model: "claude-sonnet-4-5",
       agent: "claude-cli",
       requests: 11,
       totalTokens: 198_400,
-      estimatedCostUsd: 0.9342,
+      estimatedCost: 0.9342,
     },
     {
       model: "claude-haiku-4-5",
       agent: "claude-cli",
       requests: 29,
       totalTokens: 160_214,
-      estimatedCostUsd: 0.2705,
+      estimatedCost: 0.2705,
     },
     {
       model: "claude-haiku-4-5",
       agent: "codex_cli_rs",
       requests: 6,
       totalTokens: 24_100,
-      estimatedCostUsd: 0.08,
+      estimatedCost: 0.08,
     },
     {
       model: "gpt-5.6-sol",
       agent: "GitHubCopilotChat",
       requests: 4,
       totalTokens: 12_000,
-      estimatedCostUsd: 0.025,
+      estimatedCost: 0.025,
     },
   ],
 };

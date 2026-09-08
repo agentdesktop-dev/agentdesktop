@@ -12,6 +12,7 @@ import type {
 import { UsageView, type UsageViewProps } from "./UsageView";
 
 const interactionPage: LlmUsageInteractions = {
+  currency: "USD",
   interactions: [
     {
       id: "request-1",
@@ -28,7 +29,7 @@ const interactionPage: LlmUsageInteractions = {
       inputTokens: 363_813,
       outputTokens: 341,
       totalTokens: 364_154,
-      estimatedCostUsd: 0.179343,
+      estimatedCost: 0.179343,
     },
     {
       id: "request-2",
@@ -45,13 +46,14 @@ const interactionPage: LlmUsageInteractions = {
       inputTokens: null,
       outputTokens: null,
       totalTokens: null,
-      estimatedCostUsd: 0,
+      estimatedCost: 0,
     },
   ],
   nextCursor: "older-page",
 };
 
 const olderInteractionPage: LlmUsageInteractions = {
+  currency: "USD",
   interactions: [
     {
       id: "request-3",
@@ -68,7 +70,7 @@ const olderInteractionPage: LlmUsageInteractions = {
       inputTokens: null,
       outputTokens: null,
       totalTokens: null,
-      estimatedCostUsd: null,
+      estimatedCost: null,
     },
   ],
   nextCursor: null,
@@ -86,15 +88,16 @@ function scaleUsage(factor: number, from: string): LlmUsageSummary {
     ...item,
     requests: Math.max(1, Math.round(item.requests * factor)),
     totalTokens: Math.round(item.totalTokens * factor),
-    estimatedCostUsd: item.estimatedCostUsd * factor,
+    estimatedCost: item.estimatedCost * factor,
   }));
   return {
     from,
     to: llmUsage.to,
+    currency: llmUsage.currency,
     requests: breakdown.reduce((total, item) => total + item.requests, 0),
     totalTokens: breakdown.reduce((total, item) => total + item.totalTokens, 0),
-    estimatedCostUsd: breakdown.reduce(
-      (total, item) => total + item.estimatedCostUsd,
+    estimatedCost: breakdown.reduce(
+      (total, item) => total + item.estimatedCost,
       0,
     ),
     breakdown,
@@ -302,7 +305,7 @@ export const LargeValues: Story = {
           agent: "GitHubCopilotChat",
           requests: 2_500_000,
           totalTokens: 1_234_567,
-          estimatedCostUsd: 0.42,
+          estimatedCost: 0.42,
         },
       ],
     },

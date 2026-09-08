@@ -9,7 +9,9 @@ use agentdesktop_controller::{
     oidc::OidcProvider,
     service::FleetAgentService,
 };
-use agentdesktop_core::{DEFAULT_CONTROLLER_CONFIG_PATH, config, telemetry};
+use agentdesktop_core::{
+    DEFAULT_CONTROLLER_CONFIG_PATH, config, llm_usage::UsageClient, telemetry,
+};
 use agentdesktop_proto::fleet::fleet_agent_server::FleetAgentServer;
 use anyhow::Context;
 use clap::Parser;
@@ -71,6 +73,15 @@ async fn main() -> anyhow::Result<()> {
     }
     let gateway_jwks = gateway_jwt_issuer.as_ref().map(GatewayJwtIssuer::jwks);
     let admin_gateway_jwks = gateway_jwks.clone();
+    let usage = config
+        .llm_gateway_usage_url
+        .clone()
+        .map(UsageClient::new)
+        .transpose()
+        .context("initialize LLM usage client")?;
+    if let Some(url) = &config.llm_gateway_usage_url {
+        tracing::info!(%url, "LLM usage reporting enabled");
+    }
     let admin_state = AdminState::new(
         database.clone(),
         daemon_config.clone(),
@@ -80,7 +91,9 @@ async fn main() -> anyhow::Result<()> {
             oidc_enabled: true,
             tls_enabled: true,
             gateway_jwt_enabled: gateway_jwt_issuer.is_some(),
+            llm_usage_enabled: usage.is_some(),
         },
+        usage.clone(),
     );
     let ca_certificate =
         std::fs::read_to_string(&tls.client_ca_certificate).with_context(|| {
@@ -100,6 +113,7 @@ async fn main() -> anyhow::Result<()> {
         daemon_config,
         gateway_jwt_issuer,
         Some(device_certificate_issuer),
+        usage,
     );
 
     let certificate = std::fs::read(&tls.certificate)

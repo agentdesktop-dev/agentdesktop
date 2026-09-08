@@ -1,0 +1,38 @@
+services:
+  dex:
+    image: ghcr.io/dexidp/dex:v2.45.1
+    command: dex serve /etc/dex/config.yaml
+    ports:
+    - 127.0.0.1:5558:5558
+    volumes:
+    - ./dex.yaml:/etc/dex/config.yaml:ro
+
+  # Agentgateway runs as UID 65532 and needs a writable request-log volume.
+  agentgateway-data-init:
+    image: alpine:3.23.3
+    command: ["chown", "-R", "65532:65532", "/data"]
+    volumes:
+    - agentgateway-data:/data
+
+  agentgateway:
+    image: cr.agentgateway.dev/agentgateway:v1.5.0
+    command: -f /etc/agentgateway/config.yaml
+    depends_on:
+      agentgateway-data-init:
+        condition: service_completed_successfully
+    # The controller runs on the host; Agentgateway fetches its JWKS from there.
+    extra_hosts:
+    - host.docker.internal:host-gateway
+    ports:
+    - 127.0.0.1:4003:4000
+    - 127.0.0.1:15001:15000
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-unused}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-unused}
+    volumes:
+    - ./agentgateway.yaml:/etc/agentgateway/config.yaml:ro
+    - ../standalone-costs/costs.json:/etc/agentgateway/costs.json:ro
+    - agentgateway-data:/data
+
+volumes:
+  agentgateway-data:

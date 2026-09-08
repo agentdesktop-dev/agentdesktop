@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=../../schema/daemon-config.json
+# Distributed by the controller to every enrolled device. No usageUrl: managed
+# devices read their own usage through the controller, scoped to their device.
+llmGateway:
+  url: http://127.0.0.1:4003
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
+    allowedClientIds: [claude-code, claude-desktop, codex, opencode]
+
+telemetry:
+  events:
+  - session.new
+  - tool.use
+
+programs:
+  claudeCode:
+    useLlmGateway: true
+    companyAnnouncements: ["Managed by Agentdesktop (fleet usage example)"]
+  codex:
+    useLlmGateway: true
+    managedConfig:
+      model: gpt-5.2

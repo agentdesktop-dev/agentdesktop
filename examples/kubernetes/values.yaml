@@ -9,6 +9,7 @@ gatewayJwt:
   issuer: agentdesktop-controller
   keyId: agentdesktop
   lifetime: 5m
+llmGatewayUsageUrl: http://agentgateway-admin.agentgateway-system.svc.cluster.local:15000/api/logs/analytics/summary
 daemonConfig:
   llmGateway:
     url: http://agentgateway-proxy.agentgateway-system.svc.cluster.local

@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{net::SocketAddr, path::PathBuf};
 
 use axum::{
     Json, Router,
@@ -10,10 +10,14 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
 use agentdesktop_core::{
-    config::{DaemonConfig, LlmGatewayAuthentication, ProgramAuthentication, valid_client_id},
+    config::{
+        ControllerConnectionConfig, DaemonConfig, LlmGatewayAuthentication, ProgramAuthentication,
+        valid_client_id,
+    },
+    llm_usage::{InteractionsQuery, RangeQuery, UsageClient, UsageScope},
     model::{
-        Discovery, EnrollmentStatus, LlmGatewayCredential, LlmUsageBreakdown, LlmUsageInteraction,
-        LlmUsageInteractions, LlmUsageRange, LlmUsageSummary, TelemetryEvent, TelemetryEventKind,
+        Discovery, EnrollmentStatus, LlmGatewayCredential, LlmUsageInteractions, LlmUsageSummary,
+        TelemetryEvent, TelemetryEventKind,
     },
 };
 
@@ -40,81 +44,6 @@ struct CredentialQuery {
     client_id: String,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AnalyticsResponse {
-    time_range: AnalyticsTimeRange,
-    groups: Vec<AnalyticsGroup>,
-}
-
-#[derive(Deserialize)]
-struct AnalyticsTimeRange {
-    from: String,
-    to: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AnalyticsGroup {
-    group: BTreeMap<String, serde_json::Value>,
-    requests: u64,
-    total_tokens: u64,
-    cost: f64,
-}
-
-#[derive(Deserialize)]
-struct UsageQuery {
-    #[serde(default)]
-    range: LlmUsageRange,
-}
-
-#[derive(Deserialize)]
-struct UsageInteractionsQuery {
-    from: String,
-    to: String,
-    model: String,
-    agent: String,
-    cursor: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SearchResponse {
-    logs: Vec<SearchLog>,
-    next_cursor: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SearchLog {
-    id: String,
-    started_at: String,
-    completed_at: Option<String>,
-    duration_ms: Option<u64>,
-    http_status: Option<u16>,
-    error: Option<String>,
-    gen_ai: SearchGenAi,
-    usage: SearchUsage,
-    cost: Option<f64>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SearchGenAi {
-    operation_name: Option<String>,
-    provider_name: Option<String>,
-    request_model: Option<String>,
-    response_model: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SearchUsage {
-    input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-    total_tokens: Option<u64>,
-}
-
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/health", get(health))
@@ -134,221 +63,82 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn llm_gateway_usage(
-    State(state): State<AppState>,
-    Query(query): Query<UsageQuery>,
-) -> Result<Json<Option<LlmUsageSummary>>, (StatusCode, String)> {
-    let Some(usage_url) = configured_usage_url(&state)? else {
-        return Ok(Json(None));
-    };
-    fetch_llm_usage(&usage_url, query.range)
-        .await
-        .map(Some)
-        .map(Json)
-        .map_err(|error| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("query LLM gateway usage: {error:#}"),
-            )
-        })
+/// Where the daemon obtains LLM usage for this workstation.
+enum UsageSource<'a> {
+    /// Standalone: query the loopback Agentgateway analytics API directly.
+    Gateway(UsageClient),
+    /// Managed: ask the controller, which scopes results to this device.
+    Controller(&'a ControllerConnectionConfig),
 }
 
-fn configured_usage_url(state: &AppState) -> Result<Option<url::Url>, (StatusCode, String)> {
+fn usage_source(state: &AppState) -> Result<Option<UsageSource<'_>>, (StatusCode, String)> {
     let effective = load_effective_config(&state.config, &state.state_dir).map_err(|error| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("read applied configuration: {error:#}"),
         )
     })?;
-    Ok(effective.llm_gateway.and_then(|gateway| gateway.usage_url))
-}
-
-fn usage_client() -> reqwest::Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-}
-
-async fn fetch_llm_usage(
-    usage_url: &url::Url,
-    range: LlmUsageRange,
-) -> anyhow::Result<LlmUsageSummary> {
-    let (from, to) = usage_time_range(range)?;
-    let analytics = usage_client()?
-        .post(usage_url.clone())
-        .json(&serde_json::json!({
-            "timeRange": { "from": from, "to": to },
-            "groupBy": [
-                { "field": "requestModel" },
-                { "field": "attributes", "key": "user_agent.name" }
-            ],
-            "bucketCount": 1
-        }))
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<AnalyticsResponse>()
-        .await?;
-    let mut requests = 0_u64;
-    let mut total_tokens = 0_u64;
-    let mut estimated_cost_usd = 0.0_f64;
-    let mut breakdown = Vec::with_capacity(analytics.groups.len());
-    for group in analytics.groups {
-        requests = requests.saturating_add(group.requests);
-        total_tokens = total_tokens.saturating_add(group.total_tokens);
-        estimated_cost_usd += group.cost;
-        breakdown.push(LlmUsageBreakdown {
-            model: analytics_group_value(&group.group, "requestModel", "Unknown model"),
-            agent: analytics_group_value(&group.group, "user_agent.name", "Unknown agent"),
-            requests: group.requests,
-            total_tokens: group.total_tokens,
-            estimated_cost_usd: group.cost,
-        });
+    let Some(gateway) = effective.llm_gateway else {
+        return Ok(None);
+    };
+    if let Some(usage_url) = gateway.usage_url {
+        let client = UsageClient::new(usage_url).map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("configure LLM usage client: {error:#}"),
+            )
+        })?;
+        return Ok(Some(UsageSource::Gateway(client)));
     }
-    breakdown.sort_by(|left, right| {
-        right
-            .estimated_cost_usd
-            .total_cmp(&left.estimated_cost_usd)
-            .then_with(|| left.model.cmp(&right.model))
-            .then_with(|| left.agent.cmp(&right.agent))
-    });
-    Ok(LlmUsageSummary {
-        from: analytics.time_range.from,
-        to: analytics.time_range.to,
-        requests,
-        total_tokens,
-        estimated_cost_usd,
-        breakdown,
-    })
+    if matches!(
+        gateway.authentication,
+        Some(LlmGatewayAuthentication::ControllerJwt { .. })
+    ) && let Some(controller) = state.config.controller.as_ref()
+    {
+        return Ok(Some(UsageSource::Controller(controller)));
+    }
+    Ok(None)
+}
+
+fn usage_unavailable(context: &str) -> impl Fn(anyhow::Error) -> (StatusCode, String) + '_ {
+    move |error| (StatusCode::BAD_GATEWAY, format!("{context}: {error:#}"))
+}
+
+async fn llm_gateway_usage(
+    State(state): State<AppState>,
+    Query(query): Query<RangeQuery>,
+) -> Result<Json<Option<LlmUsageSummary>>, (StatusCode, String)> {
+    let Some(source) = usage_source(&state)? else {
+        return Ok(Json(None));
+    };
+    let summary = match source {
+        UsageSource::Gateway(client) => client.summary(query.range, &UsageScope::default()).await,
+        UsageSource::Controller(controller) => {
+            remote::llm_usage(controller, &state.state_dir, query.range).await
+        }
+    }
+    .map_err(usage_unavailable("query LLM gateway usage"))?;
+    Ok(Json(Some(summary)))
 }
 
 async fn llm_gateway_usage_interactions(
     State(state): State<AppState>,
-    Query(query): Query<UsageInteractionsQuery>,
+    Query(query): Query<InteractionsQuery>,
 ) -> Result<Json<Option<LlmUsageInteractions>>, (StatusCode, String)> {
-    if query.model.trim().is_empty() || query.model.len() > 256 {
-        return Err((StatusCode::BAD_REQUEST, "invalid model".to_owned()));
-    }
-    if query.agent.trim().is_empty() || query.agent.len() > 128 {
-        return Err((StatusCode::BAD_REQUEST, "invalid agent".to_owned()));
-    }
-    if query
-        .cursor
-        .as_ref()
-        .is_some_and(|cursor| cursor.len() > 512)
-    {
-        return Err((StatusCode::BAD_REQUEST, "invalid cursor".to_owned()));
-    }
-    validate_usage_time_range(&query.from, &query.to)
+    query
+        .validate()
         .map_err(|message| (StatusCode::BAD_REQUEST, message.to_owned()))?;
-    let Some(usage_url) = configured_usage_url(&state)? else {
+    let Some(source) = usage_source(&state)? else {
         return Ok(Json(None));
     };
-    fetch_llm_usage_interactions(
-        &usage_url,
-        &query.from,
-        &query.to,
-        &query.model,
-        &query.agent,
-        query.cursor.as_deref(),
-    )
-    .await
-    .map(Some)
-    .map(Json)
-    .map_err(|error| {
-        (
-            StatusCode::BAD_GATEWAY,
-            format!("query LLM gateway interactions: {error:#}"),
-        )
-    })
-}
-
-async fn fetch_llm_usage_interactions(
-    usage_url: &url::Url,
-    from: &str,
-    to: &str,
-    model: &str,
-    agent: &str,
-    cursor: Option<&str>,
-) -> anyhow::Result<LlmUsageInteractions> {
-    // Agentgateway serves `/api/logs/search` beside `/api/logs/analytics/summary`.
-    let search_url = usage_url.join("../search")?;
-    let response = usage_client()?
-        .post(search_url)
-        .json(&serde_json::json!({
-            "limit": 25,
-            "cursor": cursor,
-            "timeRange": { "from": from, "to": to },
-            "filters": {
-                "requestModel": [model],
-                "attributes": { "user_agent.name": agent }
-            }
-        }))
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<SearchResponse>()
-        .await?;
-    let interactions = response
-        .logs
-        .into_iter()
-        .map(|log| LlmUsageInteraction {
-            agent: agent.to_owned(),
-            request_model: log.gen_ai.request_model.unwrap_or_else(|| model.to_owned()),
-            id: log.id,
-            started_at: log.started_at,
-            completed_at: log.completed_at,
-            duration_ms: log.duration_ms,
-            http_status: log.http_status,
-            failed: log.error.is_some(),
-            operation: log.gen_ai.operation_name,
-            provider: log.gen_ai.provider_name,
-            response_model: log.gen_ai.response_model,
-            input_tokens: log.usage.input_tokens,
-            output_tokens: log.usage.output_tokens,
-            total_tokens: log.usage.total_tokens,
-            estimated_cost_usd: log.cost,
-        })
-        .collect();
-    Ok(LlmUsageInteractions {
-        interactions,
-        next_cursor: response.next_cursor,
-    })
-}
-
-fn validate_usage_time_range(from: &str, to: &str) -> Result<(), &'static str> {
-    let timestamp_format = &time::format_description::well_known::Rfc3339;
-    let from = time::OffsetDateTime::parse(from, timestamp_format)
-        .map_err(|_| "invalid usage start time")?;
-    let to =
-        time::OffsetDateTime::parse(to, timestamp_format).map_err(|_| "invalid usage end time")?;
-    let duration = to - from;
-    if duration <= time::Duration::ZERO || duration > time::Duration::days(31) {
-        return Err("usage time range must be between zero and 31 days");
+    let interactions = match source {
+        UsageSource::Gateway(client) => client.interactions(&query, &UsageScope::default()).await,
+        UsageSource::Controller(controller) => {
+            remote::llm_usage_interactions(controller, &state.state_dir, &query).await
+        }
     }
-    Ok(())
-}
-
-fn usage_time_range(range: LlmUsageRange) -> anyhow::Result<(String, String)> {
-    let to = time::OffsetDateTime::now_utc();
-    let duration = time::Duration::try_from(range.duration())?;
-    let from = to - duration;
-    let timestamp_format = &time::format_description::well_known::Rfc3339;
-    Ok((from.format(timestamp_format)?, to.format(timestamp_format)?))
-}
-
-fn analytics_group_value(
-    group: &BTreeMap<String, serde_json::Value>,
-    key: &str,
-    fallback: &str,
-) -> String {
-    group
-        .get(key)
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(fallback)
-        .to_owned()
+    .map_err(usage_unavailable("query LLM gateway interactions"))?;
+    Ok(Json(Some(interactions)))
 }
 
 async fn telemetry(
@@ -609,188 +399,9 @@ fn program_uses_subscription(config: &DaemonConfig, client_id: &str) -> bool {
 mod tests {
     use std::fs;
 
-    use agentdesktop_core::{config::parse_daemon, model::LlmUsageRange};
-    use axum::{Json, Router, routing::post};
-    use serde_json::{Value, json};
+    use agentdesktop_core::config::parse_daemon;
 
-    use super::{
-        fetch_llm_usage, fetch_llm_usage_interactions, load_effective_config,
-        program_uses_subscription,
-    };
-
-    #[tokio::test]
-    async fn fetches_and_combines_agentgateway_usage() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(
-                listener,
-                Router::new().route(
-                    "/api/logs/analytics/summary",
-                    post(|Json(request): Json<Value>| async move {
-                        assert_eq!(
-                            request["groupBy"],
-                            json!([
-                                { "field": "requestModel" },
-                                { "field": "attributes", "key": "user_agent.name" }
-                            ])
-                        );
-                        assert_eq!(request["bucketCount"], 1);
-                        let timestamp_format = &time::format_description::well_known::Rfc3339;
-                        let from = time::OffsetDateTime::parse(
-                            request["timeRange"]["from"].as_str().unwrap(),
-                            timestamp_format,
-                        )
-                        .unwrap();
-                        let to = time::OffsetDateTime::parse(
-                            request["timeRange"]["to"].as_str().unwrap(),
-                            timestamp_format,
-                        )
-                        .unwrap();
-                        assert_eq!(to - from, time::Duration::hours(1));
-                        Json(json!({
-                            "timeRange": {
-                                "from": "2026-09-02T12:00:00Z",
-                                "to": "2026-09-03T12:00:00Z"
-                            },
-                            "bucketSeconds": 86400,
-                            "buckets": [],
-                            "groups": [
-                                {
-                                    "group": {
-                                        "requestModel": "claude-haiku-4-5",
-                                        "user_agent.name": "claude-cli"
-                                    },
-                                    "requests": 2,
-                                    "totalTokens": 1200,
-                                    "cost": 0.012
-                                },
-                                {
-                                    "group": {
-                                        "requestModel": "claude-sonnet-4-5",
-                                        "user_agent.name": "codex_cli_rs"
-                                    },
-                                    "requests": 1,
-                                    "totalTokens": 300,
-                                    "cost": 0.004
-                                }
-                            ],
-                            "filterOptions": {}
-                        }))
-                    }),
-                ),
-            )
-            .await
-            .unwrap();
-        });
-        let usage_url = format!("http://{address}/api/logs/analytics/summary")
-            .parse()
-            .unwrap();
-
-        let usage = fetch_llm_usage(&usage_url, LlmUsageRange::Hour)
-            .await
-            .unwrap();
-
-        assert_eq!(usage.requests, 3);
-        assert_eq!(usage.total_tokens, 1500);
-        assert!((usage.estimated_cost_usd - 0.016).abs() < f64::EPSILON);
-        assert_eq!(usage.from, "2026-09-02T12:00:00Z");
-        assert_eq!(usage.to, "2026-09-03T12:00:00Z");
-        assert_eq!(usage.breakdown.len(), 2);
-        assert_eq!(usage.breakdown[0].model, "claude-haiku-4-5");
-        assert_eq!(usage.breakdown[0].agent, "claude-cli");
-        assert_eq!(usage.breakdown[0].requests, 2);
-        assert_eq!(usage.breakdown[0].total_tokens, 1200);
-        assert!((usage.breakdown[0].estimated_cost_usd - 0.012).abs() < f64::EPSILON);
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn fetches_metadata_only_interactions_for_model_and_agent() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(
-                listener,
-                Router::new().route(
-                    "/api/logs/search",
-                    post(|Json(request): Json<Value>| async move {
-                        assert_eq!(request["limit"], 25);
-                        assert_eq!(request["cursor"], "next-page");
-                        assert!(request.get("includeAttributes").is_none());
-                        assert!(request.get("includePayload").is_none());
-                        assert_eq!(
-                            request["filters"],
-                            json!({
-                                "requestModel": ["gpt-5.6-sol"],
-                                "attributes": {
-                                    "user_agent.name": "GitHubCopilotChat"
-                                }
-                            })
-                        );
-                        assert_eq!(
-                            request["timeRange"],
-                            json!({
-                                "from": "2026-09-07T05:00:00Z",
-                                "to": "2026-09-07T06:00:00Z"
-                            })
-                        );
-                        Json(json!({
-                            "logs": [{
-                                "id": "request-1",
-                                "startedAt": "2026-09-07T06:09:23Z",
-                                "completedAt": "2026-09-07T06:09:29Z",
-                                "durationMs": 6038,
-                                "httpStatus": 200,
-                                "error": null,
-                                "genAi": {
-                                    "operationName": "chat",
-                                    "providerName": "copilot",
-                                    "requestModel": "gpt-5.6-sol",
-                                    "responseModel": "gpt-5.6-sol"
-                                },
-                                "usage": {
-                                    "inputTokens": 1200,
-                                    "outputTokens": 300,
-                                    "totalTokens": 1500
-                                },
-                                "cost": 0.012,
-                                "hasPayload": false
-                            }],
-                            "nextCursor": "following-page"
-                        }))
-                    }),
-                ),
-            )
-            .await
-            .unwrap();
-        });
-        let usage_url = format!("http://{address}/api/logs/analytics/summary")
-            .parse()
-            .unwrap();
-
-        let result = fetch_llm_usage_interactions(
-            &usage_url,
-            "2026-09-07T05:00:00Z",
-            "2026-09-07T06:00:00Z",
-            "gpt-5.6-sol",
-            "GitHubCopilotChat",
-            Some("next-page"),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result.next_cursor.as_deref(), Some("following-page"));
-        assert_eq!(result.interactions.len(), 1);
-        let interaction = &result.interactions[0];
-        assert_eq!(interaction.id, "request-1");
-        assert_eq!(interaction.agent, "GitHubCopilotChat");
-        assert_eq!(interaction.request_model, "gpt-5.6-sol");
-        assert!(!interaction.failed);
-        assert_eq!(interaction.total_tokens, Some(1500));
-        assert_eq!(interaction.estimated_cost_usd, Some(0.012));
-        server.abort();
-    }
+    use super::{load_effective_config, program_uses_subscription};
 
     #[test]
     fn subscription_is_selected_by_requesting_agent() {

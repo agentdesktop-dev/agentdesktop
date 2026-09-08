@@ -461,6 +461,33 @@ code {
   color: #8c959f;
 }
 
+th.numeric,
+td.numeric {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+td.usage-cost-cell {
+  color: #17663a;
+  font-weight: 600;
+}
+
+tbody tr.static-row {
+  cursor: default;
+}
+
+tbody tr.static-row:hover {
+  background: transparent;
+}
+
+.section-intro .usage-range {
+  flex: 0 0 auto;
+}
+
+.device-usage {
+  min-width: 0;
+}
+
 .mono-soft {
   color: #4b535c;
 }

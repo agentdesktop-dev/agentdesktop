@@ -46,6 +46,13 @@
         }
       ]
     },
+    "llmGatewayUsageUrl": {
+      "description": "Exact URL of the Agentgateway analytics summary endpoint used for fleet usage reports.\n\nThis must be a cluster-internal address that only the controller can reach; the\ncontroller is the authorization boundary for every usage query.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "oidc": {
       "description": "OpenID Connect settings used for device enrollment and authorization.",
       "$ref": "#/$defs/ControllerOidcConfig"

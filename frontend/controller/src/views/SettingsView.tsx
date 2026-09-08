@@ -31,6 +31,11 @@ export function SettingsView({ data }: { data: ControllerSettings }) {
           description="Short-lived LLM gateway credentials"
           enabled={data.gateway_jwt_enabled}
         />
+        <SettingRow
+          title="LLM usage reports"
+          description="Estimated cost per device from Agentgateway analytics"
+          enabled={data.llm_usage_enabled}
+        />
       </section>
       <section className="local-notice">
         <div>

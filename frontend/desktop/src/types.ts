@@ -32,47 +32,13 @@ export interface ManagedDeviceSnapshot {
   detail: string | null;
 }
 
-export interface LlmUsageSummary {
-  from: string;
-  to: string;
-  requests: number;
-  totalTokens: number;
-  estimatedCostUsd: number;
-  breakdown: LlmUsageBreakdown[];
-}
-
-export type LlmUsageRange = "hour" | "day" | "week" | "month";
-
-export interface LlmUsageBreakdown {
-  model: string;
-  agent: string;
-  requests: number;
-  totalTokens: number;
-  estimatedCostUsd: number;
-}
-
-export interface LlmUsageInteractions {
-  interactions: LlmUsageInteraction[];
-  nextCursor: string | null;
-}
-
-export interface LlmUsageInteraction {
-  id: string;
-  startedAt: string;
-  completedAt: string | null;
-  durationMs: number | null;
-  httpStatus: number | null;
-  failed: boolean;
-  operation: string | null;
-  provider: string | null;
-  requestModel: string;
-  responseModel: string | null;
-  agent: string;
-  inputTokens: number | null;
-  outputTokens: number | null;
-  totalTokens: number | null;
-  estimatedCostUsd: number | null;
-}
+export type {
+  LlmUsageBreakdown,
+  LlmUsageInteraction,
+  LlmUsageInteractions,
+  LlmUsageRange,
+  LlmUsageSummary,
+} from "@agentdesktop/ui";
 
 export interface McpServer {
   name: string;

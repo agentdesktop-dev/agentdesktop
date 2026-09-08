@@ -6,7 +6,7 @@ import {
   ToolInventory,
 } from "@agentdesktop/ui";
 import { ArrowLeft, Box, CircleAlert, Code2, Cpu, Trash2 } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { type ReactNode, useEffect, useRef } from "react";
 
 import {
   ConfigBadge,
@@ -30,6 +30,8 @@ export interface DeviceViewProps {
   onDeleteCancel: () => void;
   onDeleteConfirm: () => void;
   onDeleteRequest: () => void;
+  /** Device-scoped LLM usage report rendered below the configuration cards. */
+  usage?: ReactNode;
 }
 
 export function DeviceView({
@@ -40,6 +42,7 @@ export function DeviceView({
   onDeleteCancel,
   onDeleteConfirm,
   onDeleteRequest,
+  usage,
 }: DeviceViewProps) {
   const modelCount = device.model_runtimes.reduce(
     (total, runtime) => total + runtime.models.length,
@@ -105,6 +108,7 @@ export function DeviceView({
           )}
         </section>
       </div>
+      {usage}
       <section className="card table-card">
         <CardHeader
           title="Recent activity"

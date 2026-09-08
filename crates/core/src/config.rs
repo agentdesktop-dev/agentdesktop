@@ -216,6 +216,13 @@ pub struct ControllerConfig {
     /// LLM gateway JWT signing settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_jwt: Option<ControllerGatewayJwtConfig>,
+    /// Exact URL of the Agentgateway analytics summary endpoint used for fleet usage reports.
+    ///
+    /// This must be a cluster-internal address that only the controller can reach; the
+    /// controller is the authorization boundary for every usage query.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
+    pub llm_gateway_usage_url: Option<Url>,
     /// TLS identities used by the device-facing fleet API.
     ///
     /// A string selects a directory containing `controller.pem`,
@@ -578,6 +585,9 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
         if gateway.lifetime.is_zero() {
             anyhow::bail!("gatewayJwt.lifetime must be greater than zero");
         }
+    }
+    if let Some(usage_url) = &config.llm_gateway_usage_url {
+        validate_llm_gateway_url("usage URL", usage_url)?;
     }
     Ok(config)
 }

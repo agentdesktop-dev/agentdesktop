@@ -95,9 +95,11 @@ pub struct LlmGatewayCredential {
 pub struct LlmUsageSummary {
     pub from: String,
     pub to: String,
+    /// ISO 4217 code for every `estimated_cost` in this report.
+    pub currency: String,
     pub requests: u64,
     pub total_tokens: u64,
-    pub estimated_cost_usd: f64,
+    pub estimated_cost: f64,
     #[serde(default)]
     pub breakdown: Vec<LlmUsageBreakdown>,
 }
@@ -132,6 +134,20 @@ impl LlmUsageRange {
     }
 }
 
+impl std::str::FromStr for LlmUsageRange {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "hour" => Ok(Self::Hour),
+            "day" => Ok(Self::Day),
+            "week" => Ok(Self::Week),
+            "month" => Ok(Self::Month),
+            _ => Err("invalid usage range"),
+        }
+    }
+}
+
 /// Estimated LLM usage for one model and client agent combination.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -140,13 +156,42 @@ pub struct LlmUsageBreakdown {
     pub agent: String,
     pub requests: u64,
     pub total_tokens: u64,
-    pub estimated_cost_usd: f64,
+    pub estimated_cost: f64,
+}
+
+/// Estimated LLM usage across a fleet, grouped by the enrolled device that sent each request.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmFleetUsageSummary {
+    pub from: String,
+    pub to: String,
+    /// ISO 4217 code for every `estimated_cost` in this report.
+    pub currency: String,
+    pub requests: u64,
+    pub total_tokens: u64,
+    pub estimated_cost: f64,
+    #[serde(default)]
+    pub devices: Vec<LlmDeviceUsage>,
+}
+
+/// Estimated LLM usage attributed to one device. `device_id` is `None` for
+/// requests whose gateway credential carried no device identity.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmDeviceUsage {
+    pub device_id: Option<String>,
+    pub hostname: Option<String>,
+    pub requests: u64,
+    pub total_tokens: u64,
+    pub estimated_cost: f64,
 }
 
 /// Metadata-only LLM requests for one model and client agent combination.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmUsageInteractions {
+    /// ISO 4217 code for every `estimated_cost` in this page.
+    pub currency: String,
     pub interactions: Vec<LlmUsageInteraction>,
     pub next_cursor: Option<String>,
 }
@@ -169,7 +214,7 @@ pub struct LlmUsageInteraction {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
-    pub estimated_cost_usd: Option<f64>,
+    pub estimated_cost: Option<f64>,
 }
 
 /// A timestamped telemetry observation emitted by a managed device.
