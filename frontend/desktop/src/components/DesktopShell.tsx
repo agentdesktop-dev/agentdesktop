@@ -1,6 +1,12 @@
 import agentdesktopLogo from "@brand/logo.svg";
 import agentdesktopMark from "@brand/mark.svg";
-import { Gauge, Laptop, LoaderCircle, RefreshCw } from "lucide-react";
+import {
+  ChartNoAxesCombined,
+  Gauge,
+  Laptop,
+  LoaderCircle,
+  RefreshCw,
+} from "lucide-react";
 import type { ReactNode } from "react";
 
 import type { Notice, View } from "../useDesktopModel";
@@ -61,6 +67,15 @@ export function DesktopShell({
               <Laptop size={18} />
               Tools
             </button>
+            <button
+              type="button"
+              className={view === "usage" ? "active" : ""}
+              aria-current={view === "usage" ? "page" : undefined}
+              onClick={() => onNavigate("usage")}
+            >
+              <ChartNoAxesCombined size={18} />
+              Usage
+            </button>
           </nav>
         </aside>
       ) : null}
@@ -82,7 +97,13 @@ export function DesktopShell({
             Refresh
           </button>
         </header>
-        <main className="desktop-content">
+        <main
+          className={
+            view === "usage"
+              ? "desktop-content desktop-content-wide"
+              : "desktop-content"
+          }
+        >
           {refreshError ? (
             <div className="notice notice-error" role="alert">
               {refreshError}

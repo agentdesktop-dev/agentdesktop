@@ -230,6 +230,13 @@
         "url": {
           "description": "Base HTTP or HTTPS URL of the LLM gateway.\n\nThe URL must include a host and cannot include credentials, a query, or a fragment.",
           "type": "string"
+        },
+        "usageUrl": {
+          "description": "Exact loopback URL of the Agentgateway analytics summary endpoint.\n\nThis is an experimental local-only integration used to surface estimated usage.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,
@@ -317,6 +324,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/OpenCodeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "vscode": {
+          "description": "VS Code built-in GitHub Copilot endpoint configuration.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VscodeConfig"
             },
             {
               "type": "null"
@@ -413,6 +431,24 @@
           "const": "tool.use.input"
         }
       ]
+    },
+    "VscodeConfig": {
+      "description": "Settings reconciled into VS Code's user settings.",
+      "type": "object",
+      "properties": {
+        "copilotProxyUrl": {
+          "description": "AGW `/v1` base URL used by VS Code's built-in GitHub Copilot endpoint overrides.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "useLlmGateway": {
+          "description": "Whether this program uses the top-level LLM gateway.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

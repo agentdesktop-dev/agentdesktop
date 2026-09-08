@@ -32,6 +32,8 @@ export const CheckingStatus: Story = {
     ).toBeVisible();
     await userEvent.click(canvas.getByRole("button", { name: "Tools" }));
     await expect(args.onNavigate).toHaveBeenCalledWith("tools");
+    await userEvent.click(canvas.getByRole("button", { name: "Usage" }));
+    await expect(args.onNavigate).toHaveBeenCalledWith("usage");
   },
 };
 
@@ -40,6 +42,19 @@ export const DiscoveringTools: Story = {
     children: <StatusLoading view="tools" />,
     pageTitle: "Tools",
     view: "tools",
+  },
+};
+
+export const LoadingUsage: Story = {
+  args: {
+    children: <StatusLoading view="usage" />,
+    pageTitle: "Usage",
+    view: "usage",
+  },
+  play: async ({ canvas }) => {
+    await expect(
+      canvas.getByRole("heading", { name: "Loading usage" }),
+    ).toBeVisible();
   },
 };
 

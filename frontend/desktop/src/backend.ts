@@ -4,6 +4,9 @@ import type {
   Bootstrap,
   ConnectorSnapshot,
   Discovery,
+  LlmUsageInteractions,
+  LlmUsageRange,
+  LlmUsageSummary,
   ManagedDeviceSnapshot,
   Settings,
 } from "./types";
@@ -30,6 +33,28 @@ export async function getDiscovery(): Promise<Discovery> {
 
 export async function getRemoteConfig(): Promise<string | null> {
   return invoke<string | null>("get_remote_config");
+}
+
+export async function getLlmUsage(
+  range: LlmUsageRange,
+): Promise<LlmUsageSummary | null> {
+  return invoke<LlmUsageSummary | null>("get_llm_usage", { range });
+}
+
+export async function getLlmUsageInteractions(
+  from: string,
+  to: string,
+  model: string,
+  agent: string,
+  cursor: string | null = null,
+): Promise<LlmUsageInteractions | null> {
+  return invoke<LlmUsageInteractions | null>("get_llm_usage_interactions", {
+    from,
+    to,
+    model,
+    agent,
+    cursor,
+  });
 }
 
 export async function logoutManagedDevice(): Promise<void> {

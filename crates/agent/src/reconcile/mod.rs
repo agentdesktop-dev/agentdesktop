@@ -3,6 +3,7 @@ mod claude_desktop;
 mod codex;
 mod json_merge;
 mod open_code;
+mod vscode;
 
 use std::{
     cell::RefCell,
@@ -180,6 +181,7 @@ fn program_name(program: &str) -> &str {
         "claude-desktop" => "Claude Desktop",
         "codex" => "Codex",
         "opencode" => "OpenCode",
+        "vscode" => "VS Code",
         program => program,
     }
 }
@@ -193,6 +195,7 @@ pub struct Reconciler {
     codex_managed_config_path: PathBuf,
     open_code_managed_config_path: PathBuf,
     open_code_plugin_path: PathBuf,
+    vscode_settings_path: PathBuf,
     credential_helper: PathBuf,
     socket: PathBuf,
 }
@@ -207,6 +210,7 @@ impl Reconciler {
         codex_managed_config_path: PathBuf,
         open_code_managed_config_path: PathBuf,
         open_code_plugin_path: PathBuf,
+        vscode_settings_path: PathBuf,
         credential_helper: PathBuf,
         socket: PathBuf,
     ) -> Self {
@@ -218,6 +222,7 @@ impl Reconciler {
             codex_managed_config_path,
             open_code_managed_config_path,
             open_code_plugin_path,
+            vscode_settings_path,
             credential_helper,
             socket,
         }
@@ -238,6 +243,11 @@ impl Reconciler {
         if self.merge_user_settings && config.programs.claude_desktop.is_some() {
             anyhow::bail!(
                 "Claude Desktop does not read inference settings from its user preferences; remove programs.claudeDesktop or run Agentdesktop without --user as root so it can manage /etc/claude-desktop/managed-settings.json"
+            );
+        }
+        if !self.merge_user_settings && config.programs.vscode.is_some() {
+            anyhow::bail!(
+                "VS Code settings are profile-specific; remove programs.vscode or run Agentdesktop with --user"
             );
         }
         let tool_use_hook = config
@@ -309,7 +319,13 @@ impl Reconciler {
             &self.socket,
             open_code,
             mode,
-        )
+        )?;
+        let vscode = config
+            .programs
+            .vscode
+            .as_ref()
+            .filter(|vscode| vscode.use_llm_gateway);
+        vscode::apply(&self.vscode_settings_path, vscode, mode)
     }
 
     fn claude_credential_helper_command(&self) -> String {
@@ -450,6 +466,11 @@ pub fn default_open_code_plugin_path() -> PathBuf {
     PathBuf::from("/etc/opencode/plugins/agentdesktop.js")
 }
 
+/// Returns the placeholder VS Code settings path used when running without `--user`.
+pub fn default_vscode_settings_path() -> PathBuf {
+    PathBuf::from("/etc/agentdesktop/vscode-settings.json")
+}
+
 #[cfg(target_os = "macos")]
 pub fn default_claude_code_managed_settings_dir() -> PathBuf {
     PathBuf::from("/Library/Application Support/ClaudeCode/managed-settings.d")
@@ -524,6 +545,7 @@ mod tests {
     fn claude_hooks_keep_the_executable_and_arguments_separate() {
         let reconciler = Reconciler::new(
             false,
+            PathBuf::new(),
             PathBuf::new(),
             PathBuf::new(),
             PathBuf::new(),
@@ -628,6 +650,7 @@ programs:
             root.join("codex/config.toml"),
             root.join("opencode/config.json"),
             root.join("opencode/plugin.js"),
+            root.join("vscode/settings.json"),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
@@ -639,6 +662,45 @@ programs:
                 .to_string()
                 .contains("/etc/claude-desktop/managed-settings.json")
         );
+        assert!(!root.exists(), "preflight failure must not write any files");
+    }
+
+    #[test]
+    fn system_mode_rejects_vscode_before_writing_other_settings() {
+        let root = std::env::temp_dir().join(format!(
+            "agentdesktop-reconcile-system-vscode-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: http://127.0.0.1:4001
+programs:
+  claudeCode: {}
+  vscode:
+    copilotProxyUrl: http://127.0.0.1:4002/v1
+"#,
+        )
+        .expect("valid configuration");
+        let reconciler = Reconciler::new(
+            false,
+            root.join("claude/settings.json"),
+            root.join("claude-desktop/settings.json"),
+            root.join("claude-desktop/helper"),
+            root.join("codex/config.toml"),
+            root.join("opencode/config.json"),
+            root.join("opencode/plugin.js"),
+            root.join("vscode/settings.json"),
+            root.join("bin/agentdesktop"),
+            root.join("agentdesktop.sock"),
+        );
+
+        let error = reconciler
+            .apply(&config)
+            .expect_err("system mode must fail");
+
+        assert!(error.to_string().contains("profile-specific"));
         assert!(!root.exists(), "preflight failure must not write any files");
     }
 
@@ -678,6 +740,7 @@ programs:
             root.join("codex/config.toml"),
             root.join("opencode/config.json"),
             root.join("opencode/plugin.js"),
+            root.join("vscode/settings.json"),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );

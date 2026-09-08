@@ -1,0 +1,34 @@
+# yaml-language-server: $schema=../../schema/daemon-config.json
+llmGateway:
+  url: http://127.0.0.1:4001
+  usageUrl: http://127.0.0.1:15000/api/logs/analytics/summary
+  authentication:
+    type: oidc
+    issuer: http://127.0.0.1:5557/dex
+    clientId: agentdesktop-local
+    scopes: [openid, email, offline_access]
+    allowInsecure: true
+
+programs:
+  claudeCode:
+    useLlmGateway: true
+    companyAnnouncements: ["Using the local AGW through agentdesktop"]
+  codex:
+    useLlmGateway: true
+    managedConfig:
+      model: gpt-5.2
+  openCode:
+    useLlmGateway: true
+    model: claude-haiku-4-5
+    models:
+      claude-haiku-4-5:
+        name: Claude Haiku 4.5
+        limit:
+          context: 200000
+          output: 4096
+  vscode:
+    useLlmGateway: true
+    copilotProxyUrl: http://127.0.0.1:4002/v1
+#    Claude desktop cannot run with --user. Uncomment to enable
+#  claudeDesktop:
+#    useLlmGateway: true

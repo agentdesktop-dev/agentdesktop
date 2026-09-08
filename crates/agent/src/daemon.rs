@@ -90,6 +90,10 @@ pub struct DaemonArgs {
     /// Path used for Agentdesktop's OpenCode credential plugin.
     #[arg(long)]
     open_code_plugin: Option<PathBuf>,
+
+    /// Path to VS Code's user settings.
+    #[arg(long)]
+    vscode_settings: Option<PathBuf>,
 }
 
 struct ResolvedDaemonArgs {
@@ -104,6 +108,7 @@ struct ResolvedDaemonArgs {
     codex_managed_config: PathBuf,
     open_code_managed_config: PathBuf,
     open_code_plugin: PathBuf,
+    vscode_settings: PathBuf,
     once: bool,
     dry_run: bool,
 }
@@ -136,6 +141,9 @@ impl DaemonArgs {
                 open_code_plugin: self
                     .open_code_plugin
                     .unwrap_or_else(reconcile::default_open_code_plugin_path),
+                vscode_settings: self
+                    .vscode_settings
+                    .unwrap_or_else(reconcile::default_vscode_settings_path),
                 once: self.once || self.dry_run,
                 dry_run: self.dry_run,
             });
@@ -157,6 +165,7 @@ impl DaemonArgs {
             socket
         };
         let claude_desktop_settings = user_claude_desktop_settings(&home, &config_home);
+        let vscode_settings = user_vscode_settings(&home, &config_home);
         Ok(ResolvedDaemonArgs {
             user: true,
             config: self
@@ -183,6 +192,7 @@ impl DaemonArgs {
             open_code_plugin: self
                 .open_code_plugin
                 .unwrap_or_else(|| config_home.join("opencode/plugins/agentdesktop.js")),
+            vscode_settings: self.vscode_settings.unwrap_or(vscode_settings),
             once: self.once || self.dry_run,
             dry_run: self.dry_run,
         })
@@ -221,6 +231,18 @@ fn user_claude_desktop_settings(_home: &Path, _config_home: &Path) -> PathBuf {
     return _config_home.join("Claude/claude_desktop_config.json");
 }
 
+fn user_vscode_settings(_home: &Path, _config_home: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    return _home.join("Library/Application Support/Code/User/settings.json");
+    #[cfg(target_os = "windows")]
+    return std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| _home.join("AppData/Roaming"))
+        .join("Code/User/settings.json");
+    #[cfg(target_os = "linux")]
+    return _config_home.join("Code/User/settings.json");
+}
+
 pub async fn run(args: DaemonArgs, socket: PathBuf) -> anyhow::Result<()> {
     run_until_shutdown(args, socket, async {
         tokio::signal::ctrl_c()
@@ -251,6 +273,7 @@ where
         args.codex_managed_config.clone(),
         args.open_code_managed_config.clone(),
         args.open_code_plugin.clone(),
+        args.vscode_settings.clone(),
         agentdesktop_client_executable()?,
         socket.clone(),
     );

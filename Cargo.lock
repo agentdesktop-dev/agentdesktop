@@ -37,6 +37,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-single-instance",
  "tokio",
+ "url",
 ]
 
 [[package]]
@@ -55,6 +56,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "json5",
+ "jsonc-parser",
  "keyring",
  "keyring-core",
  "libc",
@@ -68,6 +70,7 @@ dependencies = [
  "serde_yaml",
  "sha2 0.11.0",
  "similar",
+ "time",
  "tokio",
  "tokio-stream",
  "toml 1.1.5+spec-1.1.0",
@@ -2839,6 +2842,12 @@ dependencies = [
  "serde",
  "ucd-trie",
 ]
+
+[[package]]
+name = "jsonc-parser"
+version = "0.33.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0560e3f9a9a03ea6b6e90b41138c5db9e21526c99eb192c1a26c68176593285"
 
 [[package]]
 name = "jsonptr"

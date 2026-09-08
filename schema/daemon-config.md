@@ -18,6 +18,7 @@
 |`llmGateway.authentication.scopes`|[]string|Scopes requested during sign-in.|
 |`llmGateway.authentication.type`|enum|Possible values: `oidc`.|
 |`llmGateway.url`|string|Base HTTP or HTTPS URL of the LLM gateway.<br><br>The URL must include a host and cannot include credentials, a query, or a fragment.|
+|`llmGateway.usageUrl`|string|Exact loopback URL of the Agentgateway analytics summary endpoint.<br><br>This is an experimental local-only integration used to surface estimated usage.|
 |`programs`|object|Per-program settings reconciled on this device.|
 |`programs.claudeCode`|object|Claude Code managed-settings configuration. Arbitrary keys are passed through directly.|
 |`programs.claudeCode.auth`|enum|Upstream authentication used by this agent.<br>Possible values: `subscription`.|
@@ -33,6 +34,9 @@
 |`programs.openCode.model`|string|Model ID selected from `models` when using the LLM gateway.<br><br>This is required when a top-level `llmGateway` is configured.|
 |`programs.openCode.models`|object|Models exposed by the managed LLM gateway provider, keyed by model ID.<br><br>Each value is an arbitrary OpenCode model configuration object. At least<br>one model is required when a top-level `llmGateway` is configured.|
 |`programs.openCode.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
+|`programs.vscode`|object|VS Code built-in GitHub Copilot endpoint configuration.|
+|`programs.vscode.copilotProxyUrl`|string|AGW `/v1` base URL used by VS Code's built-in GitHub Copilot endpoint overrides.|
+|`programs.vscode.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
 |`sandbox`|object|Local execution sandbox required for managed developer tools.|
 |`sandbox.filesystem`|object|Filesystem access available to sandboxed commands.|
 |`sandbox.filesystem.denied`|[]string|Paths sandboxed commands may neither read nor modify.|
