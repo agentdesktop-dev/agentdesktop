@@ -5,6 +5,15 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 autobins = false
+autotests = false
+
+[[bin]]
+name = "agentdesktop-headless"
+path = "src/bin/agentdesktop-headless.rs"
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
 
 [[bin]]
 name = "agentdesktop-service"
@@ -38,6 +47,12 @@ tonic.workspace = true
 tracing.workspace = true
 toml.workspace = true
 url.workspace = true
+
+[dev-dependencies]
+futures-util = "0.3"
+tempfile = "3"
+testcontainers = "0.28"
+tracing-subscriber.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

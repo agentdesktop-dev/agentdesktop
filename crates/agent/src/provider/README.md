@@ -24,3 +24,5 @@ Features currently implemented by Agentdesktop.
   requires system-managed settings.
 - Discovery is best effort; versions may be unavailable. Ollama discovers models
   through its running local API.
+
+See [provider integration tests](../../tests/README.md) for the Docker suite.
