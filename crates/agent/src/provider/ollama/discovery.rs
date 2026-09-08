@@ -1,5 +1,8 @@
+use super::Ollama;
+
 use std::time::Duration;
 
+use agentdesktop_core::http::ClientExt;
 use agentdesktop_core::model::{LocalModel, ModelRuntime};
 use serde::Deserialize;
 
@@ -25,13 +28,7 @@ async fn discover_at(endpoint: &str) -> Option<ModelRuntime> {
         .build()
         .ok()?;
     let response = client
-        .get(format!("{endpoint}/api/tags"))
-        .send()
-        .await
-        .ok()?
-        .error_for_status()
-        .ok()?
-        .json::<TagsResponse>()
+        .get_json::<TagsResponse>(format!("{endpoint}/api/tags"))
         .await
         .ok()?;
     let mut models = response
@@ -42,7 +39,7 @@ async fn discover_at(endpoint: &str) -> Option<ModelRuntime> {
     models.sort_by(|left, right| left.name.cmp(&right.name));
     models.dedup_by(|left, right| left.name == right.name);
     Some(ModelRuntime {
-        kind: "ollama".to_owned(),
+        kind: Ollama::ID.to_owned(),
         models,
     })
 }

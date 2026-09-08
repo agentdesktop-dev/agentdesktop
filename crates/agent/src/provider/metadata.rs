@@ -8,6 +8,11 @@ use std::{
 use agentdesktop_core::model::Skill;
 use serde::Deserialize;
 
+struct PackageMetadata {
+    name: Option<String>,
+    version: String,
+}
+
 pub(super) fn find_in_path(name: &str) -> Option<PathBuf> {
     let path = env::var_os("PATH")?;
     find_in_directories(name, env::split_paths(&path))
@@ -84,11 +89,6 @@ pub(super) fn json_version(path: &Path) -> Option<String> {
 pub(super) fn json_package_version(path: &Path, expected_name: &str) -> Option<String> {
     let metadata = json_package_metadata(path)?;
     (metadata.name.as_deref() == Some(expected_name)).then_some(metadata.version)
-}
-
-struct PackageMetadata {
-    name: Option<String>,
-    version: String,
 }
 
 fn json_package_metadata(path: &Path) -> Option<PackageMetadata> {

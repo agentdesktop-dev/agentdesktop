@@ -1,3 +1,5 @@
+use super::VsCode;
+
 use std::{
     collections::BTreeSet,
     fs,
@@ -7,7 +9,7 @@ use std::{
 use agentdesktop_core::model::{Agent, McpServer};
 use serde_json::Value;
 
-use super::metadata;
+use crate::provider::metadata;
 
 pub(super) fn discover() -> Option<Agent> {
     let executable = metadata::find_executable("code", executable_candidates())?;
@@ -17,7 +19,7 @@ pub(super) fn discover() -> Option<Agent> {
     Some(Agent {
         version,
         executable,
-        kind: "vscode".to_owned(),
+        kind: VsCode::ID.to_owned(),
         mcp_servers: discover_mcp_servers(),
         skills: metadata::discover_skills(skill_roots()),
     })

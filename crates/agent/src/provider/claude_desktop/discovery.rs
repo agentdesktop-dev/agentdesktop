@@ -1,3 +1,5 @@
+use super::ClaudeDesktop;
+
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
@@ -5,14 +7,14 @@ use std::{
 
 use agentdesktop_core::model::{Agent, McpServer};
 
-use super::{claude_code, metadata};
+use crate::provider::{claude_code::discovery as claude_code, metadata};
 
 pub(super) fn discover() -> Option<Agent> {
-    let executable = metadata::find_executable("claude-desktop", executable_candidates())?;
+    let executable = metadata::find_executable(ClaudeDesktop::ID, executable_candidates())?;
     Some(Agent {
         version: discover_version(&executable),
         executable,
-        kind: "claude-desktop".to_owned(),
+        kind: ClaudeDesktop::ID.to_owned(),
         mcp_servers: discover_mcp_servers(),
         skills: Vec::new(),
     })
