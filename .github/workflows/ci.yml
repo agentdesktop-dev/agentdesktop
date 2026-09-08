@@ -39,10 +39,6 @@ jobs:
           npm install --global pnpm@11.25.0
           pnpm install --frozen-lockfile
 
-      - name: Install Storybook test browser
-        working-directory: frontend
-        run: pnpm --filter @agentdesktop/desktop-web exec playwright install --with-deps chromium
-
       - name: Install Linux desktop dependencies
         run: |
           sudo apt-get update
@@ -64,14 +60,28 @@ jobs:
         with:
           tool: nextest
 
-      - name: Build frontend
-        run: make frontend
+      # Build once before Cargo, which embeds the frontend assets.
+      - name: Build UI
+        working-directory: frontend
+        run: pnpm build
 
-      - name: Test
+      - name: Test Rust
         run: cargo nextest run --workspace
 
-      - name: Lint
-        run: make check
+      - name: Lint Rust
+        run: make lint
+
+      - name: Lint UI and test packaging
+        working-directory: frontend
+        run: pnpm check:lint
+
+      - name: Test UI in Chrome
+        working-directory: frontend
+        env:
+          PLAYWRIGHT_CHANNEL: chrome
+        run: |
+          google-chrome --version
+          pnpm test:storybook
 
       - name: Check generated schemas
         run: |

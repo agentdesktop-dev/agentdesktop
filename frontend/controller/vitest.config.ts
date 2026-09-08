@@ -25,7 +25,10 @@ export default defineConfig({
           browser: {
             enabled: true,
             headless: true,
-            provider: playwright({}),
+            provider: playwright({
+              // CI selects the runner's Chrome; local runs default to Playwright's Chromium.
+              launchOptions: { channel: process.env.PLAYWRIGHT_CHANNEL },
+            }),
             instances: [{ browser: "chromium" }],
           },
         },
