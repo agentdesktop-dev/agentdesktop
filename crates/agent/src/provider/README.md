@@ -23,6 +23,7 @@ Features currently implemented by Agentdesktop.
   settings. Claude Code also supports merging into user settings; Claude Desktop
   requires system-managed settings.
 - Discovery is best effort; versions may be unavailable. Ollama discovers models
-  through its running local API.
+  through its running local API. Grok Build versions require its optional
+  `version.json` update cache; fresh installs may have no discovered version.
 
 See [provider integration tests](../../tests/README.md) for the Docker suite.
