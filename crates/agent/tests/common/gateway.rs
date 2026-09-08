@@ -76,11 +76,17 @@ async fn handle(
     if path == "/health" {
         return Json(json!({"ready": true})).into_response();
     }
-    if path != "/v1/messages" && path != "/v1/messages/count_tokens" {
+    if !matches!(
+        path,
+        "/v1/messages" | "/v1/messages/count_tokens" | "/v1/responses"
+    ) {
         return StatusCode::NOT_FOUND.into_response();
     }
     if authorization != Some(format!("Bearer {TOKEN}").as_str()) && api_key != Some(TOKEN) {
         return (StatusCode::UNAUTHORIZED, Json(json!({"type": "error", "error": {"type": "authentication_error", "message": "Expected the test API key"}}))).into_response();
+    }
+    if path == "/v1/responses" {
+        return responses(&body);
     }
     if path == "/v1/messages/count_tokens" {
         return Json(json!({"input_tokens": 10})).into_response();
@@ -105,6 +111,10 @@ async fn handle(
         json!({"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": null}, "usage": {"output_tokens": 5}}),
         json!({"type": "message_stop"}),
     ];
+    sse(&events)
+}
+
+fn sse(events: &[Value]) -> Response {
     let stream: String = events
         .iter()
         .map(|event| {
@@ -122,4 +132,24 @@ async fn handle(
         stream,
     )
         .into_response()
+}
+
+fn responses(body: &Value) -> Response {
+    let item = json!({
+        "id": "msg_provider_integration", "type": "message", "role": "assistant",
+        "status": "completed", "content": [{"type": "output_text", "text": "provider-integration-ok", "annotations": []}],
+    });
+    let response = json!({
+        "id": "resp_provider_integration", "object": "response", "status": "completed",
+        "model": body["model"], "output": [item],
+        "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+    });
+    if body["stream"] != true {
+        return Json(response).into_response();
+    }
+    sse(&[
+        json!({"type": "response.created", "sequence_number": 0, "response": {"id": "resp_provider_integration", "status": "in_progress", "output": []}}),
+        json!({"type": "response.output_item.done", "sequence_number": 1, "output_index": 0, "item": item}),
+        json!({"type": "response.completed", "sequence_number": 2, "response": response}),
+    ])
 }
