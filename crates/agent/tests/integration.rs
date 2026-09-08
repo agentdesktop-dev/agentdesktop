@@ -8,3 +8,6 @@ mod codex;
 
 #[path = "../src/provider/opencode/integration_tests.rs"]
 mod opencode;
+
+#[path = "../src/provider/vscode/integration_tests.rs"]
+mod vscode;
