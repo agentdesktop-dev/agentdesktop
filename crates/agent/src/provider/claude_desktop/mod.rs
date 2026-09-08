@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use agentdesktop_core::config::DaemonConfig;
 use agentdesktop_core::model::Discovery;
 
-use super::{Provider, Reconcile, ReconcileContext};
+use super::{Provider, ReconcileContext};
 use crate::reconcile::ReconcilePlan;
 
 pub(super) mod discovery;
@@ -24,22 +24,20 @@ impl Default for ClaudeDesktop {
     }
 }
 
+impl ClaudeDesktop {
+    pub const ID: &'static str = "claude-desktop";
+    pub const DISPLAY_NAME: &'static str = "Claude Desktop";
+}
+
+#[async_trait::async_trait]
 impl Provider for ClaudeDesktop {
-    fn id(&self) -> &'static str {
-        "claude-desktop"
-    }
-    fn display_name(&self) -> &'static str {
-        "Claude Desktop"
-    }
     async fn discover(&self) -> Discovery {
         Discovery {
             agents: discovery::discover().into_iter().collect(),
             model_runtimes: Vec::new(),
         }
     }
-}
 
-impl Reconcile for ClaudeDesktop {
     fn plan(&self, ctx: &ReconcileContext, config: &DaemonConfig) -> anyhow::Result<ReconcilePlan> {
         if ctx.merge_user_settings && config.programs.claude_desktop.is_some() {
             anyhow::bail!(

@@ -93,13 +93,11 @@ impl Container {
                 .join("../..")
                 .join(dockerfile),
         )?;
-        // Each build gets its own tag, so parallel runs cannot replace its image.
-        let tag = format!("test-{:016x}", rand::random::<u64>());
         let started = Instant::now();
         info!("Building test image with Docker cache");
         let image = timeout(
             BUILD_TIMEOUT,
-            GenericBuildableImage::new(format!("agentdesktop-provider-{provider}"), tag)
+            GenericBuildableImage::new(format!("agentdesktop-provider-{provider}"), "test")
                 .with_dockerfile_string(dockerfile)
                 .build_image_with(
                     BuildImageOptions::new().with_build_arg("BASE_IMAGE", BASE_IMAGE),

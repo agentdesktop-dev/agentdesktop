@@ -20,6 +20,7 @@ name = "agentdesktop-service"
 path = "src/bin/agentdesktop-service.rs"
 
 [dependencies]
+async-trait = "0.1"
 agentdesktop-client.workspace = true
 agentdesktop-core.workspace = true
 agentdesktop-proto.workspace = true

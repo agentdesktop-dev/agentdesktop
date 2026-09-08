@@ -31,7 +31,6 @@ pub(super) fn plan_merge(
     state_path: &Path,
     managed: Value,
     legacy_owned: bool,
-    program: &str,
     description: &str,
     display_name: &str,
     plan: &ReconcilePlan,
@@ -54,7 +53,7 @@ pub(super) fn plan_merge(
         Some(contents) => match serde_json::from_slice::<Value>(contents) {
             Ok(Value::Object(object)) => Value::Object(object),
             Ok(_) | Err(_) => {
-                plan.record(program, description, "conflict", path);
+                plan.record(display_name, description, "conflict", path);
                 return Ok(());
             }
         },
@@ -78,7 +77,7 @@ pub(super) fn plan_merge(
         None => "create",
     };
     plan.record_diff(
-        program,
+        display_name,
         description,
         action,
         path,
@@ -97,14 +96,13 @@ pub(super) fn plan_merge(
     .with_context(|| format!("serialize {display_name} merge state"))?;
     state.push(b'\n');
     plan.write_file(state_path, &state, 0o600)?;
-    debug!(program, action, path = %path.display(), "planned user settings merge");
+    debug!(provider = display_name, action, path = %path.display(), "planned user settings merge");
     Ok(())
 }
 
 pub(super) fn plan_remove(
     path: &Path,
     state_path: &Path,
-    program: &str,
     description: &str,
     display_name: &str,
     plan: &ReconcilePlan,
@@ -115,7 +113,7 @@ pub(super) fn plan_remove(
     let existing = match plan.read(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            plan.record(program, description, "unchanged", path);
+            plan.record(display_name, description, "unchanged", path);
             remove_file(state_path, display_name, plan)?;
             return Ok(true);
         }
@@ -127,7 +125,7 @@ pub(super) fn plan_remove(
     let settings = match serde_json::from_slice::<Value>(&existing) {
         Ok(Value::Object(object)) => Value::Object(object),
         Ok(_) | Err(_) => {
-            plan.record(program, description, "conflict", path);
+            plan.record(display_name, description, "conflict", path);
             return Ok(true);
         }
     };
@@ -147,7 +145,7 @@ pub(super) fn plan_remove(
         Some(_) => "update",
     };
     plan.record_diff(
-        program,
+        display_name,
         description,
         action,
         path,
@@ -163,7 +161,7 @@ pub(super) fn plan_remove(
         plan.write_file(path, &contents, 0o644)?;
     }
     remove_file(state_path, display_name, plan)?;
-    debug!(program, action, path = %path.display(), "planned removal of managed values from user settings");
+    debug!(provider = display_name, action, path = %path.display(), "planned removal of managed values from user settings");
     Ok(true)
 }
 

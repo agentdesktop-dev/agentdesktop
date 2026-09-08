@@ -1,3 +1,5 @@
+use super::ClaudeDesktop;
+
 use std::path::Path;
 
 use agentdesktop_core::config::{ClaudeDesktopConfig, LlmGatewayAuthentication, LlmGatewayConfig};
@@ -30,9 +32,8 @@ pub(super) fn plan(
             || !json_merge::plan_remove(
                 settings_path,
                 &settings_state,
-                "claude-desktop",
                 "managed settings",
-                "Claude Desktop settings",
+                ClaudeDesktop::DISPLAY_NAME,
                 plan,
             )?
         {
@@ -185,7 +186,7 @@ fn write_owned(
         Some(_) if owned => "update",
         Some(existing) => {
             plan.record_diff(
-                "claude-desktop",
+                ClaudeDesktop::DISPLAY_NAME,
                 description,
                 "conflict",
                 path,
@@ -200,9 +201,9 @@ fn write_owned(
         plan.write_file(path, contents, permissions)?;
         plan.write_file(owner_path, OWNER_MARKER, 0o644)?;
     }
-    debug!(program = "claude-desktop", action, path = %path.display(), "planned {description}");
+    debug!(program = ClaudeDesktop::ID, action, path = %path.display(), "planned {description}");
     plan.record_diff(
-        "claude-desktop",
+        ClaudeDesktop::DISPLAY_NAME,
         description,
         action,
         path,
@@ -219,22 +220,22 @@ fn remove_owned(
     plan: &ReconcilePlan,
 ) -> anyhow::Result<()> {
     if !is_owned(owner_path, plan)? {
-        plan.record("claude-desktop", description, "unchanged", path);
+        plan.record(ClaudeDesktop::DISPLAY_NAME, description, "unchanged", path);
         return Ok(());
     }
     let exists = match plan.read(path) {
         Ok(_) => {
             plan.remove_file(path)
                 .with_context(|| format!("remove {}", path.display()))?;
-            debug!(program = "claude-desktop", action = "remove", path = %path.display(), "planned {description}");
-            plan.record("claude-desktop", description, "remove", path);
+            debug!(program = ClaudeDesktop::ID, action = "remove", path = %path.display(), "planned {description}");
+            plan.record(ClaudeDesktop::DISPLAY_NAME, description, "remove", path);
             true
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
         Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
     };
     if !exists {
-        plan.record("claude-desktop", description, "unchanged", path);
+        plan.record(ClaudeDesktop::DISPLAY_NAME, description, "unchanged", path);
     }
     match plan.remove_file(owner_path) {
         Ok(()) => Ok(()),

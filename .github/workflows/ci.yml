@@ -92,7 +92,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Test agent
-        run: cargo test --locked --package agentdesktop-agent
+        run: cargo test --locked --package agentdesktop-agent --lib
 
   container:
     name: Container

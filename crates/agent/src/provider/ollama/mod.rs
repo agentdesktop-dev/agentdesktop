@@ -6,13 +6,13 @@ pub(super) mod discovery;
 
 pub struct Ollama;
 
+impl Ollama {
+    pub const ID: &'static str = "ollama";
+    pub const DISPLAY_NAME: &'static str = "Ollama";
+}
+
+#[async_trait::async_trait]
 impl Provider for Ollama {
-    fn id(&self) -> &'static str {
-        "ollama"
-    }
-    fn display_name(&self) -> &'static str {
-        "Ollama"
-    }
     async fn discover(&self) -> Discovery {
         Discovery {
             agents: Vec::new(),

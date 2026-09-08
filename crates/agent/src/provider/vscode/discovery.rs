@@ -1,3 +1,5 @@
+use super::VsCode;
+
 use std::{
     collections::BTreeSet,
     fs,
@@ -17,7 +19,7 @@ pub(super) fn discover() -> Option<Agent> {
     Some(Agent {
         version,
         executable,
-        kind: "vscode".to_owned(),
+        kind: VsCode::ID.to_owned(),
         mcp_servers: discover_mcp_servers(),
         skills: metadata::discover_skills(skill_roots()),
     })

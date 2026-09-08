@@ -1,3 +1,5 @@
+use super::Ollama;
+
 use std::time::Duration;
 
 use agentdesktop_core::http::ClientExt;
@@ -37,7 +39,7 @@ async fn discover_at(endpoint: &str) -> Option<ModelRuntime> {
     models.sort_by(|left, right| left.name.cmp(&right.name));
     models.dedup_by(|left, right| left.name == right.name);
     Some(ModelRuntime {
-        kind: "ollama".to_owned(),
+        kind: Ollama::ID.to_owned(),
         models,
     })
 }

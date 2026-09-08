@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use agentdesktop_core::config::DaemonConfig;
 use agentdesktop_core::model::Discovery;
 
-use super::{Provider, Reconcile, ReconcileContext};
+use super::{Provider, ReconcileContext};
 use crate::reconcile::ReconcilePlan;
 
 pub(super) mod discovery;
@@ -22,22 +22,20 @@ impl Default for Codex {
     }
 }
 
+impl Codex {
+    pub const ID: &'static str = "codex";
+    pub const DISPLAY_NAME: &'static str = "Codex";
+}
+
+#[async_trait::async_trait]
 impl Provider for Codex {
-    fn id(&self) -> &'static str {
-        "codex"
-    }
-    fn display_name(&self) -> &'static str {
-        "Codex"
-    }
     async fn discover(&self) -> Discovery {
         Discovery {
             agents: discovery::discover().into_iter().collect(),
             model_runtimes: Vec::new(),
         }
     }
-}
 
-impl Reconcile for Codex {
     fn plan(&self, ctx: &ReconcileContext, config: &DaemonConfig) -> anyhow::Result<ReconcilePlan> {
         let configured = config.programs.codex.as_ref().map(|provider| {
             let gateway = config

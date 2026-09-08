@@ -4,7 +4,7 @@ use agentdesktop_core::config::DaemonConfig;
 use agentdesktop_core::model::Discovery;
 
 use super::shared::{CommandSpec, render_command};
-use super::{Provider, Reconcile, ReconcileContext};
+use super::{Provider, ReconcileContext};
 use crate::reconcile::ReconcilePlan;
 
 pub(super) mod discovery;
@@ -63,22 +63,20 @@ impl Default for ClaudeCode {
     }
 }
 
+impl ClaudeCode {
+    pub const ID: &'static str = "claude-code";
+    pub const DISPLAY_NAME: &'static str = "Claude Code";
+}
+
+#[async_trait::async_trait]
 impl Provider for ClaudeCode {
-    fn id(&self) -> &'static str {
-        "claude-code"
-    }
-    fn display_name(&self) -> &'static str {
-        "Claude Code"
-    }
     async fn discover(&self) -> Discovery {
         Discovery {
             agents: discovery::discover().into_iter().collect(),
             model_runtimes: Vec::new(),
         }
     }
-}
 
-impl Reconcile for ClaudeCode {
     fn plan(&self, ctx: &ReconcileContext, config: &DaemonConfig) -> anyhow::Result<ReconcilePlan> {
         let tool_use = config
             .telemetry

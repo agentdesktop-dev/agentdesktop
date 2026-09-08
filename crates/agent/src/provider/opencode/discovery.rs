@@ -1,3 +1,5 @@
+use super::OpenCode;
+
 use std::{
     collections::BTreeSet,
     fs::File,
@@ -15,11 +17,11 @@ const MAX_VERSION_LENGTH: usize = 64;
 const MAX_BINARY_SIZE: u64 = 512 * 1024 * 1024;
 
 pub(super) fn discover() -> Option<Agent> {
-    let executable = metadata::find_executable("opencode", executable_candidates())?;
+    let executable = metadata::find_executable(OpenCode::ID, executable_candidates())?;
     Some(Agent {
         version: embedded_version(&executable),
         executable,
-        kind: "opencode".to_owned(),
+        kind: OpenCode::ID.to_owned(),
         mcp_servers: Vec::new(),
         skills: Vec::new(),
     })

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use agentdesktop_core::config::DaemonConfig;
 use agentdesktop_core::model::Discovery;
 
-use super::{Provider, Reconcile, ReconcileContext};
+use super::{Provider, ReconcileContext};
 use crate::reconcile::ReconcilePlan;
 
 pub(super) mod discovery;
@@ -24,22 +24,20 @@ impl Default for OpenCode {
     }
 }
 
+impl OpenCode {
+    pub const ID: &'static str = "opencode";
+    pub const DISPLAY_NAME: &'static str = "OpenCode";
+}
+
+#[async_trait::async_trait]
 impl Provider for OpenCode {
-    fn id(&self) -> &'static str {
-        "opencode"
-    }
-    fn display_name(&self) -> &'static str {
-        "OpenCode"
-    }
     async fn discover(&self) -> Discovery {
         Discovery {
             agents: discovery::discover().into_iter().collect(),
             model_runtimes: Vec::new(),
         }
     }
-}
 
-impl Reconcile for OpenCode {
     fn plan(&self, ctx: &ReconcileContext, config: &DaemonConfig) -> anyhow::Result<ReconcilePlan> {
         let configured = config.programs.open_code.as_ref().map(|provider| {
             let gateway = config

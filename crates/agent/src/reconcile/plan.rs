@@ -47,7 +47,7 @@ impl ReconcilePlan {
         {
             anyhow::bail!(
                 "refusing to change {} {} at {}: conflicting or invalid existing configuration",
-                super::program_name(&conflict.program),
+                conflict.display_name,
                 conflict.description,
                 conflict.path.display()
             );
@@ -154,15 +154,21 @@ impl ReconcilePlan {
         Ok(())
     }
 
-    pub(crate) fn record(&self, program: &str, description: &str, action: &str, path: &Path) {
+    pub(crate) fn record(&self, display_name: &str, description: &str, action: &str, path: &Path) {
         let before = (action == "remove").then(|| self.read(path).ok()).flatten();
-        self.report
-            .record(program, description, action, path, before.as_deref(), None);
+        self.report.record(
+            display_name,
+            description,
+            action,
+            path,
+            before.as_deref(),
+            None,
+        );
     }
 
     pub(crate) fn record_diff(
         &self,
-        program: &str,
+        display_name: &str,
         description: &str,
         action: &str,
         path: &Path,
@@ -170,7 +176,7 @@ impl ReconcilePlan {
         after: Option<&[u8]>,
     ) {
         self.report
-            .record(program, description, action, path, before, after);
+            .record(display_name, description, action, path, before, after);
     }
 }
 

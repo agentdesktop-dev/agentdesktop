@@ -1,3 +1,5 @@
+use super::ClaudeCode;
+
 use std::path::Path;
 
 use anyhow::Context;
@@ -50,9 +52,8 @@ pub(super) fn plan(
             && json_merge::plan_remove(
                 path,
                 &merge_state_path,
-                "claude-code",
                 "settings",
-                "Claude Code settings",
+                ClaudeCode::DISPLAY_NAME,
                 plan,
             )?
         {
@@ -69,9 +70,8 @@ pub(super) fn plan(
             &merge_state_path,
             settings,
             is_owned(&owner_path, plan)?,
-            "claude-code",
             "settings",
-            "Claude Code settings",
+            ClaudeCode::DISPLAY_NAME,
             plan,
         )?;
         remove_owner_marker(&owner_path, plan)?;
@@ -96,18 +96,18 @@ pub(super) fn plan(
                 plan.write_file(&owner_path, OWNER_MARKER, 0o644)?;
             }
             debug!(
-                program = "claude-code",
+                program = ClaudeCode::ID,
                 action = "unchanged",
                 path = %path.display(),
                 "managed settings already current"
             );
-            plan.record("claude-code", "settings", "unchanged", path);
+            plan.record(ClaudeCode::DISPLAY_NAME, "settings", "unchanged", path);
             return Ok(());
         }
         Some(_) if owned => "update",
         Some(existing) => {
             plan.record_diff(
-                "claude-code",
+                ClaudeCode::DISPLAY_NAME,
                 "settings",
                 "conflict",
                 path,
@@ -122,13 +122,13 @@ pub(super) fn plan(
     plan.write_file(path, &contents, 0o644)?;
     plan.write_file(&owner_path, OWNER_MARKER, 0o644)?;
     debug!(
-        program = "claude-code",
+        program = ClaudeCode::ID,
         action,
         path = %path.display(),
         "planned managed settings"
     );
     plan.record_diff(
-        "claude-code",
+        ClaudeCode::DISPLAY_NAME,
         "settings",
         action,
         path,
@@ -245,13 +245,13 @@ fn remove(path: &Path, owner_path: &Path, plan: &ReconcilePlan) -> anyhow::Resul
     if !is_owned(owner_path, plan)? {
         if path.exists() {
             debug!(
-                program = "claude-code",
+                program = ClaudeCode::ID,
                 action = "unchanged",
                 path = %path.display(),
                 "preserving managed settings not owned by Agentdesktop"
             );
         }
-        plan.record("claude-code", "settings", "unchanged", path);
+        plan.record(ClaudeCode::DISPLAY_NAME, "settings", "unchanged", path);
         return Ok(());
     }
     match plan.read(path) {
@@ -261,23 +261,23 @@ fn remove(path: &Path, owner_path: &Path, plan: &ReconcilePlan) -> anyhow::Resul
             })?;
             remove_owner_marker(owner_path, plan)?;
             debug!(
-                program = "claude-code",
+                program = ClaudeCode::ID,
                 action = "remove",
                 path = %path.display(),
                 "planned managed settings"
             );
-            plan.record("claude-code", "settings", "remove", path);
+            plan.record(ClaudeCode::DISPLAY_NAME, "settings", "remove", path);
             Ok(())
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             debug!(
-                program = "claude-code",
+                program = ClaudeCode::ID,
                 action = "unchanged",
                 path = %path.display(),
                 "managed settings already absent"
             );
             remove_owner_marker(owner_path, plan)?;
-            plan.record("claude-code", "settings", "unchanged", path);
+            plan.record(ClaudeCode::DISPLAY_NAME, "settings", "unchanged", path);
             Ok(())
         }
         Err(error) => Err(error)

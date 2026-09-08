@@ -19,19 +19,19 @@ pub(crate) mod shared;
 pub mod vscode;
 
 /// An integration with a developer tool or local model runtime.
-/// Built-ins use static dispatch; this is not a plugin ABI.
-#[allow(async_fn_in_trait)]
+#[async_trait::async_trait]
 pub trait Provider: Send + Sync {
-    fn id(&self) -> &'static str;
-    fn display_name(&self) -> &'static str;
     async fn discover(&self) -> Discovery;
-}
 
-/// Implemented only by providers that manage configuration.
-pub trait Reconcile: Provider {
-    /// Read current state and propose changes without modifying the filesystem.
-    /// Missing provider configuration must plan cleanup of owned settings.
-    fn plan(&self, ctx: &ReconcileContext, config: &DaemonConfig) -> anyhow::Result<ReconcilePlan>;
+    /// Propose configuration changes, including cleanup when disabled.
+    /// Discovery-only providers leave configuration untouched.
+    fn plan(
+        &self,
+        _ctx: &ReconcileContext,
+        _config: &DaemonConfig,
+    ) -> anyhow::Result<ReconcilePlan> {
+        Ok(ReconcilePlan::default())
+    }
 }
 
 /// Common inputs for configuration management. Provider-specific paths live

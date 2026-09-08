@@ -1,3 +1,5 @@
+use super::OpenCode;
+
 use std::path::Path;
 
 use agentdesktop_core::config::{LlmGatewayAuthentication, LlmGatewayConfig, OpenCodeConfig};
@@ -11,7 +13,7 @@ use crate::reconcile::ReconcilePlan;
 use crate::provider::shared::{deep_merge, responses_base_url};
 
 const MANAGED_HEADER: &str = "// Managed by Agentdesktop. Manual changes will be replaced.\n";
-const CONFIG_PROGRAM: &str = "opencode";
+const CONFIG_PROGRAM: &str = OpenCode::ID;
 
 pub(super) fn plan(
     config_path: &Path,
@@ -116,7 +118,7 @@ fn credential_plugin(credential_helper: &Path, socket: &Path) -> anyhow::Result<
         socket.to_string_lossy().into_owned(),
         "credential".to_owned(),
         "--client-id".to_owned(),
-        "opencode".to_owned(),
+        OpenCode::ID.to_owned(),
     ];
     let provider = serde_json::to_string(&provider_name).context("encode OpenCode provider ID")?;
     let command = serde_json::to_string(&command).context("encode OpenCode credential command")?;
@@ -196,13 +198,13 @@ fn reconcile_file(
                 path = %path.display(),
                 "managed file already current"
             );
-            plan.record(CONFIG_PROGRAM, description, "unchanged", path);
+            plan.record(OpenCode::DISPLAY_NAME, description, "unchanged", path);
             return Ok(());
         }
         Some(existing) if existing.starts_with(MANAGED_HEADER.as_bytes()) => "update",
         Some(existing) => {
             plan.record_diff(
-                CONFIG_PROGRAM,
+                OpenCode::DISPLAY_NAME,
                 description,
                 "conflict",
                 path,
@@ -222,7 +224,7 @@ fn reconcile_file(
         "planned managed file"
     );
     plan.record_diff(
-        CONFIG_PROGRAM,
+        OpenCode::DISPLAY_NAME,
         description,
         action,
         path,
@@ -244,7 +246,7 @@ fn remove_owned(path: &Path, description: &str, plan: &ReconcilePlan) -> anyhow:
                 path = %path.display(),
                 "planned managed file"
             );
-            plan.record(CONFIG_PROGRAM, description, "remove", path);
+            plan.record(OpenCode::DISPLAY_NAME, description, "remove", path);
             Ok(())
         }
         Ok(_) => {
@@ -255,11 +257,11 @@ fn remove_owned(path: &Path, description: &str, plan: &ReconcilePlan) -> anyhow:
                 path = %path.display(),
                 "preserving managed file not owned by Agentdesktop"
             );
-            plan.record(CONFIG_PROGRAM, description, "unchanged", path);
+            plan.record(OpenCode::DISPLAY_NAME, description, "unchanged", path);
             Ok(())
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            plan.record(CONFIG_PROGRAM, description, "unchanged", path);
+            plan.record(OpenCode::DISPLAY_NAME, description, "unchanged", path);
             Ok(())
         }
         Err(error) => {

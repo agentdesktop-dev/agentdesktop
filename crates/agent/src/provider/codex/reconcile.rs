@@ -1,3 +1,5 @@
+use super::Codex;
+
 use std::path::Path;
 
 use agentdesktop_core::config::{
@@ -48,18 +50,18 @@ pub(super) fn plan(
     let action = match existing.as_deref() {
         Some(existing) if existing == contents => {
             debug!(
-                program = "codex",
+                program = Codex::ID,
                 action = "unchanged",
                 path = %path.display(),
                 "managed configuration already current"
             );
-            plan.record("codex", "configuration", "unchanged", path);
+            plan.record(Codex::DISPLAY_NAME, "configuration", "unchanged", path);
             return Ok(());
         }
         Some(existing) if existing.starts_with(MANAGED_HEADER.as_bytes()) => "update",
         Some(existing) => {
             plan.record_diff(
-                "codex",
+                Codex::DISPLAY_NAME,
                 "configuration",
                 "conflict",
                 path,
@@ -73,13 +75,13 @@ pub(super) fn plan(
 
     plan.write_file(path, &contents, 0o644)?;
     debug!(
-        program = "codex",
+        program = Codex::ID,
         action,
         path = %path.display(),
         "planned managed configuration"
     );
     plan.record_diff(
-        "codex",
+        Codex::DISPLAY_NAME,
         "configuration",
         action,
         path,
@@ -163,7 +165,7 @@ fn managed_config(
                 socket.to_string_lossy(),
                 "credential",
                 "--client-id",
-                "codex",
+                Codex::ID,
             ],
             "timeout_ms": timeout_ms,
             "refresh_interval_ms": 60000,
@@ -186,32 +188,32 @@ fn remove(path: &Path, plan: &ReconcilePlan) -> anyhow::Result<()> {
                 format!("remove Codex managed configuration at {}", path.display())
             })?;
             debug!(
-                program = "codex",
+                program = Codex::ID,
                 action = "remove",
                 path = %path.display(),
                 "planned managed configuration"
             );
-            plan.record("codex", "configuration", "remove", path);
+            plan.record(Codex::DISPLAY_NAME, "configuration", "remove", path);
             Ok(())
         }
         Ok(_) => {
             debug!(
-                program = "codex",
+                program = Codex::ID,
                 action = "unchanged",
                 path = %path.display(),
                 "preserving managed configuration not owned by Agentdesktop"
             );
-            plan.record("codex", "configuration", "unchanged", path);
+            plan.record(Codex::DISPLAY_NAME, "configuration", "unchanged", path);
             Ok(())
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             debug!(
-                program = "codex",
+                program = Codex::ID,
                 action = "unchanged",
                 path = %path.display(),
                 "managed configuration already absent"
             );
-            plan.record("codex", "configuration", "unchanged", path);
+            plan.record(Codex::DISPLAY_NAME, "configuration", "unchanged", path);
             Ok(())
         }
         Err(error) => Err(error)

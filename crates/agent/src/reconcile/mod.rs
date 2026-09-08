@@ -3,16 +3,17 @@ mod plan;
 pub use plan::ReconcilePlan;
 
 use crate::provider::{
-    Reconcile, ReconcileContext, claude_code::ClaudeCode, claude_desktop::ClaudeDesktop,
-    codex::Codex, opencode::OpenCode,
+    Provider, ReconcileContext, claude_code::ClaudeCode, claude_desktop::ClaudeDesktop,
+    codex::Codex, ollama::Ollama, opencode::OpenCode, vscode::VsCode,
 };
-use agentdesktop_core::config::DaemonConfig;
+use agentdesktop_core::{config::DaemonConfig, model::Discovery};
 use serde_json::Value;
 use similar::TextDiff;
 use std::{
     cell::RefCell,
     fmt::Write,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 // Preserve callers of the existing default-path helpers.
@@ -28,10 +29,7 @@ pub use crate::provider::{
 #[derive(Clone)]
 pub struct Reconciler {
     context: ReconcileContext,
-    claude_code: ClaudeCode,
-    claude_desktop: ClaudeDesktop,
-    codex: Codex,
-    opencode: OpenCode,
+    providers: Arc<Vec<Box<dyn Provider>>>,
 }
 
 impl Reconciler {
@@ -53,20 +51,24 @@ impl Reconciler {
                 credential_helper,
                 socket,
             },
-            claude_code: ClaudeCode {
-                settings_path: claude_code_settings_path,
-            },
-            claude_desktop: ClaudeDesktop {
-                managed_settings_path: claude_desktop_managed_settings_path,
-                credential_helper_path: claude_desktop_credential_helper_path,
-            },
-            codex: Codex {
-                managed_config_path: codex_managed_config_path,
-            },
-            opencode: OpenCode {
-                managed_config_path: open_code_managed_config_path,
-                plugin_path: open_code_plugin_path,
-            },
+            providers: Arc::new(vec![
+                Box::new(ClaudeCode {
+                    settings_path: claude_code_settings_path,
+                }),
+                Box::new(ClaudeDesktop {
+                    managed_settings_path: claude_desktop_managed_settings_path,
+                    credential_helper_path: claude_desktop_credential_helper_path,
+                }),
+                Box::new(Codex {
+                    managed_config_path: codex_managed_config_path,
+                }),
+                Box::new(OpenCode {
+                    managed_config_path: open_code_managed_config_path,
+                    plugin_path: open_code_plugin_path,
+                }),
+                Box::new(VsCode),
+                Box::new(Ollama),
+            ]),
         }
     }
 
@@ -74,11 +76,23 @@ impl Reconciler {
     /// applying any writes. A later provider's failure leaves all files intact.
     pub fn plan(&self, config: &DaemonConfig) -> anyhow::Result<ReconcilePlan> {
         let mut plan = ReconcilePlan::default();
-        plan.append(self.claude_code.plan(&self.context, config)?)?;
-        plan.append(self.claude_desktop.plan(&self.context, config)?)?;
-        plan.append(self.codex.plan(&self.context, config)?)?;
-        plan.append(self.opencode.plan(&self.context, config)?)?;
+        for provider in self.providers.iter() {
+            plan.append(provider.plan(&self.context, config)?)?;
+        }
         Ok(plan)
+    }
+
+    pub async fn discover(&self) -> Discovery {
+        let mut discovery = Discovery {
+            agents: Vec::new(),
+            model_runtimes: Vec::new(),
+        };
+        for provider in self.providers.iter() {
+            let found = provider.discover().await;
+            discovery.agents.extend(found.agents);
+            discovery.model_runtimes.extend(found.model_runtimes);
+        }
+        discovery
     }
 
     pub fn apply(&self, config: &DaemonConfig) -> anyhow::Result<()> {
@@ -91,23 +105,13 @@ impl Reconciler {
     }
 }
 
-fn program_name(program: &str) -> &str {
-    match program {
-        "claude-code" => "Claude Code",
-        "claude-desktop" => "Claude Desktop",
-        "codex" => "Codex",
-        "opencode" => "OpenCode",
-        program => program,
-    }
-}
-
 #[derive(Default)]
 struct DryRunReport {
     changes: RefCell<Vec<DryRunChange>>,
 }
 
 struct DryRunChange {
-    program: String,
+    display_name: String,
     description: String,
     action: String,
     path: PathBuf,
@@ -118,7 +122,7 @@ struct DryRunChange {
 impl DryRunReport {
     fn record(
         &self,
-        program: &str,
+        display_name: &str,
         description: &str,
         action: &str,
         path: &Path,
@@ -126,7 +130,7 @@ impl DryRunReport {
         after: Option<&[u8]>,
     ) {
         self.changes.borrow_mut().push(DryRunChange {
-            program: program.to_owned(),
+            display_name: display_name.to_owned(),
             description: description.to_owned(),
             action: action.to_owned(),
             path: path.to_owned(),
@@ -156,7 +160,7 @@ impl DryRunReport {
                 output,
                 "\n{}  {} {}\n        {}\n",
                 change.action.to_uppercase(),
-                program_name(&change.program),
+                change.display_name,
                 change.description,
                 change.path.display()
             );
@@ -217,7 +221,7 @@ mod tests {
     fn dry_run_report_shows_changes_and_hides_unchanged_files() {
         let report = DryRunReport::default();
         report.record(
-            "claude-code",
+            "Claude Code",
             "settings",
             "update",
             Path::new("/home/user/.claude/settings.json"),
@@ -225,7 +229,7 @@ mod tests {
             Some(br#"{"managed":true,"keep":true}"#),
         );
         report.record(
-            "codex",
+            "Codex",
             "configuration",
             "unchanged",
             Path::new("/home/user/.codex/config.toml"),
@@ -482,8 +486,15 @@ programs:
     #[test]
     fn providers_cannot_plan_writes_to_the_same_path() {
         let mut fixture = Fixture::new();
-        fixture.reconciler.codex.managed_config_path =
-            fixture.reconciler.claude_code.settings_path.clone();
+        let path = fixture.root.join("claude/settings.json");
+        fixture.reconciler.providers = std::sync::Arc::new(vec![
+            Box::new(super::ClaudeCode {
+                settings_path: path.clone(),
+            }),
+            Box::new(super::Codex {
+                managed_config_path: path,
+            }),
+        ]);
         let config = parse_daemon("programs:\n  claudeCode: {}\n  codex: {}").unwrap();
         let error = fixture.reconciler.apply(&config).unwrap_err();
         assert!(
