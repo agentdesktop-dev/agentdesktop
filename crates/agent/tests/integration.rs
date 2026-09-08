@@ -11,3 +11,6 @@ mod opencode;
 
 #[path = "../src/provider/vscode/integration_tests.rs"]
 mod vscode;
+
+#[path = "../src/provider/cursor/integration_tests.rs"]
+mod cursor;
