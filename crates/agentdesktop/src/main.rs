@@ -602,7 +602,7 @@ fn run_desktop() -> anyhow::Result<()> {
             });
 
             let open =
-                MenuItem::with_id(app, OPEN_MENU_ID, "Open Agent Desktop", true, None::<&str>)?;
+                MenuItem::with_id(app, OPEN_MENU_ID, "Open agentdesktop", true, None::<&str>)?;
             let separator = PredefinedMenuItem::separator(app)?;
             let status = MenuItem::with_id(app, "status", "Checking daemon…", false, None::<&str>)?;
             let quit = MenuItem::with_id(app, QUIT_MENU_ID, "Quit", true, None::<&str>)?;
