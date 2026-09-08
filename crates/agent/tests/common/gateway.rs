@@ -11,7 +11,8 @@ use axum::{
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 
-pub const TOKEN: &str = "provider-integration-access-token";
+// OpenCode uses this placeholder for gateways without configured authentication.
+pub const TOKEN: &str = "agentdesktop-managed";
 
 type Requests = Arc<Mutex<Vec<Value>>>;
 
@@ -147,9 +148,18 @@ fn responses(body: &Value) -> Response {
     if body["stream"] != true {
         return Json(response).into_response();
     }
+    let mut pending_item = item.clone();
+    pending_item["status"] = json!("in_progress");
+    pending_item["content"] = json!([]);
+    let content = &item["content"][0];
     sse(&[
-        json!({"type": "response.created", "sequence_number": 0, "response": {"id": "resp_provider_integration", "status": "in_progress", "output": []}}),
-        json!({"type": "response.output_item.done", "sequence_number": 1, "output_index": 0, "item": item}),
-        json!({"type": "response.completed", "sequence_number": 2, "response": response}),
+        json!({"type": "response.created", "sequence_number": 0, "response": {"id": "resp_provider_integration", "status": "in_progress", "created_at": 0, "output": []}}),
+        json!({"type": "response.output_item.added", "sequence_number": 1, "output_index": 0, "item": pending_item}),
+        json!({"type": "response.content_part.added", "sequence_number": 2, "item_id": item["id"], "output_index": 0, "content_index": 0, "part": {"type": "output_text", "text": "", "annotations": []}}),
+        json!({"type": "response.output_text.delta", "sequence_number": 3, "item_id": item["id"], "output_index": 0, "content_index": 0, "delta": content["text"]}),
+        json!({"type": "response.output_text.done", "sequence_number": 4, "item_id": item["id"], "output_index": 0, "content_index": 0, "text": content["text"]}),
+        json!({"type": "response.content_part.done", "sequence_number": 5, "item_id": item["id"], "output_index": 0, "content_index": 0, "part": content}),
+        json!({"type": "response.output_item.done", "sequence_number": 6, "output_index": 0, "item": item}),
+        json!({"type": "response.completed", "sequence_number": 7, "response": response}),
     ])
 }
