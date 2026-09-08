@@ -1,17 +1,14 @@
 use std::{
     collections::BTreeSet,
-    fs,
     path::{Path, PathBuf},
 };
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tracing::info;
+use tracing::debug;
 
-use crate::secure_fs;
-
-use super::ReconcileMode;
+use crate::reconcile::ReconcilePlan;
 
 #[derive(Deserialize, Serialize)]
 struct MergeState {
@@ -20,7 +17,7 @@ struct MergeState {
     after: Value,
 }
 
-pub fn state_path(path: &Path) -> PathBuf {
+pub(super) fn state_path(path: &Path) -> PathBuf {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -29,7 +26,7 @@ pub fn state_path(path: &Path) -> PathBuf {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn apply(
+pub(super) fn plan_merge(
     path: &Path,
     state_path: &Path,
     managed: Value,
@@ -37,9 +34,9 @@ pub fn apply(
     program: &str,
     description: &str,
     display_name: &str,
-    mode: ReconcileMode<'_>,
+    plan: &ReconcilePlan,
 ) -> anyhow::Result<()> {
-    let existing = match fs::read(path) {
+    let existing = match plan.read(path) {
         Ok(contents) => Some(contents),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
@@ -47,7 +44,7 @@ pub fn apply(
                 .with_context(|| format!("read {display_name} from {}", path.display()));
         }
     };
-    let previous = read_state(state_path, display_name)?;
+    let previous = read_state(state_path, display_name, plan)?;
     let created = previous
         .as_ref()
         .map(|state| state.created)
@@ -56,14 +53,9 @@ pub fn apply(
     let mut combined = match existing.as_deref() {
         Some(contents) => match serde_json::from_slice::<Value>(contents) {
             Ok(Value::Object(object)) => Value::Object(object),
-            Ok(_) | Err(_) if mode.is_dry_run() => {
-                mode.record(program, description, "conflict", path);
+            Ok(_) | Err(_) => {
+                plan.record(program, description, "conflict", path);
                 return Ok(());
-            }
-            Ok(_) => anyhow::bail!("{display_name} must be a JSON object at {}", path.display()),
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("parse {display_name} from {}", path.display()));
             }
         },
         None => json!({}),
@@ -85,7 +77,7 @@ pub fn apply(
         Some(_) => "update",
         None => "create",
     };
-    mode.record_diff(
+    plan.record_diff(
         program,
         description,
         action,
@@ -93,15 +85,9 @@ pub fn apply(
         existing.as_deref(),
         Some(&contents),
     );
-    if !mode.writes() {
-        return Ok(());
-    }
 
-    let directory = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(directory)
-        .with_context(|| format!("create {display_name} directory {}", directory.display()))?;
     if action != "unchanged" {
-        secure_fs::atomic_write(path, &contents, 0o644)?;
+        plan.write_file(path, &contents, 0o644)?;
     }
     let mut state = serde_json::to_vec_pretty(&MergeState {
         created,
@@ -110,29 +96,27 @@ pub fn apply(
     })
     .with_context(|| format!("serialize {display_name} merge state"))?;
     state.push(b'\n');
-    secure_fs::atomic_write(state_path, &state, 0o600)?;
-    info!(program, action, path = %path.display(), "merged user settings");
+    plan.write_file(state_path, &state, 0o600)?;
+    debug!(program, action, path = %path.display(), "planned user settings merge");
     Ok(())
 }
 
-pub fn remove(
+pub(super) fn plan_remove(
     path: &Path,
     state_path: &Path,
     program: &str,
     description: &str,
     display_name: &str,
-    mode: ReconcileMode<'_>,
+    plan: &ReconcilePlan,
 ) -> anyhow::Result<bool> {
-    let Some(state) = read_state(state_path, display_name)? else {
+    let Some(state) = read_state(state_path, display_name, plan)? else {
         return Ok(false);
     };
-    let existing = match fs::read(path) {
+    let existing = match plan.read(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            mode.record(program, description, "unchanged", path);
-            if mode.writes() {
-                remove_file(state_path, display_name)?;
-            }
+            plan.record(program, description, "unchanged", path);
+            remove_file(state_path, display_name, plan)?;
             return Ok(true);
         }
         Err(error) => {
@@ -142,14 +126,9 @@ pub fn remove(
     };
     let settings = match serde_json::from_slice::<Value>(&existing) {
         Ok(Value::Object(object)) => Value::Object(object),
-        Ok(_) | Err(_) if mode.is_dry_run() => {
-            mode.record(program, description, "conflict", path);
+        Ok(_) | Err(_) => {
+            plan.record(program, description, "conflict", path);
             return Ok(true);
-        }
-        Ok(_) => anyhow::bail!("{display_name} must be a JSON object at {}", path.display()),
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("parse {display_name} from {}", path.display()));
         }
     };
     let settings = rollback_overlay(&settings, &state.before, &state.after);
@@ -167,7 +146,7 @@ pub fn remove(
         Some(contents) if contents == existing => "unchanged",
         Some(_) => "update",
     };
-    mode.record_diff(
+    plan.record_diff(
         program,
         description,
         action,
@@ -175,24 +154,25 @@ pub fn remove(
         Some(&existing),
         proposed.as_deref(),
     );
-    if !mode.writes() {
-        return Ok(true);
-    }
     if action == "remove" {
-        fs::remove_file(path)
+        plan.remove_file(path)
             .with_context(|| format!("remove {display_name} at {}", path.display()))?;
     } else if let Some(contents) = proposed
         && action == "update"
     {
-        secure_fs::atomic_write(path, &contents, 0o644)?;
+        plan.write_file(path, &contents, 0o644)?;
     }
-    remove_file(state_path, display_name)?;
-    info!(program, action, path = %path.display(), "removed managed values from user settings");
+    remove_file(state_path, display_name, plan)?;
+    debug!(program, action, path = %path.display(), "planned removal of managed values from user settings");
     Ok(true)
 }
 
-fn read_state(path: &Path, display_name: &str) -> anyhow::Result<Option<MergeState>> {
-    match fs::read(path) {
+fn read_state(
+    path: &Path,
+    display_name: &str,
+    plan: &ReconcilePlan,
+) -> anyhow::Result<Option<MergeState>> {
+    match plan.read(path) {
         Ok(contents) => serde_json::from_slice(&contents)
             .with_context(|| format!("parse {display_name} merge state from {}", path.display()))
             .map(Some),
@@ -202,8 +182,8 @@ fn read_state(path: &Path, display_name: &str) -> anyhow::Result<Option<MergeSta
     }
 }
 
-fn remove_file(path: &Path, display_name: &str) -> anyhow::Result<()> {
-    match fs::remove_file(path) {
+fn remove_file(path: &Path, display_name: &str, plan: &ReconcilePlan) -> anyhow::Result<()> {
+    match plan.remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error)

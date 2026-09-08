@@ -1,28 +1,20 @@
-mod claude_code;
-mod claude_desktop;
-mod codex;
-mod metadata;
-mod ollama;
-mod opencode;
-mod vscode;
-
+use crate::provider::{
+    Provider, claude_code::ClaudeCode, claude_desktop::ClaudeDesktop, codex::Codex, ollama::Ollama,
+    opencode::OpenCode, vscode::VsCode,
+};
 use agentdesktop_core::model::Discovery;
 
 pub async fn discover() -> Discovery {
-    let ollama = ollama::discover().await;
-    let (codex, opencode, claude_code, claude_desktop, vscode) = (
-        codex::discover(),
-        opencode::discover(),
-        claude_code::discover(),
-        claude_desktop::discover(),
-        vscode::discover(),
-    );
-
-    Discovery {
-        agents: [codex, opencode, claude_code, claude_desktop, vscode]
-            .into_iter()
-            .flatten()
-            .collect(),
-        model_runtimes: ollama.into_iter().collect(),
+    let mut discovery = Ollama.discover().await;
+    for found in [
+        Codex::default().discover().await,
+        OpenCode::default().discover().await,
+        ClaudeCode::default().discover().await,
+        ClaudeDesktop::default().discover().await,
+        VsCode.discover().await,
+    ] {
+        discovery.agents.extend(found.agents);
+        discovery.model_runtimes.extend(found.model_runtimes);
     }
+    discovery
 }

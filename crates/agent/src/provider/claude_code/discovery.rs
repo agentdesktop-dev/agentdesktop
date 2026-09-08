@@ -7,7 +7,7 @@ use std::{
 use agentdesktop_core::model::{Agent, McpServer};
 use serde_json::Value;
 
-use super::metadata;
+use crate::provider::metadata;
 
 pub(super) fn discover() -> Option<Agent> {
     let executable = metadata::find_executable("claude", executable_candidates())?;
@@ -94,7 +94,7 @@ fn installed_plugin_roots(home: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-pub(super) fn mcp_servers_from_json(path: &Path) -> Vec<McpServer> {
+pub(in crate::provider) fn mcp_servers_from_json(path: &Path) -> Vec<McpServer> {
     let Ok(contents) = fs::read(path) else {
         return Vec::new();
     };

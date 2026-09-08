@@ -7,7 +7,7 @@ use std::{
 use agentdesktop_core::model::{Agent, McpServer};
 use serde_json::Value;
 
-use super::metadata;
+use crate::provider::metadata;
 
 pub(super) fn discover() -> Option<Agent> {
     let executable = metadata::find_executable("code", executable_candidates())?;

@@ -134,6 +134,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "humantime-serde",
+ "reqwest",
  "schemars 1.2.2",
  "serde",
  "serde-transcode",

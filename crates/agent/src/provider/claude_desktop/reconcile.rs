@@ -1,46 +1,46 @@
-use std::{fs, path::Path};
+use std::path::Path;
 
 use agentdesktop_core::config::{ClaudeDesktopConfig, LlmGatewayAuthentication, LlmGatewayConfig};
 use anyhow::Context;
 use serde_json::{Value, json};
-use tracing::info;
+use tracing::debug;
 
-use crate::secure_fs;
+use crate::reconcile::ReconcilePlan;
 
 #[cfg(any(not(windows), test))]
-use super::shell_quote;
-use super::{ReconcileMode, deep_merge, json_merge};
+use crate::provider::shared::shell_quote;
+use crate::provider::{json_merge, shared::deep_merge};
 
 const OWNER_MARKER: &[u8] = b"Agentdesktop\n";
 
-pub fn apply(
+pub(super) fn plan(
     settings_path: &Path,
     merge_existing: bool,
     helper_path: &Path,
     credential_binary: &Path,
     socket: &Path,
     config: Option<(&ClaudeDesktopConfig, Option<&LlmGatewayConfig>)>,
-    mode: ReconcileMode,
+    plan: &ReconcilePlan,
 ) -> anyhow::Result<()> {
     let settings_owner = owner_path(settings_path);
     let settings_state = json_merge::state_path(settings_path);
     let helper_owner = owner_path(helper_path);
     let Some((config, gateway)) = config else {
         if !merge_existing
-            || !json_merge::remove(
+            || !json_merge::plan_remove(
                 settings_path,
                 &settings_state,
                 "claude-desktop",
                 "managed settings",
                 "Claude Desktop settings",
-                mode,
+                plan,
             )?
         {
-            remove_owned(settings_path, &settings_owner, "managed settings", mode)?;
-        } else if mode.writes() {
-            remove_owner_marker(&settings_owner)?;
+            remove_owned(settings_path, &settings_owner, "managed settings", plan)?;
+        } else {
+            remove_owner_marker(&settings_owner, plan)?;
         }
-        return remove_owned(helper_path, &helper_owner, "credential helper", mode);
+        return remove_owned(helper_path, &helper_owner, "credential helper", plan);
     };
 
     let uses_credential_helper = gateway.is_some_and(|gateway| {
@@ -57,10 +57,10 @@ pub fn apply(
             &script,
             0o755,
             "credential helper",
-            mode,
+            plan,
         )?;
     } else {
-        remove_owned(helper_path, &helper_owner, "credential helper", mode)?;
+        remove_owned(helper_path, &helper_owner, "credential helper", plan)?;
     }
 
     let settings = managed_settings(config, gateway, helper_path)?;
@@ -78,7 +78,7 @@ pub fn apply(
         &contents,
         0o644,
         "managed settings",
-        mode,
+        plan,
     )
 }
 
@@ -165,26 +165,26 @@ fn write_owned(
     path: &Path,
     owner_path: &Path,
     contents: &[u8],
-    mode: u32,
+    permissions: u32,
     description: &str,
-    reconcile_mode: ReconcileMode,
+    plan: &ReconcilePlan,
 ) -> anyhow::Result<()> {
-    let owned = is_owned(owner_path)?;
-    let existing = match fs::read(path) {
+    let owned = is_owned(owner_path, plan)?;
+    let existing = match plan.read(path) {
         Ok(existing) => Some(existing),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
     let action = match existing.as_deref() {
         Some(existing) if existing == contents => {
-            if !owned && reconcile_mode.writes() {
-                secure_fs::atomic_write(owner_path, OWNER_MARKER, 0o644)?;
+            if !owned {
+                plan.write_file(owner_path, OWNER_MARKER, 0o644)?;
             }
             "unchanged"
         }
         Some(_) if owned => "update",
-        Some(existing) if reconcile_mode.is_dry_run() => {
-            reconcile_mode.record_diff(
+        Some(existing) => {
+            plan.record_diff(
                 "claude-desktop",
                 description,
                 "conflict",
@@ -194,22 +194,14 @@ fn write_owned(
             );
             return Ok(());
         }
-        Some(_) => anyhow::bail!(
-            "refusing to replace Claude Desktop {description} not owned by Agentdesktop at {}",
-            path.display()
-        ),
         None => "create",
     };
-    if action != "unchanged" && reconcile_mode.writes() {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("create directory {}", parent.display()))?;
-        }
-        secure_fs::atomic_write(path, contents, mode)?;
-        secure_fs::atomic_write(owner_path, OWNER_MARKER, 0o644)?;
+    if action != "unchanged" {
+        plan.write_file(path, contents, permissions)?;
+        plan.write_file(owner_path, OWNER_MARKER, 0o644)?;
     }
-    info!(program = "claude-desktop", action, path = %path.display(), "reconciled {description}");
-    reconcile_mode.record_diff(
+    debug!(program = "claude-desktop", action, path = %path.display(), "planned {description}");
+    plan.record_diff(
         "claude-desktop",
         description,
         action,
@@ -224,47 +216,43 @@ fn remove_owned(
     path: &Path,
     owner_path: &Path,
     description: &str,
-    mode: ReconcileMode,
+    plan: &ReconcilePlan,
 ) -> anyhow::Result<()> {
-    if !is_owned(owner_path)? {
-        mode.record("claude-desktop", description, "unchanged", path);
+    if !is_owned(owner_path, plan)? {
+        plan.record("claude-desktop", description, "unchanged", path);
         return Ok(());
     }
-    let exists = match fs::metadata(path) {
+    let exists = match plan.read(path) {
         Ok(_) => {
-            if mode.writes() {
-                fs::remove_file(path).with_context(|| format!("remove {}", path.display()))?;
-            }
-            info!(program = "claude-desktop", action = "remove", path = %path.display(), "reconciled {description}");
-            mode.record("claude-desktop", description, "remove", path);
+            plan.remove_file(path)
+                .with_context(|| format!("remove {}", path.display()))?;
+            debug!(program = "claude-desktop", action = "remove", path = %path.display(), "planned {description}");
+            plan.record("claude-desktop", description, "remove", path);
             true
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
         Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
     };
     if !exists {
-        mode.record("claude-desktop", description, "unchanged", path);
+        plan.record("claude-desktop", description, "unchanged", path);
     }
-    if !mode.writes() {
-        return Ok(());
-    }
-    match fs::remove_file(owner_path) {
+    match plan.remove_file(owner_path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error).with_context(|| format!("remove {}", owner_path.display())),
     }
 }
 
-fn is_owned(path: &Path) -> anyhow::Result<bool> {
-    match fs::read(path) {
+fn is_owned(path: &Path, plan: &ReconcilePlan) -> anyhow::Result<bool> {
+    match plan.read(path) {
         Ok(contents) => Ok(contents == OWNER_MARKER),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
     }
 }
 
-fn remove_owner_marker(path: &Path) -> anyhow::Result<()> {
-    match fs::remove_file(path) {
+fn remove_owner_marker(path: &Path, plan: &ReconcilePlan) -> anyhow::Result<()> {
+    match plan.remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),

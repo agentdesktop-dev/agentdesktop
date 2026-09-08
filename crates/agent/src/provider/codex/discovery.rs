@@ -6,7 +6,7 @@ use std::{
 
 use agentdesktop_core::model::{Agent, McpServer};
 
-use super::metadata;
+use crate::provider::metadata;
 
 pub(super) fn discover() -> Option<Agent> {
     let executable = metadata::find_executable("codex", executable_candidates())?;

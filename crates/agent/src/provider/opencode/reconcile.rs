@@ -1,39 +1,39 @@
-use std::{fs, path::Path};
+use std::path::Path;
 
 use agentdesktop_core::config::{LlmGatewayAuthentication, LlmGatewayConfig, OpenCodeConfig};
 use anyhow::Context;
 use serde_json::{Value, json};
-use tracing::info;
+use tracing::debug;
 use url::Url;
 
-use crate::secure_fs;
+use crate::reconcile::ReconcilePlan;
 
-use super::{ReconcileMode, deep_merge, responses_base_url};
+use crate::provider::shared::{deep_merge, responses_base_url};
 
 const MANAGED_HEADER: &str = "// Managed by Agentdesktop. Manual changes will be replaced.\n";
 const CONFIG_PROGRAM: &str = "opencode";
 
-pub fn apply(
+pub(super) fn plan(
     config_path: &Path,
     plugin_path: &Path,
     credential_helper: &Path,
     socket: &Path,
     config: Option<(&OpenCodeConfig, Option<&LlmGatewayConfig>)>,
-    mode: ReconcileMode,
+    plan: &ReconcilePlan,
 ) -> anyhow::Result<()> {
     let Some((config, gateway)) = config else {
-        remove_owned(config_path, "managed configuration", mode)?;
-        return remove_owned(plugin_path, "credential plugin", mode);
+        remove_owned(config_path, "managed configuration", plan)?;
+        return remove_owned(plugin_path, "credential plugin", plan);
     };
 
     let authentication = gateway.and_then(|gateway| gateway.authentication.as_ref());
     let plugin_url = if authentication.is_some_and(LlmGatewayAuthentication::uses_credential_helper)
     {
         let source = credential_plugin(credential_helper, socket)?;
-        reconcile_file(plugin_path, source.as_bytes(), "credential plugin", mode)?;
+        reconcile_file(plugin_path, source.as_bytes(), "credential plugin", plan)?;
         Some(file_url(plugin_path)?)
     } else {
-        remove_owned(plugin_path, "credential plugin", mode)?;
+        remove_owned(plugin_path, "credential plugin", plan)?;
         None
     };
 
@@ -45,7 +45,7 @@ pub fn apply(
             .as_bytes(),
     );
     contents.push(b'\n');
-    reconcile_file(config_path, &contents, "managed configuration", mode)
+    reconcile_file(config_path, &contents, "managed configuration", plan)
 }
 
 fn managed_config(
@@ -177,9 +177,9 @@ fn reconcile_file(
     path: &Path,
     contents: &[u8],
     description: &str,
-    mode: ReconcileMode,
+    plan: &ReconcilePlan,
 ) -> anyhow::Result<()> {
-    let existing = match fs::read(path) {
+    let existing = match plan.read(path) {
         Ok(existing) => Some(existing),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
@@ -189,19 +189,19 @@ fn reconcile_file(
     };
     let action = match existing.as_deref() {
         Some(existing) if existing == contents => {
-            info!(
+            debug!(
                 program = CONFIG_PROGRAM,
                 kind = description,
                 action = "unchanged",
                 path = %path.display(),
                 "managed file already current"
             );
-            mode.record(CONFIG_PROGRAM, description, "unchanged", path);
+            plan.record(CONFIG_PROGRAM, description, "unchanged", path);
             return Ok(());
         }
         Some(existing) if existing.starts_with(MANAGED_HEADER.as_bytes()) => "update",
-        Some(existing) if mode.is_dry_run() => {
-            mode.record_diff(
+        Some(existing) => {
+            plan.record_diff(
                 CONFIG_PROGRAM,
                 description,
                 "conflict",
@@ -211,29 +211,17 @@ fn reconcile_file(
             );
             return Ok(());
         }
-        Some(_) => anyhow::bail!(
-            "refusing to replace OpenCode {description} not owned by Agentdesktop at {}",
-            path.display()
-        ),
         None => "create",
     };
-    if mode.writes() {
-        let directory = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(directory)
-            .with_context(|| format!("create OpenCode directory {}", directory.display()))?;
-        secure_fs::atomic_write(path, contents, 0o644)?;
-    }
-    info!(
+    plan.write_file(path, contents, 0o644)?;
+    debug!(
         program = CONFIG_PROGRAM,
         kind = description,
         action,
         path = %path.display(),
-        "reconciled managed file"
+        "planned managed file"
     );
-    mode.record_diff(
+    plan.record_diff(
         CONFIG_PROGRAM,
         description,
         action,
@@ -244,36 +232,34 @@ fn reconcile_file(
     Ok(())
 }
 
-fn remove_owned(path: &Path, description: &str, mode: ReconcileMode) -> anyhow::Result<()> {
-    match fs::read(path) {
+fn remove_owned(path: &Path, description: &str, plan: &ReconcilePlan) -> anyhow::Result<()> {
+    match plan.read(path) {
         Ok(contents) if contents.starts_with(MANAGED_HEADER.as_bytes()) => {
-            if mode.writes() {
-                fs::remove_file(path)
-                    .with_context(|| format!("remove {description} at {}", path.display()))?;
-            }
-            info!(
+            plan.remove_file(path)
+                .with_context(|| format!("remove {description} at {}", path.display()))?;
+            debug!(
                 program = CONFIG_PROGRAM,
                 kind = description,
                 action = "remove",
                 path = %path.display(),
-                "reconciled managed file"
+                "planned managed file"
             );
-            mode.record(CONFIG_PROGRAM, description, "remove", path);
+            plan.record(CONFIG_PROGRAM, description, "remove", path);
             Ok(())
         }
         Ok(_) => {
-            info!(
+            debug!(
                 program = CONFIG_PROGRAM,
                 kind = description,
                 action = "unchanged",
                 path = %path.display(),
                 "preserving managed file not owned by Agentdesktop"
             );
-            mode.record(CONFIG_PROGRAM, description, "unchanged", path);
+            plan.record(CONFIG_PROGRAM, description, "unchanged", path);
             Ok(())
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            mode.record(CONFIG_PROGRAM, description, "unchanged", path);
+            plan.record(CONFIG_PROGRAM, description, "unchanged", path);
             Ok(())
         }
         Err(error) => {

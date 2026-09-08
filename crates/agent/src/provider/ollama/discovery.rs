@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use agentdesktop_core::http::ClientExt;
 use agentdesktop_core::model::{LocalModel, ModelRuntime};
 use serde::Deserialize;
 
@@ -25,13 +26,7 @@ async fn discover_at(endpoint: &str) -> Option<ModelRuntime> {
         .build()
         .ok()?;
     let response = client
-        .get(format!("{endpoint}/api/tags"))
-        .send()
-        .await
-        .ok()?
-        .error_for_status()
-        .ok()?
-        .json::<TagsResponse>()
+        .get_json::<TagsResponse>(format!("{endpoint}/api/tags"))
         .await
         .ok()?;
     let mut models = response

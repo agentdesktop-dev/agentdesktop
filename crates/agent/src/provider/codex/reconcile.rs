@@ -1,28 +1,28 @@
-use std::{fs, path::Path};
+use std::path::Path;
 
 use agentdesktop_core::config::{
     CodexConfig, LlmGatewayAuthentication, LlmGatewayConfig, SandboxConfig,
 };
 use anyhow::Context;
 use serde_json::{Value, json};
-use tracing::info;
+use tracing::debug;
 
-use crate::secure_fs;
+use crate::reconcile::ReconcilePlan;
 
-use super::{ReconcileMode, deep_merge, responses_base_url};
+use crate::provider::shared::{deep_merge, responses_base_url};
 
 const MANAGED_HEADER: &str = "# Managed by Agentdesktop. Manual changes will be replaced.\n";
 
-pub fn apply(
+pub(super) fn plan(
     path: &Path,
     credential_helper: &Path,
     socket: &Path,
     sandbox: Option<&SandboxConfig>,
     config: Option<(&CodexConfig, Option<&LlmGatewayConfig>)>,
-    mode: ReconcileMode,
+    plan: &ReconcilePlan,
 ) -> anyhow::Result<()> {
     let Some((config, gateway)) = config else {
-        return remove(path, mode);
+        return remove(path, plan);
     };
 
     let settings = managed_config(config, gateway, credential_helper, socket, sandbox)?;
@@ -36,7 +36,7 @@ pub fn apply(
         contents.push(b'\n');
     }
 
-    let existing = match fs::read(path) {
+    let existing = match plan.read(path) {
         Ok(existing) => Some(existing),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
@@ -47,18 +47,18 @@ pub fn apply(
     };
     let action = match existing.as_deref() {
         Some(existing) if existing == contents => {
-            info!(
+            debug!(
                 program = "codex",
                 action = "unchanged",
                 path = %path.display(),
                 "managed configuration already current"
             );
-            mode.record("codex", "configuration", "unchanged", path);
+            plan.record("codex", "configuration", "unchanged", path);
             return Ok(());
         }
         Some(existing) if existing.starts_with(MANAGED_HEADER.as_bytes()) => "update",
-        Some(existing) if mode.is_dry_run() => {
-            mode.record_diff(
+        Some(existing) => {
+            plan.record_diff(
                 "codex",
                 "configuration",
                 "conflict",
@@ -68,33 +68,17 @@ pub fn apply(
             );
             return Ok(());
         }
-        Some(_) => anyhow::bail!(
-            "refusing to replace Codex configuration not owned by Agentdesktop at {}",
-            path.display()
-        ),
         None => "create",
     };
 
-    if mode.writes() {
-        let directory = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(directory).with_context(|| {
-            format!(
-                "create Codex configuration directory {}",
-                directory.display()
-            )
-        })?;
-        secure_fs::atomic_write(path, &contents, 0o644)?;
-    }
-    info!(
+    plan.write_file(path, &contents, 0o644)?;
+    debug!(
         program = "codex",
         action,
         path = %path.display(),
-        "reconciled managed configuration"
+        "planned managed configuration"
     );
-    mode.record_diff(
+    plan.record_diff(
         "codex",
         "configuration",
         action,
@@ -195,41 +179,39 @@ fn managed_config(
     Ok(settings)
 }
 
-fn remove(path: &Path, mode: ReconcileMode) -> anyhow::Result<()> {
-    match fs::read(path) {
+fn remove(path: &Path, plan: &ReconcilePlan) -> anyhow::Result<()> {
+    match plan.read(path) {
         Ok(contents) if contents.starts_with(MANAGED_HEADER.as_bytes()) => {
-            if mode.writes() {
-                fs::remove_file(path).with_context(|| {
-                    format!("remove Codex managed configuration at {}", path.display())
-                })?;
-            }
-            info!(
+            plan.remove_file(path).with_context(|| {
+                format!("remove Codex managed configuration at {}", path.display())
+            })?;
+            debug!(
                 program = "codex",
                 action = "remove",
                 path = %path.display(),
-                "reconciled managed configuration"
+                "planned managed configuration"
             );
-            mode.record("codex", "configuration", "remove", path);
+            plan.record("codex", "configuration", "remove", path);
             Ok(())
         }
         Ok(_) => {
-            info!(
+            debug!(
                 program = "codex",
                 action = "unchanged",
                 path = %path.display(),
                 "preserving managed configuration not owned by Agentdesktop"
             );
-            mode.record("codex", "configuration", "unchanged", path);
+            plan.record("codex", "configuration", "unchanged", path);
             Ok(())
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            info!(
+            debug!(
                 program = "codex",
                 action = "unchanged",
                 path = %path.display(),
                 "managed configuration already absent"
             );
-            mode.record("codex", "configuration", "unchanged", path);
+            plan.record("codex", "configuration", "unchanged", path);
             Ok(())
         }
         Err(error) => Err(error)

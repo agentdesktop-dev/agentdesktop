@@ -7,6 +7,7 @@ pub mod enrollment;
 pub mod gateway_oidc;
 pub mod identity;
 pub mod oidc;
+pub mod provider;
 pub mod reconcile;
 pub mod remote;
 pub mod secret_store;
