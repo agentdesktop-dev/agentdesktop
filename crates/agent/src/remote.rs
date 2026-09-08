@@ -100,7 +100,22 @@ pub async fn run(
                     continue;
                 }
             };
-            refresh_result?;
+            match refresh_result {
+                Ok(()) => {}
+                Err(error) if is_oauth_refresh_rejected(&error) => {
+                    let error_chain = format!("{error:#}");
+                    identity::delete(&identity_path, &identity.device_id)?;
+                    enrollment.set("starting").await;
+                    warn!(
+                        controller = %controller.address,
+                        identity_path = %identity_path.display(),
+                        error = %error_chain,
+                        "OIDC refresh token was rejected; removed local identity and restarting enrollment"
+                    );
+                    break;
+                }
+                Err(error) => return Err(error),
+            }
             if certificate_needs_renewal(&identity) {
                 match renew_device_certificate(&controller, &identity).await {
                     Ok(renewed) => {
@@ -245,6 +260,21 @@ fn is_unauthenticated(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<tonic::Status>()
         .is_some_and(|status| status.code() == tonic::Code::Unauthenticated)
+}
+
+fn is_oauth_refresh_rejected(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        .and_then(reqwest::Error::status)
+        .is_some_and(|status| {
+            matches!(
+                status,
+                reqwest::StatusCode::BAD_REQUEST
+                    | reqwest::StatusCode::UNAUTHORIZED
+                    | reqwest::StatusCode::FORBIDDEN
+            )
+        })
 }
 
 pub async fn llm_gateway_credential(
@@ -641,8 +671,8 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        MAX_RETRY_DELAY, enroll_with_retry, is_unauthenticated, next_retry_delay,
-        normalize_hostname,
+        MAX_RETRY_DELAY, enroll_with_retry, is_oauth_refresh_rejected, is_unauthenticated,
+        next_retry_delay, normalize_hostname,
     };
     use crate::enrollment::EnrollmentState;
 
@@ -651,6 +681,34 @@ mod tests {
         let error = anyhow::Error::new(tonic::Status::unauthenticated("rejected"))
             .context("open controller stream");
         assert!(is_unauthenticated(&error));
+    }
+
+    #[test]
+    fn distinguishes_rejected_refresh_tokens_from_transient_errors() {
+        fn status_error(status: reqwest::StatusCode) -> anyhow::Error {
+            reqwest::Response::from(
+                axum::http::Response::builder()
+                    .status(status)
+                    .body("")
+                    .unwrap(),
+            )
+            .error_for_status()
+            .unwrap_err()
+            .into()
+        }
+
+        assert!(is_oauth_refresh_rejected(&status_error(
+            reqwest::StatusCode::BAD_REQUEST
+        )));
+        assert!(is_oauth_refresh_rejected(&status_error(
+            reqwest::StatusCode::UNAUTHORIZED
+        )));
+        assert!(!is_oauth_refresh_rejected(&status_error(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        )));
+        assert!(!is_oauth_refresh_rejected(&anyhow::anyhow!(
+            "network unavailable"
+        )));
     }
 
     #[test]
