@@ -14,3 +14,6 @@ mod vscode;
 
 #[path = "../src/provider/cursor/integration_tests.rs"]
 mod cursor;
+
+#[path = "../src/provider/grok/integration_tests.rs"]
+mod grok;
