@@ -760,6 +760,7 @@ fn validate_daemon(
         }
     }
     if let Some(vscode) = &programs.vscode
+        && llm_gateway.is_some()
         && vscode.use_llm_gateway
     {
         let proxy_url = vscode
