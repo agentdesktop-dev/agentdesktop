@@ -173,7 +173,7 @@ fn catalog_entries(config: &GrokConfig, default_model: &str) -> Vec<(String, Val
             default_model.to_owned(),
             json!({
                 "model": default_model,
-                "name": "Agentdesktop",
+                "name": "agentdesktop",
             }),
         )];
     }
@@ -204,7 +204,7 @@ fn remove(path: &Path, plan: &ReconcilePlan) -> anyhow::Result<()> {
                 program = Grok::ID,
                 action = "unchanged",
                 path = %path.display(),
-                "preserving managed configuration not owned by Agentdesktop"
+                "preserving managed configuration not owned by agentdesktop"
             );
             plan.record(Grok::DISPLAY_NAME, "configuration", "unchanged", path);
             Ok(())
@@ -322,7 +322,7 @@ programs:
 
         assert_eq!(settings["models"]["default"], "grok-4.6");
         assert_eq!(settings["model"]["grok-4.6"]["model"], "grok-4.6");
-        assert_eq!(settings["model"]["grok-4.6"]["name"], "Agentdesktop");
+        assert_eq!(settings["model"]["grok-4.6"]["name"], "agentdesktop");
         assert_eq!(
             settings["model"]["grok-4.6"]["base_url"],
             "http://127.0.0.1:4000/v1"

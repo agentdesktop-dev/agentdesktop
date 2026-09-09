@@ -135,7 +135,7 @@
       ]
     },
     "GrokConfig": {
-      "description": "Settings reconciled into Grok Build's organization-managed configuration.\n\nValues under `managedConfig` are written to Grok's `managed_config.toml`.\nWhen generated LLM-gateway settings overlap with those values,\nAgentdesktop's generated values take precedence.\nOnly system mode on Linux and macOS is supported. Grok can delete or replace\nthe user-level managed file during startup, so `--user` rejects `programs.grok`.",
+      "description": "Settings reconciled into Grok Build's organization-managed configuration.\n\nValues under `managedConfig` are written to Grok's `managed_config.toml`.\nWhen generated LLM-gateway settings overlap with those values,\nagentdesktop's generated values take precedence.\nOnly system mode on Linux and macOS is supported. Grok can delete or replace\nthe user-level managed file during startup, so `--user` rejects `programs.grok`.",
       "type": "object",
       "properties": {
         "managedConfig": {
@@ -144,7 +144,7 @@
           "additionalProperties": true
         },
         "model": {
-          "description": "Catalog ID and API model used when pointing Grok at the LLM gateway.\n\nThis is required when a top-level `llmGateway` is configured. If `models`\nis empty, Agentdesktop creates a catalog entry with this ID.",
+          "description": "Catalog ID and API model used when pointing Grok at the LLM gateway.\n\nThis is required when a top-level `llmGateway` is configured. If `models`\nis empty, agentdesktop creates a catalog entry with this ID.",
           "type": [
             "string",
             "null"

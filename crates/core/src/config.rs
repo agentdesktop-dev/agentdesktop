@@ -484,7 +484,7 @@ pub struct OpenCodeConfig {
 ///
 /// Values under `managedConfig` are written to Grok's `managed_config.toml`.
 /// When generated LLM-gateway settings overlap with those values,
-/// Agentdesktop's generated values take precedence.
+/// agentdesktop's generated values take precedence.
 /// Only system mode on Linux and macOS is supported. Grok can delete or replace
 /// the user-level managed file during startup, so `--user` rejects `programs.grok`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -497,7 +497,7 @@ pub struct GrokConfig {
     /// Catalog ID and API model used when pointing Grok at the LLM gateway.
     ///
     /// This is required when a top-level `llmGateway` is configured. If `models`
-    /// is empty, Agentdesktop creates a catalog entry with this ID.
+    /// is empty, agentdesktop creates a catalog entry with this ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// Extra Grok `[model.<id>]` catalog entries, keyed by catalog ID.

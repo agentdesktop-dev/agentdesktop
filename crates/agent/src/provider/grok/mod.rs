@@ -44,7 +44,7 @@ impl Provider for Grok {
         }
         if ctx.merge_user_settings && config.programs.grok.is_some() {
             anyhow::bail!(
-                "Grok Build can delete or replace its user-level managed_config.toml during startup; remove programs.grok or run Agentdesktop without --user as root so it can manage /etc/grok/managed_config.toml"
+                "Grok Build can delete or replace its user-level managed_config.toml during startup; remove programs.grok or run agentdesktop without --user as root so it can manage /etc/grok/managed_config.toml"
             );
         }
         let configured = config.programs.grok.as_ref().map(|provider| {
