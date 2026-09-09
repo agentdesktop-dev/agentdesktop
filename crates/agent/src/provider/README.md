@@ -10,9 +10,9 @@ Features currently implemented by Agentdesktop.
 | Local model discovery | — | — | — | — | — | ✅ | — | — |
 | MCP server discovery | ✅ | ✅ | ✅ | ◯ | ✅ | — | ✅ | ✅ |
 | Skill discovery | ✅ | ◯ | ✅ | ◯ | ✅ | — | ✅ | ✅ |
-| Managed configuration | ✅ | ✅ | ✅ | ✅ | ◯ | ◯ | ◯ | ◯ |
-| LLM gateway routing | ✅ | ✅ | ✅ | ✅ | ◯ | — | ◯ | ◯ |
-| Gateway credentials | ✅ | ✅ | ✅ | ✅ | ◯ | — | ◯ | ◯ |
+| Managed configuration | ✅ | ✅ | ✅ | ✅ | ◯ | ◯ | ◯ | ✅ |
+| LLM gateway routing | ✅ | ✅ | ✅ | ✅ | ◯ | — | ◯ | ✅ |
+| Gateway credentials | ✅ | ✅ | ✅ | ✅ | ◯ | — | ◯ | ✅ |
 | Sandbox configuration | ✅ | ◯ | ✅ | ◯ | ◯ | — | ◯ | ◯ |
 | Tool-use telemetry | ✅ | ◯ | ◯ | ◯ | ◯ | — | ◯ | ◯ |
 | Session-start telemetry | ✅ | ◯ | ◯ | ◯ | ◯ | — | ◯ | ◯ |

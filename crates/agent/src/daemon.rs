@@ -88,6 +88,10 @@ pub struct DaemonArgs {
     /// Path used for Agentdesktop's OpenCode credential plugin.
     #[arg(long)]
     open_code_plugin: Option<PathBuf>,
+
+    /// Path to Grok Build's organization-managed TOML configuration.
+    #[arg(long)]
+    grok_managed_config: Option<PathBuf>,
 }
 
 struct ResolvedDaemonArgs {
@@ -102,6 +106,7 @@ struct ResolvedDaemonArgs {
     codex_managed_config: PathBuf,
     open_code_managed_config: PathBuf,
     open_code_plugin: PathBuf,
+    grok_managed_config: PathBuf,
     once: bool,
     dry_run: bool,
 }
@@ -134,6 +139,9 @@ impl DaemonArgs {
                 open_code_plugin: self
                     .open_code_plugin
                     .unwrap_or_else(reconcile::default_open_code_plugin_path),
+                grok_managed_config: self
+                    .grok_managed_config
+                    .unwrap_or_else(reconcile::default_grok_managed_config_path),
                 once: self.once || self.dry_run,
                 dry_run: self.dry_run,
             });
@@ -181,6 +189,13 @@ impl DaemonArgs {
             open_code_plugin: self
                 .open_code_plugin
                 .unwrap_or_else(|| config_home.join("opencode/plugins/agentdesktop.js")),
+            grok_managed_config: self.grok_managed_config.unwrap_or_else(|| {
+                std::env::var_os("GROK_HOME")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| home.join(".grok"))
+                    .join("managed_config.toml")
+            }),
             once: self.once || self.dry_run,
             dry_run: self.dry_run,
         })
@@ -249,6 +264,7 @@ where
         args.codex_managed_config.clone(),
         args.open_code_managed_config.clone(),
         args.open_code_plugin.clone(),
+        args.grok_managed_config.clone(),
         agentdesktop_client_executable()?,
         socket.clone(),
     );
@@ -489,6 +505,11 @@ fn validate_one_shot(config: &agentdesktop_core::config::DaemonConfig) -> anyhow
             config
                 .programs
                 .open_code
+                .as_ref()
+                .is_some_and(|program| program.use_llm_gateway),
+            config
+                .programs
+                .grok
                 .as_ref()
                 .is_some_and(|program| program.use_llm_gateway),
         ]
