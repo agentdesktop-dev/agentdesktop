@@ -485,6 +485,8 @@ pub struct OpenCodeConfig {
 /// Values under `managedConfig` are written to Grok's `managed_config.toml`.
 /// When generated LLM-gateway settings overlap with those values,
 /// Agentdesktop's generated values take precedence.
+/// Only system mode on Linux and macOS is supported. Grok can delete or replace
+/// the user-level managed file during startup, so `--user` rejects `programs.grok`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -501,8 +503,10 @@ pub struct GrokConfig {
     /// Extra Grok `[model.<id>]` catalog entries, keyed by catalog ID.
     ///
     /// Each value is an arbitrary Grok model object. Generated gateway
-    /// `base_url` and `auth_provider` values take precedence. When this map is
-    /// non-empty, `model` must name one of its keys.
+    /// `base_url` and `auth_provider` values take precedence. When gateway
+    /// authentication is configured, `api_key` and `env_key` are removed from
+    /// these entries, including values supplied through `managedConfig`.
+    /// When this map is non-empty, `model` must name one of its keys.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub models: BTreeMap<String, serde_json::Value>,
     /// Arbitrary values written to Grok's organization-managed TOML configuration.

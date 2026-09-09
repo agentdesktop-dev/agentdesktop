@@ -289,6 +289,55 @@ programs:
     }
 
     #[test]
+    fn user_mode_rejects_grok_before_writing_other_settings() {
+        let root = std::env::temp_dir().join(format!(
+            "agentdesktop-reconcile-user-grok-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let config = parse_daemon(
+            r#"
+programs:
+  claudeCode: {}
+  grok: {}
+"#,
+        )
+        .unwrap();
+        let reconciler = Reconciler::new(
+            true,
+            root.join("claude/settings.json"),
+            root.join("claude-desktop/settings.json"),
+            root.join("claude-desktop/helper"),
+            root.join("codex/config.toml"),
+            root.join("opencode/config.json"),
+            root.join("opencode/plugin.js"),
+            root.join("grok/managed_config.toml"),
+            root.join("bin/agentdesktop"),
+            root.join("agentdesktop.sock"),
+        );
+
+        let error = reconciler.apply(&config).expect_err("user mode must fail");
+        assert!(error.to_string().contains("Grok Build"));
+        assert!(!root.exists(), "preflight failure must not write any files");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_rejects_system_grok_before_writing_other_settings() {
+        let fixture = Fixture::new();
+        let config = parse_daemon("programs:\n  claudeCode: {}\n  grok: {}\n").unwrap();
+        let error = fixture
+            .reconciler
+            .apply(&config)
+            .expect_err("Windows must fail");
+        assert!(error.to_string().contains("Windows"));
+        assert!(
+            !fixture.root.exists(),
+            "preflight failure must not write any files"
+        );
+    }
+
+    #[test]
     fn dry_run_plans_create_update_and_remove_without_changing_files() {
         let root = std::env::temp_dir().join(format!(
             "agentdesktop-reconcile-dry-run-{}-{}",
@@ -403,6 +452,12 @@ programs:
 "#,
         )
         .unwrap();
+        #[cfg(windows)]
+        let config = {
+            let mut config = config;
+            config.programs.grok = None;
+            config
+        };
         let plan = fixture.reconciler.plan(&config).unwrap();
         assert!(
             !fixture.root.exists(),
@@ -421,6 +476,7 @@ programs:
             "codex/config.toml",
             "opencode/config.json",
             "opencode/plugin.js",
+            #[cfg(unix)]
             "grok/managed_config.toml",
         ];
         let contents: Vec<_> = paths

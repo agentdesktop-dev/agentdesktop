@@ -106,35 +106,31 @@ fn managed_config(
         .filter(|model| !model.trim().is_empty())
         .context("Grok gateway configuration has no model")?;
     let catalog = catalog_entries(config, default_model);
+    let uses_credential_helper = gateway
+        .authentication
+        .as_ref()
+        .is_some_and(LlmGatewayAuthentication::uses_credential_helper);
     let mut models = Map::new();
-    for (id, value) in catalog {
+    for (id, value) in &catalog {
         let mut entry = match value {
-            Value::Object(_) => value,
+            Value::Object(_) => value.clone(),
             _ => json!({}),
         };
         if entry.get("model").and_then(Value::as_str).is_none() {
             entry["model"] = json!(id);
         }
         entry["base_url"] = json!(responses_base_url(gateway));
-        if gateway
-            .authentication
-            .as_ref()
-            .is_some_and(LlmGatewayAuthentication::uses_credential_helper)
-        {
+        if uses_credential_helper {
             entry["auth_provider"] = json!(PROVIDER_NAME);
         }
-        models.insert(id, entry);
+        models.insert(id.clone(), entry);
     }
 
     let mut generated = json!({
         "models": { "default": default_model },
         "model": models,
     });
-    if gateway
-        .authentication
-        .as_ref()
-        .is_some_and(LlmGatewayAuthentication::uses_credential_helper)
-    {
+    if uses_credential_helper {
         let timeout_secs = if matches!(
             gateway.authentication,
             Some(LlmGatewayAuthentication::Oidc { .. })
@@ -158,6 +154,16 @@ fn managed_config(
         });
     }
     deep_merge(&mut settings, generated);
+    if uses_credential_helper {
+        // Grok resolves static credentials before auth_provider. Clear both
+        // sources after merging so pass-through values cannot shadow our helper.
+        for (id, _) in catalog {
+            if let Some(entry) = settings["model"][&id].as_object_mut() {
+                entry.remove("api_key");
+                entry.remove("env_key");
+            }
+        }
+    }
     Ok(settings)
 }
 
@@ -322,6 +328,116 @@ programs:
             "http://127.0.0.1:4000/v1"
         );
         assert!(settings.get("auth_provider").is_none());
+    }
+
+    #[test]
+    fn gateway_credentials_override_static_credentials_from_both_config_maps() {
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
+    allowedClientIds: [grok]
+programs:
+  grok:
+    model: grok-4.6
+    models:
+      grok-4.6:
+        api_key: catalog-key
+        env_key: CATALOG_KEY
+      secondary:
+        model: another-model
+    managedConfig:
+      model:
+        grok-4.6:
+          api_key: pass-through-key
+          env_key: PASS_THROUGH_KEY
+          context_window: 128000
+        secondary:
+          api_key: secondary-key
+          env_key: [SECONDARY_KEY]
+        unmanaged:
+          api_key: unmanaged-key
+"#,
+        )
+        .unwrap();
+        let grok = config.programs.grok.as_ref().unwrap();
+        let settings = managed_config(
+            grok,
+            config.llm_gateway.as_ref(),
+            Path::new("/bin/agentdesktop"),
+            Path::new("/tmp/agentdesktop.sock"),
+        )
+        .unwrap();
+
+        for id in ["grok-4.6", "secondary"] {
+            let model = &settings["model"][id];
+            assert_eq!(model["auth_provider"], "agentdesktop");
+            assert!(
+                model.get("api_key").is_none(),
+                "static key shadows helper for {id}"
+            );
+            assert!(
+                model.get("env_key").is_none(),
+                "environment key shadows helper for {id}"
+            );
+        }
+        assert_eq!(settings["model"]["grok-4.6"]["context_window"], 128000);
+        assert_eq!(settings["model"]["unmanaged"]["api_key"], "unmanaged-key");
+
+        // The synthesized default entry must also clear pass-through credentials.
+        let mut grok = grok.clone();
+        grok.models.clear();
+        let settings = managed_config(
+            &grok,
+            config.llm_gateway.as_ref(),
+            Path::new("/bin/agentdesktop"),
+            Path::new("/tmp/agentdesktop.sock"),
+        )
+        .unwrap();
+        assert!(settings["model"]["grok-4.6"].get("api_key").is_none());
+        assert!(settings["model"]["grok-4.6"].get("env_key").is_none());
+    }
+
+    #[test]
+    fn static_credentials_are_preserved_without_a_gateway_credential_helper() {
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  grok:
+    model: custom
+    models:
+      custom:
+        api_key: catalog-key
+        env_key: CATALOG_KEY
+    managedConfig:
+      model:
+        custom:
+          api_key: pass-through-key
+          env_key: PASS_THROUGH_KEY
+"#,
+        )
+        .unwrap();
+        let grok = config.programs.grok.as_ref().unwrap();
+        for (gateway, expected_key, expected_env) in [
+            (config.llm_gateway.as_ref(), "catalog-key", "CATALOG_KEY"),
+            (None, "pass-through-key", "PASS_THROUGH_KEY"),
+        ] {
+            let settings = managed_config(
+                grok,
+                gateway,
+                Path::new("/bin/agentdesktop"),
+                Path::new("/tmp/agentdesktop.sock"),
+            )
+            .unwrap();
+            assert_eq!(settings["model"]["custom"]["api_key"], expected_key);
+            assert_eq!(settings["model"]["custom"]["env_key"], expected_env);
+            assert!(settings["model"]["custom"].get("auth_provider").is_none());
+        }
     }
 
     #[test]

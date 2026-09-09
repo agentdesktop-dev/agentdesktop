@@ -478,7 +478,8 @@ export function ConfigurationView({
               {copied ? "Copied" : "Copy"}
             </button>
           </div>
-          <pre>
+          {/* biome-ignore lint/a11y/noNoninteractiveTabindex: Keyboard users need to focus this scrollable preview. */}
+          <pre tabIndex={0}>
             <code>{yaml}</code>
           </pre>
         </section>

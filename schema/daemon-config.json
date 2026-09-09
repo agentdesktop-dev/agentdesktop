@@ -135,7 +135,7 @@
       ]
     },
     "GrokConfig": {
-      "description": "Settings reconciled into Grok Build's organization-managed configuration.\n\nValues under `managedConfig` are written to Grok's `managed_config.toml`.\nWhen generated LLM-gateway settings overlap with those values,\nAgentdesktop's generated values take precedence.",
+      "description": "Settings reconciled into Grok Build's organization-managed configuration.\n\nValues under `managedConfig` are written to Grok's `managed_config.toml`.\nWhen generated LLM-gateway settings overlap with those values,\nAgentdesktop's generated values take precedence.\nOnly system mode on Linux and macOS is supported. Grok can delete or replace\nthe user-level managed file during startup, so `--user` rejects `programs.grok`.",
       "type": "object",
       "properties": {
         "managedConfig": {
@@ -151,7 +151,7 @@
           ]
         },
         "models": {
-          "description": "Extra Grok `[model.<id>]` catalog entries, keyed by catalog ID.\n\nEach value is an arbitrary Grok model object. Generated gateway\n`base_url` and `auth_provider` values take precedence. When this map is\nnon-empty, `model` must name one of its keys.",
+          "description": "Extra Grok `[model.<id>]` catalog entries, keyed by catalog ID.\n\nEach value is an arbitrary Grok model object. Generated gateway\n`base_url` and `auth_provider` values take precedence. When gateway\nauthentication is configured, `api_key` and `env_key` are removed from\nthese entries, including values supplied through `managedConfig`.\nWhen this map is non-empty, `model` must name one of its keys.",
           "type": "object",
           "additionalProperties": true
         },

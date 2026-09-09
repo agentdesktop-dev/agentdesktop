@@ -37,6 +37,16 @@ impl Provider for Grok {
     }
 
     fn plan(&self, ctx: &ReconcileContext, config: &DaemonConfig) -> anyhow::Result<ReconcilePlan> {
+        if cfg!(windows) && config.programs.grok.is_some() {
+            anyhow::bail!(
+                "Grok Build does not load system-managed configuration on Windows; remove programs.grok (managed configuration requires Linux or macOS)"
+            );
+        }
+        if ctx.merge_user_settings && config.programs.grok.is_some() {
+            anyhow::bail!(
+                "Grok Build can delete or replace its user-level managed_config.toml during startup; remove programs.grok or run Agentdesktop without --user as root so it can manage /etc/grok/managed_config.toml"
+            );
+        }
         let configured = config.programs.grok.as_ref().map(|provider| {
             let gateway = config
                 .llm_gateway
