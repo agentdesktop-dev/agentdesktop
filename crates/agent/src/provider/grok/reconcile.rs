@@ -10,7 +10,7 @@ use tracing::debug;
 use crate::provider::shared::{deep_merge, responses_base_url};
 use crate::reconcile::ReconcilePlan;
 
-const MANAGED_HEADER: &str = "# Managed by Agentdesktop. Manual changes will be replaced.\n";
+const MANAGED_HEADER: &str = "# Managed by agentdesktop. Manual changes will be replaced.\n";
 const PROVIDER_NAME: &str = "agentdesktop";
 
 pub(super) fn plan(
