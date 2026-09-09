@@ -1,4 +1,6 @@
-use std::{fs, path::Path};
+use super::ClaudeCode;
+
+use std::path::Path;
 
 use anyhow::Context;
 
@@ -6,11 +8,14 @@ use agentdesktop_core::config::{
     ClaudeCodeConfig, LlmGatewayAuthentication, LlmGatewayConfig, SandboxConfig,
 };
 use serde_json::{Value, json};
-use tracing::info;
+use tracing::debug;
 
-use crate::secure_fs;
+use crate::reconcile::ReconcilePlan;
 
-use super::{CommandSpec, ReconcileMode, deep_merge, json_merge};
+use crate::provider::{
+    json_merge,
+    shared::{CommandSpec, deep_merge},
+};
 
 const OWNER_MARKER: &[u8] = b"Agentdesktop\n";
 
@@ -31,58 +36,52 @@ impl<'a> Hooks<'a> {
     }
 }
 
-pub fn apply(
+pub(super) fn plan(
     path: &Path,
     merge_existing: bool,
     credential_helper: &str,
     hooks: Hooks<'_>,
     sandbox: Option<&SandboxConfig>,
     config: Option<(&ClaudeCodeConfig, Option<&LlmGatewayConfig>)>,
-    mode: ReconcileMode,
+    plan: &ReconcilePlan,
 ) -> anyhow::Result<()> {
     let owner_path = owner_path(path);
     let merge_state_path = json_merge::state_path(path);
     let Some((config, gateway)) = config else {
         if merge_existing
-            && json_merge::remove(
+            && json_merge::plan_remove(
                 path,
                 &merge_state_path,
-                "claude-code",
                 "settings",
-                "Claude Code settings",
-                mode,
+                ClaudeCode::DISPLAY_NAME,
+                plan,
             )?
         {
-            if mode.writes() {
-                remove_owner_marker(&owner_path)?;
-            }
+            remove_owner_marker(&owner_path, plan)?;
             return Ok(());
         }
-        return remove(path, &owner_path, mode);
+        return remove(path, &owner_path, plan);
     };
 
     let settings = managed_settings(config, gateway, credential_helper, hooks, sandbox)?;
     if merge_existing {
-        json_merge::apply(
+        json_merge::plan_merge(
             path,
             &merge_state_path,
             settings,
-            is_owned(&owner_path)?,
-            "claude-code",
+            is_owned(&owner_path, plan)?,
             "settings",
-            "Claude Code settings",
-            mode,
+            ClaudeCode::DISPLAY_NAME,
+            plan,
         )?;
-        if mode.writes() {
-            remove_owner_marker(&owner_path)?;
-        }
+        remove_owner_marker(&owner_path, plan)?;
         return Ok(());
     }
     let mut contents =
         serde_json::to_vec_pretty(&settings).context("serialize Claude Code managed settings")?;
     contents.push(b'\n');
-    let owned = is_owned(&owner_path)?;
-    let existing = match fs::read(path) {
+    let owned = is_owned(&owner_path, plan)?;
+    let existing = match plan.read(path) {
         Ok(existing) => Some(existing),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
@@ -93,22 +92,22 @@ pub fn apply(
     };
     let action = match existing.as_deref() {
         Some(existing) if existing == contents => {
-            if !owned && mode.writes() {
-                secure_fs::atomic_write(&owner_path, OWNER_MARKER, 0o644)?;
+            if !owned {
+                plan.write_file(&owner_path, OWNER_MARKER, 0o644)?;
             }
-            info!(
-                program = "claude-code",
+            debug!(
+                program = ClaudeCode::ID,
                 action = "unchanged",
                 path = %path.display(),
                 "managed settings already current"
             );
-            mode.record("claude-code", "settings", "unchanged", path);
+            plan.record(ClaudeCode::DISPLAY_NAME, "settings", "unchanged", path);
             return Ok(());
         }
         Some(_) if owned => "update",
-        Some(existing) if mode.is_dry_run() => {
-            mode.record_diff(
-                "claude-code",
+        Some(existing) => {
+            plan.record_diff(
+                ClaudeCode::DISPLAY_NAME,
                 "settings",
                 "conflict",
                 path,
@@ -117,32 +116,19 @@ pub fn apply(
             );
             return Ok(());
         }
-        Some(_) => anyhow::bail!(
-            "refusing to replace Claude Code managed settings not owned by Agentdesktop at {}",
-            path.display()
-        ),
         None => "create",
     };
 
-    if mode.writes() {
-        let directory = path.parent().unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(directory).with_context(|| {
-            format!(
-                "create Claude Code settings directory {}",
-                directory.display()
-            )
-        })?;
-        secure_fs::atomic_write(path, &contents, 0o644)?;
-        secure_fs::atomic_write(&owner_path, OWNER_MARKER, 0o644)?;
-    }
-    info!(
-        program = "claude-code",
+    plan.write_file(path, &contents, 0o644)?;
+    plan.write_file(&owner_path, OWNER_MARKER, 0o644)?;
+    debug!(
+        program = ClaudeCode::ID,
         action,
         path = %path.display(),
-        "reconciled managed settings"
+        "planned managed settings"
     );
-    mode.record_diff(
-        "claude-code",
+    plan.record_diff(
+        ClaudeCode::DISPLAY_NAME,
         "settings",
         action,
         path,
@@ -255,47 +241,43 @@ fn append_hook(
     Ok(())
 }
 
-fn remove(path: &Path, owner_path: &Path, mode: ReconcileMode) -> anyhow::Result<()> {
-    if !is_owned(owner_path)? {
+fn remove(path: &Path, owner_path: &Path, plan: &ReconcilePlan) -> anyhow::Result<()> {
+    if !is_owned(owner_path, plan)? {
         if path.exists() {
-            info!(
-                program = "claude-code",
+            debug!(
+                program = ClaudeCode::ID,
                 action = "unchanged",
                 path = %path.display(),
                 "preserving managed settings not owned by Agentdesktop"
             );
         }
-        mode.record("claude-code", "settings", "unchanged", path);
+        plan.record(ClaudeCode::DISPLAY_NAME, "settings", "unchanged", path);
         return Ok(());
     }
-    match fs::metadata(path) {
+    match plan.read(path) {
         Ok(_) => {
-            if mode.writes() {
-                fs::remove_file(path).with_context(|| {
-                    format!("remove Claude Code managed settings at {}", path.display())
-                })?;
-                remove_owner_marker(owner_path)?;
-            }
-            info!(
-                program = "claude-code",
+            plan.remove_file(path).with_context(|| {
+                format!("remove Claude Code managed settings at {}", path.display())
+            })?;
+            remove_owner_marker(owner_path, plan)?;
+            debug!(
+                program = ClaudeCode::ID,
                 action = "remove",
                 path = %path.display(),
-                "reconciled managed settings"
+                "planned managed settings"
             );
-            mode.record("claude-code", "settings", "remove", path);
+            plan.record(ClaudeCode::DISPLAY_NAME, "settings", "remove", path);
             Ok(())
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            info!(
-                program = "claude-code",
+            debug!(
+                program = ClaudeCode::ID,
                 action = "unchanged",
                 path = %path.display(),
                 "managed settings already absent"
             );
-            if mode.writes() {
-                remove_owner_marker(owner_path)?;
-            }
-            mode.record("claude-code", "settings", "unchanged", path);
+            remove_owner_marker(owner_path, plan)?;
+            plan.record(ClaudeCode::DISPLAY_NAME, "settings", "unchanged", path);
             Ok(())
         }
         Err(error) => Err(error)
@@ -303,8 +285,8 @@ fn remove(path: &Path, owner_path: &Path, mode: ReconcileMode) -> anyhow::Result
     }
 }
 
-fn is_owned(owner_path: &Path) -> anyhow::Result<bool> {
-    match fs::read(owner_path) {
+fn is_owned(owner_path: &Path, plan: &ReconcilePlan) -> anyhow::Result<bool> {
+    match plan.read(owner_path) {
         Ok(contents) => Ok(contents == OWNER_MARKER),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error)
@@ -312,8 +294,8 @@ fn is_owned(owner_path: &Path) -> anyhow::Result<bool> {
     }
 }
 
-fn remove_owner_marker(owner_path: &Path) -> anyhow::Result<()> {
-    match fs::remove_file(owner_path) {
+fn remove_owner_marker(owner_path: &Path, plan: &ReconcilePlan) -> anyhow::Result<()> {
+    match plan.remove_file(owner_path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error)
@@ -328,7 +310,7 @@ mod tests {
     use agentdesktop_core::config::parse_daemon;
     use serde_json::{Value, json};
 
-    use super::{CommandSpec, Hooks, ReconcileMode, apply, json_merge, managed_settings};
+    use super::{CommandSpec, Hooks, json_merge, managed_settings, plan};
 
     #[test]
     fn pass_through_settings_are_deep_merged_with_managed_gateway_values() {
@@ -419,16 +401,20 @@ programs:
         .unwrap();
         let claude = config.programs.claude_code.as_ref().unwrap();
 
-        apply(
+        let before_plan = fs::read(&path).unwrap();
+        let changes = crate::reconcile::ReconcilePlan::default();
+        plan(
             &path,
             true,
             "agentdesktop credential",
             Hooks::new(None, None),
             None,
             Some((claude, None)),
-            ReconcileMode::Apply,
+            &changes,
         )
         .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), before_plan);
+        changes.apply().unwrap();
 
         let merged: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(merged["theme"], "dark");
@@ -439,16 +425,20 @@ programs:
             json!(["Personal announcement", "Managed announcement"])
         );
 
-        apply(
+        let before_plan = fs::read(&path).unwrap();
+        let changes = crate::reconcile::ReconcilePlan::default();
+        plan(
             &path,
             true,
             "agentdesktop credential",
             Hooks::new(None, None),
             None,
             None,
-            ReconcileMode::Apply,
+            &changes,
         )
         .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), before_plan);
+        changes.apply().unwrap();
 
         let restored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(

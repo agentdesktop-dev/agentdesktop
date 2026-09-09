@@ -1,3 +1,5 @@
+use super::Codex;
+
 use std::{
     collections::BTreeSet,
     fs,
@@ -6,15 +8,15 @@ use std::{
 
 use agentdesktop_core::model::{Agent, McpServer};
 
-use super::metadata;
+use crate::provider::metadata;
 
 pub(super) fn discover() -> Option<Agent> {
-    let executable = metadata::find_executable("codex", executable_candidates())?;
+    let executable = metadata::find_executable(Codex::ID, executable_candidates())?;
     let version = standalone_version(&executable).or_else(|| npm_version(&executable));
     Some(Agent {
         version,
         executable,
-        kind: "codex".to_owned(),
+        kind: Codex::ID.to_owned(),
         mcp_servers: discover_mcp_servers(),
         skills: metadata::discover_skills(skill_roots()),
     })

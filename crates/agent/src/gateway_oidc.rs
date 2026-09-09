@@ -1,5 +1,6 @@
 use std::{net::SocketAddr, path::Path};
 
+use agentdesktop_core::http::ClientExt;
 use agentdesktop_core::model::LlmGatewayCredential;
 use anyhow::{Context, bail};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -162,15 +163,9 @@ async fn discover(issuer: &Url, allow_insecure: bool) -> anyhow::Result<Provider
         issuer.as_str().trim_end_matches('/')
     );
     let metadata = reqwest::Client::new()
-        .get(endpoint)
-        .send()
+        .get_json::<ProviderMetadata>(endpoint)
         .await
-        .context("discover OIDC provider")?
-        .error_for_status()
-        .context("OIDC provider rejected discovery request")?
-        .json::<ProviderMetadata>()
-        .await
-        .context("decode OIDC provider metadata")?;
+        .context("discover OIDC provider")?;
     for (name, endpoint) in [
         ("authorization", &metadata.authorization_endpoint),
         ("token", &metadata.token_endpoint),

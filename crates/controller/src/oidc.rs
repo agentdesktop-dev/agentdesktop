@@ -5,6 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use agentdesktop_core::http::ClientExt;
 use agentdesktop_proto::fleet::{BeginEnrollmentResponse, CompleteEnrollmentRequest};
 use anyhow::{Context, bail};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -103,15 +104,9 @@ impl OidcProvider {
             issuer.trim_end_matches('/')
         );
         let document = http
-            .get(&discovery_url)
-            .send()
+            .get_json::<DiscoveryDocument>(&discovery_url)
             .await
-            .with_context(|| format!("fetch OIDC discovery document from {discovery_url}"))?
-            .error_for_status()
-            .context("OIDC discovery endpoint returned an error")?
-            .json::<DiscoveryDocument>()
-            .await
-            .context("decode OIDC discovery document")?;
+            .with_context(|| format!("fetch OIDC discovery document from {discovery_url}"))?;
         if document.issuer != issuer {
             bail!(
                 "OIDC discovery issuer mismatch: expected {issuer}, got {}",

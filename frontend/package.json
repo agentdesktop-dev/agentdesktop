@@ -4,7 +4,7 @@
   "packageManager": "pnpm@11.25.0",
   "scripts": {
     "build": "pnpm --filter @agentdesktop/controller-web build && pnpm --filter @agentdesktop/desktop-web build",
-    "check": "pnpm --filter @agentdesktop/controller-web check && pnpm --filter @agentdesktop/controller-web exec biome check ../desktop && pnpm --filter @agentdesktop/desktop-web test:package-macos && pnpm --filter @agentdesktop/desktop-web test:package-windows && pnpm --filter @agentdesktop/desktop-web build && pnpm test:storybook",
+    "check": "pnpm check:lint && pnpm --filter @agentdesktop/desktop-web build && pnpm test:storybook",
     "dev:controller": "pnpm --filter @agentdesktop/controller-web dev",
     "dev:desktop": "pnpm --filter @agentdesktop/desktop-web dev:desktop",
     "storybook": "pnpm --parallel --filter @agentdesktop/desktop-web --filter @agentdesktop/controller-web run storybook",
@@ -12,6 +12,7 @@
     "storybook:controller": "pnpm --filter @agentdesktop/controller-web storybook",
     "build:storybook": "pnpm --filter @agentdesktop/desktop-web build-storybook && pnpm --filter @agentdesktop/controller-web build-storybook",
     "test:storybook": "pnpm --filter @agentdesktop/desktop-web test-storybook && pnpm --filter @agentdesktop/controller-web test-storybook",
-    "format": "pnpm --filter @agentdesktop/controller-web format && pnpm --filter @agentdesktop/controller-web exec biome format --write ../desktop"
+    "format": "pnpm --filter @agentdesktop/controller-web format && pnpm --filter @agentdesktop/controller-web exec biome format --write ../desktop",
+    "check:lint": "pnpm --filter @agentdesktop/controller-web check && pnpm --filter @agentdesktop/controller-web exec biome check ../desktop && pnpm --filter @agentdesktop/desktop-web test:package-macos && pnpm --filter @agentdesktop/desktop-web test:package-windows"
   }
 }

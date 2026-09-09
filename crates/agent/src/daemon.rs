@@ -26,9 +26,7 @@ use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 
 #[cfg(windows)]
 use crate::windows_security::SecurityDescriptor;
-use crate::{
-    api, discovery, enrollment::EnrollmentState, gateway_oidc, reconcile, remote, secure_fs,
-};
+use crate::{api, enrollment::EnrollmentState, gateway_oidc, reconcile, remote, secure_fs};
 
 #[cfg(unix)]
 const LOCAL_API_GROUP: &str = "agentdesktop";
@@ -336,7 +334,7 @@ where
             "preserving managed files until the controller provides daemon configuration"
         );
     }
-    let discovery = discovery::discover().await;
+    let discovery = reconciler.discover().await;
     for agent in &discovery.agents {
         tracing::info!(
             kind = %agent.kind,

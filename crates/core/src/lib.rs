@@ -1,4 +1,5 @@
 pub mod config;
+pub mod http;
 pub mod llm_usage;
 pub mod model;
 pub mod serdes;
