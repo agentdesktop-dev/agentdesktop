@@ -157,7 +157,19 @@ function DeviceUsageTable({
               <tr
                 key={row.deviceId ?? "unattributed"}
                 className={href ? undefined : "static-row"}
+                role={href ? "link" : undefined}
+                tabIndex={href ? 0 : undefined}
                 onClick={href ? () => navigate(href) : undefined}
+                onKeyDown={
+                  href
+                    ? (event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          navigate(href);
+                        }
+                      }
+                    : undefined
+                }
               >
                 <td>
                   <div className="device-cell">
