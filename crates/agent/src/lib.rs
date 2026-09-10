@@ -3,6 +3,7 @@ pub mod anthropic_oauth;
 pub mod api;
 pub mod cli;
 pub mod daemon;
+pub(crate) mod discovery;
 pub mod enrollment;
 pub mod gateway_oidc;
 pub mod identity;

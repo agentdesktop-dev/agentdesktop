@@ -14,7 +14,7 @@ pub mod codex;
 pub mod cursor;
 pub mod grok;
 mod json_merge;
-mod metadata;
+pub(crate) mod metadata;
 pub mod ollama;
 pub mod opencode;
 pub(crate) mod shared;

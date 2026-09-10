@@ -333,7 +333,7 @@ where
     #[cfg(not(windows))]
     let access_user_home = if args.user {
         Some(
-            discovery::metadata::home_dir()
+            crate::discovery::metadata::home_dir()
                 .context("collect local access audit without a user home")?,
         )
     } else {
