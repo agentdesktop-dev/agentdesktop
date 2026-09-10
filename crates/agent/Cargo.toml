@@ -55,6 +55,8 @@ futures-util = "0.3"
 tempfile = "3"
 testcontainers = "0.28"
 tracing-subscriber.workspace = true
+# `start_paused` keeps the interval-driven inventory tests deterministic.
+tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

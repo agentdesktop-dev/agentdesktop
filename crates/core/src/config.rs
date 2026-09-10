@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 /// Configuration for an Agentdesktop daemon.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DaemonConfig {
@@ -31,6 +31,27 @@ pub struct DaemonConfig {
     /// Per-program settings reconciled on this device.
     #[serde(default, skip_serializing_if = "ProgramsConfig::is_empty")]
     pub programs: ProgramsConfig,
+    /// Interval between inventory refreshes. Defaults to `15m`, and must be
+    /// greater than zero.
+    ///
+    /// Discovery walks user home directories and developer-tool configuration
+    /// files, so this trades inventory freshness against local disk activity.
+    #[serde(default = "default_inventory_interval", with = "humantime_serde")]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub inventory_interval: Duration,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            controller: None,
+            llm_gateway: None,
+            sandbox: None,
+            telemetry: TelemetryConfig::default(),
+            programs: ProgramsConfig::default(),
+            inventory_interval: default_inventory_interval(),
+        }
+    }
 }
 
 /// Local execution restrictions applied to managed developer tools.
@@ -371,6 +392,10 @@ fn default_gateway_jwt_lifetime() -> Duration {
     Duration::from_secs(5 * 60)
 }
 
+fn default_inventory_interval() -> Duration {
+    Duration::from_secs(15 * 60)
+}
+
 fn default_heartbeat_interval() -> Duration {
     Duration::from_secs(30)
 }
@@ -395,6 +420,9 @@ pub struct ProgramsConfig {
     /// VS Code built-in GitHub Copilot endpoint configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vscode: Option<VscodeConfig>,
+    /// Grok Build managed configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grok: Option<GrokConfig>,
 }
 
 impl ProgramsConfig {
@@ -404,6 +432,7 @@ impl ProgramsConfig {
             && self.codex.is_none()
             && self.open_code.is_none()
             && self.vscode.is_none()
+            && self.grok.is_none()
     }
 }
 
@@ -507,6 +536,43 @@ pub struct VscodeConfig {
     pub copilot_proxy_url: Option<Url>,
 }
 
+/// Settings reconciled into Grok Build's organization-managed configuration.
+///
+/// Values under `managedConfig` are written to Grok's `managed_config.toml`.
+/// When generated LLM-gateway settings overlap with those values,
+/// agentdesktop's generated values take precedence.
+/// Only system mode is supported. Grok can delete or replace the user-level
+/// managed file during startup, so `--user` rejects `programs.grok`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GrokConfig {
+    /// Whether this program uses the top-level LLM gateway.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub use_llm_gateway: bool,
+    /// Catalog ID and API model used when pointing Grok at the LLM gateway.
+    ///
+    /// This is required when a top-level `llmGateway` is configured. If `models`
+    /// is empty, agentdesktop creates a catalog entry with this ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Extra Grok `[model.<id>]` catalog entries, keyed by catalog ID.
+    ///
+    /// Each value is an arbitrary Grok model object. Generated gateway
+    /// `base_url` and `auth_provider` values take precedence. When gateway
+    /// authentication is configured, `api_key` and `env_key` are removed from
+    /// these entries, including values supplied through `managedConfig`.
+    /// When this map is non-empty, `model` must name one of its keys.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<String, serde_json::Value>,
+    /// Arbitrary values written to Grok's organization-managed TOML configuration.
+    ///
+    /// Use Grok's native snake_case configuration keys. TOML has no null value,
+    /// so null values cannot be reconciled.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub managed_config: BTreeMap<String, serde_json::Value>,
+}
+
 /// Upstream authentication selected by a managed agent.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -607,6 +673,9 @@ pub fn parse_daemon(contents: &str) -> anyhow::Result<DaemonConfig> {
     {
         anyhow::bail!("controller address must use HTTPS");
     }
+    if config.inventory_interval.is_zero() {
+        anyhow::bail!("inventoryInterval must be greater than zero");
+    }
     validate_daemon(
         config.llm_gateway.as_ref(),
         config.sandbox.as_ref(),
@@ -636,6 +705,9 @@ fn validate_daemon(
         }
         if programs.open_code.is_some() {
             anyhow::bail!("sandbox is not supported for OpenCode");
+        }
+        if programs.grok.is_some() {
+            anyhow::bail!("sandbox is not supported for Grok Build");
         }
     }
     if let Some(gateway) = llm_gateway {
@@ -775,6 +847,19 @@ fn validate_daemon(
             anyhow::bail!("VS Code copilotProxyUrl must end in /v1");
         }
     }
+    if let Some(grok) = &programs.grok
+        && llm_gateway.is_some()
+        && grok.use_llm_gateway
+    {
+        let model = grok
+            .model
+            .as_deref()
+            .filter(|model| !model.trim().is_empty())
+            .context("Grok Build requires model when llmGateway is configured")?;
+        if !grok.models.is_empty() && !grok.models.contains_key(model) {
+            anyhow::bail!("Grok Build model {model} is not declared in models");
+        }
+    }
     Ok(())
 }
 
@@ -820,7 +905,7 @@ fn is_true(value: &bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{LlmGatewayAuthentication, parse_controller, parse_daemon};
+    use super::{DaemonConfig, LlmGatewayAuthentication, parse_controller, parse_daemon};
 
     #[test]
     fn daemon_configuration_supports_local_and_managed_options() {
@@ -836,6 +921,35 @@ programs: { claudeCode: { useLlmGateway: false } }
         assert!(daemon.controller.is_some());
         assert!(daemon.llm_gateway.is_some());
         assert!(!daemon.programs.claude_code.unwrap().use_llm_gateway);
+    }
+
+    #[test]
+    fn daemon_inventory_interval_defaults_and_parses_durations() {
+        let default = parse_daemon("programs: {}").expect("valid daemon configuration");
+        assert_eq!(
+            default.inventory_interval,
+            std::time::Duration::from_secs(15 * 60)
+        );
+        assert_eq!(
+            DaemonConfig::default().inventory_interval,
+            default.inventory_interval
+        );
+
+        let configured = parse_daemon("inventoryInterval: 2m").expect("valid daemon configuration");
+        assert_eq!(
+            configured.inventory_interval,
+            std::time::Duration::from_secs(120)
+        );
+    }
+
+    #[test]
+    fn daemon_inventory_interval_rejects_zero() {
+        let error = parse_daemon("inventoryInterval: 0s")
+            .expect_err("a zero inventory interval is not schedulable");
+        assert!(
+            error.to_string().contains("inventoryInterval"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -1168,5 +1282,46 @@ programs:
             let error = parse_daemon(&invalid).expect_err("invalid VS Code configuration");
             assert!(format!("{error:#}").contains(expected));
         }
+    }
+
+    #[test]
+    fn grok_requires_a_model_when_using_the_gateway() {
+        let error = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  grok: {}
+"#,
+        )
+        .expect_err("Grok without a model should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Grok Build requires model when llmGateway is configured")
+        );
+    }
+
+    #[test]
+    fn grok_requires_a_declared_gateway_model_when_models_are_listed() {
+        let error = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  grok:
+    model: missing
+    models:
+      available: {}
+"#,
+        )
+        .expect_err("undeclared Grok model should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Grok Build model missing is not declared in models")
+        );
     }
 }

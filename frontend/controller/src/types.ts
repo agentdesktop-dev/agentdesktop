@@ -96,7 +96,12 @@ export type LlmDeviceUsage = {
   estimatedCost: number;
 };
 
-export type AgentKind = "claudeCode" | "claudeDesktop" | "codex" | "openCode";
+export type AgentKind =
+  | "claudeCode"
+  | "claudeDesktop"
+  | "codex"
+  | "openCode"
+  | "grok";
 
 export type AgentDraft = {
   kind: AgentKind;

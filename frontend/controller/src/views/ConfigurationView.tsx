@@ -478,7 +478,8 @@ export function ConfigurationView({
               {copied ? "Copied" : "Copy"}
             </button>
           </div>
-          <pre>
+          {/* biome-ignore lint/a11y/noNoninteractiveTabindex: Keyboard users need to focus this scrollable preview. */}
+          <pre tabIndex={0}>
             <code>{yaml}</code>
           </pre>
         </section>
@@ -520,11 +521,19 @@ const configurableAgents: Array<{
     initialSettings:
       "model: gpt-5.6-terra\nmodels:\n  gpt-5.6-terra:\n    name: GPT 5.6 Terra",
   },
+  {
+    kind: "grok",
+    label: "Grok Build",
+    iconKind: "grok",
+    placeholder: "model: grok-4.6",
+    initialSettings: "model: grok-4.6",
+  },
 ];
 
 const sandboxUnsupportedAgents = new Set<AgentKind>([
   "claudeDesktop",
   "openCode",
+  "grok",
 ]);
 
 function daemonConfigYaml(options: {
@@ -549,7 +558,7 @@ function daemonConfigYaml(options: {
         "  authentication:",
         "    type: controllerJwt",
         `    audience: ${yamlString(options.audience)}`,
-        "    allowedClientIds: [claude-code, claude-desktop, codex, opencode]",
+        "    allowedClientIds: [claude-code, claude-desktop, codex, opencode, grok]",
       );
     }
     lines.push("");
