@@ -23,6 +23,7 @@ pub use crate::provider::{
         default_claude_desktop_credential_helper_path, default_claude_desktop_managed_settings_path,
     },
     codex::default_codex_managed_config_path,
+    grok::default_grok_managed_config_path,
     opencode::{default_open_code_managed_config_path, default_open_code_plugin_path},
 };
 
@@ -42,6 +43,7 @@ impl Reconciler {
         codex_managed_config_path: PathBuf,
         open_code_managed_config_path: PathBuf,
         open_code_plugin_path: PathBuf,
+        grok_managed_config_path: PathBuf,
         credential_helper: PathBuf,
         socket: PathBuf,
     ) -> Self {
@@ -68,7 +70,9 @@ impl Reconciler {
                 }),
                 Box::new(VsCode),
                 Box::new(Cursor),
-                Box::new(Grok),
+                Box::new(Grok {
+                    managed_config_path: grok_managed_config_path,
+                }),
                 Box::new(Ollama),
             ]),
         }
@@ -269,6 +273,7 @@ programs:
             root.join("codex/config.toml"),
             root.join("opencode/config.json"),
             root.join("opencode/plugin.js"),
+            root.join("grok/managed_config.toml"),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
@@ -281,6 +286,48 @@ programs:
                 .contains("/etc/claude-desktop/managed-settings.json")
         );
         assert!(!root.exists(), "preflight failure must not write any files");
+    }
+
+    #[test]
+    fn user_mode_rejects_grok_before_writing_other_settings() {
+        let root = std::env::temp_dir().join(format!(
+            "agentdesktop-reconcile-user-grok-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let config = parse_daemon(
+            r#"
+programs:
+  claudeCode: {}
+  grok: {}
+"#,
+        )
+        .unwrap();
+        let reconciler = Reconciler::new(
+            true,
+            root.join("claude/settings.json"),
+            root.join("claude-desktop/settings.json"),
+            root.join("claude-desktop/helper"),
+            root.join("codex/config.toml"),
+            root.join("opencode/config.json"),
+            root.join("opencode/plugin.js"),
+            root.join("grok/managed_config.toml"),
+            root.join("bin/agentdesktop"),
+            root.join("agentdesktop.sock"),
+        );
+
+        let error = reconciler.apply(&config).expect_err("user mode must fail");
+        assert!(error.to_string().contains("Grok Build"));
+        assert!(!root.exists(), "preflight failure must not write any files");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_reconciles_system_grok_managed_config() {
+        let fixture = Fixture::new();
+        let config = parse_daemon("programs:\n  claudeCode: {}\n  grok: {}\n").unwrap();
+        fixture.reconciler.apply(&config).unwrap();
+        assert!(fixture.root.join("grok/managed_config.toml").exists());
     }
 
     #[test]
@@ -319,6 +366,7 @@ programs:
             root.join("codex/config.toml"),
             root.join("opencode/config.json"),
             root.join("opencode/plugin.js"),
+            root.join("grok/managed_config.toml"),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
@@ -359,6 +407,7 @@ programs:
                 root.join("codex/config.toml"),
                 root.join("opencode/config.json"),
                 root.join("opencode/plugin.js"),
+                root.join("grok/managed_config.toml"),
                 root.join("bin/agentdesktop"),
                 root.join("agentdesktop.sock"),
             );
@@ -382,7 +431,7 @@ llmGateway:
   authentication:
     type: controllerJwt
     audience: agentgateway
-    allowedClientIds: [claude-code, claude-desktop, codex, opencode]
+    allowedClientIds: [claude-code, claude-desktop, codex, opencode, grok]
 programs:
   claudeCode: {}
   claudeDesktop: {}
@@ -391,6 +440,8 @@ programs:
     model: company-model
     models:
       company-model: {}
+  grok:
+    model: grok-4.6
 "#,
         )
         .unwrap();
@@ -412,6 +463,7 @@ programs:
             "codex/config.toml",
             "opencode/config.json",
             "opencode/plugin.js",
+            "grok/managed_config.toml",
         ];
         let contents: Vec<_> = paths
             .iter()

@@ -2,6 +2,12 @@
 
 Features currently implemented by Agentdesktop.
 
+Grok Build managed configuration requires system mode. Linux and macOS use
+`/etc/grok/managed_config.toml`; Windows uses the system drive's
+`\etc\grok\managed_config.toml`. `--user` rejects `programs.grok` because
+Grok's own configuration sync can delete or replace the user-level managed
+file.
+
 ✅ Implemented · ◯ Not implemented · — Not applicable
 
 | Feature | [Claude Code](claude_code/) | [Claude Desktop](claude_desktop/) | [Codex](codex/) | [OpenCode](opencode/) | [VS Code](vscode/) | [Ollama](ollama/) | [Cursor](cursor/) | [Grok Build](grok/) |
@@ -10,9 +16,9 @@ Features currently implemented by Agentdesktop.
 | Local model discovery | — | — | — | — | — | ✅ | — | — |
 | MCP server discovery | ✅ | ✅ | ✅ | ◯ | ✅ | — | ✅ | ✅ |
 | Skill discovery | ✅ | ◯ | ✅ | ◯ | ✅ | — | ✅ | ✅ |
-| Managed configuration | ✅ | ✅ | ✅ | ✅ | ◯ | ◯ | ◯ | ◯ |
-| LLM gateway routing | ✅ | ✅ | ✅ | ✅ | ◯ | — | ◯ | ◯ |
-| Gateway credentials | ✅ | ✅ | ✅ | ✅ | ◯ | — | ◯ | ◯ |
+| Managed configuration | ✅ | ✅ | ✅ | ✅ | ◯ | ◯ | ◯ | ✅ |
+| LLM gateway routing | ✅ | ✅ | ✅ | ✅ | ◯ | — | ◯ | ✅ |
+| Gateway credentials | ✅ | ✅ | ✅ | ✅ | ◯ | — | ◯ | ✅ |
 | Sandbox configuration | ✅ | ◯ | ✅ | ◯ | ◯ | — | ◯ | ◯ |
 | Tool-use telemetry | ✅ | ◯ | ◯ | ◯ | ◯ | — | ◯ | ◯ |
 | Session-start telemetry | ✅ | ◯ | ◯ | ◯ | ◯ | — | ◯ | ◯ |
