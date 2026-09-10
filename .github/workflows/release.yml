@@ -271,6 +271,26 @@ jobs:
         shell: bash
         run: cargo build --locked --release --package agentdesktop --target "${{ matrix.target }}"
 
+      - name: Import macOS signing identity
+        if: matrix.os_name == 'darwin'
+        shell: bash
+        env:
+          APPLE_APPLICATION_CERTIFICATE: ${{ secrets.APPLE_APPLICATION_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: bash .github/scripts/import-macos-signing.sh
+
+      - name: Sign macOS binary
+        if: matrix.os_name == 'darwin'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          binary="target/${TARGET}/release/agentdesktop"
+          codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
+            --identifier dev.agentdesktop.tray --options runtime --timestamp=none "$binary"
+          codesign --verify --strict --verbose=2 \
+            -R="identifier \"dev.agentdesktop.tray\" and certificate leaf = H\"${APPLE_SIGNING_IDENTITY}\"" "$binary"
+
       - name: Stage binary and checksum
         shell: bash
         env:
@@ -283,6 +303,18 @@ jobs:
           else
             (cd release && shasum -a 256 "${OUTPUT_NAME}" > "${OUTPUT_NAME}.sha256")
           fi
+
+      - name: Remove macOS signing identity
+        if: always() && matrix.os_name == 'darwin'
+        shell: bash
+        run: |
+          if [ -f "${RUNNER_TEMP}/agentdesktop-signing.pem" ]; then
+            sudo security remove-trusted-cert -d "${RUNNER_TEMP}/agentdesktop-signing.pem"
+          fi
+          if [ -f "${RUNNER_TEMP}/agentdesktop-signing.keychain-db" ]; then
+            security delete-keychain "${RUNNER_TEMP}/agentdesktop-signing.keychain-db"
+          fi
+          rm -f "${RUNNER_TEMP}/agentdesktop-signing.pem" "${RUNNER_TEMP}/agentdesktop-signing.p12"
 
       - name: Upload binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -332,28 +364,28 @@ jobs:
           npm install --global pnpm@11.25.0
           pnpm install --frozen-lockfile
 
-      # Production signing placeholder: import the Developer ID Application and
-      # Developer ID Installer certificates into a temporary keychain here.
-      # Store the certificates and keychain password as GitHub Actions secrets.
-      # - name: Import Apple signing certificates
-      #   shell: bash
-      #   env:
-      #     APPLE_APPLICATION_CERTIFICATE: ${{ secrets.APPLE_APPLICATION_CERTIFICATE }}
-      #     APPLE_INSTALLER_CERTIFICATE: ${{ secrets.APPLE_INSTALLER_CERTIFICATE }}
-      #     APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      #   run: |
-      #     # Create a temporary keychain and import both certificates here.
+      - name: Import macOS signing identity
+        shell: bash
+        env:
+          APPLE_APPLICATION_CERTIFICATE: ${{ secrets.APPLE_APPLICATION_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: bash .github/scripts/import-macos-signing.sh
 
       - name: Build PKG
         working-directory: frontend
         shell: bash
-        # Production signing placeholder: expose the imported identities to
-        # Tauri and package-macos.mjs when certificate import is implemented.
-        # env:
-        #   APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_APPLICATION_SIGNING_IDENTITY }}
-        #   APPLE_INSTALLER_SIGNING_IDENTITY: ${{ secrets.APPLE_INSTALLER_SIGNING_IDENTITY }}
-        #   APPLE_INSTALLER_KEYCHAIN: ${{ runner.temp }}/agentdesktop-signing.keychain-db
         run: pnpm --filter @agentdesktop/desktop-web dist:mac -- --target "${{ matrix.target }}"
+
+      - name: Verify application signature
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          app="target/${TARGET}/release/bundle/macos/agentdesktop.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign --verify --strict \
+            -R="identifier \"dev.agentdesktop.tray\" and certificate leaf = H\"${APPLE_SIGNING_IDENTITY}\"" \
+            "$app/Contents/MacOS/agentdesktop"
 
       - name: Stage PKG
         shell: bash
@@ -445,10 +477,22 @@ jobs:
           sudo rm -f /var/run/agentdesktop-relaunch
           sudo pkgutil --forget dev.agentdesktop.installer || true
 
-      - name: Upload unsigned PKG
+      - name: Remove macOS signing identity
+        if: always()
+        shell: bash
+        run: |
+          if [ -f "${RUNNER_TEMP}/agentdesktop-signing.pem" ]; then
+            sudo security remove-trusted-cert -d "${RUNNER_TEMP}/agentdesktop-signing.pem"
+          fi
+          if [ -f "${RUNNER_TEMP}/agentdesktop-signing.keychain-db" ]; then
+            security delete-keychain "${RUNNER_TEMP}/agentdesktop-signing.keychain-db"
+          fi
+          rm -f "${RUNNER_TEMP}/agentdesktop-signing.pem" "${RUNNER_TEMP}/agentdesktop-signing.p12"
+
+      - name: Upload PKG (self-signed application)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: unsigned-macos-installer-${{ matrix.arch }}
+          name: macos-installer-${{ matrix.arch }}
           path: release/agentdesktop-macos-*
           if-no-files-found: error
 
