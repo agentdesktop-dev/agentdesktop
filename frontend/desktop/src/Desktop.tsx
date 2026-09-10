@@ -12,7 +12,7 @@ export function Desktop() {
   return (
     <DesktopShell
       fullWidth={model.needsEnrollment}
-      isRefreshing={model.isRefreshing}
+      isRefreshing={model.isRefreshing || model.isAssessing}
       notice={model.notice}
       onNavigate={model.navigate}
       onRefresh={model.refresh}
@@ -48,7 +48,14 @@ export function Desktop() {
           />
         ) : (
           <ToolsView
+            accessLoaded={model.hasLoadedAccess}
+            accessLoading={model.isAssessing}
+            accessReport={model.accessReport}
+            accessStale={model.accessStale}
+            allowAccessEditing={model.connector?.runtime?.mode === "standalone"}
             discovery={model.discovery}
+            onApplyNetworkRuleChange={model.applyNetworkRuleChange}
+            onOpenAccessSource={model.openAccessSettings}
             unavailable={!model.discovery}
           />
         )}

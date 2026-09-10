@@ -1,10 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
+  AccessReport,
   Bootstrap,
   ConnectorSnapshot,
   Discovery,
   ManagedDeviceSnapshot,
+  NetworkRuleChange,
   Settings,
 } from "./types";
 
@@ -26,6 +28,20 @@ export async function getManagedDeviceStatus(): Promise<ManagedDeviceSnapshot> {
 
 export async function getDiscovery(): Promise<Discovery> {
   return invoke<Discovery>("get_discovery");
+}
+
+export async function getAccessReport(): Promise<AccessReport> {
+  return invoke<AccessReport>("get_access_report");
+}
+
+export async function applyNetworkRuleChange(
+  request: NetworkRuleChange,
+): Promise<AccessReport> {
+  return invoke<AccessReport>("apply_network_rule_change", { request });
+}
+
+export async function openAccessSource(path: string): Promise<void> {
+  return invoke<void>("open_access_source", { path });
 }
 
 export async function getRemoteConfig(): Promise<string | null> {

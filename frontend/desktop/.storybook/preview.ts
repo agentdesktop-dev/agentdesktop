@@ -5,8 +5,8 @@ import "@agentdesktop/ui/styles.css";
 
 const desktopViewports = {
   native: {
-    name: "Native window (940 × 680)",
-    styles: { width: "940px", height: "680px" },
+    name: "Native window (1080 × 680)",
+    styles: { width: "1080px", height: "680px" },
     type: "desktop" as const,
   },
   minimum: {
