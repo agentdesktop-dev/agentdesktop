@@ -283,6 +283,11 @@ a {
   overflow: hidden;
 }
 
+.output-card {
+  max-height: 490px;
+  overflow: auto;
+}
+
 .table-scroll {
   position: relative;
   overflow-x: auto;
@@ -1157,10 +1162,8 @@ code {
 }
 
 .output-card pre {
-  max-height: 490px;
   margin: 0;
   padding: 18px;
-  overflow: auto;
   color: #24292f;
   background: #f7f7f5;
   font-size: 12px;
