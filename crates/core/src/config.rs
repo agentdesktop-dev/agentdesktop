@@ -485,8 +485,8 @@ pub struct OpenCodeConfig {
 /// Values under `managedConfig` are written to Grok's `managed_config.toml`.
 /// When generated LLM-gateway settings overlap with those values,
 /// agentdesktop's generated values take precedence.
-/// Only system mode on Linux and macOS is supported. Grok can delete or replace
-/// the user-level managed file during startup, so `--user` rejects `programs.grok`.
+/// Only system mode is supported. Grok can delete or replace the user-level
+/// managed file during startup, so `--user` rejects `programs.grok`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

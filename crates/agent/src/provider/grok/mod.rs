@@ -37,14 +37,9 @@ impl Provider for Grok {
     }
 
     fn plan(&self, ctx: &ReconcileContext, config: &DaemonConfig) -> anyhow::Result<ReconcilePlan> {
-        if cfg!(windows) && config.programs.grok.is_some() {
-            anyhow::bail!(
-                "Grok Build does not load system-managed configuration on Windows; remove programs.grok (managed configuration requires Linux or macOS)"
-            );
-        }
         if ctx.merge_user_settings && config.programs.grok.is_some() {
             anyhow::bail!(
-                "Grok Build can delete or replace its user-level managed_config.toml during startup; remove programs.grok or run agentdesktop without --user as root so it can manage /etc/grok/managed_config.toml"
+                "Grok Build can delete or replace its user-level managed_config.toml during startup; remove programs.grok or run agentdesktop in system mode so it can manage Grok's system managed_config.toml"
             );
         }
         let configured = config.programs.grok.as_ref().map(|provider| {
@@ -68,5 +63,50 @@ impl Provider for Grok {
 
 /// Returns the system-wide Grok Build managed configuration path.
 pub fn default_grok_managed_config_path() -> PathBuf {
+    #[cfg(windows)]
+    return windows_system_managed_config_path(
+        std::env::var_os("SystemDrive").or_else(|| std::env::var_os("SYSTEMDRIVE")),
+    );
+
+    #[cfg(not(windows))]
     PathBuf::from("/etc/grok/managed_config.toml")
+}
+
+#[cfg(any(windows, test))]
+fn windows_system_managed_config_path(system_drive: Option<std::ffi::OsString>) -> PathBuf {
+    let drive = system_drive
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "C:".into());
+    let mut drive = drive
+        .to_string_lossy()
+        .trim_end_matches(['\\', '/'])
+        .to_owned();
+    if drive.len() == 1 && drive.as_bytes()[0].is_ascii_alphabetic() {
+        drive.push(':');
+    }
+    if drive.is_empty() || !drive.ends_with(':') {
+        drive = "C:".to_owned();
+    }
+    PathBuf::from(format!(r"{drive}\etc\grok\managed_config.toml"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::windows_system_managed_config_path;
+
+    #[test]
+    fn windows_system_managed_config_path_uses_system_drive_root() {
+        assert_eq!(
+            windows_system_managed_config_path(Some("D:".into())),
+            std::path::PathBuf::from(r"D:\etc\grok\managed_config.toml")
+        );
+        assert_eq!(
+            windows_system_managed_config_path(Some(r"E:\".into())),
+            std::path::PathBuf::from(r"E:\etc\grok\managed_config.toml")
+        );
+        assert_eq!(
+            windows_system_managed_config_path(None),
+            std::path::PathBuf::from(r"C:\etc\grok\managed_config.toml")
+        );
+    }
 }

@@ -135,7 +135,7 @@
       ]
     },
     "GrokConfig": {
-      "description": "Settings reconciled into Grok Build's organization-managed configuration.\n\nValues under `managedConfig` are written to Grok's `managed_config.toml`.\nWhen generated LLM-gateway settings overlap with those values,\nagentdesktop's generated values take precedence.\nOnly system mode on Linux and macOS is supported. Grok can delete or replace\nthe user-level managed file during startup, so `--user` rejects `programs.grok`.",
+      "description": "Settings reconciled into Grok Build's organization-managed configuration.\n\nValues under `managedConfig` are written to Grok's `managed_config.toml`.\nWhen generated LLM-gateway settings overlap with those values,\nagentdesktop's generated values take precedence.\nOnly system mode is supported. Grok can delete or replace the user-level\nmanaged file during startup, so `--user` rejects `programs.grok`.",
       "type": "object",
       "properties": {
         "managedConfig": {

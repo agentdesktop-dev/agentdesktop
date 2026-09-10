@@ -2,10 +2,11 @@
 
 Features currently implemented by Agentdesktop.
 
-Grok Build managed configuration requires system mode on Linux or macOS and uses
-`/etc/grok/managed_config.toml`. `--user` rejects `programs.grok` because Grok's
-own configuration sync can delete or replace the user-level managed file.
-Grok does not load system-managed configuration on Windows.
+Grok Build managed configuration requires system mode. Linux and macOS use
+`/etc/grok/managed_config.toml`; Windows uses the system drive's
+`\etc\grok\managed_config.toml`. `--user` rejects `programs.grok` because
+Grok's own configuration sync can delete or replace the user-level managed
+file.
 
 ✅ Implemented · ◯ Not implemented · — Not applicable
 

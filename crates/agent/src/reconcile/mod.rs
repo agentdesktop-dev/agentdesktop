@@ -323,18 +323,11 @@ programs:
 
     #[cfg(windows)]
     #[test]
-    fn windows_rejects_system_grok_before_writing_other_settings() {
+    fn windows_reconciles_system_grok_managed_config() {
         let fixture = Fixture::new();
         let config = parse_daemon("programs:\n  claudeCode: {}\n  grok: {}\n").unwrap();
-        let error = fixture
-            .reconciler
-            .apply(&config)
-            .expect_err("Windows must fail");
-        assert!(error.to_string().contains("Windows"));
-        assert!(
-            !fixture.root.exists(),
-            "preflight failure must not write any files"
-        );
+        fixture.reconciler.apply(&config).unwrap();
+        assert!(fixture.root.join("grok/managed_config.toml").exists());
     }
 
     #[test]
@@ -452,12 +445,6 @@ programs:
 "#,
         )
         .unwrap();
-        #[cfg(windows)]
-        let config = {
-            let mut config = config;
-            config.programs.grok = None;
-            config
-        };
         let plan = fixture.reconciler.plan(&config).unwrap();
         assert!(
             !fixture.root.exists(),
@@ -476,7 +463,6 @@ programs:
             "codex/config.toml",
             "opencode/config.json",
             "opencode/plugin.js",
-            #[cfg(unix)]
             "grok/managed_config.toml",
         ];
         let contents: Vec<_> = paths
