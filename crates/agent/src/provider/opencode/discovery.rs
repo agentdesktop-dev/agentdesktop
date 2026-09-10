@@ -1,3 +1,5 @@
+use super::OpenCode;
+
 use std::{
     collections::BTreeSet,
     fs::File,
@@ -8,14 +10,18 @@ use std::{
 use agentdesktop_core::model::Agent;
 use memchr::memmem;
 
-use super::metadata;
+use crate::provider::metadata;
+
+const VERSION_MARKER: &[u8] = b"user-agent=opencode/";
+const MAX_VERSION_LENGTH: usize = 64;
+const MAX_BINARY_SIZE: u64 = 512 * 1024 * 1024;
 
 pub(super) fn discover() -> Option<Agent> {
-    let executable = metadata::find_executable("opencode", executable_candidates())?;
+    let executable = metadata::find_executable(OpenCode::ID, executable_candidates())?;
     Some(Agent {
         version: embedded_version(&executable),
         executable,
-        kind: "opencode".to_owned(),
+        kind: OpenCode::ID.to_owned(),
         mcp_servers: Vec::new(),
         skills: Vec::new(),
     })
@@ -40,10 +46,6 @@ fn executable_candidates() -> Vec<PathBuf> {
     ]);
     candidates.into_iter().collect()
 }
-
-const VERSION_MARKER: &[u8] = b"user-agent=opencode/";
-const MAX_VERSION_LENGTH: usize = 64;
-const MAX_BINARY_SIZE: u64 = 512 * 1024 * 1024;
 
 /// Reads OpenCode's embedded user-agent marker without executing the binary.
 fn embedded_version(executable: &Path) -> Option<String> {

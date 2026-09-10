@@ -12,7 +12,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { macosArchitecture } from "./package-macos-architecture.mjs";
-import { createTauriVersionConfig } from "./package-windows-version.mjs";
+import {
+  createTauriVersionConfig,
+  normalizeTauriArguments,
+} from "./package-tauri.mjs";
 
 if (process.platform !== "darwin") {
   throw new Error("macOS installer packages must be built on macOS");
@@ -26,7 +29,7 @@ const nativeDirectory = path.join(
   "agentdesktop",
 );
 const macosDirectory = path.join(nativeDirectory, "macos");
-const forwardedArguments = process.argv.slice(2);
+const forwardedArguments = normalizeTauriArguments(process.argv.slice(2));
 const targetIndex = forwardedArguments.indexOf("--target");
 const target =
   targetIndex === -1 ? undefined : forwardedArguments[targetIndex + 1];

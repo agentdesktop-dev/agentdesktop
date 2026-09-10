@@ -11,9 +11,33 @@ use std::{ffi::CStr, os::unix::ffi::OsStringExt};
 use agentdesktop_core::model::Skill;
 use serde::Deserialize;
 
+struct PackageMetadata {
+    name: Option<String>,
+    version: String,
+}
+
 pub(super) fn find_in_path(name: &str) -> Option<PathBuf> {
-    let path = env::var_os("PATH")?;
-    find_in_directories(name, env::split_paths(&path))
+    find_all_in_path(name).into_iter().next()
+}
+
+/// Every match for `name` on `PATH`, in `PATH` order.
+///
+/// Discovery for a tool with editor forks needs to look past the first hit,
+/// because the fork's launcher can shadow the real one.
+pub(super) fn find_all_in_path(name: &str) -> Vec<PathBuf> {
+    let Some(path) = env::var_os("PATH") else {
+        return Vec::new();
+    };
+    let extensions = executable_extensions(name);
+    env::split_paths(&path)
+        .flat_map(|directory| {
+            extensions
+                .iter()
+                .map(|extension| directory.join(format!("{name}{extension}")))
+                .collect::<Vec<_>>()
+        })
+        .filter(|candidate| candidate.is_file())
+        .collect()
 }
 
 pub(super) fn find_executable(
@@ -23,19 +47,6 @@ pub(super) fn find_executable(
     find_in_path(name).or_else(|| {
         additional_candidates
             .into_iter()
-            .find(|candidate| candidate.is_file())
-    })
-}
-
-fn find_in_directories(
-    name: &str,
-    directories: impl IntoIterator<Item = PathBuf>,
-) -> Option<PathBuf> {
-    let extensions = executable_extensions(name);
-    directories.into_iter().find_map(|directory| {
-        extensions
-            .iter()
-            .map(|extension| directory.join(format!("{name}{extension}")))
             .find(|candidate| candidate.is_file())
     })
 }
@@ -80,18 +91,39 @@ pub(super) fn version_after_component(executable: &Path, component: &str) -> Opt
     components.next()?.as_os_str().to_str().map(str::to_owned)
 }
 
-pub(super) fn json_version(path: &Path) -> Option<String> {
-    json_package_metadata(path).map(|metadata| metadata.version)
-}
-
 pub(super) fn json_package_version(path: &Path, expected_name: &str) -> Option<String> {
     let metadata = json_package_metadata(path)?;
     (metadata.name.as_deref() == Some(expected_name)).then_some(metadata.version)
 }
 
-struct PackageMetadata {
-    name: Option<String>,
-    version: String,
+pub(super) fn json_package_name(path: &Path) -> Option<String> {
+    json_package_metadata(path)?.name
+}
+
+/// `package.json` manifests that may describe the packaged application an
+/// executable belongs to.
+///
+/// Electron editors keep the manifest a fixed number of directories above their
+/// launcher, and the launcher on `PATH` is frequently a symlink into the
+/// install root.
+pub(super) fn packaged_manifest_candidates(executable: &Path) -> Vec<PathBuf> {
+    let mut candidates = BTreeSet::new();
+    for executable in [
+        Some(executable.to_path_buf()),
+        executable.canonicalize().ok(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(directory) = executable.parent() {
+            candidates.insert(directory.join("resources/app/package.json"));
+            candidates.insert(directory.join("../resources/app/package.json"));
+            // macOS application bundles keep the manifest directly above `bin`.
+            candidates.insert(directory.join("../package.json"));
+            candidates.insert(directory.join("../../package.json"));
+        }
+    }
+    candidates.into_iter().collect()
 }
 
 fn json_package_metadata(path: &Path) -> Option<PackageMetadata> {

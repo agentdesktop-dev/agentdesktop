@@ -9,13 +9,14 @@
 [![Release](https://img.shields.io/github/v/release/agentdesktop-dev/agentdesktop?display_name=tag&sort=semver)](https://github.com/agentdesktop-dev/agentdesktop/releases/latest)
 [![License](https://img.shields.io/github/license/agentdesktop-dev/agentdesktop)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/agentdesktop-dev/agentdesktop?style=flat&logo=github)](https://github.com/agentdesktop-dev/agentdesktop)
+[![Join Discord](https://img.shields.io/discord/1538954092486070444?style=flat&label=Join%20Discord&color=6D28D9)](https://discord.com/invite/uKX2FvCVpS)
 
 Agentdesktop discovers AI developer tools, inventories MCP servers and skills,
 applies tool-native configuration and sandbox policy, and connects each device
 to an LLM gateway with user and device identity.
 
-Keep developers in Claude Code, Codex, OpenCode, and VS Code while giving
-platform teams one place to understand and manage the fleet.
+Keep developers in Claude Code, Codex, Cursor, OpenCode, VS Code, and Grok Build
+while giving platform teams one place to understand and manage the fleet.
 
 [Website](https://agentdesktop.dev) ·
 [Documentation](https://agentdesktop.dev/docs/) ·
@@ -132,8 +133,10 @@ stage.
 | Claude Code | Yes | Yes | MCP and skills | Yes |
 | Claude Desktop | Yes | Yes | MCP | — |
 | Codex | Yes | Yes | MCP and skills | Yes |
+| Cursor | Yes | — | MCP and skills | — |
 | OpenCode | Yes | Yes | MCP | — |
 | VS Code | Yes | — | MCP and skills | — |
+| Grok Build | Yes | — | MCP and skills | — |
 
 > **Don't see your tool?** We're actively expanding this list and would love
 > your help. [Open an integration request](https://github.com/agentdesktop-dev/agentdesktop/issues/new)

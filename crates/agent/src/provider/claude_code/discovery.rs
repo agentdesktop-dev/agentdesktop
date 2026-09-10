@@ -1,3 +1,5 @@
+use super::ClaudeCode;
+
 use std::{
     collections::BTreeSet,
     fs,
@@ -7,14 +9,14 @@ use std::{
 use agentdesktop_core::model::{Agent, McpServer};
 use serde_json::Value;
 
-use super::metadata;
+use crate::provider::metadata;
 
 pub(super) fn discover() -> Option<Agent> {
     let executable = metadata::find_executable("claude", executable_candidates())?;
     Some(Agent {
         version: metadata::version_after_component(&executable, "versions"),
         executable,
-        kind: "claude-code".to_owned(),
+        kind: ClaudeCode::ID.to_owned(),
         mcp_servers: discover_mcp_servers(),
         skills: metadata::discover_skills(skill_roots()),
     })
@@ -94,7 +96,7 @@ fn installed_plugin_roots(home: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-pub(super) fn mcp_servers_from_json(path: &Path) -> Vec<McpServer> {
+pub(in crate::provider) fn mcp_servers_from_json(path: &Path) -> Vec<McpServer> {
     let Ok(contents) = fs::read(path) else {
         return Vec::new();
     };

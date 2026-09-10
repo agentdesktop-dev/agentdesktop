@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { macosArchitecture } from "./package-macos-architecture.mjs";
+import { normalizeTauriArguments } from "./package-tauri.mjs";
 
 const nativeDirectory = path.resolve(
   import.meta.dirname,
@@ -25,6 +26,17 @@ test("names native and Rust target architectures consistently", () => {
   assert.equal(macosArchitecture("aarch64-apple-darwin"), "arm64");
   assert.equal(macosArchitecture("x86_64-apple-darwin"), "amd64");
   assert.throws(() => macosArchitecture(undefined, "riscv64"));
+});
+
+test("forwards the target option to Tauri instead of Cargo", () => {
+  assert.deepEqual(
+    normalizeTauriArguments(["--", "--target", "aarch64-apple-darwin"]),
+    ["--target", "aarch64-apple-darwin"],
+  );
+  assert.deepEqual(
+    normalizeTauriArguments(["--target", "x86_64-apple-darwin"]),
+    ["--target", "x86_64-apple-darwin"],
+  );
 });
 
 test("package installs the app at a fixed location", () => {

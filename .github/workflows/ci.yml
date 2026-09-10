@@ -20,7 +20,7 @@ env:
 jobs:
   check:
     name: Test and lint
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -39,10 +39,6 @@ jobs:
           npm install --global pnpm@11.25.0
           pnpm install --frozen-lockfile
 
-      - name: Install Storybook test browser
-        working-directory: frontend
-        run: pnpm --filter @agentdesktop/desktop-web exec playwright install --with-deps chromium
-
       - name: Install Linux desktop dependencies
         run: |
           sudo apt-get update
@@ -59,11 +55,33 @@ jobs:
           cache-key: ci
           save: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Test
-        run: make test
+      - name: Install nextest
+        uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2
+        with:
+          tool: nextest
 
-      - name: Lint
-        run: make check
+      # Build once before Cargo, which embeds the frontend assets.
+      - name: Build UI
+        working-directory: frontend
+        run: pnpm build
+
+      - name: Test Rust
+        run: cargo nextest run --workspace
+
+      - name: Lint Rust
+        run: make lint
+
+      - name: Lint UI and test packaging
+        working-directory: frontend
+        run: pnpm check:lint
+
+      - name: Test UI in Chrome
+        working-directory: frontend
+        env:
+          PLAYWRIGHT_CHANNEL: chrome
+        run: |
+          google-chrome --version
+          pnpm test:storybook
 
       - name: Check generated schemas
         run: |
@@ -91,12 +109,17 @@ jobs:
           cache-workspace-crates: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Install nextest
+        uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2
+        with:
+          tool: nextest
+
       - name: Test agent
-        run: cargo test --locked --package agentdesktop-agent
+        run: cargo nextest run --locked --package agentdesktop-agent --lib
 
   container:
     name: Container
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

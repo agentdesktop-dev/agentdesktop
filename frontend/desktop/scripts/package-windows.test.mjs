@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { createTauriVersionConfig } from "./package-windows-version.mjs";
+import { createTauriVersionConfig } from "./package-tauri.mjs";
 
 test("keeps a stable MSI upgrade identity", () => {
   const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -30,9 +30,8 @@ test("writes the Tauri release version to a temporary config file", () => {
 
   try {
     assert.deepEqual(config.arguments, ["--config", config.path]);
-    assert.deepEqual(JSON.parse(readFileSync(config.path, "utf8")), {
-      version: "0.1.0",
-    });
+    assert.equal(path.extname(config.path), ".toml");
+    assert.equal(readFileSync(config.path, "utf8"), 'version = "0.1.0"\n');
     assert.equal(
       config.arguments.some((argument) => argument.includes("{")),
       false,
