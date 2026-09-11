@@ -37,6 +37,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-single-instance",
  "tokio",
+ "url",
 ]
 
 [[package]]
@@ -57,6 +58,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "json5",
+ "jsonc-parser",
  "keyring",
  "keyring-core",
  "libc",
@@ -138,6 +140,7 @@ name = "agentdesktop-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "humantime-serde",
  "reqwest",
  "schemars 1.2.2",
@@ -146,6 +149,8 @@ dependencies = [
  "serde_json",
  "serde_json_path_to_error",
  "serde_yaml",
+ "time",
+ "tokio",
  "tracing-appender",
  "tracing-subscriber",
  "url",
@@ -3032,6 +3037,12 @@ dependencies = [
  "serde",
  "ucd-trie",
 ]
+
+[[package]]
+name = "jsonc-parser"
+version = "0.33.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0560e3f9a9a03ea6b6e90b41138c5db9e21526c99eb192c1a26c68176593285"
 
 [[package]]
 name = "jsonptr"

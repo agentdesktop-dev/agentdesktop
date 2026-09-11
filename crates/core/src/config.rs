@@ -100,6 +100,12 @@ pub struct LlmGatewayConfig {
     /// The URL must include a host and cannot include credentials, a query, or a fragment.
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub url: Url,
+    /// Exact loopback URL of the Agentgateway analytics summary endpoint.
+    ///
+    /// This is an experimental local-only integration used to surface estimated usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
+    pub usage_url: Option<Url>,
     /// Authentication mechanism used when connecting to this gateway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authentication: Option<LlmGatewayAuthentication>,
@@ -231,6 +237,13 @@ pub struct ControllerConfig {
     /// LLM gateway JWT signing settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_jwt: Option<ControllerGatewayJwtConfig>,
+    /// Exact URL of the Agentgateway analytics summary endpoint used for fleet usage reports.
+    ///
+    /// This must be a cluster-internal address that only the controller can reach; the
+    /// controller is the authorization boundary for every usage query.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
+    pub llm_gateway_usage_url: Option<Url>,
     /// TLS identities used by the device-facing fleet API.
     ///
     /// A string selects a directory containing `controller.pem`,
@@ -404,6 +417,9 @@ pub struct ProgramsConfig {
     /// OpenCode managed configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_code: Option<OpenCodeConfig>,
+    /// VS Code built-in GitHub Copilot endpoint configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vscode: Option<VscodeConfig>,
     /// Grok Build managed configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grok: Option<GrokConfig>,
@@ -415,6 +431,7 @@ impl ProgramsConfig {
             && self.claude_desktop.is_none()
             && self.codex.is_none()
             && self.open_code.is_none()
+            && self.vscode.is_none()
             && self.grok.is_none()
     }
 }
@@ -503,6 +520,20 @@ pub struct OpenCodeConfig {
     /// Arbitrary values written to OpenCode's system-managed configuration.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub managed_config: BTreeMap<String, serde_json::Value>,
+}
+
+/// Settings reconciled into VS Code's user settings.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VscodeConfig {
+    /// Whether this program uses the top-level LLM gateway.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub use_llm_gateway: bool,
+    /// AGW `/v1` base URL used by VS Code's built-in GitHub Copilot endpoint overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
+    pub copilot_proxy_url: Option<Url>,
 }
 
 /// Settings reconciled into Grok Build's organization-managed configuration.
@@ -621,6 +652,9 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
             anyhow::bail!("gatewayJwt.lifetime must be greater than zero");
         }
     }
+    if let Some(usage_url) = &config.llm_gateway_usage_url {
+        validate_llm_gateway_url("usage URL", usage_url)?;
+    }
     Ok(config)
 }
 
@@ -677,20 +711,12 @@ fn validate_daemon(
         }
     }
     if let Some(gateway) = llm_gateway {
-        if !matches!(gateway.url.scheme(), "http" | "https") {
-            anyhow::bail!(
-                "LLM gateway URL must use HTTP or HTTPS, got {}",
-                gateway.url.scheme()
-            );
-        }
-        if gateway.url.host().is_none() {
-            anyhow::bail!("LLM gateway URL must include a host");
-        }
-        if !gateway.url.username().is_empty() || gateway.url.password().is_some() {
-            anyhow::bail!("LLM gateway URL cannot include credentials");
-        }
-        if gateway.url.query().is_some() || gateway.url.fragment().is_some() {
-            anyhow::bail!("LLM gateway URL cannot include a query or fragment");
+        validate_llm_gateway_url("URL", &gateway.url)?;
+        if let Some(usage_url) = &gateway.usage_url {
+            validate_llm_gateway_url("usage URL", usage_url)?;
+            if !usage_url.host_str().is_some_and(is_loopback) {
+                anyhow::bail!("LLM gateway usage URL must use a loopback host");
+            }
         }
         if let Some(authentication) = &gateway.authentication {
             match authentication {
@@ -805,6 +831,22 @@ fn validate_daemon(
             anyhow::bail!("OpenCode model {model} is not declared in models");
         }
     }
+    if let Some(vscode) = &programs.vscode
+        && llm_gateway.is_some()
+        && vscode.use_llm_gateway
+    {
+        let proxy_url = vscode
+            .copilot_proxy_url
+            .as_ref()
+            .context("VS Code requires copilotProxyUrl when llmGateway is configured")?;
+        validate_llm_gateway_url("VS Code Copilot proxy URL", proxy_url)?;
+        if proxy_url.scheme() == "http" && !proxy_url.host_str().is_some_and(is_loopback) {
+            anyhow::bail!("VS Code Copilot proxy URL must use HTTPS or a loopback HTTP host");
+        }
+        if !proxy_url.path().trim_end_matches('/').ends_with("/v1") {
+            anyhow::bail!("VS Code copilotProxyUrl must end in /v1");
+        }
+    }
     if let Some(grok) = &programs.grok
         && llm_gateway.is_some()
         && grok.use_llm_gateway
@@ -817,6 +859,25 @@ fn validate_daemon(
         if !grok.models.is_empty() && !grok.models.contains_key(model) {
             anyhow::bail!("Grok Build model {model} is not declared in models");
         }
+    }
+    Ok(())
+}
+
+fn validate_llm_gateway_url(label: &str, url: &Url) -> anyhow::Result<()> {
+    if !matches!(url.scheme(), "http" | "https") {
+        anyhow::bail!(
+            "LLM gateway {label} must use HTTP or HTTPS, got {}",
+            url.scheme()
+        );
+    }
+    if url.host().is_none() {
+        anyhow::bail!("LLM gateway {label} must include a host");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        anyhow::bail!("LLM gateway {label} cannot include credentials");
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        anyhow::bail!("LLM gateway {label} cannot include a query or fragment");
     }
     Ok(())
 }
@@ -947,6 +1008,14 @@ oidc:
         .expect("Claude subscription user configuration example");
         parse_daemon(include_str!("../../../examples/standalone/config.yaml"))
             .expect("standalone daemon configuration example");
+        parse_daemon(include_str!(
+            "../../../examples/standalone-costs/config.yaml"
+        ))
+        .expect("standalone costs daemon configuration example");
+        parse_daemon(include_str!(
+            "../../../examples/standalone-costs/claude-desktop.yaml"
+        ))
+        .expect("standalone costs Claude Desktop configuration example");
     }
 
     #[test]
@@ -987,6 +1056,28 @@ llmGateway:
 "#;
         assert!(
             parse_daemon(remote_plaintext)
+                .unwrap_err()
+                .to_string()
+                .contains("loopback")
+        );
+    }
+
+    #[test]
+    fn llm_usage_endpoint_must_use_a_loopback_host() {
+        let local = r#"
+llmGateway:
+    url: https://gateway.example.com
+    usageUrl: http://127.0.0.1:15000/api/logs/analytics/summary
+"#;
+        parse_daemon(local).expect("loopback usage endpoint");
+
+        let remote = r#"
+llmGateway:
+    url: https://gateway.example.com
+    usageUrl: https://gateway.example.com/api/logs/analytics/summary
+"#;
+        assert!(
+            parse_daemon(remote)
                 .unwrap_err()
                 .to_string()
                 .contains("loopback")
@@ -1153,6 +1244,44 @@ programs:
                 .to_string()
                 .contains("OpenCode model missing is not declared in models")
         );
+    }
+
+    #[test]
+    fn vscode_requires_a_secure_v1_copilot_proxy() {
+        let valid = r#"
+programs:
+  vscode:
+    copilotProxyUrl: http://127.0.0.1:4002/v1
+"#;
+        let daemon = parse_daemon(valid).expect("valid VS Code gateway configuration");
+        assert_eq!(
+            daemon
+                .programs
+                .vscode
+                .unwrap()
+                .copilot_proxy_url
+                .unwrap()
+                .as_str(),
+            "http://127.0.0.1:4002/v1"
+        );
+
+        for (invalid, expected) in [
+            (
+                valid.replace("127.0.0.1:4002/v1", "gateway.example.com/v1"),
+                "HTTPS or a loopback HTTP host",
+            ),
+            (valid.replace("/v1", "/v2"), "must end in /v1"),
+            (
+                valid.replace(
+                    "  vscode:\n    copilotProxyUrl: http://127.0.0.1:4002/v1\n",
+                    "  vscode: {}\n",
+                ),
+                "requires copilotProxyUrl",
+            ),
+        ] {
+            let error = parse_daemon(&invalid).expect_err("invalid VS Code configuration");
+            assert!(format!("{error:#}").contains(expected));
+        }
     }
 
     #[test]

@@ -40,7 +40,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -231,6 +232,10 @@ p {
   max-width: 900px;
   margin: 0 auto;
   padding: 36px 40px 64px;
+}
+
+.desktop-content-wide {
+  max-width: 1100px;
 }
 
 .notice {
@@ -484,6 +489,14 @@ p {
   color: #24292f;
   font-size: 12px;
   font-weight: 600;
+}
+
+.usage-page .usage-summary {
+  border: 0;
+}
+
+.usage-page .usage-breakdown {
+  max-height: min(55vh, 520px);
 }
 
 .badge {
@@ -993,6 +1006,30 @@ p {
 
   .definition-row dd {
     text-align: left;
+  }
+}
+
+@media (max-width: 360px) {
+  .desktop-sidebar {
+    padding-inline: 8px;
+  }
+
+  .desktop-brand {
+    display: none;
+  }
+
+  .desktop-nav {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .desktop-nav button {
+    min-width: 0;
+    padding: 0 4px;
+    justify-content: center;
+    gap: 5px;
+    font-size: 11px;
   }
 }
 

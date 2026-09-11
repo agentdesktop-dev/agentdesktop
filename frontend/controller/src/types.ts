@@ -67,6 +67,33 @@ export type ControllerSettings = {
   oidc_enabled: boolean;
   tls_enabled: boolean;
   gateway_jwt_enabled: boolean;
+  llm_usage_enabled: boolean;
+};
+
+export type {
+  LlmUsageInteractions,
+  LlmUsageRange,
+  LlmUsageSummary,
+} from "@agentdesktop/ui";
+
+export type LlmFleetUsageSummary = {
+  from: string;
+  to: string;
+  /** ISO 4217 code for every `estimatedCost` in this report. */
+  currency: string;
+  requests: number;
+  totalTokens: number;
+  estimatedCost: number;
+  devices: LlmDeviceUsage[];
+};
+
+export type LlmDeviceUsage = {
+  /** Null when the request's gateway credential carried no device identity. */
+  deviceId: string | null;
+  hostname: string | null;
+  requests: number;
+  totalTokens: number;
+  estimatedCost: number;
 };
 
 export type AgentKind =

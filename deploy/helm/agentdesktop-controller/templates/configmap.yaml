@@ -20,6 +20,9 @@ data:
     gatewayJwt:
 {{ toYaml . | indent 6 }}
     {{- end }}
+    {{- with .Values.llmGatewayUsageUrl }}
+    llmGatewayUsageUrl: {{ . | quote }}
+    {{- end }}
     {{- with .Values.daemonConfig }}
     daemonConfig:
       path: /etc/agentdesktop/config/daemon.yaml

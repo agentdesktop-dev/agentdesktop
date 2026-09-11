@@ -1,0 +1,19 @@
+# yaml-language-server: $schema=../../schema/controller-config.json
+fleetListen: 0.0.0.0:8444
+adminListen: 127.0.0.1:8081
+allowInsecureDev: true
+databaseUrl: sqlite:///tmp/agentdesktop-fleet-controller.db?mode=rwc
+tls: /tmp/agentdesktop-keys
+
+oidc:
+  issuer: http://127.0.0.1:5558/dex
+  clientId: local-public
+
+daemonConfig:
+  path: ./daemon.yaml
+
+gatewayJwt:
+  privateKey: /tmp/agentdesktop-keys/gateway-jwt-key.pem
+
+# Agentgateway's admin API, published only on host loopback by compose.yaml.
+llmGatewayUsageUrl: http://127.0.0.1:15001/api/logs/analytics/summary

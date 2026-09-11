@@ -5,6 +5,7 @@ import { useDesktopModel } from "./useDesktopModel";
 import { EnrollmentView } from "./views/EnrollmentView";
 import { StatusView } from "./views/StatusView";
 import { ToolsView } from "./views/ToolsView";
+import { UsageView } from "./views/UsageView";
 
 export function Desktop() {
   const model = useDesktopModel();
@@ -46,10 +47,19 @@ export function Desktop() {
             onCopyRemoteConfig={model.copyRemoteConfig}
             onLogout={model.logout}
           />
-        ) : (
+        ) : model.view === "tools" ? (
           <ToolsView
             discovery={model.discovery}
             unavailable={!model.discovery}
+          />
+        ) : (
+          <UsageView
+            llmUsage={model.llmUsage}
+            range={model.usageRange}
+            loadedRange={model.loadedUsageRange}
+            isRangeLoading={model.isUsageRangeLoading}
+            onRangeChange={model.setUsageRange}
+            onLoadInteractions={model.loadUsageInteractions}
           />
         )}
       </PageBoundary>

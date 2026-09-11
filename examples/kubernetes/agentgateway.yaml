@@ -5,6 +5,11 @@ metadata:
   namespace: agentgateway-system
 spec:
   gatewayClassName: agentgateway
+  infrastructure:
+    parametersRef:
+      group: agentgateway.dev
+      kind: AgentgatewayParameters
+      name: agentdesktop-usage
   listeners:
   - name: http
     protocol: HTTP
@@ -15,6 +20,77 @@ spec:
       kinds:
       - group: agentgateway.dev
         kind: AgentgatewayModel
+---
+# Every gateway replica writes metadata-only request logs to one PostgreSQL
+# database and prices them with the model catalog. The admin API serving
+# analytics over that log is exposed only through the ClusterIP Service below.
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayParameters
+metadata:
+  name: agentdesktop-usage
+  namespace: agentgateway-system
+spec:
+  env:
+  - name: AGENTGATEWAY_DATABASE_URL
+    valueFrom:
+      secretKeyRef:
+        name: agentgateway-database
+        key: url
+  rawConfig:
+    config:
+      adminAddr: 0.0.0.0:15000
+      database:
+        url: $AGENTGATEWAY_DATABASE_URL
+      storage:
+        mode: readOnly
+    frontendPolicies:
+      accessLog:
+        database:
+          llm: metadata
+  modelCatalog:
+    sources:
+    - configMap:
+        name: agentgateway-model-catalog
+        key: catalog.json
+---
+# Cluster-internal only. The Agentdesktop controller is the sole client and
+# scopes every query before it reaches this API. Never expose it externally.
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentgateway-admin
+  namespace: agentgateway-system
+spec:
+  type: ClusterIP
+  selector:
+    gateway.networking.k8s.io/gateway-name: agentgateway-proxy
+  ports:
+  - name: admin
+    port: 15000
+    targetPort: 15000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agentgateway-admin
+  namespace: agentgateway-system
+spec:
+  podSelector:
+    matchLabels:
+      gateway.networking.k8s.io/gateway-name: agentgateway-proxy
+  policyTypes: [Ingress]
+  ingress:
+  - ports:
+    - port: 80
+  - ports:
+    - port: 15000
+    from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: agentdesktop
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: agentdesktop-controller
 ---
 apiVersion: agentgateway.dev/v1alpha1
 kind: AgentgatewayModel
@@ -53,6 +129,10 @@ spec:
           expression: jwt.client_id
         - name: user
           expression: jwt.email
+        # Enrolled device asserted by the controller; the usage report groups and
+        # filters on this attribute. It is never taken from a client header.
+        - name: device_id
+          expression: jwt.device_id
   traffic:
     jwtAuthentication:
       mode: Strict

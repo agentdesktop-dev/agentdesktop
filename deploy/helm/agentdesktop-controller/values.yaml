@@ -22,6 +22,12 @@ allowInsecureDev: false
 # Optional short-lived JWT issuer for authenticated LLM gateways.
 gatewayJwt: {}
 
+# Optional cluster-internal agentgateway analytics endpoint used for fleet
+# LLM usage reports, for example
+# http://agentgateway-admin.agentgateway-system.svc.cluster.local:15000/api/logs/analytics/summary.
+# The controller is the only permitted client of that endpoint.
+llmGatewayUsageUrl: ""
+
 # Daemon configuration distributed to enrolled devices. Leave empty to
 # disable managed configuration.
 daemonConfig: {}

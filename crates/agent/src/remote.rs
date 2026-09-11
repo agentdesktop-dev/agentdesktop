@@ -22,15 +22,17 @@ use tracing::{debug, info, warn};
 
 use agentdesktop_core::{
     config::{self, ControllerConnectionConfig},
+    llm_usage::InteractionsQuery,
     model::{
-        Discovery as AgentDiscovery, TelemetryEvent as ModelTelemetryEvent, TelemetryEventKind,
+        Discovery as AgentDiscovery, LlmUsageInteractions, LlmUsageRange, LlmUsageSummary,
+        TelemetryEvent as ModelTelemetryEvent, TelemetryEventKind,
     },
 };
 use agentdesktop_proto::fleet::{
     AgentMessage, ConfigState, ConfigStatus, Discovery, Heartbeat, Hello, Inventory,
-    LlmGatewayCredentialRequest, RenewDeviceCertificateRequest, SessionNewEvent, TelemetryEvent,
-    ToolUseEvent, agent_message, controller_message, fleet_agent_client::FleetAgentClient,
-    telemetry_event,
+    LlmGatewayCredentialRequest, LlmUsageInteractionsRequest, LlmUsageRequest,
+    RenewDeviceCertificateRequest, SessionNewEvent, TelemetryEvent, ToolUseEvent, agent_message,
+    controller_message, fleet_agent_client::FleetAgentClient, telemetry_event,
 };
 
 use crate::{
@@ -301,6 +303,59 @@ pub async fn llm_gateway_credential(
         credential: response.credential,
         expires_at_unix_seconds: response.expires_at_unix_seconds,
     })
+}
+
+/// Requests this device's own LLM usage from the controller. The controller
+/// derives the device from the mTLS certificate, so no identity is sent here.
+pub async fn llm_usage(
+    controller: &ControllerConnectionConfig,
+    state_dir: &Path,
+    range: LlmUsageRange,
+) -> anyhow::Result<LlmUsageSummary> {
+    let (identity, mut client) = authenticated_client(controller, state_dir).await?;
+    let mut request = Request::new(LlmUsageRequest {
+        range: range.as_str().to_owned(),
+    });
+    authenticate_request(&identity, &mut request)?;
+    let response = client
+        .get_llm_usage(request)
+        .await
+        .context("request LLM usage")?
+        .into_inner();
+    serde_json::from_slice(&response.summary_json).context("decode LLM usage summary")
+}
+
+pub async fn llm_usage_interactions(
+    controller: &ControllerConnectionConfig,
+    state_dir: &Path,
+    query: &InteractionsQuery,
+) -> anyhow::Result<LlmUsageInteractions> {
+    let (identity, mut client) = authenticated_client(controller, state_dir).await?;
+    let mut request = Request::new(LlmUsageInteractionsRequest {
+        from: query.from.clone(),
+        to: query.to.clone(),
+        model: query.model.clone(),
+        agent: query.agent.clone(),
+        cursor: query.cursor.clone().unwrap_or_default(),
+    });
+    authenticate_request(&identity, &mut request)?;
+    let response = client
+        .get_llm_usage_interactions(request)
+        .await
+        .context("request LLM usage interactions")?
+        .into_inner();
+    serde_json::from_slice(&response.interactions_json).context("decode LLM usage interactions")
+}
+
+async fn authenticated_client(
+    controller: &ControllerConnectionConfig,
+    state_dir: &Path,
+) -> anyhow::Result<(Identity, FleetAgentClient<Channel>)> {
+    let identity_path = state_dir.join("identity.json");
+    let mut identity = identity::load(&identity_path)?.context("device is not enrolled")?;
+    refresh_oauth_if_needed(&mut identity, &identity_path).await?;
+    let client = client(controller, Some(&identity)).await?;
+    Ok((identity, client))
 }
 
 async fn connect(

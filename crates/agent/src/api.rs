@@ -10,9 +10,14 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use agentdesktop_core::{
-    config::{DaemonConfig, LlmGatewayAuthentication, ProgramAuthentication, valid_client_id},
+    config::{
+        ControllerConnectionConfig, DaemonConfig, LlmGatewayAuthentication, ProgramAuthentication,
+        valid_client_id,
+    },
+    llm_usage::{InteractionsQuery, RangeQuery, UsageClient, UsageScope},
     model::{
-        Discovery, EnrollmentStatus, LlmGatewayCredential, TelemetryEvent, TelemetryEventKind,
+        Discovery, EnrollmentStatus, LlmGatewayCredential, LlmUsageInteractions, LlmUsageSummary,
+        TelemetryEvent, TelemetryEventKind,
     },
 };
 
@@ -50,7 +55,90 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/logout", post(logout))
         .route("/v1/telemetry", post(telemetry))
         .route("/v1/llm-gateway/credential", get(llm_gateway_credential))
+        .route("/v1/llm-gateway/usage", get(llm_gateway_usage))
+        .route(
+            "/v1/llm-gateway/usage/interactions",
+            get(llm_gateway_usage_interactions),
+        )
         .with_state(state)
+}
+
+/// Where the daemon obtains LLM usage for this workstation.
+enum UsageSource<'a> {
+    /// Standalone: query the loopback Agentgateway analytics API directly.
+    Gateway(UsageClient),
+    /// Managed: ask the controller, which scopes results to this device.
+    Controller(&'a ControllerConnectionConfig),
+}
+
+fn usage_source(state: &AppState) -> Result<Option<UsageSource<'_>>, (StatusCode, String)> {
+    let effective = load_effective_config(&state.config, &state.state_dir).map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("read applied configuration: {error:#}"),
+        )
+    })?;
+    let Some(gateway) = effective.llm_gateway else {
+        return Ok(None);
+    };
+    if let Some(usage_url) = gateway.usage_url {
+        let client = UsageClient::new(usage_url).map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("configure LLM usage client: {error:#}"),
+            )
+        })?;
+        return Ok(Some(UsageSource::Gateway(client)));
+    }
+    if matches!(
+        gateway.authentication,
+        Some(LlmGatewayAuthentication::ControllerJwt { .. })
+    ) && let Some(controller) = state.config.controller.as_ref()
+    {
+        return Ok(Some(UsageSource::Controller(controller)));
+    }
+    Ok(None)
+}
+
+fn usage_unavailable(context: &str) -> impl Fn(anyhow::Error) -> (StatusCode, String) + '_ {
+    move |error| (StatusCode::BAD_GATEWAY, format!("{context}: {error:#}"))
+}
+
+async fn llm_gateway_usage(
+    State(state): State<AppState>,
+    Query(query): Query<RangeQuery>,
+) -> Result<Json<Option<LlmUsageSummary>>, (StatusCode, String)> {
+    let Some(source) = usage_source(&state)? else {
+        return Ok(Json(None));
+    };
+    let summary = match source {
+        UsageSource::Gateway(client) => client.summary(query.range, &UsageScope::default()).await,
+        UsageSource::Controller(controller) => {
+            remote::llm_usage(controller, &state.state_dir, query.range).await
+        }
+    }
+    .map_err(usage_unavailable("query LLM gateway usage"))?;
+    Ok(Json(Some(summary)))
+}
+
+async fn llm_gateway_usage_interactions(
+    State(state): State<AppState>,
+    Query(query): Query<InteractionsQuery>,
+) -> Result<Json<Option<LlmUsageInteractions>>, (StatusCode, String)> {
+    query
+        .validate()
+        .map_err(|message| (StatusCode::BAD_REQUEST, message.to_owned()))?;
+    let Some(source) = usage_source(&state)? else {
+        return Ok(Json(None));
+    };
+    let interactions = match source {
+        UsageSource::Gateway(client) => client.interactions(&query, &UsageScope::default()).await,
+        UsageSource::Controller(controller) => {
+            remote::llm_usage_interactions(controller, &state.state_dir, &query).await
+        }
+    }
+    .map_err(usage_unavailable("query LLM gateway interactions"))?;
+    Ok(Json(Some(interactions)))
 }
 
 async fn telemetry(

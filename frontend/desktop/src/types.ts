@@ -32,6 +32,14 @@ export interface ManagedDeviceSnapshot {
   detail: string | null;
 }
 
+export type {
+  LlmUsageBreakdown,
+  LlmUsageInteraction,
+  LlmUsageInteractions,
+  LlmUsageRange,
+  LlmUsageSummary,
+} from "@agentdesktop/ui";
+
 export interface McpServer {
   name: string;
   transport: string;

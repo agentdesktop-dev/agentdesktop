@@ -13,7 +13,9 @@ use agentdesktop_client as client;
 use agentdesktop_core::{
     DEFAULT_SOCKET_PATH, VERSION,
     config::DaemonConfig,
-    model::{Discovery, EnrollmentStatus, Health},
+    model::{
+        Discovery, EnrollmentStatus, Health, LlmUsageInteractions, LlmUsageRange, LlmUsageSummary,
+    },
 };
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -543,6 +545,49 @@ async fn get_remote_config() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
+async fn get_llm_usage(range: LlmUsageRange) -> Result<Option<LlmUsageSummary>, String> {
+    client::get(
+        &socket_path(),
+        &format!("/v1/llm-gateway/usage?range={}", range.as_str()),
+    )
+    .await
+    .map_err(|error| format!("{error:#}"))
+}
+
+#[tauri::command]
+async fn get_llm_usage_interactions(
+    from: String,
+    to: String,
+    model: String,
+    agent: String,
+    cursor: Option<String>,
+) -> Result<Option<LlmUsageInteractions>, String> {
+    let path = usage_interactions_path(&from, &to, &model, &agent, cursor.as_deref());
+    client::get(&socket_path(), &path)
+        .await
+        .map_err(|error| format!("{error:#}"))
+}
+
+fn usage_interactions_path(
+    from: &str,
+    to: &str,
+    model: &str,
+    agent: &str,
+    cursor: Option<&str>,
+) -> String {
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    query.append_pair("from", from);
+    query.append_pair("to", to);
+    query.append_pair("model", model);
+    query.append_pair("agent", agent);
+    if let Some(cursor) = cursor {
+        query.append_pair("cursor", cursor);
+    }
+    let query = query.finish();
+    format!("/v1/llm-gateway/usage/interactions?{query}")
+}
+
+#[tauri::command]
 async fn logout_managed_device() -> Result<(), String> {
     client::post_json(&socket_path(), "/v1/logout", &())
         .await
@@ -662,6 +707,8 @@ fn run_desktop() -> anyhow::Result<()> {
             get_managed_device_status,
             get_discovery,
             get_remote_config,
+            get_llm_usage,
+            get_llm_usage_interactions,
             logout_managed_device,
             setup_managed_device
         ])
@@ -748,6 +795,27 @@ mod enrollment_tests {
 
         assert_eq!(status.status, "awaitingAuthentication");
         assert_eq!(opened, ["https://login.example/authorize"]);
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::usage_interactions_path;
+
+    #[test]
+    fn interaction_query_encodes_model_agent_and_cursor() {
+        let path = usage_interactions_path(
+            "2026-09-01T00:00:00Z",
+            "2026-09-07T00:00:00Z",
+            "model/name",
+            "VS Code + agent",
+            Some("next/page="),
+        );
+
+        assert_eq!(
+            path,
+            "/v1/llm-gateway/usage/interactions?from=2026-09-01T00%3A00%3A00Z&to=2026-09-07T00%3A00%3A00Z&model=model%2Fname&agent=VS+Code+%2B+agent&cursor=next%2Fpage%3D"
+        );
     }
 }
 

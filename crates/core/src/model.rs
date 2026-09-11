@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
@@ -87,6 +87,134 @@ pub struct EnrollmentStatus {
 pub struct LlmGatewayCredential {
     pub credential: String,
     pub expires_at_unix_seconds: u64,
+}
+
+/// Estimated LLM usage reported by the configured gateway.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmUsageSummary {
+    pub from: String,
+    pub to: String,
+    /// ISO 4217 code for every `estimated_cost` in this report.
+    pub currency: String,
+    pub requests: u64,
+    pub total_tokens: u64,
+    pub estimated_cost: f64,
+    #[serde(default)]
+    pub breakdown: Vec<LlmUsageBreakdown>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LlmUsageRange {
+    Hour,
+    #[default]
+    Day,
+    Week,
+    Month,
+}
+
+impl LlmUsageRange {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hour => "hour",
+            Self::Day => "day",
+            Self::Week => "week",
+            Self::Month => "month",
+        }
+    }
+
+    pub fn duration(self) -> Duration {
+        match self {
+            Self::Hour => Duration::from_secs(60 * 60),
+            Self::Day => Duration::from_secs(24 * 60 * 60),
+            Self::Week => Duration::from_secs(7 * 24 * 60 * 60),
+            Self::Month => Duration::from_secs(30 * 24 * 60 * 60),
+        }
+    }
+}
+
+impl std::str::FromStr for LlmUsageRange {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "hour" => Ok(Self::Hour),
+            "day" => Ok(Self::Day),
+            "week" => Ok(Self::Week),
+            "month" => Ok(Self::Month),
+            _ => Err("invalid usage range"),
+        }
+    }
+}
+
+/// Estimated LLM usage for one model and client agent combination.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmUsageBreakdown {
+    pub model: String,
+    pub agent: String,
+    pub requests: u64,
+    pub total_tokens: u64,
+    pub estimated_cost: f64,
+}
+
+/// Estimated LLM usage across a fleet, grouped by the enrolled device that sent each request.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmFleetUsageSummary {
+    pub from: String,
+    pub to: String,
+    /// ISO 4217 code for every `estimated_cost` in this report.
+    pub currency: String,
+    pub requests: u64,
+    pub total_tokens: u64,
+    pub estimated_cost: f64,
+    #[serde(default)]
+    pub devices: Vec<LlmDeviceUsage>,
+}
+
+/// Estimated LLM usage attributed to one device. `device_id` is `None` for
+/// requests whose gateway credential carried no device identity.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmDeviceUsage {
+    pub device_id: Option<String>,
+    pub hostname: Option<String>,
+    pub requests: u64,
+    pub total_tokens: u64,
+    pub estimated_cost: f64,
+}
+
+/// Metadata-only LLM requests for one model and client agent combination.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmUsageInteractions {
+    /// ISO 4217 code for every `estimated_cost` in this page.
+    pub currency: String,
+    pub interactions: Vec<LlmUsageInteraction>,
+    pub next_cursor: Option<String>,
+}
+
+/// Metadata captured for one LLM request. Prompt and response content are excluded.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmUsageInteraction {
+    pub id: String,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub http_status: Option<u16>,
+    pub failed: bool,
+    pub operation: Option<String>,
+    pub provider: Option<String>,
+    pub request_model: String,
+    pub response_model: Option<String>,
+    pub agent: String,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub estimated_cost: Option<f64>,
 }
 
 /// A timestamped telemetry observation emitted by a managed device.

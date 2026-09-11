@@ -4,6 +4,8 @@ import {
   getBootstrap,
   getConnectorStatus,
   getDiscovery,
+  getLlmUsage,
+  getLlmUsageInteractions,
   getManagedDeviceStatus,
   getRemoteConfig,
   logoutManagedDevice,
@@ -14,24 +16,29 @@ import type {
   Bootstrap,
   ConnectorSnapshot,
   Discovery,
+  LlmUsageRange,
+  LlmUsageSummary,
   ManagedDeviceSnapshot,
   Settings,
 } from "./types";
 
-export type View = "home" | "tools";
+export type View = "home" | "tools" | "usage";
 export type Notice = { tone: "success" | "error"; message: string } | null;
 
 type StatusSource =
   | "connector"
   | "managedDevice"
   | "discovery"
-  | "remoteConfig";
+  | "remoteConfig"
+  | "llmUsage";
 type StatusErrors = Partial<Record<StatusSource, string>>;
 type StatusUpdate = {
+  usageRange: LlmUsageRange;
   connector: PromiseSettledResult<ConnectorSnapshot>;
   managedDevice: PromiseSettledResult<ManagedDeviceSnapshot>;
   discovery: PromiseSettledResult<Discovery>;
   remoteConfig: PromiseSettledResult<string | null>;
+  llmUsage: PromiseSettledResult<LlmUsageSummary | null>;
 };
 
 const loadingSettings: Settings = { openOnStartup: true };
@@ -41,21 +48,32 @@ const statusSourceLabels: Record<StatusSource, string> = {
   managedDevice: "organization status",
   discovery: "tool inventory",
   remoteConfig: "advanced configuration",
+  llmUsage: "LLM usage",
 };
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function getStatusUpdate(): Promise<StatusUpdate> {
-  const [connector, managedDevice, discovery, remoteConfig] =
+async function getStatusUpdate(
+  usageRange: LlmUsageRange,
+): Promise<StatusUpdate> {
+  const [connector, managedDevice, discovery, remoteConfig, llmUsage] =
     await Promise.allSettled([
       getConnectorStatus(),
       getManagedDeviceStatus(),
       getDiscovery(),
       getRemoteConfig(),
+      getLlmUsage(usageRange),
     ]);
-  return { connector, managedDevice, discovery, remoteConfig };
+  return {
+    usageRange,
+    connector,
+    managedDevice,
+    discovery,
+    remoteConfig,
+    llmUsage,
+  };
 }
 
 function statusErrorMessage(errors: StatusErrors): string | null {
@@ -76,6 +94,10 @@ export function useDesktopModel() {
     useState<ManagedDeviceSnapshot | null>(null);
   const [discovery, setDiscovery] = useState<Discovery | null>(null);
   const [remoteConfig, setRemoteConfig] = useState<string | null>(null);
+  const [llmUsage, setLlmUsage] = useState<LlmUsageSummary | null>(null);
+  const [usageRange, setUsageRange] = useState<LlmUsageRange>("day");
+  const [loadedUsageRange, setLoadedUsageRange] =
+    useState<LlmUsageRange>("day");
   const [notice, setNotice] = useState<Notice>(null);
   const [statusErrors, setStatusErrors] = useState<StatusErrors>({});
   const [hasLoadedStatus, setHasLoadedStatus] = useState(false);
@@ -109,6 +131,12 @@ export function useDesktopModel() {
         setRemoteConfig(update.remoteConfig.value);
       } else {
         nextErrors.remoteConfig = errorMessage(update.remoteConfig.reason);
+      }
+      if (update.llmUsage.status === "fulfilled") {
+        setLlmUsage(update.llmUsage.value);
+        setLoadedUsageRange(update.usageRange);
+      } else {
+        nextErrors.llmUsage = errorMessage(update.llmUsage.reason);
       }
       setStatusErrors(nextErrors);
       setHasLoadedStatus(true);
@@ -205,7 +233,7 @@ export function useDesktopModel() {
     let active = true;
     let interval: number | undefined;
     const refreshStatus = async () => {
-      const update = await getStatusUpdate();
+      const update = await getStatusUpdate(usageRange);
       if (active) applyStatusUpdate(update);
     };
     const stopPolling = () => {
@@ -234,12 +262,12 @@ export function useDesktopModel() {
       stopPolling();
       document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
-  }, []);
+  }, [usageRange]);
 
   function refresh() {
     setNotice(null);
     startRefreshing(async () => {
-      applyStatusUpdate(await getStatusUpdate());
+      applyStatusUpdate(await getStatusUpdate(usageRange));
     });
   }
 
@@ -335,11 +363,24 @@ export function useDesktopModel() {
     setNotice(null);
   }
 
+  function changeUsageRange(nextRange: LlmUsageRange) {
+    if (nextRange === usageRange) return;
+    setStatusErrors((current) => {
+      if (!current.llmUsage) return current;
+      const next = { ...current };
+      delete next.llmUsage;
+      return next;
+    });
+    setUsageRange(nextRange);
+  }
+
   const pageTitle = needsEnrollment
     ? "Enrollment"
     : view === "home"
       ? "Status"
-      : "Tools";
+      : view === "tools"
+        ? "Tools"
+        : "Usage";
 
   return {
     bootstrap,
@@ -353,6 +394,9 @@ export function useDesktopModel() {
     isManaging,
     isRefreshing,
     isSaving,
+    llmUsage,
+    loadUsageInteractions: getLlmUsageInteractions,
+    loadedUsageRange,
     logout,
     managedDevice,
     navigate,
@@ -364,6 +408,10 @@ export function useDesktopModel() {
     remoteConfig,
     setOpenOnStartup,
     settings,
+    setUsageRange: changeUsageRange,
+    isUsageRangeLoading:
+      loadedUsageRange !== usageRange && !statusErrors.llmUsage,
+    usageRange,
     view,
   };
 }

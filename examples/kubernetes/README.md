@@ -65,7 +65,21 @@ kubectl -n agentgateway-system create secret generic anthropic \
   --dry-run=client --output=yaml | kubectl apply -f -
 ```
 
-Create the Gateway and its wildcard Anthropic `AgentgatewayModel`:
+Give Agentgateway its request-log database and model cost catalog. The
+database lives on the example PostgreSQL server next to the controller's, and
+the catalog reuses the standalone example's rates:
+
+```console
+kubectl -n agentgateway-system create secret generic agentgateway-database \
+  --from-literal=url='postgresql://agentdesktop:agentdesktop@postgres.agentdesktop.svc.cluster.local:5432/agentgateway?sslmode=disable' \
+  --dry-run=client --output=yaml | kubectl apply -f -
+kubectl -n agentgateway-system create configmap agentgateway-model-catalog \
+  --from-file=catalog.json=examples/standalone-costs/costs.json \
+  --dry-run=client --output=yaml | kubectl apply -f -
+```
+
+Create the Gateway, its parameters, and its wildcard Anthropic
+`AgentgatewayModel`:
 
 ```console
 kubectl apply -f examples/kubernetes/agentgateway.yaml
@@ -153,8 +167,29 @@ short-lived JWT from the controller. Agentgateway requires the
 signature against `https://agentdesktop.agentdesktop.svc.cluster.local/.well-known/jwks.json`
 on the controller's existing port 443 Service. A backend policy supplies the
 development CA for that TLS connection. Agentgateway access logs include the
-authenticated `llm.client` and `user` JWT attributes. The Anthropic API key is
-never distributed to the workstation.
+authenticated `llm.client`, `user`, and `device_id` JWT attributes. The
+Anthropic API key is never distributed to the workstation.
+
+## Review LLM usage
+
+Every gateway replica writes metadata-only request records, token counts, and
+catalog-priced estimated cost to the `agentgateway` PostgreSQL database. The
+controller queries agentgateway's analytics API over the cluster-internal
+`agentgateway-admin` Service; that Service is never exposed outside the
+cluster and a NetworkPolicy admits only controller Pods.
+
+Open the controller UI through a port-forward and choose **Usage** to see
+estimated cost per device, or open a device to see its model and agent
+breakdown:
+
+```console
+kubectl -n agentdesktop port-forward deployment/agentdesktop 8080:8080
+```
+
+On the workstation, agentdesktop's Usage view asks the controller for the same
+report. The controller identifies the device from its mTLS certificate and
+filters every query to that device, so one workstation can never read another
+workstation's usage.
 
 ## Clean up
 

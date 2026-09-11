@@ -1,3 +1,5 @@
+@import "./usage.css";
+
 :root {
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
@@ -5,6 +7,7 @@
   color: #1f2328;
   background: #fff;
   font-synthesis: none;
+  --ink: #1f2328;
   --muted: #656d76;
   --subtle: #6b737c;
   --border: #d8dee4;

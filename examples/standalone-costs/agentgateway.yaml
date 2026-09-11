@@ -1,0 +1,124 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+config:
+  adminAddr: 0.0.0.0:15000
+  database:
+    url: sqlite:///data/requests.db?mode=rwc
+  storage:
+    mode: readOnly
+  modelCatalog:
+  - file: /etc/agentgateway/costs.json
+
+frontendPolicies:
+  accessLog:
+    add:
+      oauth.client: jwt.aud
+      user: jwt.email
+    database:
+      llm: metadata
+
+gateways:
+  gateway:
+    port: 4001
+
+binds:
+- port: 4002
+  listeners:
+  - name: vscode-copilot
+    protocol: HTTP
+    routes:
+    - name: copilot-models
+      matches:
+      - method: GET
+        path:
+          exact: /v1/models
+      - method: GET
+        path:
+          exact: /models
+      policies:
+        urlRewrite:
+          path:
+            full: /models
+      backends:
+      - host: api.githubcopilot.com:443
+        policies:
+          backendTLS: {}
+    - name: copilot
+      backends:
+      - ai:
+          name: copilot
+          provider:
+            copilot: {}
+          policies:
+            backendAuth:
+              passthrough: {}
+            ai:
+              routes:
+                /chat/completions: completions
+                /responses: responses
+                /embeddings: embeddings
+                /v1/chat/completions: completions
+                /v1/responses: responses
+                /v1/messages: messages
+                /v1/embeddings: embeddings
+                "*": detect
+
+routes:
+- name: reachability
+  gateways: gateway
+  matches:
+  - method: HEAD
+    path:
+      exact: /
+  policies:
+    directResponse:
+      status: 200
+
+llm:
+  gateways: gateway
+  policies:
+    jwtAuth:
+      mode: strict
+      issuer: http://127.0.0.1:5557/dex
+      audiences: [agentdesktop-local]
+      jwks:
+        file: /data/jwks.json
+  models:
+  # Codex defaults to OpenAI models; list them before the Anthropic catch-all.
+  - name: "gpt-5.6"
+    provider: openai
+    params:
+      apiKey: $OPENAI_API_KEY
+  - name: "gpt-5.5"
+    provider: openai
+    params:
+      apiKey: $OPENAI_API_KEY
+  - name: "gpt-5.4"
+    provider: openai
+    params:
+      apiKey: $OPENAI_API_KEY
+  - name: "gpt-5.4-mini"
+    provider: openai
+    params:
+      apiKey: $OPENAI_API_KEY
+  - name: "gpt-5.3-codex"
+    provider: openai
+    params:
+      apiKey: $OPENAI_API_KEY
+  - name: "gpt-5.2"
+    provider: openai
+    params:
+      apiKey: $OPENAI_API_KEY
+  # Claude desktop requires an explicit model
+  - name: "claude-haiku-4-5"
+    provider: anthropic
+    params:
+      apiKey: $ANTHROPIC_API_KEY
+  - name: "claude-sonnet-4-5"
+    provider: anthropic
+    params:
+      apiKey: $ANTHROPIC_API_KEY
+  # Claude code will not query our models and is fine with passthrough
+  - name: "*"
+    provider: anthropic
+    params:
+      apiKey: $ANTHROPIC_API_KEY

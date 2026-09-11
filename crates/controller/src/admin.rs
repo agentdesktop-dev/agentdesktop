@@ -1,9 +1,9 @@
-use std::{net::SocketAddr, time::SystemTime};
+use std::{collections::HashMap, net::SocketAddr, time::SystemTime};
 
 use anyhow::Context;
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{StatusCode, Uri, header},
     response::{IntoResponse, Response},
     routing::get,
@@ -12,7 +12,11 @@ use rust_embed::RustEmbed;
 use serde::Serialize;
 use tracing::info;
 
-use agentdesktop_core::config::DaemonConfig;
+use agentdesktop_core::{
+    config::DaemonConfig,
+    llm_usage::{InteractionsQuery, RangeQuery, UsageClient, UsageScope},
+    model::{LlmFleetUsageSummary, LlmUsageInteractions, LlmUsageSummary},
+};
 
 use crate::{
     daemon_config::DaemonConfigStore,
@@ -25,6 +29,7 @@ pub struct AdminState {
     database: Database,
     daemon_config: DaemonConfigStore,
     settings: ControllerSettings,
+    usage: Option<UsageClient>,
 }
 
 #[derive(Clone, Serialize)]
@@ -34,6 +39,7 @@ pub struct ControllerSettings {
     pub oidc_enabled: bool,
     pub tls_enabled: bool,
     pub gateway_jwt_enabled: bool,
+    pub llm_usage_enabled: bool,
 }
 
 impl AdminState {
@@ -41,11 +47,13 @@ impl AdminState {
         database: Database,
         daemon_config: DaemonConfigStore,
         settings: ControllerSettings,
+        usage: Option<UsageClient>,
     ) -> Self {
         Self {
             database,
             daemon_config,
             settings,
+            usage,
         }
     }
 }
@@ -77,6 +85,12 @@ pub async fn serve(
             "/api/v1/devices/{device_id}",
             get(device).delete(delete_device),
         )
+        .route("/api/v1/devices/{device_id}/usage", get(device_usage))
+        .route(
+            "/api/v1/devices/{device_id}/usage/interactions",
+            get(device_usage_interactions),
+        )
+        .route("/api/v1/usage", get(fleet_usage))
         .route("/api/v1/settings", get(settings))
         .fallback(get(asset))
         .with_state(state)
@@ -143,6 +157,71 @@ async fn settings(State(state): State<AdminState>) -> Json<ControllerSettings> {
     Json(state.settings)
 }
 
+/// Tenant-wide usage grouped by device. Operator-only: the admin listener is loopback.
+async fn fleet_usage(
+    State(state): State<AdminState>,
+    Query(query): Query<RangeQuery>,
+) -> Result<Json<Option<LlmFleetUsageSummary>>, AdminError> {
+    let Some(usage) = state.usage.as_ref() else {
+        return Ok(Json(None));
+    };
+    let mut summary = usage
+        .fleet_summary(query.range)
+        .await
+        .map_err(AdminError::Usage)?;
+    let hostnames: HashMap<String, String> = state
+        .database
+        .list_devices()
+        .await?
+        .into_iter()
+        .map(|device| (device.id, device.hostname))
+        .collect();
+    for row in &mut summary.devices {
+        row.hostname = row
+            .device_id
+            .as_deref()
+            .and_then(|device_id| hostnames.get(device_id).cloned());
+    }
+    Ok(Json(Some(summary)))
+}
+
+async fn device_usage(
+    State(state): State<AdminState>,
+    Path(device_id): Path<String>,
+    Query(query): Query<RangeQuery>,
+) -> Result<Json<Option<LlmUsageSummary>>, AdminError> {
+    let Some(usage) = state.usage.as_ref() else {
+        return Ok(Json(None));
+    };
+    if state.database.get_device(&device_id).await?.is_none() {
+        return Err(AdminError::NotFound);
+    }
+    let summary = usage
+        .summary(query.range, &UsageScope::device(device_id))
+        .await
+        .map_err(AdminError::Usage)?;
+    Ok(Json(Some(summary)))
+}
+
+async fn device_usage_interactions(
+    State(state): State<AdminState>,
+    Path(device_id): Path<String>,
+    Query(query): Query<InteractionsQuery>,
+) -> Result<Json<Option<LlmUsageInteractions>>, AdminError> {
+    query.validate().map_err(AdminError::BadRequest)?;
+    let Some(usage) = state.usage.as_ref() else {
+        return Ok(Json(None));
+    };
+    if state.database.get_device(&device_id).await?.is_none() {
+        return Err(AdminError::NotFound);
+    }
+    let interactions = usage
+        .interactions(&query, &UsageScope::device(device_id))
+        .await
+        .map_err(AdminError::Usage)?;
+    Ok(Json(Some(interactions)))
+}
+
 #[derive(Serialize)]
 struct ActiveDaemonConfig {
     config: Option<DaemonConfig>,
@@ -198,6 +277,8 @@ fn unix_time_seconds() -> i64 {
 
 enum AdminError {
     Internal(anyhow::Error),
+    Usage(anyhow::Error),
+    BadRequest(&'static str),
     NotFound,
 }
 
@@ -211,6 +292,11 @@ impl IntoResponse for AdminError {
     fn into_response(self) -> Response {
         match self {
             Self::NotFound => (StatusCode::NOT_FOUND, "device not found").into_response(),
+            Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message).into_response(),
+            Self::Usage(error) => {
+                tracing::warn!(error = %format!("{error:#}"), "LLM usage query failed");
+                (StatusCode::BAD_GATEWAY, "LLM usage is unavailable").into_response()
+            }
             Self::Internal(error) => {
                 tracing::error!(%error, "admin API operation failed");
                 (StatusCode::INTERNAL_SERVER_ERROR, "controller state error").into_response()

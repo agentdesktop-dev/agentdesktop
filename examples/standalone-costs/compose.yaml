@@ -1,0 +1,47 @@
+services:
+  dex:
+    image: ghcr.io/dexidp/dex:v2.45.1
+    command: dex serve /etc/dex/config.yaml
+    ports:
+    - 127.0.0.1:5557:5557
+    volumes:
+    - ./dex.yaml:/etc/dex/config.yaml:ro
+
+  agentgateway-data-init:
+    image: alpine:3.23.3
+    depends_on:
+    - dex
+    command:
+    - /bin/sh
+    - -ec
+    - |
+      until wget -qO /data/jwks.json.next http://dex:5557/dex/keys; do
+        sleep 1
+      done
+      mv /data/jwks.json.next /data/jwks.json
+      chown -R 65532:65532 /data
+    volumes:
+    - agentgateway-data:/data
+
+  agentgateway:
+    image: cr.agentgateway.dev/agentgateway:v1.5.0
+    command: -f /etc/agentgateway/config.yaml
+    depends_on:
+      dex:
+        condition: service_started
+      agentgateway-data-init:
+        condition: service_completed_successfully
+    ports:
+    - 127.0.0.1:4001:4001
+    - 127.0.0.1:4002:4002
+    - 127.0.0.1:15000:15000
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-unused}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-unused}
+    volumes:
+    - ./agentgateway.yaml:/etc/agentgateway/config.yaml:ro
+    - ./costs.json:/etc/agentgateway/costs.json:ro
+    - agentgateway-data:/data
+
+volumes:
+  agentgateway-data:

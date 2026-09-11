@@ -14,6 +14,16 @@ stringData:
   POSTGRES_USER: agentdesktop
   POSTGRES_PASSWORD: agentdesktop
 ---
+# Agentgateway keeps its request log in its own database on the same server.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: agentdesktop
+data:
+  agentgateway.sql: |
+    CREATE DATABASE agentgateway OWNER agentdesktop;
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -49,9 +59,15 @@ spec:
         volumeMounts:
         - name: data
           mountPath: /var/lib/postgresql/data
+        - name: init
+          mountPath: /docker-entrypoint-initdb.d
+          readOnly: true
       volumes:
       - name: data
         emptyDir: {}
+      - name: init
+        configMap:
+          name: postgres-init
 ---
 apiVersion: v1
 kind: Service

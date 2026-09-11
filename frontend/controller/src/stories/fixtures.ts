@@ -3,6 +3,8 @@ import type {
   DaemonConfigDocument,
   Device,
   DeviceDetail,
+  LlmFleetUsageSummary,
+  LlmUsageSummary,
   Overview,
 } from "../types";
 
@@ -269,6 +271,71 @@ export const controllerSettings: ControllerSettings = {
   oidc_enabled: true,
   tls_enabled: true,
   gateway_jwt_enabled: true,
+  llm_usage_enabled: true,
+};
+
+export const fleetUsage: LlmFleetUsageSummary = {
+  from: "2026-09-07T12:00:00Z",
+  to: "2026-09-08T12:00:00Z",
+  currency: "USD",
+  requests: 214,
+  totalTokens: 1_842_310,
+  estimatedCost: 6.4821,
+  devices: [
+    {
+      deviceId: macDevice.id,
+      hostname: macDevice.hostname,
+      requests: 151,
+      totalTokens: 1_390_002,
+      estimatedCost: 4.9107,
+    },
+    {
+      deviceId: linuxDevice.id,
+      hostname: linuxDevice.hostname,
+      requests: 58,
+      totalTokens: 431_908,
+      estimatedCost: 1.5464,
+    },
+    {
+      deviceId: "device-retired-00000000",
+      hostname: null,
+      requests: 4,
+      totalTokens: 20_000,
+      estimatedCost: 0.025,
+    },
+    {
+      deviceId: null,
+      hostname: null,
+      requests: 1,
+      totalTokens: 400,
+      estimatedCost: 0,
+    },
+  ],
+};
+
+export const deviceUsage: LlmUsageSummary = {
+  from: fleetUsage.from,
+  to: fleetUsage.to,
+  currency: "USD",
+  requests: 151,
+  totalTokens: 1_390_002,
+  estimatedCost: 4.9107,
+  breakdown: [
+    {
+      model: "claude-sonnet-4-5",
+      agent: "claude-cli",
+      requests: 96,
+      totalTokens: 1_102_400,
+      estimatedCost: 4.3311,
+    },
+    {
+      model: "claude-haiku-4-5",
+      agent: "codex_cli_rs",
+      requests: 55,
+      totalTokens: 287_602,
+      estimatedCost: 0.5796,
+    },
+  ],
 };
 
 export const activeDaemonConfig: DaemonConfigDocument = {

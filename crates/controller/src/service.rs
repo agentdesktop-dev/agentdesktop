@@ -3,8 +3,9 @@ use std::pin::Pin;
 use agentdesktop_proto::fleet::{
     AgentMessage, BeginEnrollmentRequest, BeginEnrollmentResponse, CompleteEnrollmentRequest,
     ControllerMessage, DeviceCertificateResponse, EnrollResponse, LlmGatewayCredentialRequest,
-    LlmGatewayCredentialResponse, RenewDeviceCertificateRequest, agent_message, controller_message,
-    fleet_agent_server::FleetAgent,
+    LlmGatewayCredentialResponse, LlmUsageInteractionsRequest, LlmUsageInteractionsResponse,
+    LlmUsageRequest, LlmUsageResponse, RenewDeviceCertificateRequest, agent_message,
+    controller_message, fleet_agent_server::FleetAgent,
 };
 use futures_core::Stream;
 use tokio::{sync::mpsc, time};
@@ -14,7 +15,11 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 use x509_parser::{extensions::GeneralName, parse_x509_certificate};
 
-use agentdesktop_core::config::LlmGatewayAuthentication;
+use agentdesktop_core::{
+    config::LlmGatewayAuthentication,
+    llm_usage::{InteractionsQuery, UsageClient, UsageScope},
+    model::LlmUsageRange,
+};
 
 use crate::{
     daemon_config::DaemonConfigStore,
@@ -31,6 +36,7 @@ pub struct FleetAgentService {
     daemon_config: DaemonConfigStore,
     gateway_jwt_issuer: Option<GatewayJwtIssuer>,
     device_certificate_issuer: Option<DeviceCertificateIssuer>,
+    usage: Option<UsageClient>,
 }
 
 impl FleetAgentService {
@@ -40,6 +46,7 @@ impl FleetAgentService {
         daemon_config: DaemonConfigStore,
         gateway_jwt_issuer: Option<GatewayJwtIssuer>,
         device_certificate_issuer: Option<DeviceCertificateIssuer>,
+        usage: Option<UsageClient>,
     ) -> Self {
         Self {
             oidc,
@@ -47,6 +54,7 @@ impl FleetAgentService {
             daemon_config,
             gateway_jwt_issuer,
             device_certificate_issuer,
+            usage,
         }
     }
 }
@@ -190,6 +198,49 @@ impl FleetAgent for FleetAgentService {
         }))
     }
 
+    async fn get_llm_usage(
+        &self,
+        request: Request<LlmUsageRequest>,
+    ) -> Result<Response<LlmUsageResponse>, Status> {
+        // The device is the only scope a daemon can read; it comes from the
+        // mTLS certificate, never from the request body.
+        let device_id = self.authenticate_device(&request).await?;
+        let usage = self.usage_client()?;
+        let range = parse_usage_range(&request.into_inner().range)?;
+        let summary = usage
+            .summary(range, &UsageScope::device(device_id))
+            .await
+            .map_err(usage_unavailable)?;
+        let summary_json = serde_json::to_vec(&summary).map_err(|error| internal(error.into()))?;
+        Ok(Response::new(LlmUsageResponse { summary_json }))
+    }
+
+    async fn get_llm_usage_interactions(
+        &self,
+        request: Request<LlmUsageInteractionsRequest>,
+    ) -> Result<Response<LlmUsageInteractionsResponse>, Status> {
+        let device_id = self.authenticate_device(&request).await?;
+        let usage = self.usage_client()?;
+        let request = request.into_inner();
+        let query = InteractionsQuery {
+            from: request.from,
+            to: request.to,
+            model: request.model,
+            agent: request.agent,
+            cursor: Some(request.cursor).filter(|cursor| !cursor.is_empty()),
+        };
+        query.validate().map_err(Status::invalid_argument)?;
+        let interactions = usage
+            .interactions(&query, &UsageScope::device(device_id))
+            .await
+            .map_err(usage_unavailable)?;
+        let interactions_json =
+            serde_json::to_vec(&interactions).map_err(|error| internal(error.into()))?;
+        Ok(Response::new(LlmUsageInteractionsResponse {
+            interactions_json,
+        }))
+    }
+
     async fn connect(
         &self,
         request: Request<tonic::Streaming<AgentMessage>>,
@@ -310,6 +361,12 @@ impl FleetAgent for FleetAgentService {
 }
 
 impl FleetAgentService {
+    fn usage_client(&self) -> Result<&UsageClient, Status> {
+        self.usage
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("LLM usage reporting is not configured"))
+    }
+
     async fn authenticate_device<T>(&self, request: &Request<T>) -> Result<String, Status> {
         let certificate_device_id = peer_certificate_device_id(request)?;
         self.authenticate_device_identity(certificate_device_id.as_deref(), request.metadata())
@@ -523,6 +580,19 @@ fn internal(err: anyhow::Error) -> Status {
     Status::internal("controller state error")
 }
 
+fn parse_usage_range(range: &str) -> Result<LlmUsageRange, Status> {
+    // An unset proto string field arrives empty; treat it as the default window.
+    if range.is_empty() {
+        return Ok(LlmUsageRange::default());
+    }
+    range.parse().map_err(Status::invalid_argument)
+}
+
+fn usage_unavailable(err: anyhow::Error) -> Status {
+    warn!(error = %format!("{err:#}"), "LLM usage query failed");
+    Status::unavailable("LLM usage is unavailable")
+}
+
 fn invalid_enrollment(err: anyhow::Error) -> Status {
     warn!(error = %err, "OIDC enrollment failed");
     Status::unauthenticated("OIDC enrollment failed")
@@ -551,29 +621,162 @@ fn invalid_access_token(err: anyhow::Error) -> Status {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use agentdesktop_core::llm_usage::UsageClient;
+    use agentdesktop_proto::fleet::{LlmUsageRequest, fleet_agent_server::FleetAgent};
+    use axum::{Json, Router, routing::post};
     use rcgen::{CertificateParams, KeyPair};
-    use tonic::Code;
+    use serde_json::{Value, json};
+    use tokio::sync::Mutex;
+    use tonic::{Code, Request};
 
     use super::{FleetAgentService, device_id_from_certificate};
     use crate::{daemon_config::DaemonConfigStore, database::Database, oidc::OidcPrincipal};
 
-    #[tokio::test]
-    async fn device_authentication_binds_oidc_issuer_and_subject() {
-        let device_id = "7ca03414-bb20-4c80-98ef-7b0538b988ba";
+    async fn temporary_database(label: &str) -> Database {
         let path = std::env::temp_dir().join(format!(
-            "agentdesktop-mtls-{}-{}.db",
+            "agentdesktop-{label}-{}-{}.db",
             std::process::id(),
             rand::random::<u64>()
         ));
-        let database = Database::connect(&format!("sqlite://{}?mode=rwc", path.display()))
+        Database::connect(&format!("sqlite://{}?mode=rwc", path.display()))
             .await
-            .expect("connect database");
+            .expect("connect database")
+    }
+
+    /// Serves a fake Agentgateway analytics API and records every request body.
+    async fn fake_gateway() -> (UsageClient, Arc<Mutex<Vec<Value>>>) {
+        let recorded: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handler_recorded = recorded.clone();
+        tokio::spawn(async move {
+            let router = Router::new().route(
+                "/api/logs/analytics/summary",
+                post(move |Json(request): Json<Value>| {
+                    let recorded = handler_recorded.clone();
+                    async move {
+                        recorded.lock().await.push(request);
+                        Json(json!({
+                            "timeRange": { "from": "2026-09-02T12:00:00Z", "to": "2026-09-03T12:00:00Z" },
+                            "bucketSeconds": 86400,
+                            "buckets": [],
+                            "groups": [],
+                            "filterOptions": {}
+                        }))
+                    }
+                }),
+            );
+            axum::serve(listener, router).await.unwrap();
+        });
+        let client = UsageClient::new(
+            format!("http://{address}/api/logs/analytics/summary")
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        (client, recorded)
+    }
+
+    #[tokio::test]
+    async fn usage_rpc_rejects_callers_without_a_device_certificate() {
+        let database = temporary_database("usage-unauthenticated").await;
+        let (usage, recorded) = fake_gateway().await;
+        let service = FleetAgentService::new(
+            None,
+            database,
+            DaemonConfigStore::new(None),
+            None,
+            None,
+            Some(usage),
+        );
+
+        let status = service
+            .get_llm_usage(Request::new(LlmUsageRequest {
+                range: "day".to_owned(),
+            }))
+            .await
+            .expect_err("missing certificate must fail");
+
+        assert_eq!(status.code(), Code::Unauthenticated);
+        assert!(
+            recorded.lock().await.is_empty(),
+            "gateway must not be queried"
+        );
+    }
+
+    #[tokio::test]
+    async fn device_usage_is_always_filtered_to_the_authenticated_device() {
+        let device_a = "7ca03414-bb20-4c80-98ef-7b0538b988ba";
+        let device_b = "0f8fad5b-d9cb-469f-a165-70867728950e";
+        let database = temporary_database("usage-scope").await;
+        for device in [device_a, device_b] {
+            database
+                .enroll_device(device, "host", "issuer", "subject", None)
+                .await
+                .expect("enroll device");
+        }
+        let (usage, recorded) = fake_gateway().await;
+        let service = FleetAgentService::new(
+            None,
+            database,
+            DaemonConfigStore::new(None),
+            None,
+            None,
+            Some(usage),
+        );
+
+        // Simulate the identity that `authenticate_device` derives from device A's
+        // certificate, then run the same scoped query the RPC performs.
+        let authenticated = service
+            .authenticate_device_certificate_identity(
+                device_a,
+                &OidcPrincipal {
+                    issuer: "issuer".to_owned(),
+                    subject: "subject".to_owned(),
+                },
+            )
+            .await
+            .unwrap();
+        service
+            .usage_client()
+            .unwrap()
+            .summary(
+                agentdesktop_core::model::LlmUsageRange::Day,
+                &agentdesktop_core::llm_usage::UsageScope::device(authenticated),
+            )
+            .await
+            .unwrap();
+
+        let recorded = recorded.lock().await;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(
+            recorded[0]["filters"]["attributes"]["device_id"],
+            json!(device_a)
+        );
+        assert_ne!(
+            recorded[0]["filters"]["attributes"]["device_id"],
+            json!(device_b)
+        );
+    }
+
+    #[tokio::test]
+    async fn device_authentication_binds_oidc_issuer_and_subject() {
+        let device_id = "7ca03414-bb20-4c80-98ef-7b0538b988ba";
+        let database = temporary_database("mtls").await;
         database
             .enroll_device(device_id, "host", "issuer", "subject", None)
             .await
             .expect("enroll device");
-        let service =
-            FleetAgentService::new(None, database, DaemonConfigStore::new(None), None, None);
+        let service = FleetAgentService::new(
+            None,
+            database,
+            DaemonConfigStore::new(None),
+            None,
+            None,
+            None,
+        );
         let principal = |issuer: &str, subject: &str| OidcPrincipal {
             issuer: issuer.to_owned(),
             subject: subject.to_owned(),
@@ -626,8 +829,14 @@ mod tests {
             .enroll_device(device_id, "host", "", "subject", None)
             .await
             .expect("enroll legacy device");
-        let service =
-            FleetAgentService::new(None, database, DaemonConfigStore::new(None), None, None);
+        let service = FleetAgentService::new(
+            None,
+            database,
+            DaemonConfigStore::new(None),
+            None,
+            None,
+            None,
+        );
 
         let status = service
             .authenticate_device_certificate_identity(

@@ -1,6 +1,7 @@
 import agentdesktopLogo from "@brand/logo.svg";
 import agentdesktopMark from "@brand/mark.svg";
 import {
+  ChartNoAxesCombined,
   Gauge,
   Laptop,
   RefreshCw,
@@ -14,6 +15,7 @@ import { Link } from "../router";
 const navigation = [
   { href: "/", label: "Overview", icon: Gauge },
   { href: "/devices", label: "Devices", icon: Laptop },
+  { href: "/usage", label: "Usage", icon: ChartNoAxesCombined },
   { href: "/configuration", label: "Configuration", icon: SlidersHorizontal },
   { href: "/settings", label: "Settings", icon: Settings },
 ];

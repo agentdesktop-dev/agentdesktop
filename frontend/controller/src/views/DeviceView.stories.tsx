@@ -1,9 +1,11 @@
+import { UsageReport } from "@agentdesktop/ui";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, userEvent, within } from "storybook/test";
 
 import { ControllerStoryFrame } from "../stories/ControllerStoryFrame";
 import {
   deviceDetail,
+  deviceUsage,
   emptyDeviceDetail,
   failedDeviceDetail,
 } from "../stories/fixtures";
@@ -39,6 +41,36 @@ export const Healthy: Story = {
   play: async ({ canvas }) => {
     await expect(canvas.getByText("Ollama")).toBeVisible();
     await expect(canvas.getByText("qwen3:8b")).toBeVisible();
+  },
+};
+
+export const WithUsage: Story = {
+  args: {
+    usage: (
+      <UsageReport
+        llmUsage={deviceUsage}
+        range="day"
+        loadedRange="day"
+        isRangeLoading={false}
+        onRangeChange={fn()}
+        onLoadInteractions={async () => ({
+          currency: "USD",
+          interactions: [],
+          nextCursor: null,
+        })}
+        title="Device usage"
+      />
+    ),
+  },
+  play: async ({ canvas }) => {
+    await expect(canvas.getByText("Device usage")).toBeVisible();
+    await expect(canvas.getByText("$4.91")).toBeVisible();
+    await expect(
+      canvas.getByRole("button", { name: /claude-sonnet-4-5/ }),
+    ).toBeVisible();
+    await expect(
+      canvas.getByText("Codex", { selector: "small" }),
+    ).toBeVisible();
   },
 };
 

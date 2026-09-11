@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import { useApi } from "./api";
 import { ControllerShell } from "./components/ControllerShell";
+import { DeviceUsage } from "./components/DeviceUsage";
 import { ErrorState, NotFound, PageSkeleton } from "./components/ViewStates";
 import { navigate, usePath } from "./router";
 import type {
@@ -9,6 +10,8 @@ import type {
   ControllerSettings,
   Device,
   DeviceDetail,
+  LlmFleetUsageSummary,
+  LlmUsageRange,
   Overview,
 } from "./types";
 import { ConfigurationView } from "./views/ConfigurationView";
@@ -16,6 +19,7 @@ import { DevicesView } from "./views/DevicesView";
 import { DeviceView } from "./views/DeviceView";
 import { OverviewView } from "./views/OverviewView";
 import { SettingsView } from "./views/SettingsView";
+import { UsageView } from "./views/UsageView";
 
 export function App() {
   const path = usePath();
@@ -33,6 +37,7 @@ function ControllerRoute({ path }: { path: string }) {
   if (path.startsWith("/devices/")) {
     return <DevicePage id={decodeURIComponent(path.slice(9))} />;
   }
+  if (path === "/usage") return <UsagePage />;
   if (path === "/configuration") return <ConfigurationPage />;
   if (path === "/settings") return <SettingsPage />;
   return <NotFound />;
@@ -50,6 +55,22 @@ function DevicesPage() {
   return (
     <DevicesView
       devices={query.data ?? []}
+      error={query.error}
+      loading={query.loading}
+    />
+  );
+}
+
+function UsagePage() {
+  const [range, setRange] = useState<LlmUsageRange>("day");
+  const query = useApi<LlmFleetUsageSummary | null>(
+    `/api/v1/usage?range=${range}`,
+  );
+  return (
+    <UsageView
+      usage={query.data}
+      range={range}
+      onRangeChange={setRange}
       error={query.error}
       loading={query.loading}
     />
@@ -96,6 +117,7 @@ function DevicePage({ id }: { id: string }) {
       }}
       onDeleteConfirm={deleteDevice}
       onDeleteRequest={() => setShowDelete(true)}
+      usage={<DeviceUsage deviceId={id} />}
     />
   );
 }

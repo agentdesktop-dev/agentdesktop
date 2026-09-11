@@ -7,6 +7,10 @@ service FleetAgent {
   rpc CompleteEnrollment(CompleteEnrollmentRequest) returns (EnrollResponse);
   rpc RenewDeviceCertificate(RenewDeviceCertificateRequest) returns (DeviceCertificateResponse);
   rpc GetLlmGatewayCredential(LlmGatewayCredentialRequest) returns (LlmGatewayCredentialResponse);
+  // Usage is always scoped to the device identified by the caller's mTLS
+  // certificate. Requests intentionally carry no device or user identity.
+  rpc GetLlmUsage(LlmUsageRequest) returns (LlmUsageResponse);
+  rpc GetLlmUsageInteractions(LlmUsageInteractionsRequest) returns (LlmUsageInteractionsResponse);
   rpc Connect(stream AgentMessage) returns (stream ControllerMessage);
 }
 
@@ -57,6 +61,29 @@ message LlmGatewayCredentialRequest {
 message LlmGatewayCredentialResponse {
   string credential = 1;
   uint64 expires_at_unix_seconds = 2;
+}
+
+message LlmUsageRequest {
+  // Trailing window: `hour`, `day`, `week`, or `month`.
+  string range = 1;
+}
+
+message LlmUsageResponse {
+  // JSON-encoded `agentdesktop_core::model::LlmUsageSummary`.
+  bytes summary_json = 1;
+}
+
+message LlmUsageInteractionsRequest {
+  string from = 1;
+  string to = 2;
+  string model = 3;
+  string agent = 4;
+  string cursor = 5;
+}
+
+message LlmUsageInteractionsResponse {
+  // JSON-encoded `agentdesktop_core::model::LlmUsageInteractions`.
+  bytes interactions_json = 1;
 }
 
 message AgentMessage {

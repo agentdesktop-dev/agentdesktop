@@ -2,6 +2,7 @@ import type {
   Bootstrap,
   ConnectorSnapshot,
   Discovery,
+  LlmUsageSummary,
   ManagedDeviceSnapshot,
 } from "../types";
 
@@ -17,7 +18,7 @@ export const standaloneConnector: ConnectorSnapshot = {
   runtime: {
     version: "0.1.0",
     mode: "standalone",
-    gateway: "not-configured",
+    gateway: "reachable",
     platform: { os: "macos" },
   },
 };
@@ -37,6 +38,45 @@ export const offlineConnector: ConnectorSnapshot = {
   state: "offline",
   detail: "The Agent Desktop daemon is unavailable.",
   runtime: null,
+};
+
+export const llmUsage: LlmUsageSummary = {
+  from: "2026-09-02T12:00:00Z",
+  to: "2026-09-03T12:00:00Z",
+  currency: "USD",
+  requests: 50,
+  totalTokens: 394_714,
+  estimatedCost: 1.3097,
+  breakdown: [
+    {
+      model: "claude-sonnet-4-5",
+      agent: "claude-cli",
+      requests: 11,
+      totalTokens: 198_400,
+      estimatedCost: 0.9342,
+    },
+    {
+      model: "claude-haiku-4-5",
+      agent: "claude-cli",
+      requests: 29,
+      totalTokens: 160_214,
+      estimatedCost: 0.2705,
+    },
+    {
+      model: "claude-haiku-4-5",
+      agent: "codex_cli_rs",
+      requests: 6,
+      totalTokens: 24_100,
+      estimatedCost: 0.08,
+    },
+    {
+      model: "gpt-5.6-sol",
+      agent: "GitHubCopilotChat",
+      requests: 4,
+      totalTokens: 12_000,
+      estimatedCost: 0.025,
+    },
+  ],
 };
 
 export const unconfiguredDevice: ManagedDeviceSnapshot = {
