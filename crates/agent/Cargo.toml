@@ -63,6 +63,7 @@ libc.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store.workspace = true
 keyring-core.workspace = true
+plist = "1.10"
 
 [target.'cfg(windows)'.dependencies]
 keyring.workspace = true
