@@ -70,9 +70,7 @@ pub(super) fn plan(
             "Claude Desktop settings cannot be applied to its user preferences; use system-managed settings"
         );
     }
-    let mut contents = serde_json::to_vec_pretty(&settings)
-        .context("serialize Claude Desktop managed settings")?;
-    contents.push(b'\n');
+    let contents = serialize_managed_settings(&settings)?;
     write_owned(
         settings_path,
         &settings_owner,
@@ -81,6 +79,25 @@ pub(super) fn plan(
         "managed settings",
         plan,
     )
+}
+
+/// Serializes managed settings into the format Claude Desktop actually reads on this
+/// platform. On macOS that's a property list — `CFPreferencesCopyAppValue` never consults
+/// a JSON file — everywhere else it's pretty-printed JSON.
+#[cfg(target_os = "macos")]
+fn serialize_managed_settings(settings: &Value) -> anyhow::Result<Vec<u8>> {
+    let mut contents = Vec::new();
+    plist::to_writer_xml(&mut contents, settings)
+        .context("serialize Claude Desktop managed settings as a property list")?;
+    Ok(contents)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn serialize_managed_settings(settings: &Value) -> anyhow::Result<Vec<u8>> {
+    let mut contents = serde_json::to_vec_pretty(settings)
+        .context("serialize Claude Desktop managed settings")?;
+    contents.push(b'\n');
+    Ok(contents)
 }
 
 fn credential_helper_contents(credential_binary: &Path, socket: &Path) -> anyhow::Result<Vec<u8>> {
@@ -268,6 +285,8 @@ mod tests {
         batch_quote, managed_settings, posix_credential_helper_contents,
         windows_credential_helper_contents,
     };
+    #[cfg(target_os = "macos")]
+    use super::serialize_managed_settings;
     use agentdesktop_core::config::parse_daemon;
 
     #[test]
@@ -324,5 +343,45 @@ programs:
         assert_eq!(settings["isLocalDevMcpEnabled"], true);
         assert_eq!(settings["inferenceProvider"], "gateway");
         assert_eq!(settings["inferenceCredentialHelper"], "/helper");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_serializes_managed_settings_as_a_property_list() {
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
+    allowedClientIds: [claude-desktop]
+programs:
+  claudeDesktop: {}
+"#,
+        )
+        .unwrap();
+        let desktop = config.programs.claude_desktop.as_ref().unwrap();
+        let settings =
+            managed_settings(desktop, config.llm_gateway.as_ref(), Path::new("/helper")).unwrap();
+
+        let contents = serialize_managed_settings(&settings).expect("plist serializes");
+        assert!(
+            contents.starts_with(b"<?xml"),
+            "expected XML property list, got {:?}",
+            String::from_utf8_lossy(&contents)
+        );
+
+        let parsed: plist::Value = plist::from_bytes(&contents).expect("plist parses back");
+        let dict = parsed.as_dictionary().expect("top-level dictionary");
+        assert_eq!(
+            dict.get("inferenceProvider").and_then(plist::Value::as_string),
+            Some("gateway")
+        );
+        assert_eq!(
+            dict.get("inferenceGatewayBaseUrl")
+                .and_then(plist::Value::as_string),
+            Some("https://gateway.example.com/")
+        );
     }
 }

@@ -283,7 +283,7 @@ programs:
         assert!(
             error
                 .to_string()
-                .contains("/etc/claude-desktop/managed-settings.json")
+                .contains("Claude Desktop managed settings")
         );
         assert!(!root.exists(), "preflight failure must not write any files");
     }

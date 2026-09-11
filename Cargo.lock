@@ -62,6 +62,7 @@ dependencies = [
  "libc",
  "memchr",
  "open",
+ "plist",
  "rand",
  "rcgen",
  "reqwest",
