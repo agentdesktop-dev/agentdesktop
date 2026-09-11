@@ -1,5 +1,3 @@
-use super::OpenCode;
-
 use std::{
     collections::BTreeSet,
     fs::File,
@@ -10,14 +8,16 @@ use std::{
 use agentdesktop_core::model::Agent;
 use memchr::memmem;
 
-use crate::provider::metadata;
-
-const VERSION_MARKER: &[u8] = b"user-agent=opencode/";
-const MAX_VERSION_LENGTH: usize = 64;
-const MAX_BINARY_SIZE: u64 = 512 * 1024 * 1024;
+use super::OpenCode;
+use crate::provider::context::ScanContext;
 
 pub(super) fn discover() -> Option<Agent> {
-    let executable = metadata::find_executable(OpenCode::ID, executable_candidates())?;
+    let context = ScanContext::capture();
+    discover_with(&context)
+}
+
+fn discover_with(context: &ScanContext) -> Option<Agent> {
+    let executable = context.find_executable(OpenCode::ID, executable_candidates(context))?;
     Some(Agent {
         version: embedded_version(&executable),
         executable,
@@ -27,9 +27,9 @@ pub(super) fn discover() -> Option<Agent> {
     })
 }
 
-fn executable_candidates() -> Vec<PathBuf> {
+fn executable_candidates(context: &ScanContext) -> Vec<PathBuf> {
     let mut candidates = BTreeSet::new();
-    for home in metadata::user_home_dirs() {
+    for home in context.homes() {
         candidates.insert(home.join(".opencode/bin/opencode"));
         candidates.insert(home.join(".local/bin/opencode"));
         #[cfg(windows)]
@@ -40,12 +40,17 @@ fn executable_candidates() -> Vec<PathBuf> {
         }
     }
     #[cfg(target_os = "macos")]
-    candidates.extend([
-        PathBuf::from("/opt/homebrew/bin/opencode"),
-        PathBuf::from("/usr/local/bin/opencode"),
-    ]);
+    candidates.extend(
+        ["/opt/homebrew/bin/opencode", "/usr/local/bin/opencode"]
+            .into_iter()
+            .filter_map(|path| context.system_path(path)),
+    );
     candidates.into_iter().collect()
 }
+
+const VERSION_MARKER: &[u8] = b"user-agent=opencode/";
+const MAX_VERSION_LENGTH: usize = 64;
+const MAX_BINARY_SIZE: u64 = 512 * 1024 * 1024;
 
 /// Reads OpenCode's embedded user-agent marker without executing the binary.
 fn embedded_version(executable: &Path) -> Option<String> {
@@ -113,9 +118,21 @@ fn valid_version(version: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::{io::Cursor, path::PathBuf};
 
-    use super::embedded_version_from_reader;
+    use super::{ScanContext, embedded_version_from_reader, executable_candidates};
+
+    #[test]
+    fn isolated_candidates_only_use_scanned_homes() {
+        let root = PathBuf::from("opencode-fixture");
+        let home = root.join("home");
+        let context = ScanContext::isolated(home.clone(), root.join("project"));
+        let candidates = executable_candidates(&context);
+
+        assert!(candidates.contains(&home.join(".opencode/bin/opencode")));
+        assert!(candidates.contains(&home.join(".local/bin/opencode")));
+        assert!(candidates.iter().all(|path| path.starts_with(&home)));
+    }
 
     #[test]
     fn reads_version_across_chunk_boundaries() {

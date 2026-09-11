@@ -879,6 +879,10 @@ code {
   line-height: 1.4;
 }
 
+.field .field-error {
+  color: #9a222b;
+}
+
 .toggle-row input {
   width: 16px;
   height: 16px;

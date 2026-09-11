@@ -7,17 +7,19 @@
     "dev": "vite --host 127.0.0.1 --port 1421",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
-    "check": "biome check . && pnpm typecheck",
+    "check": "biome check . && pnpm typecheck && pnpm test:unit",
     "format": "biome format --write .",
     "storybook": "storybook dev -p 6007",
     "build-storybook": "storybook build",
+    "test:unit": "vitest run --project=unit",
     "test-storybook": "vitest run --project=storybook"
   },
   "dependencies": {
     "@agentdesktop/ui": "workspace:*",
     "lucide-react": "^1.41.0",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.12",

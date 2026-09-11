@@ -76,35 +76,38 @@ export type AgentKind =
   | "openCode"
   | "grok";
 
-export type AgentDraft = {
-  kind: AgentKind;
-  useGateway: boolean;
-  settings: string;
-};
-
 export type SandboxConfigDocument = {
+  [key: string]: unknown;
   network?: {
+    [key: string]: unknown;
     allowedDomains?: string[];
   };
   filesystem?: {
+    [key: string]: unknown;
     writable?: string[];
     denied?: string[];
   };
 };
 
 export type DaemonConfigDocument = {
+  [key: string]: unknown;
   llmGateway?: {
+    [key: string]: unknown;
     url: string;
     authentication?: {
+      [key: string]: unknown;
       type: string;
       audience?: string;
+      allowedClientIds?: string[];
     };
   };
   sandbox?: SandboxConfigDocument;
   telemetry?: {
+    [key: string]: unknown;
     events?: string[];
   };
-  programs?: Partial<Record<AgentKind, Record<string, unknown>>>;
+  // Imported programs may include kinds this builder cannot edit yet.
+  programs?: Record<string, Record<string, unknown> | undefined>;
 };
 
 export type ActiveDaemonConfig = {
