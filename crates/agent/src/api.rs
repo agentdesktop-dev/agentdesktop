@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, path::PathBuf};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -7,7 +7,7 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use agentdesktop_core::{
     config::{DaemonConfig, LlmGatewayAuthentication, ProgramAuthentication, valid_client_id},
@@ -21,7 +21,7 @@ use crate::{enrollment::EnrollmentState, gateway_oidc, remote, subscription};
 #[derive(Clone)]
 pub struct AppState {
     pub config: DaemonConfig,
-    pub discovery: Discovery,
+    pub discovery: watch::Receiver<Arc<Discovery>>,
     pub enrollment: EnrollmentState,
     pub state_dir: PathBuf,
     pub oidc_callback_listen: Option<SocketAddr>,
@@ -176,7 +176,7 @@ async fn remote_config(
 }
 
 async fn discover(State(state): State<AppState>) -> Json<Discovery> {
-    Json(state.discovery)
+    Json((**state.discovery.borrow()).clone())
 }
 
 async fn enrollment(State(state): State<AppState>) -> Json<EnrollmentStatus> {

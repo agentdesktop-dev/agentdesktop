@@ -11,6 +11,7 @@ import claudeCodeIcon from "./assets/claude-code.svg";
 import claudeDesktopIcon from "./assets/claude-desktop.svg";
 import codexIcon from "./assets/codex.svg";
 import copilotIcon from "./assets/copilot.svg";
+import grokIcon from "./assets/grok.svg";
 import ollamaIcon from "./assets/ollama.svg";
 import openCodeIcon from "./assets/opencode.svg";
 
@@ -46,7 +47,7 @@ const toolPresentations: ReadonlyArray<{
   id: string;
   aliases: readonly string[];
   label: string;
-  icon: string;
+  icon?: string;
 }> = [
   { id: "codex", aliases: [], label: "Codex", icon: codexIcon },
   {
@@ -61,8 +62,10 @@ const toolPresentations: ReadonlyArray<{
     label: "Claude Desktop",
     icon: claudeDesktopIcon,
   },
+  { id: "grok", aliases: ["grok-build"], label: "Grok Build", icon: grokIcon },
   { id: "opencode", aliases: [], label: "OpenCode", icon: openCodeIcon },
   { id: "vscode", aliases: [], label: "VS Code", icon: copilotIcon },
+  { id: "cursor", aliases: [], label: "Cursor" },
 ];
 
 function toolPresentation(kind: string) {

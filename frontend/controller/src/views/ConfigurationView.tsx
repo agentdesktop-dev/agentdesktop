@@ -593,9 +593,16 @@ const configurableAgents: Array<{
       models: { "gpt-5.6-terra": { name: "GPT 5.6 Terra" } },
     },
   },
+  {
+    kind: "grok",
+    iconKind: "grok",
+    placeholder: "model: grok-4.6",
+    initialSettings: { model: "grok-4.6" },
+  },
 ];
 
 const sandboxUnsupportedAgents = new Set<AgentKind>([
   "claudeDesktop",
   "openCode",
+  "grok",
 ]);

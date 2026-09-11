@@ -4,16 +4,21 @@ use std::{
 };
 
 use agentdesktop_core::model::{Agent, McpServer};
-use serde_json::Value;
+use crate::provider::{claude_code::discovery as claude_code, context::ScanContext, metadata};
 
-use super::{context::ScanContext, mcp, metadata};
+use super::ClaudeDesktop;
 
-pub(super) fn discover(context: &ScanContext) -> Option<Agent> {
-    let executable = context.find_executable("claude-desktop", executable_candidates(context))?;
+pub(super) fn discover() -> Option<Agent> {
+    let context = ScanContext::capture();
+    discover_with(&context)
+}
+
+fn discover_with(context: &ScanContext) -> Option<Agent> {
+    let executable = context.find_executable(ClaudeDesktop::ID, executable_candidates(context))?;
     Some(Agent {
         version: discover_version(context, &executable),
         executable,
-        kind: "claude-desktop".to_owned(),
+        kind: ClaudeDesktop::ID.to_owned(),
         mcp_servers: discover_mcp_servers(context),
         skills: Vec::new(),
     })
@@ -102,10 +107,6 @@ fn discover_mcp_servers(context: &ScanContext) -> Vec<McpServer> {
     }
     paths
         .into_iter()
-        .flat_map(|path| {
-            mcp::from_mcp_servers_file(&path, |entry| {
-                entry.get("disabled").and_then(Value::as_bool) != Some(true)
-            })
-        })
+        .flat_map(|path| claude_code::mcp_servers_from_json(&path))
         .collect()
 }

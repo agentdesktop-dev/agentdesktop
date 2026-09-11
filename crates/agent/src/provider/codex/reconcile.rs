@@ -1,3 +1,5 @@
+use super::Codex;
+
 use std::path::Path;
 
 use agentdesktop_core::config::{
@@ -5,36 +7,88 @@ use agentdesktop_core::config::{
 };
 use anyhow::Context;
 use serde_json::{Value, json};
+use tracing::debug;
 
-use super::{ReconcileMode, deep_merge, managed_file::HeaderOwnedFile, responses_base_url};
+use crate::reconcile::ReconcilePlan;
+
+use crate::provider::shared::{deep_merge, responses_base_url};
 
 const MANAGED_HEADER: &str = "# Managed by Agentdesktop. Manual changes will be replaced.\n";
-const MANAGED_FILE: HeaderOwnedFile = HeaderOwnedFile {
-    program: "codex",
-    header: MANAGED_HEADER,
-};
 
-pub fn apply(
+pub(super) fn plan(
     path: &Path,
     credential_helper: &Path,
     socket: &Path,
     sandbox: Option<&SandboxConfig>,
     config: Option<(&CodexConfig, Option<&LlmGatewayConfig>)>,
-    mode: ReconcileMode,
+    plan: &ReconcilePlan,
 ) -> anyhow::Result<()> {
     let Some((config, gateway)) = config else {
-        return MANAGED_FILE.reconcile(path, "configuration", None, mode);
+        return remove(path, plan);
     };
 
     let settings = managed_config(config, gateway, credential_helper, socket, sandbox)?;
-    let mut body = toml::to_string_pretty(&settings)
-        .context("serialize Codex managed configuration as TOML")?
-        .into_bytes();
-    if !body.is_empty() && !body.ends_with(b"\n") {
-        body.push(b'\n');
+    let mut contents = MANAGED_HEADER.as_bytes().to_vec();
+    contents.extend_from_slice(
+        toml::to_string_pretty(&settings)
+            .context("serialize Codex managed configuration as TOML")?
+            .as_bytes(),
+    );
+    if !contents.ends_with(b"\n") {
+        contents.push(b'\n');
     }
 
-    MANAGED_FILE.reconcile(path, "configuration", Some(&body), mode)
+    let existing = match plan.read(path) {
+        Ok(existing) => Some(existing),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("read Codex managed configuration from {}", path.display())
+            });
+        }
+    };
+    let action = match existing.as_deref() {
+        Some(existing) if existing == contents => {
+            debug!(
+                program = Codex::ID,
+                action = "unchanged",
+                path = %path.display(),
+                "managed configuration already current"
+            );
+            plan.record(Codex::DISPLAY_NAME, "configuration", "unchanged", path);
+            return Ok(());
+        }
+        Some(existing) if existing.starts_with(MANAGED_HEADER.as_bytes()) => "update",
+        Some(existing) => {
+            plan.record_diff(
+                Codex::DISPLAY_NAME,
+                "configuration",
+                "conflict",
+                path,
+                Some(existing),
+                Some(&contents),
+            );
+            return Ok(());
+        }
+        None => "create",
+    };
+
+    plan.write_file(path, &contents, 0o644)?;
+    debug!(
+        program = Codex::ID,
+        action,
+        path = %path.display(),
+        "planned managed configuration"
+    );
+    plan.record_diff(
+        Codex::DISPLAY_NAME,
+        "configuration",
+        action,
+        path,
+        existing.as_deref(),
+        Some(&contents),
+    );
+    Ok(())
 }
 
 fn managed_config(
@@ -111,7 +165,7 @@ fn managed_config(
                 socket.to_string_lossy(),
                 "credential",
                 "--client-id",
-                "codex",
+                Codex::ID,
             ],
             "timeout_ms": timeout_ms,
             "refresh_interval_ms": 60000,
@@ -127,116 +181,53 @@ fn managed_config(
     Ok(settings)
 }
 
+fn remove(path: &Path, plan: &ReconcilePlan) -> anyhow::Result<()> {
+    match plan.read(path) {
+        Ok(contents) if contents.starts_with(MANAGED_HEADER.as_bytes()) => {
+            plan.remove_file(path).with_context(|| {
+                format!("remove Codex managed configuration at {}", path.display())
+            })?;
+            debug!(
+                program = Codex::ID,
+                action = "remove",
+                path = %path.display(),
+                "planned managed configuration"
+            );
+            plan.record(Codex::DISPLAY_NAME, "configuration", "remove", path);
+            Ok(())
+        }
+        Ok(_) => {
+            debug!(
+                program = Codex::ID,
+                action = "unchanged",
+                path = %path.display(),
+                "preserving managed configuration not owned by Agentdesktop"
+            );
+            plan.record(Codex::DISPLAY_NAME, "configuration", "unchanged", path);
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            debug!(
+                program = Codex::ID,
+                action = "unchanged",
+                path = %path.display(),
+                "managed configuration already absent"
+            );
+            plan.record(Codex::DISPLAY_NAME, "configuration", "unchanged", path);
+            Ok(())
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("read Codex managed configuration from {}", path.display())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path};
+    use std::path::Path;
 
     use agentdesktop_core::config::parse_daemon;
 
-    use super::{MANAGED_HEADER, apply, managed_config};
-    use crate::reconcile::{DryRunReport, ReconcileMode};
-
-    struct Scratch(std::path::PathBuf);
-
-    impl Scratch {
-        fn new() -> Self {
-            let root = std::env::temp_dir().join(format!("codex-{}", rand::random::<u64>()));
-            fs::create_dir(&root).unwrap();
-            Self(root)
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    #[test]
-    fn apply_previews_rendered_bytes_and_only_removes_owned_configuration() {
-        let root = Scratch::new();
-        let path = root.0.join("managed.toml");
-        let helper = root.0.join("credential helper");
-        let socket = root.0.join("agent.sock");
-        let config = parse_daemon(
-            r#"
-llmGateway:
-  url: https://gateway.example.com/proxy
-  authentication: { type: controllerJwt, audience: agentgateway, allowedClientIds: [codex] }
-programs: { codex: { managedConfig: { model: company-model } } }
-"#,
-        )
-        .unwrap();
-        let codex = config.programs.codex.as_ref().unwrap();
-        let gateway = config.llm_gateway.as_ref();
-        let settings = managed_config(codex, gateway, &helper, &socket, None).unwrap();
-        let toml = toml::to_string_pretty(&settings).unwrap();
-        let rendered = format!("{MANAGED_HEADER}{toml}");
-        let rendered = rendered.as_str();
-        assert!(rendered.ends_with('\n'));
-        let run = |enabled: bool, mode: ReconcileMode<'_>| {
-            let desired = enabled.then_some((codex, gateway));
-            apply(&path, &helper, &socket, None, desired, mode)
-        };
-        for (seed, enabled, action, after) in [
-            (None, true, "create", Some(rendered)),
-            (Some(rendered), true, "unchanged", Some(rendered)),
-            (Some(MANAGED_HEADER), true, "update", Some(rendered)),
-            (Some(rendered), false, "remove", None),
-            (
-                Some("user-owned\n"),
-                false,
-                "unchanged",
-                Some("user-owned\n"),
-            ),
-        ] {
-            if let Some(seed) = seed {
-                fs::write(&path, seed).unwrap();
-            }
-            let report = DryRunReport::default();
-            run(enabled, ReconcileMode::DryRun(&report)).unwrap();
-            assert_eq!(fs::read(&path).ok().as_deref(), seed.map(str::as_bytes));
-            let changes = report.changes.borrow();
-            assert_eq!(changes.len(), 1);
-            let change = &changes[0];
-            assert_eq!((&change.path, change.action.as_str()), (&path, action));
-            assert_eq!(
-                change.before.as_deref(),
-                seed.filter(|_| action != "unchanged")
-            );
-            assert_eq!(
-                change.after.as_deref(),
-                after.filter(|_| action != "unchanged")
-            );
-            run(enabled, ReconcileMode::Apply).unwrap();
-            assert_eq!(fs::read(&path).ok().as_deref(), after.map(str::as_bytes));
-        }
-    }
-
-    #[test]
-    fn empty_configuration_renders_only_the_header_without_an_extra_newline() {
-        let root = Scratch::new();
-        let path = root.0.join("managed.toml");
-        let helper = root.0.join("credential helper");
-        let socket = root.0.join("agent.sock");
-        let config = parse_daemon("programs: { codex: {} }").unwrap();
-        let codex = config.programs.codex.as_ref().unwrap();
-        let run = |mode: ReconcileMode<'_>| {
-            apply(&path, &helper, &socket, None, Some((codex, None)), mode)
-        };
-        let report = DryRunReport::default();
-        run(ReconcileMode::DryRun(&report)).unwrap();
-        assert!(!path.exists());
-        assert_eq!(
-            report.changes.borrow()[0].after.as_deref(),
-            Some(MANAGED_HEADER)
-        );
-        run(ReconcileMode::Apply).unwrap();
-        assert_eq!(fs::read(&path).unwrap(), MANAGED_HEADER.as_bytes());
-        let report = DryRunReport::default();
-        run(ReconcileMode::DryRun(&report)).unwrap();
-        assert_eq!(report.changes.borrow()[0].action, "unchanged");
-    }
+    use super::managed_config;
 
     #[test]
     fn pass_through_settings_are_merged_with_managed_gateway_values() {

@@ -6,14 +6,20 @@ use std::{
 use agentdesktop_core::model::{Agent, McpServer};
 use serde_json::Value;
 
-use super::{context::ScanContext, files, mcp, metadata};
+use super::ClaudeCode;
+use crate::provider::{context::ScanContext, files, mcp, metadata};
 
-pub(super) fn discover(context: &ScanContext) -> Option<Agent> {
+pub(super) fn discover() -> Option<Agent> {
+    let context = ScanContext::capture();
+    discover_with(&context)
+}
+
+fn discover_with(context: &ScanContext) -> Option<Agent> {
     let executable = context.find_executable("claude", executable_candidates(context))?;
     Some(Agent {
         version: metadata::version_after_component(&executable, "versions"),
         executable,
-        kind: "claude-code".to_owned(),
+        kind: ClaudeCode::ID.to_owned(),
         mcp_servers: discover_mcp_servers(context),
         skills: metadata::discover_skills(skill_roots(context)),
     })
@@ -95,4 +101,9 @@ fn installed_plugin_roots(home: &Path) -> Vec<PathBuf> {
         .filter_map(|install| install.get("installPath").and_then(Value::as_str))
         .map(PathBuf::from)
         .collect()
+}
+
+
+pub(in crate::provider) fn mcp_servers_from_json(path: &Path) -> Vec<McpServer> {
+    mcp::from_mcp_servers_file(path, mcp_enabled)
 }

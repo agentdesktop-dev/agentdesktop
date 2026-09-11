@@ -1,0 +1,358 @@
+use super::OpenCode;
+
+use std::path::Path;
+
+use agentdesktop_core::config::{LlmGatewayAuthentication, LlmGatewayConfig, OpenCodeConfig};
+use anyhow::Context;
+use serde_json::{Value, json};
+use tracing::debug;
+use url::Url;
+
+use crate::reconcile::ReconcilePlan;
+
+use crate::provider::shared::{deep_merge, responses_base_url};
+
+const MANAGED_HEADER: &str = "// Managed by Agentdesktop. Manual changes will be replaced.\n";
+const CONFIG_PROGRAM: &str = OpenCode::ID;
+
+pub(super) fn plan(
+    config_path: &Path,
+    plugin_path: &Path,
+    credential_helper: &Path,
+    socket: &Path,
+    config: Option<(&OpenCodeConfig, Option<&LlmGatewayConfig>)>,
+    plan: &ReconcilePlan,
+) -> anyhow::Result<()> {
+    let Some((config, gateway)) = config else {
+        remove_owned(config_path, "managed configuration", plan)?;
+        return remove_owned(plugin_path, "credential plugin", plan);
+    };
+
+    let authentication = gateway.and_then(|gateway| gateway.authentication.as_ref());
+    let plugin_url = if authentication.is_some_and(LlmGatewayAuthentication::uses_credential_helper)
+    {
+        let source = credential_plugin(credential_helper, socket)?;
+        reconcile_file(plugin_path, source.as_bytes(), "credential plugin", plan)?;
+        Some(file_url(plugin_path)?)
+    } else {
+        None
+    };
+
+    let settings = managed_config(config, gateway, plugin_url.as_deref())?;
+    let mut contents = MANAGED_HEADER.as_bytes().to_vec();
+    contents.extend_from_slice(
+        serde_json::to_string_pretty(&settings)
+            .context("serialize OpenCode managed configuration")?
+            .as_bytes(),
+    );
+    contents.push(b'\n');
+    reconcile_file(config_path, &contents, "managed configuration", plan)?;
+    if plugin_url.is_none() {
+        remove_owned(plugin_path, "credential plugin", plan)?;
+    }
+    Ok(())
+}
+
+fn managed_config(
+    config: &OpenCodeConfig,
+    gateway: Option<&LlmGatewayConfig>,
+    plugin_url: Option<&str>,
+) -> anyhow::Result<Value> {
+    let mut settings = serde_json::to_value(&config.managed_config)
+        .context("serialize OpenCode pass-through managed configuration")?;
+    let Some(gateway) = gateway else {
+        return Ok(settings);
+    };
+
+    let model = config
+        .model
+        .as_deref()
+        .context("OpenCode gateway configuration has no model")?;
+    let provider_name = "agentdesktop";
+    let provider = json!({
+        "npm": "@ai-sdk/openai",
+        "name": "Agentdesktop",
+        "options": {
+            "baseURL": responses_base_url(gateway),
+            "apiKey": "agentdesktop-managed",
+        },
+        "models": config.models,
+    });
+    let generated = json!({
+        "$schema": "https://opencode.ai/config.json",
+        "enabled_providers": [provider_name],
+        "model": format!("{provider_name}/{model}"),
+        "provider": {
+            (provider_name): provider,
+        },
+    });
+    deep_merge(&mut settings, generated);
+    if let Some(plugin_url) = plugin_url {
+        append_plugin(&mut settings, plugin_url);
+    }
+    Ok(settings)
+}
+
+fn append_plugin(settings: &mut Value, plugin_url: &str) {
+    let plugins = settings
+        .as_object_mut()
+        .expect("OpenCode settings serialize as an object")
+        .entry("plugin")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !plugins.is_array() {
+        *plugins = Value::Array(Vec::new());
+    }
+    let plugins = plugins
+        .as_array_mut()
+        .expect("plugin was replaced by an array");
+    if !plugins
+        .iter()
+        .any(|value| value.as_str() == Some(plugin_url))
+    {
+        plugins.push(Value::String(plugin_url.to_owned()));
+    }
+}
+
+fn credential_plugin(credential_helper: &Path, socket: &Path) -> anyhow::Result<String> {
+    let provider_name = "agentdesktop";
+    let command = [
+        credential_helper.to_string_lossy().into_owned(),
+        "--socket".to_owned(),
+        socket.to_string_lossy().into_owned(),
+        "credential".to_owned(),
+        "--client-id".to_owned(),
+        OpenCode::ID.to_owned(),
+    ];
+    let provider = serde_json::to_string(&provider_name).context("encode OpenCode provider ID")?;
+    let command = serde_json::to_string(&command).context("encode OpenCode credential command")?;
+
+    Ok(format!(
+        r#"{MANAGED_HEADER}const provider = {provider};
+const command = {command};
+let cachedToken = "";
+let refreshAfter = 0;
+
+async function credential() {{
+  if (cachedToken && Date.now() < refreshAfter) return cachedToken;
+  const child = Bun.spawn(command, {{ stdout: "pipe", stderr: "pipe" }});
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  if (exitCode !== 0) {{
+    throw new Error(`Agentdesktop credential helper failed: ${{stderr.trim() || `exit ${{exitCode}}`}}`);
+  }}
+  const token = stdout.trim();
+  if (!token) throw new Error("Agentdesktop credential helper returned an empty token");
+  cachedToken = token;
+  refreshAfter = Date.now() + 60_000;
+  return token;
+}}
+
+export const Agentdesktop = async () => ({{
+  "chat.headers": async (input, output) => {{
+    if (input.model.providerID !== provider) return;
+    output.headers.Authorization = `Bearer ${{await credential()}}`;
+  }},
+}});
+"#
+    ))
+}
+
+fn file_url(path: &Path) -> anyhow::Result<String> {
+    let absolute = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()
+            .context("locate current directory for OpenCode plugin path")?
+            .join(path)
+    };
+    Url::from_file_path(&absolute)
+        .map(|url| url.to_string())
+        .map_err(|()| {
+            anyhow::anyhow!(
+                "convert OpenCode plugin path {} to file URL",
+                absolute.display()
+            )
+        })
+}
+
+fn reconcile_file(
+    path: &Path,
+    contents: &[u8],
+    description: &str,
+    plan: &ReconcilePlan,
+) -> anyhow::Result<()> {
+    let existing = match plan.read(path) {
+        Ok(existing) => Some(existing),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read {description} from {}", path.display()));
+        }
+    };
+    let action = match existing.as_deref() {
+        Some(existing) if existing == contents => {
+            debug!(
+                program = CONFIG_PROGRAM,
+                kind = description,
+                action = "unchanged",
+                path = %path.display(),
+                "managed file already current"
+            );
+            plan.record(OpenCode::DISPLAY_NAME, description, "unchanged", path);
+            return Ok(());
+        }
+        Some(existing) if existing.starts_with(MANAGED_HEADER.as_bytes()) => "update",
+        Some(existing) => {
+            plan.record_diff(
+                OpenCode::DISPLAY_NAME,
+                description,
+                "conflict",
+                path,
+                Some(existing),
+                Some(contents),
+            );
+            return Ok(());
+        }
+        None => "create",
+    };
+    plan.write_file(path, contents, 0o644)?;
+    debug!(
+        program = CONFIG_PROGRAM,
+        kind = description,
+        action,
+        path = %path.display(),
+        "planned managed file"
+    );
+    plan.record_diff(
+        OpenCode::DISPLAY_NAME,
+        description,
+        action,
+        path,
+        existing.as_deref(),
+        Some(contents),
+    );
+    Ok(())
+}
+
+fn remove_owned(path: &Path, description: &str, plan: &ReconcilePlan) -> anyhow::Result<()> {
+    match plan.read(path) {
+        Ok(contents) if contents.starts_with(MANAGED_HEADER.as_bytes()) => {
+            plan.remove_file(path)
+                .with_context(|| format!("remove {description} at {}", path.display()))?;
+            debug!(
+                program = CONFIG_PROGRAM,
+                kind = description,
+                action = "remove",
+                path = %path.display(),
+                "planned managed file"
+            );
+            plan.record(OpenCode::DISPLAY_NAME, description, "remove", path);
+            Ok(())
+        }
+        Ok(_) => {
+            debug!(
+                program = CONFIG_PROGRAM,
+                kind = description,
+                action = "unchanged",
+                path = %path.display(),
+                "preserving managed file not owned by Agentdesktop"
+            );
+            plan.record(OpenCode::DISPLAY_NAME, description, "unchanged", path);
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            plan.record(OpenCode::DISPLAY_NAME, description, "unchanged", path);
+            Ok(())
+        }
+        Err(error) => {
+            Err(error).with_context(|| format!("read {description} from {}", path.display()))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use agentdesktop_core::config::parse_daemon;
+
+    use super::{credential_plugin, managed_config};
+
+    #[test]
+    fn pass_through_settings_are_merged_with_gateway_and_plugin() {
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com/proxy
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
+    allowedClientIds: [opencode]
+programs:
+  openCode:
+    model: gpt-company
+    models:
+      gpt-company:
+        name: Company GPT
+        limit:
+          context: 200000
+    managedConfig:
+      autoupdate: false
+      plugin:
+        - opencode-existing-plugin
+      provider:
+        existing:
+          options:
+            baseURL: https://existing.example.com/v1
+"#,
+        )
+        .expect("valid daemon configuration");
+        let open_code = config.programs.open_code.as_ref().unwrap();
+        let gateway = config.llm_gateway.as_ref().unwrap();
+        let settings = managed_config(
+            open_code,
+            Some(gateway),
+            Some("file:///etc/opencode/plugins/agentdesktop.js"),
+        )
+        .expect("merged settings");
+
+        assert_eq!(settings["autoupdate"], false);
+        assert_eq!(settings["model"], "agentdesktop/gpt-company");
+        assert_eq!(settings["enabled_providers"][0], "agentdesktop");
+        assert_eq!(settings["plugin"][0], "opencode-existing-plugin");
+        assert_eq!(
+            settings["plugin"][1],
+            "file:///etc/opencode/plugins/agentdesktop.js"
+        );
+        assert_eq!(
+            settings["provider"]["existing"]["options"]["baseURL"],
+            "https://existing.example.com/v1"
+        );
+        let provider = &settings["provider"]["agentdesktop"];
+        assert_eq!(provider["npm"], "@ai-sdk/openai");
+        assert_eq!(
+            provider["options"]["baseURL"],
+            "https://gateway.example.com/proxy/v1"
+        );
+        assert_eq!(provider["models"]["gpt-company"]["name"], "Company GPT");
+    }
+
+    #[test]
+    fn plugin_uses_argument_array_and_scopes_the_header() {
+        let plugin = credential_plugin(
+            Path::new("/usr/local/bin/agentdesktop"),
+            Path::new("/run/agentdesktop/agentdesktop.sock"),
+        )
+        .expect("credential plugin");
+
+        assert!(plugin.contains(r#"const provider = "agentdesktop";"#));
+        assert!(plugin.contains(
+            r#"const command = ["/usr/local/bin/agentdesktop","--socket","/run/agentdesktop/agentdesktop.sock","credential","--client-id","opencode"];"#
+        ));
+        assert!(plugin.contains("input.model.providerID !== provider"));
+        assert!(plugin.contains("output.headers.Authorization"));
+    }
+}

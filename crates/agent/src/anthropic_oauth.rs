@@ -4,6 +4,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+use agentdesktop_core::http::ClientExt;
 use agentdesktop_core::model::LlmGatewayCredential;
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
@@ -136,24 +137,20 @@ async fn exchange_authorization_code(
     state: &str,
 ) -> anyhow::Result<TokenResponse> {
     reqwest::Client::new()
-        .post(TOKEN_ENDPOINT)
-        .json(&TokenRequest {
-            grant_type: "authorization_code",
-            code: authorization_code,
-            redirect_uri: REDIRECT_URI,
-            client_id: CLIENT_ID,
-            code_verifier,
-            state,
-            expires_in: REQUESTED_LIFETIME_SECONDS,
-        })
-        .send()
+        .post_json::<TokenResponse>(
+            TOKEN_ENDPOINT,
+            &TokenRequest {
+                grant_type: "authorization_code",
+                code: authorization_code,
+                redirect_uri: REDIRECT_URI,
+                client_id: CLIENT_ID,
+                code_verifier,
+                state,
+                expires_in: REQUESTED_LIFETIME_SECONDS,
+            },
+        )
         .await
-        .context("exchange Anthropic subscription authorization code")?
-        .error_for_status()
-        .context("Anthropic OAuth endpoint rejected authorization code")?
-        .json()
-        .await
-        .context("decode Anthropic OAuth token response")
+        .context("exchange Anthropic subscription authorization code")
 }
 
 fn load(store: &SecretStore) -> anyhow::Result<Option<StoredToken>> {

@@ -5,15 +5,21 @@ use std::{
 
 use agentdesktop_core::model::{Agent, McpServer};
 
-use super::{context::ScanContext, files, mcp, metadata};
+use super::Codex;
+use crate::provider::{context::ScanContext, files, mcp, metadata};
 
-pub(super) fn discover(context: &ScanContext) -> Option<Agent> {
-    let executable = context.find_executable("codex", executable_candidates(context))?;
+pub(super) fn discover() -> Option<Agent> {
+    let context = ScanContext::capture();
+    discover_with(&context)
+}
+
+fn discover_with(context: &ScanContext) -> Option<Agent> {
+    let executable = context.find_executable(Codex::ID, executable_candidates(context))?;
     let version = standalone_version(&executable).or_else(|| npm_version(&executable));
     Some(Agent {
         version,
         executable,
-        kind: "codex".to_owned(),
+        kind: Codex::ID.to_owned(),
         mcp_servers: discover_mcp_servers(context),
         skills: metadata::discover_skills(skill_roots(context)),
     })

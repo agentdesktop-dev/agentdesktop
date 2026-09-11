@@ -1,73 +1,113 @@
-mod claude_code;
-mod claude_desktop;
-mod codex;
-mod json_merge;
-mod managed_file;
-mod open_code;
+//! Shared reconciliation orchestration, plan application, and dry-run reporting.
+mod plan;
+pub use plan::ReconcilePlan;
 
+use crate::provider::{
+    Provider, ReconcileContext, claude_code::ClaudeCode, claude_desktop::ClaudeDesktop,
+    codex::Codex, cursor::Cursor, grok::Grok, ollama::Ollama, opencode::OpenCode, vscode::VsCode,
+};
+use agentdesktop_core::{config::DaemonConfig, model::Discovery};
+use serde_json::Value;
+use similar::TextDiff;
 use std::{
     cell::RefCell,
     fmt::Write,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
-use agentdesktop_core::config::{DaemonConfig, LlmGatewayConfig};
-#[cfg(any(windows, test))]
-use base64::{Engine as _, prelude::BASE64_STANDARD};
-use serde_json::Value;
-use similar::TextDiff;
+// Preserve callers of the existing default-path helpers.
+pub use crate::provider::{
+    claude_code::default_claude_code_managed_settings_dir,
+    claude_desktop::{
+        default_claude_desktop_credential_helper_path, default_claude_desktop_managed_settings_path,
+    },
+    codex::default_codex_managed_config_path,
+    grok::default_grok_managed_config_path,
+    opencode::{default_open_code_managed_config_path, default_open_code_plugin_path},
+};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct CommandSpec {
-    program: String,
-    args: Vec<String>,
+#[derive(Clone)]
+pub struct Reconciler {
+    context: ReconcileContext,
+    providers: Arc<Vec<Box<dyn Provider>>>,
 }
 
-impl CommandSpec {
-    fn new(program: &Path, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
+impl Reconciler {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        merge_user_settings: bool,
+        claude_code_settings_path: PathBuf,
+        claude_desktop_managed_settings_path: PathBuf,
+        claude_desktop_credential_helper_path: PathBuf,
+        codex_managed_config_path: PathBuf,
+        open_code_managed_config_path: PathBuf,
+        open_code_plugin_path: PathBuf,
+        grok_managed_config_path: PathBuf,
+        credential_helper: PathBuf,
+        socket: PathBuf,
+    ) -> Self {
         Self {
-            program: program.to_string_lossy().into_owned(),
-            args: args.into_iter().map(Into::into).collect(),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum ReconcileMode<'a> {
-    Apply,
-    DryRun(&'a DryRunReport),
-}
-
-impl ReconcileMode<'_> {
-    fn writes(self) -> bool {
-        matches!(self, Self::Apply)
-    }
-
-    fn record(self, program: &str, description: &str, action: &str, path: &Path) {
-        if let Self::DryRun(report) = self {
-            let before = (action == "remove")
-                .then(|| std::fs::read(path).ok())
-                .flatten();
-            report.record(program, description, action, path, before.as_deref(), None);
-        }
-    }
-
-    fn record_diff(
-        self,
-        program: &str,
-        description: &str,
-        action: &str,
-        path: &Path,
-        before: Option<&[u8]>,
-        after: Option<&[u8]>,
-    ) {
-        if let Self::DryRun(report) = self {
-            report.record(program, description, action, path, before, after);
+            context: ReconcileContext {
+                merge_user_settings,
+                credential_helper,
+                socket,
+            },
+            providers: Arc::new(vec![
+                Box::new(ClaudeCode {
+                    settings_path: claude_code_settings_path,
+                }),
+                Box::new(ClaudeDesktop {
+                    managed_settings_path: claude_desktop_managed_settings_path,
+                    credential_helper_path: claude_desktop_credential_helper_path,
+                }),
+                Box::new(Codex {
+                    managed_config_path: codex_managed_config_path,
+                }),
+                Box::new(OpenCode {
+                    managed_config_path: open_code_managed_config_path,
+                    plugin_path: open_code_plugin_path,
+                }),
+                Box::new(VsCode),
+                Box::new(Cursor),
+                Box::new(Grok {
+                    managed_config_path: grok_managed_config_path,
+                }),
+                Box::new(Ollama),
+            ]),
         }
     }
 
-    fn is_dry_run(self) -> bool {
-        matches!(self, Self::DryRun(_))
+    /// Plan every provider, including cleanup for disabled providers, before
+    /// applying any writes. A later provider's failure leaves all files intact.
+    pub fn plan(&self, config: &DaemonConfig) -> anyhow::Result<ReconcilePlan> {
+        let mut plan = ReconcilePlan::default();
+        for provider in self.providers.iter() {
+            plan.append(provider.plan(&self.context, config)?)?;
+        }
+        Ok(plan)
+    }
+
+    pub async fn discover(&self) -> Discovery {
+        let mut discovery = Discovery {
+            agents: Vec::new(),
+            model_runtimes: Vec::new(),
+        };
+        for provider in self.providers.iter() {
+            let found = provider.discover().await;
+            discovery.agents.extend(found.agents);
+            discovery.model_runtimes.extend(found.model_runtimes);
+        }
+        discovery
+    }
+
+    pub fn apply(&self, config: &DaemonConfig) -> anyhow::Result<()> {
+        self.plan(config)?.apply()
+    }
+
+    pub fn dry_run(&self, config: &DaemonConfig) -> anyhow::Result<()> {
+        print!("{}", self.plan(config)?.render());
+        Ok(())
     }
 }
 
@@ -77,7 +117,7 @@ struct DryRunReport {
 }
 
 struct DryRunChange {
-    program: String,
+    display_name: String,
     description: String,
     action: String,
     path: PathBuf,
@@ -88,7 +128,7 @@ struct DryRunChange {
 impl DryRunReport {
     fn record(
         &self,
-        program: &str,
+        display_name: &str,
         description: &str,
         action: &str,
         path: &Path,
@@ -96,7 +136,7 @@ impl DryRunReport {
         after: Option<&[u8]>,
     ) {
         self.changes.borrow_mut().push(DryRunChange {
-            program: program.to_owned(),
+            display_name: display_name.to_owned(),
             description: description.to_owned(),
             action: action.to_owned(),
             path: path.to_owned(),
@@ -126,7 +166,7 @@ impl DryRunReport {
                 output,
                 "\n{}  {} {}\n        {}\n",
                 change.action.to_uppercase(),
-                program_name(&change.program),
+                change.display_name,
                 change.description,
                 change.path.display()
             );
@@ -175,415 +215,19 @@ fn normalized_diff(before: &str, after: &str) -> (String, String) {
     }
 }
 
-fn program_name(program: &str) -> &str {
-    match program {
-        "claude-code" => "Claude Code",
-        "claude-desktop" => "Claude Desktop",
-        "codex" => "Codex",
-        "opencode" => "OpenCode",
-        program => program,
-    }
-}
-
-#[derive(Clone)]
-pub struct Reconciler {
-    merge_user_settings: bool,
-    claude_code_settings_path: PathBuf,
-    claude_desktop_managed_settings_path: PathBuf,
-    claude_desktop_credential_helper_path: PathBuf,
-    codex_managed_config_path: PathBuf,
-    open_code_managed_config_path: PathBuf,
-    open_code_plugin_path: PathBuf,
-    credential_helper: PathBuf,
-    socket: PathBuf,
-}
-
-impl Reconciler {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        merge_user_settings: bool,
-        claude_code_settings_path: PathBuf,
-        claude_desktop_managed_settings_path: PathBuf,
-        claude_desktop_credential_helper_path: PathBuf,
-        codex_managed_config_path: PathBuf,
-        open_code_managed_config_path: PathBuf,
-        open_code_plugin_path: PathBuf,
-        credential_helper: PathBuf,
-        socket: PathBuf,
-    ) -> Self {
-        Self {
-            merge_user_settings,
-            claude_code_settings_path,
-            claude_desktop_managed_settings_path,
-            claude_desktop_credential_helper_path,
-            codex_managed_config_path,
-            open_code_managed_config_path,
-            open_code_plugin_path,
-            credential_helper,
-            socket,
-        }
-    }
-
-    pub fn apply(&self, config: &DaemonConfig) -> anyhow::Result<()> {
-        self.reconcile(config, ReconcileMode::Apply)
-    }
-
-    pub fn dry_run(&self, config: &DaemonConfig) -> anyhow::Result<()> {
-        let report = DryRunReport::default();
-        self.reconcile(config, ReconcileMode::DryRun(&report))?;
-        print!("{}", report.render());
-        Ok(())
-    }
-
-    fn reconcile(&self, config: &DaemonConfig, mode: ReconcileMode<'_>) -> anyhow::Result<()> {
-        if self.merge_user_settings && config.programs.claude_desktop.is_some() {
-            anyhow::bail!(
-                "Claude Desktop does not read inference settings from its user preferences; remove programs.claudeDesktop or run Agentdesktop without --user as root so it can manage /etc/claude-desktop/managed-settings.json"
-            );
-        }
-        let tool_use_hook = config
-            .telemetry
-            .collects_tool_use()
-            .then(|| self.claude_hook_command(config.telemetry.includes_tool_input()));
-        let session_new_hook = config
-            .telemetry
-            .collects_session_new()
-            .then(|| self.claude_session_hook_command());
-        let claude_code = config.programs.claude_code.as_ref().map(|claude_code| {
-            let gateway = config
-                .llm_gateway
-                .as_ref()
-                .filter(|_| claude_code.use_llm_gateway);
-            (claude_code, gateway)
-        });
-        claude_code::apply(
-            &self.claude_code_settings_path,
-            self.merge_user_settings,
-            &self.claude_credential_helper_command(),
-            claude_code::Hooks::new(tool_use_hook.as_ref(), session_new_hook.as_ref()),
-            config.sandbox.as_ref(),
-            claude_code,
-            mode,
-        )?;
-        let claude_desktop = config.programs.claude_desktop.as_ref().map(|desktop| {
-            let gateway = config
-                .llm_gateway
-                .as_ref()
-                .filter(|_| desktop.use_llm_gateway);
-            (desktop, gateway)
-        });
-        claude_desktop::apply(
-            &self.claude_desktop_managed_settings_path,
-            self.merge_user_settings,
-            &self.claude_desktop_credential_helper_path,
-            &self.credential_helper,
-            &self.socket,
-            claude_desktop,
-            mode,
-        )?;
-        let codex = config.programs.codex.as_ref().map(|codex| {
-            let gateway = config
-                .llm_gateway
-                .as_ref()
-                .filter(|_| codex.use_llm_gateway);
-            (codex, gateway)
-        });
-        codex::apply(
-            &self.codex_managed_config_path,
-            &self.credential_helper,
-            &self.socket,
-            config.sandbox.as_ref(),
-            codex,
-            mode,
-        )?;
-        let open_code = config.programs.open_code.as_ref().map(|open_code| {
-            let gateway = config
-                .llm_gateway
-                .as_ref()
-                .filter(|_| open_code.use_llm_gateway);
-            (open_code, gateway)
-        });
-        open_code::apply(
-            &self.open_code_managed_config_path,
-            &self.open_code_plugin_path,
-            &self.credential_helper,
-            &self.socket,
-            open_code,
-            mode,
-        )
-    }
-
-    fn claude_credential_helper_command(&self) -> String {
-        render_command(&CommandSpec::new(
-            &self.credential_helper,
-            [
-                "--socket".to_owned(),
-                self.socket.to_string_lossy().into_owned(),
-                "credential".to_owned(),
-                "--client-id".to_owned(),
-                "claude-code".to_owned(),
-            ],
-        ))
-    }
-
-    fn claude_hook_command(&self, include_input: bool) -> CommandSpec {
-        let mut args = vec![
-            "--socket".to_owned(),
-            self.socket.to_string_lossy().into_owned(),
-            "hook".to_owned(),
-            "claude-pre-tool-use".to_owned(),
-        ];
-        if include_input {
-            args.push("--include-input".to_owned());
-        }
-        CommandSpec::new(&self.credential_helper, args)
-    }
-
-    fn claude_session_hook_command(&self) -> CommandSpec {
-        CommandSpec::new(
-            &self.credential_helper,
-            [
-                "--socket".to_owned(),
-                self.socket.to_string_lossy().into_owned(),
-                "hook".to_owned(),
-                "claude-session-start".to_owned(),
-            ],
-        )
-    }
-}
-
-#[cfg(any(not(windows), test))]
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-#[cfg(any(windows, test))]
-fn powershell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
-fn render_command(command: &CommandSpec) -> String {
-    #[cfg(windows)]
-    return render_windows_command(command);
-    #[cfg(not(windows))]
-    return render_posix_command(command);
-}
-
-#[cfg(any(not(windows), test))]
-fn render_posix_command(command: &CommandSpec) -> String {
-    std::iter::once(command.program.as_str())
-        .chain(command.args.iter().map(String::as_str))
-        .map(shell_quote)
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-#[cfg(any(windows, test))]
-fn render_windows_command(command: &CommandSpec) -> String {
-    let script = std::iter::once(command.program.as_str())
-        .chain(command.args.iter().map(String::as_str))
-        .map(powershell_quote)
-        .collect::<Vec<_>>()
-        .join(" ");
-    let encoded = format!("& {script}")
-        .encode_utf16()
-        .flat_map(u16::to_le_bytes)
-        .collect::<Vec<_>>();
-    format!(
-        "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
-        BASE64_STANDARD.encode(encoded)
-    )
-}
-
-fn deep_merge(base: &mut Value, overlay: Value) {
-    match (base, overlay) {
-        (Value::Object(base), Value::Object(overlay)) => {
-            for (key, value) in overlay {
-                deep_merge(base.entry(key).or_insert(Value::Null), value);
-            }
-        }
-        (base, overlay) => *base = overlay,
-    }
-}
-
-fn responses_base_url(gateway: &LlmGatewayConfig) -> String {
-    let mut url = gateway.url.clone();
-    let path = url.path().trim_end_matches('/');
-    if !path.ends_with("/v1") {
-        url.set_path(&format!("{path}/v1"));
-    }
-    url.to_string().trim_end_matches('/').to_owned()
-}
-
-#[cfg(target_os = "linux")]
-pub fn default_claude_code_managed_settings_dir() -> PathBuf {
-    PathBuf::from("/etc/claude-code/managed-settings.d")
-}
-
-/// Returns the system-wide Codex managed configuration path.
-pub fn default_codex_managed_config_path() -> PathBuf {
-    PathBuf::from("/etc/codex/managed_config.toml")
-}
-
-/// Returns Claude Desktop's system-managed settings path.
-pub fn default_claude_desktop_managed_settings_path() -> PathBuf {
-    PathBuf::from("/etc/claude-desktop/managed-settings.json")
-}
-
-/// Returns the path of Agentdesktop's Claude Desktop credential helper.
-pub fn default_claude_desktop_credential_helper_path() -> PathBuf {
-    #[cfg(windows)]
-    return std::env::var_os("ProgramData")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
-        .join("AgentDesktop/claude-desktop-credential-helper.cmd");
-    #[cfg(not(windows))]
-    return PathBuf::from("/etc/claude-desktop/agentdesktop-credential-helper");
-}
-
-/// Returns the system-wide OpenCode managed configuration path.
-pub fn default_open_code_managed_config_path() -> PathBuf {
-    PathBuf::from("/etc/opencode/opencode.jsonc")
-}
-
-/// Returns the path of Agentdesktop's managed OpenCode credential plugin.
-pub fn default_open_code_plugin_path() -> PathBuf {
-    PathBuf::from("/etc/opencode/plugins/agentdesktop.js")
-}
-
-#[cfg(target_os = "macos")]
-pub fn default_claude_code_managed_settings_dir() -> PathBuf {
-    PathBuf::from("/Library/Application Support/ClaudeCode/managed-settings.d")
-}
-
-#[cfg(target_os = "windows")]
-pub fn default_claude_code_managed_settings_dir() -> PathBuf {
-    let program_files = std::env::var_os("ProgramFiles")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"));
-    program_files.join("ClaudeCode").join("managed-settings.d")
-}
-
 #[cfg(test)]
 mod tests {
     use std::{fs, path::Path, path::PathBuf};
 
     use agentdesktop_core::config::parse_daemon;
-    use base64::{Engine as _, prelude::BASE64_STANDARD};
 
-    use super::{
-        CommandSpec, DryRunReport, Reconciler, default_claude_desktop_credential_helper_path,
-        render_posix_command, render_windows_command,
-    };
-
-    #[test]
-    fn renders_posix_commands_with_each_argument_quoted() {
-        let command = CommandSpec::new(
-            Path::new("/Applications/Agent Desktop/agentdesktop"),
-            ["--socket", "/tmp/agent's socket", "credential"],
-        );
-
-        assert_eq!(
-            render_posix_command(&command),
-            "'/Applications/Agent Desktop/agentdesktop' '--socket' '/tmp/agent'\\''s socket' 'credential'"
-        );
-    }
-
-    #[test]
-    fn renders_windows_commands_as_shell_neutral_encoded_powershell() {
-        let command = CommandSpec::new(
-            Path::new(r"C:\Program Files\Agent Desktop\agentdesktop.exe"),
-            [
-                "--socket",
-                r"\\.\pipe\agentdesktop",
-                "credential",
-                "--client-id",
-                "claude-code",
-            ],
-        );
-
-        let rendered = render_windows_command(&command);
-        let encoded = rendered
-            .strip_prefix("powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ")
-            .expect("explicit PowerShell launcher");
-        let bytes = BASE64_STANDARD.decode(encoded).expect("valid base64");
-        let utf16 = bytes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|bytes| u16::from_le_bytes(*bytes))
-            .collect::<Vec<_>>();
-        let script = String::from_utf16(&utf16).expect("valid UTF-16LE");
-
-        assert_eq!(
-            script,
-            r"& 'C:\Program Files\Agent Desktop\agentdesktop.exe' '--socket' '\\.\pipe\agentdesktop' 'credential' '--client-id' 'claude-code'"
-        );
-    }
-
-    #[test]
-    fn claude_hooks_keep_the_executable_and_arguments_separate() {
-        let reconciler = Reconciler::new(
-            false,
-            PathBuf::new(),
-            PathBuf::new(),
-            PathBuf::new(),
-            PathBuf::new(),
-            PathBuf::new(),
-            PathBuf::new(),
-            PathBuf::from(r"C:\Program Files\Agent Desktop\agentdesktop.exe"),
-            PathBuf::from(r"\\.\pipe\agentdesktop"),
-        );
-
-        let tool = reconciler.claude_hook_command(true);
-        assert_eq!(
-            tool.program,
-            r"C:\Program Files\Agent Desktop\agentdesktop.exe"
-        );
-        assert_eq!(
-            tool.args,
-            [
-                "--socket",
-                r"\\.\pipe\agentdesktop",
-                "hook",
-                "claude-pre-tool-use",
-                "--include-input",
-            ]
-        );
-        assert_eq!(
-            reconciler.claude_session_hook_command().args,
-            [
-                "--socket",
-                r"\\.\pipe\agentdesktop",
-                "hook",
-                "claude-session-start",
-            ]
-        );
-    }
-
-    #[test]
-    fn claude_desktop_helper_default_matches_the_native_script_type() {
-        #[cfg(windows)]
-        {
-            assert_eq!(
-                default_claude_desktop_credential_helper_path().extension(),
-                Some(std::ffi::OsStr::new("cmd"))
-            );
-        }
-        #[cfg(not(windows))]
-        {
-            assert_eq!(
-                default_claude_desktop_credential_helper_path(),
-                PathBuf::from("/etc/claude-desktop/agentdesktop-credential-helper")
-            );
-        }
-    }
+    use super::{DryRunReport, Reconciler};
 
     #[test]
     fn dry_run_report_shows_changes_and_hides_unchanged_files() {
         let report = DryRunReport::default();
         report.record(
-            "claude-code",
+            "Claude Code",
             "settings",
             "update",
             Path::new("/home/user/.claude/settings.json"),
@@ -591,7 +235,7 @@ mod tests {
             Some(br#"{"managed":true,"keep":true}"#),
         );
         report.record(
-            "codex",
+            "Codex",
             "configuration",
             "unchanged",
             Path::new("/home/user/.codex/config.toml"),
@@ -629,6 +273,7 @@ programs:
             root.join("codex/config.toml"),
             root.join("opencode/config.json"),
             root.join("opencode/plugin.js"),
+            root.join("grok/managed_config.toml"),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
@@ -641,6 +286,48 @@ programs:
                 .contains("/etc/claude-desktop/managed-settings.json")
         );
         assert!(!root.exists(), "preflight failure must not write any files");
+    }
+
+    #[test]
+    fn user_mode_rejects_grok_before_writing_other_settings() {
+        let root = std::env::temp_dir().join(format!(
+            "agentdesktop-reconcile-user-grok-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let config = parse_daemon(
+            r#"
+programs:
+  claudeCode: {}
+  grok: {}
+"#,
+        )
+        .unwrap();
+        let reconciler = Reconciler::new(
+            true,
+            root.join("claude/settings.json"),
+            root.join("claude-desktop/settings.json"),
+            root.join("claude-desktop/helper"),
+            root.join("codex/config.toml"),
+            root.join("opencode/config.json"),
+            root.join("opencode/plugin.js"),
+            root.join("grok/managed_config.toml"),
+            root.join("bin/agentdesktop"),
+            root.join("agentdesktop.sock"),
+        );
+
+        let error = reconciler.apply(&config).expect_err("user mode must fail");
+        assert!(error.to_string().contains("Grok Build"));
+        assert!(!root.exists(), "preflight failure must not write any files");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_reconciles_system_grok_managed_config() {
+        let fixture = Fixture::new();
+        let config = parse_daemon("programs:\n  claudeCode: {}\n  grok: {}\n").unwrap();
+        fixture.reconciler.apply(&config).unwrap();
+        assert!(fixture.root.join("grok/managed_config.toml").exists());
     }
 
     #[test]
@@ -679,6 +366,7 @@ programs:
             root.join("codex/config.toml"),
             root.join("opencode/config.json"),
             root.join("opencode/plugin.js"),
+            root.join("grok/managed_config.toml"),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
@@ -697,5 +385,177 @@ programs:
             old_plugin
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    struct Fixture {
+        root: PathBuf,
+        reconciler: Reconciler,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "agentdesktop-provider-plan-{}-{}",
+                std::process::id(),
+                rand::random::<u64>()
+            ));
+            let reconciler = Reconciler::new(
+                false,
+                root.join("claude/settings.json"),
+                root.join("desktop/settings.json"),
+                root.join("desktop/helper"),
+                root.join("codex/config.toml"),
+                root.join("opencode/config.json"),
+                root.join("opencode/plugin.js"),
+                root.join("grok/managed_config.toml"),
+                root.join("bin/agentdesktop"),
+                root.join("agentdesktop.sock"),
+            );
+            Self { root, reconciler }
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn providers_plan_apply_repeat_and_remove_managed_files() {
+        let fixture = Fixture::new();
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
+    allowedClientIds: [claude-code, claude-desktop, codex, opencode, grok]
+programs:
+  claudeCode: {}
+  claudeDesktop: {}
+  codex: {}
+  openCode:
+    model: company-model
+    models:
+      company-model: {}
+  grok:
+    model: grok-4.6
+"#,
+        )
+        .unwrap();
+        let plan = fixture.reconciler.plan(&config).unwrap();
+        assert!(
+            !fixture.root.exists(),
+            "planning must not create directories or sidecars"
+        );
+        assert!(!plan.has_conflicts());
+        plan.apply().unwrap();
+
+        let paths = [
+            "claude/settings.json",
+            "claude/.settings.json.owner",
+            "desktop/settings.json",
+            "desktop/.settings.json.owner",
+            "desktop/helper",
+            "desktop/.helper.owner",
+            "codex/config.toml",
+            "opencode/config.json",
+            "opencode/plugin.js",
+            "grok/managed_config.toml",
+        ];
+        let contents: Vec<_> = paths
+            .iter()
+            .map(|path| fs::read(fixture.root.join(path)).unwrap())
+            .collect();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(fixture.root.join("desktop/helper"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755
+            );
+        }
+        let repeated = fixture.reconciler.plan(&config).unwrap();
+        assert!(repeated.render().contains("Summary: 0 changes"));
+        repeated.apply().unwrap();
+        for (path, expected) in paths.iter().zip(contents) {
+            assert_eq!(fs::read(fixture.root.join(path)).unwrap(), expected);
+        }
+
+        let disabled = parse_daemon("programs: {}").unwrap();
+        let cleanup = fixture.reconciler.plan(&disabled).unwrap();
+        assert!(paths.iter().all(|path| fixture.root.join(path).exists()));
+        cleanup.apply().unwrap();
+        assert!(paths.iter().all(|path| !fixture.root.join(path).exists()));
+    }
+
+    #[test]
+    fn later_provider_conflict_prevents_all_writes() {
+        let fixture = Fixture::new();
+        let path = fixture.root.join("codex/config.toml");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let user_config = b"model = \"personal\"\n";
+        fs::write(&path, user_config).unwrap();
+        let config = parse_daemon("programs:\n  claudeCode: {}\n  codex: {}").unwrap();
+        let plan = fixture.reconciler.plan(&config).unwrap();
+        assert!(plan.has_conflicts());
+        assert!(plan.render().contains("CONFLICT  Codex"));
+        assert!(plan.apply().is_err());
+        assert!(!fixture.root.join("claude").exists());
+        assert_eq!(fs::read(path).unwrap(), user_config);
+    }
+
+    #[test]
+    fn changed_settings_or_ownership_reject_plan_before_any_writes() {
+        for changed in ["codex/config.toml", "claude/.settings.json.owner"] {
+            let fixture = Fixture::new();
+            let original = parse_daemon("programs:\n  claudeCode: {}\n  codex: {}").unwrap();
+            fixture.reconciler.apply(&original).unwrap();
+            let settings = fixture.root.join("claude/settings.json");
+            let before = fs::read(&settings).unwrap();
+            let update = parse_daemon(
+                "programs:\n  claudeCode:\n    env:\n      COMPANY: updated\n  codex: {}",
+            )
+            .unwrap();
+            let plan = fixture.reconciler.plan(&update).unwrap();
+            let changed_path = fixture.root.join(changed);
+            fs::write(&changed_path, b"externally changed").unwrap();
+            let error = plan.apply().unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("changed since reconciliation was planned")
+            );
+            assert_eq!(fs::read(settings).unwrap(), before);
+            assert_eq!(fs::read(changed_path).unwrap(), b"externally changed");
+        }
+    }
+
+    #[test]
+    fn providers_cannot_plan_writes_to_the_same_path() {
+        let mut fixture = Fixture::new();
+        let path = fixture.root.join("claude/settings.json");
+        fixture.reconciler.providers = std::sync::Arc::new(vec![
+            Box::new(super::ClaudeCode {
+                settings_path: path.clone(),
+            }),
+            Box::new(super::Codex {
+                managed_config_path: path,
+            }),
+        ]);
+        let config = parse_daemon("programs:\n  claudeCode: {}\n  codex: {}").unwrap();
+        let error = fixture.reconciler.apply(&config).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("multiple providers plan to modify")
+        );
+        assert!(!fixture.root.exists());
     }
 }

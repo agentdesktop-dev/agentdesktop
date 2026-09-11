@@ -6,6 +6,7 @@
 |`controller.address`|string|HTTPS address of the controller's fleet API.|
 |`controller.caCertificatePath`|string|Path to a PEM-encoded CA certificate used to verify the controller.<br><br>Omit this field to use the operating system's trusted certificate roots.|
 |`controller.heartbeatInterval`|string|Interval between device heartbeats. Defaults to `30s`.|
+|`inventoryInterval`|string|Interval between inventory refreshes. Defaults to `15m`, and must be<br>greater than zero.<br><br>Discovery walks user home directories and developer-tool configuration<br>files, so this trades inventory freshness against local disk activity.|
 |`llmGateway`|object|LLM gateway used by managed developer tools.|
 |`llmGateway.authentication`|object|Authentication mechanism used when connecting to this gateway.|
 |`llmGateway.authentication.allowedClientIds`|[]string|Client identifiers permitted to request credentials for this gateway.|
@@ -28,6 +29,11 @@
 |`programs.codex`|object|Codex managed configuration.|
 |`programs.codex.managedConfig`|object|Arbitrary values written to Codex's organization-managed TOML configuration.<br><br>Use Codex's native snake_case configuration keys. TOML has no null value,<br>so null values cannot be reconciled.|
 |`programs.codex.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
+|`programs.grok`|object|Grok Build managed configuration.|
+|`programs.grok.managedConfig`|object|Arbitrary values written to Grok's organization-managed TOML configuration.<br><br>Use Grok's native snake_case configuration keys. TOML has no null value,<br>so null values cannot be reconciled.|
+|`programs.grok.model`|string|Catalog ID and API model used when pointing Grok at the LLM gateway.<br><br>This is required when a top-level `llmGateway` is configured. If `models`<br>is empty, agentdesktop creates a catalog entry with this ID.|
+|`programs.grok.models`|object|Extra Grok `[model.<id>]` catalog entries, keyed by catalog ID.<br><br>Each value is an arbitrary Grok model object. Generated gateway<br>`base_url` and `auth_provider` values take precedence. When gateway<br>authentication is configured, `api_key` and `env_key` are removed from<br>these entries, including values supplied through `managedConfig`.<br>When this map is non-empty, `model` must name one of its keys.|
+|`programs.grok.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
 |`programs.openCode`|object|OpenCode managed configuration.|
 |`programs.openCode.managedConfig`|object|Arbitrary values written to OpenCode's system-managed configuration.|
 |`programs.openCode.model`|string|Model ID selected from `models` when using the LLM gateway.<br><br>This is required when a top-level `llmGateway` is configured.|

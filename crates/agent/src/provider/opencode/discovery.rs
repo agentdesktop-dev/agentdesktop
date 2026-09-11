@@ -8,14 +8,20 @@ use std::{
 use agentdesktop_core::model::Agent;
 use memchr::memmem;
 
-use super::context::ScanContext;
+use super::OpenCode;
+use crate::provider::context::ScanContext;
 
-pub(super) fn discover(context: &ScanContext) -> Option<Agent> {
-    let executable = context.find_executable("opencode", executable_candidates(context))?;
+pub(super) fn discover() -> Option<Agent> {
+    let context = ScanContext::capture();
+    discover_with(&context)
+}
+
+fn discover_with(context: &ScanContext) -> Option<Agent> {
+    let executable = context.find_executable(OpenCode::ID, executable_candidates(context))?;
     Some(Agent {
         version: embedded_version(&executable),
         executable,
-        kind: "opencode".to_owned(),
+        kind: OpenCode::ID.to_owned(),
         mcp_servers: Vec::new(),
         skills: Vec::new(),
     })

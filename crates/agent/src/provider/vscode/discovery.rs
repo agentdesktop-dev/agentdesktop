@@ -7,20 +7,45 @@ use std::{
 use agentdesktop_core::model::{Agent, McpServer};
 use serde_json::Value;
 
-use super::{context::ScanContext, files, mcp, metadata};
+use super::VsCode;
+use crate::provider::{context::ScanContext, files, mcp, metadata};
 
-pub(super) fn discover(context: &ScanContext) -> Option<Agent> {
-    let executable = context.find_executable("code", executable_candidates(context))?;
+/// Product name recorded in Visual Studio Code's packaged `package.json`.
+const PRODUCT_NAME: &str = "Code";
+
+pub(super) fn discover() -> Option<Agent> {
+    let context = ScanContext::capture();
+    discover_with(&context)
+}
+
+fn discover_with(context: &ScanContext) -> Option<Agent> {
+    let executable = metadata::find_all_in_path("code")
+        .into_iter()
+        .chain(
+            executable_candidates(context)
+                .into_iter()
+                .filter(|candidate| candidate.is_file()),
+        )
+        .find(|candidate| is_visual_studio_code(candidate))?;
     let version = version_candidates(context, &executable)
         .into_iter()
-        .find_map(|path| metadata::json_version(&path));
+        .find_map(|path| metadata::json_package_version(&path, PRODUCT_NAME));
     Some(Agent {
         version,
         executable,
-        kind: "vscode".to_owned(),
+        kind: VsCode::ID.to_owned(),
         mcp_servers: discover_mcp_servers(context),
         skills: metadata::discover_skills(skill_roots(context)),
     })
+}
+
+/// Visual Studio Code forks such as Cursor and Windsurf ship their own `code`
+/// launcher, so finding one on `PATH` does not prove it is Visual Studio Code.
+fn is_visual_studio_code(executable: &Path) -> bool {
+    metadata::packaged_manifest_candidates(executable)
+        .into_iter()
+        .find_map(|path| metadata::json_package_name(&path))
+        .is_none_or(|name| name == PRODUCT_NAME)
 }
 
 fn discover_mcp_servers(context: &ScanContext) -> Vec<McpServer> {
@@ -66,14 +91,14 @@ fn user_profile_root(home: &Path) -> PathBuf {
     home.join("AppData/Roaming/Code/User")
 }
 
-fn mcp_servers_from_json(path: &Path) -> Vec<McpServer> {
+pub(in crate::provider) fn mcp_servers_from_json(path: &Path) -> Vec<McpServer> {
     let Some(document) = files::read_json5::<Value>(path) else {
         return Vec::new();
     };
     mcp_servers_from_value(&document, path)
 }
 
-fn mcp_servers_from_value(document: &Value, source: &Path) -> Vec<McpServer> {
+pub(in crate::provider) fn mcp_servers_from_value(document: &Value, source: &Path) -> Vec<McpServer> {
     let Some(servers) = document
         .get("servers")
         .or_else(|| document.get("mcpServers"))
@@ -182,11 +207,61 @@ fn version_candidates(context: &ScanContext, executable: &Path) -> Vec<PathBuf> 
 
 #[cfg(test)]
 mod tests {
+    fn packaged_editor(name: &str, product: &str, manifest: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "agentdesktop-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let manifest = root.join(manifest);
+        fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::write(
+            &manifest,
+            json!({ "name": product, "version": "1.2.3" }).to_string(),
+        )
+        .unwrap();
+        let launcher = root.join("bin/code");
+        fs::write(&launcher, "").unwrap();
+        launcher
+    }
+
+    #[test]
+    fn rejects_a_code_launcher_belonging_to_a_fork() {
+        let launcher = packaged_editor("fork", "Cursor", "resources/app/package.json");
+        assert!(!is_visual_studio_code(&launcher));
+        let _ = fs::remove_dir_all(launcher.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn accepts_a_code_launcher_belonging_to_visual_studio_code() {
+        let launcher = packaged_editor("vscode", "Code", "resources/app/package.json");
+        assert!(is_visual_studio_code(&launcher));
+        let _ = fs::remove_dir_all(launcher.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn reads_the_product_of_an_application_bundle_layout() {
+        let fork = packaged_editor("bundle-fork", "Cursor", "package.json");
+        assert!(!is_visual_studio_code(&fork));
+        let _ = fs::remove_dir_all(fork.parent().unwrap().parent().unwrap());
+
+        let genuine = packaged_editor("bundle-vscode", "Code", "package.json");
+        assert!(is_visual_studio_code(&genuine));
+        let _ = fs::remove_dir_all(genuine.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn accepts_an_install_layout_without_a_manifest() {
+        assert!(is_visual_studio_code(Path::new("/usr/bin/code")));
+    }
+
     use std::{fs, path::Path};
 
     use serde_json::json;
 
-    use super::{mcp_servers_from_json, mcp_servers_from_value};
+    use super::{is_visual_studio_code, mcp_servers_from_json, mcp_servers_from_value};
 
     #[cfg(target_os = "macos")]
     #[test]
