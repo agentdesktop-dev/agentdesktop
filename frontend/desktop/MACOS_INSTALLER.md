@@ -35,10 +35,40 @@ Packages are written below `target/<target>/release/bundle/pkg`, or below
 Set `AGENTDESKTOP_VERSION` to override the package and application version.
 Set `APPLE_INSTALLER_SIGNING_IDENTITY` to a Developer ID Installer identity to
 sign the package. `APPLE_INSTALLER_KEYCHAIN` optionally selects its keychain.
-Application signing continues to use Tauri's standard Apple signing variables.
+Set `APPLE_SIGNING_IDENTITY` to the name or SHA-1 fingerprint of a code-signing
+certificate in your macOS keychain to sign the application itself. Reuse the
+same certificate and app identifier across builds so Keychain recognizes
+upgrades as the same application. A persistent self-signed certificate works
+for this; ad-hoc signing (`-`) does not preserve identity across changed builds.
 
-For production distribution, notarize and staple the resulting package after
-signing it:
+## Release signing
+
+The release workflow signs both architectures of the standalone macOS binary
+and the application inside the PKG. Configure these repository Actions secrets:
+
+| Secret | Value |
+| --- | --- |
+| `APPLE_APPLICATION_CERTIFICATE` | Base64-encoded `.p12` containing the signing certificate and private key |
+| `APPLE_CERTIFICATE_PASSWORD` | Password protecting that `.p12` |
+
+The workflow imports the identity into a temporary keychain, trusts the
+self-signed certificate on the build runner, and selects it by fingerprint.
+It verifies the application signature before uploading artifacts and removes
+the signing identity afterward. Missing secrets fail the macOS release jobs.
+
+Keep a secure backup of the certificate, private key, and password. Reuse them
+for future releases; generating a replacement certificate changes the identity
+that protects existing Keychain entries. The application identifier remains
+`dev.agentdesktop.tray`, including for standalone binaries.
+
+Self-signing requires no Apple account. It preserves application identity but
+does not provide Gatekeeper approval or notarization. The PKG container itself
+remains unsigned. Devices enrolled under an earlier ad-hoc signature still need
+credential recovery or re-enrollment once; adopting this certificate does not
+unlock the old entries.
+
+For Apple-trusted distribution, use Developer ID Application signing, sign the
+PKG with Developer ID Installer, then notarize and staple the package:
 
 ```sh
 xcrun notarytool submit "Agent Desktop.pkg" \
