@@ -2,6 +2,7 @@ mod claude_code;
 mod claude_desktop;
 mod codex;
 mod json_merge;
+mod managed_file;
 mod open_code;
 
 use std::{

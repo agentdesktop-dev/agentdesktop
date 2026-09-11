@@ -274,12 +274,16 @@ export const controllerSettings: ControllerSettings = {
 export const activeDaemonConfig: DaemonConfigDocument = {
   llmGateway: {
     url: "https://gateway.example.internal",
-    authentication: { type: "controllerJwt", audience: "agentgateway" },
+    authentication: {
+      type: "controllerJwt",
+      audience: "agentgateway",
+      allowedClientIds: ["claude-code", "opencode"],
+    },
   },
   telemetry: { events: ["session.new", "tool.use.input"] },
   programs: {
     claudeCode: { permissions: { defaultMode: "plan" } },
-    openCode: { useLlmGateway: false, autoupdate: false },
+    openCode: { useLlmGateway: false, managedConfig: { autoupdate: false } },
   },
 };
 

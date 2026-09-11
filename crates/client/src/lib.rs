@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{Context, bail};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Empty, Full};
-use hyper::{Request, client::conn::http1};
+use hyper::{Request, body::Body, client::conn::http1};
 use hyper_util::rt::TokioIo;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -50,9 +50,13 @@ async fn connect(endpoint: &Path) -> anyhow::Result<LocalStream> {
     }
 }
 
-pub async fn get<T>(endpoint: &Path, path: &str) -> anyhow::Result<T>
+async fn roundtrip<B>(
+    endpoint: &Path,
+    make_request: impl FnOnce() -> anyhow::Result<Request<B>>,
+) -> anyhow::Result<Bytes>
 where
-    T: DeserializeOwned,
+    B: Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
     let stream = connect(endpoint).await?;
     let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
@@ -65,11 +69,7 @@ where
         }
     });
 
-    let request = Request::builder()
-        .method("GET")
-        .uri(path)
-        .header("host", "localhost")
-        .body(Empty::<Bytes>::new())?;
+    let request = make_request()?;
     let response = sender.send_request(request).await.context("send request")?;
     let status = response.status();
     let body = response
@@ -86,6 +86,21 @@ where
         );
     }
 
+    Ok(body)
+}
+
+pub async fn get<T>(endpoint: &Path, path: &str) -> anyhow::Result<T>
+where
+    T: DeserializeOwned,
+{
+    let body = roundtrip(endpoint, || {
+        Ok(Request::builder()
+            .method("GET")
+            .uri(path)
+            .header("host", "localhost")
+            .body(Empty::<Bytes>::new())?)
+    })
+    .await?;
     serde_json::from_slice(&body).context("decode daemon response")
 }
 
@@ -93,54 +108,18 @@ pub async fn post_json<T>(endpoint: &Path, path: &str, value: &T) -> anyhow::Res
 where
     T: Serialize,
 {
-    let stream = connect(endpoint).await?;
-    let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
-        .await
-        .context("start HTTP connection")?;
-
-    tokio::spawn(async move {
-        if let Err(error) = connection.await {
-            tracing::debug!(%error, "local HTTP connection failed");
-        }
-    });
-
-    let body = serde_json::to_vec(value).context("encode request body")?;
-    let request = Request::builder()
-        .method("POST")
-        .uri(path)
-        .header("host", "localhost")
-        .header("content-type", "application/json")
-        .body(Full::new(Bytes::from(body)))?;
-    let response = sender.send_request(request).await.context("send request")?;
-    let status = response.status();
-    let body = response
-        .into_body()
-        .collect()
-        .await
-        .context("read response")?
-        .to_bytes();
-    if !status.is_success() {
-        bail!(
-            "daemon returned {status}: {}",
-            String::from_utf8_lossy(&body)
-        );
-    }
+    roundtrip(endpoint, || {
+        let body = serde_json::to_vec(value).context("encode request body")?;
+        Ok(Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("host", "localhost")
+            .header("content-type", "application/json")
+            .body(Full::new(Bytes::from(body)))?)
+    })
+    .await?;
     Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    use std::path::Path;
-
-    use super::connect_error;
-
-    #[test]
-    fn connection_error_suggests_checking_the_daemon() {
-        let endpoint = Path::new("/tmp/agentdesktop.sock");
-
-        assert_eq!(
-            connect_error(endpoint),
-            "connect to /tmp/agentdesktop.sock\nCheck that the Agentdesktop daemon is running."
-        );
-    }
-}
+mod tests;

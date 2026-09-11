@@ -1,17 +1,17 @@
-use std::{fs, path::Path};
+use std::path::Path;
 
 use agentdesktop_core::config::{LlmGatewayAuthentication, LlmGatewayConfig, OpenCodeConfig};
 use anyhow::Context;
 use serde_json::{Value, json};
-use tracing::info;
 use url::Url;
 
-use crate::secure_fs;
-
-use super::{ReconcileMode, deep_merge, responses_base_url};
+use super::{ReconcileMode, deep_merge, managed_file::HeaderOwnedFile, responses_base_url};
 
 const MANAGED_HEADER: &str = "// Managed by Agentdesktop. Manual changes will be replaced.\n";
-const CONFIG_PROGRAM: &str = "opencode";
+const MANAGED_FILE: HeaderOwnedFile = HeaderOwnedFile {
+    program: "opencode",
+    header: MANAGED_HEADER,
+};
 
 pub fn apply(
     config_path: &Path,
@@ -22,30 +22,40 @@ pub fn apply(
     mode: ReconcileMode,
 ) -> anyhow::Result<()> {
     let Some((config, gateway)) = config else {
-        remove_owned(config_path, "managed configuration", mode)?;
-        return remove_owned(plugin_path, "credential plugin", mode);
+        MANAGED_FILE.reconcile(config_path, "managed configuration", None, mode)?;
+        return MANAGED_FILE.reconcile(plugin_path, "credential plugin", None, mode);
     };
 
     let authentication = gateway.and_then(|gateway| gateway.authentication.as_ref());
-    let plugin_url = if authentication.is_some_and(LlmGatewayAuthentication::uses_credential_helper)
-    {
-        let source = credential_plugin(credential_helper, socket)?;
-        reconcile_file(plugin_path, source.as_bytes(), "credential plugin", mode)?;
-        Some(file_url(plugin_path)?)
+    let plugin = if authentication.is_some_and(LlmGatewayAuthentication::uses_credential_helper) {
+        Some((
+            credential_plugin_body(credential_helper, socket)?,
+            file_url(plugin_path)?,
+        ))
     } else {
-        remove_owned(plugin_path, "credential plugin", mode)?;
         None
     };
+    let plugin_url = plugin.as_ref().map(|(_, url)| url.as_str());
+    let settings = managed_config(config, gateway, plugin_url)?;
+    let mut body = serde_json::to_string_pretty(&settings)
+        .context("serialize OpenCode managed configuration")?
+        .into_bytes();
+    body.push(b'\n');
 
-    let settings = managed_config(config, gateway, plugin_url.as_deref())?;
-    let mut contents = MANAGED_HEADER.as_bytes().to_vec();
-    contents.extend_from_slice(
-        serde_json::to_string_pretty(&settings)
-            .context("serialize OpenCode managed configuration")?
-            .as_bytes(),
-    );
-    contents.push(b'\n');
-    reconcile_file(config_path, &contents, "managed configuration", mode)
+    // Activate the plugin before referencing it; remove its reference before deleting it.
+    if let Some((source, _)) = &plugin {
+        MANAGED_FILE.reconcile(
+            plugin_path,
+            "credential plugin",
+            Some(source.as_bytes()),
+            mode,
+        )?;
+    }
+    MANAGED_FILE.reconcile(config_path, "managed configuration", Some(&body), mode)?;
+    if plugin.is_none() {
+        MANAGED_FILE.reconcile(plugin_path, "credential plugin", None, mode)?;
+    }
+    Ok(())
 }
 
 fn managed_config(
@@ -108,7 +118,7 @@ fn append_plugin(settings: &mut Value, plugin_url: &str) {
     }
 }
 
-fn credential_plugin(credential_helper: &Path, socket: &Path) -> anyhow::Result<String> {
+fn credential_plugin_body(credential_helper: &Path, socket: &Path) -> anyhow::Result<String> {
     let provider_name = "agentdesktop";
     let command = [
         credential_helper.to_string_lossy().into_owned(),
@@ -122,7 +132,7 @@ fn credential_plugin(credential_helper: &Path, socket: &Path) -> anyhow::Result<
     let command = serde_json::to_string(&command).context("encode OpenCode credential command")?;
 
     Ok(format!(
-        r#"{MANAGED_HEADER}const provider = {provider};
+        r#"const provider = {provider};
 const command = {command};
 let cachedToken = "";
 let refreshAfter = 0;
@@ -173,122 +183,307 @@ fn file_url(path: &Path) -> anyhow::Result<String> {
         })
 }
 
-fn reconcile_file(
-    path: &Path,
-    contents: &[u8],
-    description: &str,
-    mode: ReconcileMode,
-) -> anyhow::Result<()> {
-    let existing = match fs::read(path) {
-        Ok(existing) => Some(existing),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("read {description} from {}", path.display()));
-        }
-    };
-    let action = match existing.as_deref() {
-        Some(existing) if existing == contents => {
-            info!(
-                program = CONFIG_PROGRAM,
-                kind = description,
-                action = "unchanged",
-                path = %path.display(),
-                "managed file already current"
-            );
-            mode.record(CONFIG_PROGRAM, description, "unchanged", path);
-            return Ok(());
-        }
-        Some(existing) if existing.starts_with(MANAGED_HEADER.as_bytes()) => "update",
-        Some(existing) if mode.is_dry_run() => {
-            mode.record_diff(
-                CONFIG_PROGRAM,
-                description,
-                "conflict",
-                path,
-                Some(existing),
-                Some(contents),
-            );
-            return Ok(());
-        }
-        Some(_) => anyhow::bail!(
-            "refusing to replace OpenCode {description} not owned by Agentdesktop at {}",
-            path.display()
-        ),
-        None => "create",
-    };
-    if mode.writes() {
-        let directory = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(directory)
-            .with_context(|| format!("create OpenCode directory {}", directory.display()))?;
-        secure_fs::atomic_write(path, contents, 0o644)?;
-    }
-    info!(
-        program = CONFIG_PROGRAM,
-        kind = description,
-        action,
-        path = %path.display(),
-        "reconciled managed file"
-    );
-    mode.record_diff(
-        CONFIG_PROGRAM,
-        description,
-        action,
-        path,
-        existing.as_deref(),
-        Some(contents),
-    );
-    Ok(())
-}
-
-fn remove_owned(path: &Path, description: &str, mode: ReconcileMode) -> anyhow::Result<()> {
-    match fs::read(path) {
-        Ok(contents) if contents.starts_with(MANAGED_HEADER.as_bytes()) => {
-            if mode.writes() {
-                fs::remove_file(path)
-                    .with_context(|| format!("remove {description} at {}", path.display()))?;
-            }
-            info!(
-                program = CONFIG_PROGRAM,
-                kind = description,
-                action = "remove",
-                path = %path.display(),
-                "reconciled managed file"
-            );
-            mode.record(CONFIG_PROGRAM, description, "remove", path);
-            Ok(())
-        }
-        Ok(_) => {
-            info!(
-                program = CONFIG_PROGRAM,
-                kind = description,
-                action = "unchanged",
-                path = %path.display(),
-                "preserving managed file not owned by Agentdesktop"
-            );
-            mode.record(CONFIG_PROGRAM, description, "unchanged", path);
-            Ok(())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            mode.record(CONFIG_PROGRAM, description, "unchanged", path);
-            Ok(())
-        }
-        Err(error) => {
-            Err(error).with_context(|| format!("read {description} from {}", path.display()))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{fs, path::Path};
 
     use agentdesktop_core::config::parse_daemon;
 
-    use super::{credential_plugin, managed_config};
+    use super::{MANAGED_HEADER, apply, credential_plugin_body, file_url, managed_config};
+    use crate::reconcile::{DryRunReport, ReconcileMode};
+
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!("opencode-{}", rand::random::<u64>()));
+            fs::create_dir(&root).unwrap();
+            Self(root)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn apply_renders_both_files_and_observes_lifecycle_and_conflict_ordering() {
+        let root = Scratch::new();
+        let path = root.0.join("managed.jsonc");
+        let plugin = root.0.join("credential plugin.js");
+        let helper = root.0.join("credential helper");
+        let socket = root.0.join("agent.sock");
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com/proxy
+  authentication: { type: controllerJwt, audience: agentgateway, allowedClientIds: [opencode] }
+programs:
+  openCode:
+    model: company-model
+    models: { company-model: { name: Company GPT } }
+    managedConfig: { plugin: [existing-plugin], autoupdate: false }
+"#,
+        )
+        .unwrap();
+        let open_code = config.programs.open_code.as_ref().unwrap();
+        let gateway = config.llm_gateway.as_ref().unwrap();
+        let mut no_auth = gateway.clone();
+        no_auth.authentication = None;
+        let source = format!(
+            "{MANAGED_HEADER}{}",
+            credential_plugin_body(&helper, &socket).unwrap()
+        );
+        let url = file_url(&plugin).unwrap();
+        let files = [&path, &plugin];
+        let read = || files.map(|path| fs::read_to_string(path).ok());
+        let run = |enabled: bool, gateway, mode: ReconcileMode<'_>| {
+            let desired = enabled.then_some((open_code, gateway));
+            apply(&path, &plugin, &helper, &socket, desired, mode)
+        };
+        for (gateway, enabled, actions) in [
+            (Some(gateway), true, ["create", "create"]),
+            (Some(gateway), true, ["unchanged", "unchanged"]),
+            (Some(&no_auth), true, ["update", "remove"]),
+            (Some(gateway), true, ["create", "update"]),
+            (None, true, ["update", "remove"]),
+            (None, true, ["unchanged", "unchanged"]),
+            (Some(gateway), true, ["create", "update"]),
+            (Some(gateway), false, ["remove", "remove"]),
+        ] {
+            let authenticated = gateway
+                .and_then(|gateway| gateway.authentication.as_ref())
+                .is_some();
+            let plugin_url = authenticated.then_some(url.as_str());
+            let settings = managed_config(open_code, gateway, plugin_url).unwrap();
+            let json = serde_json::to_string_pretty(&settings).unwrap();
+            let rendered = format!("{MANAGED_HEADER}{json}\n");
+            let paths = if enabled && authenticated {
+                [&plugin, &path]
+            } else {
+                files
+            };
+            let before = read();
+            let after = [
+                enabled.then_some(rendered),
+                (enabled && authenticated).then_some(source.clone()),
+            ];
+            let report = DryRunReport::default();
+            run(enabled, gateway, ReconcileMode::DryRun(&report)).unwrap();
+            assert_eq!(read(), before);
+            let changes = report.changes.borrow();
+            assert_eq!(changes.len(), 2);
+            for (change, (file_path, action)) in changes.iter().zip(paths.into_iter().zip(actions))
+            {
+                assert_eq!((&change.path, change.action.as_str()), (file_path, action));
+                let index = files.iter().position(|path| *path == file_path).unwrap();
+                assert_eq!(
+                    change.before.as_deref(),
+                    before[index].as_deref().filter(|_| action != "unchanged")
+                );
+                assert_eq!(
+                    change.after.as_deref(),
+                    after[index].as_deref().filter(|_| action != "unchanged")
+                );
+            }
+            run(enabled, gateway, ReconcileMode::Apply).unwrap();
+            assert_eq!(read(), after);
+        }
+        for (config_seed, plugin_seed) in [
+            ("user config\n", MANAGED_HEADER),
+            (MANAGED_HEADER, "user plugin\n"),
+            ("user config\n", "user plugin\n"),
+        ] {
+            fs::write(&path, config_seed).unwrap();
+            fs::write(&plugin, plugin_seed).unwrap();
+            let before = read();
+            let report = DryRunReport::default();
+            run(true, Some(gateway), ReconcileMode::DryRun(&report)).unwrap();
+            let changes = report.changes.borrow();
+            assert_eq!(changes.len(), 2);
+            let expected = [(&plugin, plugin_seed), (&path, config_seed)];
+            for (change, (path, seed)) in changes.iter().zip(expected) {
+                assert_eq!(&change.path, path);
+                let action = if seed == MANAGED_HEADER {
+                    "update"
+                } else {
+                    "conflict"
+                };
+                assert_eq!(change.action, action);
+            }
+            assert_eq!(read(), before);
+            let error = run(true, Some(gateway), ReconcileMode::Apply).unwrap_err();
+            assert!(error.to_string().contains("not owned by Agentdesktop"));
+            let updated = if plugin_seed == MANAGED_HEADER {
+                &source
+            } else {
+                plugin_seed
+            };
+            assert_eq!(
+                read(),
+                [Some(config_seed.to_owned()), Some(updated.to_owned())]
+            );
+        }
+        // A directory is a deterministic read error: activation stops; removal reaches it second.
+        fs::remove_file(&plugin).unwrap();
+        fs::create_dir(&plugin).unwrap();
+        fs::write(&path, MANAGED_HEADER).unwrap();
+        for enabled in [true, false] {
+            let report = DryRunReport::default();
+            for mode in [ReconcileMode::DryRun(&report), ReconcileMode::Apply] {
+                let error = run(enabled, Some(gateway), mode).unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("read OpenCode credential plugin")
+                );
+                assert!(plugin.is_dir());
+                let expected = (enabled || mode.is_dry_run()).then_some(MANAGED_HEADER);
+                assert_eq!(fs::read_to_string(&path).ok().as_deref(), expected);
+            }
+            let changes = report.changes.borrow();
+            assert_eq!(changes.len(), usize::from(!enabled));
+            if !enabled {
+                assert_eq!(
+                    (&changes[0].path, changes[0].action.as_str()),
+                    (&path, "remove")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn disabling_authentication_preserves_plugin_referenced_by_foreign_config() {
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com/proxy
+  authentication: { type: controllerJwt, audience: agentgateway, allowedClientIds: [opencode] }
+programs:
+  openCode:
+    model: company-model
+    models: { company-model: { name: Company GPT } }
+    managedConfig: { plugin: [existing-plugin] }
+"#,
+        )
+        .unwrap();
+        let open_code = config.programs.open_code.as_ref().unwrap();
+        let gateway = config.llm_gateway.as_ref().unwrap();
+        let mut no_auth = gateway.clone();
+        no_auth.authentication = None;
+        for desired_gateway in [Some(&no_auth), None] {
+            let root = Scratch::new();
+            let path = root.0.join("managed.jsonc");
+            let plugin = root.0.join("credential plugin.js");
+            let helper = root.0.join("credential helper");
+            let socket = root.0.join("agent.sock");
+            let run = |gateway, mode: ReconcileMode<'_>| {
+                apply(
+                    &path,
+                    &plugin,
+                    &helper,
+                    &socket,
+                    Some((open_code, gateway)),
+                    mode,
+                )
+            };
+            run(Some(gateway), ReconcileMode::Apply).unwrap();
+            let owned = fs::read_to_string(&path).unwrap();
+            let foreign = owned.strip_prefix(MANAGED_HEADER).unwrap();
+            let url = file_url(&plugin).unwrap();
+            let settings: serde_json::Value = serde_json::from_str(foreign).unwrap();
+            assert!(
+                settings["plugin"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|value| value == &url)
+            );
+            fs::write(&path, foreign).unwrap();
+            let files = [&path, &plugin];
+            let read = || files.map(|path| fs::read_to_string(path).ok());
+            let before = read();
+            assert!(before.iter().all(Option::is_some));
+            let report = DryRunReport::default();
+            run(desired_gateway, ReconcileMode::DryRun(&report)).unwrap();
+            assert_eq!(read(), before);
+            let error = run(desired_gateway, ReconcileMode::Apply).unwrap_err();
+            assert!(error.to_string().contains("not owned by Agentdesktop"));
+            assert_eq!(read(), before);
+
+            let changes = report.changes.borrow();
+            assert_eq!(changes.len(), 2);
+            assert_eq!(
+                (&changes[0].path, changes[0].action.as_str()),
+                (&path, "conflict")
+            );
+            assert_eq!(
+                (&changes[1].path, changes[1].action.as_str()),
+                (&plugin, "remove")
+            );
+            assert!(!changes[0].after.as_deref().unwrap().contains(&url));
+            assert_eq!(changes[0].before.as_deref(), Some(foreign));
+            assert_eq!(changes[1].before, before[1]);
+            assert!(changes[1].after.is_none());
+        }
+    }
+
+    #[test]
+    fn invalid_gateway_configuration_fails_before_mutating_files_or_recording_a_plan() {
+        let root = Scratch::new();
+        let path = root.0.join("managed.jsonc");
+        let plugin = root.0.join("credential plugin.js");
+        let helper = root.0.join("credential helper");
+        let socket = root.0.join("agent.sock");
+        let mut config = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com/proxy
+  authentication: { type: controllerJwt, audience: agentgateway, allowedClientIds: [opencode] }
+programs:
+  openCode:
+    model: company-model
+    models: { company-model: { name: Company GPT } }
+"#,
+        )
+        .unwrap();
+        let open_code = config.programs.open_code.as_mut().unwrap();
+        open_code.model = None;
+        let run = |mode: ReconcileMode<'_>| {
+            apply(
+                &path,
+                &plugin,
+                &helper,
+                &socket,
+                Some((open_code, config.llm_gateway.as_ref())),
+                mode,
+            )
+        };
+        for seed in [None, Some(MANAGED_HEADER)] {
+            if let Some(seed) = seed {
+                fs::write(&path, seed).unwrap();
+                fs::write(&plugin, seed).unwrap();
+            }
+            let report = DryRunReport::default();
+            for mode in [ReconcileMode::DryRun(&report), ReconcileMode::Apply] {
+                let error = run(mode).unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    "OpenCode gateway configuration has no model"
+                );
+                for file in [&path, &plugin] {
+                    assert_eq!(fs::read_to_string(file).ok().as_deref(), seed);
+                }
+                assert_eq!(
+                    fs::read_dir(&root.0).unwrap().count(),
+                    if seed.is_some() { 2 } else { 0 }
+                );
+            }
+            assert!(report.changes.borrow().is_empty());
+        }
+    }
 
     #[test]
     fn pass_through_settings_are_merged_with_gateway_and_plugin() {
@@ -351,7 +546,7 @@ programs:
 
     #[test]
     fn plugin_uses_argument_array_and_scopes_the_header() {
-        let plugin = credential_plugin(
+        let plugin = credential_plugin_body(
             Path::new("/usr/local/bin/agentdesktop"),
             Path::new("/run/agentdesktop/agentdesktop.sock"),
         )

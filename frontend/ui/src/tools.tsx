@@ -41,27 +41,39 @@ export interface ModelRuntimeDiscovery {
   models: Array<{ name: string }>;
 }
 
-const toolIcons: Record<string, string> = {
-  codex: codexIcon,
-  "claude-code": claudeCodeIcon,
-  claude_code: claudeCodeIcon,
-  "claude-desktop": claudeDesktopIcon,
-  claude_desktop: claudeDesktopIcon,
-  opencode: openCodeIcon,
-  vscode: copilotIcon,
-};
+// Presentation only: configuration support and authorization remain caller-owned.
+const toolPresentations: ReadonlyArray<{
+  id: string;
+  aliases: readonly string[];
+  label: string;
+  icon: string;
+}> = [
+  { id: "codex", aliases: [], label: "Codex", icon: codexIcon },
+  {
+    id: "claude-code",
+    aliases: ["claude_code"],
+    label: "Claude Code",
+    icon: claudeCodeIcon,
+  },
+  {
+    id: "claude-desktop",
+    aliases: ["claude_desktop"],
+    label: "Claude Desktop",
+    icon: claudeDesktopIcon,
+  },
+  { id: "opencode", aliases: [], label: "OpenCode", icon: openCodeIcon },
+  { id: "vscode", aliases: [], label: "VS Code", icon: copilotIcon },
+];
+
+function toolPresentation(kind: string) {
+  const normalized = kind.toLowerCase();
+  return toolPresentations.find(
+    (tool) => tool.id === normalized || tool.aliases.includes(normalized),
+  );
+}
 
 export function friendlyTool(kind: string) {
-  const names: Record<string, string> = {
-    codex: "Codex",
-    claude_code: "Claude Code",
-    "claude-code": "Claude Code",
-    claude_desktop: "Claude Desktop",
-    "claude-desktop": "Claude Desktop",
-    opencode: "OpenCode",
-    vscode: "VS Code",
-  };
-  return names[kind.toLowerCase()] ?? kind;
+  return toolPresentation(kind)?.label ?? kind;
 }
 
 export function friendlyModelRuntime(kind: string) {
@@ -114,7 +126,7 @@ export function ModelRuntimeInventory({
 }
 
 export function ToolIcon({ kind }: { kind: string }) {
-  const icon = toolIcons[kind.toLowerCase()];
+  const icon = toolPresentation(kind)?.icon;
   return icon ? (
     <img className="tool-icon" src={icon} alt="" aria-hidden="true" />
   ) : (

@@ -1,0 +1,29 @@
+{
+  "input": {
+    "llmGateway": {
+      "url": "https://gateway.example.com",
+      "authentication": {
+        "type": "controllerJwt",
+        "audience": "restricted",
+        "allowedClientIds": ["codex"]
+      }
+    },
+    "programs": {
+      "codex": {
+        "useLlmGateway": false,
+        "managedConfig": {
+          "model": "0b101",
+          "instructions": "first\nsecond\n\n\n",
+          "0b101": "0b101",
+          "on": "on",
+          "date": "2026-09-11",
+          "numericString": "00123",
+          "quotes": "\"quotes\" and \\paths",
+          "unicode": "café 日本語",
+          "list": [false, 0, "false", {}]
+        }
+      }
+    }
+  },
+  "yaml": "llmGateway:\n  url: https://gateway.example.com\n  authentication:\n    type: controllerJwt\n    audience: restricted\n    allowedClientIds:\n      - codex\nprograms:\n  codex:\n    useLlmGateway: false\n    managedConfig:\n      model: \"0b101\"\n      instructions: |+\n        first\n        second\n\n\n      \"0b101\": \"0b101\"\n      \"on\": \"on\"\n      date: \"2026-09-11\"\n      numericString: \"00123\"\n      quotes: '\"quotes\" and \\paths'\n      unicode: café 日本語\n      list:\n        - false\n        - 0\n        - \"false\"\n        - {}\n"
+}

@@ -1,72 +1,12 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env, fs,
+    fs,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
 use agentdesktop_core::model::Skill;
 use serde::Deserialize;
-
-pub(super) fn find_in_path(name: &str) -> Option<PathBuf> {
-    let path = env::var_os("PATH")?;
-    find_in_directories(name, env::split_paths(&path))
-}
-
-pub(super) fn find_executable(
-    name: &str,
-    additional_candidates: impl IntoIterator<Item = PathBuf>,
-) -> Option<PathBuf> {
-    find_in_path(name).or_else(|| {
-        additional_candidates
-            .into_iter()
-            .find(|candidate| candidate.is_file())
-    })
-}
-
-fn find_in_directories(
-    name: &str,
-    directories: impl IntoIterator<Item = PathBuf>,
-) -> Option<PathBuf> {
-    let extensions = executable_extensions(name);
-    directories.into_iter().find_map(|directory| {
-        extensions
-            .iter()
-            .map(|extension| directory.join(format!("{name}{extension}")))
-            .find(|candidate| candidate.is_file())
-    })
-}
-
-#[cfg(windows)]
-fn executable_extensions(name: &str) -> Vec<String> {
-    if Path::new(name).extension().is_some() {
-        return vec![String::new()];
-    }
-
-    let mut extensions = vec![String::new()];
-    let path_extensions = env::var_os("PATHEXT")
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
-    extensions.extend(
-        path_extensions
-            .to_string_lossy()
-            .split(';')
-            .filter(|extension| !extension.is_empty())
-            .map(|extension| {
-                if extension.starts_with('.') {
-                    extension.to_owned()
-                } else {
-                    format!(".{extension}")
-                }
-            }),
-    );
-    extensions
-}
-
-#[cfg(unix)]
-fn executable_extensions(_name: &str) -> Vec<String> {
-    vec![String::new()]
-}
 
 pub(super) fn version_after_component(executable: &Path, component: &str) -> Option<String> {
     let resolved = executable.canonicalize().ok()?;
@@ -99,8 +39,7 @@ fn json_package_metadata(path: &Path) -> Option<PackageMetadata> {
         version: String,
     }
 
-    let contents = fs::read(path).ok()?;
-    let metadata: JsonPackageMetadata = serde_json::from_slice(&contents).ok()?;
+    let metadata: JsonPackageMetadata = super::files::read_json(path)?;
     (!metadata.version.is_empty()).then_some(PackageMetadata {
         name: metadata.name,
         version: metadata.version,
@@ -156,89 +95,6 @@ pub(super) fn electron_asar_version(path: &Path, product_name: &str) -> Option<S
     let metadata: PackageMetadata = serde_json::from_slice(&contents).ok()?;
     (metadata.product_name == product_name && !metadata.version.is_empty())
         .then_some(metadata.version)
-}
-
-pub(super) fn home_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        if let Some(profile) = env_path("USERPROFILE") {
-            return Some(profile);
-        }
-        let drive = env::var_os("HOMEDRIVE")?;
-        let path = env::var_os("HOMEPATH")?;
-        Some(PathBuf::from(drive).join(path))
-    }
-
-    #[cfg(unix)]
-    env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
-}
-
-#[cfg(windows)]
-pub(super) fn env_path(name: &str) -> Option<PathBuf> {
-    env::var_os(name)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-}
-
-/// Home directories that may contain per-user developer-tool configuration.
-///
-/// The daemon commonly runs as root or in a container, so its own `HOME` is
-/// not necessarily the home of the users whose tools it discovers.
-pub(super) fn user_home_dirs() -> Vec<PathBuf> {
-    let mut homes = BTreeSet::new();
-    homes.extend(home_dir());
-
-    #[cfg(unix)]
-    if let Ok(passwd) = fs::read_to_string("/etc/passwd") {
-        for line in passwd.lines() {
-            let fields: Vec<_> = line.split(':').collect();
-            let Some(home) = fields.get(5).filter(|home| home.starts_with('/')) else {
-                continue;
-            };
-            let path = PathBuf::from(home);
-            if path.is_dir() {
-                homes.insert(path);
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    let parents = vec![PathBuf::from("/home")];
-    #[cfg(target_os = "macos")]
-    let parents = vec![PathBuf::from("/Users")];
-    #[cfg(windows)]
-    let parents: Vec<PathBuf> = home_dir()
-        .and_then(|home| home.parent().map(Path::to_path_buf))
-        .into_iter()
-        .chain(env_path("SystemDrive").map(|drive| drive.join("Users")))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    for parent in &parents {
-        let Ok(entries) = fs::read_dir(parent) else {
-            continue;
-        };
-        homes.extend(
-            entries
-                .flatten()
-                .map(|entry| entry.path())
-                .filter(|path| path.is_dir()),
-        );
-    }
-
-    homes.into_iter().collect()
-}
-
-pub(super) fn current_dir_ancestors(relative: &Path) -> Vec<PathBuf> {
-    let Ok(current) = env::current_dir() else {
-        return Vec::new();
-    };
-    current
-        .ancestors()
-        .map(|directory| directory.join(relative))
-        .collect()
 }
 
 pub(super) fn discover_skills(roots: impl IntoIterator<Item = PathBuf>) -> Vec<Skill> {

@@ -1,4 +1,4 @@
-import { ToolIcon } from "@agentdesktop/ui";
+import { friendlyTool, ToolIcon } from "@agentdesktop/ui";
 import {
   Check,
   ChevronRight,
@@ -9,7 +9,13 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import type { AgentDraft, AgentKind, DaemonConfigDocument } from "../types";
+import {
+  createConfigurationDraft,
+  defaultLlmGateway,
+  programSettingsYaml,
+  renderConfiguration,
+} from "../configuration";
+import type { AgentKind, DaemonConfigDocument } from "../types";
 
 export interface ConfigurationViewProps {
   initialConfig?: DaemonConfigDocument | null;
@@ -22,43 +28,30 @@ export function ConfigurationView({
 }: ConfigurationViewProps) {
   const addAgentMenu = useRef<HTMLDetailsElement>(null);
   const initializedFromController = useRef(false);
-  const [gateway, setGateway] = useState(true);
-  const [gatewayUrl, setGatewayUrl] = useState("https://gateway.example.com");
-  const [controllerJwt, setControllerJwt] = useState(true);
-  const [audience, setAudience] = useState("agentgateway");
-  const [sessionNewTelemetry, setSessionNewTelemetry] = useState(false);
-  const [toolUseTelemetry, setToolUseTelemetry] = useState(false);
-  const [toolInputTelemetry, setToolInputTelemetry] = useState(false);
-  const [sandboxEnabled, setSandboxEnabled] = useState(false);
-  const [allowedDomains, setAllowedDomains] = useState("");
-  const [writablePaths, setWritablePaths] = useState("");
-  const [deniedPaths, setDeniedPaths] = useState("");
-  const [agents, setAgents] = useState<AgentDraft[]>([
-    { kind: "claudeCode", useGateway: true, settings: "" },
-  ]);
+  const [draft, setDraft] = useState(() =>
+    createConfigurationDraft(initialConfig),
+  );
   const [copied, setCopied] = useState(false);
-  const incompatibleSandboxAgentNames = agents.flatMap((agent) => {
-    if (!sandboxUnsupportedAgents.has(agent.kind)) return [];
-    const definition = configurableAgents.find(
-      (candidate) => candidate.kind === agent.kind,
-    );
-    return [definition?.label ?? agent.kind];
-  });
+  const { config, gatewayEnabled: gateway, sandboxEnabled } = draft;
+  const llmGateway = config.llmGateway ?? defaultLlmGateway();
+  const controllerJwt = llmGateway.authentication?.type === "controllerJwt";
+  const events = new Set(config.telemetry?.events ?? []);
+  const sessionNewTelemetry = events.has("session.new");
+  const toolInputTelemetry = events.has("tool.use.input");
+  const toolUseTelemetry = events.has("tool.use") || toolInputTelemetry;
+  const agents = Object.entries(config.programs ?? {}).flatMap(
+    ([kind, program]) => {
+      const definition = configurableAgents.find(
+        (candidate) => candidate.kind === kind,
+      );
+      return definition && program ? [{ ...definition, program }] : [];
+    },
+  );
+  const incompatibleSandboxAgentNames = agents
+    .filter((agent) => sandboxUnsupportedAgents.has(agent.kind))
+    .map((agent) => friendlyTool(agent.iconKind));
   const sandboxUnavailable = incompatibleSandboxAgentNames.length > 0;
-  const yaml = daemonConfigYaml({
-    gateway,
-    gatewayUrl,
-    controllerJwt,
-    audience,
-    sandboxEnabled,
-    allowedDomains,
-    writablePaths,
-    deniedPaths,
-    sessionNewTelemetry,
-    toolUseTelemetry,
-    toolInputTelemetry,
-    agents,
-  });
+  const { yaml, errors } = renderConfiguration(draft);
   const availableAgents = configurableAgents.filter(
     (candidate) => !agents.some((agent) => agent.kind === candidate.kind),
   );
@@ -69,29 +62,7 @@ export function ConfigurationView({
     }
     initializedFromController.current = true;
     if (!initialConfig) return;
-
-    const llmGateway = initialConfig.llmGateway;
-    const events = new Set(initialConfig.telemetry?.events ?? []);
-    setGateway(Boolean(llmGateway));
-    if (llmGateway) {
-      setGatewayUrl(llmGateway.url);
-      setControllerJwt(llmGateway.authentication?.type === "controllerJwt");
-      setAudience(llmGateway.authentication?.audience ?? "agentgateway");
-    }
-    setSessionNewTelemetry(events.has("session.new"));
-    setToolUseTelemetry(events.has("tool.use") || events.has("tool.use.input"));
-    setToolInputTelemetry(events.has("tool.use.input"));
-    setSandboxEnabled(Boolean(initialConfig.sandbox));
-    setAllowedDomains(
-      (initialConfig.sandbox?.network?.allowedDomains ?? []).join("\n"),
-    );
-    setWritablePaths(
-      (initialConfig.sandbox?.filesystem?.writable ?? []).join("\n"),
-    );
-    setDeniedPaths(
-      (initialConfig.sandbox?.filesystem?.denied ?? []).join("\n"),
-    );
-    setAgents(agentDrafts(initialConfig.programs));
+    setDraft(createConfigurationDraft(initialConfig));
   }, [initialConfig]);
 
   useEffect(() => {
@@ -106,6 +77,7 @@ export function ConfigurationView({
   }, []);
 
   async function copyYaml() {
+    if (yaml === null) return;
     if (onCopy) {
       await onCopy(yaml);
     } else {
@@ -115,12 +87,46 @@ export function ConfigurationView({
     window.setTimeout(() => setCopied(false), 1500);
   }
 
-  function updateAgent(kind: AgentKind, update: Partial<AgentDraft>) {
-    setAgents((current) =>
-      current.map((agent) =>
-        agent.kind === kind ? { ...agent, ...update } : agent,
-      ),
-    );
+  function updateConfig(
+    update: (config: DaemonConfigDocument) => DaemonConfigDocument,
+  ) {
+    setDraft((current) => ({ ...current, config: update(current.config) }));
+  }
+
+  function updateGateway(
+    update: Partial<NonNullable<DaemonConfigDocument["llmGateway"]>>,
+  ) {
+    updateConfig((current) => ({
+      ...current,
+      llmGateway: { ...(current.llmGateway ?? defaultLlmGateway()), ...update },
+    }));
+  }
+
+  function updateSandbox(
+    field: "allowedDomains" | "writable" | "denied",
+    value: string,
+  ) {
+    setDraft((current) => ({
+      ...current,
+      sandboxFields: { ...current.sandboxFields, [field]: value },
+    }));
+  }
+
+  function updateTelemetry(event: string, enabled: boolean) {
+    updateConfig((current) => {
+      const next = new Set(current.telemetry?.events ?? []);
+      if (enabled) next.add(event);
+      else next.delete(event);
+      if (event === "tool.use" && !enabled) next.delete("tool.use.input");
+      if (event === "tool.use.input") {
+        if (enabled) next.delete("tool.use");
+        else next.add("tool.use");
+      }
+      return {
+        ...current,
+        telemetry: { ...current.telemetry, events: [...next] },
+      };
+    });
   }
 
   function addAgent(selectedAgent: AgentKind) {
@@ -128,14 +134,23 @@ export function ConfigurationView({
     const definition = configurableAgents.find(
       (candidate) => candidate.kind === selectedAgent,
     );
-    setAgents((current) => [
+    updateConfig((current) => ({
       ...current,
-      {
-        kind: selectedAgent,
-        useGateway: true,
-        settings: definition?.initialSettings ?? "",
+      programs: {
+        ...current.programs,
+        [selectedAgent]: definition?.initialSettings ?? {},
       },
-    ]);
+    }));
+  }
+
+  function removeAgent(kind: AgentKind) {
+    setDraft((current) => {
+      const programs = { ...current.config.programs };
+      const settings = { ...current.settings };
+      delete programs[kind];
+      delete settings[kind];
+      return { ...current, config: { ...current.config, programs }, settings };
+    });
   }
 
   return (
@@ -165,7 +180,9 @@ export function ConfigurationView({
                 <input
                   type="checkbox"
                   checked={gateway}
-                  onChange={(event) => setGateway(event.target.checked)}
+                  onChange={(event) =>
+                    setDraft({ ...draft, gatewayEnabled: event.target.checked })
+                  }
                 />
               </label>
               {gateway && (
@@ -173,8 +190,10 @@ export function ConfigurationView({
                   <label className="field full-width">
                     <span>Gateway URL</span>
                     <input
-                      value={gatewayUrl}
-                      onChange={(event) => setGatewayUrl(event.target.value)}
+                      value={llmGateway.url}
+                      onChange={(event) =>
+                        updateGateway({ url: event.target.value })
+                      }
                     />
                   </label>
                   <label className="toggle-row compact full-width">
@@ -186,16 +205,35 @@ export function ConfigurationView({
                       type="checkbox"
                       checked={controllerJwt}
                       onChange={(event) =>
-                        setControllerJwt(event.target.checked)
+                        updateGateway({
+                          authentication: event.target.checked
+                            ? defaultLlmGateway().authentication
+                            : undefined,
+                        })
                       }
                     />
                   </label>
+                  {llmGateway.authentication && !controllerJwt && (
+                    <p className="sandbox-compatibility full-width">
+                      {llmGateway.authentication.type.toUpperCase()}{" "}
+                      authentication is preserved. Enable Controller JWT to
+                      replace it.
+                    </p>
+                  )}
                   {controllerJwt && (
                     <label className="field full-width">
                       <span>JWT audience</span>
                       <input
-                        value={audience}
-                        onChange={(event) => setAudience(event.target.value)}
+                        value={llmGateway.authentication?.audience ?? ""}
+                        onChange={(event) =>
+                          updateGateway({
+                            authentication: {
+                              ...llmGateway.authentication,
+                              type: "controllerJwt",
+                              audience: event.target.value,
+                            },
+                          })
+                        }
                       />
                     </label>
                   )}
@@ -228,7 +266,9 @@ export function ConfigurationView({
                   aria-describedby={
                     sandboxUnavailable ? "sandbox-compatibility" : undefined
                   }
-                  onChange={(event) => setSandboxEnabled(event.target.checked)}
+                  onChange={(event) =>
+                    setDraft({ ...draft, sandboxEnabled: event.target.checked })
+                  }
                 />
               </label>
               {sandboxUnavailable && (
@@ -246,9 +286,14 @@ export function ConfigurationView({
                       rows={4}
                       spellCheck={false}
                       placeholder={"api.github.com\nregistry.npmjs.org"}
-                      value={allowedDomains}
+                      value={
+                        draft.sandboxFields.allowedDomains ??
+                        (config.sandbox?.network?.allowedDomains ?? []).join(
+                          "\n",
+                        )
+                      }
                       onChange={(event) =>
-                        setAllowedDomains(event.target.value)
+                        updateSandbox("allowedDomains", event.target.value)
                       }
                     />
                     <small>
@@ -261,8 +306,13 @@ export function ConfigurationView({
                       rows={4}
                       spellCheck={false}
                       placeholder={"/tmp/build-cache\n/opt/project/output"}
-                      value={writablePaths}
-                      onChange={(event) => setWritablePaths(event.target.value)}
+                      value={
+                        draft.sandboxFields.writable ??
+                        (config.sandbox?.filesystem?.writable ?? []).join("\n")
+                      }
+                      onChange={(event) =>
+                        updateSandbox("writable", event.target.value)
+                      }
                     />
                     <small>One additional writable path per line.</small>
                   </label>
@@ -272,8 +322,13 @@ export function ConfigurationView({
                       rows={4}
                       spellCheck={false}
                       placeholder={"~/.ssh\n~/.aws"}
-                      value={deniedPaths}
-                      onChange={(event) => setDeniedPaths(event.target.value)}
+                      value={
+                        draft.sandboxFields.denied ??
+                        (config.sandbox?.filesystem?.denied ?? []).join("\n")
+                      }
+                      onChange={(event) =>
+                        updateSandbox("denied", event.target.value)
+                      }
                     />
                     <small>
                       One path per line. Denied paths cannot be read or changed.
@@ -306,7 +361,7 @@ export function ConfigurationView({
                     type="checkbox"
                     checked={sessionNewTelemetry}
                     onChange={(event) =>
-                      setSessionNewTelemetry(event.target.checked)
+                      updateTelemetry("session.new", event.target.checked)
                     }
                   />
                 </label>
@@ -319,10 +374,9 @@ export function ConfigurationView({
                   <input
                     type="checkbox"
                     checked={toolUseTelemetry}
-                    onChange={(event) => {
-                      setToolUseTelemetry(event.target.checked);
-                      if (!event.target.checked) setToolInputTelemetry(false);
-                    }}
+                    onChange={(event) =>
+                      updateTelemetry("tool.use", event.target.checked)
+                    }
                   />
                 </label>
                 <label className="telemetry-option">
@@ -334,10 +388,9 @@ export function ConfigurationView({
                   <input
                     type="checkbox"
                     checked={toolInputTelemetry}
-                    onChange={(event) => {
-                      setToolInputTelemetry(event.target.checked);
-                      if (event.target.checked) setToolUseTelemetry(true);
-                    }}
+                    onChange={(event) =>
+                      updateTelemetry("tool.use.input", event.target.checked)
+                    }
                   />
                 </label>
               </div>
@@ -382,7 +435,7 @@ export function ConfigurationView({
                           }}
                         >
                           <ToolIcon kind={agent.iconKind} />
-                          <span>{agent.label}</span>
+                          <span>{friendlyTool(agent.iconKind)}</span>
                           <Plus size={13} />
                         </button>
                       ))}
@@ -392,28 +445,19 @@ export function ConfigurationView({
               </div>
               <div className="agent-drafts">
                 {agents.map((agent) => {
-                  const definition = configurableAgents.find(
-                    (candidate) => candidate.kind === agent.kind,
-                  );
-                  if (!definition) return null;
+                  const name = friendlyTool(agent.iconKind);
                   return (
                     <section className="agent-draft" key={agent.kind}>
                       <div className="agent-draft-heading">
                         <span className="tool-cell">
-                          <ToolIcon kind={definition.iconKind} />
-                          <strong>{definition.label}</strong>
+                          <ToolIcon kind={agent.iconKind} />
+                          <strong>{name}</strong>
                         </span>
                         <button
                           type="button"
                           className="icon-button"
-                          aria-label={`Remove ${definition.label}`}
-                          onClick={() =>
-                            setAgents((current) =>
-                              current.filter(
-                                (candidate) => candidate.kind !== agent.kind,
-                              ),
-                            )
-                          }
+                          aria-label={`Remove ${name}`}
+                          onClick={() => removeAgent(agent.kind)}
                         >
                           <Trash2 size={14} />
                         </button>
@@ -428,11 +472,20 @@ export function ConfigurationView({
                         <input
                           type="checkbox"
                           disabled={!gateway}
-                          checked={gateway && agent.useGateway}
+                          checked={
+                            gateway && agent.program.useLlmGateway !== false
+                          }
                           onChange={(event) =>
-                            updateAgent(agent.kind, {
-                              useGateway: event.target.checked,
-                            })
+                            updateConfig((current) => ({
+                              ...current,
+                              programs: {
+                                ...current.programs,
+                                [agent.kind]: {
+                                  ...current.programs?.[agent.kind],
+                                  useLlmGateway: event.target.checked,
+                                },
+                              },
+                            }))
                           }
                         />
                       </label>
@@ -441,16 +494,31 @@ export function ConfigurationView({
                         <textarea
                           rows={7}
                           spellCheck={false}
-                          placeholder={definition.placeholder}
-                          value={agent.settings}
+                          placeholder={agent.placeholder}
+                          value={
+                            draft.settings[agent.kind] ??
+                            programSettingsYaml(agent.program)
+                          }
+                          aria-invalid={Boolean(errors[agent.kind])}
+                          aria-describedby={`${agent.kind}-settings-help`}
                           onChange={(event) =>
-                            updateAgent(agent.kind, {
-                              settings: event.target.value,
+                            setDraft({
+                              ...draft,
+                              settings: {
+                                ...draft.settings,
+                                [agent.kind]: event.target.value,
+                              },
                             })
                           }
                         />
-                        <small>
-                          Use the agent’s native configuration keys.
+                        <small
+                          id={`${agent.kind}-settings-help`}
+                          className={
+                            errors[agent.kind] ? "field-error" : undefined
+                          }
+                        >
+                          {errors[agent.kind] ??
+                            "Use the agent’s native configuration keys."}
                         </small>
                       </label>
                     </section>
@@ -472,15 +540,23 @@ export function ConfigurationView({
             <button
               type="button"
               className="button secondary"
+              disabled={yaml === null}
               onClick={copyYaml}
             >
               {copied ? <Check size={14} /> : <Copy size={14} />}
               {copied ? "Copied" : "Copy"}
             </button>
           </div>
-          <pre>
-            <code>{yaml}</code>
-          </pre>
+          {yaml === null ? (
+            <p className="error-callout" role="status">
+              Fix the additional settings above to generate YAML.
+            </p>
+          ) : (
+            // biome-ignore lint/a11y/noNoninteractiveTabindex: The YAML preview scrolls and must be keyboard-accessible.
+            <pre tabIndex={0}>
+              <code>{yaml}</code>
+            </pre>
+          )}
         </section>
       </div>
     </div>
@@ -489,36 +565,33 @@ export function ConfigurationView({
 
 const configurableAgents: Array<{
   kind: AgentKind;
-  label: string;
   iconKind: string;
   placeholder: string;
-  initialSettings?: string;
+  initialSettings?: Record<string, unknown>;
 }> = [
   {
     kind: "claudeCode",
-    label: "Claude Code",
     iconKind: "claude-code",
     placeholder: "permissions:\n  defaultMode: plan",
   },
   {
     kind: "claudeDesktop",
-    label: "Claude Desktop",
     iconKind: "claude-desktop",
     placeholder: "isLocalDevMcpEnabled: true",
   },
   {
     kind: "codex",
-    label: "Codex",
     iconKind: "codex",
     placeholder: "managedConfig:\n  model_reasoning_effort: high",
   },
   {
     kind: "openCode",
-    label: "OpenCode",
     iconKind: "opencode",
     placeholder: "managedConfig:\n  autoupdate: false",
-    initialSettings:
-      "model: gpt-5.6-terra\nmodels:\n  gpt-5.6-terra:\n    name: GPT 5.6 Terra",
+    initialSettings: {
+      model: "gpt-5.6-terra",
+      models: { "gpt-5.6-terra": { name: "GPT 5.6 Terra" } },
+    },
   },
 ];
 
@@ -526,158 +599,3 @@ const sandboxUnsupportedAgents = new Set<AgentKind>([
   "claudeDesktop",
   "openCode",
 ]);
-
-function daemonConfigYaml(options: {
-  gateway: boolean;
-  gatewayUrl: string;
-  controllerJwt: boolean;
-  audience: string;
-  sandboxEnabled: boolean;
-  allowedDomains: string;
-  writablePaths: string;
-  deniedPaths: string;
-  sessionNewTelemetry: boolean;
-  toolUseTelemetry: boolean;
-  toolInputTelemetry: boolean;
-  agents: AgentDraft[];
-}) {
-  const lines: string[] = [];
-  if (options.gateway) {
-    lines.push("llmGateway:", `  url: ${yamlString(options.gatewayUrl)}`);
-    if (options.controllerJwt) {
-      lines.push(
-        "  authentication:",
-        "    type: controllerJwt",
-        `    audience: ${yamlString(options.audience)}`,
-        "    allowedClientIds: [claude-code, claude-desktop, codex, opencode]",
-      );
-    }
-    lines.push("");
-  }
-  if (options.sandboxEnabled) {
-    lines.push(
-      "sandbox:",
-      "  network:",
-      ...yamlStringList("allowedDomains", textList(options.allowedDomains), 4),
-      "  filesystem:",
-      ...yamlStringList("writable", textList(options.writablePaths), 4),
-      ...yamlStringList("denied", textList(options.deniedPaths), 4),
-      "",
-    );
-  }
-  if (options.sessionNewTelemetry || options.toolUseTelemetry) {
-    lines.push("telemetry:", "  events:");
-    if (options.sessionNewTelemetry) lines.push("  - session.new");
-    if (options.toolUseTelemetry) {
-      lines.push(
-        `  - ${options.toolInputTelemetry ? "tool.use.input" : "tool.use"}`,
-      );
-    }
-    lines.push("");
-  }
-  if (options.agents.length === 0) {
-    lines.push("programs: {}");
-  } else {
-    lines.push("programs:");
-    for (const agent of options.agents) {
-      const settings = agent.settings.trim();
-      const disablesGateway = options.gateway && !agent.useGateway;
-      if (!settings && !disablesGateway) {
-        lines.push(`  ${agent.kind}: {}`);
-        continue;
-      }
-      lines.push(`  ${agent.kind}:`);
-      if (disablesGateway) lines.push("    useLlmGateway: false");
-      if (settings) {
-        lines.push(...settings.split("\n").map((line) => `    ${line}`));
-      }
-    }
-  }
-  return `${lines.join("\n")}\n`;
-}
-
-function yamlString(value: string) {
-  return JSON.stringify(value);
-}
-
-function textList(value: string) {
-  return [...new Set(value.split(/\r?\n/).map((item) => item.trim()))].filter(
-    Boolean,
-  );
-}
-
-function yamlStringList(key: string, values: string[], indent: number) {
-  const padding = " ".repeat(indent);
-  if (values.length === 0) return [`${padding}${key}: []`];
-  return [
-    `${padding}${key}:`,
-    ...values.map((value) => `${padding}  - ${yamlString(value)}`),
-  ];
-}
-
-function agentDrafts(programs: DaemonConfigDocument["programs"]): AgentDraft[] {
-  if (!programs) return [];
-  return configurableAgents.flatMap(({ kind }) => {
-    const program = programs[kind];
-    if (!program) return [];
-    const { useLlmGateway, ...settings } = program;
-    return [
-      {
-        kind,
-        useGateway: useLlmGateway !== false,
-        settings: objectYaml(settings),
-      },
-    ];
-  });
-}
-
-function objectYaml(value: Record<string, unknown>) {
-  return yamlLines(value, 0).join("\n");
-}
-
-function yamlLines(value: unknown, indent: number): string[] {
-  const padding = " ".repeat(indent);
-  if (Array.isArray(value)) {
-    if (value.length === 0) return [`${padding}[]`];
-    return value.flatMap((item) => {
-      if (isNonEmptyCollection(item)) {
-        return [`${padding}-`, ...yamlLines(item, indent + 2)];
-      }
-      return [`${padding}- ${yamlScalar(item)}`];
-    });
-  }
-  if (value !== null && typeof value === "object") {
-    const entries = Object.entries(value);
-    if (entries.length === 0) return [`${padding}{}`];
-    return entries.flatMap(([key, item]) => {
-      const yamlKey = /^[A-Za-z_][A-Za-z0-9_.-]*$/.test(key)
-        ? key
-        : yamlString(key);
-      if (isNonEmptyCollection(item)) {
-        return [`${padding}${yamlKey}:`, ...yamlLines(item, indent + 2)];
-      }
-      return [`${padding}${yamlKey}: ${yamlScalar(item)}`];
-    });
-  }
-  return [`${padding}${yamlScalar(value)}`];
-}
-
-function isNonEmptyCollection(value: unknown) {
-  return (
-    (Array.isArray(value) && value.length > 0) ||
-    (value !== null &&
-      typeof value === "object" &&
-      Object.keys(value).length > 0)
-  );
-}
-
-function yamlScalar(value: unknown) {
-  if (typeof value === "string") return yamlString(value);
-  if (value === null) return "null";
-  if (typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-  if (Array.isArray(value)) return "[]";
-  if (typeof value === "object") return "{}";
-  return yamlString(String(value));
-}

@@ -1,22 +1,21 @@
 use std::{
     collections::BTreeSet,
-    fs,
     path::{Path, PathBuf},
 };
 
 use agentdesktop_core::model::{Agent, McpServer};
 
-use super::metadata;
+use super::{context::ScanContext, files, mcp, metadata};
 
-pub(super) fn discover() -> Option<Agent> {
-    let executable = metadata::find_executable("codex", executable_candidates())?;
+pub(super) fn discover(context: &ScanContext) -> Option<Agent> {
+    let executable = context.find_executable("codex", executable_candidates(context))?;
     let version = standalone_version(&executable).or_else(|| npm_version(&executable));
     Some(Agent {
         version,
         executable,
         kind: "codex".to_owned(),
-        mcp_servers: discover_mcp_servers(),
-        skills: metadata::discover_skills(skill_roots()),
+        mcp_servers: discover_mcp_servers(context),
+        skills: metadata::discover_skills(skill_roots(context)),
     })
 }
 
@@ -48,9 +47,9 @@ fn npm_version(executable: &Path) -> Option<String> {
         .find_map(|path| metadata::json_package_version(&path, "@openai/codex"))
 }
 
-fn executable_candidates() -> Vec<PathBuf> {
+fn executable_candidates(context: &ScanContext) -> Vec<PathBuf> {
     let mut candidates = BTreeSet::new();
-    for home in metadata::user_home_dirs() {
+    for home in context.homes() {
         candidates.insert(home.join(".local/bin/codex"));
         candidates.insert(home.join(".npm-global/bin/codex"));
         #[cfg(windows)]
@@ -60,75 +59,66 @@ fn executable_candidates() -> Vec<PathBuf> {
         }
     }
     #[cfg(target_os = "macos")]
-    candidates.extend([
-        PathBuf::from("/opt/homebrew/bin/codex"),
-        PathBuf::from("/usr/local/bin/codex"),
-    ]);
+    candidates.extend(
+        ["/opt/homebrew/bin/codex", "/usr/local/bin/codex"]
+            .into_iter()
+            .filter_map(|path| context.system_path(path)),
+    );
     candidates.into_iter().collect()
 }
 
-fn discover_mcp_servers() -> Vec<McpServer> {
-    config_paths()
+fn discover_mcp_servers(context: &ScanContext) -> Vec<McpServer> {
+    config_paths(context)
         .into_iter()
         .flat_map(|path| mcp_servers_from_toml(&path))
         .collect()
 }
 
-fn config_paths() -> Vec<PathBuf> {
+fn config_paths(context: &ScanContext) -> Vec<PathBuf> {
     let mut paths = BTreeSet::new();
-    paths.extend(system_config_paths());
-    if let Some(home) = metadata::home_dir() {
-        let codex_home = std::env::var_os("CODEX_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".codex"));
+    if let Some(root) = system_root(context) {
+        paths.extend([root.join("config.toml"), root.join("managed_config.toml")]);
+    }
+    if let Some(codex_home) = codex_home(context) {
         paths.insert(codex_home.join("config.toml"));
     }
-    for home in metadata::user_home_dirs() {
+    for home in context.homes() {
         paths.insert(home.join(".codex/config.toml"));
     }
-    paths.extend(metadata::current_dir_ancestors(Path::new(
-        ".codex/config.toml",
-    )));
+    paths.extend(context.current_dir_ancestors(Path::new(".codex/config.toml")));
     paths.into_iter().collect()
 }
 
-fn system_config_paths() -> Vec<PathBuf> {
-    #[cfg(unix)]
-    let root = Some(PathBuf::from("/etc/codex"));
-    #[cfg(windows)]
-    let root: Option<PathBuf> = None;
-
-    root.into_iter()
-        .flat_map(|root| [root.join("config.toml"), root.join("managed_config.toml")])
-        .collect()
+fn codex_home(context: &ScanContext) -> Option<PathBuf> {
+    context
+        .env_path("CODEX_HOME")
+        .or_else(|| context.home().map(|home| home.join(".codex")))
 }
 
-fn skill_roots() -> Vec<PathBuf> {
+fn system_root(context: &ScanContext) -> Option<PathBuf> {
+    if cfg!(unix) {
+        context.system_path("/etc/codex")
+    } else {
+        None
+    }
+}
+
+fn skill_roots(context: &ScanContext) -> Vec<PathBuf> {
     let mut roots = BTreeSet::new();
-    roots.extend(system_config_paths().into_iter().filter_map(|path| {
-        (path.file_name().is_some_and(|name| name == "config.toml"))
-            .then(|| path.parent().map(|parent| parent.join("skills")))
-            .flatten()
-    }));
-    if let Some(home) = metadata::home_dir() {
-        let codex_home = std::env::var_os("CODEX_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".codex"));
+    roots.extend(system_root(context).map(|root| root.join("skills")));
+    if let Some(codex_home) = codex_home(context) {
         roots.insert(codex_home.join("skills"));
     }
-    for home in metadata::user_home_dirs() {
+    for home in context.homes() {
         roots.insert(home.join(".agents/skills"));
         roots.insert(home.join(".codex/skills"));
     }
-    roots.extend(metadata::current_dir_ancestors(Path::new(".agents/skills")));
+    roots.extend(context.current_dir_ancestors(Path::new(".agents/skills")));
     roots.into_iter().collect()
 }
 
 fn mcp_servers_from_toml(path: &Path) -> Vec<McpServer> {
-    let Ok(contents) = fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    let Ok(document) = toml::from_str::<toml::Value>(&contents) else {
+    let Some(document) = files::read_toml::<toml::Value>(path) else {
         return Vec::new();
     };
     let Some(servers) = document.get("mcp_servers").and_then(toml::Value::as_table) else {
@@ -138,14 +128,8 @@ fn mcp_servers_from_toml(path: &Path) -> Vec<McpServer> {
         .iter()
         .filter_map(|(name, value)| {
             let server = value.as_table()?;
-            let command = server
-                .get("command")
-                .and_then(toml::Value::as_str)
-                .map(str::to_owned);
-            let url = server
-                .get("url")
-                .and_then(toml::Value::as_str)
-                .map(str::to_owned);
+            let command = server.get("command").and_then(toml::Value::as_str);
+            let url = server.get("url").and_then(toml::Value::as_str);
             let transport = if url.is_some() {
                 "http"
             } else if command.is_some() {
@@ -153,26 +137,84 @@ fn mcp_servers_from_toml(path: &Path) -> Vec<McpServer> {
             } else {
                 return None;
             };
-            Some(McpServer {
-                name: name.clone(),
-                transport: transport.to_owned(),
+            Some(mcp::server(
+                name,
+                transport,
                 command,
                 url,
-                enabled: server
+                server
                     .get("enabled")
                     .and_then(toml::Value::as_bool)
                     .unwrap_or(true),
-                source: path.to_path_buf(),
-            })
+                path,
+            ))
         })
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
+    use std::{collections::BTreeSet, fs, path::PathBuf};
 
-    use super::{mcp_servers_from_toml, npm_version};
+    use super::{
+        ScanContext, config_paths, executable_candidates, mcp_servers_from_toml, npm_version,
+        skill_roots, system_root,
+    };
+
+    #[cfg(unix)]
+    #[test]
+    fn native_system_configurations_and_skills_are_included_in_sorted_paths() {
+        // Inspect candidate paths only; do not read any host configuration or skill files.
+        let context = ScanContext::capture();
+        let configs = config_paths(&context);
+        let skills = skill_roots(&context);
+        let root = PathBuf::from("/etc/codex");
+        for name in ["config.toml", "managed_config.toml"] {
+            assert!(configs.contains(&root.join(name)));
+        }
+        assert!(skills.contains(&root.join("skills")));
+        assert!(configs.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(skills.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn isolated_paths_preserve_scanned_defaults_and_codex_home_overrides() {
+        let root = temporary("codex-paths");
+        let home = root.join("home");
+        let project = root.join("project");
+        let cwd = project.join("nested");
+
+        for override_path in [None, Some(root.join("custom-codex")), Some(PathBuf::new())] {
+            let mut context = ScanContext::isolated(home.clone(), cwd.clone());
+            let mut configs = BTreeSet::from([
+                home.join(".codex/config.toml"),
+                cwd.join(".codex/config.toml"),
+                project.join(".codex/config.toml"),
+                root.join(".codex/config.toml"),
+            ]);
+            let mut skills = BTreeSet::from([
+                home.join(".codex/skills"),
+                home.join(".agents/skills"),
+                cwd.join(".agents/skills"),
+                project.join(".agents/skills"),
+                root.join(".agents/skills"),
+            ]);
+            if let Some(override_path) = override_path {
+                if !override_path.as_os_str().is_empty() {
+                    configs.insert(override_path.join("config.toml"));
+                    skills.insert(override_path.join("skills"));
+                }
+                context = context.with_override("CODEX_HOME", override_path);
+            }
+
+            assert_eq!(config_paths(&context), Vec::from_iter(configs));
+            assert_eq!(skill_roots(&context), Vec::from_iter(skills));
+            assert!(system_root(&context).is_none());
+            let executables = executable_candidates(&context);
+            assert!(executables.contains(&home.join(".local/bin/codex")));
+            assert!(executables.iter().all(|path| path.starts_with(&home)));
+        }
+    }
 
     #[test]
     fn reads_version_from_npm_package() {
@@ -199,7 +241,7 @@ mod tests {
             &path,
             r#"
 [mcp_servers.docs]
-url = "https://example.com/mcp"
+url = "https://USER_SENTINEL:PASS_SENTINEL@example.com/PATH_SENTINEL/mcp?key=QUERY_SENTINEL#FRAGMENT_SENTINEL"
 bearer_token_env_var = "SECRET"
 enabled = false
 
@@ -217,8 +259,16 @@ TOKEN = "secret"
         assert_eq!(servers.len(), 2);
         assert_eq!(servers[0].name, "docs");
         assert_eq!(servers[0].transport, "http");
+        assert_eq!(servers[0].url.as_deref(), Some("https://example.com/"));
         assert!(!servers[0].enabled);
         assert_eq!(servers[1].command.as_deref(), Some("npx"));
+        assert_eq!(servers[1].transport, "stdio");
+        assert!(servers[1].enabled);
+        assert!(servers.iter().all(|server| server.source == path));
+        let serialized = serde_json::to_string(&servers).unwrap();
+        assert!(!serialized.contains("SENTINEL"));
+        assert!(!serialized.contains("SECRET"));
+        assert!(!serialized.contains("secret"));
     }
 
     fn temporary(name: &str) -> PathBuf {

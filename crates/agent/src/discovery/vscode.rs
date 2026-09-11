@@ -7,34 +7,34 @@ use std::{
 use agentdesktop_core::model::{Agent, McpServer};
 use serde_json::Value;
 
-use super::metadata;
+use super::{context::ScanContext, files, mcp, metadata};
 
-pub(super) fn discover() -> Option<Agent> {
-    let executable = metadata::find_executable("code", executable_candidates())?;
-    let version = version_candidates(&executable)
+pub(super) fn discover(context: &ScanContext) -> Option<Agent> {
+    let executable = context.find_executable("code", executable_candidates(context))?;
+    let version = version_candidates(context, &executable)
         .into_iter()
         .find_map(|path| metadata::json_version(&path));
     Some(Agent {
         version,
         executable,
         kind: "vscode".to_owned(),
-        mcp_servers: discover_mcp_servers(),
-        skills: metadata::discover_skills(skill_roots()),
+        mcp_servers: discover_mcp_servers(context),
+        skills: metadata::discover_skills(skill_roots(context)),
     })
 }
 
-fn discover_mcp_servers() -> Vec<McpServer> {
-    mcp_config_paths()
+fn discover_mcp_servers(context: &ScanContext) -> Vec<McpServer> {
+    mcp_config_paths(context)
         .into_iter()
         .flat_map(|path| mcp_servers_from_json(&path))
         .collect()
 }
 
-fn mcp_config_paths() -> Vec<PathBuf> {
+fn mcp_config_paths(context: &ScanContext) -> Vec<PathBuf> {
     let mut paths = BTreeSet::new();
-    for home in metadata::user_home_dirs() {
+    for home in context.homes() {
         paths.insert(home.join(".copilot/mcp-config.json"));
-        let user_root = user_profile_root(&home);
+        let user_root = user_profile_root(home);
         paths.insert(user_root.join("mcp.json"));
         if let Ok(profiles) = fs::read_dir(user_root.join("profiles")) {
             paths.extend(
@@ -46,10 +46,8 @@ fn mcp_config_paths() -> Vec<PathBuf> {
             );
         }
     }
-    paths.extend(metadata::current_dir_ancestors(Path::new(
-        ".vscode/mcp.json",
-    )));
-    paths.extend(metadata::current_dir_ancestors(Path::new(".mcp.json")));
+    paths.extend(context.current_dir_ancestors(Path::new(".vscode/mcp.json")));
+    paths.extend(context.current_dir_ancestors(Path::new(".mcp.json")));
     paths.into_iter().collect()
 }
 
@@ -69,10 +67,7 @@ fn user_profile_root(home: &Path) -> PathBuf {
 }
 
 fn mcp_servers_from_json(path: &Path) -> Vec<McpServer> {
-    let Ok(contents) = fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    let Ok(document) = json5::from_str::<Value>(&contents) else {
+    let Some(document) = files::read_json5::<Value>(path) else {
         return Vec::new();
     };
     mcp_servers_from_value(&document, path)
@@ -86,43 +81,18 @@ fn mcp_servers_from_value(document: &Value, source: &Path) -> Vec<McpServer> {
     else {
         return Vec::new();
     };
-    servers
-        .iter()
-        .filter_map(|(name, value)| {
-            let server = value.as_object()?;
-            let command = server
-                .get("command")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            let url = server.get("url").and_then(Value::as_str).map(str::to_owned);
-            let transport = server
-                .get("type")
-                .and_then(Value::as_str)
-                .map(|transport| match transport {
-                    "streamable-http" => "http",
-                    other => other,
-                })
-                .or_else(|| url.as_ref().map(|_| "http"))
-                .or_else(|| command.as_ref().map(|_| "stdio"))?;
-            Some(McpServer {
-                name: name.clone(),
-                transport: transport.to_owned(),
-                command,
-                url,
-                enabled: server.get("disabled").and_then(Value::as_bool) != Some(true)
-                    && server.get("enabled").and_then(Value::as_bool) != Some(false),
-                source: source.to_path_buf(),
-            })
-        })
-        .collect()
+    mcp::from_json_map(servers, source, |entry| {
+        entry.get("disabled").and_then(Value::as_bool) != Some(true)
+            && entry.get("enabled").and_then(Value::as_bool) != Some(false)
+    })
 }
 
-fn skill_roots() -> Vec<PathBuf> {
+fn skill_roots(context: &ScanContext) -> Vec<PathBuf> {
     let mut roots = BTreeSet::new();
     for relative in [".github/skills", ".claude/skills", ".agents/skills"] {
-        roots.extend(metadata::current_dir_ancestors(Path::new(relative)));
+        roots.extend(context.current_dir_ancestors(Path::new(relative)));
     }
-    for home in metadata::user_home_dirs() {
+    for home in context.homes() {
         roots.insert(home.join(".copilot/skills"));
         roots.insert(home.join(".claude/skills"));
         roots.insert(home.join(".agents/skills"));
@@ -130,16 +100,20 @@ fn skill_roots() -> Vec<PathBuf> {
     roots.into_iter().collect()
 }
 
-fn executable_candidates() -> Vec<PathBuf> {
+fn executable_candidates(context: &ScanContext) -> Vec<PathBuf> {
     let candidates = BTreeSet::new();
+    #[cfg(target_os = "linux")]
+    let _ = context;
 
     #[cfg(target_os = "macos")]
     let candidates = {
         let mut candidates = candidates;
-        candidates.insert(PathBuf::from(
-            "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
-        ));
-        for home in metadata::user_home_dirs() {
+        candidates.extend(
+            context.system_path(
+                "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
+            ),
+        );
+        for home in context.homes() {
             candidates.insert(
                 home.join("Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"),
             );
@@ -150,13 +124,13 @@ fn executable_candidates() -> Vec<PathBuf> {
     #[cfg(windows)]
     let candidates = {
         let mut candidates = candidates;
-        for home in metadata::user_home_dirs() {
+        for home in context.homes() {
             candidates.insert(home.join("AppData/Local/Programs/Microsoft VS Code/bin/code.cmd"));
             candidates.insert(home.join("AppData/Local/Programs/Microsoft VS Code/bin/code.exe"));
         }
         for root in [
-            metadata::env_path("ProgramFiles"),
-            metadata::env_path("ProgramFiles(x86)"),
+            context.env_path("ProgramFiles"),
+            context.env_path("ProgramFiles(x86)"),
         ]
         .into_iter()
         .flatten()
@@ -170,7 +144,7 @@ fn executable_candidates() -> Vec<PathBuf> {
     candidates.into_iter().collect()
 }
 
-fn version_candidates(executable: &Path) -> Vec<PathBuf> {
+fn version_candidates(context: &ScanContext, executable: &Path) -> Vec<PathBuf> {
     let mut candidates = BTreeSet::new();
     for executable in [
         Some(executable.to_path_buf()),
@@ -185,18 +159,24 @@ fn version_candidates(executable: &Path) -> Vec<PathBuf> {
             candidates.insert(directory.join("../../package.json"));
         }
     }
-    candidates.extend([
-        PathBuf::from("/usr/share/code/resources/app/package.json"),
-        PathBuf::from("/usr/lib/code/resources/app/package.json"),
-    ]);
-    for home in metadata::user_home_dirs() {
+    candidates.extend(
+        [
+            "/usr/share/code/resources/app/package.json",
+            "/usr/lib/code/resources/app/package.json",
+        ]
+        .into_iter()
+        .filter_map(|path| context.system_path(path)),
+    );
+    for home in context.homes() {
         candidates.insert(
             home.join("Applications/Visual Studio Code.app/Contents/Resources/app/package.json"),
         );
     }
-    candidates.insert(PathBuf::from(
-        "/Applications/Visual Studio Code.app/Contents/Resources/app/package.json",
-    ));
+    candidates.extend(
+        context.system_path(
+            "/Applications/Visual Studio Code.app/Contents/Resources/app/package.json",
+        ),
+    );
     candidates.into_iter().collect()
 }
 
@@ -248,7 +228,7 @@ mod tests {
         assert!(!servers[0].enabled);
         assert_eq!(servers[1].name, "docs");
         assert_eq!(servers[1].transport, "http");
-        assert_eq!(servers[1].url.as_deref(), Some("https://example.com/mcp"));
+        assert_eq!(servers[1].url.as_deref(), Some("https://example.com/"));
         assert_eq!(servers[2].name, "local");
         assert_eq!(servers[2].transport, "stdio");
         assert_eq!(servers[2].command.as_deref(), Some("npx"));

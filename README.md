@@ -139,7 +139,7 @@ stage.
 > **Don't see your tool?** We're actively expanding this list and would love
 > your help. [Open an integration request](https://github.com/agentdesktop-dev/agentdesktop/issues/new)
 > to tell us what you use, or contribute discovery and configuration support
-> for another AI developer tool or harness.
+> for another AI developer tool or harness using the [contributor guide below](#adding-an-agent-or-harness).
 
 The project targets Linux, macOS, and Windows. Support varies where a tool or
 operating system does not expose an equivalent native configuration surface.
@@ -168,13 +168,136 @@ Read the [announcement](https://agentdesktop.dev/blog/2026/09/introducing-agentd
 for a deeper walkthrough of standalone mode, enrollment, and short-lived tool
 credentials.
 
+## Adding an agent or harness
+
+Discovery and managed configuration are separate capabilities. Start with
+discovery; add configuration, gateway authentication, sandbox policy, or
+telemetry only where the harness exposes a supported native mechanism.
+Verify paths and configuration formats against a released harness version on
+each supported OS, and document any limitations in the supported-tools table.
+
+### 1. Implement and register discovery
+
+Add a module under [crates/agent/src/discovery](crates/agent/src/discovery)
+with the entry point `pub(super) fn discover(context: &ScanContext) -> Option<Agent>`.
+Use [crates/agent/src/discovery/codex.rs](crates/agent/src/discovery/codex.rs)
+for a native configuration example or
+[crates/agent/src/discovery/opencode.rs](crates/agent/src/discovery/opencode.rs)
+for installation-only discovery.
+
+- Choose a stable `Agent.kind`, such as `claude-code`. Return `None` when no
+  installation is found; an unknown version should remain `None`, not hide
+  an installed harness. Missing or malformed configuration should not hide
+  the installation or valid inventory from other sources.
+- Use `ScanContext` for homes, PATH, working-directory ancestors, and captured
+  environment overrides. Add any new override names to `ScanContext::capture`
+  in [crates/agent/src/discovery/context.rs](crates/agent/src/discovery/context.rs).
+  Route fixed system paths through `context.system_path` so fixture tests can
+  exclude them. Keep user, project, managed, and override scope rules native
+  to the harness; do not read process-global environment inside the adapter.
+- Use `context.find_executable` for PATH-first lookup. If names can collide
+  with unrelated tools, inspect candidates from `context.executable_candidates`
+  and continue past rejected installations. Never execute discovered binaries
+  to obtain versions; use installation or package metadata instead.
+- Declare the module and append its entry point to `HARNESSES` in
+  [crates/agent/src/discovery/mod.rs](crates/agent/src/discovery/mod.rs).
+  Keep registry order stable. No new trait, core enum, or wire type is needed
+  for ordinary harness discovery.
+
+### 2. Reuse the inventory helpers
+
+| Module | Responsibility |
+| --- | --- |
+| [crates/agent/src/discovery/files.rs](crates/agent/src/discovery/files.rs) | Best-effort JSON, JSON5, and TOML reads. Add another format here when needed; keep native field interpretation in the adapter. |
+| [crates/agent/src/discovery/mcp.rs](crates/agent/src/discovery/mcp.rs) | MCP projection and endpoint disclosure. Use `server` after native parsing, or supply the adapter's enablement predicate to `from_json_map` or `from_mcp_servers_file` for compatible JSON layouts. |
+| [crates/agent/src/discovery/metadata.rs](crates/agent/src/discovery/metadata.rs) | Version metadata and shared skill traversal. Pass the harness's native skill roots to `discover_skills`. |
+| [crates/core/src/model.rs](crates/core/src/model.rs) | Shared `Agent`, `McpServer`, and `Skill` output types. |
+
+Never collect MCP arguments, environment values, headers, credentials, or skill
+bodies. The MCP helper exposes only HTTP(S) origins, omitting paths, user
+information, query strings, and fragments. Socket, variable-based, and invalid
+endpoints are undisclosed, but their native registrations remain in inventory.
+Never resolve endpoint variables to discover credentials. Review other copied
+strings and skill front matter for unintended sensitive data. Preserve each MCP
+server's `source`: same-named servers from different files are distinct inventory
+entries, not an effective merged configuration. Leave unimplemented capability
+lists empty rather than guessing support.
+
+### 3. Add fixtures and UI metadata
+
+Extend [crates/agent/src/discovery/tests.rs](crates/agent/src/discovery/tests.rs)
+to exercise the new adapter through the registry. Use `ScanContext::isolated`
+and temporary files, not real user configurations or process-global environment
+mutation. Keep version probes and skill traversal inside the fixture tree.
+
+Cover present and missing installations, unknown versions, native paths and
+overrides, malformed files, enablement, source ordering, and duplicate names.
+Serialize the result and assert that sentinel secrets and skill bodies do not
+appear. Run platform-specific tests on the relevant OS.
+
+Add the canonical ID, aliases, display name, and icon to `toolPresentations` in
+[frontend/ui/src/tools.tsx](frontend/ui/src/tools.tsx). `friendlyTool` and
+`ToolIcon` share this catalog; unknown IDs retain their name and use the generic
+icon. Keep configuration support and authorization separate from presentation
+metadata. Update the desktop and controller inventory fixtures/stories, the
+desktop empty-state tool list, and the supported-tools table above.
+
+### 4. Add managed configuration separately, if supported
+
+- Add the typed program configuration to `ProgramsConfig`, update `is_empty`,
+  and validate gateway/model requirements and unsupported sandbox combinations
+  in [crates/core/src/config.rs](crates/core/src/config.rs).
+- Add a native reconciler and wire it through
+  [crates/agent/src/reconcile/mod.rs](crates/agent/src/reconcile/mod.rs) and
+  [crates/agent/src/daemon.rs](crates/agent/src/daemon.rs), including user/system
+  paths and `validate_one_shot`. Preserve unrelated settings, ownership, and
+  permissions; test idempotence, conflicts, removal, and non-mutating dry runs.
+  For files entirely owned through a header, reuse `HeaderOwnedFile` from
+  [crates/agent/src/reconcile/managed_file.rs](crates/agent/src/reconcile/managed_file.rs),
+  as Codex and OpenCode do. Pass unmarked body bytes; the helper prepends its
+  ownership header. Keep native rendering, final newlines, and dependency-safe
+  multi-file ordering in the adapter. Remove references before deleting their
+  targets; sidecar ownership and user-settings merge/rollback are separate.
+- For authenticated gateway access, use the harness's renewable credential
+  mechanism with `agentdesktop credential --client-id <kind>`. Include the ID
+  in controller-JWT `allowedClientIds`; do not persist short-lived tokens in
+  generated configuration. Do not invent system-managed paths the harness
+  does not actually read.
+- Add the configuration key to `AgentKind` in
+  [frontend/controller/src/types.ts](frontend/controller/src/types.ts) and
+  update `configurableAgents` and sandbox restrictions in
+  [frontend/controller/src/views/ConfigurationView.tsx](frontend/controller/src/views/ConfigurationView.tsx).
+  Keep authorization defaults separate in
+  [frontend/controller/src/configuration.ts](frontend/controller/src/configuration.ts).
+  Configuration keys such as `claudeCode` may differ from inventory/client IDs
+  such as `claude-code`. Preserve untouched document fields and imported
+  authentication, use the shared YAML codec, and add round-trip and interaction
+  tests. Malformed additional settings must block copying rather than produce
+  invalid configuration.
+- Run `cargo xtask schema` after changing core configuration types; it requires
+  `jq` and regenerates the checked-in schemas and schema documentation.
+
+Keep discovery read-only and independent of reconciliation. Model-runtime
+discovery, such as Ollama, remains separate from the harness registry.
+
+### 5. Validate the integration
+
+From the repository root, run `cargo test -p agentdesktop-agent discovery::`
+for focused discovery coverage, then `cargo test --workspace`,
+`cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all --check`,
+and `git diff --check`. For UI changes, also run `pnpm -C frontend check`.
+For a fresh checkout, install frontend dependencies and run
+`pnpm -C frontend build` before the workspace Rust checks; the controller embeds
+the built frontend. Fixture tests do not replace a live smoke test with the
+supported harness version and isolated configuration.
+
 ## Project and community
 
 Agentdesktop is fully open source under the [Apache License 2.0](LICENSE).
 
 - Read the [documentation](https://agentdesktop.dev/docs/).
 - Browse or report [issues](https://github.com/agentdesktop-dev/agentdesktop/issues).
-- Help us [add support for another AI developer tool](https://github.com/agentdesktop-dev/agentdesktop/issues/new).
+- Help us [add support for another AI developer tool](#adding-an-agent-or-harness).
 - Review the [Code of Conduct](CODE_OF_CONDUCT.md) before contributing.
 - See the [production guide](https://agentdesktop.dev/docs/operations/production/)
   for Kubernetes, certificates, MDM, and endpoint enrollment.
