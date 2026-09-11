@@ -175,7 +175,7 @@ mod tests {
         assert_eq!(servers[1].transport, "http");
         assert_eq!(
             servers[1].url.as_deref(),
-            Some("https://mcp.notion.com/mcp")
+            Some("https://mcp.notion.com/")
         );
     }
 
