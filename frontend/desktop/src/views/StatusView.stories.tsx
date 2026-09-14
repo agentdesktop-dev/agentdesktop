@@ -32,14 +32,11 @@ const meta = {
     connector: managedConnector,
     discovery: populatedDiscovery,
     isLoggingOut: false,
-    isSaving: false,
     managedDevice: approvedDevice,
     onCopy: fn(),
     onCopyRemoteConfig: fn(),
     onLogout: fn(),
-    onStartupChange: fn(),
     remoteConfig,
-    settings: bootstrap.settings,
   },
 } satisfies Meta<typeof StatusView>;
 
@@ -85,14 +82,13 @@ export const LongOrganizationName: Story = {
   },
 };
 
-export const ChangesStartupPreference: Story = {
-  play: async ({ args, canvas }) => {
-    await userEvent.click(canvas.getByText("Runtime"));
-    await userEvent.click(
-      canvas.getByRole("checkbox", { name: "Open window at startup" }),
-    );
-    await expect(args.onStartupChange).toHaveBeenCalledWith(false);
-  },
+export const Dark: Story = {
+  globals: { colorMode: "dark" },
+};
+
+export const DarkOffline: Story = {
+  ...DaemonOffline,
+  globals: { colorMode: "dark" },
 };
 
 export const ConfirmsLogout: Story = {

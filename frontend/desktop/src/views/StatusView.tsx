@@ -17,7 +17,6 @@ import type {
   ConnectorSnapshot,
   Discovery,
   ManagedDeviceSnapshot,
-  Settings,
 } from "../types";
 
 export interface StatusViewProps {
@@ -25,14 +24,11 @@ export interface StatusViewProps {
   connector: ConnectorSnapshot | null;
   discovery: Discovery | null;
   isLoggingOut: boolean;
-  isSaving: boolean;
   managedDevice: ManagedDeviceSnapshot | null;
   onCopy: () => void;
   onCopyRemoteConfig: () => void;
   onLogout: () => void;
-  onStartupChange: (checked: boolean) => void;
   remoteConfig: string | null;
-  settings: Settings;
 }
 
 function humanize(value: string | undefined): string {
@@ -63,10 +59,7 @@ export function StatusView({
   managedDevice,
   discovery,
   remoteConfig,
-  settings,
-  isSaving,
   isLoggingOut,
-  onStartupChange,
   onCopy,
   onCopyRemoteConfig,
   onLogout,
@@ -229,23 +222,6 @@ export function StatusView({
               value={runtime?.version ?? "Unavailable"}
             />
           </dl>
-          <div className="inline-preference">
-            <div>
-              <strong>Open window at startup</strong>
-              <span>
-                The tray application continues running when this is off.
-              </span>
-            </div>
-            <label className="switch" aria-label="Open window at startup">
-              <input
-                type="checkbox"
-                disabled={!bootstrap || isSaving}
-                checked={settings.openOnStartup}
-                onChange={(event) => onStartupChange(event.target.checked)}
-              />
-              <span className="switch-track" aria-hidden="true" />
-            </label>
-          </div>
         </div>
       </details>
 

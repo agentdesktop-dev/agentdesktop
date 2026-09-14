@@ -1,5 +1,8 @@
+import type { ColorMode } from "@agentdesktop/ui";
+
 export interface Settings {
   openOnStartup: boolean;
+  colorMode: ColorMode;
 }
 
 export interface Bootstrap {

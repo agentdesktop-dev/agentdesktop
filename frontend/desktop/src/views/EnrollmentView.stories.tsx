@@ -51,3 +51,12 @@ export const PendingApproval: Story = {
 export const Rejected: Story = {
   args: { enrollment: rejectedDevice },
 };
+
+export const Dark: Story = {
+  globals: { colorMode: "dark" },
+};
+
+export const DarkRejected: Story = {
+  ...Rejected,
+  globals: { colorMode: "dark" },
+};

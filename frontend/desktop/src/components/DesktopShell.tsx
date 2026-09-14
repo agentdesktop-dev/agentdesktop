@@ -1,6 +1,8 @@
+import { useTheme } from "@agentdesktop/ui";
 import agentdesktopLogo from "@brand/logo.svg";
+import agentdesktopLogoLight from "@brand/logo-light.svg";
 import agentdesktopMark from "@brand/mark.svg";
-import { Gauge, Laptop, LoaderCircle, RefreshCw } from "lucide-react";
+import { Gauge, Laptop, LoaderCircle, RefreshCw, Settings } from "lucide-react";
 import type { ReactNode } from "react";
 
 import type { Notice, View } from "../useDesktopModel";
@@ -28,6 +30,7 @@ export function DesktopShell({
   refreshError,
   view,
 }: DesktopShellProps) {
+  const { theme } = useTheme();
   return (
     <div
       className={fullWidth ? "desktop-shell enrollment-shell" : "desktop-shell"}
@@ -37,7 +40,7 @@ export function DesktopShell({
           <div className="desktop-brand">
             <img
               className="desktop-brand-logo"
-              src={agentdesktopLogo}
+              src={theme === "dark" ? agentdesktopLogoLight : agentdesktopLogo}
               alt="Agentdesktop"
             />
             <img className="desktop-brand-icon" src={agentdesktopMark} alt="" />
@@ -61,6 +64,15 @@ export function DesktopShell({
               <Laptop size={18} />
               Tools
             </button>
+            <button
+              type="button"
+              className={view === "settings" ? "active" : ""}
+              aria-current={view === "settings" ? "page" : undefined}
+              onClick={() => onNavigate("settings")}
+            >
+              <Settings size={18} />
+              Settings
+            </button>
           </nav>
         </aside>
       ) : null}
@@ -68,19 +80,30 @@ export function DesktopShell({
       <section className="desktop-main">
         <header className="desktop-page-header">
           <h1>{pageTitle}</h1>
-          <button
-            className="desktop-refresh"
-            type="button"
-            onClick={onRefresh}
-            disabled={isRefreshing}
-          >
-            {isRefreshing ? (
-              <LoaderCircle className="spin" size={14} />
-            ) : (
-              <RefreshCw size={14} />
-            )}{" "}
-            Refresh
-          </button>
+          <div className="desktop-header-actions">
+            {fullWidth ? (
+              <button
+                className="desktop-refresh"
+                type="button"
+                onClick={() => onNavigate("settings")}
+              >
+                <Settings size={14} /> Settings
+              </button>
+            ) : null}
+            <button
+              className="desktop-refresh"
+              type="button"
+              onClick={onRefresh}
+              disabled={isRefreshing}
+            >
+              {isRefreshing ? (
+                <LoaderCircle className="spin" size={14} />
+              ) : (
+                <RefreshCw size={14} />
+              )}{" "}
+              Refresh
+            </button>
+          </div>
         </header>
         <main className="desktop-content">
           {refreshError ? (

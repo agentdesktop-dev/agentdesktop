@@ -80,7 +80,7 @@ export function friendlyModelRuntime(kind: string) {
 function ModelRuntimeIcon({ kind }: { kind: string }) {
   return kind.toLowerCase() === "ollama" ? (
     <img
-      className="model-runtime-icon"
+      className="model-runtime-icon theme-monochrome"
       src={ollamaIcon}
       alt=""
       aria-hidden="true"
@@ -121,8 +121,14 @@ export function ModelRuntimeInventory({
 
 export function ToolIcon({ kind }: { kind: string }) {
   const icon = toolIcons[kind.toLowerCase()];
+  const monochrome = ["opencode", "vscode"].includes(kind.toLowerCase());
   return icon ? (
-    <img className="tool-icon" src={icon} alt="" aria-hidden="true" />
+    <img
+      className={`tool-icon${monochrome ? " theme-monochrome" : ""}`}
+      src={icon}
+      alt=""
+      aria-hidden="true"
+    />
   ) : (
     <Code2 className="tool-icon-fallback" size={16} aria-hidden="true" />
   );

@@ -1,13 +1,19 @@
-use std::{env, fs, future::Future, io::ErrorKind, path::PathBuf, time::Duration};
+use std::{
+    env, fs,
+    future::Future,
+    io::ErrorKind,
+    path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 #[cfg(target_os = "macos")]
 use std::{ffi::OsString, io::Write, os::unix::fs::OpenOptionsExt, path::Path, process::Stdio};
 
-#[cfg(target_os = "macos")]
-use agentdesktop_agent::secure_fs;
 use agentdesktop_agent::{
     cli::{self, ClientCommand},
     daemon::{self, DaemonArgs},
+    secure_fs,
 };
 use agentdesktop_client as client;
 use agentdesktop_core::{
@@ -68,16 +74,38 @@ fn tray_icon(state: &str) -> tauri::Result<Image<'static>> {
     Image::from_bytes(bytes)
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ColorMode {
+    Light,
+    Dark,
+    #[default]
+    #[serde(other)]
+    System,
+}
+
+impl ColorMode {
+    fn native_theme(self) -> Option<tauri::Theme> {
+        match self {
+            Self::System => None,
+            Self::Light => Some(tauri::Theme::Light),
+            Self::Dark => Some(tauri::Theme::Dark),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 struct Settings {
     open_on_startup: bool,
+    color_mode: ColorMode,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             open_on_startup: true,
+            color_mode: ColorMode::default(),
         }
     }
 }
@@ -495,6 +523,22 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
+struct StartupWindow(AtomicBool);
+
+impl StartupWindow {
+    fn take_open_request(&self) -> bool {
+        self.0.swap(false, Ordering::Relaxed)
+    }
+}
+
+#[tauri::command]
+fn desktop_ready(app: AppHandle, startup: tauri::State<'_, StartupWindow>) {
+    // StrictMode, reloads, and later preference changes must not reopen a hidden window.
+    if startup.take_open_request() {
+        show_main_window(&app);
+    }
+}
+
 #[tauri::command]
 fn get_bootstrap(app: AppHandle) -> Result<Bootstrap, String> {
     Ok(Bootstrap {
@@ -513,8 +557,13 @@ fn get_bootstrap(app: AppHandle) -> Result<Bootstrap, String> {
 fn save_settings(app: AppHandle, settings: Settings) -> Result<Settings, String> {
     let serialized = serde_json::to_string_pretty(&settings)
         .map_err(|error| format!("cannot serialize settings: {error}"))?;
-    fs::write(settings_path(&app)?, format!("{serialized}\n"))
-        .map_err(|error| format!("cannot save settings: {error}"))?;
+    secure_fs::atomic_write(
+        &settings_path(&app)?,
+        format!("{serialized}\n").as_bytes(),
+        0o600,
+    )
+    .map_err(|error| format!("cannot save settings: {error}"))?;
+    app.set_theme(settings.color_mode.native_theme());
     Ok(settings)
 }
 
@@ -591,6 +640,10 @@ fn run_desktop() -> anyhow::Result<()> {
             show_main_window(app);
         }))
         .setup(|app| {
+            let settings = load_settings(app.handle())?;
+            app.manage(StartupWindow(AtomicBool::new(settings.open_on_startup)));
+            app.handle().set_theme(settings.color_mode.native_theme());
+
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
@@ -642,9 +695,7 @@ fn run_desktop() -> anyhow::Result<()> {
                 }
             });
 
-            if load_settings(app.handle())?.open_on_startup {
-                show_main_window(app.handle());
-            }
+            // The frontend calls desktop_ready after applying the saved appearance.
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -656,6 +707,7 @@ fn run_desktop() -> anyhow::Result<()> {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            desktop_ready,
             get_bootstrap,
             save_settings,
             get_connector_status,
@@ -711,6 +763,91 @@ fn main() -> anyhow::Result<()> {
             prepare_desktop_process();
             run_desktop()
         }
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::{AtomicBool, ColorMode, Settings, StartupWindow};
+
+    #[test]
+    fn ready_frontend_opens_startup_window_only_once() {
+        let startup = StartupWindow(AtomicBool::new(true));
+        assert!(startup.take_open_request());
+        assert!(!startup.take_open_request());
+        assert!(!startup.take_open_request());
+    }
+
+    #[test]
+    fn ready_frontend_preserves_hidden_startup() {
+        let startup = StartupWindow(AtomicBool::new(false));
+        assert!(!startup.take_open_request());
+        assert!(!startup.take_open_request());
+    }
+
+    #[test]
+    fn settings_default_to_system_color_mode() {
+        assert_eq!(ColorMode::default(), ColorMode::System);
+        for settings in [Settings::default(), serde_json::from_str("{}").unwrap()] {
+            assert!(settings.open_on_startup);
+            assert_eq!(settings.color_mode, ColorMode::System);
+        }
+    }
+
+    #[test]
+    fn legacy_settings_preserve_disabled_open_on_startup() {
+        let settings: Settings = serde_json::from_str(r#"{"openOnStartup":false}"#).unwrap();
+
+        assert!(!settings.open_on_startup);
+        assert_eq!(settings.color_mode, ColorMode::System);
+    }
+
+    #[test]
+    fn unknown_color_mode_falls_back_to_system() {
+        let json = r#"{"openOnStartup":false,"colorMode":"future-mode"}"#;
+        let settings: Settings = serde_json::from_str(json).unwrap();
+
+        assert!(!settings.open_on_startup);
+        assert_eq!(settings.color_mode, ColorMode::System);
+    }
+
+    #[test]
+    fn all_color_modes_round_trip() {
+        for (color_mode, serialized_mode) in [
+            (ColorMode::System, "system"),
+            (ColorMode::Light, "light"),
+            (ColorMode::Dark, "dark"),
+        ] {
+            for open_on_startup in [true, false] {
+                let settings = Settings {
+                    open_on_startup,
+                    color_mode,
+                };
+                let serialized = serde_json::to_value(&settings).unwrap();
+                assert_eq!(
+                    serialized,
+                    serde_json::json!({
+                        "openOnStartup": open_on_startup,
+                        "colorMode": serialized_mode,
+                    })
+                );
+
+                let restored: Settings = serde_json::from_value(serialized).unwrap();
+                assert_eq!(restored.open_on_startup, open_on_startup);
+                assert_eq!(restored.color_mode, color_mode);
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_color_modes_map_to_native_themes() {
+        assert_eq!(ColorMode::Light.native_theme(), Some(tauri::Theme::Light));
+        assert_eq!(ColorMode::Dark.native_theme(), Some(tauri::Theme::Dark));
+    }
+
+    #[test]
+    fn system_color_mode_clears_the_native_theme_override() {
+        assert_eq!(ColorMode::System.native_theme(), None);
     }
 }
 

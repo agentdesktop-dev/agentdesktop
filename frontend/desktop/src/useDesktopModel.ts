@@ -1,6 +1,14 @@
-import { startTransition, useEffect, useState, useTransition } from "react";
+import type { ColorMode } from "@agentdesktop/ui";
+import {
+  startTransition,
+  useEffect,
+  useRef,
+  useState,
+  useTransition,
+} from "react";
 
 import {
+  desktopReady,
   getBootstrap,
   getConnectorStatus,
   getDiscovery,
@@ -18,7 +26,7 @@ import type {
   Settings,
 } from "./types";
 
-export type View = "home" | "tools";
+export type View = "home" | "tools" | "settings";
 export type Notice = { tone: "success" | "error"; message: string } | null;
 
 type StatusSource =
@@ -34,7 +42,7 @@ type StatusUpdate = {
   remoteConfig: PromiseSettledResult<string | null>;
 };
 
-const loadingSettings: Settings = { openOnStartup: true };
+const loadingSettings: Settings = { openOnStartup: true, colorMode: "system" };
 
 const statusSourceLabels: Record<StatusSource, string> = {
   connector: "local daemon status",
@@ -70,6 +78,7 @@ function statusErrorMessage(errors: StatusErrors): string | null {
 export function useDesktopModel() {
   const [view, setView] = useState<View>("home");
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
+  const [hasLoadedBootstrap, setHasLoadedBootstrap] = useState(false);
   const [settings, setSettings] = useState<Settings>(loadingSettings);
   const [connector, setConnector] = useState<ConnectorSnapshot | null>(null);
   const [managedDevice, setManagedDevice] =
@@ -82,6 +91,7 @@ export function useDesktopModel() {
   const [isRefreshing, startRefreshing] = useTransition();
   const [isManaging, startManaging] = useTransition();
   const [isSaving, startSaving] = useTransition();
+  const savingSettings = useRef(false);
   const [isLoggingOut, startLoggingOut] = useTransition();
   const needsEnrollment = Boolean(
     managedDevice?.configured && managedDevice.enrollment !== "approved",
@@ -125,11 +135,22 @@ export function useDesktopModel() {
       })
       .catch((error: unknown) => {
         if (active) setNotice({ tone: "error", message: errorMessage(error) });
+      })
+      .finally(() => {
+        if (active) setHasLoadedBootstrap(true);
       });
     return () => {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!hasLoadedBootstrap) return;
+    // ThemeProvider's layout effect has applied the restored mode before showing.
+    desktopReady().catch((error: unknown) => {
+      setNotice({ tone: "error", message: errorMessage(error) });
+    });
+  }, [hasLoadedBootstrap]);
 
   useEffect(() => {
     if (
@@ -288,18 +309,31 @@ export function useDesktopModel() {
     });
   }
 
-  function setOpenOnStartup(checked: boolean) {
+  function updateSettings(patch: Partial<Settings>) {
+    if (!bootstrap || savingSettings.current) return;
+    savingSettings.current = true;
     const previous = settings;
-    const next = { ...settings, openOnStartup: checked };
+    const next = { ...settings, ...patch };
     setSettings(next);
+    setNotice(null);
     startSaving(async () => {
       try {
         setSettings(await saveSettings(next));
       } catch (error: unknown) {
         setSettings(previous);
         setNotice({ tone: "error", message: errorMessage(error) });
+      } finally {
+        savingSettings.current = false;
       }
     });
+  }
+
+  function setOpenOnStartup(checked: boolean) {
+    updateSettings({ openOnStartup: checked });
+  }
+
+  function setColorMode(colorMode: ColorMode) {
+    updateSettings({ colorMode });
   }
 
   async function copyDiagnostics() {
@@ -335,11 +369,14 @@ export function useDesktopModel() {
     setNotice(null);
   }
 
-  const pageTitle = needsEnrollment
-    ? "Enrollment"
-    : view === "home"
-      ? "Status"
-      : "Tools";
+  const pageTitle =
+    view === "settings"
+      ? "Settings"
+      : needsEnrollment
+        ? "Enrollment"
+        : view === "home"
+          ? "Status"
+          : "Tools";
 
   return {
     bootstrap,
@@ -362,6 +399,7 @@ export function useDesktopModel() {
     refresh,
     refreshError: statusErrorMessage(statusErrors),
     remoteConfig,
+    setColorMode,
     setOpenOnStartup,
     settings,
     view,
