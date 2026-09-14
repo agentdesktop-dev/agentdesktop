@@ -1,6 +1,7 @@
 import type {
   Bootstrap,
   ConnectorSnapshot,
+  DaemonInfo,
   Discovery,
   ManagedDeviceSnapshot,
 } from "../types";
@@ -11,27 +12,49 @@ export const bootstrap: Bootstrap = {
   platform: "macos",
 };
 
-export const standaloneConnector: ConnectorSnapshot = {
-  state: "ready",
-  detail: null,
-  runtime: {
-    version: "0.1.0",
-    mode: "standalone",
-    gateway: "not-configured",
-    platform: { os: "macos" },
+export const standaloneDaemonInfo: DaemonInfo = {
+  version: "0.1.0",
+  scope: "user",
+  configPath: "/Users/developer/.config/agentdesktop/config.yaml",
+  stateDirectory: "/Users/developer/.local/state/agentdesktop",
+  inventoryInterval: "15m",
+  controller: null,
+};
+
+export const managedDaemonInfo: DaemonInfo = {
+  version: "0.1.1",
+  scope: "system",
+  configPath: "/etc/agentdesktop/config.yaml",
+  stateDirectory: "/var/lib/agentdesktop",
+  inventoryInterval: "15m",
+  controller: {
+    address: "https://controller.example.internal:8443/",
+    caCertificatePath: "/etc/agentdesktop/controller-ca.pem",
+    heartbeatInterval: "30s",
   },
 };
 
-export const managedConnector: ConnectorSnapshot = {
+export const standaloneConnector = {
   state: "ready",
   detail: null,
   runtime: {
-    version: "0.1.0",
+    mode: "standalone",
+    gateway: "not-configured",
+    platform: { os: "macos" },
+    daemon: standaloneDaemonInfo,
+  },
+} satisfies ConnectorSnapshot;
+
+export const managedConnector = {
+  state: "ready",
+  detail: null,
+  runtime: {
     mode: "managed",
     gateway: "reachable",
     platform: { os: "macos" },
+    daemon: managedDaemonInfo,
   },
-};
+} satisfies ConnectorSnapshot;
 
 export const offlineConnector: ConnectorSnapshot = {
   state: "offline",
@@ -262,10 +285,3 @@ export const populatedDiscovery: Discovery = {
 };
 
 export const emptyDiscovery: Discovery = { agents: [] };
-
-export const remoteConfig = `organization: Acme Engineering
-gateway:
-  endpoint: https://gateway.example.internal
-policies:
-  mode: enforced
-`;

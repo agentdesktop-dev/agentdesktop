@@ -12,11 +12,24 @@ export interface PlatformCapabilities {
   os: string;
 }
 
-export interface ConnectorRuntime {
+export interface DaemonInfo {
   version: string;
+  scope: "user" | "system";
+  configPath: string;
+  stateDirectory: string;
+  inventoryInterval: string;
+  controller: {
+    address: string;
+    caCertificatePath: string | null;
+    heartbeatInterval: string;
+  } | null;
+}
+
+export interface ConnectorRuntime {
   mode: string;
   gateway: string;
   platform: PlatformCapabilities;
+  daemon: DaemonInfo;
 }
 
 export interface ConnectorSnapshot {
