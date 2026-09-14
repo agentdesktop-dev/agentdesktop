@@ -94,8 +94,8 @@ fn serialize_managed_settings(settings: &Value) -> anyhow::Result<Vec<u8>> {
 
 #[cfg(not(target_os = "macos"))]
 fn serialize_managed_settings(settings: &Value) -> anyhow::Result<Vec<u8>> {
-    let mut contents = serde_json::to_vec_pretty(settings)
-        .context("serialize Claude Desktop managed settings")?;
+    let mut contents =
+        serde_json::to_vec_pretty(settings).context("serialize Claude Desktop managed settings")?;
     contents.push(b'\n');
     Ok(contents)
 }
@@ -281,12 +281,12 @@ fn remove_owner_marker(path: &Path, plan: &ReconcilePlan) -> anyhow::Result<()> 
 mod tests {
     use std::path::Path;
 
+    #[cfg(target_os = "macos")]
+    use super::serialize_managed_settings;
     use super::{
         batch_quote, managed_settings, posix_credential_helper_contents,
         windows_credential_helper_contents,
     };
-    #[cfg(target_os = "macos")]
-    use super::serialize_managed_settings;
     use agentdesktop_core::config::parse_daemon;
 
     #[test]
@@ -375,7 +375,8 @@ programs:
         let parsed: plist::Value = plist::from_bytes(&contents).expect("plist parses back");
         let dict = parsed.as_dictionary().expect("top-level dictionary");
         assert_eq!(
-            dict.get("inferenceProvider").and_then(plist::Value::as_string),
+            dict.get("inferenceProvider")
+                .and_then(plist::Value::as_string),
             Some("gateway")
         );
         assert_eq!(
