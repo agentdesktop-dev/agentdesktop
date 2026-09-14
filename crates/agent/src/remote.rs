@@ -10,7 +10,7 @@ use anyhow::{Context, bail};
 use rcgen::{CertificateParams, ExtendedKeyUsagePurpose, KeyPair, KeyUsagePurpose};
 use sha2::{Digest, Sha256};
 use tokio::{
-    sync::{Mutex, mpsc, oneshot, watch},
+    sync::{Mutex, RwLock, mpsc, oneshot, watch},
     time,
 };
 use tokio_stream::wrappers::ReceiverStream;
@@ -23,7 +23,8 @@ use tracing::{debug, info, warn};
 use agentdesktop_core::{
     config::{self, ControllerConnectionConfig},
     model::{
-        Discovery as AgentDiscovery, TelemetryEvent as ModelTelemetryEvent, TelemetryEventKind,
+        ControllerConnectionStatus, Discovery as AgentDiscovery,
+        TelemetryEvent as ModelTelemetryEvent, TelemetryEventKind,
     },
 };
 use agentdesktop_proto::fleet::{
@@ -54,6 +55,60 @@ pub struct Requests {
     pub logout: mpsc::Receiver<LogoutRequest>,
 }
 
+/// Tracks whether the daemon's connection to the controller is currently
+/// live. This is the only source of truth for controller connectivity: it is
+/// updated exclusively by the controller stream-management code (this
+/// module and its caller in `daemon.rs`) and read by the local API
+/// (`/v1/health`) so the desktop UI can distinguish "the daemon process is
+/// healthy" from "the daemon is actually talking to the controller right
+/// now" — a daemon can hold valid enrollment credentials and answer local
+/// requests fine for an arbitrarily long time while its controller stream is
+/// stuck retrying (auth rejection, network partition, etc.), and neither the
+/// process itself nor its cached enrollment state ever reflects that on
+/// their own.
+#[derive(Clone)]
+pub struct ControllerConnectionState {
+    status: Arc<RwLock<ControllerConnectionStatus>>,
+}
+
+impl ControllerConnectionState {
+    pub fn new() -> Self {
+        Self {
+            status: Arc::new(RwLock::new(ControllerConnectionStatus {
+                connected: false,
+                last_connected_unix_seconds: None,
+                last_error: None,
+            })),
+        }
+    }
+
+    pub async fn get(&self) -> ControllerConnectionStatus {
+        self.status.read().await.clone()
+    }
+
+    pub(crate) async fn mark_connected(&self) {
+        let mut status = self.status.write().await;
+        status.connected = true;
+        status.last_connected_unix_seconds = Some(unix_time_seconds());
+        status.last_error = None;
+    }
+
+    pub(crate) async fn mark_disconnected(&self, error: Option<String>) {
+        let mut status = self.status.write().await;
+        status.connected = false;
+        if error.is_some() {
+            status.last_error = error;
+        }
+    }
+}
+
+impl Default for ControllerConnectionState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     controller: ControllerConnectionConfig,
     mut discovered: watch::Receiver<Arc<AgentDiscovery>>,
@@ -61,6 +116,7 @@ pub async fn run(
     oidc_callback_listen: Option<SocketAddr>,
     reconciler: Reconciler,
     enrollment: EnrollmentState,
+    controller_status: ControllerConnectionState,
     requests: Requests,
 ) -> anyhow::Result<()> {
     let Requests {
@@ -107,6 +163,9 @@ pub async fn run(
                     let error_chain = format!("{error:#}");
                     identity::delete(&identity_path, &identity.device_id)?;
                     enrollment.set("starting").await;
+                    controller_status
+                        .mark_disconnected(Some(error_chain.clone()))
+                        .await;
                     warn!(
                         controller = %controller.address,
                         identity_path = %identity_path.display(),
@@ -138,6 +197,7 @@ pub async fn run(
                     &state_dir,
                     &reconciler,
                     &mut telemetry,
+                    &controller_status,
                 ) => Some(result),
                 Some(request) = logout.recv() => {
                     if complete_logout(request, &identity_path, &identity, &enrollment).await {
@@ -151,11 +211,17 @@ pub async fn run(
                 break;
             };
             match connection {
-                Ok(()) => warn!("controller stream closed"),
+                Ok(()) => {
+                    controller_status.mark_disconnected(None).await;
+                    warn!("controller stream closed");
+                }
                 Err(error) if is_unauthenticated(&error) => {
                     let error_chain = format!("{error:#}");
                     identity::delete(&identity_path, &identity.device_id)?;
                     enrollment.set("starting").await;
+                    controller_status
+                        .mark_disconnected(Some(error_chain.clone()))
+                        .await;
                     warn!(
                         controller = %controller.address,
                         identity_path = %identity_path.display(),
@@ -166,6 +232,9 @@ pub async fn run(
                 }
                 Err(error) => {
                     let error_chain = format!("{error:#}");
+                    controller_status
+                        .mark_disconnected(Some(error_chain.clone()))
+                        .await;
                     warn!(
                         controller = %controller.address,
                         retry_in_seconds = delay.as_secs(),
@@ -310,6 +379,7 @@ async fn connect(
     state_dir: &Path,
     reconciler: &Reconciler,
     telemetry: &mut mpsc::Receiver<ModelTelemetryEvent>,
+    controller_status: &ControllerConnectionState,
 ) -> anyhow::Result<()> {
     let mut client = client(controller, Some(identity)).await?;
     let (sender, receiver) = mpsc::channel(16);
@@ -338,6 +408,7 @@ async fn connect(
     send_inventory(&sender, &snapshot).await?;
 
     info!(address = %controller.address, "connected to controller");
+    controller_status.mark_connected().await;
     let mut heartbeat = time::interval(controller.heartbeat_interval);
     let reconnect_at = identity.oauth.expires_at_unix_seconds.saturating_sub(60);
     let oauth_reconnect = time::sleep(Duration::from_secs(
@@ -700,8 +771,8 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        MAX_RETRY_DELAY, enroll_with_retry, is_oauth_refresh_rejected, is_unauthenticated,
-        next_inventory, next_retry_delay, normalize_hostname,
+        ControllerConnectionState, MAX_RETRY_DELAY, enroll_with_retry, is_oauth_refresh_rejected,
+        is_unauthenticated, next_inventory, next_retry_delay, normalize_hostname,
     };
     use crate::enrollment::EnrollmentState;
     use agentdesktop_core::model::Discovery as AgentDiscovery;
@@ -821,5 +892,69 @@ mod tests {
 
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert_eq!(identity, "identity");
+    }
+
+    #[tokio::test]
+    async fn controller_connection_state_starts_disconnected() {
+        let status = ControllerConnectionState::new().get().await;
+        assert!(!status.connected);
+        assert_eq!(status.last_connected_unix_seconds, None);
+        assert_eq!(status.last_error, None);
+    }
+
+    #[tokio::test]
+    async fn controller_connection_state_reports_a_successful_connection() {
+        let state = ControllerConnectionState::new();
+        state.mark_connected().await;
+
+        let status = state.get().await;
+        assert!(status.connected);
+        assert!(status.last_connected_unix_seconds.is_some());
+        assert_eq!(status.last_error, None);
+    }
+
+    #[tokio::test]
+    async fn controller_connection_state_disconnect_clears_connected_but_keeps_last_success() {
+        let state = ControllerConnectionState::new();
+        state.mark_connected().await;
+        let connected_at = state.get().await.last_connected_unix_seconds;
+
+        state
+            .mark_disconnected(Some("controller unavailable".to_owned()))
+            .await;
+
+        let status = state.get().await;
+        assert!(!status.connected);
+        assert_eq!(status.last_connected_unix_seconds, connected_at);
+        assert_eq!(status.last_error, Some("controller unavailable".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn controller_connection_state_reconnect_clears_the_previous_error() {
+        let state = ControllerConnectionState::new();
+        state
+            .mark_disconnected(Some("controller unavailable".to_owned()))
+            .await;
+        state.mark_connected().await;
+
+        let status = state.get().await;
+        assert!(status.connected);
+        assert_eq!(status.last_error, None);
+    }
+
+    #[tokio::test]
+    async fn controller_connection_state_disconnect_without_an_error_keeps_the_previous_one() {
+        let state = ControllerConnectionState::new();
+        state
+            .mark_disconnected(Some("controller unavailable".to_owned()))
+            .await;
+        // A clean stream close (e.g. the periodic OIDC-refresh reconnect)
+        // reports no error; it should not silently erase the last real one.
+        state.mark_disconnected(None).await;
+
+        assert_eq!(
+            state.get().await.last_error,
+            Some("controller unavailable".to_owned())
+        );
     }
 }

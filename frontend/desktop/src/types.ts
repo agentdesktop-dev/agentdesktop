@@ -15,6 +15,17 @@ export interface PlatformCapabilities {
   os: string;
 }
 
+/**
+ * The daemon's own live connection to the controller, independent of local
+ * process health. `null` for a standalone (unmanaged) daemon, which has no
+ * controller to connect to.
+ */
+export interface ControllerConnectionStatus {
+  connected: boolean;
+  lastConnectedUnixSeconds?: number;
+  lastError?: string;
+}
+
 export interface DaemonInfo {
   version: string;
   scope: "user" | "system";
@@ -33,6 +44,7 @@ export interface ConnectorRuntime {
   gateway: string;
   platform: PlatformCapabilities;
   daemon: DaemonInfo;
+  controller: ControllerConnectionStatus | null;
 }
 
 export interface ConnectorSnapshot {

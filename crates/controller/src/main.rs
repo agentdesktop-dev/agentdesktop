@@ -29,7 +29,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let _log_flush = telemetry::setup_logging("info", false);
+    let _log_flush = telemetry::setup_logging("info", false, None)?;
     let config = config::load_controller(&args.config)?;
     let tls = config.tls.files();
     let daemon_config = match &config.daemon_config {
