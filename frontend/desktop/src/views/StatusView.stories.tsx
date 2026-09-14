@@ -9,6 +9,7 @@ import {
   managedConnector,
   offlineConnector,
   populatedDiscovery,
+  reconnectingConnector,
   remoteConfig,
   standaloneConnector,
   unconfiguredDevice,
@@ -63,6 +64,12 @@ export const DaemonOffline: Story = {
     discovery: emptyDiscovery,
     managedDevice: unconfiguredDevice,
     remoteConfig: null,
+  },
+};
+
+export const ReconnectingToController: Story = {
+  args: {
+    connector: reconnectingConnector,
   },
 };
 

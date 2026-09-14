@@ -48,6 +48,20 @@ function gatewayIsConfigured(gateway: string | undefined): boolean {
   return gateway === "reachable" || gateway === "configured";
 }
 
+function formatRelativeTime(unixSeconds: number | undefined): string | null {
+  if (!unixSeconds) return null;
+  const elapsedSeconds = Math.max(
+    0,
+    Math.round(Date.now() / 1000 - unixSeconds),
+  );
+  if (elapsedSeconds < 60) return "just now";
+  const minutes = Math.round(elapsedSeconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
 function Definition({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div className="definition-row">
@@ -80,6 +94,11 @@ export function StatusView({
     !connector || !discovery || (runtime?.mode === "managed" && !managedDevice);
   const ready = !statusUnavailable && daemonReady && enrolled;
   const gatewayConfigured = gatewayIsConfigured(runtime?.gateway);
+  const controllerConnection = managed ? runtime?.controller : undefined;
+  const controllerConnected = controllerConnection?.connected ?? false;
+  const controllerLastSeen = formatRelativeTime(
+    controllerConnection?.lastConnectedUnixSeconds,
+  );
   const [confirmingLogout, setConfirmingLogout] = useState(false);
   const agents = discovery?.agents ?? [];
   const capabilityCount = agents.reduce(
@@ -146,7 +165,7 @@ export function StatusView({
           </span>
           <div>
             <strong>Local daemon</strong>
-            <span>Discovery, configuration, and controller connection</span>
+            <span>Discovery and configuration on this device</span>
           </div>
           <span
             className={`badge ${!connector ? "neutral" : daemonReady ? "success" : "danger"}`}
@@ -154,6 +173,38 @@ export function StatusView({
             {!connector ? "Unavailable" : daemonReady ? "Running" : "Offline"}
           </span>
         </div>
+        {managed ? (
+          <div className="status-row">
+            <span
+              className={`status-row-icon ${!controllerConnection ? "neutral" : controllerConnected ? "success" : "warning"}`}
+            >
+              <Waypoints size={17} />
+            </span>
+            <div>
+              <strong>Controller connection</strong>
+              <span>
+                {!controllerConnection
+                  ? "Live status is unavailable"
+                  : controllerConnected
+                    ? "Reporting device status to your organization"
+                    : controllerConnection.lastError
+                      ? `Reconnecting — ${controllerConnection.lastError}`
+                      : "Reconnecting to your organization's controller"}
+              </span>
+            </div>
+            <span
+              className={`badge ${!controllerConnection ? "neutral" : controllerConnected ? "success" : "warning"}`}
+            >
+              {!controllerConnection
+                ? "Unavailable"
+                : controllerConnected
+                  ? "Connected"
+                  : controllerLastSeen
+                    ? `Reconnecting (seen ${controllerLastSeen})`
+                    : "Reconnecting"}
+            </span>
+          </div>
+        ) : null}
         <div className="status-row">
           <span
             className={`status-row-icon ${runtime && gatewayConfigured ? "success" : "neutral"}`}

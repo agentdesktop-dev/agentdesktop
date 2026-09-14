@@ -13,7 +13,7 @@ use agentdesktop_client as client;
 use agentdesktop_core::{
     DEFAULT_SOCKET_PATH, VERSION,
     config::DaemonConfig,
-    model::{Discovery, EnrollmentStatus, Health},
+    model::{ControllerConnectionStatus, Discovery, EnrollmentStatus, Health},
 };
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -103,6 +103,10 @@ struct ConnectorRuntime {
     mode: &'static str,
     gateway: &'static str,
     platform: PlatformCapabilities,
+    /// The daemon's own live connection to the controller, independent of
+    /// local process health. `None` for a standalone (unmanaged) daemon,
+    /// which has no controller to connect to.
+    controller: Option<ControllerConnectionStatus>,
 }
 
 #[derive(Serialize)]
@@ -410,11 +414,14 @@ async fn enrollment_status() -> Result<EnrollmentStatus, String> {
 
 async fn read_connector_status() -> ConnectorSnapshot {
     let endpoint = socket_path();
-    if let Err(error) = client::get::<Health>(&endpoint, "/v1/health").await {
-        return ConnectorSnapshot::offline(format!(
-            "The Agent Desktop daemon is unavailable: {error}"
-        ));
-    }
+    let health = match client::get::<Health>(&endpoint, "/v1/health").await {
+        Ok(health) => health,
+        Err(error) => {
+            return ConnectorSnapshot::offline(format!(
+                "The Agent Desktop daemon is unavailable: {error}"
+            ));
+        }
+    };
     let (config, effective_config) = match tokio::try_join!(
         client::get::<DaemonConfig>(&endpoint, "/v1/config"),
         client::get::<DaemonConfig>(&endpoint, "/v1/effective-config")
@@ -450,6 +457,7 @@ async fn read_connector_status() -> ConnectorSnapshot {
             platform: PlatformCapabilities {
                 os: env::consts::OS,
             },
+            controller: health.controller,
         }),
     }
 }

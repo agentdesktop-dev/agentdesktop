@@ -70,8 +70,26 @@ pub struct Skill {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Health {
     pub status: String,
+    /// Present only when the daemon has a controller configured. Reflects
+    /// whether the daemon's own connection to the controller is currently
+    /// live, independent of local process health: a daemon can be fully
+    /// healthy locally while its controller stream is down (auth rejection,
+    /// network partition, stuck retry loop, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller: Option<ControllerConnectionStatus>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ControllerConnectionStatus {
+    pub connected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_connected_unix_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
