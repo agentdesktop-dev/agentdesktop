@@ -41,7 +41,7 @@ impl Provider for ClaudeDesktop {
     fn plan(&self, ctx: &ReconcileContext, config: &DaemonConfig) -> anyhow::Result<ReconcilePlan> {
         if ctx.merge_user_settings && config.programs.claude_desktop.is_some() {
             anyhow::bail!(
-                "Claude Desktop does not read inference settings from its user preferences; remove programs.claudeDesktop or run Agentdesktop without --user as root so it can manage /etc/claude-desktop/managed-settings.json"
+                "Claude Desktop does not read inference settings from its user preferences; remove programs.claudeDesktop or run Agentdesktop without --user as root so it can manage its Claude Desktop managed settings"
             );
         }
         let configured = config.programs.claude_desktop.as_ref().map(|provider| {
@@ -66,8 +66,22 @@ impl Provider for ClaudeDesktop {
 }
 
 /// Returns Claude Desktop's system-managed settings path.
+#[cfg(not(target_os = "macos"))]
 pub fn default_claude_desktop_managed_settings_path() -> PathBuf {
     PathBuf::from("/etc/claude-desktop/managed-settings.json")
+}
+
+/// Returns Claude Desktop's system-managed settings path.
+///
+/// Claude Desktop on macOS reads its managed configuration the same way as any other
+/// managed macOS application: via `CFPreferencesCopyAppValue` against the
+/// `com.anthropic.claudefordesktop` preference domain, backed by a property list under
+/// `/Library/Managed Preferences/`. It never reads a JSON file under `/etc`, so this must
+/// be a `.plist` and the reconciler must write it with `plist::to_writer_xml` — see
+/// `reconcile::serialize_managed_settings`.
+#[cfg(target_os = "macos")]
+pub fn default_claude_desktop_managed_settings_path() -> PathBuf {
+    PathBuf::from("/Library/Managed Preferences/com.anthropic.claudefordesktop.plist")
 }
 
 /// Returns the path of Agentdesktop's Claude Desktop credential helper.
