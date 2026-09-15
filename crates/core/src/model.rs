@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
@@ -72,6 +72,39 @@ pub struct Skill {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Health {
     pub status: String,
+}
+
+/// Read-only startup information reported by the running daemon, not the desktop host.
+/// Deliberately excludes tool configuration, credentials, and certificate contents.
+/// Paths are lossy UTF-8 display strings, not paths for filesystem operations.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DaemonInfo {
+    pub version: String,
+    pub scope: DaemonScope,
+    pub config_path: String,
+    pub state_directory: String,
+    #[serde(with = "humantime_serde")]
+    pub inventory_interval: Duration,
+    pub controller: Option<DaemonControllerInfo>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DaemonScope {
+    User,
+    System,
+}
+
+/// Connection metadata only; URL credentials, query, and fragment are omitted.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DaemonControllerInfo {
+    pub address: String,
+    /// Lossy UTF-8 display path; never used to load the certificate.
+    pub ca_certificate_path: Option<String>,
+    #[serde(with = "humantime_serde")]
+    pub heartbeat_interval: Duration,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

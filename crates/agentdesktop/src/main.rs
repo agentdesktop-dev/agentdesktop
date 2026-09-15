@@ -17,9 +17,9 @@ use agentdesktop_agent::{
 };
 use agentdesktop_client as client;
 use agentdesktop_core::{
-    DEFAULT_SOCKET_PATH, VERSION,
+    DEFAULT_SOCKET_PATH,
     config::DaemonConfig,
-    model::{Discovery, EnrollmentStatus, Health},
+    model::{DaemonInfo, Discovery, EnrollmentStatus, Health},
 };
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -127,10 +127,10 @@ struct PlatformCapabilities {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ConnectorRuntime {
-    version: &'static str,
     mode: &'static str,
     gateway: &'static str,
     platform: PlatformCapabilities,
+    daemon: DaemonInfo,
 }
 
 #[derive(Serialize)]
@@ -438,14 +438,19 @@ async fn enrollment_status() -> Result<EnrollmentStatus, String> {
 
 async fn read_connector_status() -> ConnectorSnapshot {
     let endpoint = socket_path();
-    if let Err(error) = client::get::<Health>(&endpoint, "/v1/health").await {
+    read_connector_status_at(&endpoint).await
+}
+
+async fn read_connector_status_at(endpoint: &std::path::Path) -> ConnectorSnapshot {
+    if let Err(error) = client::get::<Health>(endpoint, "/v1/health").await {
         return ConnectorSnapshot::offline(format!(
             "The Agent Desktop daemon is unavailable: {error}"
         ));
     }
-    let (config, effective_config) = match tokio::try_join!(
-        client::get::<DaemonConfig>(&endpoint, "/v1/config"),
-        client::get::<DaemonConfig>(&endpoint, "/v1/effective-config")
+    let (config, effective_config, daemon) = match tokio::try_join!(
+        client::get::<DaemonConfig>(endpoint, "/v1/config"),
+        client::get::<DaemonConfig>(endpoint, "/v1/effective-config"),
+        client::get::<DaemonInfo>(endpoint, "/v1/daemon-info"),
     ) {
         Ok(configs) => configs,
         Err(error) => {
@@ -453,7 +458,7 @@ async fn read_connector_status() -> ConnectorSnapshot {
         }
     };
     let managed = config.controller.is_some();
-    let enrollment = client::get::<EnrollmentStatus>(&endpoint, "/v1/enrollment")
+    let enrollment = client::get::<EnrollmentStatus>(endpoint, "/v1/enrollment")
         .await
         .ok();
     let organization_access_ready =
@@ -472,12 +477,12 @@ async fn read_connector_status() -> ConnectorSnapshot {
         state,
         detail: None,
         runtime: Some(ConnectorRuntime {
-            version: VERSION,
             mode: if managed { "managed" } else { "standalone" },
             gateway,
             platform: PlatformCapabilities {
                 os: env::consts::OS,
             },
+            daemon,
         }),
     }
 }
@@ -580,13 +585,6 @@ async fn get_managed_device_status() -> Result<ManagedDeviceSnapshot, String> {
 #[tauri::command]
 async fn get_discovery() -> Result<Discovery, String> {
     client::get(&socket_path(), "/v1/discovery")
-        .await
-        .map_err(|error| format!("{error:#}"))
-}
-
-#[tauri::command]
-async fn get_remote_config() -> Result<Option<String>, String> {
-    client::get(&socket_path(), "/v1/remote-config")
         .await
         .map_err(|error| format!("{error:#}"))
 }
@@ -713,7 +711,6 @@ fn run_desktop() -> anyhow::Result<()> {
             get_connector_status,
             get_managed_device_status,
             get_discovery,
-            get_remote_config,
             logout_managed_device,
             setup_managed_device
         ])
@@ -762,6 +759,84 @@ fn main() -> anyhow::Result<()> {
         None => {
             prepare_desktop_process();
             run_desktop()
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod connector_tests {
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+        net::UnixListener,
+    };
+
+    use super::{ConnectorSnapshot, Duration, read_connector_status_at};
+
+    async fn snapshot_with_daemon_info(
+        status: &'static str,
+        body: &'static str,
+    ) -> ConnectorSnapshot {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = directory.path().join("daemon.sock");
+        let listener = UnixListener::bind(&endpoint).unwrap();
+        let server = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut request = String::new();
+                if stream.read_line(&mut request).await.unwrap() == 0 {
+                    continue;
+                }
+                let (status, body) = match request.split_whitespace().nth(1).unwrap() {
+                    "/v1/health" => ("200 OK", r#"{"status":"ok"}"#),
+                    "/v1/config" | "/v1/effective-config" => ("200 OK", "{}"),
+                    "/v1/enrollment" => ("200 OK", r#"{"status":"notConfigured"}"#),
+                    "/v1/daemon-info" => (status, body),
+                    other => panic!("unexpected endpoint: {other}"),
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                // A failed required request can cancel the other in-flight reads.
+                let _ = stream.get_mut().write_all(response.as_bytes()).await;
+            }
+        });
+        let snapshot =
+            tokio::time::timeout(Duration::from_secs(5), read_connector_status_at(&endpoint)).await;
+        server.abort();
+        let _ = server.await;
+        snapshot.expect("connector status should finish")
+    }
+
+    #[tokio::test]
+    async fn reads_required_daemon_information() {
+        let snapshot = snapshot_with_daemon_info(
+            "200 OK",
+            r#"{"version":"0.1.1","scope":"user","configPath":"/tmp/config.yaml","stateDirectory":"/tmp/state","inventoryInterval":"15m","controller":null}"#,
+        )
+        .await;
+
+        assert_eq!(snapshot.state, "ready");
+        assert!(snapshot.detail.is_none());
+        let json = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(json["runtime"]["daemon"]["version"], "0.1.1");
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_or_malformed_daemon_information() {
+        for (status, body) in [("404 Not Found", ""), ("200 OK", "{}"), ("200 OK", "null")] {
+            let snapshot = snapshot_with_daemon_info(status, body).await;
+
+            assert_eq!(snapshot.state, "offline", "{status}: {body}");
+            assert!(snapshot.runtime.is_none());
+            assert!(
+                snapshot
+                    .detail
+                    .as_deref()
+                    .unwrap()
+                    .starts_with("Cannot read daemon state:")
+            );
         }
     }
 }

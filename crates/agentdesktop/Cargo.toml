@@ -26,6 +26,9 @@ tauri = { version = "2", features = ["image-png", "tray-icon"] }
 tauri-plugin-single-instance = "2"
 tokio.workspace = true
 
+[dev-dependencies]
+tempfile = "3"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 libc.workspace = true
 plist = "1.10"

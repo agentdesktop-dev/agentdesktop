@@ -12,6 +12,7 @@ import {
 import type { ReactNode } from "react";
 import { useState } from "react";
 
+import { DaemonInformation } from "../components/DaemonInformation";
 import type {
   Bootstrap,
   ConnectorSnapshot,
@@ -26,9 +27,7 @@ export interface StatusViewProps {
   isLoggingOut: boolean;
   managedDevice: ManagedDeviceSnapshot | null;
   onCopy: () => void;
-  onCopyRemoteConfig: () => void;
   onLogout: () => void;
-  remoteConfig: string | null;
 }
 
 function humanize(value: string | undefined): string {
@@ -58,10 +57,8 @@ export function StatusView({
   connector,
   managedDevice,
   discovery,
-  remoteConfig,
   isLoggingOut,
   onCopy,
-  onCopyRemoteConfig,
   onLogout,
 }: StatusViewProps) {
   const runtime = connector?.runtime;
@@ -219,98 +216,77 @@ export function StatusView({
             />
             <Definition
               label="Daemon version"
-              value={runtime?.version ?? "Unavailable"}
+              value={runtime?.daemon.version ?? "Unavailable"}
             />
           </dl>
         </div>
       </details>
 
-      {remoteConfig || (managed && enrolled) ? (
-        <details className="card advanced-config">
-          <summary>
-            <span>
-              <strong>Advanced</strong>
-              <small>Raw configuration and organization session controls</small>
-            </span>
-            <span>View</span>
-          </summary>
-          <div className="advanced-config-body">
-            {remoteConfig ? (
-              <>
-                <div className="advanced-config-heading">
-                  <p>
-                    This is the exact controller configuration currently
-                    persisted and applied by the daemon.
-                  </p>
-                  <button
-                    className="button button-secondary"
-                    type="button"
-                    onClick={onCopyRemoteConfig}
-                  >
-                    <Copy size={13} /> Copy YAML
-                  </button>
-                </div>
-                <pre>
-                  <code>{remoteConfig}</code>
-                </pre>
-              </>
-            ) : null}
+      <details className="card advanced-config">
+        <summary>
+          <span>
+            <strong>Advanced</strong>
+            <small>Daemon information and session controls</small>
+          </span>
+          <span>View</span>
+        </summary>
+        <div className="advanced-config-body">
+          <DaemonInformation info={runtime?.daemon} />
 
-            {managed && enrolled ? (
-              <section
-                className="advanced-danger-zone"
-                aria-labelledby="logout-heading"
-              >
-                <div>
-                  <p className="eyebrow">Danger zone</p>
-                  <h2 id="logout-heading">Sign out of this organization</h2>
-                  <p>
-                    Removes this device’s local organization credentials and
-                    stops managed access. It does not revoke the device record
-                    in the controller.
-                  </p>
-                </div>
-                {confirmingLogout ? (
-                  <div className="logout-confirmation">
-                    <strong>Are you sure?</strong>
-                    <div>
-                      <button
-                        className="button button-secondary"
-                        type="button"
-                        onClick={() => setConfirmingLogout(false)}
-                        disabled={isLoggingOut}
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        className="button button-danger"
-                        type="button"
-                        onClick={onLogout}
-                        disabled={isLoggingOut}
-                      >
-                        {isLoggingOut ? (
-                          <LoaderCircle className="spin" size={13} />
-                        ) : (
-                          <LogOut size={13} />
-                        )}
-                        {isLoggingOut ? "Signing out…" : "Yes, sign out"}
-                      </button>
-                    </div>
+          {managed && enrolled ? (
+            <section
+              className="advanced-danger-zone"
+              aria-labelledby="logout-heading"
+            >
+              <div>
+                <p className="eyebrow">Danger zone</p>
+                <h3 id="logout-heading">Sign out of this organization</h3>
+                <p>
+                  Removes this device’s local organization credentials and stops
+                  managed access. It does not revoke the device record in the
+                  controller.
+                </p>
+              </div>
+              {confirmingLogout ? (
+                <div className="logout-confirmation">
+                  <strong>Are you sure?</strong>
+                  <div>
+                    <button
+                      className="button button-secondary"
+                      type="button"
+                      onClick={() => setConfirmingLogout(false)}
+                      disabled={isLoggingOut}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className="button button-danger"
+                      type="button"
+                      onClick={onLogout}
+                      disabled={isLoggingOut}
+                    >
+                      {isLoggingOut ? (
+                        <LoaderCircle className="spin" size={13} />
+                      ) : (
+                        <LogOut size={13} />
+                      )}
+                      {isLoggingOut ? "Signing out…" : "Yes, sign out"}
+                    </button>
                   </div>
-                ) : (
-                  <button
-                    className="button button-danger"
-                    type="button"
-                    onClick={() => setConfirmingLogout(true)}
-                  >
-                    <LogOut size={13} /> Sign out
-                  </button>
-                )}
-              </section>
-            ) : null}
-          </div>
-        </details>
-      ) : null}
+                </div>
+              ) : (
+                <button
+                  className="button button-danger"
+                  type="button"
+                  onClick={() => setConfirmingLogout(true)}
+                >
+                  <LogOut size={13} /> Sign out
+                </button>
+              )}
+            </section>
+          ) : null}
+        </div>
+      </details>
     </div>
   );
 }
