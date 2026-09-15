@@ -32,6 +32,8 @@ export const CheckingStatus: Story = {
     ).toBeVisible();
     await userEvent.click(canvas.getByRole("button", { name: "Tools" }));
     await expect(args.onNavigate).toHaveBeenCalledWith("tools");
+    await userEvent.click(canvas.getByRole("button", { name: "Settings" }));
+    await expect(args.onNavigate).toHaveBeenCalledWith("settings");
   },
 };
 
@@ -52,4 +54,17 @@ export const PartialRefreshError: Story = {
     refreshError:
       "Couldn’t refresh tool inventory. Showing available or last known information.",
   },
+};
+
+export const EnrollmentSettings: Story = {
+  args: { fullWidth: true, pageTitle: "Enrollment" },
+  play: async ({ args, canvas }) => {
+    await userEvent.click(canvas.getByRole("button", { name: "Settings" }));
+    await expect(args.onNavigate).toHaveBeenCalledWith("settings");
+  },
+};
+
+export const DarkError: Story = {
+  ...PartialRefreshError,
+  globals: { colorMode: "dark" },
 };

@@ -134,3 +134,18 @@ export const AddsAgent: Story = {
     await expect(canvas.getAllByText("OpenCode")).toHaveLength(1);
   },
 };
+
+export const Dark: Story = {
+  ...ActiveSandbox,
+  globals: { colorMode: "dark" },
+};
+
+export const DarkAgentMenu: Story = {
+  globals: { colorMode: "dark" },
+  play: async ({ canvas }) => {
+    await userEvent.click(canvas.getByText("Add agent"));
+    await expect(
+      canvas.getByRole("button", { name: /OpenCode/ }),
+    ).toBeVisible();
+  },
+};

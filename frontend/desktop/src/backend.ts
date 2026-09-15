@@ -8,6 +8,10 @@ import type {
   Settings,
 } from "./types";
 
+export async function desktopReady(): Promise<void> {
+  return invoke<void>("desktop_ready");
+}
+
 export async function getBootstrap(): Promise<Bootstrap> {
   return invoke<Bootstrap>("get_bootstrap");
 }

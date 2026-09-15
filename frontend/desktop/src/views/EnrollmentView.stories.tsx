@@ -72,3 +72,12 @@ export const ConnectionDetailsBeforeEnrollment: Story = {
     await expect(args.onCopy).toHaveBeenCalledOnce();
   },
 };
+
+export const Dark: Story = {
+  globals: { colorMode: "dark" },
+};
+
+export const DarkRejected: Story = {
+  ...Rejected,
+  globals: { colorMode: "dark" },
+};

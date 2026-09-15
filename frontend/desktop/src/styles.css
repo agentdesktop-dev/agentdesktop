@@ -1,24 +1,5 @@
 :root {
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-    "Segoe UI", sans-serif;
-  color: #1f2328;
-  background: #fff;
-  font-synthesis: none;
   text-rendering: optimizeLegibility;
-  --ink: #1f2328;
-  --muted: #656d76;
-  --subtle: #6b737c;
-  --border: #d8dee4;
-  --border-soft: #eaeef2;
-  --surface: #f6f8fa;
-  --accent: #5f43b2;
-  --accent-hover: #4e3692;
-  --accent-soft: #f1edfb;
-  --danger: #cf222e;
-  --red: #cf222e;
-  --warning: #9a6700;
-  --green: #1a7f4b;
 }
 
 * {
@@ -36,7 +17,7 @@ body,
 
 body {
   min-height: 100vh;
-  background: #fff;
+  background: var(--canvas);
 }
 
 button,
@@ -78,8 +59,8 @@ p {
   padding: 20px 12px;
   display: flex;
   flex-direction: column;
-  color: #343a40;
-  background: #f7f7f5;
+  color: var(--foreground-secondary);
+  background: var(--sidebar);
   border-right: 1px solid var(--border);
 }
 
@@ -114,7 +95,7 @@ p {
   display: flex;
   align-items: center;
   gap: 9px;
-  color: #57606a;
+  color: var(--foreground-muted);
   background: transparent;
   border-radius: 5px;
   font-size: 13px;
@@ -124,12 +105,12 @@ p {
 
 .desktop-nav button:hover {
   color: var(--ink);
-  background: #ececea;
+  background: var(--nav-hover);
 }
 
 .desktop-nav button.active {
   color: var(--ink);
-  background: #e6e6e3;
+  background: var(--nav-active);
   font-weight: 600;
 }
 
@@ -144,7 +125,7 @@ p {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: #fff;
+  background: var(--canvas);
   border-bottom: 1px solid var(--border);
 }
 
@@ -153,6 +134,12 @@ p {
   color: var(--ink);
   font-size: 15px;
   font-weight: 600;
+}
+
+.desktop-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .desktop-refresh,
@@ -170,8 +157,8 @@ p {
 .desktop-refresh {
   height: 30px;
   padding: 0 10px;
-  color: #343a40;
-  background: #fff;
+  color: var(--foreground-secondary);
+  background: var(--card);
   border: 1px solid var(--border);
   font-weight: 500;
 }
@@ -185,7 +172,7 @@ p {
 .button:focus-visible,
 .runtime-card > summary:focus-visible,
 .advanced-config > summary:focus-visible {
-  outline: 3px solid rgb(95 67 178 / 18%);
+  outline: 3px solid var(--focus-ring);
   outline-offset: 3px;
 }
 
@@ -201,29 +188,29 @@ p {
 }
 
 .button-primary {
-  color: #fff;
-  background: var(--accent);
+  color: var(--on-accent);
+  background: var(--accent-button);
 }
 
 .button-primary:hover:not(:disabled) {
-  background: var(--accent-hover);
+  background: var(--accent-button-hover);
 }
 
 .button-secondary {
   color: var(--ink);
-  background: #fff;
+  background: var(--card);
   border: 1px solid var(--border);
 }
 
 .button-danger {
-  color: #fff;
-  background: var(--danger);
-  border: 1px solid var(--danger);
+  color: var(--on-danger);
+  background: var(--danger-button);
+  border: 1px solid var(--danger-button);
 }
 
 .button-danger:hover:not(:disabled) {
-  background: #a40e26;
-  border-color: #a40e26;
+  background: var(--danger-button-hover-strong);
+  border-color: var(--danger-button-hover-strong);
 }
 
 .desktop-content {
@@ -245,14 +232,14 @@ p {
 
 .notice-success {
   color: var(--green);
-  background: #f1f8f4;
-  border-color: #b9d9c7;
+  background: var(--success-notice-surface);
+  border-color: var(--success-border);
 }
 
 .notice-error {
-  color: #843a33;
-  background: #f7e9e6;
-  border-color: #e8c8c2;
+  color: var(--danger-notice-text);
+  background: var(--danger-notice-surface);
+  border-color: var(--danger-notice-border);
 }
 
 .notice + .notice {
@@ -325,7 +312,7 @@ p {
   align-items: center;
   flex-direction: column;
   text-align: center;
-  background: #fff;
+  background: var(--card);
   border: 1px solid var(--border);
   border-radius: 8px;
 }
@@ -348,7 +335,7 @@ p {
 
 .enrollment-mark-error {
   color: var(--danger);
-  background: #fff1f2;
+  background: var(--danger-soft);
 }
 
 .enrollment-welcome .eyebrow {
@@ -411,12 +398,12 @@ p {
 
 .status-hero-icon.ready {
   color: var(--green);
-  background: #eaf7ef;
+  background: var(--success-soft);
 }
 
 .status-hero-icon.attention {
   color: var(--warning);
-  background: #fff8dc;
+  background: var(--warning-soft);
 }
 
 .status-hero .eyebrow {
@@ -466,16 +453,16 @@ p {
 
 .status-row-icon.success {
   color: var(--green);
-  background: #eaf7ef;
+  background: var(--success-soft);
 }
 
 .status-row-icon.danger {
   color: var(--danger);
-  background: #fff1f2;
+  background: var(--danger-soft);
 }
 
 .status-row-icon.neutral {
-  color: #57606a;
+  color: var(--foreground-muted);
   background: var(--surface);
 }
 
@@ -487,7 +474,7 @@ p {
 }
 
 .status-row strong {
-  color: #24292f;
+  color: var(--ink);
   font-size: 12px;
   font-weight: 600;
 }
@@ -507,24 +494,24 @@ p {
 
 .badge.success {
   color: var(--green);
-  background: #f1faf4;
-  border-color: #b9dfc7;
+  background: var(--success-badge-surface);
+  border-color: var(--success-badge-border);
 }
 
 .badge.warning {
-  color: #7a4f00;
-  background: #fff8dc;
-  border-color: #ead28b;
+  color: var(--warning-strong);
+  background: var(--warning-soft);
+  border-color: var(--warning-badge-border);
 }
 
 .badge.danger {
   color: var(--danger);
-  background: #fff5f5;
-  border-color: #efc7ca;
+  background: var(--danger-badge-surface);
+  border-color: var(--danger-border);
 }
 
 .badge.neutral {
-  color: #57606a;
+  color: var(--foreground-muted);
   background: var(--surface);
 }
 
@@ -532,7 +519,7 @@ p {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   overflow: hidden;
-  background: #fff;
+  background: var(--card);
   border: 1px solid var(--border);
   border-radius: 6px;
 }
@@ -585,7 +572,7 @@ p {
 
 .runtime-card > summary strong,
 .advanced-config > summary strong {
-  color: #24292f;
+  color: var(--ink);
   font-size: 12px;
   font-weight: 600;
 }
@@ -649,7 +636,7 @@ p {
 }
 
 .inline-preference strong {
-  color: #24292f;
+  color: var(--ink);
   font-size: 12px;
   font-weight: 600;
 }
@@ -682,7 +669,7 @@ p {
 .switch-track {
   position: absolute;
   inset: 0;
-  background: #bec3bf;
+  background: var(--switch-track);
   border-radius: 999px;
   transition: background 150ms ease;
 }
@@ -694,14 +681,14 @@ p {
   left: 3px;
   width: 22px;
   height: 22px;
-  background: #fff;
+  background: var(--switch-thumb);
   border-radius: 50%;
-  box-shadow: 0 1px 2px rgb(22 28 25 / 20%);
+  box-shadow: var(--switch-shadow);
   transition: transform 150ms ease;
 }
 
 .switch input:checked + .switch-track {
-  background: var(--accent);
+  background: var(--accent-button);
 }
 
 .switch input:checked + .switch-track::after {
@@ -709,7 +696,7 @@ p {
 }
 
 .switch input:focus-visible + .switch-track {
-  outline: 3px solid rgb(95 67 178 / 18%);
+  outline: 3px solid var(--focus-ring);
   outline-offset: 2px;
 }
 
@@ -820,11 +807,32 @@ p {
   gap: 20px;
 }
 
+.advanced-config-heading p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .advanced-config-heading h3 {
   margin: 0 0 6px;
   color: var(--ink);
   font-size: 12px;
   font-weight: 600;
+}
+
+.advanced-config pre {
+  max-height: 360px;
+  margin: 0;
+  padding: 14px;
+  overflow: auto;
+  color: var(--foreground-secondary);
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 5px;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre;
 }
 
 .advanced-danger-zone {
@@ -833,8 +841,8 @@ p {
   align-items: center;
   justify-content: space-between;
   gap: 28px;
-  background: #fffafa;
-  border: 1px solid #e8c8c2;
+  background: var(--danger-zone-surface);
+  border: 1px solid var(--danger-notice-border);
   border-radius: 5px;
 }
 
@@ -845,7 +853,7 @@ p {
 
 .advanced-danger-zone h3 {
   margin: 0 0 5px;
-  color: #652c27;
+  color: var(--danger-heading);
   font-size: 13px;
 }
 
@@ -870,7 +878,7 @@ p {
 }
 
 .logout-confirmation > strong {
-  color: #652c27;
+  color: var(--danger-heading);
   font-size: 11px;
 }
 
@@ -915,14 +923,14 @@ p {
   flex-direction: column;
   color: var(--danger);
   text-align: center;
-  background: #fff;
-  border: 1px solid #efc7ca;
+  background: var(--card);
+  border: 1px solid var(--danger-border);
   border-radius: 6px;
 }
 
 .page-error h2 {
   margin: 14px 0 5px;
-  color: #24292f;
+  color: var(--ink);
   font-size: 16px;
 }
 
@@ -1022,12 +1030,13 @@ p {
   .desktop-nav {
     margin-top: 0;
     flex-direction: row;
-    gap: 4px;
+    gap: 2px;
   }
 
   .desktop-nav button {
     min-height: 40px;
-    padding: 0 10px;
+    padding: 0 7px;
+    gap: 6px;
   }
 
   .desktop-main {

@@ -107,7 +107,11 @@ function ConfigurationPage() {
 
 function SettingsPage() {
   const query = useApi<ControllerSettings>("/api/v1/settings");
-  if (query.loading) return <PageSkeleton />;
-  if (query.error || !query.data) return <ErrorState message={query.error} />;
-  return <SettingsView data={query.data} />;
+  return (
+    <SettingsView
+      data={query.data}
+      loading={query.loading}
+      error={query.error}
+    />
+  );
 }

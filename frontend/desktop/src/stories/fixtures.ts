@@ -7,7 +7,7 @@ import type {
 } from "../types";
 
 export const bootstrap: Bootstrap = {
-  settings: { openOnStartup: true },
+  settings: { openOnStartup: true, colorMode: "system" },
   version: "0.1.0",
   platform: "macos",
 };
