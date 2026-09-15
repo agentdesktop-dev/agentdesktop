@@ -1,33 +1,55 @@
 import type {
   Bootstrap,
   ConnectorSnapshot,
+  DaemonInfo,
   Discovery,
   ManagedDeviceSnapshot,
 } from "../types";
 
 export const bootstrap: Bootstrap = {
-  settings: { openOnStartup: true },
+  settings: { openOnStartup: true, colorMode: "system" },
   version: "0.1.0",
   platform: "macos",
 };
 
-export const standaloneConnector: ConnectorSnapshot = {
+export const standaloneDaemonInfo: DaemonInfo = {
+  version: "0.1.0",
+  scope: "user",
+  configPath: "/Users/developer/.config/agentdesktop/config.yaml",
+  stateDirectory: "/Users/developer/.local/state/agentdesktop",
+  inventoryInterval: "15m",
+  controller: null,
+};
+
+export const managedDaemonInfo: DaemonInfo = {
+  version: "0.1.1",
+  scope: "system",
+  configPath: "/etc/agentdesktop/config.yaml",
+  stateDirectory: "/var/lib/agentdesktop",
+  inventoryInterval: "15m",
+  controller: {
+    address: "https://controller.example.internal:8443/",
+    caCertificatePath: "/etc/agentdesktop/controller-ca.pem",
+    heartbeatInterval: "30s",
+  },
+};
+
+export const standaloneConnector = {
   state: "ready",
   detail: null,
   runtime: {
-    version: "0.1.0",
     mode: "standalone",
     gateway: "not-configured",
     platform: { os: "macos" },
     controller: null,
+    daemon: standaloneDaemonInfo,
   },
-};
+} satisfies ConnectorSnapshot;
 
-export const managedConnector: ConnectorSnapshot = {
+export const managedConnector = {
   state: "ready",
   detail: null,
   runtime: {
-    version: "0.1.0",
     mode: "managed",
     gateway: "reachable",
     platform: { os: "macos" },
@@ -35,18 +57,18 @@ export const managedConnector: ConnectorSnapshot = {
       connected: true,
       lastConnectedUnixSeconds: Date.now() / 1000,
     },
+    daemon: managedDaemonInfo,
   },
-};
+} satisfies ConnectorSnapshot;
 
 // A device that is fully healthy locally (daemon running, enrollment
 // approved) but whose connection to the controller is currently down —
 // the case that motivated a dedicated status row instead of folding this
 // into "Local daemon".
-export const reconnectingConnector: ConnectorSnapshot = {
+export const reconnectingConnector = {
   state: "ready",
   detail: null,
   runtime: {
-    version: "0.1.0",
     mode: "managed",
     gateway: "reachable",
     platform: { os: "macos" },
@@ -55,8 +77,9 @@ export const reconnectingConnector: ConnectorSnapshot = {
       lastConnectedUnixSeconds: Date.now() / 1000 - 900,
       lastError: "controller connection failed: connection refused",
     },
+    daemon: managedDaemonInfo,
   },
-};
+} satisfies ConnectorSnapshot;
 
 export const offlineConnector: ConnectorSnapshot = {
   state: "offline",
@@ -287,10 +310,3 @@ export const populatedDiscovery: Discovery = {
 };
 
 export const emptyDiscovery: Discovery = { agents: [] };
-
-export const remoteConfig = `organization: Acme Engineering
-gateway:
-  endpoint: https://gateway.example.internal
-policies:
-  mode: enforced
-`;

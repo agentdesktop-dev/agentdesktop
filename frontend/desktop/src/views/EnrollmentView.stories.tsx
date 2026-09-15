@@ -3,6 +3,7 @@ import { expect, fn, userEvent } from "storybook/test";
 
 import { DesktopStoryFrame } from "../stories/DesktopStoryFrame";
 import {
+  managedDaemonInfo,
   pendingDevice,
   rejectedDevice,
   unconfiguredDevice,
@@ -23,7 +24,9 @@ const meta = {
   tags: ["test"],
   args: {
     busy: false,
+    daemon: managedDaemonInfo,
     enrollment: unconfiguredDevice,
+    onCopy: fn(),
     onEnroll: fn(),
   },
 } satisfies Meta<typeof EnrollmentView>;
@@ -50,4 +53,31 @@ export const PendingApproval: Story = {
 
 export const Rejected: Story = {
   args: { enrollment: rejectedDevice },
+};
+
+export const ConnectionDetailsBeforeEnrollment: Story = {
+  args: { enrollment: rejectedDevice },
+  play: async ({ args, canvas }) => {
+    await userEvent.click(canvas.getByText("Advanced"));
+    await expect(
+      canvas.getByRole("region", { name: "Daemon information" }),
+    ).toBeVisible();
+    await expect(canvas.getByText(managedDaemonInfo.configPath)).toBeVisible();
+    await expect(
+      canvas.getByText("https://controller.example.internal:8443/"),
+    ).toBeVisible();
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Copy diagnostics" }),
+    );
+    await expect(args.onCopy).toHaveBeenCalledOnce();
+  },
+};
+
+export const Dark: Story = {
+  globals: { colorMode: "dark" },
+};
+
+export const DarkRejected: Story = {
+  ...Rejected,
+  globals: { colorMode: "dark" },
 };

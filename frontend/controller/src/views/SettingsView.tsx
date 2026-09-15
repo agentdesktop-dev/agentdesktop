@@ -1,37 +1,66 @@
+import { AppearancePreference, CardHeader } from "@agentdesktop/ui";
+
+import { ErrorState, PageSkeleton } from "../components/ViewStates";
 import type { ControllerSettings } from "../types";
 
-export function SettingsView({ data }: { data: ControllerSettings }) {
+export function SettingsView({
+  data,
+  loading = false,
+  error,
+}: {
+  data?: ControllerSettings | null;
+  loading?: boolean;
+  error?: string | null;
+}) {
   return (
     <div className="stack">
+      <section className="card">
+        <CardHeader
+          heading="h2"
+          title="Appearance"
+          description="Personalize the fleet UI in this browser."
+        />
+        <AppearancePreference description="System follows your device’s appearance. Saved in this browser only." />
+      </section>
       <section className="section-intro">
         <div>
           <h2>Controller settings</h2>
           <p>Runtime capabilities for this controller instance.</p>
         </div>
       </section>
-      <section className="settings-list">
-        <SettingRow title="Fleet API" description={data.fleet_listen} enabled />
-        <SettingRow
-          title="Admin UI"
-          description={`${data.admin_listen} · loopback only`}
-          enabled
-        />
-        <SettingRow
-          title="TLS"
-          description="Encrypted fleet transport"
-          enabled={data.tls_enabled}
-        />
-        <SettingRow
-          title="OIDC enrollment"
-          description="Interactive SSO-based device enrollment"
-          enabled={data.oidc_enabled}
-        />
-        <SettingRow
-          title="Gateway JWT issuer"
-          description="Short-lived LLM gateway credentials"
-          enabled={data.gateway_jwt_enabled}
-        />
-      </section>
+      {loading ? (
+        <PageSkeleton />
+      ) : error || !data ? (
+        <ErrorState message={error} />
+      ) : (
+        <section className="settings-list">
+          <SettingRow
+            title="Fleet API"
+            description={data.fleet_listen}
+            enabled
+          />
+          <SettingRow
+            title="Admin UI"
+            description={`${data.admin_listen} · loopback only`}
+            enabled
+          />
+          <SettingRow
+            title="TLS"
+            description="Encrypted fleet transport"
+            enabled={data.tls_enabled}
+          />
+          <SettingRow
+            title="OIDC enrollment"
+            description="Interactive SSO-based device enrollment"
+            enabled={data.oidc_enabled}
+          />
+          <SettingRow
+            title="Gateway JWT issuer"
+            description="Short-lived LLM gateway credentials"
+            enabled={data.gateway_jwt_enabled}
+          />
+        </section>
+      )}
       <section className="local-notice">
         <div>
           <strong>Local access only</strong>

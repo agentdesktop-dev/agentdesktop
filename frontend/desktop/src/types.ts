@@ -1,5 +1,8 @@
+import type { ColorMode } from "@agentdesktop/ui";
+
 export interface Settings {
   openOnStartup: boolean;
+  colorMode: ColorMode;
 }
 
 export interface Bootstrap {
@@ -23,12 +26,25 @@ export interface ControllerConnectionStatus {
   lastError?: string;
 }
 
-export interface ConnectorRuntime {
+export interface DaemonInfo {
   version: string;
+  scope: "user" | "system";
+  configPath: string;
+  stateDirectory: string;
+  inventoryInterval: string;
+  controller: {
+    address: string;
+    caCertificatePath: string | null;
+    heartbeatInterval: string;
+  } | null;
+}
+
+export interface ConnectorRuntime {
   mode: string;
   gateway: string;
   platform: PlatformCapabilities;
   controller: ControllerConnectionStatus | null;
+  daemon: DaemonInfo;
 }
 
 export interface ConnectorSnapshot {

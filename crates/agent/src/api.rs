@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use agentdesktop_core::{
     config::{DaemonConfig, LlmGatewayAuthentication, ProgramAuthentication, valid_client_id},
     model::{
-        Discovery, EnrollmentStatus, Health, LlmGatewayCredential, TelemetryEvent,
+        DaemonInfo, Discovery, EnrollmentStatus, Health, LlmGatewayCredential, TelemetryEvent,
         TelemetryEventKind,
     },
 };
@@ -22,6 +22,7 @@ use crate::{enrollment::EnrollmentState, gateway_oidc, remote, subscription};
 #[derive(Clone)]
 pub struct AppState {
     pub config: DaemonConfig,
+    pub daemon_info: DaemonInfo,
     pub discovery: watch::Receiver<Arc<Discovery>>,
     pub enrollment: EnrollmentState,
     pub controller_status: Option<remote::ControllerConnectionState>,
@@ -39,6 +40,7 @@ struct CredentialQuery {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/daemon-info", get(daemon_info))
         .route("/v1/config", get(config))
         .route("/v1/effective-config", get(effective_config))
         .route("/v1/remote-config", get(remote_config))
@@ -130,6 +132,10 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
         status: "ok".to_owned(),
         controller,
     })
+}
+
+async fn daemon_info(State(state): State<AppState>) -> Json<DaemonInfo> {
+    Json(state.daemon_info)
 }
 
 async fn config(State(state): State<AppState>) -> Json<DaemonConfig> {

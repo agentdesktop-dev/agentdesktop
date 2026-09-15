@@ -1,11 +1,18 @@
-import { startTransition, useEffect, useState, useTransition } from "react";
+import type { ColorMode } from "@agentdesktop/ui";
+import {
+  startTransition,
+  useEffect,
+  useRef,
+  useState,
+  useTransition,
+} from "react";
 
 import {
+  desktopReady,
   getBootstrap,
   getConnectorStatus,
   getDiscovery,
   getManagedDeviceStatus,
-  getRemoteConfig,
   logoutManagedDevice,
   saveSettings,
   setupManagedDevice,
@@ -18,29 +25,23 @@ import type {
   Settings,
 } from "./types";
 
-export type View = "home" | "tools";
+export type View = "home" | "tools" | "settings";
 export type Notice = { tone: "success" | "error"; message: string } | null;
 
-type StatusSource =
-  | "connector"
-  | "managedDevice"
-  | "discovery"
-  | "remoteConfig";
+type StatusSource = "connector" | "managedDevice" | "discovery";
 type StatusErrors = Partial<Record<StatusSource, string>>;
 type StatusUpdate = {
   connector: PromiseSettledResult<ConnectorSnapshot>;
   managedDevice: PromiseSettledResult<ManagedDeviceSnapshot>;
   discovery: PromiseSettledResult<Discovery>;
-  remoteConfig: PromiseSettledResult<string | null>;
 };
 
-const loadingSettings: Settings = { openOnStartup: true };
+const loadingSettings: Settings = { openOnStartup: true, colorMode: "system" };
 
 const statusSourceLabels: Record<StatusSource, string> = {
   connector: "local daemon status",
   managedDevice: "organization status",
   discovery: "tool inventory",
-  remoteConfig: "advanced configuration",
 };
 
 function errorMessage(error: unknown): string {
@@ -48,14 +49,12 @@ function errorMessage(error: unknown): string {
 }
 
 async function getStatusUpdate(): Promise<StatusUpdate> {
-  const [connector, managedDevice, discovery, remoteConfig] =
-    await Promise.allSettled([
-      getConnectorStatus(),
-      getManagedDeviceStatus(),
-      getDiscovery(),
-      getRemoteConfig(),
-    ]);
-  return { connector, managedDevice, discovery, remoteConfig };
+  const [connector, managedDevice, discovery] = await Promise.allSettled([
+    getConnectorStatus(),
+    getManagedDeviceStatus(),
+    getDiscovery(),
+  ]);
+  return { connector, managedDevice, discovery };
 }
 
 function statusErrorMessage(errors: StatusErrors): string | null {
@@ -70,18 +69,19 @@ function statusErrorMessage(errors: StatusErrors): string | null {
 export function useDesktopModel() {
   const [view, setView] = useState<View>("home");
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
+  const [hasLoadedBootstrap, setHasLoadedBootstrap] = useState(false);
   const [settings, setSettings] = useState<Settings>(loadingSettings);
   const [connector, setConnector] = useState<ConnectorSnapshot | null>(null);
   const [managedDevice, setManagedDevice] =
     useState<ManagedDeviceSnapshot | null>(null);
   const [discovery, setDiscovery] = useState<Discovery | null>(null);
-  const [remoteConfig, setRemoteConfig] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
   const [statusErrors, setStatusErrors] = useState<StatusErrors>({});
   const [hasLoadedStatus, setHasLoadedStatus] = useState(false);
   const [isRefreshing, startRefreshing] = useTransition();
   const [isManaging, startManaging] = useTransition();
   const [isSaving, startSaving] = useTransition();
+  const savingSettings = useRef(false);
   const [isLoggingOut, startLoggingOut] = useTransition();
   const needsEnrollment = Boolean(
     managedDevice?.configured && managedDevice.enrollment !== "approved",
@@ -105,11 +105,6 @@ export function useDesktopModel() {
       } else {
         nextErrors.discovery = errorMessage(update.discovery.reason);
       }
-      if (update.remoteConfig.status === "fulfilled") {
-        setRemoteConfig(update.remoteConfig.value);
-      } else {
-        nextErrors.remoteConfig = errorMessage(update.remoteConfig.reason);
-      }
       setStatusErrors(nextErrors);
       setHasLoadedStatus(true);
     });
@@ -125,11 +120,22 @@ export function useDesktopModel() {
       })
       .catch((error: unknown) => {
         if (active) setNotice({ tone: "error", message: errorMessage(error) });
+      })
+      .finally(() => {
+        if (active) setHasLoadedBootstrap(true);
       });
     return () => {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!hasLoadedBootstrap) return;
+    // ThemeProvider's layout effect has applied the restored mode before showing.
+    desktopReady().catch((error: unknown) => {
+      setNotice({ tone: "error", message: errorMessage(error) });
+    });
+  }, [hasLoadedBootstrap]);
 
   useEffect(() => {
     if (
@@ -268,15 +274,12 @@ export function useDesktopModel() {
     startLoggingOut(async () => {
       try {
         await logoutManagedDevice();
-        const [nextConnector, nextManagedDevice, nextRemoteConfig] =
-          await Promise.all([
-            getConnectorStatus(),
-            getManagedDeviceStatus(),
-            getRemoteConfig(),
-          ]);
+        const [nextConnector, nextManagedDevice] = await Promise.all([
+          getConnectorStatus(),
+          getManagedDeviceStatus(),
+        ]);
         setConnector(nextConnector);
         setManagedDevice(nextManagedDevice);
-        setRemoteConfig(nextRemoteConfig);
         setView("home");
         setNotice({
           tone: "success",
@@ -288,18 +291,31 @@ export function useDesktopModel() {
     });
   }
 
-  function setOpenOnStartup(checked: boolean) {
+  function updateSettings(patch: Partial<Settings>) {
+    if (!bootstrap || savingSettings.current) return;
+    savingSettings.current = true;
     const previous = settings;
-    const next = { ...settings, openOnStartup: checked };
+    const next = { ...settings, ...patch };
     setSettings(next);
+    setNotice(null);
     startSaving(async () => {
       try {
         setSettings(await saveSettings(next));
       } catch (error: unknown) {
         setSettings(previous);
         setNotice({ tone: "error", message: errorMessage(error) });
+      } finally {
+        savingSettings.current = false;
       }
     });
+  }
+
+  function setOpenOnStartup(checked: boolean) {
+    updateSettings({ openOnStartup: checked });
+  }
+
+  function setColorMode(colorMode: ColorMode) {
+    updateSettings({ colorMode });
   }
 
   async function copyDiagnostics() {
@@ -320,32 +336,24 @@ export function useDesktopModel() {
     }
   }
 
-  async function copyRemoteConfig() {
-    if (!remoteConfig) return;
-    try {
-      await navigator.clipboard.writeText(remoteConfig);
-      setNotice({ tone: "success", message: "Configuration copied" });
-    } catch (error: unknown) {
-      setNotice({ tone: "error", message: errorMessage(error) });
-    }
-  }
-
   function navigate(nextView: View) {
     setView(nextView);
     setNotice(null);
   }
 
-  const pageTitle = needsEnrollment
-    ? "Enrollment"
-    : view === "home"
-      ? "Status"
-      : "Tools";
+  const pageTitle =
+    view === "settings"
+      ? "Settings"
+      : needsEnrollment
+        ? "Enrollment"
+        : view === "home"
+          ? "Status"
+          : "Tools";
 
   return {
     bootstrap,
     connector,
     copyDiagnostics,
-    copyRemoteConfig,
     discovery,
     enroll,
     hasLoadedStatus,
@@ -361,7 +369,7 @@ export function useDesktopModel() {
     pageTitle,
     refresh,
     refreshError: statusErrorMessage(statusErrors),
-    remoteConfig,
+    setColorMode,
     setOpenOnStartup,
     settings,
     view,

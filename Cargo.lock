@@ -36,6 +36,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-single-instance",
+ "tempfile",
  "tokio",
 ]
 
@@ -62,6 +63,7 @@ dependencies = [
  "libc",
  "memchr",
  "open",
+ "plist",
  "rand",
  "rcgen",
  "reqwest",

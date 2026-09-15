@@ -13,7 +13,9 @@ use std::{
 };
 
 use agentdesktop_core::{
-    DEFAULT_CONFIG_PATH, DEFAULT_SOCKET_PATH, DEFAULT_STATE_DIR, config, telemetry,
+    DEFAULT_CONFIG_PATH, DEFAULT_SOCKET_PATH, DEFAULT_STATE_DIR, VERSION, config,
+    model::{DaemonControllerInfo, DaemonInfo, DaemonScope},
+    telemetry,
 };
 use anyhow::{Context, bail};
 use clap::Args;
@@ -301,6 +303,7 @@ where
         return Ok(());
     }
 
+    let daemon_info = describe_daemon(&config, &args.config, &args.state_dir, args.user);
     secure_fs::ensure_private_dir(&args.state_dir)?;
     start_gateway_authentication(&config, args.state_dir.clone(), args.oidc_callback_listen);
     let enrollment = EnrollmentState::new(config.controller.is_some());
@@ -390,6 +393,7 @@ where
     let has_controller = config.controller.is_some();
     let app = api::router(api::AppState {
         config,
+        daemon_info,
         discovery: inventory,
         enrollment,
         controller_status: has_controller.then_some(controller_status),
@@ -406,6 +410,62 @@ where
     serve_named_pipe(&socket, app, shutdown).await?;
 
     Ok(())
+}
+
+fn describe_daemon(
+    config: &config::DaemonConfig,
+    config_path: &Path,
+    state_directory: &Path,
+    user: bool,
+) -> DaemonInfo {
+    let controller = config
+        .controller
+        .as_ref()
+        .map(|controller| DaemonControllerInfo {
+            address: controller_address_for_display(&controller.address),
+            ca_certificate_path: controller
+                .ca_certificate_path
+                .as_ref()
+                .map(|path| path_for_display(path)),
+            heartbeat_interval: controller.heartbeat_interval,
+        });
+    DaemonInfo {
+        version: VERSION.to_owned(),
+        scope: if user {
+            DaemonScope::User
+        } else {
+            DaemonScope::System
+        },
+        config_path: path_for_display(config_path),
+        state_directory: path_for_display(state_directory),
+        inventory_interval: config.inventory_interval,
+        controller,
+    }
+}
+
+fn path_for_display(path: &Path) -> String {
+    // Diagnostics must not stop startup if an optional path is empty or the
+    // working directory cannot be resolved. Only this display copy is lossy;
+    // filesystem operations keep the original native path.
+    std::path::absolute(path)
+        .unwrap_or_else(|_| path.to_owned())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn controller_address_for_display(address: &str) -> String {
+    let Some(mut url) = url::Url::parse(address)
+        .ok()
+        .filter(|url| url.scheme() == "https" && url.has_host())
+    else {
+        return "Invalid controller address".to_owned();
+    };
+    if url.set_username("").is_err() || url.set_password(None).is_err() {
+        return "Invalid controller address".to_owned();
+    }
+    url.set_query(None);
+    url.set_fragment(None);
+    url.to_string()
 }
 
 fn log_discovery(discovery: &agentdesktop_core::model::Discovery) {
@@ -928,8 +988,247 @@ mod tests {
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
     use super::{
-        client_executable_for_daemon, serve_local_connection, validate_dry_run, validate_one_shot,
+        client_executable_for_daemon, controller_address_for_display, describe_daemon,
+        serve_local_connection, validate_dry_run, validate_one_shot,
     };
+
+    #[test]
+    fn daemon_information_reports_standalone_defaults_and_resolved_paths() {
+        let config = parse_daemon("{}").unwrap();
+        let info = describe_daemon(&config, Path::new("config.yaml"), Path::new("state"), true);
+
+        assert_eq!(info.version, agentdesktop_core::VERSION);
+        assert_eq!(info.scope, super::DaemonScope::User);
+        assert_eq!(
+            info.config_path,
+            std::path::absolute("config.yaml")
+                .unwrap()
+                .to_string_lossy()
+        );
+        assert_eq!(
+            info.state_directory,
+            std::path::absolute("state").unwrap().to_string_lossy()
+        );
+        assert_eq!(info.inventory_interval, Duration::from_secs(15 * 60));
+        assert!(info.controller.is_none());
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["scope"], "user");
+        assert_eq!(json["inventoryInterval"], "15m");
+        assert_eq!(
+            serde_json::from_value::<super::DaemonInfo>(json).unwrap(),
+            info
+        );
+    }
+
+    #[test]
+    fn controller_display_omits_url_secrets_and_fails_closed_on_invalid_urls() {
+        for address in [
+            "https://controller.example.com:8443/fleet",
+            "https://test-user:test-password@controller.example.com:8443/fleet?token=test-query#test-fragment",
+            "https://controller.example.com:8443/fleet?api_key=test-query#test-fragment",
+        ] {
+            assert_eq!(
+                controller_address_for_display(address),
+                "https://controller.example.com:8443/fleet"
+            );
+        }
+        for address in [
+            "https://[test-secret",
+            "https://test-user:test-password@",
+            "http://test-user:test-password@example.com",
+            "not-a-url-test-secret",
+        ] {
+            assert_eq!(
+                controller_address_for_display(address),
+                "Invalid controller address"
+            );
+        }
+    }
+
+    #[test]
+    fn daemon_information_preserves_an_empty_ca_path_without_failing_startup() {
+        let config = parse_daemon(
+            "controller:\n  address: https://controller.example.com\n  caCertificatePath: ''\n",
+        )
+        .unwrap();
+        let info = describe_daemon(&config, Path::new("config.yaml"), Path::new("state"), false);
+        assert_eq!(
+            info.controller.unwrap().ca_certificate_path.as_deref(),
+            Some("")
+        );
+    }
+
+    #[tokio::test]
+    async fn daemon_information_api_is_read_only_and_reports_the_loaded_local_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let config_path = root.path().join("config.yaml");
+        std::fs::write(
+            &config_path,
+            r#"
+controller:
+  address: https://test-user:test-password@controller.example.com:8443/fleet?token=test-query#test-fragment
+  caCertificatePath: certs/controller-ca.pem
+  heartbeatInterval: 45s
+inventoryInterval: 2m
+programs:
+  claudeCode:
+    env:
+      API_KEY: test-program-secret
+"#,
+        )
+        .unwrap();
+        let config = agentdesktop_core::config::load_daemon(&config_path).unwrap();
+        let info = describe_daemon(&config, &config_path, root.path(), false);
+        assert_eq!(info.scope, super::DaemonScope::System);
+        let controller = info.controller.as_ref().unwrap();
+        assert_eq!(controller.heartbeat_interval, Duration::from_secs(45));
+        assert_eq!(
+            controller.ca_certificate_path.as_deref(),
+            Some(
+                std::path::absolute("certs/controller-ca.pem")
+                    .unwrap()
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+
+        // Later disk edits and cached controller policy must not replace the
+        // local settings actually used by the running connection worker.
+        std::fs::write(
+            &config_path,
+            "controller:\n  address: https://edited.example.com\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("remote-config.yaml"),
+            "controller:\n  address: https://remote.example.com\ninventoryInterval: 3m\n",
+        )
+        .unwrap();
+        let (_, inventory) = watch::channel(Arc::new(discovery(&[])));
+        let app = crate::api::router(crate::api::AppState {
+            config,
+            daemon_info: info.clone(),
+            discovery: inventory,
+            enrollment: crate::enrollment::EnrollmentState::new(true),
+            state_dir: root.path().to_owned(),
+            oidc_callback_listen: None,
+            telemetry: None,
+            logout: None,
+        });
+
+        for (method, expected_status) in [("GET", "200 OK"), ("POST", "405 Method Not Allowed")] {
+            let (mut client, server) = tokio::io::duplex(16 * 1024);
+            let connection = tokio::spawn(serve_local_connection(server, app.clone()));
+            client
+                .write_all(
+                    format!(
+                        "{method} /v1/daemon-info HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut response = String::new();
+            client.read_to_string(&mut response).await.unwrap();
+            connection.await.unwrap().unwrap();
+            assert!(response.starts_with(&format!("HTTP/1.1 {expected_status}\r\n")));
+            if method == "GET" {
+                let (_, body) = response.split_once("\r\n\r\n").unwrap();
+                assert_eq!(
+                    serde_json::from_str::<super::DaemonInfo>(body).unwrap(),
+                    info
+                );
+                let json: serde_json::Value = serde_json::from_str(body).unwrap();
+                assert_eq!(json["inventoryInterval"], "2m");
+                assert_eq!(json["controller"]["heartbeatInterval"], "45s");
+                assert_eq!(
+                    json["controller"]["address"],
+                    "https://controller.example.com:8443/fleet"
+                );
+                for omitted in [
+                    "test-user",
+                    "test-password",
+                    "test-query",
+                    "test-fragment",
+                    "test-program-secret",
+                    "programs",
+                    "edited.example.com",
+                    "remote.example.com",
+                ] {
+                    assert!(
+                        !body.contains(omitted),
+                        "unexpected diagnostics value: {omitted}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn daemon_information_api_handles_non_utf8_startup_paths() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let root = tempfile::tempdir().unwrap();
+        let config_path = root
+            .path()
+            .join(OsString::from_vec(b"config-\xff.yaml".to_vec()));
+        let state_dir = root.path().join(OsString::from_vec(b"state-\xfe".to_vec()));
+        // Keep invalid-byte paths in memory: filesystems such as APFS reject
+        // these filenames, but the diagnostic projection must handle them.
+        let config = parse_daemon("{}").unwrap();
+        let info = describe_daemon(&config, &config_path, &state_dir, true);
+        let (_, inventory) = watch::channel(Arc::new(discovery(&[])));
+        let app = crate::api::router(crate::api::AppState {
+            config,
+            daemon_info: info,
+            discovery: inventory,
+            enrollment: crate::enrollment::EnrollmentState::new(false),
+            state_dir: state_dir.clone(),
+            oidc_callback_listen: None,
+            telemetry: None,
+            logout: None,
+        });
+
+        for endpoint in ["/v1/health", "/v1/config", "/v1/daemon-info"] {
+            let (mut client, server) = tokio::io::duplex(16 * 1024);
+            let connection = tokio::spawn(serve_local_connection(server, app.clone()));
+            client
+                .write_all(
+                    format!(
+                        "GET {endpoint} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut response = String::new();
+            client.read_to_string(&mut response).await.unwrap();
+            connection.await.unwrap().unwrap();
+            assert!(
+                response.starts_with("HTTP/1.1 200 OK\r\n"),
+                "{endpoint}: {response}"
+            );
+            if endpoint == "/v1/daemon-info" {
+                let (_, body) = response.split_once("\r\n\r\n").unwrap();
+                let json: serde_json::Value = serde_json::from_str(body).unwrap();
+                assert_eq!(json["configPath"], config_path.to_string_lossy().as_ref());
+                assert_eq!(json["stateDirectory"], state_dir.to_string_lossy().as_ref());
+                assert_eq!(json["version"], agentdesktop_core::VERSION);
+                assert_eq!(json["scope"], "user");
+                assert_eq!(json["inventoryInterval"], "15m");
+                assert!(json["controller"].is_null());
+
+                // The native desktop must be able to decode and re-serialize the snapshot.
+                let decoded: super::DaemonInfo = serde_json::from_str(body).unwrap();
+                assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+            }
+        }
+
+        // Only the display snapshot may be lossy, not the native input paths.
+        assert!(config_path.to_str().is_none());
+        assert!(state_dir.to_str().is_none());
+    }
 
     struct ShutdownRejectingStream {
         inner: tokio::io::DuplexStream,

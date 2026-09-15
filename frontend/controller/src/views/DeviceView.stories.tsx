@@ -103,3 +103,13 @@ export const DeleteFailed: Story = {
 export const Deleting: Story = {
   args: { deleteOpen: true, deleting: true },
 };
+
+export const Dark: Story = {
+  ...BrowsesDiscoveredCapabilities,
+  globals: { colorMode: "dark" },
+};
+
+export const DarkDeleteFailed: Story = {
+  ...DeleteFailed,
+  globals: { colorMode: "dark" },
+};

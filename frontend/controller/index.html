@@ -3,7 +3,24 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#10192b" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#fff" />
+    <script>
+      // Restore appearance before styles paint; storage may be blocked.
+      let colorMode = "system";
+      try {
+        const saved = localStorage.getItem("agentdesktop.colorMode");
+        if (saved === "light" || saved === "dark") colorMode = saved;
+      } catch {}
+      const theme = colorMode === "system"
+        ? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
+        : colorMode;
+      document.documentElement.dataset.colorMode = colorMode;
+      document.documentElement.dataset.theme = theme;
+      document.documentElement.style.colorScheme = theme;
+      document.querySelector('meta[name="theme-color"]').content =
+        theme === "dark" ? "#1c1d21" : "#fff";
+    </script>
     <meta name="description" content="Local management console for the Agentdesktop fleet controller" />
     <link rel="icon" href="../desktop/assets/app-icon.png" type="image/png" />
     <title>Agentdesktop Controller</title>

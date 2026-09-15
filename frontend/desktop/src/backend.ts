@@ -8,6 +8,10 @@ import type {
   Settings,
 } from "./types";
 
+export async function desktopReady(): Promise<void> {
+  return invoke<void>("desktop_ready");
+}
+
 export async function getBootstrap(): Promise<Bootstrap> {
   return invoke<Bootstrap>("get_bootstrap");
 }
@@ -26,10 +30,6 @@ export async function getManagedDeviceStatus(): Promise<ManagedDeviceSnapshot> {
 
 export async function getDiscovery(): Promise<Discovery> {
   return invoke<Discovery>("get_discovery");
-}
-
-export async function getRemoteConfig(): Promise<string | null> {
-  return invoke<string | null>("get_remote_config");
 }
 
 export async function logoutManagedDevice(): Promise<void> {

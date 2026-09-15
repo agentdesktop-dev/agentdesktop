@@ -1,19 +1,25 @@
-use std::{env, fs, future::Future, io::ErrorKind, path::PathBuf, time::Duration};
+use std::{
+    env, fs,
+    future::Future,
+    io::ErrorKind,
+    path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 #[cfg(target_os = "macos")]
 use std::{ffi::OsString, io::Write, os::unix::fs::OpenOptionsExt, path::Path, process::Stdio};
 
-#[cfg(target_os = "macos")]
-use agentdesktop_agent::secure_fs;
 use agentdesktop_agent::{
     cli::{self, ClientCommand},
     daemon::{self, DaemonArgs},
+    secure_fs,
 };
 use agentdesktop_client as client;
 use agentdesktop_core::{
-    DEFAULT_SOCKET_PATH, VERSION,
+    DEFAULT_SOCKET_PATH,
     config::DaemonConfig,
-    model::{ControllerConnectionStatus, Discovery, EnrollmentStatus, Health},
+    model::{ControllerConnectionStatus, DaemonInfo, Discovery, EnrollmentStatus, Health},
 };
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -68,16 +74,38 @@ fn tray_icon(state: &str) -> tauri::Result<Image<'static>> {
     Image::from_bytes(bytes)
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ColorMode {
+    Light,
+    Dark,
+    #[default]
+    #[serde(other)]
+    System,
+}
+
+impl ColorMode {
+    fn native_theme(self) -> Option<tauri::Theme> {
+        match self {
+            Self::System => None,
+            Self::Light => Some(tauri::Theme::Light),
+            Self::Dark => Some(tauri::Theme::Dark),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 struct Settings {
     open_on_startup: bool,
+    color_mode: ColorMode,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             open_on_startup: true,
+            color_mode: ColorMode::default(),
         }
     }
 }
@@ -99,7 +127,6 @@ struct PlatformCapabilities {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ConnectorRuntime {
-    version: &'static str,
     mode: &'static str,
     gateway: &'static str,
     platform: PlatformCapabilities,
@@ -107,6 +134,7 @@ struct ConnectorRuntime {
     /// local process health. `None` for a standalone (unmanaged) daemon,
     /// which has no controller to connect to.
     controller: Option<ControllerConnectionStatus>,
+    daemon: DaemonInfo,
 }
 
 #[derive(Serialize)]
@@ -414,7 +442,11 @@ async fn enrollment_status() -> Result<EnrollmentStatus, String> {
 
 async fn read_connector_status() -> ConnectorSnapshot {
     let endpoint = socket_path();
-    let health = match client::get::<Health>(&endpoint, "/v1/health").await {
+    read_connector_status_at(&endpoint).await
+}
+
+async fn read_connector_status_at(endpoint: &std::path::Path) -> ConnectorSnapshot {
+    let health = match client::get::<Health>(endpoint, "/v1/health").await {
         Ok(health) => health,
         Err(error) => {
             return ConnectorSnapshot::offline(format!(
@@ -422,9 +454,10 @@ async fn read_connector_status() -> ConnectorSnapshot {
             ));
         }
     };
-    let (config, effective_config) = match tokio::try_join!(
-        client::get::<DaemonConfig>(&endpoint, "/v1/config"),
-        client::get::<DaemonConfig>(&endpoint, "/v1/effective-config")
+    let (config, effective_config, daemon) = match tokio::try_join!(
+        client::get::<DaemonConfig>(endpoint, "/v1/config"),
+        client::get::<DaemonConfig>(endpoint, "/v1/effective-config"),
+        client::get::<DaemonInfo>(endpoint, "/v1/daemon-info"),
     ) {
         Ok(configs) => configs,
         Err(error) => {
@@ -432,7 +465,7 @@ async fn read_connector_status() -> ConnectorSnapshot {
         }
     };
     let managed = config.controller.is_some();
-    let enrollment = client::get::<EnrollmentStatus>(&endpoint, "/v1/enrollment")
+    let enrollment = client::get::<EnrollmentStatus>(endpoint, "/v1/enrollment")
         .await
         .ok();
     let organization_access_ready =
@@ -451,13 +484,13 @@ async fn read_connector_status() -> ConnectorSnapshot {
         state,
         detail: None,
         runtime: Some(ConnectorRuntime {
-            version: VERSION,
             mode: if managed { "managed" } else { "standalone" },
             gateway,
             platform: PlatformCapabilities {
                 os: env::consts::OS,
             },
             controller: health.controller,
+            daemon,
         }),
     }
 }
@@ -503,6 +536,22 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
+struct StartupWindow(AtomicBool);
+
+impl StartupWindow {
+    fn take_open_request(&self) -> bool {
+        self.0.swap(false, Ordering::Relaxed)
+    }
+}
+
+#[tauri::command]
+fn desktop_ready(app: AppHandle, startup: tauri::State<'_, StartupWindow>) {
+    // StrictMode, reloads, and later preference changes must not reopen a hidden window.
+    if startup.take_open_request() {
+        show_main_window(&app);
+    }
+}
+
 #[tauri::command]
 fn get_bootstrap(app: AppHandle) -> Result<Bootstrap, String> {
     Ok(Bootstrap {
@@ -521,8 +570,13 @@ fn get_bootstrap(app: AppHandle) -> Result<Bootstrap, String> {
 fn save_settings(app: AppHandle, settings: Settings) -> Result<Settings, String> {
     let serialized = serde_json::to_string_pretty(&settings)
         .map_err(|error| format!("cannot serialize settings: {error}"))?;
-    fs::write(settings_path(&app)?, format!("{serialized}\n"))
-        .map_err(|error| format!("cannot save settings: {error}"))?;
+    secure_fs::atomic_write(
+        &settings_path(&app)?,
+        format!("{serialized}\n").as_bytes(),
+        0o600,
+    )
+    .map_err(|error| format!("cannot save settings: {error}"))?;
+    app.set_theme(settings.color_mode.native_theme());
     Ok(settings)
 }
 
@@ -539,13 +593,6 @@ async fn get_managed_device_status() -> Result<ManagedDeviceSnapshot, String> {
 #[tauri::command]
 async fn get_discovery() -> Result<Discovery, String> {
     client::get(&socket_path(), "/v1/discovery")
-        .await
-        .map_err(|error| format!("{error:#}"))
-}
-
-#[tauri::command]
-async fn get_remote_config() -> Result<Option<String>, String> {
-    client::get(&socket_path(), "/v1/remote-config")
         .await
         .map_err(|error| format!("{error:#}"))
 }
@@ -599,6 +646,10 @@ fn run_desktop() -> anyhow::Result<()> {
             show_main_window(app);
         }))
         .setup(|app| {
+            let settings = load_settings(app.handle())?;
+            app.manage(StartupWindow(AtomicBool::new(settings.open_on_startup)));
+            app.handle().set_theme(settings.color_mode.native_theme());
+
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
@@ -650,9 +701,7 @@ fn run_desktop() -> anyhow::Result<()> {
                 }
             });
 
-            if load_settings(app.handle())?.open_on_startup {
-                show_main_window(app.handle());
-            }
+            // The frontend calls desktop_ready after applying the saved appearance.
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -664,12 +713,12 @@ fn run_desktop() -> anyhow::Result<()> {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            desktop_ready,
             get_bootstrap,
             save_settings,
             get_connector_status,
             get_managed_device_status,
             get_discovery,
-            get_remote_config,
             logout_managed_device,
             setup_managed_device
         ])
@@ -719,6 +768,169 @@ fn main() -> anyhow::Result<()> {
             prepare_desktop_process();
             run_desktop()
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod connector_tests {
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+        net::UnixListener,
+    };
+
+    use super::{ConnectorSnapshot, Duration, read_connector_status_at};
+
+    async fn snapshot_with_daemon_info(
+        status: &'static str,
+        body: &'static str,
+    ) -> ConnectorSnapshot {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = directory.path().join("daemon.sock");
+        let listener = UnixListener::bind(&endpoint).unwrap();
+        let server = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut request = String::new();
+                if stream.read_line(&mut request).await.unwrap() == 0 {
+                    continue;
+                }
+                let (status, body) = match request.split_whitespace().nth(1).unwrap() {
+                    "/v1/health" => ("200 OK", r#"{"status":"ok"}"#),
+                    "/v1/config" | "/v1/effective-config" => ("200 OK", "{}"),
+                    "/v1/enrollment" => ("200 OK", r#"{"status":"notConfigured"}"#),
+                    "/v1/daemon-info" => (status, body),
+                    other => panic!("unexpected endpoint: {other}"),
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                // A failed required request can cancel the other in-flight reads.
+                let _ = stream.get_mut().write_all(response.as_bytes()).await;
+            }
+        });
+        let snapshot =
+            tokio::time::timeout(Duration::from_secs(5), read_connector_status_at(&endpoint)).await;
+        server.abort();
+        let _ = server.await;
+        snapshot.expect("connector status should finish")
+    }
+
+    #[tokio::test]
+    async fn reads_required_daemon_information() {
+        let snapshot = snapshot_with_daemon_info(
+            "200 OK",
+            r#"{"version":"0.1.1","scope":"user","configPath":"/tmp/config.yaml","stateDirectory":"/tmp/state","inventoryInterval":"15m","controller":null}"#,
+        )
+        .await;
+
+        assert_eq!(snapshot.state, "ready");
+        assert!(snapshot.detail.is_none());
+        let json = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(json["runtime"]["daemon"]["version"], "0.1.1");
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_or_malformed_daemon_information() {
+        for (status, body) in [("404 Not Found", ""), ("200 OK", "{}"), ("200 OK", "null")] {
+            let snapshot = snapshot_with_daemon_info(status, body).await;
+
+            assert_eq!(snapshot.state, "offline", "{status}: {body}");
+            assert!(snapshot.runtime.is_none());
+            assert!(
+                snapshot
+                    .detail
+                    .as_deref()
+                    .unwrap()
+                    .starts_with("Cannot read daemon state:")
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::{AtomicBool, ColorMode, Settings, StartupWindow};
+
+    #[test]
+    fn ready_frontend_opens_startup_window_only_once() {
+        let startup = StartupWindow(AtomicBool::new(true));
+        assert!(startup.take_open_request());
+        assert!(!startup.take_open_request());
+        assert!(!startup.take_open_request());
+    }
+
+    #[test]
+    fn ready_frontend_preserves_hidden_startup() {
+        let startup = StartupWindow(AtomicBool::new(false));
+        assert!(!startup.take_open_request());
+        assert!(!startup.take_open_request());
+    }
+
+    #[test]
+    fn settings_default_to_system_color_mode() {
+        assert_eq!(ColorMode::default(), ColorMode::System);
+        for settings in [Settings::default(), serde_json::from_str("{}").unwrap()] {
+            assert!(settings.open_on_startup);
+            assert_eq!(settings.color_mode, ColorMode::System);
+        }
+    }
+
+    #[test]
+    fn legacy_settings_preserve_disabled_open_on_startup() {
+        let settings: Settings = serde_json::from_str(r#"{"openOnStartup":false}"#).unwrap();
+
+        assert!(!settings.open_on_startup);
+        assert_eq!(settings.color_mode, ColorMode::System);
+    }
+
+    #[test]
+    fn unknown_color_mode_falls_back_to_system() {
+        let json = r#"{"openOnStartup":false,"colorMode":"future-mode"}"#;
+        let settings: Settings = serde_json::from_str(json).unwrap();
+
+        assert!(!settings.open_on_startup);
+        assert_eq!(settings.color_mode, ColorMode::System);
+    }
+
+    #[test]
+    fn all_color_modes_round_trip() {
+        for (color_mode, serialized_mode) in [
+            (ColorMode::System, "system"),
+            (ColorMode::Light, "light"),
+            (ColorMode::Dark, "dark"),
+        ] {
+            for open_on_startup in [true, false] {
+                let settings = Settings {
+                    open_on_startup,
+                    color_mode,
+                };
+                let serialized = serde_json::to_value(&settings).unwrap();
+                assert_eq!(
+                    serialized,
+                    serde_json::json!({
+                        "openOnStartup": open_on_startup,
+                        "colorMode": serialized_mode,
+                    })
+                );
+
+                let restored: Settings = serde_json::from_value(serialized).unwrap();
+                assert_eq!(restored.open_on_startup, open_on_startup);
+                assert_eq!(restored.color_mode, color_mode);
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_color_modes_map_to_native_themes() {
+        assert_eq!(ColorMode::Light.native_theme(), Some(tauri::Theme::Light));
+        assert_eq!(ColorMode::Dark.native_theme(), Some(tauri::Theme::Dark));
+    }
+
+    #[test]
+    fn system_color_mode_clears_the_native_theme_override() {
+        assert_eq!(ColorMode::System.native_theme(), None);
     }
 }
 
