@@ -5,7 +5,6 @@ import {
   getConnectorStatus,
   getDiscovery,
   getManagedDeviceStatus,
-  getRemoteConfig,
   logoutManagedDevice,
   saveSettings,
   setupManagedDevice,
@@ -21,17 +20,12 @@ import type {
 export type View = "home" | "tools";
 export type Notice = { tone: "success" | "error"; message: string } | null;
 
-type StatusSource =
-  | "connector"
-  | "managedDevice"
-  | "discovery"
-  | "remoteConfig";
+type StatusSource = "connector" | "managedDevice" | "discovery";
 type StatusErrors = Partial<Record<StatusSource, string>>;
 type StatusUpdate = {
   connector: PromiseSettledResult<ConnectorSnapshot>;
   managedDevice: PromiseSettledResult<ManagedDeviceSnapshot>;
   discovery: PromiseSettledResult<Discovery>;
-  remoteConfig: PromiseSettledResult<string | null>;
 };
 
 const loadingSettings: Settings = { openOnStartup: true };
@@ -40,7 +34,6 @@ const statusSourceLabels: Record<StatusSource, string> = {
   connector: "local daemon status",
   managedDevice: "organization status",
   discovery: "tool inventory",
-  remoteConfig: "advanced configuration",
 };
 
 function errorMessage(error: unknown): string {
@@ -48,14 +41,12 @@ function errorMessage(error: unknown): string {
 }
 
 async function getStatusUpdate(): Promise<StatusUpdate> {
-  const [connector, managedDevice, discovery, remoteConfig] =
-    await Promise.allSettled([
-      getConnectorStatus(),
-      getManagedDeviceStatus(),
-      getDiscovery(),
-      getRemoteConfig(),
-    ]);
-  return { connector, managedDevice, discovery, remoteConfig };
+  const [connector, managedDevice, discovery] = await Promise.allSettled([
+    getConnectorStatus(),
+    getManagedDeviceStatus(),
+    getDiscovery(),
+  ]);
+  return { connector, managedDevice, discovery };
 }
 
 function statusErrorMessage(errors: StatusErrors): string | null {
@@ -75,7 +66,6 @@ export function useDesktopModel() {
   const [managedDevice, setManagedDevice] =
     useState<ManagedDeviceSnapshot | null>(null);
   const [discovery, setDiscovery] = useState<Discovery | null>(null);
-  const [remoteConfig, setRemoteConfig] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
   const [statusErrors, setStatusErrors] = useState<StatusErrors>({});
   const [hasLoadedStatus, setHasLoadedStatus] = useState(false);
@@ -104,11 +94,6 @@ export function useDesktopModel() {
         setDiscovery(update.discovery.value);
       } else {
         nextErrors.discovery = errorMessage(update.discovery.reason);
-      }
-      if (update.remoteConfig.status === "fulfilled") {
-        setRemoteConfig(update.remoteConfig.value);
-      } else {
-        nextErrors.remoteConfig = errorMessage(update.remoteConfig.reason);
       }
       setStatusErrors(nextErrors);
       setHasLoadedStatus(true);
@@ -268,15 +253,12 @@ export function useDesktopModel() {
     startLoggingOut(async () => {
       try {
         await logoutManagedDevice();
-        const [nextConnector, nextManagedDevice, nextRemoteConfig] =
-          await Promise.all([
-            getConnectorStatus(),
-            getManagedDeviceStatus(),
-            getRemoteConfig(),
-          ]);
+        const [nextConnector, nextManagedDevice] = await Promise.all([
+          getConnectorStatus(),
+          getManagedDeviceStatus(),
+        ]);
         setConnector(nextConnector);
         setManagedDevice(nextManagedDevice);
-        setRemoteConfig(nextRemoteConfig);
         setView("home");
         setNotice({
           tone: "success",
@@ -320,16 +302,6 @@ export function useDesktopModel() {
     }
   }
 
-  async function copyRemoteConfig() {
-    if (!remoteConfig) return;
-    try {
-      await navigator.clipboard.writeText(remoteConfig);
-      setNotice({ tone: "success", message: "Configuration copied" });
-    } catch (error: unknown) {
-      setNotice({ tone: "error", message: errorMessage(error) });
-    }
-  }
-
   function navigate(nextView: View) {
     setView(nextView);
     setNotice(null);
@@ -345,7 +317,6 @@ export function useDesktopModel() {
     bootstrap,
     connector,
     copyDiagnostics,
-    copyRemoteConfig,
     discovery,
     enroll,
     hasLoadedStatus,
@@ -361,7 +332,6 @@ export function useDesktopModel() {
     pageTitle,
     refresh,
     refreshError: statusErrorMessage(statusErrors),
-    remoteConfig,
     setOpenOnStartup,
     settings,
     view,

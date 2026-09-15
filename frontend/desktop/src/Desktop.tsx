@@ -29,6 +29,8 @@ export function Desktop() {
           <EnrollmentView
             enrollment={model.managedDevice}
             busy={model.isManaging}
+            daemon={model.connector?.runtime?.daemon ?? null}
+            onCopy={model.copyDiagnostics}
             onEnroll={model.enroll}
           />
         ) : model.view === "home" ? (
@@ -37,13 +39,11 @@ export function Desktop() {
             connector={model.connector}
             managedDevice={model.managedDevice}
             discovery={model.discovery}
-            remoteConfig={model.remoteConfig}
             settings={model.settings}
             isSaving={model.isSaving}
             isLoggingOut={model.isLoggingOut}
             onStartupChange={model.setOpenOnStartup}
             onCopy={model.copyDiagnostics}
-            onCopyRemoteConfig={model.copyRemoteConfig}
             onLogout={model.logout}
           />
         ) : (
