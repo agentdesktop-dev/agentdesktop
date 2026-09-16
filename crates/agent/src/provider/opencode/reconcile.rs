@@ -35,7 +35,6 @@ pub(super) fn plan(
         reconcile_file(plugin_path, source.as_bytes(), "credential plugin", plan)?;
         Some(file_url(plugin_path)?)
     } else {
-        remove_owned(plugin_path, "credential plugin", plan)?;
         None
     };
 
@@ -47,7 +46,11 @@ pub(super) fn plan(
             .as_bytes(),
     );
     contents.push(b'\n');
-    reconcile_file(config_path, &contents, "managed configuration", plan)
+    reconcile_file(config_path, &contents, "managed configuration", plan)?;
+    if plugin_url.is_none() {
+        remove_owned(plugin_path, "credential plugin", plan)?;
+    }
+    Ok(())
 }
 
 fn managed_config(

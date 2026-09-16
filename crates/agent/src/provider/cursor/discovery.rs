@@ -173,10 +173,7 @@ mod tests {
         assert_eq!(servers[0].command.as_deref(), Some("npx"));
         assert_eq!(servers[1].name, "notion");
         assert_eq!(servers[1].transport, "http");
-        assert_eq!(
-            servers[1].url.as_deref(),
-            Some("https://mcp.notion.com/mcp")
-        );
+        assert_eq!(servers[1].url.as_deref(), Some("https://mcp.notion.com/"));
     }
 
     #[test]

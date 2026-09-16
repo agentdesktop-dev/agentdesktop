@@ -44,7 +44,7 @@ async fn headless_discovery() -> anyhow::Result<()> {
         ensure!(agent.version.as_deref() == Some(VERSION), "incorrect discovered version: {:?}", agent.version);
         ensure!(agent.mcp_servers.len() == 2, "unexpected MCP servers: {:?}", agent.mcp_servers);
         for (name, transport, enabled, source, command, url) in [
-            ("user-docs", "http", true, USER_MCP, None, Some("https://example.test/mcp")),
+            ("user-docs", "http", true, USER_MCP, None, Some("https://example.test/")),
             ("workspace-local", "stdio", false, WORKSPACE_MCP, Some("fixture-command"), None),
         ] {
             let server = agent.mcp_servers.iter().find(|server| server.name == name).with_context(|| format!("missing MCP server {name}"))?;
