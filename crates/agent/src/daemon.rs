@@ -260,7 +260,19 @@ where
     F: Future<Output = anyhow::Result<()>> + Send,
 {
     let args = args.resolve(socket)?;
-    let _log_flush = telemetry::setup_logging(if args.once { "warn" } else { "info" }, false);
+    // The user-mode LaunchAgent/systemd unit we generate sets an explicit
+    // stdout log path, so stdout logging already works there. The
+    // system-wide daemon has no such guarantee — nothing in this repo
+    // controls how its supervisor (e.g. an MDM-deployed LaunchDaemon) is
+    // configured, and a supervisor entry with no log redirect silently
+    // discards everything written to stdout. Give the system daemon a log
+    // file it controls itself so its logs exist regardless of that.
+    let log_dir = (!args.user && !args.once).then(|| args.state_dir.join("logs"));
+    let _log_flush = telemetry::setup_logging(
+        if args.once { "warn" } else { "info" },
+        false,
+        log_dir.as_deref(),
+    )?;
     let socket = args.socket.clone();
     let config = config::load_daemon(&args.config)?;
     let reconciler = reconcile::Reconciler::new(
@@ -295,6 +307,7 @@ where
     secure_fs::ensure_private_dir(&args.state_dir)?;
     start_gateway_authentication(&config, args.state_dir.clone(), args.oidc_callback_listen);
     let enrollment = EnrollmentState::new(config.controller.is_some());
+    let controller_status = remote::ControllerConnectionState::new();
     let local_config = config.clone();
     let cached_remote_path = args.state_dir.join("remote-config.yaml");
     let initial_config = if config.controller.is_some() {
@@ -352,6 +365,7 @@ where
         let state_dir = args.state_dir.clone();
         let oidc_callback_listen = args.oidc_callback_listen;
         let remote_enrollment = enrollment.clone();
+        let remote_controller_status = controller_status.clone();
         tokio::spawn(async move {
             if let Err(error) = remote::run(
                 controller,
@@ -360,6 +374,7 @@ where
                 oidc_callback_listen,
                 reconciler,
                 remote_enrollment.clone(),
+                remote_controller_status.clone(),
                 remote::Requests {
                     telemetry: telemetry_receiver,
                     logout: logout_receiver,
@@ -368,15 +383,20 @@ where
             .await
             {
                 remote_enrollment.set("failed").await;
+                remote_controller_status
+                    .mark_disconnected(Some(format!("{error:#}")))
+                    .await;
                 tracing::error!(error = %format!("{error:#}"), "controller integration disabled");
             }
         });
     }
+    let has_controller = config.controller.is_some();
     let app = api::router(api::AppState {
         config,
         daemon_info,
         discovery: inventory,
         enrollment,
+        controller_status: has_controller.then_some(controller_status),
         state_dir: args.state_dir,
         oidc_callback_listen: args.oidc_callback_listen,
         telemetry,

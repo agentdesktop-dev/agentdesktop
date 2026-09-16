@@ -41,6 +41,7 @@ export const standaloneConnector = {
     mode: "standalone",
     gateway: "not-configured",
     platform: { os: "macos" },
+    controller: null,
     daemon: standaloneDaemonInfo,
   },
 } satisfies ConnectorSnapshot;
@@ -52,6 +53,30 @@ export const managedConnector = {
     mode: "managed",
     gateway: "reachable",
     platform: { os: "macos" },
+    controller: {
+      connected: true,
+      lastConnectedUnixSeconds: Date.now() / 1000,
+    },
+    daemon: managedDaemonInfo,
+  },
+} satisfies ConnectorSnapshot;
+
+// A device that is fully healthy locally (daemon running, enrollment
+// approved) but whose connection to the controller is currently down —
+// the case that motivated a dedicated status row instead of folding this
+// into "Local daemon".
+export const reconnectingConnector = {
+  state: "ready",
+  detail: null,
+  runtime: {
+    mode: "managed",
+    gateway: "reachable",
+    platform: { os: "macos" },
+    controller: {
+      connected: false,
+      lastConnectedUnixSeconds: Date.now() / 1000 - 900,
+      lastError: "controller connection failed: connection refused",
+    },
     daemon: managedDaemonInfo,
   },
 } satisfies ConnectorSnapshot;
