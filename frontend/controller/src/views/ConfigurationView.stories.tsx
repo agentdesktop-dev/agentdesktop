@@ -217,6 +217,9 @@ export const BuildsSandboxYaml: Story = {
     await expect(
       canvas.getByRole("button", { name: /OpenCode/ }),
     ).toBeDisabled();
+    await expect(
+      canvas.getByRole("button", { name: /Grok Build/ }),
+    ).toBeDisabled();
     await expect(canvas.getByRole("button", { name: /Codex/ })).toBeEnabled();
   },
 };
@@ -278,6 +281,7 @@ export const PreservesAgentChoicesAndAuthorization: Story = {
           "claude-desktop",
           "codex",
           "opencode",
+          "grok",
         ],
       },
     };
@@ -286,7 +290,12 @@ export const PreservesAgentChoicesAndAuthorization: Story = {
       programs: { claudeCode: {} },
     });
 
-    const additionalAgents = ["Claude Desktop", "Codex", "OpenCode"];
+    const additionalAgents = [
+      "Claude Desktop",
+      "Codex",
+      "OpenCode",
+      "Grok Build",
+    ];
     for (const [index, name] of additionalAgents.entries()) {
       await userEvent.click(canvas.getByText("Add agent"));
       await expect(
@@ -316,6 +325,7 @@ export const PreservesAgentChoicesAndAuthorization: Story = {
         model: "gpt-5.6-terra",
         models: { "gpt-5.6-terra": { name: "GPT 5.6 Terra" } },
       },
+      grok: { model: "grok-4.6" },
     };
     await expect(output()).toEqual({ llmGateway, programs });
 
@@ -333,7 +343,9 @@ export const PreservesAgentChoicesAndAuthorization: Story = {
     ).toEqual(["Claude Desktop"]);
     await userEvent.click(canvas.getByText("Add agent"));
 
-    for (const name of ["Claude Code", "Codex", "OpenCode"]) {
+    for (const name of allAgents.filter(
+      (agent) => agent !== "Claude Desktop",
+    )) {
       await userEvent.click(
         canvas.getByRole("button", { name: `Remove ${name}` }),
       );

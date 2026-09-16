@@ -37,6 +37,21 @@ describe("configuration documents", () => {
     expect(renderConfiguration(draft).yaml).toBe(builderFixture.yaml);
   });
 
+  it("authorizes the supported gateway clients in a fresh configuration", () => {
+    const result = renderConfiguration(createConfigurationDraft());
+    expect(parse(result.yaml ?? "").llmGateway.authentication).toEqual({
+      type: "controllerJwt",
+      audience: "agentgateway",
+      allowedClientIds: [
+        "claude-code",
+        "claude-desktop",
+        "codex",
+        "opencode",
+        "grok",
+      ],
+    });
+  });
+
   it.each([
     {},
     oidcConfig,

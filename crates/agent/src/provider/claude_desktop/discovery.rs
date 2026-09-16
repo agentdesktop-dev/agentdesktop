@@ -3,8 +3,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use agentdesktop_core::model::{Agent, McpServer};
 use crate::provider::{claude_code::discovery as claude_code, context::ScanContext, metadata};
+use agentdesktop_core::model::{Agent, McpServer};
 
 use super::ClaudeDesktop;
 

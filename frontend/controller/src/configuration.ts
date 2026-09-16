@@ -32,7 +32,13 @@ export function defaultLlmGateway() {
       type: "controllerJwt",
       audience: "agentgateway",
       // Authorization policy is independent of presentation and builder choices.
-      allowedClientIds: ["claude-code", "claude-desktop", "codex", "opencode"],
+      allowedClientIds: [
+        "claude-code",
+        "claude-desktop",
+        "codex",
+        "opencode",
+        "grok",
+      ],
     },
   };
 }

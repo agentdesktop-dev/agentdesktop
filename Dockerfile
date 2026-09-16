@@ -12,6 +12,8 @@ RUN --mount=type=cache,id=agentdesktop-pnpm,target=/pnpm/store \
     pnpm install --frozen-lockfile
 COPY frontend/ ./
 COPY images/ /app/images/
+# The controller's typecheck includes the shared configuration contract test.
+COPY crates/core/tests/fixtures/ /app/crates/core/tests/fixtures/
 RUN --mount=type=cache,id=agentdesktop-pnpm,target=/pnpm/store \
     pnpm --filter @agentdesktop/controller-web build
 

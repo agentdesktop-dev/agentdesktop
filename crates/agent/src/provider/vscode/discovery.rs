@@ -98,7 +98,10 @@ pub(in crate::provider) fn mcp_servers_from_json(path: &Path) -> Vec<McpServer> 
     mcp_servers_from_value(&document, path)
 }
 
-pub(in crate::provider) fn mcp_servers_from_value(document: &Value, source: &Path) -> Vec<McpServer> {
+pub(in crate::provider) fn mcp_servers_from_value(
+    document: &Value,
+    source: &Path,
+) -> Vec<McpServer> {
     let Some(servers) = document
         .get("servers")
         .or_else(|| document.get("mcpServers"))

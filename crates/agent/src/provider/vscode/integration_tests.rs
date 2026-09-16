@@ -48,10 +48,10 @@ async fn headless_discovery() -> anyhow::Result<()> {
         ensure!(agent.executable.to_string_lossy().ends_with("/code"), "incorrect executable: {:?}", agent.executable);
         ensure!(agent.mcp_servers.len() == 4, "unexpected MCP servers: {:?}", agent.mcp_servers);
         for (name, transport, enabled, source, command, url) in [
-            ("user-docs", "http", true, USER_MCP, None, Some("https://example.test/mcp")),
-            ("profile-events", "sse", false, PROFILE_MCP, None, Some("https://example.test/events")),
+            ("user-docs", "http", true, USER_MCP, None, Some("https://example.test/")),
+            ("profile-events", "sse", false, PROFILE_MCP, None, Some("https://example.test/")),
             ("workspace-local", "stdio", true, WORKSPACE_MCP, Some("fixture-command"), None),
-            ("copilot-docs", "http", true, COPILOT_MCP, None, Some("https://example.test/copilot")),
+            ("copilot-docs", "http", true, COPILOT_MCP, None, Some("https://example.test/")),
         ] {
             let server = agent.mcp_servers.iter().find(|server| server.name == name).with_context(|| format!("missing MCP server {name}"))?;
             ensure!(server.transport == transport && server.enabled == enabled && server.source == std::path::Path::new(source)

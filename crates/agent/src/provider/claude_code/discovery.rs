@@ -103,7 +103,6 @@ fn installed_plugin_roots(home: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-
 pub(in crate::provider) fn mcp_servers_from_json(path: &Path) -> Vec<McpServer> {
     mcp::from_mcp_servers_file(path, mcp_enabled)
 }
