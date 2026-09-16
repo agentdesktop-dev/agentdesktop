@@ -5,6 +5,7 @@ pub mod daemon;
 pub mod enrollment;
 pub mod gateway_oidc;
 pub mod identity;
+mod inventory_watch;
 pub mod oidc;
 pub mod provider;
 pub mod reconcile;
