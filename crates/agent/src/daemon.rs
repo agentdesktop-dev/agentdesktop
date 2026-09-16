@@ -13,7 +13,7 @@ use std::{
 };
 
 use agentdesktop_core::{
-    DEFAULT_CONFIG_PATH, DEFAULT_SOCKET_PATH, DEFAULT_STATE_DIR, VERSION, config,
+    DEFAULT_CONFIG_PATH, DEFAULT_SOCKET_PATH, VERSION, config,
     model::{DaemonControllerInfo, DaemonInfo, DaemonScope},
     telemetry,
 };
@@ -63,42 +63,6 @@ pub struct DaemonArgs {
     /// Path to the local YAML configuration file.
     #[arg(long)]
     config: Option<PathBuf>,
-
-    /// Directory used for persistent daemon state.
-    #[arg(long)]
-    state_dir: Option<PathBuf>,
-
-    /// Address for the OIDC callback server to bind instead of the redirect URI's loopback address.
-    #[arg(long)]
-    oidc_callback_listen: Option<SocketAddr>,
-
-    /// Path to Claude Code's Agentdesktop-managed settings file.
-    #[arg(long)]
-    claude_code_settings: Option<PathBuf>,
-
-    /// Path to Claude Desktop's system-managed JSON configuration.
-    #[arg(long)]
-    claude_desktop_managed_settings: Option<PathBuf>,
-
-    /// Path used for Claude Desktop's Agentdesktop credential helper.
-    #[arg(long)]
-    claude_desktop_credential_helper: Option<PathBuf>,
-
-    /// Path to Codex's organization-managed TOML configuration.
-    #[arg(long)]
-    codex_managed_config: Option<PathBuf>,
-
-    /// Path to OpenCode's system-managed JSONC configuration.
-    #[arg(long)]
-    open_code_managed_config: Option<PathBuf>,
-
-    /// Path used for Agentdesktop's OpenCode credential plugin.
-    #[arg(long)]
-    open_code_plugin: Option<PathBuf>,
-
-    /// Path to Grok Build's organization-managed TOML configuration.
-    #[arg(long)]
-    grok_managed_config: Option<PathBuf>,
 }
 
 struct ResolvedDaemonArgs {
@@ -107,48 +71,85 @@ struct ResolvedDaemonArgs {
     state_dir: PathBuf,
     socket: PathBuf,
     oidc_callback_listen: Option<SocketAddr>,
-    claude_code_settings: PathBuf,
-    claude_desktop_managed_settings: PathBuf,
-    claude_desktop_credential_helper: PathBuf,
-    codex_managed_config: PathBuf,
-    open_code_managed_config: PathBuf,
-    open_code_plugin: PathBuf,
-    grok_managed_config: PathBuf,
+    claude_code: ResolvedToolConfigPath,
+    claude_desktop: ResolvedClaudeDesktopStartupConfig,
+    codex: ResolvedToolConfigPath,
+    open_code: ResolvedOpenCodeStartupConfig,
+    grok: ResolvedToolConfigPath,
     once: bool,
     dry_run: bool,
 }
 
+struct ResolvedToolConfigPath {
+    config: PathBuf,
+}
+
+struct ResolvedClaudeDesktopStartupConfig {
+    config: PathBuf,
+    credential_helper: PathBuf,
+}
+
+struct ResolvedOpenCodeStartupConfig {
+    config: PathBuf,
+    plugin: PathBuf,
+}
+
 impl DaemonArgs {
-    fn resolve(self, socket: PathBuf) -> anyhow::Result<ResolvedDaemonArgs> {
-        if !self.user {
+    fn resolve(
+        self,
+        startup: config::DaemonStartupConfig,
+        config: PathBuf,
+        socket: PathBuf,
+    ) -> anyhow::Result<ResolvedDaemonArgs> {
+        let user = self.user || startup.user;
+        let socket = startup.socket.clone().unwrap_or(socket);
+        if !user {
             return Ok(ResolvedDaemonArgs {
                 user: false,
-                config: self.config.unwrap_or_else(|| DEFAULT_CONFIG_PATH.into()),
-                state_dir: self.state_dir.unwrap_or_else(|| DEFAULT_STATE_DIR.into()),
+                config,
+                state_dir: startup
+                    .state_dir
+                    .unwrap_or_else(|| PathBuf::from(agentdesktop_core::DEFAULT_STATE_DIR)),
                 socket,
-                oidc_callback_listen: self.oidc_callback_listen,
-                claude_code_settings: self.claude_code_settings.unwrap_or_else(|| {
-                    reconcile::default_claude_code_managed_settings_dir()
-                        .join("50-agentdesktop.json")
-                }),
-                claude_desktop_managed_settings: self
-                    .claude_desktop_managed_settings
-                    .unwrap_or_else(reconcile::default_claude_desktop_managed_settings_path),
-                claude_desktop_credential_helper: self
-                    .claude_desktop_credential_helper
-                    .unwrap_or_else(reconcile::default_claude_desktop_credential_helper_path),
-                codex_managed_config: self
-                    .codex_managed_config
-                    .unwrap_or_else(reconcile::default_codex_managed_config_path),
-                open_code_managed_config: self
-                    .open_code_managed_config
-                    .unwrap_or_else(reconcile::default_open_code_managed_config_path),
-                open_code_plugin: self
-                    .open_code_plugin
-                    .unwrap_or_else(reconcile::default_open_code_plugin_path),
-                grok_managed_config: self
-                    .grok_managed_config
-                    .unwrap_or_else(reconcile::default_grok_managed_config_path),
+                oidc_callback_listen: startup.oidc_callback_listen,
+                claude_code: ResolvedToolConfigPath {
+                    config: startup.claude_code.config.unwrap_or_else(|| {
+                        reconcile::default_claude_code_managed_settings_dir()
+                            .join("50-agentdesktop.json")
+                    }),
+                },
+                claude_desktop: ResolvedClaudeDesktopStartupConfig {
+                    config: startup
+                        .claude_desktop
+                        .config
+                        .unwrap_or_else(reconcile::default_claude_desktop_managed_settings_path),
+                    credential_helper: startup
+                        .claude_desktop
+                        .credential_helper
+                        .unwrap_or_else(reconcile::default_claude_desktop_credential_helper_path),
+                },
+                codex: ResolvedToolConfigPath {
+                    config: startup
+                        .codex
+                        .config
+                        .unwrap_or_else(reconcile::default_codex_managed_config_path),
+                },
+                open_code: ResolvedOpenCodeStartupConfig {
+                    config: startup
+                        .open_code
+                        .config
+                        .unwrap_or_else(reconcile::default_open_code_managed_config_path),
+                    plugin: startup
+                        .open_code
+                        .plugin
+                        .unwrap_or_else(reconcile::default_open_code_plugin_path),
+                },
+                grok: ResolvedToolConfigPath {
+                    config: startup
+                        .grok
+                        .config
+                        .unwrap_or_else(reconcile::default_grok_managed_config_path),
+                },
                 once: self.once || self.dry_run,
                 dry_run: self.dry_run,
             });
@@ -161,10 +162,10 @@ impl DaemonArgs {
         let state_home = std::env::var_os("XDG_STATE_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".local/state"));
-        let state_dir = self
+        let state_dir = startup
             .state_dir
             .unwrap_or_else(|| state_home.join("agentdesktop"));
-        let socket = if socket == Path::new(DEFAULT_SOCKET_PATH) {
+        let socket = if startup.socket.is_none() && socket == Path::new(DEFAULT_SOCKET_PATH) {
             user_socket_path(&state_dir)
         } else {
             socket
@@ -172,37 +173,51 @@ impl DaemonArgs {
         let claude_desktop_settings = user_claude_desktop_settings(&home, &config_home);
         Ok(ResolvedDaemonArgs {
             user: true,
-            config: self
-                .config
-                .unwrap_or_else(|| config_home.join("agentdesktop/config.yaml")),
+            config,
             state_dir: state_dir.clone(),
             socket,
-            oidc_callback_listen: self.oidc_callback_listen,
-            claude_code_settings: self
-                .claude_code_settings
-                .unwrap_or_else(|| home.join(".claude/settings.json")),
-            claude_desktop_managed_settings: self
-                .claude_desktop_managed_settings
-                .unwrap_or(claude_desktop_settings),
-            claude_desktop_credential_helper: self
-                .claude_desktop_credential_helper
-                .unwrap_or_else(|| state_dir.join("bin/claude-desktop-credential-helper")),
-            codex_managed_config: self
-                .codex_managed_config
-                .unwrap_or_else(|| home.join(".codex/config.toml")),
-            open_code_managed_config: self
-                .open_code_managed_config
-                .unwrap_or_else(|| config_home.join("opencode/opencode.json")),
-            open_code_plugin: self
-                .open_code_plugin
-                .unwrap_or_else(|| config_home.join("opencode/plugins/agentdesktop.js")),
-            grok_managed_config: self.grok_managed_config.unwrap_or_else(|| {
-                std::env::var_os("GROK_HOME")
-                    .filter(|value| !value.is_empty())
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| home.join(".grok"))
-                    .join("managed_config.toml")
-            }),
+            oidc_callback_listen: startup.oidc_callback_listen,
+            claude_code: ResolvedToolConfigPath {
+                config: startup
+                    .claude_code
+                    .config
+                    .unwrap_or_else(|| home.join(".claude/settings.json")),
+            },
+            claude_desktop: ResolvedClaudeDesktopStartupConfig {
+                config: startup
+                    .claude_desktop
+                    .config
+                    .unwrap_or(claude_desktop_settings),
+                credential_helper: startup
+                    .claude_desktop
+                    .credential_helper
+                    .unwrap_or_else(|| state_dir.join("bin/claude-desktop-credential-helper")),
+            },
+            codex: ResolvedToolConfigPath {
+                config: startup
+                    .codex
+                    .config
+                    .unwrap_or_else(|| home.join(".codex/config.toml")),
+            },
+            open_code: ResolvedOpenCodeStartupConfig {
+                config: startup
+                    .open_code
+                    .config
+                    .unwrap_or_else(|| config_home.join("opencode/opencode.json")),
+                plugin: startup
+                    .open_code
+                    .plugin
+                    .unwrap_or_else(|| config_home.join("opencode/plugins/agentdesktop.js")),
+            },
+            grok: ResolvedToolConfigPath {
+                config: startup.grok.config.unwrap_or_else(|| {
+                    std::env::var_os("GROK_HOME")
+                        .filter(|value| !value.is_empty())
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| home.join(".grok"))
+                        .join("managed_config.toml")
+                }),
+            },
             once: self.once || self.dry_run,
             dry_run: self.dry_run,
         })
@@ -259,19 +274,31 @@ pub async fn run_until_shutdown<F>(
 where
     F: Future<Output = anyhow::Result<()>> + Send,
 {
-    let args = args.resolve(socket)?;
+    if socket != Path::new(DEFAULT_SOCKET_PATH) {
+        bail!("set daemon.socket in the configuration file; --socket is for client commands");
+    }
+    let config_path = match args.config.clone() {
+        Some(path) => path,
+        None if args.user => std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or(home_directory()?.join(".config"))
+            .join("agentdesktop/config.yaml"),
+        None => DEFAULT_CONFIG_PATH.into(),
+    };
+    let config = config::load_daemon(&config_path)?;
+    let startup = config.daemon.clone().unwrap_or_default();
+    let args = args.resolve(startup, config_path, socket)?;
     let _log_flush = telemetry::setup_logging(if args.once { "warn" } else { "info" }, false);
     let socket = args.socket.clone();
-    let config = config::load_daemon(&args.config)?;
     let reconciler = reconcile::Reconciler::new(
         args.user,
-        args.claude_code_settings.clone(),
-        args.claude_desktop_managed_settings.clone(),
-        args.claude_desktop_credential_helper.clone(),
-        args.codex_managed_config.clone(),
-        args.open_code_managed_config.clone(),
-        args.open_code_plugin.clone(),
-        args.grok_managed_config.clone(),
+        args.claude_code.config.clone(),
+        args.claude_desktop.config.clone(),
+        args.claude_desktop.credential_helper.clone(),
+        args.codex.config.clone(),
+        args.open_code.config.clone(),
+        args.open_code.plugin.clone(),
+        args.grok.config.clone(),
         agentdesktop_client_executable()?,
         socket.clone(),
     );

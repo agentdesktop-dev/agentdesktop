@@ -6,6 +6,23 @@
 |`controller.address`|string|HTTPS address of the controller's fleet API.|
 |`controller.caCertificatePath`|string|Path to a PEM-encoded CA certificate used to verify the controller.<br><br>Omit this field to use the operating system's trusted certificate roots.|
 |`controller.heartbeatInterval`|string|Interval between device heartbeats. Defaults to `30s`.|
+|`daemon`|object|Local daemon startup settings. Not accepted in controller-delivered policy.|
+|`daemon.claudeCode`|object|Claude Code paths.|
+|`daemon.claudeCode.config`|string|Configuration file.|
+|`daemon.claudeDesktop`|object|Claude Desktop paths.|
+|`daemon.claudeDesktop.config`|string|Configuration file.|
+|`daemon.claudeDesktop.credentialHelper`|string|Credential helper path.|
+|`daemon.codex`|object|Codex paths.|
+|`daemon.codex.config`|string|Configuration file.|
+|`daemon.grok`|object|Grok Build paths.|
+|`daemon.grok.config`|string|Configuration file.|
+|`daemon.oidcCallbackListen`|string|Override the OIDC callback bind address.|
+|`daemon.openCode`|object|OpenCode paths.|
+|`daemon.openCode.config`|string|Configuration file.|
+|`daemon.openCode.plugin`|string|Credential plugin path.|
+|`daemon.socket`|string|Local API Unix socket or Windows named pipe.|
+|`daemon.stateDir`|string|Persistent daemon state directory.|
+|`daemon.user`|boolean|Manage the current user’s tool settings instead of system settings.|
 |`inventoryInterval`|string|Interval between inventory refreshes. Defaults to `15m`, and must be<br>greater than zero.<br><br>Discovery walks user home directories and developer-tool configuration<br>files, so this trades inventory freshness against local disk activity.|
 |`llmGateway`|object|LLM gateway used by managed developer tools.|
 |`llmGateway.authentication`|object|Authentication mechanism used when connecting to this gateway.|
