@@ -306,15 +306,17 @@ jobs:
 
       - name: Remove macOS signing identity
         if: always() && matrix.os_name == 'darwin'
+        timeout-minutes: 2
         shell: bash
         run: |
-          if [ -f "${RUNNER_TEMP}/agentdesktop-signing.pem" ]; then
-            sudo security remove-trusted-cert -d "${RUNNER_TEMP}/agentdesktop-signing.pem"
-          fi
+          # remove-trusted-cert can hang on headless macOS runners:
+          # https://github.com/actions/runner-images/issues/12116
+          # Leave public trust metadata to disposable GitHub-hosted VM teardown.
+          # Delete exported files first, even if keychain deletion later fails.
+          rm -f "${RUNNER_TEMP}/agentdesktop-signing.pem" "${RUNNER_TEMP}/agentdesktop-signing.p12"
           if [ -f "${RUNNER_TEMP}/agentdesktop-signing.keychain-db" ]; then
             security delete-keychain "${RUNNER_TEMP}/agentdesktop-signing.keychain-db"
           fi
-          rm -f "${RUNNER_TEMP}/agentdesktop-signing.pem" "${RUNNER_TEMP}/agentdesktop-signing.p12"
 
       - name: Upload binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -479,15 +481,17 @@ jobs:
 
       - name: Remove macOS signing identity
         if: always()
+        timeout-minutes: 2
         shell: bash
         run: |
-          if [ -f "${RUNNER_TEMP}/agentdesktop-signing.pem" ]; then
-            sudo security remove-trusted-cert -d "${RUNNER_TEMP}/agentdesktop-signing.pem"
-          fi
+          # remove-trusted-cert can hang on headless macOS runners:
+          # https://github.com/actions/runner-images/issues/12116
+          # Leave public trust metadata to disposable GitHub-hosted VM teardown.
+          # Delete exported files first, even if keychain deletion later fails.
+          rm -f "${RUNNER_TEMP}/agentdesktop-signing.pem" "${RUNNER_TEMP}/agentdesktop-signing.p12"
           if [ -f "${RUNNER_TEMP}/agentdesktop-signing.keychain-db" ]; then
             security delete-keychain "${RUNNER_TEMP}/agentdesktop-signing.keychain-db"
           fi
-          rm -f "${RUNNER_TEMP}/agentdesktop-signing.pem" "${RUNNER_TEMP}/agentdesktop-signing.p12"
 
       - name: Upload PKG (self-signed application)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

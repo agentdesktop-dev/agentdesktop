@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -110,3 +118,130 @@ test("installer hooks replace running processes without losing state", () => {
   assert.match(postinstall, /open -g/);
   assert.match(postinstall, /for uid in \$\{user_ids\}/);
 });
+
+const releaseWorkflow = readFileSync(
+  path.resolve(nativeDirectory, "../../.github/workflows/release.yml"),
+  "utf8",
+);
+const signingCleanupSteps = [
+  ...releaseWorkflow.matchAll(
+    /^ {6}- name: Remove macOS signing identity\n((?: {8}[^\n]*\n|\n)*)/gm,
+  ),
+].map(([, body]) => {
+  const run = body.match(/^ {8}run: \|\n([\s\S]*)/m);
+  assert.ok(run, "Expected an inline signing cleanup script");
+  return { body, script: run[1].replace(/^ {10}/gm, "") };
+});
+
+test("both release signing cleanups always run with a short timeout", () => {
+  assert.equal(signingCleanupSteps.length, 2);
+  for (const { body } of signingCleanupSteps) {
+    assert.match(body, /^ {8}if: always\(\)/m);
+    const timeout = body.match(/^ {8}timeout-minutes: (\d+)$/m);
+    assert.ok(timeout, "Signing cleanup must have a step timeout");
+    assert.ok(Number(timeout[1]) > 0 && Number(timeout[1]) <= 2);
+    assert.doesNotMatch(body, /continue-on-error: true/);
+  }
+});
+
+const signingFiles = [
+  "agentdesktop-signing.keychain-db",
+  "agentdesktop-signing.pem",
+  "agentdesktop-signing.p12",
+];
+
+function signingCleanupFixture(t, files = signingFiles) {
+  const directory = mkdtempSync(path.join(tmpdir(), "agentdesktop signing-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  for (const file of [...files, "unrelated-file"]) {
+    writeFileSync(path.join(directory, file), "fixture");
+  }
+  return directory;
+}
+
+function runSigningCleanup(script, directory, failKeychainDeletion = false) {
+  // Intercept macOS commands before executing the real workflow script.
+  // Trust removal fails immediately here instead of hanging on authorization.
+  const mocks = `
+    sudo() {
+      echo "Unexpected privileged trust-settings command" >&2
+      echo sudo >> "$RUNNER_TEMP/unexpected-commands"
+      return 99
+    }
+    security() {
+      if [[ "$#" != 2 || "$1" != delete-keychain || "$2" != "$RUNNER_TEMP/agentdesktop-signing.keychain-db" ]]; then
+        echo "Unexpected security command" >&2
+        echo security >> "$RUNNER_TEMP/unexpected-commands"
+        return 98
+      fi
+      printf '%s\\n' "$1" >> "$RUNNER_TEMP/security-calls"
+      if [[ "$FAIL_KEYCHAIN_DELETION" == 1 ]]; then
+        echo "Simulated keychain deletion failure" >&2
+        return 42
+      fi
+      rm -f "$2"
+    }
+  `;
+  const result = spawnSync(
+    "bash",
+    ["--noprofile", "--norc", "-e", "-o", "pipefail"],
+    {
+      input: `${mocks}\n${script}`,
+      encoding: "utf8",
+      timeout: 5000,
+      env: {
+        PATH: process.env.PATH,
+        RUNNER_TEMP: directory,
+        FAIL_KEYCHAIN_DELETION: failKeychainDeletion ? "1" : "0",
+      },
+    },
+  );
+  assert.ifError(result.error);
+  assert.equal(
+    existsSync(path.join(directory, "unexpected-commands")),
+    false,
+    "Cleanup must not invoke trust settings, even with suppressed errors",
+  );
+  return result;
+}
+
+for (const [index, { script }] of signingCleanupSteps.entries()) {
+  test(`signing cleanup ${index + 1} removes only signing material and is repeatable`, (t) => {
+    const directory = signingCleanupFixture(t);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = runSigningCleanup(script, directory);
+      assert.equal(result.status, 0, result.stderr);
+      for (const file of signingFiles) {
+        assert.equal(existsSync(path.join(directory, file)), false, file);
+      }
+      assert.equal(
+        readFileSync(path.join(directory, "unrelated-file"), "utf8"),
+        "fixture",
+      );
+    }
+    assert.equal(
+      readFileSync(path.join(directory, "security-calls"), "utf8"),
+      "delete-keychain\n",
+    );
+  });
+
+  test(`signing cleanup ${index + 1} handles a partially imported identity`, (t) => {
+    const directory = signingCleanupFixture(t, signingFiles.slice(1));
+    const result = runSigningCleanup(script, directory);
+    assert.equal(result.status, 0, result.stderr);
+    for (const file of signingFiles) {
+      assert.equal(existsSync(path.join(directory, file)), false, file);
+    }
+    assert.equal(existsSync(path.join(directory, "security-calls")), false);
+  });
+
+  test(`signing cleanup ${index + 1} deletes exported files even when keychain deletion fails`, (t) => {
+    const directory = signingCleanupFixture(t);
+    const result = runSigningCleanup(script, directory, true);
+    assert.equal(result.status, 42, result.stderr);
+    for (const file of signingFiles.slice(1)) {
+      assert.equal(existsSync(path.join(directory, file)), false, file);
+    }
+    assert.equal(existsSync(path.join(directory, signingFiles[0])), true);
+  });
+}
