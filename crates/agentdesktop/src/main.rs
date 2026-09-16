@@ -200,7 +200,6 @@ fn user_socket_path() -> Option<PathBuf> {
 #[cfg(target_os = "macos")]
 struct UserDaemonPaths {
     config: PathBuf,
-    state_directory: PathBuf,
     socket: PathBuf,
     launch_agent: PathBuf,
     log: PathBuf,
@@ -238,7 +237,6 @@ fn user_daemon_paths() -> anyhow::Result<UserDaemonPaths> {
 
     Ok(UserDaemonPaths {
         config: config_home.join("agentdesktop/config.yaml"),
-        state_directory,
         socket,
         launch_agent: home
             .join("Library/LaunchAgents")
@@ -264,14 +262,10 @@ fn user_launch_agent(
         label: USER_LAUNCH_AGENT_LABEL,
         program_arguments: vec![
             path_string(executable)?,
-            "--socket".to_owned(),
-            path_string(&paths.socket)?,
             "daemon".to_owned(),
             "--user".to_owned(),
             "--config".to_owned(),
             path_string(&paths.config)?,
-            "--state-dir".to_owned(),
-            path_string(&paths.state_directory)?,
         ],
         run_at_load: true,
         keep_alive: true,
@@ -973,7 +967,6 @@ mod tests {
     fn user_launch_agent_runs_the_bundled_daemon_in_user_mode() {
         let paths = UserDaemonPaths {
             config: "/Users/test/.config/agentdesktop/config.yaml".into(),
-            state_directory: "/Users/test/.local/state/agentdesktop".into(),
             socket: "/Users/test/.local/state/agentdesktop/agentdesktop.sock".into(),
             launch_agent: "/Users/test/Library/LaunchAgents/dev.agentdesktop.daemon.user.plist"
                 .into(),
@@ -992,14 +985,10 @@ mod tests {
             launch_agent.program_arguments,
             [
                 "/Applications/agentdesktop.app/Contents/MacOS/agentdesktop",
-                "--socket",
-                "/Users/test/.local/state/agentdesktop/agentdesktop.sock",
                 "daemon",
                 "--user",
                 "--config",
                 "/Users/test/.config/agentdesktop/config.yaml",
-                "--state-dir",
-                "/Users/test/.local/state/agentdesktop",
             ]
         );
     }

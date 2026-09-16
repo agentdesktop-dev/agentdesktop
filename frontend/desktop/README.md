@@ -38,10 +38,12 @@ rm -rf "$AGENTDESKTOP_DEV_STATE"
 pnpm --dir frontend --filter @agentdesktop/desktop-web build
 cargo run -p agentdesktop -- daemon \
 	--user \
-	--socket "$AGENTDESKTOP_SOCKET" \
-	--config "$HOME/.config/agentdesktop/config.yaml" \
-	--state-dir "$AGENTDESKTOP_DEV_STATE"
+	--config "$HOME/.config/agentdesktop/config.yaml"
 ```
+
+Set `daemon.stateDir` and `daemon.socket` in that config to the absolute paths
+printed by `echo "$AGENTDESKTOP_DEV_STATE"` and `echo "$AGENTDESKTOP_SOCKET"`.
+Config values do not expand shell variables.
 
 The configuration file must exist and contain the controller-managed or
 standalone configuration to test. Removing the disposable state directory

@@ -15,6 +15,17 @@
         }
       ]
     },
+    "daemon": {
+      "description": "Local daemon startup settings. Not accepted in controller-delivered policy.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DaemonStartupConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "inventoryInterval": {
       "description": "Interval between inventory refreshes. Defaults to `15m`, and must be\ngreater than zero.\n\nDiscovery walks user home directories and developer-tool configuration\nfiles, so this trades inventory freshness against local disk activity.",
       "type": "string",
@@ -97,6 +108,27 @@
       },
       "additionalProperties": true
     },
+    "ClaudeDesktopStartupConfig": {
+      "description": "Local Claude Desktop paths.",
+      "type": "object",
+      "properties": {
+        "config": {
+          "description": "Configuration file.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "credentialHelper": {
+          "description": "Credential helper path.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "CodexConfig": {
       "description": "Settings reconciled into Codex's organization-managed configuration.\n\nValues under `managedConfig` are written to Codex's `managed_config.toml`.\nWhen generated LLM-gateway settings overlap with those values,\nAgentdesktop's generated values take precedence.",
       "type": "object",
@@ -138,6 +170,67 @@
       "required": [
         "address"
       ]
+    },
+    "DaemonStartupConfig": {
+      "description": "Settings read only at local daemon startup. Paths use the process working directory.",
+      "type": "object",
+      "properties": {
+        "claudeCode": {
+          "description": "Claude Code paths.",
+          "$ref": "#/$defs/ToolConfigPath",
+          "default": {}
+        },
+        "claudeDesktop": {
+          "description": "Claude Desktop paths.",
+          "$ref": "#/$defs/ClaudeDesktopStartupConfig",
+          "default": {}
+        },
+        "codex": {
+          "description": "Codex paths.",
+          "$ref": "#/$defs/ToolConfigPath",
+          "default": {}
+        },
+        "grok": {
+          "description": "Grok Build paths.",
+          "$ref": "#/$defs/ToolConfigPath",
+          "default": {}
+        },
+        "oidcCallbackListen": {
+          "description": "Override the OIDC callback bind address.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "openCode": {
+          "description": "OpenCode paths.",
+          "$ref": "#/$defs/OpenCodeStartupConfig",
+          "default": {}
+        },
+        "socket": {
+          "description": "Local API Unix socket or Windows named pipe.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "stateDir": {
+          "description": "Persistent daemon state directory.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "user": {
+          "description": "Manage the current user’s tool settings instead of system settings.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
     },
     "GrokConfig": {
       "description": "Settings reconciled into Grok Build's organization-managed configuration.\n\nValues under `managedConfig` are written to Grok's `managed_config.toml`.\nWhen generated LLM-gateway settings overlap with those values,\nagentdesktop's generated values take precedence.\nOnly system mode is supported. Grok can delete or replace the user-level\nmanaged file during startup, so `--user` rejects `programs.grok`.",
@@ -294,6 +387,27 @@
         "useLlmGateway": {
           "description": "Whether this program uses the top-level LLM gateway.",
           "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "OpenCodeStartupConfig": {
+      "description": "Local OpenCode paths.",
+      "type": "object",
+      "properties": {
+        "config": {
+          "description": "Configuration file.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "plugin": {
+          "description": "Credential plugin path.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false
@@ -457,6 +571,20 @@
           "const": "tool.use.input"
         }
       ]
+    },
+    "ToolConfigPath": {
+      "description": "Local tool configuration path.",
+      "type": "object",
+      "properties": {
+        "config": {
+          "description": "Configuration file.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

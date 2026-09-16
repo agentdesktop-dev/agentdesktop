@@ -16,7 +16,12 @@ pub const DEFAULT_CONFIG_PATH: &str = "/etc/agentdesktop/config.yaml";
 /// Default location of the controller's YAML configuration file.
 pub const DEFAULT_CONTROLLER_CONFIG_PATH: &str = "/etc/agentdesktop/controller.yaml";
 /// Default directory for the device identity and other persistent daemon state.
+#[cfg(unix)]
 pub const DEFAULT_STATE_DIR: &str = "/var/lib/agentdesktop";
+
+/// Default directory for the device identity and other persistent daemon state.
+#[cfg(windows)]
+pub const DEFAULT_STATE_DIR: &str = r"C:\ProgramData\AgentDesktop\state";
 
 #[cfg(all(unix, not(target_os = "macos")))]
 /// Default Unix socket exposed by the daemon to local clients.
