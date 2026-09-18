@@ -76,6 +76,7 @@ struct ResolvedDaemonArgs {
     codex: ResolvedToolConfigPath,
     open_code: ResolvedOpenCodeStartupConfig,
     grok: ResolvedToolConfigPath,
+    pi: ResolvedPiStartupConfig,
     once: bool,
     dry_run: bool,
 }
@@ -92,6 +93,11 @@ struct ResolvedClaudeDesktopStartupConfig {
 struct ResolvedOpenCodeStartupConfig {
     config: PathBuf,
     plugin: PathBuf,
+}
+
+struct ResolvedPiStartupConfig {
+    models: PathBuf,
+    settings: PathBuf,
 }
 
 impl DaemonArgs {
@@ -149,6 +155,16 @@ impl DaemonArgs {
                         .grok
                         .config
                         .unwrap_or_else(reconcile::default_grok_managed_config_path),
+                },
+                pi: ResolvedPiStartupConfig {
+                    models: startup
+                        .pi
+                        .models
+                        .unwrap_or_else(reconcile::default_pi_models_path),
+                    settings: startup
+                        .pi
+                        .settings
+                        .unwrap_or_else(reconcile::default_pi_settings_path),
                 },
                 once: self.once || self.dry_run,
                 dry_run: self.dry_run,
@@ -216,6 +232,14 @@ impl DaemonArgs {
                         .map(PathBuf::from)
                         .unwrap_or_else(|| home.join(".grok"))
                         .join("managed_config.toml")
+                }),
+            },
+            pi: ResolvedPiStartupConfig {
+                models: startup.pi.models.unwrap_or_else(|| {
+                    crate::provider::pi::user_pi_agent_dir(&home).join("models.json")
+                }),
+                settings: startup.pi.settings.unwrap_or_else(|| {
+                    crate::provider::pi::user_pi_agent_dir(&home).join("settings.json")
                 }),
             },
             once: self.once || self.dry_run,
@@ -299,6 +323,8 @@ where
         args.open_code.config.clone(),
         args.open_code.plugin.clone(),
         args.grok.config.clone(),
+        args.pi.models.clone(),
+        args.pi.settings.clone(),
         agentdesktop_client_executable()?,
         socket.clone(),
     );
@@ -910,6 +936,37 @@ mod tests {
     use agentdesktop_core::config::parse_daemon;
     use agentdesktop_core::model::{Agent, Discovery};
     use tokio::sync::watch;
+
+    #[test]
+    fn pi_startup_paths_override_defaults_in_both_scopes() {
+        for user in [false, true] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(
+                file.path(),
+                format!(
+                    "daemon:\n  user: {user}\n  pi:\n    models: custom/pi-models.json\n    settings: custom/pi-settings.json\n"
+                ),
+            )
+            .unwrap();
+            let config = agentdesktop_core::config::load_daemon(file.path()).unwrap();
+            let args = super::DaemonArgs {
+                user: false,
+                once: false,
+                dry_run: false,
+                config: None,
+            };
+            let resolved = args
+                .resolve(
+                    config.daemon.unwrap(),
+                    file.path().to_path_buf(),
+                    agentdesktop_core::DEFAULT_SOCKET_PATH.into(),
+                )
+                .unwrap();
+            assert_eq!(resolved.user, user);
+            assert_eq!(resolved.pi.models, Path::new("custom/pi-models.json"));
+            assert_eq!(resolved.pi.settings, Path::new("custom/pi-settings.json"));
+        }
+    }
 
     fn discovery(kinds: &[&str]) -> Discovery {
         Discovery {

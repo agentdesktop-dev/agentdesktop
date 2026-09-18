@@ -528,12 +528,20 @@ const configurableAgents: Array<{
     placeholder: "model: grok-4.6",
     initialSettings: "model: grok-4.6",
   },
+  {
+    kind: "pi",
+    label: "Pi",
+    iconKind: "pi",
+    placeholder: "model: claude-sonnet-4-5",
+    initialSettings: "model: claude-sonnet-4-5",
+  },
 ];
 
 const sandboxUnsupportedAgents = new Set<AgentKind>([
   "claudeDesktop",
   "openCode",
   "grok",
+  "pi",
 ]);
 
 function daemonConfigYaml(options: {
@@ -558,7 +566,7 @@ function daemonConfigYaml(options: {
         "  authentication:",
         "    type: controllerJwt",
         `    audience: ${yamlString(options.audience)}`,
-        "    allowedClientIds: [claude-code, claude-desktop, codex, opencode, grok]",
+        "    allowedClientIds: [claude-code, claude-desktop, codex, opencode, grok, pi]",
       );
     }
     lines.push("");

@@ -20,6 +20,9 @@
 |`daemon.openCode`|object|OpenCode paths.|
 |`daemon.openCode.config`|string|Configuration file.|
 |`daemon.openCode.plugin`|string|Credential plugin path.|
+|`daemon.pi`|object|Pi paths.|
+|`daemon.pi.models`|string|Model catalog file.|
+|`daemon.pi.settings`|string|Settings file.|
 |`daemon.socket`|string|Local API Unix socket or Windows named pipe.|
 |`daemon.stateDir`|string|Persistent daemon state directory.|
 |`daemon.user`|boolean|Manage the current user’s tool settings instead of system settings.|
@@ -56,6 +59,12 @@
 |`programs.openCode.model`|string|Model ID selected from `models` when using the LLM gateway.<br><br>This is required when a top-level `llmGateway` is configured.|
 |`programs.openCode.models`|object|Models exposed by the managed LLM gateway provider, keyed by model ID.<br><br>Each value is an arbitrary OpenCode model configuration object. At least<br>one model is required when a top-level `llmGateway` is configured.|
 |`programs.openCode.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
+|`programs.pi`|object|Pi coding-agent harness managed configuration.|
+|`programs.pi.api`|string|Pi API dialect for the managed provider. Defaults to `anthropic-messages`.|
+|`programs.pi.managedConfig`|object|Arbitrary values merged into Pi's `models.json`.|
+|`programs.pi.model`|string|Model ID selected when pointing Pi at the LLM gateway.<br><br>This is required when a top-level `llmGateway` is configured. If `models`<br>is empty, agentdesktop creates a catalog entry with this ID.|
+|`programs.pi.models`|object|Extra Pi model objects, keyed by model ID.<br><br>Each value is an arbitrary Pi `models.json` model object. Generated<br>gateway `baseUrl` and `apiKey` values take precedence. When this map is<br>non-empty, `model` must name one of its keys.|
+|`programs.pi.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
 |`sandbox`|object|Local execution sandbox required for managed developer tools.|
 |`sandbox.filesystem`|object|Filesystem access available to sandboxed commands.|
 |`sandbox.filesystem.denied`|[]string|Paths sandboxed commands may neither read nor modify.|

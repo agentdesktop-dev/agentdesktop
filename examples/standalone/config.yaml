@@ -12,6 +12,9 @@ programs:
   claudeCode:
     useLlmGateway: true
     companyAnnouncements: ["Using the local Agentgateway through Agentdesktop"]
+  pi:
+    useLlmGateway: true
+    model: claude-sonnet-4-5
 #    Claude desktop cannot run with --user. Uncomment to enable
 #  claudeDesktop:
 #    useLlmGateway: true
