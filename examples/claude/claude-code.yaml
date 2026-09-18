@@ -16,3 +16,6 @@ programs:
     companyAnnouncements: ["Managed by Agentdesktop"]
   claudeDesktop:
     isLocalDevMcpEnabled: true
+  pi:
+    useLlmGateway: true
+    model: claude-sonnet-4-5
