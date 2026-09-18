@@ -99,6 +99,14 @@ pub struct DaemonArgs {
     /// Path to Grok Build's organization-managed TOML configuration.
     #[arg(long)]
     grok_managed_config: Option<PathBuf>,
+
+    /// Path to Pi's models.json catalog.
+    #[arg(long)]
+    pi_models: Option<PathBuf>,
+
+    /// Path to Pi's settings.json.
+    #[arg(long)]
+    pi_settings: Option<PathBuf>,
 }
 
 struct ResolvedDaemonArgs {
@@ -114,6 +122,8 @@ struct ResolvedDaemonArgs {
     open_code_managed_config: PathBuf,
     open_code_plugin: PathBuf,
     grok_managed_config: PathBuf,
+    pi_models: PathBuf,
+    pi_settings: PathBuf,
     once: bool,
     dry_run: bool,
 }
@@ -149,6 +159,12 @@ impl DaemonArgs {
                 grok_managed_config: self
                     .grok_managed_config
                     .unwrap_or_else(reconcile::default_grok_managed_config_path),
+                pi_models: self
+                    .pi_models
+                    .unwrap_or_else(reconcile::default_pi_models_path),
+                pi_settings: self
+                    .pi_settings
+                    .unwrap_or_else(reconcile::default_pi_settings_path),
                 once: self.once || self.dry_run,
                 dry_run: self.dry_run,
             });
@@ -202,6 +218,12 @@ impl DaemonArgs {
                     .map(PathBuf::from)
                     .unwrap_or_else(|| home.join(".grok"))
                     .join("managed_config.toml")
+            }),
+            pi_models: self.pi_models.unwrap_or_else(|| {
+                crate::provider::pi::user_pi_agent_dir(&home).join("models.json")
+            }),
+            pi_settings: self.pi_settings.unwrap_or_else(|| {
+                crate::provider::pi::user_pi_agent_dir(&home).join("settings.json")
             }),
             once: self.once || self.dry_run,
             dry_run: self.dry_run,
@@ -272,6 +294,8 @@ where
         args.open_code_managed_config.clone(),
         args.open_code_plugin.clone(),
         args.grok_managed_config.clone(),
+        args.pi_models.clone(),
+        args.pi_settings.clone(),
         agentdesktop_client_executable()?,
         socket.clone(),
     );

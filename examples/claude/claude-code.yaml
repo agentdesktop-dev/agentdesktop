@@ -4,7 +4,7 @@ llmGateway:
   authentication:
     type: controllerJwt
     audience: "agentgateway"
-    allowedClientIds: [claude-code, claude-desktop, codex, opencode]
+    allowedClientIds: [claude-code, claude-desktop, codex, opencode, pi]
 
 telemetry:
   events:
