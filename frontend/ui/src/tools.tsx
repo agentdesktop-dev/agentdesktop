@@ -50,6 +50,8 @@ const toolIcons: Record<string, string> = {
   claude_desktop: claudeDesktopIcon,
   grok: grokIcon,
   "grok-build": grokIcon,
+  "grok-bot": grokIcon,
+  grok_bot: grokIcon,
   opencode: openCodeIcon,
   vscode: copilotIcon,
 };
@@ -63,6 +65,8 @@ export function friendlyTool(kind: string) {
     "claude-desktop": "Claude Desktop",
     grok: "Grok Build",
     "grok-build": "Grok Build",
+    "grok-bot": "Grok Bot",
+    grok_bot: "Grok Bot",
     opencode: "OpenCode",
     vscode: "VS Code",
     cursor: "Cursor",
