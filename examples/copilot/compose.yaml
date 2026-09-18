@@ -1,0 +1,48 @@
+services:
+  dex:
+    image: ghcr.io/dexidp/dex:v2.45.1
+    command: dex serve /etc/dex/config.yaml
+    ports:
+      - "127.0.0.1:5557:5557"
+    volumes:
+      - ../standalone/dex.yaml:/etc/dex/config.yaml:ro
+
+  gateway-jwks:
+    image: alpine:3.23.3
+    depends_on:
+      - dex
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        for attempt in $$(seq 1 30); do
+          if wget -q -T 5 -O /jwks/jwks.json.next http://dex:5557/dex/keys; then
+            mv /jwks/jwks.json.next /jwks/jwks.json
+            chmod 644 /jwks/jwks.json
+            exit 0
+          fi
+          sleep 1
+        done
+        echo "Dex signing keys are unavailable" >&2
+        exit 1
+    volumes:
+      - gateway-jwks:/jwks
+
+  agentgateway:
+    image: cr.agentgateway.dev/agentgateway:v1.5.0
+    command: -f /etc/agentgateway/config.yaml
+    depends_on:
+      gateway-jwks:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:4001:4001"
+      - "127.0.0.1:4002:4002"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-unused}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-unused}
+    volumes:
+      - ./agentgateway.yaml:/etc/agentgateway/config.yaml:ro
+      - gateway-jwks:/jwks:ro
+
+volumes:
+  gateway-jwks:

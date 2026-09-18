@@ -15,6 +15,10 @@ path = "src/bin/agentdesktop-headless.rs"
 name = "integration"
 path = "tests/integration.rs"
 
+[[test]]
+name = "copilot_cli"
+path = "tests/copilot_cli.rs"
+
 [[bin]]
 name = "agentdesktop-service"
 path = "src/bin/agentdesktop-service.rs"
@@ -32,17 +36,20 @@ hostname.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 json5.workspace = true
+jsonc-parser.workspace = true
 memchr.workspace = true
 open.workspace = true
 rand.workspace = true
 rcgen.workspace = true
 reqwest.workspace = true
+semver = "1"
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 sha2.workspace = true
 similar.workspace = true
-tokio.workspace = true
+tempfile = "3"
+tokio = { workspace = true, features = ["io-util"] }
 tokio-stream.workspace = true
 tonic.workspace = true
 tracing.workspace = true
@@ -51,7 +58,6 @@ url.workspace = true
 
 [dev-dependencies]
 futures-util = "0.3"
-tempfile = "3"
 testcontainers = "0.28"
 tracing-subscriber.workspace = true
 # `start_paused` keeps the interval-driven inventory tests deterministic.

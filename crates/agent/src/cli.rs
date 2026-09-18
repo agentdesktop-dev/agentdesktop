@@ -1,4 +1,4 @@
-use std::{io::Read, path::PathBuf};
+use std::{ffi::OsString, io::Read, path::PathBuf};
 
 use agentdesktop_client as client;
 use agentdesktop_core::{
@@ -7,6 +7,8 @@ use agentdesktop_core::{
 };
 use clap::Subcommand;
 use serde::Deserialize;
+
+use crate::provider::copilot_cli;
 
 const MAX_HOOK_INPUT_BYTES: u64 = 1024 * 1024;
 
@@ -23,6 +25,12 @@ pub enum ClientCommand {
         /// Developer tool requesting the credential.
         #[arg(long, default_value = "agentdesktop")]
         client_id: String,
+    },
+    /// Launch GitHub Copilot CLI through the daemon's effective LLM gateway.
+    Copilot {
+        /// Native Copilot arguments, passed literally after `--`.
+        #[arg(last = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
     },
     /// Handle an event emitted by a managed developer-tool hook.
     Hook {
@@ -91,6 +99,11 @@ pub async fn run(command: ClientCommand, socket: PathBuf) -> anyhow::Result<()> 
             );
         }
         ClientCommand::Credential { client_id } => {
+            if client_id == copilot_cli::CopilotCli::ID {
+                let response = copilot_cli::credential(&socket).await?;
+                println!("{}", response.credential);
+                return Ok(());
+            }
             let client_id: String =
                 url::form_urlencoded::byte_serialize(client_id.as_bytes()).collect();
             let response: LlmGatewayCredential = client::get(
@@ -99,6 +112,22 @@ pub async fn run(command: ClientCommand, socket: PathBuf) -> anyhow::Result<()> 
             )
             .await?;
             println!("{}", response.credential);
+        }
+        ClientCommand::Copilot { args } => {
+            let status = copilot_cli::launch(&socket, &args).await?;
+            if !status.success() {
+                // The launcher has already waited and removed its private registry.
+                #[cfg(unix)]
+                let code = {
+                    use std::os::unix::process::ExitStatusExt;
+                    status
+                        .code()
+                        .unwrap_or_else(|| 128 + status.signal().unwrap_or(1))
+                };
+                #[cfg(windows)]
+                let code = status.code().unwrap_or(1);
+                std::process::exit(code);
+            }
         }
         ClientCommand::Hook {
             hook: HookCommand::ClaudePreToolUse { include_input },

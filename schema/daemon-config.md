@@ -29,6 +29,10 @@
 |`programs.codex`|object|Codex managed configuration.|
 |`programs.codex.managedConfig`|object|Arbitrary values written to Codex's organization-managed TOML configuration.<br><br>Use Codex's native snake_case configuration keys. TOML has no null value,<br>so null values cannot be reconciled.|
 |`programs.codex.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
+|`programs.copilotCli`|object|GitHub Copilot CLI settings for the explicit `agentdesktop copilot` launcher.|
+|`programs.copilotCli.model`|string|Gateway model ID. A nonempty string is required when gateway routing is enabled.|
+|`programs.copilotCli.useLlmGateway`|boolean|Whether `agentdesktop copilot` may route this program through `llmGateway`.|
+|`programs.copilotCli.wireApi`|enum|OpenAI-compatible wire API. Responses requires a compatible gateway backend.<br>Possible values: `completions`, `responses`.|
 |`programs.grok`|object|Grok Build managed configuration.|
 |`programs.grok.managedConfig`|object|Arbitrary values written to Grok's organization-managed TOML configuration.<br><br>Use Grok's native snake_case configuration keys. TOML has no null value,<br>so null values cannot be reconciled.|
 |`programs.grok.model`|string|Catalog ID and API model used when pointing Grok at the LLM gateway.<br><br>This is required when a top-level `llmGateway` is configured. If `models`<br>is empty, agentdesktop creates a catalog entry with this ID.|
@@ -39,6 +43,9 @@
 |`programs.openCode.model`|string|Model ID selected from `models` when using the LLM gateway.<br><br>This is required when a top-level `llmGateway` is configured.|
 |`programs.openCode.models`|object|Models exposed by the managed LLM gateway provider, keyed by model ID.<br><br>Each value is an arbitrary OpenCode model configuration object. At least<br>one model is required when a top-level `llmGateway` is configured.|
 |`programs.openCode.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
+|`programs.vscode`|object|VS Code built-in GitHub Copilot endpoint configuration.|
+|`programs.vscode.copilotProxyUrl`|string|AGW `/v1` base URL used by VS Code's built-in GitHub Copilot endpoint overrides.|
+|`programs.vscode.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
 |`sandbox`|object|Local execution sandbox required for managed developer tools.|
 |`sandbox.filesystem`|object|Filesystem access available to sandboxed commands.|
 |`sandbox.filesystem.denied`|[]string|Paths sandboxed commands may neither read nor modify.|

@@ -407,6 +407,12 @@ pub struct ProgramsConfig {
     /// Grok Build managed configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grok: Option<GrokConfig>,
+    /// VS Code built-in GitHub Copilot endpoint configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vscode: Option<VscodeConfig>,
+    /// GitHub Copilot CLI settings for the explicit `agentdesktop copilot` launcher.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copilot_cli: Option<CopilotCliConfig>,
 }
 
 impl ProgramsConfig {
@@ -416,6 +422,8 @@ impl ProgramsConfig {
             && self.codex.is_none()
             && self.open_code.is_none()
             && self.grok.is_none()
+            && self.vscode.is_none()
+            && self.copilot_cli.is_none()
     }
 }
 
@@ -542,6 +550,59 @@ pub struct GrokConfig {
     pub managed_config: BTreeMap<String, serde_json::Value>,
 }
 
+/// Settings reconciled into VS Code's user settings.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VscodeConfig {
+    /// Whether this program uses the top-level LLM gateway.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub use_llm_gateway: bool,
+    /// AGW `/v1` base URL used by VS Code's built-in GitHub Copilot endpoint overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
+    pub copilot_proxy_url: Option<Url>,
+}
+
+/// Settings for the opt-in GitHub Copilot CLI launcher (native CLI 1.0.84+).
+///
+/// These settings do not modify the CLI's configuration, login, or shell profile.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CopilotCliConfig {
+    /// Whether `agentdesktop copilot` may route this program through `llmGateway`.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub use_llm_gateway: bool,
+    /// Gateway model ID. A nonempty string is required when gateway routing is enabled.
+    #[serde(default)]
+    pub model: String,
+    /// OpenAI-compatible wire API. Responses requires a compatible gateway backend.
+    #[serde(default)]
+    pub wire_api: CopilotWireApi,
+}
+
+/// Native GitHub Copilot CLI BYOK wire APIs.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum CopilotWireApi {
+    /// OpenAI Chat Completions, including gateway-translated Anthropic requests.
+    #[default]
+    Completions,
+    /// OpenAI Responses; the gateway backend must support this protocol.
+    Responses,
+}
+
+impl CopilotWireApi {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completions => "completions",
+            Self::Responses => "responses",
+        }
+    }
+}
+
 /// Upstream authentication selected by a managed agent.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -634,23 +695,28 @@ fn resolve_relative(path: &mut PathBuf, directory: &Path) {
 pub fn parse_daemon(contents: &str) -> anyhow::Result<DaemonConfig> {
     let config: DaemonConfig =
         crate::serdes::yamlviajson::from_str(contents).context("parse daemon configuration")?;
-    if let Some(controller) = &config.controller
-        && !controller.address.starts_with("https://")
-    {
-        anyhow::bail!("controller address must use HTTPS");
-    }
-    if config.inventory_interval.is_zero() {
-        anyhow::bail!("inventoryInterval must be greater than zero");
-    }
-    validate_daemon(
-        config.llm_gateway.as_ref(),
-        config.sandbox.as_ref(),
-        &config.programs,
-    )?;
+    config.validate()?;
     Ok(config)
 }
 
 impl DaemonConfig {
+    /// Validates typed configuration, including documents received over local IPC.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(controller) = &self.controller
+            && !controller.address.starts_with("https://")
+        {
+            anyhow::bail!("controller address must use HTTPS");
+        }
+        if self.inventory_interval.is_zero() {
+            anyhow::bail!("inventoryInterval must be greater than zero");
+        }
+        validate_daemon(
+            self.llm_gateway.as_ref(),
+            self.sandbox.as_ref(),
+            &self.programs,
+        )
+    }
+
     /// Returns whether this configuration manages no gateway or developer tools.
     pub fn is_empty(&self) -> bool {
         self.llm_gateway.is_none()
@@ -675,23 +741,15 @@ fn validate_daemon(
         if programs.grok.is_some() {
             anyhow::bail!("sandbox is not supported for Grok Build");
         }
+        if programs.copilot_cli.is_some() {
+            anyhow::bail!("sandbox is not supported for GitHub Copilot CLI");
+        }
+        if programs.vscode.is_some() {
+            anyhow::bail!("sandbox is not supported for VS Code");
+        }
     }
     if let Some(gateway) = llm_gateway {
-        if !matches!(gateway.url.scheme(), "http" | "https") {
-            anyhow::bail!(
-                "LLM gateway URL must use HTTP or HTTPS, got {}",
-                gateway.url.scheme()
-            );
-        }
-        if gateway.url.host().is_none() {
-            anyhow::bail!("LLM gateway URL must include a host");
-        }
-        if !gateway.url.username().is_empty() || gateway.url.password().is_some() {
-            anyhow::bail!("LLM gateway URL cannot include credentials");
-        }
-        if gateway.url.query().is_some() || gateway.url.fragment().is_some() {
-            anyhow::bail!("LLM gateway URL cannot include a query or fragment");
-        }
+        validate_llm_gateway_url("URL", &gateway.url)?;
         if let Some(authentication) = &gateway.authentication {
             match authentication {
                 LlmGatewayAuthentication::ControllerJwt {
@@ -817,6 +875,55 @@ fn validate_daemon(
         if !grok.models.is_empty() && !grok.models.contains_key(model) {
             anyhow::bail!("Grok Build model {model} is not declared in models");
         }
+    }
+    if let Some(vscode) = &programs.vscode
+        && vscode.use_llm_gateway
+    {
+        let proxy_url = vscode
+            .copilot_proxy_url
+            .as_ref()
+            .context("VS Code requires copilotProxyUrl when llmGateway is configured")?;
+        validate_llm_gateway_url("VS Code Copilot proxy URL", proxy_url)?;
+        if proxy_url.scheme() == "http" && !proxy_url.host_str().is_some_and(is_loopback) {
+            anyhow::bail!("VS Code Copilot proxy URL must use HTTPS or a loopback HTTP host");
+        }
+        if !proxy_url.path().trim_end_matches('/').ends_with("/v1") {
+            anyhow::bail!("VS Code copilotProxyUrl must end in /v1");
+        }
+    }
+    if let Some(copilot) = &programs.copilot_cli
+        && copilot.use_llm_gateway
+    {
+        if copilot.model.trim().is_empty() || copilot.model.chars().any(char::is_control) {
+            anyhow::bail!("programs.copilotCli.model must be a nonempty model ID when enabled");
+        }
+        if llm_gateway.is_none() {
+            anyhow::bail!("GitHub Copilot CLI requires llmGateway when useLlmGateway is enabled");
+        }
+        if llm_gateway.is_some_and(|gateway| gateway.authentication.is_none()) {
+            anyhow::bail!(
+                "GitHub Copilot CLI requires oidc or controllerJwt gateway authentication"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_llm_gateway_url(label: &str, url: &Url) -> anyhow::Result<()> {
+    if !matches!(url.scheme(), "http" | "https") {
+        anyhow::bail!(
+            "LLM gateway {label} must use HTTP or HTTPS, got {}",
+            url.scheme()
+        );
+    }
+    if url.host().is_none() {
+        anyhow::bail!("LLM gateway {label} must include a host");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        anyhow::bail!("LLM gateway {label} cannot include credentials");
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        anyhow::bail!("LLM gateway {label} cannot include a query or fragment");
     }
     Ok(())
 }
@@ -947,6 +1054,10 @@ oidc:
         .expect("Claude subscription user configuration example");
         parse_daemon(include_str!("../../../examples/standalone/config.yaml"))
             .expect("standalone daemon configuration example");
+        parse_daemon(include_str!("../../../examples/copilot/config.yaml"))
+            .expect("Copilot CLI daemon configuration example");
+        parse_daemon(include_str!("../../../examples/copilot/vscode.yaml"))
+            .expect("VS Code daemon configuration example");
     }
 
     #[test]
@@ -1193,6 +1304,206 @@ programs:
             error
                 .to_string()
                 .contains("Grok Build model missing is not declared in models")
+        );
+    }
+
+    #[test]
+    fn vscode_requires_a_secure_v1_copilot_proxy() {
+        let valid = r#"
+programs:
+  vscode:
+    copilotProxyUrl: http://127.0.0.1:4002/v1
+"#;
+        let daemon = parse_daemon(valid).expect("valid VS Code gateway configuration");
+        assert_eq!(
+            daemon
+                .programs
+                .vscode
+                .unwrap()
+                .copilot_proxy_url
+                .unwrap()
+                .as_str(),
+            "http://127.0.0.1:4002/v1"
+        );
+
+        for (invalid, expected) in [
+            (
+                valid.replace("127.0.0.1:4002/v1", "gateway.example.com/v1"),
+                "HTTPS or a loopback HTTP host",
+            ),
+            (valid.replace("/v1", "/v2"), "must end in /v1"),
+            (
+                valid.replace(
+                    "  vscode:\n    copilotProxyUrl: http://127.0.0.1:4002/v1\n",
+                    "  vscode: {}\n",
+                ),
+                "requires copilotProxyUrl",
+            ),
+        ] {
+            let error = parse_daemon(&invalid).expect_err("invalid VS Code configuration");
+            assert!(format!("{error:#}").contains(expected));
+        }
+    }
+
+    #[test]
+    fn gateway_and_copilot_urls_share_transport_and_secret_validation() {
+        for (invalid, expected) in [
+            ("ftp://127.0.0.1/v1", "must use HTTP or HTTPS"),
+            (
+                "http://user:password@127.0.0.1/v1",
+                "cannot include credentials",
+            ),
+            (
+                "http://127.0.0.1/v1?token=value",
+                "cannot include a query or fragment",
+            ),
+            (
+                "http://127.0.0.1/v1#fragment",
+                "cannot include a query or fragment",
+            ),
+        ] {
+            for document in [
+                format!("llmGateway:\n  url: {invalid}\n"),
+                format!("programs:\n  vscode:\n    copilotProxyUrl: {invalid}\n"),
+            ] {
+                let error = parse_daemon(&document).expect_err("invalid gateway URL");
+                assert!(format!("{error:#}").contains(expected));
+            }
+        }
+    }
+
+    #[test]
+    fn vscode_accepts_https_loopback_and_explicit_disable() {
+        for proxy in [
+            "https://gateway.example.com/copilot/v1/",
+            "http://localhost:4002/v1",
+            "http://[::1]:4002/v1",
+        ] {
+            let daemon = parse_daemon(&format!(
+                "programs:\n  vscode:\n    copilotProxyUrl: {proxy}\n"
+            ))
+            .expect("secure VS Code proxy URL");
+            assert!(!daemon.is_empty());
+        }
+        let daemon = parse_daemon("programs:\n  vscode:\n    useLlmGateway: false\n")
+            .expect("disabled VS Code does not require a proxy URL");
+        assert!(
+            !daemon.is_empty(),
+            "explicit disable still needs reconciliation"
+        );
+        assert!(!daemon.programs.vscode.unwrap().use_llm_gateway);
+    }
+
+    #[test]
+    fn grok_vscode_and_copilot_configuration_round_trip_together() {
+        let document = serde_json::json!({
+            "llmGateway": {
+                "url": "https://gateway.example.com",
+                "authentication": {
+                    "type": "controllerJwt",
+                    "audience": "agentgateway",
+                    "allowedClientIds": ["grok", "copilot-cli"]
+                }
+            },
+            "programs": {
+                "grok": { "model": "grok-4.6" },
+                "vscode": { "copilotProxyUrl": "http://127.0.0.1:4002/v1" },
+                "copilotCli": { "model": "gpt-5.2", "wireApi": "responses" }
+            }
+        });
+        let daemon = parse_daemon(&document.to_string())
+            .expect("Grok, VS Code and Copilot CLI configuration can coexist");
+        let serialized = serde_json::to_value(&daemon).unwrap();
+        assert_eq!(serialized["programs"]["grok"]["model"], "grok-4.6");
+        assert_eq!(
+            serialized["programs"]["vscode"]["copilotProxyUrl"],
+            "http://127.0.0.1:4002/v1"
+        );
+        assert_eq!(serialized["programs"]["copilotCli"]["model"], "gpt-5.2");
+        assert_eq!(serialized["programs"]["copilotCli"]["wireApi"], "responses");
+        let restored = parse_daemon(&serialized.to_string()).unwrap();
+        assert!(restored.programs.grok.is_some());
+        assert!(restored.programs.vscode.is_some());
+        assert_eq!(
+            restored.programs.copilot_cli.unwrap().wire_api,
+            super::CopilotWireApi::Responses
+        );
+    }
+
+    #[test]
+    fn copilot_requires_a_model_and_gateway_only_when_enabled() {
+        let gateway = concat!(
+            "llmGateway:\n  url: https://gateway.example.com\n",
+            "  authentication:\n    type: controllerJwt\n    audience: agentgateway\n",
+            "    allowedClientIds: [copilot-cli]\n",
+        );
+        for model in [
+            "",
+            "    model: ''\n",
+            "    model: '  '\n",
+            "    model: null\n",
+        ] {
+            let document =
+                format!("{gateway}programs:\n  copilotCli:\n    useLlmGateway: true\n{model}");
+            assert!(parse_daemon(&document).is_err(), "missing or empty model");
+        }
+        let error = parse_daemon("programs:\n  copilotCli:\n    model: gpt-5.2\n").unwrap_err();
+        assert!(error.to_string().contains("requires llmGateway"));
+        let error = parse_daemon(
+            "llmGateway:\n  url: https://gateway.example.com\nprograms:\n  copilotCli:\n    model: gpt-5.2\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("gateway authentication"));
+
+        let disabled =
+            parse_daemon("programs:\n  copilotCli:\n    useLlmGateway: false\n").unwrap();
+        assert!(!disabled.is_empty());
+        assert!(!disabled.programs.copilot_cli.unwrap().use_llm_gateway);
+
+        let document = format!("{gateway}programs:\n  copilotCli:\n    model: gpt-5.2\n");
+        let config = parse_daemon(&document).unwrap();
+        let copilot = config.programs.copilot_cli.unwrap();
+        assert!(copilot.use_llm_gateway);
+        assert_eq!(copilot.wire_api, super::CopilotWireApi::Completions);
+        for field in [
+            "wireApi: messages",
+            "apiKey: secret",
+            "models: {}",
+            "model: 123",
+        ] {
+            let document = format!("{document}    {field}\n");
+            assert!(
+                parse_daemon(&document).is_err(),
+                "unsupported config: {field}"
+            );
+        }
+        assert!(parse_daemon(&format!("{document}sandbox: {{}}\n")).is_err());
+        assert!(
+            parse_daemon(
+                "sandbox: {}\nprograms:\n  vscode:\n    copilotProxyUrl: http://127.0.0.1:4002/v1\n",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn adding_copilot_does_not_widen_an_imported_credential_policy() {
+        let document = r#"
+llmGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
+    allowedClientIds: [claude-code]
+programs:
+  copilotCli:
+    model: gpt-5.2
+"#;
+        let config = parse_daemon(document).unwrap();
+        let serialized = serde_json::to_value(config).unwrap();
+        assert_eq!(
+            serialized["llmGateway"]["authentication"]["allowedClientIds"],
+            serde_json::json!(["claude-code"])
         );
     }
 }

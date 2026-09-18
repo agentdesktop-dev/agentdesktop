@@ -1,0 +1,80 @@
+# Agentgateway v1.5.0. Port 4001 uses daemon OIDC credentials; port 4002
+# forwards VS Code's existing Copilot bearer. Do not expose port 4002 remotely.
+gateways:
+  gateway:
+    port: 4001
+
+routes:
+  - name: reachability
+    gateways: gateway
+    matches:
+      - method: HEAD
+        path:
+          exact: /
+    policies:
+      directResponse:
+        status: 200
+
+llm:
+  gateways: gateway
+  policies:
+    jwtAuth:
+      mode: strict
+      issuer: http://127.0.0.1:5557/dex
+      audiences: [agentdesktop-local]
+      # Public Dex signing keys, fetched by the Compose init service.
+      jwks:
+        file: /jwks/jwks.json
+  models:
+    - name: gpt-5.2
+      provider: openai
+      params:
+        apiKey: $OPENAI_API_KEY
+    - name: claude-haiku-4-5
+      provider: anthropic
+      params:
+        apiKey: $ANTHROPIC_API_KEY
+
+binds:
+  - port: 4002
+    listeners:
+      - name: vscode-copilot
+        protocol: HTTP
+        routes:
+          # v1.5.0's generic AI backend does not implement Models.
+          # Forward both discovery paths to Copilot's native /models endpoint.
+          - name: copilot-models
+            matches:
+              - method: GET
+                path:
+                  exact: /v1/models
+              - method: GET
+                path:
+                  exact: /models
+            policies:
+              urlRewrite:
+                path:
+                  full: /models
+            backends:
+              - host: api.githubcopilot.com:443
+                policies:
+                  backendTLS: {}
+          - name: copilot
+            backends:
+              - ai:
+                  name: copilot
+                  provider:
+                    copilot: {}
+                  policies:
+                    backendAuth:
+                      passthrough: {}
+                    ai:
+                      routes:
+                        /chat/completions: completions
+                        /responses: responses
+                        /embeddings: embeddings
+                        /v1/chat/completions: completions
+                        /v1/responses: responses
+                        /v1/messages: messages
+                        /v1/embeddings: embeddings
+                        "*": detect

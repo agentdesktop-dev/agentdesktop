@@ -4,7 +4,8 @@ pub use plan::ReconcilePlan;
 
 use crate::provider::{
     Provider, ReconcileContext, claude_code::ClaudeCode, claude_desktop::ClaudeDesktop,
-    codex::Codex, cursor::Cursor, grok::Grok, ollama::Ollama, opencode::OpenCode, vscode::VsCode,
+    codex::Codex, copilot_cli::CopilotCli, cursor::Cursor, grok::Grok, ollama::Ollama,
+    opencode::OpenCode, vscode::VsCode,
 };
 use agentdesktop_core::{config::DaemonConfig, model::Discovery};
 use serde_json::Value;
@@ -25,6 +26,7 @@ pub use crate::provider::{
     codex::default_codex_managed_config_path,
     grok::default_grok_managed_config_path,
     opencode::{default_open_code_managed_config_path, default_open_code_plugin_path},
+    vscode::default_vscode_settings_path,
 };
 
 #[derive(Clone)]
@@ -44,6 +46,7 @@ impl Reconciler {
         open_code_managed_config_path: PathBuf,
         open_code_plugin_path: PathBuf,
         grok_managed_config_path: PathBuf,
+        vscode_settings_path: PathBuf,
         credential_helper: PathBuf,
         socket: PathBuf,
     ) -> Self {
@@ -68,7 +71,10 @@ impl Reconciler {
                     managed_config_path: open_code_managed_config_path,
                     plugin_path: open_code_plugin_path,
                 }),
-                Box::new(VsCode),
+                Box::new(VsCode {
+                    settings_path: vscode_settings_path,
+                }),
+                Box::new(CopilotCli),
                 Box::new(Cursor),
                 Box::new(Grok {
                     managed_config_path: grok_managed_config_path,
@@ -274,6 +280,7 @@ programs:
             root.join("opencode/config.json"),
             root.join("opencode/plugin.js"),
             root.join("grok/managed_config.toml"),
+            root.join("vscode/settings.json"),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
@@ -312,6 +319,7 @@ programs:
             root.join("opencode/config.json"),
             root.join("opencode/plugin.js"),
             root.join("grok/managed_config.toml"),
+            root.join("vscode/settings.json"),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
@@ -328,6 +336,35 @@ programs:
         let config = parse_daemon("programs:\n  claudeCode: {}\n  grok: {}\n").unwrap();
         fixture.reconciler.apply(&config).unwrap();
         assert!(fixture.root.join("grok/managed_config.toml").exists());
+    }
+
+    #[test]
+    fn system_mode_rejects_vscode_before_writing_other_settings() {
+        let fixture = Fixture::new();
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: http://127.0.0.1:4001
+programs:
+  claudeCode: {}
+  vscode:
+    copilotProxyUrl: http://127.0.0.1:4002/v1
+"#,
+        )
+        .expect("valid configuration");
+
+        assert!(fixture.reconciler.plan(&config).is_err());
+        assert!(fixture.reconciler.dry_run(&config).is_err());
+        let error = fixture
+            .reconciler
+            .apply(&config)
+            .expect_err("system mode must fail");
+
+        assert!(error.to_string().contains("profile-specific"));
+        assert!(
+            !fixture.root.exists(),
+            "preflight failure must not write any files"
+        );
     }
 
     #[test]
@@ -367,6 +404,7 @@ programs:
             root.join("opencode/config.json"),
             root.join("opencode/plugin.js"),
             root.join("grok/managed_config.toml"),
+            root.join("vscode/settings.json"),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
@@ -408,6 +446,7 @@ programs:
                 root.join("opencode/config.json"),
                 root.join("opencode/plugin.js"),
                 root.join("grok/managed_config.toml"),
+                root.join("vscode/settings.json"),
                 root.join("bin/agentdesktop"),
                 root.join("agentdesktop.sock"),
             );
@@ -509,6 +548,56 @@ programs:
         assert!(plan.apply().is_err());
         assert!(!fixture.root.join("claude").exists());
         assert_eq!(fs::read(path).unwrap(), user_config);
+    }
+
+    #[test]
+    fn vscode_conflict_prevents_other_provider_writes() {
+        let mut fixture = Fixture::new();
+        fixture.reconciler.context.merge_user_settings = true;
+        let path = fixture.root.join("vscode/settings.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"[]").unwrap();
+        let config = parse_daemon(
+            "programs:\n  claudeCode: {}\n  vscode:\n    copilotProxyUrl: http://127.0.0.1:4002/v1\n",
+        )
+        .unwrap();
+        let plan = fixture.reconciler.plan(&config).unwrap();
+        assert!(plan.has_conflicts());
+        assert!(plan.render().contains("CONFLICT  VS Code settings"));
+        assert!(plan.apply().is_err());
+        assert!(!fixture.root.join("claude").exists());
+        assert!(
+            !fixture
+                .root
+                .join("vscode/.settings.json.agentdesktop")
+                .exists()
+        );
+        assert_eq!(fs::read(path).unwrap(), b"[]");
+    }
+
+    #[test]
+    fn vscode_sidecar_change_prevents_other_provider_writes() {
+        let mut fixture = Fixture::new();
+        fixture.reconciler.context.merge_user_settings = true;
+        let initial =
+            parse_daemon("programs:\n  vscode:\n    copilotProxyUrl: http://127.0.0.1:4002/v1\n")
+                .unwrap();
+        fixture.reconciler.apply(&initial).unwrap();
+        let path = fixture.root.join("vscode/settings.json");
+        let before = fs::read(&path).unwrap();
+        let config = parse_daemon("programs:\n  claudeCode: {}\n").unwrap();
+        let plan = fixture.reconciler.plan(&config).unwrap();
+        let sidecar = fixture.root.join("vscode/.settings.json.agentdesktop");
+        fs::write(&sidecar, b"external edit").unwrap();
+        let error = plan.apply().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("changed since reconciliation was planned")
+        );
+        assert!(!fixture.root.join("claude").exists());
+        assert_eq!(fs::read(path).unwrap(), before);
+        assert_eq!(fs::read(sidecar).unwrap(), b"external edit");
     }
 
     #[test]

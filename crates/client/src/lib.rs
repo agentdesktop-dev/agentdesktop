@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::{Context, bail};
 use bytes::Bytes;
-use http_body_util::{BodyExt, Empty, Full};
+use http_body_util::{BodyExt, Empty, Full, Limited};
 use hyper::{Request, client::conn::http1};
 use hyper_util::rt::TokioIo;
 use serde::Serialize;
@@ -16,6 +16,14 @@ use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 type LocalStream = UnixStream;
 #[cfg(windows)]
 type LocalStream = NamedPipeClient;
+
+struct ConnectionTask(tokio::task::JoinHandle<()>);
+
+impl Drop for ConnectionTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 fn connect_error(endpoint: &Path) -> String {
     format!(
@@ -54,16 +62,30 @@ pub async fn get<T>(endpoint: &Path, path: &str) -> anyhow::Result<T>
 where
     T: DeserializeOwned,
 {
+    get_bounded(endpoint, path, usize::MAX).await
+}
+
+/// Reads a local JSON response without buffering more than `max_response_bytes`.
+/// Callers handling credentials should also impose a timeout and redact errors.
+pub async fn get_bounded<T>(
+    endpoint: &Path,
+    path: &str,
+    max_response_bytes: usize,
+) -> anyhow::Result<T>
+where
+    T: DeserializeOwned,
+{
     let stream = connect(endpoint).await?;
     let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
         .await
         .context("start HTTP connection")?;
 
-    tokio::spawn(async move {
+    // Cancelling a bounded request must also release its connection driver.
+    let _connection = ConnectionTask(tokio::spawn(async move {
         if let Err(error) = connection.await {
             tracing::debug!(%error, "local HTTP connection failed");
         }
-    });
+    }));
 
     let request = Request::builder()
         .method("GET")
@@ -72,10 +94,10 @@ where
         .body(Empty::<Bytes>::new())?;
     let response = sender.send_request(request).await.context("send request")?;
     let status = response.status();
-    let body = response
-        .into_body()
+    let body = Limited::new(response.into_body(), max_response_bytes)
         .collect()
         .await
+        .map_err(anyhow::Error::from_boxed)
         .context("read response")?
         .to_bytes();
 

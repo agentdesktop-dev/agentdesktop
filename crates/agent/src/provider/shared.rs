@@ -48,18 +48,32 @@ pub(crate) fn render_posix_command(command: &CommandSpec) -> String {
 
 #[cfg(any(windows, test))]
 pub(crate) fn render_windows_command(command: &CommandSpec) -> String {
+    let command = windows_command(command);
+    format!("{} {}", command.program, command.args.join(" "))
+}
+
+/// Structured PowerShell invocation, also used for npm `.cmd` launchers.
+/// Only encoded script text crosses the outer Windows command-line parser.
+#[cfg(any(windows, test))]
+pub(crate) fn windows_command(command: &CommandSpec) -> CommandSpec {
     let script = std::iter::once(command.program.as_str())
         .chain(command.args.iter().map(String::as_str))
         .map(powershell_quote)
         .collect::<Vec<_>>()
         .join(" ");
-    let encoded = format!("& {script}")
+    let encoded = format!("& {script}; exit $LASTEXITCODE")
         .encode_utf16()
         .flat_map(u16::to_le_bytes)
         .collect::<Vec<_>>();
-    format!(
-        "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
-        BASE64_STANDARD.encode(encoded)
+    CommandSpec::new(
+        Path::new("powershell.exe"),
+        [
+            "-NoLogo".to_owned(),
+            "-NoProfile".to_owned(),
+            "-NonInteractive".to_owned(),
+            "-EncodedCommand".to_owned(),
+            BASE64_STANDARD.encode(encoded),
+        ],
     )
 }
 
@@ -127,7 +141,7 @@ mod tests {
 
         assert_eq!(
             script,
-            r"& 'C:\Program Files\Agent Desktop\agentdesktop.exe' '--socket' '\\.\pipe\agentdesktop' 'credential' '--client-id' 'claude-code'"
+            r"& 'C:\Program Files\Agent Desktop\agentdesktop.exe' '--socket' '\\.\pipe\agentdesktop' 'credential' '--client-id' 'claude-code'; exit $LASTEXITCODE"
         );
     }
 }

@@ -139,6 +139,42 @@
         "address"
       ]
     },
+    "CopilotCliConfig": {
+      "description": "Settings for the opt-in GitHub Copilot CLI launcher (native CLI 1.0.84+).\n\nThese settings do not modify the CLI's configuration, login, or shell profile.",
+      "type": "object",
+      "properties": {
+        "model": {
+          "description": "Gateway model ID. A nonempty string is required when gateway routing is enabled.",
+          "type": "string",
+          "default": ""
+        },
+        "useLlmGateway": {
+          "description": "Whether `agentdesktop copilot` may route this program through `llmGateway`.",
+          "type": "boolean"
+        },
+        "wireApi": {
+          "description": "OpenAI-compatible wire API. Responses requires a compatible gateway backend.",
+          "$ref": "#/$defs/CopilotWireApi",
+          "default": "completions"
+        }
+      },
+      "additionalProperties": false
+    },
+    "CopilotWireApi": {
+      "description": "Native GitHub Copilot CLI BYOK wire APIs.",
+      "oneOf": [
+        {
+          "description": "OpenAI Chat Completions, including gateway-translated Anthropic requests.",
+          "type": "string",
+          "const": "completions"
+        },
+        {
+          "description": "OpenAI Responses; the gateway backend must support this protocol.",
+          "type": "string",
+          "const": "responses"
+        }
+      ]
+    },
     "GrokConfig": {
       "description": "Settings reconciled into Grok Build's organization-managed configuration.\n\nValues under `managedConfig` are written to Grok's `managed_config.toml`.\nWhen generated LLM-gateway settings overlap with those values,\nagentdesktop's generated values take precedence.\nOnly system mode is supported. Grok can delete or replace the user-level\nmanaged file during startup, so `--user` rejects `programs.grok`.",
       "type": "object",
@@ -345,6 +381,17 @@
             }
           ]
         },
+        "copilotCli": {
+          "description": "GitHub Copilot CLI settings for the explicit `agentdesktop copilot` launcher.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CopilotCliConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "grok": {
           "description": "Grok Build managed configuration.",
           "anyOf": [
@@ -361,6 +408,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/OpenCodeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "vscode": {
+          "description": "VS Code built-in GitHub Copilot endpoint configuration.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VscodeConfig"
             },
             {
               "type": "null"
@@ -457,6 +515,24 @@
           "const": "tool.use.input"
         }
       ]
+    },
+    "VscodeConfig": {
+      "description": "Settings reconciled into VS Code's user settings.",
+      "type": "object",
+      "properties": {
+        "copilotProxyUrl": {
+          "description": "AGW `/v1` base URL used by VS Code's built-in GitHub Copilot endpoint overrides.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "useLlmGateway": {
+          "description": "Whether this program uses the top-level LLM gateway.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

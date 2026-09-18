@@ -42,32 +42,60 @@ export interface ModelRuntimeDiscovery {
   models: Array<{ name: string }>;
 }
 
-const toolIcons: Record<string, string> = {
-  codex: codexIcon,
-  "claude-code": claudeCodeIcon,
-  claude_code: claudeCodeIcon,
-  "claude-desktop": claudeDesktopIcon,
-  claude_desktop: claudeDesktopIcon,
-  grok: grokIcon,
-  "grok-build": grokIcon,
-  opencode: openCodeIcon,
-  vscode: copilotIcon,
-};
+interface ToolPresentation {
+  id: string;
+  label: string;
+  aliases?: readonly string[];
+  icon?: string;
+  monochrome?: boolean;
+}
+
+export const toolPresentations: readonly ToolPresentation[] = [
+  { id: "codex", label: "Codex", icon: codexIcon },
+  {
+    id: "claude-code",
+    label: "Claude Code",
+    aliases: ["claude_code"],
+    icon: claudeCodeIcon,
+  },
+  {
+    id: "claude-desktop",
+    label: "Claude Desktop",
+    aliases: ["claude_desktop"],
+    icon: claudeDesktopIcon,
+  },
+  {
+    id: "grok",
+    label: "Grok Build",
+    aliases: ["grok-build"],
+    icon: grokIcon,
+  },
+  {
+    id: "opencode",
+    label: "OpenCode",
+    icon: openCodeIcon,
+    monochrome: true,
+  },
+  { id: "vscode", label: "VS Code", icon: copilotIcon, monochrome: true },
+  {
+    id: "copilot-cli",
+    label: "GitHub Copilot CLI",
+    aliases: ["copilot_cli", "copilot"],
+    icon: copilotIcon,
+    monochrome: true,
+  },
+  { id: "cursor", label: "Cursor" },
+];
+
+function toolPresentation(kind: string) {
+  const id = kind.toLowerCase();
+  return toolPresentations.find(
+    (tool) => tool.id === id || tool.aliases?.includes(id),
+  );
+}
 
 export function friendlyTool(kind: string) {
-  const names: Record<string, string> = {
-    codex: "Codex",
-    claude_code: "Claude Code",
-    "claude-code": "Claude Code",
-    claude_desktop: "Claude Desktop",
-    "claude-desktop": "Claude Desktop",
-    grok: "Grok Build",
-    "grok-build": "Grok Build",
-    opencode: "OpenCode",
-    vscode: "VS Code",
-    cursor: "Cursor",
-  };
-  return names[kind.toLowerCase()] ?? kind;
+  return toolPresentation(kind)?.label ?? kind;
 }
 
 export function friendlyModelRuntime(kind: string) {
@@ -120,12 +148,11 @@ export function ModelRuntimeInventory({
 }
 
 export function ToolIcon({ kind }: { kind: string }) {
-  const icon = toolIcons[kind.toLowerCase()];
-  const monochrome = ["opencode", "vscode"].includes(kind.toLowerCase());
-  return icon ? (
+  const tool = toolPresentation(kind);
+  return tool?.icon ? (
     <img
-      className={`tool-icon${monochrome ? " theme-monochrome" : ""}`}
-      src={icon}
+      className={`tool-icon${tool.monochrome ? " theme-monochrome" : ""}`}
+      src={tool.icon}
       alt=""
       aria-hidden="true"
     />

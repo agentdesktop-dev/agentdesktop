@@ -1,0 +1,6 @@
+# Local VS Code Copilot bearer passthrough; not the CLI's OIDC gateway.
+# Run with --user. Use --vscode-settings to select a different User file.
+programs:
+  vscode:
+    useLlmGateway: true
+    copilotProxyUrl: http://127.0.0.1:4002/v1

@@ -1,0 +1,14 @@
+llmGateway:
+  url: http://127.0.0.1:4001
+  authentication:
+    type: oidc
+    issuer: http://127.0.0.1:5557/dex
+    clientId: agentdesktop-local
+    scopes: [openid, email, offline_access]
+    allowInsecure: true
+
+programs:
+  copilotCli:
+    useLlmGateway: true
+    model: gpt-5.2
+    wireApi: completions

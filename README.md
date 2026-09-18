@@ -15,8 +15,9 @@ Agentdesktop discovers AI developer tools, inventories MCP servers and skills,
 applies tool-native configuration and sandbox policy, and connects each device
 to an LLM gateway with user and device identity.
 
-Keep developers in Claude Code, Codex, Cursor, OpenCode, VS Code, and Grok Build
-while giving platform teams one place to understand and manage the fleet.
+Keep developers in Claude Code, Codex, Cursor, OpenCode, VS Code, GitHub Copilot
+CLI, and Grok Build while giving platform teams one place to understand and
+manage the fleet.
 
 [Website](https://agentdesktop.dev) ·
 [Documentation](https://agentdesktop.dev/docs/) ·
@@ -94,6 +95,13 @@ The desktop and fleet interfaces also expose the MCP server and skill
 inventory. See the [standalone quickstart](https://agentdesktop.dev/docs/getting-started/standalone/)
 for prerequisites, test credentials, and a walkthrough of the local services.
 
+For **GitHub Copilot CLI or VS Code**, see the separate
+[Copilot example](examples/copilot/README.md). CLI 1.0.84+ uses an explicit
+`agentdesktop copilot -- …` launcher with a required gateway model; plain
+`copilot` and existing login are unchanged. VS Code uses user-mode endpoint
+overrides with local Copilot bearer passthrough, not the CLI's gateway
+credential helper.
+
 ## Start locally, grow into a fleet
 
 Agentdesktop uses the same daemon and tool-native configuration model at every
@@ -135,7 +143,8 @@ stage.
 | Codex | Yes | Yes | MCP and skills | Yes |
 | Cursor | Yes | — | MCP and skills | — |
 | OpenCode | Yes | Yes | MCP | — |
-| VS Code | Yes | — | MCP and skills | — |
+| VS Code | Yes | Configured User settings only | MCP and skills | — |
+| GitHub Copilot CLI | Yes | Launch-time gateway environment | User-config MCP and skills | — |
 | Grok Build | Yes | System mode | MCP and skills | — |
 
 > **Don't see your tool?** We're actively expanding this list and would love
@@ -145,6 +154,10 @@ stage.
 
 The project targets Linux, macOS, and Windows. Support varies where a tool or
 operating system does not expose an equivalent native configuration surface.
+VS Code requires `--user`; `--vscode-settings` selects its User settings file
+without automatically managing other profiles. Copilot CLI routing applies
+only to `agentdesktop copilot -- …` and does not rewrite native configuration.
+See the [provider support matrix](crates/agent/src/provider/README.md) for details.
 
 ## How it works
 

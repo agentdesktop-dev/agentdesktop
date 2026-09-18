@@ -318,7 +318,7 @@ fn collect_skill_files(
     }
 }
 
-fn skill_front_matter(contents: &str) -> Option<BTreeMap<String, serde_json::Value>> {
+pub(super) fn skill_front_matter(contents: &str) -> Option<BTreeMap<String, serde_json::Value>> {
     let contents = contents.strip_prefix('\u{feff}').unwrap_or(contents);
     let rest = contents
         .strip_prefix("---\n")

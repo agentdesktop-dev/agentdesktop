@@ -99,6 +99,10 @@ pub struct DaemonArgs {
     /// Path to Grok Build's organization-managed TOML configuration.
     #[arg(long)]
     grok_managed_config: Option<PathBuf>,
+
+    /// Path to VS Code's user settings.
+    #[arg(long)]
+    vscode_settings: Option<PathBuf>,
 }
 
 struct ResolvedDaemonArgs {
@@ -114,6 +118,7 @@ struct ResolvedDaemonArgs {
     open_code_managed_config: PathBuf,
     open_code_plugin: PathBuf,
     grok_managed_config: PathBuf,
+    vscode_settings: PathBuf,
     once: bool,
     dry_run: bool,
 }
@@ -149,6 +154,9 @@ impl DaemonArgs {
                 grok_managed_config: self
                     .grok_managed_config
                     .unwrap_or_else(reconcile::default_grok_managed_config_path),
+                vscode_settings: self
+                    .vscode_settings
+                    .unwrap_or_else(reconcile::default_vscode_settings_path),
                 once: self.once || self.dry_run,
                 dry_run: self.dry_run,
             });
@@ -170,6 +178,7 @@ impl DaemonArgs {
             socket
         };
         let claude_desktop_settings = user_claude_desktop_settings(&home, &config_home);
+        let vscode_settings = user_vscode_settings(&home, &config_home);
         Ok(ResolvedDaemonArgs {
             user: true,
             config: self
@@ -203,6 +212,7 @@ impl DaemonArgs {
                     .unwrap_or_else(|| home.join(".grok"))
                     .join("managed_config.toml")
             }),
+            vscode_settings: self.vscode_settings.unwrap_or(vscode_settings),
             once: self.once || self.dry_run,
             dry_run: self.dry_run,
         })
@@ -241,6 +251,18 @@ fn user_claude_desktop_settings(_home: &Path, _config_home: &Path) -> PathBuf {
     return _config_home.join("Claude/claude_desktop_config.json");
 }
 
+fn user_vscode_settings(_home: &Path, _config_home: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    return _home.join("Library/Application Support/Code/User/settings.json");
+    #[cfg(target_os = "windows")]
+    return std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| _home.join("AppData/Roaming"))
+        .join("Code/User/settings.json");
+    #[cfg(target_os = "linux")]
+    return _config_home.join("Code/User/settings.json");
+}
+
 pub async fn run(args: DaemonArgs, socket: PathBuf) -> anyhow::Result<()> {
     run_until_shutdown(args, socket, async {
         tokio::signal::ctrl_c()
@@ -272,6 +294,7 @@ where
         args.open_code_managed_config.clone(),
         args.open_code_plugin.clone(),
         args.grok_managed_config.clone(),
+        args.vscode_settings.clone(),
         agentdesktop_client_executable()?,
         socket.clone(),
     );
@@ -883,6 +906,52 @@ mod tests {
     use agentdesktop_core::config::parse_daemon;
     use agentdesktop_core::model::{Agent, Discovery};
     use tokio::sync::watch;
+
+    #[test]
+    fn daemon_settings_overrides_keep_both_grok_and_vscode_flags() {
+        use clap::{Args, FromArgMatches};
+
+        for user in [false, true] {
+            let mut arguments = vec![
+                "daemon",
+                "--grok-managed-config",
+                "test/grok/managed_config.toml",
+                "--vscode-settings",
+                "test/Code/User/settings.json",
+            ];
+            if user {
+                arguments.push("--user");
+            }
+            let matches = super::DaemonArgs::augment_args(clap::Command::new("daemon"))
+                .try_get_matches_from(arguments)
+                .unwrap();
+            let args = super::DaemonArgs::from_arg_matches(&matches).unwrap();
+            assert_eq!(args.user, user);
+            assert_eq!(
+                args.grok_managed_config.as_deref(),
+                Some(Path::new("test/grok/managed_config.toml"))
+            );
+            assert_eq!(
+                args.vscode_settings.as_deref(),
+                Some(Path::new("test/Code/User/settings.json"))
+            );
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn user_vscode_settings_uses_the_native_profile_directory() {
+        let home = Path::new("/home/developer");
+        let config_home = Path::new("/custom/config");
+        let settings = super::user_vscode_settings(home, config_home);
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            settings,
+            home.join("Library/Application Support/Code/User/settings.json")
+        );
+        #[cfg(target_os = "linux")]
+        assert_eq!(settings, config_home.join("Code/User/settings.json"));
+    }
 
     fn discovery(kinds: &[&str]) -> Discovery {
         Discovery {

@@ -74,12 +74,19 @@ export type AgentKind =
   | "claudeDesktop"
   | "codex"
   | "openCode"
-  | "grok";
+  | "grok"
+  | "vscode"
+  | "copilotCli";
+
+export type CopilotWireApi = "completions" | "responses";
 
 export type AgentDraft = {
   kind: AgentKind;
   useGateway: boolean;
   settings: string;
+  model?: string;
+  wireApi?: CopilotWireApi;
+  copilotProxyUrl?: string;
 };
 
 export type SandboxConfigDocument = {
@@ -93,18 +100,23 @@ export type SandboxConfigDocument = {
 };
 
 export type DaemonConfigDocument = {
+  [key: string]: unknown;
   llmGateway?: {
+    [key: string]: unknown;
     url: string;
     authentication?: {
+      [key: string]: unknown;
       type: string;
       audience?: string;
+      allowedClientIds?: string[];
     };
   };
   sandbox?: SandboxConfigDocument;
   telemetry?: {
     events?: string[];
   };
-  programs?: Partial<Record<AgentKind, Record<string, unknown>>>;
+  programs?: Partial<Record<AgentKind, Record<string, unknown>>> &
+    Record<string, Record<string, unknown> | undefined>;
 };
 
 export type ActiveDaemonConfig = {
