@@ -1,6 +1,6 @@
 # Provider support
 
-Features currently implemented by Agentdesktop.
+Features currently implemented by agentdesktop.
 
 Grok Build managed configuration requires system mode. Linux and macOS use
 `/etc/grok/managed_config.toml`; Windows uses the system drive's
@@ -30,9 +30,9 @@ files are not scanned until the adapter imports them into a Pi-owned file.
 | Tool-use telemetry | ✅ | ◯ | ◯ | ◯ | ◯ | — | ◯ | ◯ | ◯ |
 | Session-start telemetry | ✅ | ◯ | ◯ | ◯ | ◯ | — | ◯ | ◯ | ◯ |
 
-- ◯ describes a gap in Agentdesktop; it does not mean the upstream provider
+- ◯ describes a gap in agentdesktop; it does not mean the upstream provider
   cannot support the feature.
-- Managed configuration includes dry runs and removal of Agentdesktop-owned
+- Managed configuration includes dry runs and removal of agentdesktop-owned
   settings. Claude Code also supports merging into user settings; Claude Desktop
   requires system-managed settings.
 - Discovery is best effort; versions may be unavailable. Ollama discovers models
