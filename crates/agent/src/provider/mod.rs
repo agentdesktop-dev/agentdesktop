@@ -13,6 +13,7 @@ pub mod claude_desktop;
 pub mod codex;
 pub mod cursor;
 pub mod grok;
+pub mod grok_bot;
 mod json_merge;
 mod metadata;
 pub mod ollama;
