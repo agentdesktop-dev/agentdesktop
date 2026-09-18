@@ -12,6 +12,7 @@ import claudeDesktopIcon from "./assets/claude-desktop.svg";
 import codexIcon from "./assets/codex.svg";
 import copilotIcon from "./assets/copilot.svg";
 import grokIcon from "./assets/grok.svg";
+import grokBotIcon from "./assets/grok-bot.png";
 import ollamaIcon from "./assets/ollama.svg";
 import openCodeIcon from "./assets/opencode.svg";
 
@@ -50,8 +51,8 @@ const toolIcons: Record<string, string> = {
   claude_desktop: claudeDesktopIcon,
   grok: grokIcon,
   "grok-build": grokIcon,
-  "grok-bot": grokIcon,
-  grok_bot: grokIcon,
+  "grok-bot": grokBotIcon,
+  grok_bot: grokBotIcon,
   opencode: openCodeIcon,
   vscode: copilotIcon,
 };
