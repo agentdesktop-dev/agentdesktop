@@ -640,7 +640,7 @@ pub struct GrokConfig {
 ///
 /// Generated `providers.agentdesktop` values take precedence over overlapping
 /// `managedConfig` keys. Pi stores configuration under `~/.pi/agent` (or
-/// `PI_CODING_AGENT_DIR`), so `--user` is the supported management mode.
+/// `PI_CODING_AGENT_DIR`), so management requires `--user`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -656,9 +656,10 @@ pub struct PiConfig {
     pub model: Option<String>,
     /// Extra Pi model objects, keyed by model ID.
     ///
-    /// Each value is an arbitrary Pi `models.json` model object. Generated
-    /// gateway `baseUrl` and `apiKey` values take precedence. When this map is
-    /// non-empty, `model` must name one of its keys.
+    /// Each value is an arbitrary Pi `models.json` model object. The map key
+    /// sets its `id`. Generated gateway `baseUrl` and `apiKey` values take
+    /// precedence, including per-model URLs. When this map is non-empty,
+    /// `model` must name one of its keys.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub models: BTreeMap<String, serde_json::Value>,
     /// Pi API dialect for the managed provider. Defaults to `anthropic-messages`.

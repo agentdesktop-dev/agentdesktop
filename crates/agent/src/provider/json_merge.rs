@@ -17,6 +17,24 @@ struct MergeState {
     after: Value,
 }
 
+pub(super) enum JsonFormat {
+    Json,
+    Jsonc,
+}
+
+impl JsonFormat {
+    fn parse(&self, contents: &[u8]) -> anyhow::Result<Value> {
+        match self {
+            Self::Json => Ok(serde_json::from_slice(contents)?),
+            Self::Jsonc => {
+                let contents = std::str::from_utf8(contents)?;
+                // Normalize commented input to ordinary JSON when writing it.
+                Ok(json5::from_str(contents.trim_start_matches('\u{feff}'))?)
+            }
+        }
+    }
+}
+
 pub(super) fn state_path(path: &Path) -> PathBuf {
     let name = path
         .file_name()
@@ -29,6 +47,7 @@ pub(super) fn state_path(path: &Path) -> PathBuf {
 pub(super) fn plan_merge(
     path: &Path,
     state_path: &Path,
+    format: JsonFormat,
     managed: Value,
     legacy_owned: bool,
     description: &str,
@@ -50,7 +69,7 @@ pub(super) fn plan_merge(
         .unwrap_or(existing.is_none() || legacy_owned);
 
     let mut combined = match existing.as_deref() {
-        Some(contents) => match serde_json::from_slice::<Value>(contents) {
+        Some(contents) => match format.parse(contents) {
             Ok(Value::Object(object)) => Value::Object(object),
             Ok(_) | Err(_) => {
                 plan.record(display_name, description, "conflict", path);
@@ -103,6 +122,7 @@ pub(super) fn plan_merge(
 pub(super) fn plan_remove(
     path: &Path,
     state_path: &Path,
+    format: JsonFormat,
     description: &str,
     display_name: &str,
     plan: &ReconcilePlan,
@@ -122,7 +142,7 @@ pub(super) fn plan_remove(
                 .with_context(|| format!("read {display_name} from {}", path.display()));
         }
     };
-    let settings = match serde_json::from_slice::<Value>(&existing) {
+    let settings = match format.parse(&existing) {
         Ok(Value::Object(object)) => Value::Object(object),
         Ok(_) | Err(_) => {
             plan.record(display_name, description, "conflict", path);

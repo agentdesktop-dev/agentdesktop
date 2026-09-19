@@ -26,10 +26,18 @@ pub(super) fn plan(
     let models_state = json_merge::state_path(models_path);
     let settings_state = json_merge::state_path(settings_path);
     let Some((config, gateway)) = config else {
-        json_merge::plan_remove(models_path, &models_state, "models", Pi::DISPLAY_NAME, plan)?;
+        json_merge::plan_remove(
+            models_path,
+            &models_state,
+            json_merge::JsonFormat::Jsonc,
+            "models",
+            Pi::DISPLAY_NAME,
+            plan,
+        )?;
         json_merge::plan_remove(
             settings_path,
             &settings_state,
+            json_merge::JsonFormat::Json,
             "settings",
             Pi::DISPLAY_NAME,
             plan,
@@ -40,6 +48,7 @@ pub(super) fn plan(
     json_merge::plan_merge(
         models_path,
         &models_state,
+        json_merge::JsonFormat::Jsonc,
         managed_models(config, gateway, credential_helper, socket)?,
         false,
         "models",
@@ -49,6 +58,7 @@ pub(super) fn plan(
     json_merge::plan_merge(
         settings_path,
         &settings_state,
+        json_merge::JsonFormat::Json,
         managed_settings(config, gateway)?,
         false,
         "settings",
@@ -105,9 +115,10 @@ fn managed_models(
 
     let mut models = Vec::new();
     for (id, mut entry) in catalog_entries(config, default_model) {
-        if entry.get("id").and_then(Value::as_str).is_none() {
-            entry.insert("id".to_owned(), json!(id));
-        }
+        entry.insert("id".to_owned(), json!(id));
+        let model_api = entry.get("api").and_then(Value::as_str).unwrap_or(api);
+        let base_url = gateway_base_url(gateway, model_api);
+        entry.insert("baseUrl".to_owned(), json!(base_url));
         models.push(Value::Object(entry));
     }
 
@@ -170,11 +181,196 @@ fn gateway_base_url(gateway: &LlmGatewayConfig, api: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::Path;
 
     use agentdesktop_core::config::parse_daemon;
+    use serde_json::{Value, json};
 
-    use super::{managed_models, managed_settings};
+    use super::{managed_models, managed_settings, plan};
+    use crate::reconcile::ReconcilePlan;
+
+    #[test]
+    fn gateway_overrides_per_model_endpoints() {
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com/proxy
+programs:
+  pi:
+    model: claude
+    models:
+      claude:
+        baseUrl: https://outside.example.com
+      chat:
+        api: openai-completions
+        baseUrl: https://outside.example.com/v1
+      responses:
+        api: openai-responses
+"#,
+        )
+        .unwrap();
+        let managed = managed_models(
+            config.programs.pi.as_ref().unwrap(),
+            config.llm_gateway.as_ref(),
+            Path::new("agentdesktop"),
+            Path::new("agentdesktop.sock"),
+        )
+        .unwrap();
+        for model in managed["providers"]["agentdesktop"]["models"]
+            .as_array()
+            .unwrap()
+        {
+            let expected = if model["id"] == "claude" {
+                "https://gateway.example.com/proxy"
+            } else {
+                "https://gateway.example.com/proxy/v1"
+            };
+            assert_eq!(model["baseUrl"], expected, "model {}", model["id"]);
+        }
+    }
+
+    #[test]
+    fn model_map_keys_define_catalog_ids() {
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  pi:
+    model: selected
+    models:
+      selected:
+        id: different
+        name: Selected Model
+"#,
+        )
+        .unwrap();
+        let pi = config.programs.pi.as_ref().unwrap();
+        let gateway = config.llm_gateway.as_ref();
+        let managed = managed_models(
+            pi,
+            gateway,
+            Path::new("agentdesktop"),
+            Path::new("agentdesktop.sock"),
+        )
+        .unwrap();
+        let settings = managed_settings(pi, gateway).unwrap();
+        let model = &managed["providers"]["agentdesktop"]["models"][0];
+        assert_eq!(model["id"], settings["defaultModel"]);
+        assert_eq!(model["name"], "Selected Model");
+    }
+
+    #[test]
+    fn commented_models_survive_merge_repeat_and_removal() {
+        let root = tempfile::tempdir().unwrap();
+        let models = root.path().join("models.json");
+        let settings = root.path().join("settings.json");
+        fs::write(
+            &models,
+            "\u{feff}{\n // Personal provider\n \"providers\": {\"local\": {\"baseUrl\": \"http://localhost:11434/v1\",},},\n}\n",
+        )
+        .unwrap();
+        fs::write(&settings, r#"{"theme":"dark"}"#).unwrap();
+        let config = parse_daemon(
+            "llmGateway:\n  url: https://gateway.example.com\nprograms:\n  pi:\n    model: selected\n",
+        )
+        .unwrap();
+        let configured = Some((
+            config.programs.pi.as_ref().unwrap(),
+            config.llm_gateway.as_ref(),
+        ));
+        let helper = root.path().join("agentdesktop");
+        let socket = root.path().join("agentdesktop.sock");
+        let changes = ReconcilePlan::default();
+        plan(&models, &settings, &helper, &socket, configured, &changes).unwrap();
+        assert!(!changes.has_conflicts(), "Pi accepts commented models.json");
+        changes.apply().unwrap();
+        let merged: Value = serde_json::from_slice(&fs::read(&models).unwrap()).unwrap();
+        assert_eq!(
+            merged["providers"]["local"]["baseUrl"],
+            "http://localhost:11434/v1"
+        );
+        assert_eq!(
+            merged["providers"]["agentdesktop"]["models"][0]["id"],
+            "selected"
+        );
+
+        let before = fs::read(&models).unwrap();
+        let repeated = ReconcilePlan::default();
+        plan(&models, &settings, &helper, &socket, configured, &repeated).unwrap();
+        assert!(repeated.render().contains("Summary: 0 changes"));
+        repeated.apply().unwrap();
+        assert_eq!(fs::read(&models).unwrap(), before);
+
+        // A user can add comments while agentdesktop manages the file.
+        fs::write(
+            &models,
+            format!("// Updated comment\n{}", String::from_utf8(before).unwrap()),
+        )
+        .unwrap();
+        let removal = ReconcilePlan::default();
+        plan(&models, &settings, &helper, &socket, None, &removal).unwrap();
+        removal.apply().unwrap();
+        let restored: Value = serde_json::from_slice(&fs::read(&models).unwrap()).unwrap();
+        assert_eq!(
+            restored,
+            json!({"providers":{"local":{"baseUrl":"http://localhost:11434/v1"}}})
+        );
+        let restored_settings: Value =
+            serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
+        assert_eq!(restored_settings, json!({"theme":"dark"}));
+        assert!(!super::json_merge::state_path(&models).exists());
+        assert!(!super::json_merge::state_path(&settings).exists());
+    }
+
+    #[test]
+    fn commented_settings_remain_a_conflict() {
+        let root = tempfile::tempdir().unwrap();
+        let models = root.path().join("models.json");
+        let settings = root.path().join("settings.json");
+        let existing = b"// Pi settings require strict JSON\n{\"theme\":\"dark\"}";
+        fs::write(&settings, existing).unwrap();
+        let config = parse_daemon("programs:\n  pi: {}\n").unwrap();
+        let changes = ReconcilePlan::default();
+        plan(
+            &models,
+            &settings,
+            Path::new("agentdesktop"),
+            Path::new("agentdesktop.sock"),
+            Some((config.programs.pi.as_ref().unwrap(), None)),
+            &changes,
+        )
+        .unwrap();
+        assert!(changes.has_conflicts());
+        assert!(changes.apply().is_err());
+        assert_eq!(fs::read(&settings).unwrap(), existing);
+        assert!(!models.exists());
+    }
+
+    #[test]
+    fn malformed_models_prevent_settings_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let models = root.path().join("models.json");
+        let settings = root.path().join("settings.json");
+        let invalid = b"{\"providers\":";
+        fs::write(&models, invalid).unwrap();
+        let config = parse_daemon("programs:\n  pi: {}\n").unwrap();
+        let changes = ReconcilePlan::default();
+        plan(
+            &models,
+            &settings,
+            Path::new("agentdesktop"),
+            Path::new("agentdesktop.sock"),
+            Some((config.programs.pi.as_ref().unwrap(), None)),
+            &changes,
+        )
+        .unwrap();
+        assert!(changes.has_conflicts());
+        assert!(changes.apply().is_err());
+        assert_eq!(fs::read(&models).unwrap(), invalid);
+        assert!(!settings.exists());
+    }
 
     #[test]
     fn pass_through_settings_are_merged_with_managed_gateway_values() {

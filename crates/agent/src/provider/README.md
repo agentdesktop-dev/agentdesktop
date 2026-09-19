@@ -8,9 +8,18 @@ Grok Build managed configuration requires system mode. Linux and macOS use
 Grok's own configuration sync can delete or replace the user-level managed
 file.
 
-Pi stores configuration in `~/.pi/agent` (or `PI_CODING_AGENT_DIR`). `--user`
-merges `providers.agentdesktop` into `models.json` and sets the default model
-in `settings.json`. MCP inventory comes from `pi-mcp-adapter` config files
+Pi stores configuration in `~/.pi/agent` (or `PI_CODING_AGENT_DIR`, with `~`
+expanded to the user's home). Management requires `--user`; system mode
+rejects `programs.pi` because Pi does not read `/etc/pi/agent`. Authenticated
+gateway configuration also requires a running daemon and rejects `--once`.
+User mode merges `providers.agentdesktop` into `models.json` and sets the
+default model in `settings.json`. Model map keys determine catalog IDs, and
+gateway URLs override per-model endpoints, using each model's API dialect.
+Commented `models.json` files are accepted and rewritten as standard JSON,
+preserving user configuration values. `settings.json` requires standard JSON.
+Discovery recognizes npm's Windows command shims as well as symlinked launchers,
+verifying the Pi package manifest without executing the launcher.
+MCP inventory comes from `pi-mcp-adapter` config files
 (`~/.pi/agent/mcp.json`, `.pi/mcp.json`, `.mcp.json`, and shared
 `~/.config/mcp/mcp.json` / `~/.agents/mcp.json`). Host-specific Cursor/Claude
 files are not scanned until the adapter imports them into a Pi-owned file.

@@ -686,6 +686,11 @@ fn validate_one_shot(config: &agentdesktop_core::config::DaemonConfig) -> anyhow
                 .grok
                 .as_ref()
                 .is_some_and(|program| program.use_llm_gateway),
+            config
+                .programs
+                .pi
+                .as_ref()
+                .is_some_and(|program| program.use_llm_gateway),
         ]
         .into_iter()
         .any(|used| used);
@@ -1372,6 +1377,32 @@ programs:
             client_executable_for_daemon(Path::new("/usr/bin/agentdesktop")),
             Path::new("/usr/bin/agentdesktop")
         );
+    }
+
+    #[test]
+    fn one_shot_rejects_authenticated_pi_gateway() {
+        for authentication in [
+            "    type: oidc\n    issuer: https://login.example.com\n    clientId: agentdesktop\n",
+            "    type: controllerJwt\n    audience: agentgateway\n    allowedClientIds: [pi]\n",
+        ] {
+            let config = parse_daemon(&format!(
+                "llmGateway:\n  url: https://gateway.example.com\n  authentication:\n{authentication}programs:\n  pi:\n    model: selected\n"
+            )).unwrap();
+            let error =
+                validate_one_shot(&config).expect_err("Pi credentials require a running daemon");
+            assert!(error.to_string().contains("credential helpers"));
+        }
+    }
+
+    #[test]
+    fn one_shot_accepts_pi_without_runtime_credentials() {
+        for yaml in [
+            "programs:\n  pi: {}\n",
+            "llmGateway:\n  url: https://gateway.example.com\nprograms:\n  pi:\n    model: selected\n",
+            "llmGateway:\n  url: https://gateway.example.com\n  authentication:\n    type: oidc\n    issuer: https://login.example.com\n    clientId: agentdesktop\nprograms:\n  pi:\n    useLlmGateway: false\n",
+        ] {
+            validate_one_shot(&parse_daemon(yaml).unwrap()).unwrap();
+        }
     }
 
     #[test]

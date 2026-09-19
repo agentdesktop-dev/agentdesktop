@@ -334,6 +334,21 @@ programs:
     }
 
     #[test]
+    fn system_mode_rejects_pi_before_writing_other_settings() {
+        let fixture = Fixture::new();
+        let config = parse_daemon("programs:\n  claudeCode: {}\n  pi: {}\n").unwrap();
+        let error = fixture
+            .reconciler
+            .apply(&config)
+            .expect_err("Pi requires user mode");
+        assert!(error.to_string().contains("--user"));
+        assert!(
+            !fixture.root.exists(),
+            "preflight failure must not write any files"
+        );
+    }
+
+    #[test]
     fn user_mode_reconciles_pi_models_and_settings() {
         let root = std::env::temp_dir().join(format!(
             "agentdesktop-reconcile-user-pi-{}-{}",
@@ -373,6 +388,30 @@ programs:
         assert!(models.contains("claude-sonnet-4-5"));
         let settings = String::from_utf8(fs::read(root.join("pi/settings.json")).unwrap()).unwrap();
         assert!(settings.contains("defaultProvider"));
+
+        let repeated = reconciler.plan(&config).unwrap();
+        assert!(repeated.render().contains("Summary: 0 changes"));
+        repeated.apply().unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("pi/models.json")).unwrap(),
+            models
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("pi/settings.json")).unwrap(),
+            settings
+        );
+
+        reconciler
+            .apply(&parse_daemon("programs: {}").unwrap())
+            .unwrap();
+        for path in [
+            "models.json",
+            ".models.json.agentdesktop",
+            "settings.json",
+            ".settings.json.agentdesktop",
+        ] {
+            assert!(!root.join("pi").join(path).exists());
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -501,8 +540,6 @@ programs:
       company-model: {}
   grok:
     model: grok-4.6
-  pi:
-    model: claude-sonnet-4-5
 "#,
         )
         .unwrap();
@@ -525,10 +562,6 @@ programs:
             "opencode/config.json",
             "opencode/plugin.js",
             "grok/managed_config.toml",
-            "pi/models.json",
-            "pi/.models.json.agentdesktop",
-            "pi/settings.json",
-            "pi/.settings.json.agentdesktop",
         ];
         let contents: Vec<_> = paths
             .iter()
