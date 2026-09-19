@@ -16,6 +16,7 @@ programs:
     companyAnnouncements: ["Managed by Agentdesktop"]
   claudeDesktop:
     isLocalDevMcpEnabled: true
-  pi:
-    useLlmGateway: true
-    model: claude-sonnet-4-5
+  # Pi requires --user. Remove claudeDesktop before enabling Pi in user mode.
+  # pi:
+  #   useLlmGateway: true
+  #   model: claude-sonnet-4-5

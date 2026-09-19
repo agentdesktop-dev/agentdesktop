@@ -43,7 +43,7 @@
 |`programs.pi.api`|string|Pi API dialect for the managed provider. Defaults to `anthropic-messages`.|
 |`programs.pi.managedConfig`|object|Arbitrary values merged into Pi's `models.json`.|
 |`programs.pi.model`|string|Model ID selected when pointing Pi at the LLM gateway.<br><br>This is required when a top-level `llmGateway` is configured. If `models`<br>is empty, agentdesktop creates a catalog entry with this ID.|
-|`programs.pi.models`|object|Extra Pi model objects, keyed by model ID.<br><br>Each value is an arbitrary Pi `models.json` model object. Generated<br>gateway `baseUrl` and `apiKey` values take precedence. When this map is<br>non-empty, `model` must name one of its keys.|
+|`programs.pi.models`|object|Extra Pi model objects, keyed by model ID.<br><br>Each value is an arbitrary Pi `models.json` model object. The map key<br>sets its `id`. Generated gateway `baseUrl` and `apiKey` values take<br>precedence, including per-model URLs. When this map is non-empty,<br>`model` must name one of its keys.|
 |`programs.pi.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
 |`sandbox`|object|Local execution sandbox required for managed developer tools.|
 |`sandbox.filesystem`|object|Filesystem access available to sandboxed commands.|

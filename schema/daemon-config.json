@@ -299,7 +299,7 @@
       "additionalProperties": false
     },
     "PiConfig": {
-      "description": "Settings reconciled into Pi's user `models.json` and `settings.json`.\n\nGenerated `providers.agentdesktop` values take precedence over overlapping\n`managedConfig` keys. Pi stores configuration under `~/.pi/agent` (or\n`PI_CODING_AGENT_DIR`), so `--user` is the supported management mode.",
+      "description": "Settings reconciled into Pi's user `models.json` and `settings.json`.\n\nGenerated `providers.agentdesktop` values take precedence over overlapping\n`managedConfig` keys. Pi stores configuration under `~/.pi/agent` (or\n`PI_CODING_AGENT_DIR`), so management requires `--user`.",
       "type": "object",
       "properties": {
         "api": {
@@ -322,7 +322,7 @@
           ]
         },
         "models": {
-          "description": "Extra Pi model objects, keyed by model ID.\n\nEach value is an arbitrary Pi `models.json` model object. Generated\ngateway `baseUrl` and `apiKey` values take precedence. When this map is\nnon-empty, `model` must name one of its keys.",
+          "description": "Extra Pi model objects, keyed by model ID.\n\nEach value is an arbitrary Pi `models.json` model object. The map key\nsets its `id`. Generated gateway `baseUrl` and `apiKey` values take\nprecedence, including per-model URLs. When this map is non-empty,\n`model` must name one of its keys.",
           "type": "object",
           "additionalProperties": true
         },

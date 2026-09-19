@@ -15,6 +15,6 @@ programs:
   pi:
     useLlmGateway: true
     model: claude-sonnet-4-5
-#    Claude desktop cannot run with --user. Uncomment to enable
+#    Claude Desktop requires system mode. Remove pi above before enabling it.
 #  claudeDesktop:
 #    useLlmGateway: true
