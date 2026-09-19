@@ -12,6 +12,7 @@ import claudeDesktopIcon from "./assets/claude-desktop.svg";
 import codexIcon from "./assets/codex.svg";
 import copilotIcon from "./assets/copilot.svg";
 import grokIcon from "./assets/grok.svg";
+import grokBotIcon from "./assets/grok-bot.png";
 import ollamaIcon from "./assets/ollama.svg";
 import openCodeIcon from "./assets/opencode.svg";
 
@@ -50,6 +51,8 @@ const toolIcons: Record<string, string> = {
   claude_desktop: claudeDesktopIcon,
   grok: grokIcon,
   "grok-build": grokIcon,
+  "grok-bot": grokBotIcon,
+  grok_bot: grokBotIcon,
   opencode: openCodeIcon,
   vscode: copilotIcon,
 };
@@ -63,6 +66,8 @@ export function friendlyTool(kind: string) {
     "claude-desktop": "Claude Desktop",
     grok: "Grok Build",
     "grok-build": "Grok Build",
+    "grok-bot": "Grok Bot",
+    grok_bot: "Grok Bot",
     opencode: "OpenCode",
     vscode: "VS Code",
     cursor: "Cursor",
