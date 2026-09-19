@@ -32,7 +32,7 @@ pub(super) fn plan(
             || !json_merge::plan_remove(
                 settings_path,
                 &settings_state,
-                json_merge::JsonFormat::Json,
+                json_merge::MergeOptions::default(),
                 "managed settings",
                 ClaudeDesktop::DISPLAY_NAME,
                 plan,

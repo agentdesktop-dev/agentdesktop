@@ -52,7 +52,7 @@ pub(super) fn plan(
             && json_merge::plan_remove(
                 path,
                 &merge_state_path,
-                json_merge::JsonFormat::Json,
+                json_merge::MergeOptions::default(),
                 "settings",
                 ClaudeCode::DISPLAY_NAME,
                 plan,
@@ -69,7 +69,7 @@ pub(super) fn plan(
         json_merge::plan_merge(
             path,
             &merge_state_path,
-            json_merge::JsonFormat::Json,
+            json_merge::MergeOptions::default(),
             settings,
             is_owned(&owner_path, plan)?,
             "settings",

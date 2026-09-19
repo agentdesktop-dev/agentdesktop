@@ -22,6 +22,23 @@ pub(super) enum JsonFormat {
     Jsonc,
 }
 
+pub(super) struct MergeOptions {
+    pub format: JsonFormat,
+    pub permissions: u32,
+    /// JSON pointers to values managed as a whole, rather than merged additively.
+    pub replace_paths: &'static [&'static str],
+}
+
+impl Default for MergeOptions {
+    fn default() -> Self {
+        Self {
+            format: JsonFormat::Json,
+            permissions: 0o644,
+            replace_paths: &[],
+        }
+    }
+}
+
 impl JsonFormat {
     fn parse(&self, contents: &[u8]) -> anyhow::Result<Value> {
         match self {
@@ -47,7 +64,7 @@ pub(super) fn state_path(path: &Path) -> PathBuf {
 pub(super) fn plan_merge(
     path: &Path,
     state_path: &Path,
-    format: JsonFormat,
+    options: MergeOptions,
     managed: Value,
     legacy_owned: bool,
     description: &str,
@@ -69,7 +86,7 @@ pub(super) fn plan_merge(
         .unwrap_or(existing.is_none() || legacy_owned);
 
     let mut combined = match existing.as_deref() {
-        Some(contents) => match format.parse(contents) {
+        Some(contents) => match options.format.parse(contents) {
             Ok(Value::Object(object)) => Value::Object(object),
             Ok(_) | Err(_) => {
                 plan.record(display_name, description, "conflict", path);
@@ -85,13 +102,25 @@ pub(super) fn plan_merge(
         combined = json!({});
     }
     let before = combined.clone();
+    // Snapshot the user's original values before replacing any owned subtree.
+    for pointer in options.replace_paths {
+        if managed.pointer(pointer).is_some()
+            && let Some(existing) = combined.pointer_mut(pointer)
+        {
+            *existing = Value::Null;
+        }
+    }
     merge_overlay(&mut combined, managed);
 
     let mut contents = serde_json::to_vec_pretty(&combined)
         .with_context(|| format!("serialize merged {display_name}"))?;
     contents.push(b'\n');
     let action = match existing.as_deref() {
-        Some(existing) if existing == contents => "unchanged",
+        Some(existing)
+            if existing == contents && !needs_permission_update(path, options.permissions)? =>
+        {
+            "unchanged"
+        }
         Some(_) => "update",
         None => "create",
     };
@@ -105,7 +134,7 @@ pub(super) fn plan_merge(
     );
 
     if action != "unchanged" {
-        plan.write_file(path, &contents, 0o644)?;
+        plan.write_file(path, &contents, options.permissions)?;
     }
     let mut state = serde_json::to_vec_pretty(&MergeState {
         created,
@@ -122,7 +151,7 @@ pub(super) fn plan_merge(
 pub(super) fn plan_remove(
     path: &Path,
     state_path: &Path,
-    format: JsonFormat,
+    options: MergeOptions,
     description: &str,
     display_name: &str,
     plan: &ReconcilePlan,
@@ -142,7 +171,7 @@ pub(super) fn plan_remove(
                 .with_context(|| format!("read {display_name} from {}", path.display()));
         }
     };
-    let settings = match format.parse(&existing) {
+    let settings = match options.format.parse(&existing) {
         Ok(Value::Object(object)) => Value::Object(object),
         Ok(_) | Err(_) => {
             plan.record(display_name, description, "conflict", path);
@@ -161,7 +190,11 @@ pub(super) fn plan_remove(
     };
     let action = match proposed.as_deref() {
         None => "remove",
-        Some(contents) if contents == existing => "unchanged",
+        Some(contents)
+            if contents == existing && !needs_permission_update(path, options.permissions)? =>
+        {
+            "unchanged"
+        }
         Some(_) => "update",
     };
     plan.record_diff(
@@ -178,11 +211,29 @@ pub(super) fn plan_remove(
     } else if let Some(contents) = proposed
         && action == "update"
     {
-        plan.write_file(path, &contents, 0o644)?;
+        plan.write_file(path, &contents, options.permissions)?;
     }
     remove_file(state_path, display_name, plan)?;
     debug!(provider = display_name, action, path = %path.display(), "planned removal of managed values from user settings");
     Ok(true)
+}
+
+fn needs_permission_update(path: &Path, permissions: u32) -> anyhow::Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let existing = std::fs::metadata(path)
+            .with_context(|| format!("inspect permissions at {}", path.display()))?
+            .permissions()
+            .mode();
+        Ok(existing & 0o777 & !permissions != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, permissions);
+        Ok(false)
+    }
 }
 
 fn read_state(
@@ -292,6 +343,33 @@ fn rollback_value(
         let after = after
             .and_then(Value::as_array)
             .map_or(&[][..], Vec::as_slice);
+        // Additive merges keep the original array as a prefix. A replacement
+        // must restore its order and duplicate entries, then retain user edits.
+        if !after.starts_with(before) {
+            let mut result = before.to_vec();
+            let mut restored = before.to_vec();
+            let mut added = current_array.clone();
+            for value in after {
+                if let Some(index) = restored.iter().position(|entry| entry == value) {
+                    restored.remove(index);
+                }
+                if let Some(index) = added.iter().position(|entry| entry == value) {
+                    added.remove(index);
+                } else if let Some(index) = result.iter().position(|entry| entry == value) {
+                    // Respect a user's removal of a retained original entry.
+                    result.remove(index);
+                }
+            }
+            for value in added {
+                if let Some(index) = restored.iter().position(|entry| entry == &value) {
+                    // An original entry restored by the user is already present.
+                    restored.remove(index);
+                } else {
+                    result.push(value);
+                }
+            }
+            return Some(Value::Array(result));
+        }
         let mut result = current_array.clone();
         for added in after.iter().filter(|value| !before.contains(value)) {
             if let Some(index) = result.iter().position(|value| value == added) {

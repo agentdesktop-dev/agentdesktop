@@ -14,6 +14,11 @@ use crate::reconcile::ReconcilePlan;
 
 const PROVIDER_NAME: &str = "agentdesktop";
 const DEFAULT_API: &str = "anthropic-messages";
+const MODELS_OPTIONS: json_merge::MergeOptions = json_merge::MergeOptions {
+    format: json_merge::JsonFormat::Jsonc,
+    permissions: 0o600,
+    replace_paths: &[],
+};
 
 pub(super) fn plan(
     models_path: &Path,
@@ -29,7 +34,7 @@ pub(super) fn plan(
         json_merge::plan_remove(
             models_path,
             &models_state,
-            json_merge::JsonFormat::Jsonc,
+            MODELS_OPTIONS,
             "models",
             Pi::DISPLAY_NAME,
             plan,
@@ -37,7 +42,7 @@ pub(super) fn plan(
         json_merge::plan_remove(
             settings_path,
             &settings_state,
-            json_merge::JsonFormat::Json,
+            json_merge::MergeOptions::default(),
             "settings",
             Pi::DISPLAY_NAME,
             plan,
@@ -48,7 +53,14 @@ pub(super) fn plan(
     json_merge::plan_merge(
         models_path,
         &models_state,
-        json_merge::JsonFormat::Jsonc,
+        json_merge::MergeOptions {
+            replace_paths: if gateway.is_some() {
+                &["/providers/agentdesktop/models"]
+            } else {
+                &[]
+            },
+            ..MODELS_OPTIONS
+        },
         managed_models(config, gateway, credential_helper, socket)?,
         false,
         "models",
@@ -58,7 +70,7 @@ pub(super) fn plan(
     json_merge::plan_merge(
         settings_path,
         &settings_state,
-        json_merge::JsonFormat::Json,
+        json_merge::MergeOptions::default(),
         managed_settings(config, gateway)?,
         false,
         "settings",
@@ -189,6 +201,275 @@ mod tests {
 
     use super::{managed_models, managed_settings, plan};
     use crate::reconcile::ReconcilePlan;
+
+    fn reconcile_fixture(models: &Path, config: Option<&str>) -> ReconcilePlan {
+        let config = config.map(|yaml| parse_daemon(yaml).unwrap());
+        let changes = ReconcilePlan::default();
+        plan(
+            models,
+            &models.with_file_name("settings.json"),
+            Path::new("agentdesktop"),
+            Path::new("agentdesktop.sock"),
+            config.as_ref().map(|config| {
+                (
+                    config.programs.pi.as_ref().unwrap(),
+                    config.llm_gateway.as_ref(),
+                )
+            }),
+            &changes,
+        )
+        .unwrap();
+        changes
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn models_create_and_merge_use_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for existing_mode in [None, Some(0o600), Some(0o644)] {
+            let root = tempfile::tempdir().unwrap();
+            let models = root.path().join("models.json");
+            if let Some(mode) = existing_mode {
+                fs::write(
+                    &models,
+                    r#"{"providers":{"personal":{"apiKey":"test-secret"}}}"#,
+                )
+                .unwrap();
+                fs::set_permissions(&models, fs::Permissions::from_mode(mode)).unwrap();
+            }
+            let changes = reconcile_fixture(&models, Some("programs:\n  pi: {}\n"));
+            if let Some(mode) = existing_mode {
+                assert_eq!(
+                    fs::metadata(&models).unwrap().permissions().mode() & 0o777,
+                    mode
+                );
+            } else {
+                assert!(!models.exists(), "planning must not write files");
+            }
+            changes.apply().unwrap();
+            assert_eq!(
+                fs::metadata(&models).unwrap().permissions().mode() & 0o077,
+                0
+            );
+            if existing_mode.is_some() {
+                let merged: Value = serde_json::from_slice(&fs::read(&models).unwrap()).unwrap();
+                assert_eq!(merged["providers"]["personal"]["apiKey"], "test-secret");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn models_cleanup_keeps_personal_credentials_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let models = root.path().join("models.json");
+        let original = json!({"providers":{"personal":{"apiKey":"test-secret"}}});
+        fs::write(&models, serde_json::to_vec(&original).unwrap()).unwrap();
+        reconcile_fixture(&models, Some("llmGateway:\n  url: https://gateway.example.com\nprograms:\n  pi:\n    model: selected\n"))
+            .apply().unwrap();
+        fs::set_permissions(&models, fs::Permissions::from_mode(0o600)).unwrap();
+
+        reconcile_fixture(&models, None).apply().unwrap();
+        assert_eq!(
+            fs::metadata(&models).unwrap().permissions().mode() & 0o077,
+            0
+        );
+        let restored: Value = serde_json::from_slice(&fs::read(&models).unwrap()).unwrap();
+        assert_eq!(restored, original);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn models_reconcile_repairs_permissions_without_content_changes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Cover both an active provider and cleanup of a previous merge.
+        for cleanup in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let models = root.path().join("models.json");
+            fs::write(
+                &models,
+                r#"{"providers":{"personal":{"apiKey":"test-secret"}}}"#,
+            )
+            .unwrap();
+            let config = Some("programs:\n  pi: {}\n");
+            reconcile_fixture(&models, config).apply().unwrap();
+            let before = fs::read(&models).unwrap();
+            // Simulate a file written by the old 0644 merge implementation.
+            fs::set_permissions(&models, fs::Permissions::from_mode(0o644)).unwrap();
+            let changes = reconcile_fixture(&models, if cleanup { None } else { config });
+            assert!(
+                changes.render().contains("UPDATE  Pi models"),
+                "{}",
+                changes.render()
+            );
+            changes.apply().unwrap();
+            assert_eq!(fs::read(&models).unwrap(), before);
+            assert_eq!(
+                fs::metadata(&models).unwrap().permissions().mode() & 0o077,
+                0
+            );
+            if !cleanup {
+                let repeated = reconcile_fixture(&models, config);
+                assert!(repeated.render().contains("Summary: 0 changes"));
+                repeated.apply().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn gateway_catalog_replaces_existing_models_and_restores_on_removal() {
+        let root = tempfile::tempdir().unwrap();
+        let models = root.path().join("models.json");
+        let original = json!({"providers":{
+            "agentdesktop": {
+                "baseUrl":"https://old.example.com",
+                "apiKey":"test-secret",
+                "models":[
+                    {"id":"selected","baseUrl":"https://gateway.example.com"},
+                    {"id":"selected","baseUrl":"https://outside.example.com"},
+                    {"id":"stale","baseUrl":"https://outside.example.com"}
+                ]
+            },
+            "personal":{"models":[{"id":"personal-model"}],"apiKey":"personal-secret"}
+        }});
+        fs::write(&models, serde_json::to_vec(&original).unwrap()).unwrap();
+
+        for selected in ["selected", "next"] {
+            let config = format!(
+                "llmGateway:\n  url: https://gateway.example.com\nprograms:\n  pi:\n    model: {selected}\n"
+            );
+            reconcile_fixture(&models, Some(&config)).apply().unwrap();
+            let merged: Value = serde_json::from_slice(&fs::read(&models).unwrap()).unwrap();
+            assert_eq!(
+                merged["providers"]["agentdesktop"]["models"],
+                json!([
+                    {"id":selected,"baseUrl":"https://gateway.example.com"}
+                ])
+            );
+            assert_eq!(
+                merged["providers"]["personal"],
+                original["providers"]["personal"]
+            );
+            let repeated = reconcile_fixture(&models, Some(&config));
+            assert!(repeated.render().contains("Summary: 0 changes"));
+            repeated.apply().unwrap();
+        }
+
+        // Unrelated user edits made while managed must survive cleanup.
+        let mut edited: Value = serde_json::from_slice(&fs::read(&models).unwrap()).unwrap();
+        edited["providers"]["personal"]["apiKey"] = json!("updated-personal-secret");
+        fs::write(&models, serde_json::to_vec(&edited).unwrap()).unwrap();
+        reconcile_fixture(&models, None).apply().unwrap();
+        let restored: Value = serde_json::from_slice(&fs::read(&models).unwrap()).unwrap();
+        assert_eq!(
+            restored["providers"]["agentdesktop"],
+            original["providers"]["agentdesktop"]
+        );
+        assert_eq!(
+            restored["providers"]["personal"]["apiKey"],
+            "updated-personal-secret"
+        );
+        assert!(!super::json_merge::state_path(&models).exists());
+    }
+
+    #[test]
+    fn cleanup_restores_catalog_order_after_user_additions() {
+        for restore_original in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let models = root.path().join("models.json");
+            // Pi resolves duplicate IDs using the last entry. The original catalog
+            // must keep that ordering even if one entry matches the managed model.
+            let original_catalog = json!([
+                {"id":"selected","baseUrl":"https://outside.example.com"},
+                {"id":"selected","baseUrl":"https://gateway.example.com"},
+                {"id":"selected","baseUrl":"https://gateway.example.com"}
+            ]);
+            fs::write(
+                &models,
+                serde_json::to_vec(&json!({"providers":{"agentdesktop":{
+                    "models":original_catalog
+                }}}))
+                .unwrap(),
+            )
+            .unwrap();
+            reconcile_fixture(&models, Some("llmGateway:\n  url: https://gateway.example.com\nprograms:\n  pi:\n    model: selected\n"))
+            .apply().unwrap();
+            let mut edited: Value = serde_json::from_slice(&fs::read(&models).unwrap()).unwrap();
+            let addition = json!({"id":"added","baseUrl":"https://added.example.com"});
+            if restore_original {
+                // A user may restore an original entry before disabling management.
+                edited["providers"]["agentdesktop"]["models"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(original_catalog[0].clone());
+            }
+            edited["providers"]["agentdesktop"]["models"]
+                .as_array_mut()
+                .unwrap()
+                .push(addition.clone());
+            fs::write(&models, serde_json::to_vec(&edited).unwrap()).unwrap();
+
+            reconcile_fixture(&models, None).apply().unwrap();
+            let restored: Value = serde_json::from_slice(&fs::read(&models).unwrap()).unwrap();
+            let mut expected = original_catalog;
+            expected.as_array_mut().unwrap().push(addition);
+            assert_eq!(restored["providers"]["agentdesktop"]["models"], expected);
+        }
+    }
+
+    #[test]
+    fn disabling_gateway_restores_catalog_and_preserves_user_additions() {
+        let root = tempfile::tempdir().unwrap();
+        let models = root.path().join("models.json");
+        let original_model = json!({"id":"original","baseUrl":"https://original.example.com"});
+        fs::write(
+            &models,
+            serde_json::to_vec(&json!({"providers":{"agentdesktop":{
+                "models":[original_model.clone()]
+            }}}))
+            .unwrap(),
+        )
+        .unwrap();
+        reconcile_fixture(&models, Some("llmGateway:\n  url: https://gateway.example.com\nprograms:\n  pi:\n    model: selected\n"))
+            .apply().unwrap();
+        let mut edited: Value = serde_json::from_slice(&fs::read(&models).unwrap()).unwrap();
+        assert_eq!(
+            edited["providers"]["agentdesktop"]["models"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let added_model = json!({"id":"added","baseUrl":"https://added.example.com"});
+        edited["providers"]["agentdesktop"]["models"]
+            .as_array_mut()
+            .unwrap()
+            .push(added_model.clone());
+        fs::write(&models, serde_json::to_vec(&edited).unwrap()).unwrap();
+
+        reconcile_fixture(
+            &models,
+            Some("programs:\n  pi:\n    useLlmGateway: false\n"),
+        )
+        .apply()
+        .unwrap();
+        let restored: Value = serde_json::from_slice(&fs::read(&models).unwrap()).unwrap();
+        let catalog = restored["providers"]["agentdesktop"]["models"]
+            .as_array()
+            .unwrap();
+        assert_eq!(catalog.len(), 2);
+        assert!(catalog.contains(&original_model));
+        assert!(catalog.contains(&added_model));
+        reconcile_fixture(&models, None).apply().unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(&models).unwrap()).unwrap(),
+            restored
+        );
+    }
 
     #[test]
     fn gateway_overrides_per_model_endpoints() {
