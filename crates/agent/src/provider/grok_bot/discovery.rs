@@ -65,15 +65,21 @@ fn executable_candidates() -> Vec<PathBuf> {
 
     #[cfg(target_os = "linux")]
     {
+        // .deb/.rpm install into /opt/Grok Bot (binary may be grok-bot or "Grok Bot").
         candidates.extend([
             PathBuf::from("/opt/Grok Bot/grok-bot"),
+            PathBuf::from("/opt/Grok Bot/Grok Bot"),
             PathBuf::from("/opt/grok-bot/grok-bot"),
             PathBuf::from("/usr/bin/grok-bot"),
             PathBuf::from("/usr/local/bin/grok-bot"),
+            PathBuf::from("/usr/lib/grok-bot/grok-bot"),
+            PathBuf::from("/usr/share/grok-bot/grok-bot"),
         ]);
         for home in metadata::user_home_dirs() {
             candidates.insert(home.join(".local/bin/grok-bot"));
             candidates.insert(home.join(".local/share/Grok Bot/grok-bot"));
+            candidates.insert(home.join("Applications/grok-bot.AppImage"));
+            candidates.insert(home.join("Applications/Grok Bot.AppImage"));
         }
     }
 
@@ -189,6 +195,18 @@ mod tests {
         assert!(agent.mcp_servers.is_empty());
         assert!(agent.skills.is_empty());
         assert!(agent.executable.ends_with("Grok Bot"));
+    }
+
+    #[test]
+    fn asar_lookup_uses_electron_resources_next_to_the_binary() {
+        let root =
+            std::env::temp_dir().join(format!("agentdesktop-grok-bot-asar-{}", std::process::id()));
+        let bin = root.join("Grok Bot.exe");
+        fs::create_dir_all(root.join("resources")).unwrap();
+        fs::write(&bin, []).unwrap();
+        let archives = super::asar_archives(&bin);
+        assert!(archives.contains(&root.join("resources/app.asar")));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
