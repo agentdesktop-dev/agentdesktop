@@ -33,13 +33,6 @@ fn executable_candidates() -> Vec<PathBuf> {
     for home in metadata::user_home_dirs() {
         candidates.insert(home.join(".local/bin/pi"));
         candidates.insert(home.join(".npm-global/bin/pi"));
-        #[cfg(windows)]
-        {
-            candidates.insert(home.join(".local/bin/pi.exe"));
-            candidates.insert(home.join("AppData/Roaming/npm/pi.cmd"));
-            candidates.insert(home.join("AppData/Roaming/npm/pi.exe"));
-            candidates.insert(home.join("AppData/Local/pnpm/pi.exe"));
-        }
     }
     #[cfg(target_os = "macos")]
     candidates.extend([
@@ -51,7 +44,30 @@ fn executable_candidates() -> Vec<PathBuf> {
         PathBuf::from("/usr/bin/pi"),
         PathBuf::from("/usr/local/bin/pi"),
     ]);
+    #[cfg(windows)]
+    {
+        windows_executable_candidates(candidates)
+    }
+    #[cfg(not(windows))]
     candidates.into_iter().collect()
+}
+
+#[cfg(any(windows, test))]
+fn windows_executable_candidates(mut candidates: BTreeSet<PathBuf>) -> Vec<PathBuf> {
+    for home in metadata::user_home_dirs() {
+        candidates.extend([
+            home.join(".local/bin/pi.exe"),
+            home.join("AppData/Roaming/npm/pi.cmd"),
+            home.join("AppData/Roaming/npm/pi.exe"),
+            home.join("AppData/Roaming/npm/pi.ps1"),
+            home.join("AppData/Local/pnpm/pi.exe"),
+        ]);
+    }
+    // PowerShell shims may be absent from PATHEXT; keep PATH order before fallbacks.
+    metadata::find_all_in_path("pi.ps1")
+        .into_iter()
+        .chain(candidates)
+        .collect()
 }
 
 fn is_pi(executable: &Path) -> bool {
@@ -291,9 +307,12 @@ fi
 
     fn npm_shim_fixture(name: &str, source: &str) -> (tempfile::TempDir, PathBuf) {
         let root = tempfile::tempdir().unwrap();
-        let package = root
-            .path()
-            .join("node_modules/@earendil-works/pi-coding-agent");
+        let shim = write_npm_shim(root.path(), name, source);
+        (root, shim)
+    }
+
+    fn write_npm_shim(prefix: &Path, name: &str, source: &str) -> PathBuf {
+        let package = prefix.join("node_modules/@earendil-works/pi-coding-agent");
         fs::create_dir_all(package.join("dist/bundle")).unwrap();
         fs::write(
             package.join("package.json"),
@@ -301,9 +320,71 @@ fi
         )
         .unwrap();
         fs::write(package.join("dist/bundle/cli.js"), "#!/usr/bin/env node\n").unwrap();
-        let shim = root.path().join(name);
+        let shim = prefix.join(name);
         fs::write(&shim, source).unwrap();
-        (root, shim)
+        shim
+    }
+
+    #[test]
+    fn discovers_powershell_only_npm_installs_without_pathext() {
+        const EXPECTED_SHIM: &str = "AGENTDESKTOP_PI_PS1_TEST_SHIM";
+        if let Some(expected) = std::env::var_os(EXPECTED_SHIM) {
+            #[cfg(windows)]
+            let executable = super::discover()
+                .expect("Pi should be discovered")
+                .executable;
+            // Exercise Windows candidate discovery on other platforms too.
+            #[cfg(not(windows))]
+            let executable = super::windows_executable_candidates(Default::default())
+                .into_iter()
+                .filter(|path| path.is_file())
+                .find(|path| is_pi(path))
+                .expect("PowerShell-only Pi should be discovered");
+            assert_eq!(executable, PathBuf::from(expected));
+            return;
+        }
+
+        for use_path in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let prefix = home.path().join(if use_path {
+                "z-custom-npm-prefix"
+            } else {
+                "AppData/Roaming/npm"
+            });
+            let shim = write_npm_shim(&prefix, "pi.ps1", NPM_POWERSHELL_SHIM);
+            let path = if use_path {
+                // The first PATH match wins over later entries and fallback locations.
+                let later_prefix = home.path().join("a-older-npm-prefix");
+                write_npm_shim(&later_prefix, "pi.ps1", NPM_POWERSHELL_SHIM);
+                write_npm_shim(
+                    &home.path().join("AppData/Roaming/npm"),
+                    "pi.ps1",
+                    NPM_POWERSHELL_SHIM,
+                );
+                std::env::join_paths([&prefix, &later_prefix]).unwrap()
+            } else {
+                Default::default()
+            };
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "provider::pi::discovery::tests::discovers_powershell_only_npm_installs_without_pathext",
+                    "--nocapture",
+                ])
+                .env(EXPECTED_SHIM, &shim)
+                .env("HOME", home.path())
+                .env("USERPROFILE", home.path())
+                .env("PATH", path)
+                .env("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "Pi with only pi.ps1 (on PATH: {use_path}):\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
     }
 
     #[test]
