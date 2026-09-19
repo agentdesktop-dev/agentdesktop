@@ -15,13 +15,20 @@ gateway configuration also requires a running daemon and rejects `--once`.
 User mode merges `providers.agentdesktop` into `models.json` and sets the
 default model in `settings.json`. Model map keys determine catalog IDs, and
 gateway URLs override per-model endpoints, using each model's API dialect.
+The gateway owns the entire `providers.agentdesktop.models` catalog while
+enabled; stale entries are replaced, and the prior catalog is restored on
+cleanup. Other providers and user additions are preserved. On Unix,
+`models.json` is written with owner-only permissions (`0600`), including
+cleanup, and reconciliation repairs permissions on existing managed files.
 Commented `models.json` files are accepted and rewritten as standard JSON,
 preserving user configuration values. `settings.json` requires standard JSON.
 Discovery recognizes npm's Windows command shims as well as symlinked launchers,
 verifying the Pi package manifest without executing the launcher.
 MCP inventory comes from `pi-mcp-adapter` config files
 (`~/.pi/agent/mcp.json`, `.pi/mcp.json`, `.mcp.json`, and shared
-`~/.config/mcp/mcp.json` / `~/.agents/mcp.json`). Host-specific Cursor/Claude
+`~/.config/mcp/mcp.json` / `~/.agents/mcp.json` / `~/.agents/mcp/mcp.json`).
+Both `.agents` paths are supported by the [adapter's configuration loader](https://github.com/nicobailon/pi-mcp-adapter/blob/33bdc38d8dd3802f2b51ba1fe37e30ed7ae6a29a/config.ts#L15-L19).
+Host-specific Cursor/Claude
 files are not scanned until the adapter imports them into a Pi-owned file.
 
 ✅ Implemented · ◯ Not implemented · — Not applicable
