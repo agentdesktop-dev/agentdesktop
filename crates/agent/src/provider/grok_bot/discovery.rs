@@ -4,7 +4,6 @@ use std::{
 };
 
 use agentdesktop_core::model::Agent;
-use serde::Deserialize;
 
 use super::GrokBot;
 use crate::provider::metadata;
@@ -121,6 +120,7 @@ fn asar_archives(executable: &Path) -> BTreeSet<PathBuf> {
     archives
 }
 
+#[cfg(target_os = "macos")]
 fn bundle_plist(executable: &Path) -> Option<PathBuf> {
     let mut directory = executable.parent()?.to_path_buf();
     for _ in 0..4 {
@@ -135,7 +135,8 @@ fn bundle_plist(executable: &Path) -> Option<PathBuf> {
     None
 }
 
-#[derive(Deserialize)]
+#[cfg(target_os = "macos")]
+#[derive(serde::Deserialize)]
 struct InfoPlist {
     #[serde(rename = "CFBundleIdentifier")]
     identifier: Option<String>,
@@ -143,29 +144,46 @@ struct InfoPlist {
     version: Option<String>,
 }
 
+#[cfg(target_os = "macos")]
 fn read_info_plist(executable: &Path) -> Option<InfoPlist> {
     let path = bundle_plist(executable)?;
     plist::from_file(path).ok()
 }
 
+#[cfg(target_os = "macos")]
 fn bundle_identifier(executable: &Path) -> Option<String> {
     read_info_plist(executable)?
         .identifier
         .filter(|value| !value.is_empty())
 }
 
+#[cfg(not(target_os = "macos"))]
+fn bundle_identifier(_executable: &Path) -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "macos")]
 fn bundle_short_version(executable: &Path) -> Option<String> {
     read_info_plist(executable)?
         .version
         .filter(|value| !value.is_empty())
 }
 
+#[cfg(not(target_os = "macos"))]
+fn bundle_short_version(_executable: &Path) -> Option<String> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{bundle_identifier, bundle_short_version, is_grok_bot};
-    use crate::provider::grok_bot::GrokBot;
     use std::{fs, path::PathBuf};
 
+    #[cfg(target_os = "macos")]
+    use super::{bundle_identifier, bundle_short_version, is_grok_bot};
+    #[cfg(target_os = "macos")]
+    use crate::provider::grok_bot::GrokBot;
+
+    #[cfg(target_os = "macos")]
     #[test]
     fn accepts_official_bundle_and_reads_version() {
         let executable = fake_app("Grok Bot", GrokBot::BUNDLE_IDENTIFIER, "0.57.0");
@@ -178,6 +196,7 @@ mod tests {
         let _ = fs::remove_dir_all(executable.ancestors().nth(3).unwrap());
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn discovers_installed_macos_app_when_present() {
         let path = PathBuf::from("/Applications/Grok Bot.app/Contents/MacOS/Grok Bot");
@@ -209,6 +228,7 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn rejects_an_unrelated_grok_named_app() {
         let executable = fake_app("Grok Bot", "com.example.unofficial-grok", "1.0.0");
@@ -216,6 +236,7 @@ mod tests {
         let _ = fs::remove_dir_all(executable.ancestors().nth(3).unwrap());
     }
 
+    #[cfg(target_os = "macos")]
     fn fake_app(name: &str, identifier: &str, version: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "agentdesktop-grok-bot-{name}-{identifier}-{}",
