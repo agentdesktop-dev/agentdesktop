@@ -261,14 +261,18 @@ a {
 }
 
 .table-card,
-.detail-card,
-.output-card {
+.detail-card {
   overflow: hidden;
 }
 
 .output-card {
-  max-height: 490px;
-  overflow: auto;
+  position: sticky;
+  top: 16px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: calc(100dvh - 140px);
+  overflow: hidden;
 }
 
 .table-scroll {
@@ -1147,6 +1151,10 @@ code {
 .output-card pre {
   margin: 0;
   padding: 18px;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  overscroll-behavior: contain;
   color: var(--ink);
   background: var(--code-surface);
   font-size: 12px;
