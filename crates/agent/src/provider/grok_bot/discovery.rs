@@ -188,23 +188,24 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn accepts_official_bundle_and_reads_version() {
-        let executable = fake_app("Grok Bot", GrokBot::BUNDLE_IDENTIFIER, "0.57.0");
+        let (_root, executable) = fake_app("Grok Bot", GrokBot::BUNDLE_IDENTIFIER, "0.57.0");
         assert!(is_grok_bot(&executable));
         assert_eq!(
             bundle_identifier(&executable).as_deref(),
             Some(GrokBot::BUNDLE_IDENTIFIER)
         );
         assert_eq!(bundle_short_version(&executable).as_deref(), Some("0.57.0"));
-        let _ = fs::remove_dir_all(executable.ancestors().nth(3).unwrap());
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn discovers_installed_macos_app_when_present() {
+    #[ignore = "requires Grok Bot installed in /Applications"]
+    fn discovers_installed_macos_app() {
         let path = PathBuf::from("/Applications/Grok Bot.app/Contents/MacOS/Grok Bot");
-        if !path.is_file() {
-            return;
-        }
+        assert!(
+            path.is_file(),
+            "Grok Bot must be installed in /Applications"
+        );
         let agent = super::discover().expect("Grok Bot is installed");
         assert_eq!(agent.kind, GrokBot::ID);
         assert!(
@@ -220,34 +221,28 @@ mod tests {
 
     #[test]
     fn asar_lookup_uses_electron_resources_next_to_the_binary() {
-        let root =
-            std::env::temp_dir().join(format!("agentdesktop-grok-bot-asar-{}", std::process::id()));
-        let bin = root.join("Grok Bot.exe");
-        fs::create_dir_all(root.join("resources")).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("Grok Bot.exe");
+        fs::create_dir_all(root.path().join("resources")).unwrap();
         fs::write(&bin, []).unwrap();
         let archives = super::asar_archives(&bin);
-        assert!(archives.contains(&root.join("resources/app.asar")));
-        let _ = fs::remove_dir_all(root);
+        assert!(archives.contains(&root.path().join("resources/app.asar")));
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn rejects_an_unrelated_grok_named_app() {
-        let executable = fake_app("Grok Bot", "com.example.unofficial-grok", "1.0.0");
+        let (_root, executable) = fake_app("Grok Bot", "com.example.unofficial-grok", "1.0.0");
         assert!(!is_grok_bot(&executable));
-        let _ = fs::remove_dir_all(executable.ancestors().nth(3).unwrap());
     }
 
     #[cfg(target_os = "macos")]
-    fn fake_app(name: &str, identifier: &str, version: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "agentdesktop-grok-bot-{name}-{identifier}-{}",
-            std::process::id()
-        ));
-        let macos = root.join(format!("{name}.app/Contents/MacOS"));
+    fn fake_app(name: &str, identifier: &str, version: &str) -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let macos = root.path().join(format!("{name}.app/Contents/MacOS"));
         fs::create_dir_all(&macos).unwrap();
         fs::write(
-            root.join(format!("{name}.app/Contents/Info.plist")),
+            root.path().join(format!("{name}.app/Contents/Info.plist")),
             format!(
                 r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -265,6 +260,6 @@ mod tests {
         .unwrap();
         let executable = macos.join(name);
         fs::write(&executable, "#!/bin/sh\n").unwrap();
-        executable
+        (root, executable)
     }
 }

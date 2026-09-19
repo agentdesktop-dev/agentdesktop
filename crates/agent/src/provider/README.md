@@ -18,14 +18,14 @@ and no managed LLM-gateway configuration.
 | --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | Installation and version discovery | ✅ | ✅ | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ |
 | Local model discovery | — | — | — | — | — | ✅ | — | — | — |
-| MCP server discovery | ✅ | ✅ | ✅ | ◯ | ✅ | — | ✅ | ✅ | ◯ |
-| Skill discovery | ✅ | ◯ | ✅ | ◯ | ✅ | — | ✅ | ✅ | ◯ |
-| Managed configuration | ✅ | ✅ | ✅ | ✅ | ◯ | ◯ | ◯ | ✅ | ◯ |
-| LLM gateway routing | ✅ | ✅ | ✅ | ✅ | ◯ | — | ◯ | ✅ | ◯ |
-| Gateway credentials | ✅ | ✅ | ✅ | ✅ | ◯ | — | ◯ | ✅ | ◯ |
-| Sandbox configuration | ✅ | ◯ | ✅ | ◯ | ◯ | — | ◯ | ◯ | ◯ |
-| Tool-use telemetry | ✅ | ◯ | ◯ | ◯ | ◯ | — | ◯ | ◯ | ◯ |
-| Session-start telemetry | ✅ | ◯ | ◯ | ◯ | ◯ | — | ◯ | ◯ | ◯ |
+| MCP server discovery | ✅ | ✅ | ✅ | ◯ | ✅ | — | ✅ | ✅ | — |
+| Skill discovery | ✅ | ◯ | ✅ | ◯ | ✅ | — | ✅ | ✅ | — |
+| Managed configuration | ✅ | ✅ | ✅ | ✅ | ◯ | ◯ | ◯ | ✅ | — |
+| LLM gateway routing | ✅ | ✅ | ✅ | ✅ | ◯ | — | ◯ | ✅ | — |
+| Gateway credentials | ✅ | ✅ | ✅ | ✅ | ◯ | — | ◯ | ✅ | — |
+| Sandbox configuration | ✅ | ◯ | ✅ | ◯ | ◯ | — | ◯ | ◯ | — |
+| Tool-use telemetry | ✅ | ◯ | ◯ | ◯ | ◯ | — | ◯ | ◯ | — |
+| Session-start telemetry | ✅ | ◯ | ◯ | ◯ | ◯ | — | ◯ | ◯ | — |
 
 - ◯ describes a gap in Agentdesktop; it does not mean the upstream provider
   cannot support the feature.
