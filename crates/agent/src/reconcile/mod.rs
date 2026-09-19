@@ -4,7 +4,8 @@ pub use plan::ReconcilePlan;
 
 use crate::provider::{
     Provider, ReconcileContext, claude_code::ClaudeCode, claude_desktop::ClaudeDesktop,
-    codex::Codex, cursor::Cursor, grok::Grok, ollama::Ollama, opencode::OpenCode, vscode::VsCode,
+    codex::Codex, cursor::Cursor, grok::Grok, ollama::Ollama, opencode::OpenCode, pi::Pi,
+    vscode::VsCode,
 };
 use agentdesktop_core::{config::DaemonConfig, model::Discovery};
 use serde_json::Value;
@@ -25,6 +26,7 @@ pub use crate::provider::{
     codex::default_codex_managed_config_path,
     grok::default_grok_managed_config_path,
     opencode::{default_open_code_managed_config_path, default_open_code_plugin_path},
+    pi::{default_pi_models_path, default_pi_settings_path},
 };
 
 #[derive(Clone)]
@@ -44,6 +46,8 @@ impl Reconciler {
         open_code_managed_config_path: PathBuf,
         open_code_plugin_path: PathBuf,
         grok_managed_config_path: PathBuf,
+        pi_models_path: PathBuf,
+        pi_settings_path: PathBuf,
         credential_helper: PathBuf,
         socket: PathBuf,
     ) -> Self {
@@ -72,6 +76,10 @@ impl Reconciler {
                 Box::new(Cursor),
                 Box::new(Grok {
                     managed_config_path: grok_managed_config_path,
+                }),
+                Box::new(Pi {
+                    models_path: pi_models_path,
+                    settings_path: pi_settings_path,
                 }),
                 Box::new(Ollama),
             ]),
@@ -274,6 +282,8 @@ programs:
             root.join("opencode/config.json"),
             root.join("opencode/plugin.js"),
             root.join("grok/managed_config.toml"),
+            root.join("pi/models.json"),
+            root.join("pi/settings.json"),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
@@ -312,6 +322,8 @@ programs:
             root.join("opencode/config.json"),
             root.join("opencode/plugin.js"),
             root.join("grok/managed_config.toml"),
+            root.join("pi/models.json"),
+            root.join("pi/settings.json"),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
@@ -319,6 +331,88 @@ programs:
         let error = reconciler.apply(&config).expect_err("user mode must fail");
         assert!(error.to_string().contains("Grok Build"));
         assert!(!root.exists(), "preflight failure must not write any files");
+    }
+
+    #[test]
+    fn system_mode_rejects_pi_before_writing_other_settings() {
+        let fixture = Fixture::new();
+        let config = parse_daemon("programs:\n  claudeCode: {}\n  pi: {}\n").unwrap();
+        let error = fixture
+            .reconciler
+            .apply(&config)
+            .expect_err("Pi requires user mode");
+        assert!(error.to_string().contains("--user"));
+        assert!(
+            !fixture.root.exists(),
+            "preflight failure must not write any files"
+        );
+    }
+
+    #[test]
+    fn user_mode_reconciles_pi_models_and_settings() {
+        let root = std::env::temp_dir().join(format!(
+            "agentdesktop-reconcile-user-pi-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  pi:
+    model: claude-sonnet-4-5
+"#,
+        )
+        .unwrap();
+        let reconciler = Reconciler::new(
+            true,
+            root.join("claude/settings.json"),
+            root.join("claude-desktop/settings.json"),
+            root.join("claude-desktop/helper"),
+            root.join("codex/config.toml"),
+            root.join("opencode/config.json"),
+            root.join("opencode/plugin.js"),
+            root.join("grok/managed_config.toml"),
+            root.join("pi/models.json"),
+            root.join("pi/settings.json"),
+            root.join("bin/agentdesktop"),
+            root.join("agentdesktop.sock"),
+        );
+
+        reconciler
+            .apply(&config)
+            .expect("Pi is supported in user mode");
+        let models = String::from_utf8(fs::read(root.join("pi/models.json")).unwrap()).unwrap();
+        assert!(models.contains("agentdesktop"));
+        assert!(models.contains("claude-sonnet-4-5"));
+        let settings = String::from_utf8(fs::read(root.join("pi/settings.json")).unwrap()).unwrap();
+        assert!(settings.contains("defaultProvider"));
+
+        let repeated = reconciler.plan(&config).unwrap();
+        assert!(repeated.render().contains("Summary: 0 changes"));
+        repeated.apply().unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("pi/models.json")).unwrap(),
+            models
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("pi/settings.json")).unwrap(),
+            settings
+        );
+
+        reconciler
+            .apply(&parse_daemon("programs: {}").unwrap())
+            .unwrap();
+        for path in [
+            "models.json",
+            ".models.json.agentdesktop",
+            "settings.json",
+            ".settings.json.agentdesktop",
+        ] {
+            assert!(!root.join("pi").join(path).exists());
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(windows)]
@@ -367,6 +461,8 @@ programs:
             root.join("opencode/config.json"),
             root.join("opencode/plugin.js"),
             root.join("grok/managed_config.toml"),
+            root.join("pi/models.json"),
+            root.join("pi/settings.json"),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
@@ -408,6 +504,8 @@ programs:
                 root.join("opencode/config.json"),
                 root.join("opencode/plugin.js"),
                 root.join("grok/managed_config.toml"),
+                root.join("pi/models.json"),
+                root.join("pi/settings.json"),
                 root.join("bin/agentdesktop"),
                 root.join("agentdesktop.sock"),
             );
@@ -431,7 +529,7 @@ llmGateway:
   authentication:
     type: controllerJwt
     audience: agentgateway
-    allowedClientIds: [claude-code, claude-desktop, codex, opencode, grok]
+    allowedClientIds: [claude-code, claude-desktop, codex, opencode, grok, pi]
 programs:
   claudeCode: {}
   claudeDesktop: {}

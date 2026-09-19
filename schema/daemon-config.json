@@ -298,6 +298,41 @@
       },
       "additionalProperties": false
     },
+    "PiConfig": {
+      "description": "Settings reconciled into Pi's user `models.json` and `settings.json`.\n\nGenerated `providers.agentdesktop` values take precedence over overlapping\n`managedConfig` keys. Pi stores configuration under `~/.pi/agent` (or\n`PI_CODING_AGENT_DIR`), so management requires `--user`.",
+      "type": "object",
+      "properties": {
+        "api": {
+          "description": "Pi API dialect for the managed provider. Defaults to `anthropic-messages`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "managedConfig": {
+          "description": "Arbitrary values merged into Pi's `models.json`.",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "model": {
+          "description": "Model ID selected when pointing Pi at the LLM gateway.\n\nThis is required when a top-level `llmGateway` is configured. If `models`\nis empty, agentdesktop creates a catalog entry with this ID.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "models": {
+          "description": "Extra Pi model objects, keyed by model ID.\n\nEach value is an arbitrary Pi `models.json` model object. The map key\nsets its `id`. Generated gateway `baseUrl` and `apiKey` values take\nprecedence, including per-model URLs. When this map is non-empty,\n`model` must name one of its keys.",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "useLlmGateway": {
+          "description": "Whether this program uses the top-level LLM gateway.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
     "ProgramAuthentication": {
       "description": "Upstream authentication selected by a managed agent.",
       "oneOf": [
@@ -361,6 +396,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/OpenCodeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pi": {
+          "description": "Pi coding-agent harness managed configuration.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PiConfig"
             },
             {
               "type": "null"

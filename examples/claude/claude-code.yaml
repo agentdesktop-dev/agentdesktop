@@ -4,7 +4,7 @@ llmGateway:
   authentication:
     type: controllerJwt
     audience: "agentgateway"
-    allowedClientIds: [claude-code, claude-desktop, codex, opencode]
+    allowedClientIds: [claude-code, claude-desktop, codex, opencode, pi]
 
 telemetry:
   events:
@@ -16,3 +16,7 @@ programs:
     companyAnnouncements: ["Managed by Agentdesktop"]
   claudeDesktop:
     isLocalDevMcpEnabled: true
+  # Pi requires --user. Remove claudeDesktop before enabling Pi in user mode.
+  # pi:
+  #   useLlmGateway: true
+  #   model: claude-sonnet-4-5

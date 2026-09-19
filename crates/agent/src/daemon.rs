@@ -99,6 +99,14 @@ pub struct DaemonArgs {
     /// Path to Grok Build's organization-managed TOML configuration.
     #[arg(long)]
     grok_managed_config: Option<PathBuf>,
+
+    /// Path to Pi's models.json catalog.
+    #[arg(long)]
+    pi_models: Option<PathBuf>,
+
+    /// Path to Pi's settings.json.
+    #[arg(long)]
+    pi_settings: Option<PathBuf>,
 }
 
 struct ResolvedDaemonArgs {
@@ -114,6 +122,8 @@ struct ResolvedDaemonArgs {
     open_code_managed_config: PathBuf,
     open_code_plugin: PathBuf,
     grok_managed_config: PathBuf,
+    pi_models: PathBuf,
+    pi_settings: PathBuf,
     once: bool,
     dry_run: bool,
 }
@@ -149,6 +159,12 @@ impl DaemonArgs {
                 grok_managed_config: self
                     .grok_managed_config
                     .unwrap_or_else(reconcile::default_grok_managed_config_path),
+                pi_models: self
+                    .pi_models
+                    .unwrap_or_else(reconcile::default_pi_models_path),
+                pi_settings: self
+                    .pi_settings
+                    .unwrap_or_else(reconcile::default_pi_settings_path),
                 once: self.once || self.dry_run,
                 dry_run: self.dry_run,
             });
@@ -202,6 +218,12 @@ impl DaemonArgs {
                     .map(PathBuf::from)
                     .unwrap_or_else(|| home.join(".grok"))
                     .join("managed_config.toml")
+            }),
+            pi_models: self.pi_models.unwrap_or_else(|| {
+                crate::provider::pi::user_pi_agent_dir(&home).join("models.json")
+            }),
+            pi_settings: self.pi_settings.unwrap_or_else(|| {
+                crate::provider::pi::user_pi_agent_dir(&home).join("settings.json")
             }),
             once: self.once || self.dry_run,
             dry_run: self.dry_run,
@@ -272,6 +294,8 @@ where
         args.open_code_managed_config.clone(),
         args.open_code_plugin.clone(),
         args.grok_managed_config.clone(),
+        args.pi_models.clone(),
+        args.pi_settings.clone(),
         agentdesktop_client_executable()?,
         socket.clone(),
     );
@@ -631,6 +655,11 @@ fn validate_one_shot(config: &agentdesktop_core::config::DaemonConfig) -> anyhow
             config
                 .programs
                 .grok
+                .as_ref()
+                .is_some_and(|program| program.use_llm_gateway),
+            config
+                .programs
+                .pi
                 .as_ref()
                 .is_some_and(|program| program.use_llm_gateway),
         ]
@@ -1288,6 +1317,32 @@ programs:
             client_executable_for_daemon(Path::new("/usr/bin/agentdesktop")),
             Path::new("/usr/bin/agentdesktop")
         );
+    }
+
+    #[test]
+    fn one_shot_rejects_authenticated_pi_gateway() {
+        for authentication in [
+            "    type: oidc\n    issuer: https://login.example.com\n    clientId: agentdesktop\n",
+            "    type: controllerJwt\n    audience: agentgateway\n    allowedClientIds: [pi]\n",
+        ] {
+            let config = parse_daemon(&format!(
+                "llmGateway:\n  url: https://gateway.example.com\n  authentication:\n{authentication}programs:\n  pi:\n    model: selected\n"
+            )).unwrap();
+            let error =
+                validate_one_shot(&config).expect_err("Pi credentials require a running daemon");
+            assert!(error.to_string().contains("credential helpers"));
+        }
+    }
+
+    #[test]
+    fn one_shot_accepts_pi_without_runtime_credentials() {
+        for yaml in [
+            "programs:\n  pi: {}\n",
+            "llmGateway:\n  url: https://gateway.example.com\nprograms:\n  pi:\n    model: selected\n",
+            "llmGateway:\n  url: https://gateway.example.com\n  authentication:\n    type: oidc\n    issuer: https://login.example.com\n    clientId: agentdesktop\nprograms:\n  pi:\n    useLlmGateway: false\n",
+        ] {
+            validate_one_shot(&parse_daemon(yaml).unwrap()).unwrap();
+        }
     }
 
     #[test]
