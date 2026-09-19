@@ -176,7 +176,9 @@ fn bundle_short_version(_executable: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
+    use std::fs;
+    #[cfg(target_os = "macos")]
+    use std::path::PathBuf;
 
     #[cfg(target_os = "macos")]
     use super::{bundle_identifier, bundle_short_version, is_grok_bot};
