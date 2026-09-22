@@ -16,9 +16,9 @@ file.
 | Local model discovery | — | — | — | — | — | ✅ | — | — |
 | MCP server discovery | ✅ | ✅ | ✅ | ◯ | ✅ | — | ✅ | ✅ |
 | Skill discovery | ✅ | ◯ | ✅ | ◯ | ✅ | — | ✅ | ✅ |
-| Managed configuration | ✅ | ✅ | ✅ | ✅ | ◯ | ◯ | ◯ | ✅ |
-| LLM gateway routing | ✅ | ✅ | ✅ | ✅ | ◯ | — | ◯ | ✅ |
-| Gateway credentials | ✅ | ✅ | ✅ | ✅ | ◯ | — | ◯ | ✅ |
+| Managed configuration | ✅ | ✅ | ✅ | ✅ | User only | ◯ | ◯ | ✅ |
+| LLM gateway routing | ✅ | ✅ | ✅ | ✅ | Local passthrough | — | ◯ | ✅ |
+| Gateway credentials | ✅ | ✅ | ✅ | ✅ | Existing Copilot bearer | — | ◯ | ✅ |
 | Sandbox configuration | ✅ | ◯ | ✅ | ◯ | ◯ | — | ◯ | ◯ |
 | Tool-use telemetry | ✅ | ◯ | ◯ | ◯ | ◯ | — | ◯ | ◯ |
 | Session-start telemetry | ✅ | ◯ | ◯ | ◯ | ◯ | — | ◯ | ◯ |
@@ -31,5 +31,17 @@ file.
 - Discovery is best effort; versions may be unavailable. Ollama discovers models
   through its running local API. Grok Build versions require its optional
   `version.json` update cache; fresh installs may have no discovered version.
+
+## VS Code
+
+- `programs.vscode` manages only the configured User settings file, requires
+  `--user`, and accepts an explicit `daemon.vscode.config` path. It does not
+  automatically select the active profile or configure every profile,
+  workspace, Remote session, or system setting.
+- The local Copilot proxy uses the existing Copilot bearer, not a daemon-issued
+  credential. No daemon JWT or OIDC credential is a usable Copilot upstream
+  credential.
+
+See the [VS Code example](../../../../examples/vscode/README.md) for local setup.
 
 See [provider integration tests](../../tests/README.md) for the Docker suite.

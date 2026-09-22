@@ -94,6 +94,10 @@ The desktop and fleet interfaces also expose the MCP server and skill
 inventory. See the [standalone quickstart](https://agentdesktop.dev/docs/getting-started/standalone/)
 for prerequisites, test credentials, and a walkthrough of the local services.
 
+For **VS Code**, see the separate [VS Code example](examples/vscode/README.md).
+It uses user-mode Copilot endpoint overrides with local Copilot bearer
+passthrough; Copilot keeps its existing sign-in.
+
 ## Start locally, grow into a fleet
 
 Agentdesktop uses the same daemon and tool-native configuration model at every
@@ -135,7 +139,7 @@ stage.
 | Codex | Yes | Yes | MCP and skills | Yes |
 | Cursor | Yes | — | MCP and skills | — |
 | OpenCode | Yes | Yes | MCP | — |
-| VS Code | Yes | — | MCP and skills | — |
+| VS Code | Yes | Configured User settings only | MCP and skills | — |
 | Grok Build | Yes | System mode | MCP and skills | — |
 
 > **Don't see your tool?** We're actively expanding this list and would love
@@ -145,6 +149,9 @@ stage.
 
 The project targets Linux, macOS, and Windows. Support varies where a tool or
 operating system does not expose an equivalent native configuration surface.
+VS Code requires `--user`; `daemon.vscode.config` selects its User settings file
+without automatically managing other profiles.
+See the [provider support matrix](crates/agent/src/provider/README.md) for details.
 
 ## How it works
 

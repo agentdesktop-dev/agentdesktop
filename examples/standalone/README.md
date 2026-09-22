@@ -7,6 +7,9 @@ Agentgateway verifies that token against Dex's JWKS before forwarding the reques
 
 This example runs without a controller, and is useful for simple configuration on a single machine.
 
+For VS Code's local Copilot passthrough, use the separate
+[VS Code example](../vscode/README.md).
+
 ## Prerequisites
 
 - Docker with Compose

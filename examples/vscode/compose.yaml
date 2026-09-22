@@ -1,0 +1,8 @@
+services:
+  agentgateway:
+    image: cr.agentgateway.dev/agentgateway:v1.5.0
+    command: -f /etc/agentgateway/config.yaml
+    ports:
+      - "127.0.0.1:4002:4002"
+    volumes:
+      - ./agentgateway.yaml:/etc/agentgateway/config.yaml:ro

@@ -1,0 +1,6 @@
+# Local VS Code Copilot bearer passthrough through Agentgateway on port 4002.
+# Run with --user. Set daemon.vscode.config to select a different User file.
+programs:
+  vscode:
+    useLlmGateway: true
+    copilotProxyUrl: http://127.0.0.1:4002/v1

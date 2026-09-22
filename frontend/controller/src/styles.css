@@ -876,7 +876,8 @@ code {
   margin-top: 16px;
 }
 
-.sandbox-compatibility {
+.sandbox-compatibility,
+.configuration-error {
   margin: 12px 0 0;
   padding: 9px 10px;
   display: flex;
@@ -890,7 +891,8 @@ code {
   line-height: 1.45;
 }
 
-.sandbox-compatibility svg {
+.sandbox-compatibility svg,
+.configuration-error-icon {
   flex: 0 0 auto;
   margin-top: 1px;
 }
@@ -1091,6 +1093,13 @@ code {
 
 .agent-draft > .field {
   padding: 12px 0;
+}
+
+.agent-hint {
+  margin: 0 12px 12px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .icon-button {

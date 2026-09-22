@@ -76,6 +76,7 @@ struct ResolvedDaemonArgs {
     codex: ResolvedToolConfigPath,
     open_code: ResolvedOpenCodeStartupConfig,
     grok: ResolvedToolConfigPath,
+    vscode: ResolvedToolConfigPath,
     once: bool,
     dry_run: bool,
 }
@@ -150,6 +151,12 @@ impl DaemonArgs {
                         .config
                         .unwrap_or_else(reconcile::default_grok_managed_config_path),
                 },
+                vscode: ResolvedToolConfigPath {
+                    config: startup
+                        .vscode
+                        .config
+                        .unwrap_or_else(reconcile::default_vscode_settings_path),
+                },
                 once: self.once || self.dry_run,
                 dry_run: self.dry_run,
             });
@@ -171,6 +178,7 @@ impl DaemonArgs {
             socket
         };
         let claude_desktop_settings = user_claude_desktop_settings(&home, &config_home);
+        let vscode_settings = user_vscode_settings(&home, &config_home);
         Ok(ResolvedDaemonArgs {
             user: true,
             config,
@@ -218,6 +226,9 @@ impl DaemonArgs {
                         .join("managed_config.toml")
                 }),
             },
+            vscode: ResolvedToolConfigPath {
+                config: startup.vscode.config.unwrap_or(vscode_settings),
+            },
             once: self.once || self.dry_run,
             dry_run: self.dry_run,
         })
@@ -254,6 +265,18 @@ fn user_claude_desktop_settings(_home: &Path, _config_home: &Path) -> PathBuf {
         .join("Claude/claude_desktop_config.json");
     #[cfg(target_os = "linux")]
     return _config_home.join("Claude/claude_desktop_config.json");
+}
+
+fn user_vscode_settings(_home: &Path, _config_home: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    return _home.join("Library/Application Support/Code/User/settings.json");
+    #[cfg(target_os = "windows")]
+    return std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| _home.join("AppData/Roaming"))
+        .join("Code/User/settings.json");
+    #[cfg(target_os = "linux")]
+    return _config_home.join("Code/User/settings.json");
 }
 
 pub async fn run(args: DaemonArgs, socket: PathBuf) -> anyhow::Result<()> {
@@ -299,6 +322,7 @@ where
         args.open_code.config.clone(),
         args.open_code.plugin.clone(),
         args.grok.config.clone(),
+        args.vscode.config.clone(),
         agentdesktop_client_executable()?,
         socket.clone(),
     );
@@ -910,6 +934,68 @@ mod tests {
     use agentdesktop_core::config::parse_daemon;
     use agentdesktop_core::model::{Agent, Discovery};
     use tokio::sync::watch;
+
+    #[test]
+    fn startup_settings_resolve_the_vscode_settings_path_in_both_modes() {
+        use clap::{Args, FromArgMatches};
+
+        for user in [false, true] {
+            let startup = super::config::DaemonStartupConfig {
+                user,
+                vscode: super::config::ToolConfigPath {
+                    config: Some("test/Code/User/settings.json".into()),
+                },
+                ..Default::default()
+            };
+            let matches = super::DaemonArgs::augment_args(clap::Command::new("daemon"))
+                .try_get_matches_from(["daemon"])
+                .unwrap();
+            let args = super::DaemonArgs::from_arg_matches(&matches).unwrap();
+            let resolved = args
+                .resolve(
+                    startup,
+                    "config.yaml".into(),
+                    super::DEFAULT_SOCKET_PATH.into(),
+                )
+                .unwrap();
+            assert_eq!(resolved.user, user);
+            assert_eq!(
+                resolved.vscode.config,
+                Path::new("test/Code/User/settings.json")
+            );
+        }
+
+        let matches = super::DaemonArgs::augment_args(clap::Command::new("daemon"))
+            .try_get_matches_from(["daemon"])
+            .unwrap();
+        let args = super::DaemonArgs::from_arg_matches(&matches).unwrap();
+        let resolved = args
+            .resolve(
+                Default::default(),
+                "config.yaml".into(),
+                super::DEFAULT_SOCKET_PATH.into(),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved.vscode.config,
+            super::reconcile::default_vscode_settings_path()
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn user_vscode_settings_uses_the_native_profile_directory() {
+        let home = Path::new("/home/developer");
+        let config_home = Path::new("/custom/config");
+        let settings = super::user_vscode_settings(home, config_home);
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            settings,
+            home.join("Library/Application Support/Code/User/settings.json")
+        );
+        #[cfg(target_os = "linux")]
+        assert_eq!(settings, config_home.join("Code/User/settings.json"));
+    }
 
     fn discovery(kinds: &[&str]) -> Discovery {
         Discovery {

@@ -228,6 +228,11 @@
           "description": "Manage the current user’s tool settings instead of system settings.",
           "type": "boolean",
           "default": false
+        },
+        "vscode": {
+          "description": "VS Code paths. `config` is the User settings file managed in user mode.",
+          "$ref": "#/$defs/ToolConfigPath",
+          "default": {}
         }
       },
       "additionalProperties": false
@@ -480,6 +485,17 @@
               "type": "null"
             }
           ]
+        },
+        "vscode": {
+          "description": "VS Code built-in GitHub Copilot endpoint configuration.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VscodeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -582,6 +598,24 @@
             "string",
             "null"
           ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "VscodeConfig": {
+      "description": "Settings reconciled into VS Code's user settings.",
+      "type": "object",
+      "properties": {
+        "copilotProxyUrl": {
+          "description": "AGW `/v1` base URL used by VS Code's built-in GitHub Copilot endpoint overrides.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "useLlmGateway": {
+          "description": "Whether this program uses the top-level LLM gateway.",
+          "type": "boolean"
         }
       },
       "additionalProperties": false

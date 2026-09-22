@@ -76,6 +76,9 @@ pub struct DaemonStartupConfig {
     /// Grok Build paths.
     #[serde(default)]
     pub grok: ToolConfigPath,
+    /// VS Code paths. `config` is the User settings file managed in user mode.
+    #[serde(default)]
+    pub vscode: ToolConfigPath,
 }
 
 /// Local Claude Desktop paths.
@@ -481,6 +484,9 @@ pub struct ProgramsConfig {
     /// Grok Build managed configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grok: Option<GrokConfig>,
+    /// VS Code built-in GitHub Copilot endpoint configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vscode: Option<VscodeConfig>,
 }
 
 impl ProgramsConfig {
@@ -490,6 +496,7 @@ impl ProgramsConfig {
             && self.codex.is_none()
             && self.open_code.is_none()
             && self.grok.is_none()
+            && self.vscode.is_none()
     }
 }
 
@@ -614,6 +621,20 @@ pub struct GrokConfig {
     /// so null values cannot be reconciled.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub managed_config: BTreeMap<String, serde_json::Value>,
+}
+
+/// Settings reconciled into VS Code's user settings.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VscodeConfig {
+    /// Whether this program uses the top-level LLM gateway.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub use_llm_gateway: bool,
+    /// AGW `/v1` base URL used by VS Code's built-in GitHub Copilot endpoint overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
+    pub copilot_proxy_url: Option<Url>,
 }
 
 /// Upstream authentication selected by a managed agent.
@@ -758,23 +779,12 @@ fn validate_daemon(
         if programs.grok.is_some() {
             anyhow::bail!("sandbox is not supported for Grok Build");
         }
+        if programs.vscode.is_some() {
+            anyhow::bail!("sandbox is not supported for VS Code");
+        }
     }
     if let Some(gateway) = llm_gateway {
-        if !matches!(gateway.url.scheme(), "http" | "https") {
-            anyhow::bail!(
-                "LLM gateway URL must use HTTP or HTTPS, got {}",
-                gateway.url.scheme()
-            );
-        }
-        if gateway.url.host().is_none() {
-            anyhow::bail!("LLM gateway URL must include a host");
-        }
-        if !gateway.url.username().is_empty() || gateway.url.password().is_some() {
-            anyhow::bail!("LLM gateway URL cannot include credentials");
-        }
-        if gateway.url.query().is_some() || gateway.url.fragment().is_some() {
-            anyhow::bail!("LLM gateway URL cannot include a query or fragment");
-        }
+        validate_llm_gateway_url("URL", &gateway.url)?;
         if let Some(authentication) = &gateway.authentication {
             match authentication {
                 LlmGatewayAuthentication::ControllerJwt {
@@ -900,6 +910,40 @@ fn validate_daemon(
         if !grok.models.is_empty() && !grok.models.contains_key(model) {
             anyhow::bail!("Grok Build model {model} is not declared in models");
         }
+    }
+    if let Some(vscode) = &programs.vscode
+        && vscode.use_llm_gateway
+    {
+        let proxy_url = vscode
+            .copilot_proxy_url
+            .as_ref()
+            .context("VS Code requires copilotProxyUrl when llmGateway is configured")?;
+        validate_llm_gateway_url("VS Code Copilot proxy URL", proxy_url)?;
+        if proxy_url.scheme() == "http" && !proxy_url.host_str().is_some_and(is_loopback) {
+            anyhow::bail!("VS Code Copilot proxy URL must use HTTPS or a loopback HTTP host");
+        }
+        if !proxy_url.path().trim_end_matches('/').ends_with("/v1") {
+            anyhow::bail!("VS Code copilotProxyUrl must end in /v1");
+        }
+    }
+    Ok(())
+}
+
+fn validate_llm_gateway_url(label: &str, url: &Url) -> anyhow::Result<()> {
+    if !matches!(url.scheme(), "http" | "https") {
+        anyhow::bail!(
+            "LLM gateway {label} must use HTTP or HTTPS, got {}",
+            url.scheme()
+        );
+    }
+    if url.host().is_none() {
+        anyhow::bail!("LLM gateway {label} must include a host");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        anyhow::bail!("LLM gateway {label} cannot include credentials");
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        anyhow::bail!("LLM gateway {label} cannot include a query or fragment");
     }
     Ok(())
 }
@@ -1053,6 +1097,8 @@ oidc:
         .expect("Claude subscription user configuration example");
         parse_daemon(include_str!("../../../examples/standalone/config.yaml"))
             .expect("standalone daemon configuration example");
+        parse_daemon(include_str!("../../../examples/vscode/config.yaml"))
+            .expect("VS Code daemon configuration example");
     }
 
     #[test]
@@ -1300,5 +1346,136 @@ programs:
                 .to_string()
                 .contains("Grok Build model missing is not declared in models")
         );
+    }
+
+    #[test]
+    fn vscode_requires_a_secure_v1_copilot_proxy() {
+        let valid = r#"
+programs:
+  vscode:
+    copilotProxyUrl: http://127.0.0.1:4002/v1
+"#;
+        let daemon = parse_daemon(valid).expect("valid VS Code gateway configuration");
+        assert_eq!(
+            daemon
+                .programs
+                .vscode
+                .unwrap()
+                .copilot_proxy_url
+                .unwrap()
+                .as_str(),
+            "http://127.0.0.1:4002/v1"
+        );
+
+        for (invalid, expected) in [
+            (
+                valid.replace("127.0.0.1:4002/v1", "gateway.example.com/v1"),
+                "HTTPS or a loopback HTTP host",
+            ),
+            (valid.replace("/v1", "/v2"), "must end in /v1"),
+            (
+                valid.replace(
+                    "  vscode:\n    copilotProxyUrl: http://127.0.0.1:4002/v1\n",
+                    "  vscode: {}\n",
+                ),
+                "requires copilotProxyUrl",
+            ),
+        ] {
+            let error = parse_daemon(&invalid).expect_err("invalid VS Code configuration");
+            assert!(format!("{error:#}").contains(expected));
+        }
+    }
+
+    #[test]
+    fn gateway_and_copilot_urls_share_transport_and_secret_validation() {
+        for (invalid, expected) in [
+            ("ftp://127.0.0.1/v1", "must use HTTP or HTTPS"),
+            (
+                "http://user:password@127.0.0.1/v1",
+                "cannot include credentials",
+            ),
+            (
+                "http://127.0.0.1/v1?token=value",
+                "cannot include a query or fragment",
+            ),
+            (
+                "http://127.0.0.1/v1#fragment",
+                "cannot include a query or fragment",
+            ),
+        ] {
+            for document in [
+                format!("llmGateway:\n  url: {invalid}\n"),
+                format!("programs:\n  vscode:\n    copilotProxyUrl: {invalid}\n"),
+            ] {
+                let error = parse_daemon(&document).expect_err("invalid gateway URL");
+                assert!(format!("{error:#}").contains(expected));
+            }
+        }
+    }
+
+    #[test]
+    fn vscode_accepts_https_loopback_and_explicit_disable() {
+        for proxy in [
+            "https://gateway.example.com/copilot/v1/",
+            "http://localhost:4002/v1",
+            "http://[::1]:4002/v1",
+        ] {
+            let daemon = parse_daemon(&format!(
+                "programs:\n  vscode:\n    copilotProxyUrl: {proxy}\n"
+            ))
+            .expect("secure VS Code proxy URL");
+            assert!(!daemon.is_empty());
+        }
+        let daemon = parse_daemon("programs:\n  vscode:\n    useLlmGateway: false\n")
+            .expect("disabled VS Code does not require a proxy URL");
+        assert!(
+            !daemon.is_empty(),
+            "explicit disable still needs reconciliation"
+        );
+        assert!(!daemon.programs.vscode.unwrap().use_llm_gateway);
+    }
+
+    #[test]
+    fn vscode_rejects_sandbox_and_unknown_fields() {
+        let error = parse_daemon(
+            "sandbox: {}\nprograms:\n  vscode:\n    copilotProxyUrl: http://127.0.0.1:4002/v1\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("not supported for VS Code"));
+        assert!(
+            parse_daemon(
+                "programs:\n  vscode:\n    copilotProxyUrl: http://127.0.0.1:4002/v1\n    apiKey: secret\n",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn grok_and_vscode_configuration_round_trip_together() {
+        let document = serde_json::json!({
+            "llmGateway": {
+                "url": "https://gateway.example.com",
+                "authentication": {
+                    "type": "controllerJwt",
+                    "audience": "agentgateway",
+                    "allowedClientIds": ["grok"]
+                }
+            },
+            "programs": {
+                "grok": { "model": "grok-4.6" },
+                "vscode": { "copilotProxyUrl": "http://127.0.0.1:4002/v1" }
+            }
+        });
+        let daemon = parse_daemon(&document.to_string())
+            .expect("Grok and VS Code configuration can coexist");
+        let serialized = serde_json::to_value(&daemon).unwrap();
+        assert_eq!(serialized["programs"]["grok"]["model"], "grok-4.6");
+        assert_eq!(
+            serialized["programs"]["vscode"]["copilotProxyUrl"],
+            "http://127.0.0.1:4002/v1"
+        );
+        let restored = parse_daemon(&serialized.to_string()).unwrap();
+        assert!(restored.programs.grok.is_some());
+        assert!(restored.programs.vscode.is_some());
     }
 }

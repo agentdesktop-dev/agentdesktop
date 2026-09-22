@@ -1,0 +1,45 @@
+# Agentgateway v1.5.0. Port 4002 forwards VS Code's existing Copilot bearer to
+# GitHub Copilot unchanged. Do not expose port 4002 remotely.
+binds:
+  - port: 4002
+    listeners:
+      - name: vscode-copilot
+        protocol: HTTP
+        routes:
+          # v1.5.0's generic AI backend does not implement Models.
+          # Forward both discovery paths to Copilot's native /models endpoint.
+          - name: copilot-models
+            matches:
+              - method: GET
+                path:
+                  exact: /v1/models
+              - method: GET
+                path:
+                  exact: /models
+            policies:
+              urlRewrite:
+                path:
+                  full: /models
+            backends:
+              - host: api.githubcopilot.com:443
+                policies:
+                  backendTLS: {}
+          - name: copilot
+            backends:
+              - ai:
+                  name: copilot
+                  provider:
+                    copilot: {}
+                  policies:
+                    backendAuth:
+                      passthrough: {}
+                    ai:
+                      routes:
+                        /chat/completions: completions
+                        /responses: responses
+                        /embeddings: embeddings
+                        /v1/chat/completions: completions
+                        /v1/responses: responses
+                        /v1/messages: messages
+                        /v1/embeddings: embeddings
+                        "*": detect

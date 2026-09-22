@@ -23,6 +23,8 @@
 |`daemon.socket`|string|Local API Unix socket or Windows named pipe.|
 |`daemon.stateDir`|string|Persistent daemon state directory.|
 |`daemon.user`|boolean|Manage the current user’s tool settings instead of system settings.|
+|`daemon.vscode`|object|VS Code paths. `config` is the User settings file managed in user mode.|
+|`daemon.vscode.config`|string|Configuration file.|
 |`inventoryInterval`|string|Interval between inventory refreshes. Defaults to `15m`, and must be<br>greater than zero.<br><br>Discovery walks user home directories and developer-tool configuration<br>files, so this trades inventory freshness against local disk activity.|
 |`llmGateway`|object|LLM gateway used by managed developer tools.|
 |`llmGateway.authentication`|object|Authentication mechanism used when connecting to this gateway.|
@@ -56,6 +58,9 @@
 |`programs.openCode.model`|string|Model ID selected from `models` when using the LLM gateway.<br><br>This is required when a top-level `llmGateway` is configured.|
 |`programs.openCode.models`|object|Models exposed by the managed LLM gateway provider, keyed by model ID.<br><br>Each value is an arbitrary OpenCode model configuration object. At least<br>one model is required when a top-level `llmGateway` is configured.|
 |`programs.openCode.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
+|`programs.vscode`|object|VS Code built-in GitHub Copilot endpoint configuration.|
+|`programs.vscode.copilotProxyUrl`|string|AGW `/v1` base URL used by VS Code's built-in GitHub Copilot endpoint overrides.|
+|`programs.vscode.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
 |`sandbox`|object|Local execution sandbox required for managed developer tools.|
 |`sandbox.filesystem`|object|Filesystem access available to sandboxed commands.|
 |`sandbox.filesystem.denied`|[]string|Paths sandboxed commands may neither read nor modify.|

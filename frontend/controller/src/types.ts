@@ -74,12 +74,14 @@ export type AgentKind =
   | "claudeDesktop"
   | "codex"
   | "openCode"
-  | "grok";
+  | "grok"
+  | "vscode";
 
 export type AgentDraft = {
   kind: AgentKind;
   useGateway: boolean;
   settings: string;
+  copilotProxyUrl?: string;
 };
 
 export type SandboxConfigDocument = {

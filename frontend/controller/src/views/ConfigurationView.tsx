@@ -7,7 +7,7 @@ import {
   Plus,
   Trash2,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 import type { AgentDraft, AgentKind, DaemonConfigDocument } from "../types";
 
@@ -20,6 +20,7 @@ export function ConfigurationView({
   initialConfig,
   onCopy,
 }: ConfigurationViewProps) {
+  const formId = useId();
   const addAgentMenu = useRef<HTMLDetailsElement>(null);
   const initializedFromController = useRef(false);
   const [gateway, setGateway] = useState(true);
@@ -45,7 +46,7 @@ export function ConfigurationView({
     return [definition?.label ?? agent.kind];
   });
   const sandboxUnavailable = incompatibleSandboxAgentNames.length > 0;
-  const yaml = daemonConfigYaml({
+  const options = {
     gateway,
     gatewayUrl,
     controllerJwt,
@@ -58,7 +59,9 @@ export function ConfigurationView({
     toolUseTelemetry,
     toolInputTelemetry,
     agents,
-  });
+  };
+  const errors = configurationErrors(options);
+  const yaml = errors.length ? "" : daemonConfigYaml(options);
   const availableAgents = configurableAgents.filter(
     (candidate) => !agents.some((agent) => agent.kind === candidate.kind),
   );
@@ -106,6 +109,7 @@ export function ConfigurationView({
   }, []);
 
   async function copyYaml() {
+    if (errors.length) return;
     if (onCopy) {
       await onCopy(yaml);
     } else {
@@ -134,6 +138,9 @@ export function ConfigurationView({
         kind: selectedAgent,
         useGateway: true,
         settings: definition?.initialSettings ?? "",
+        ...(selectedAgent === "vscode"
+          ? { copilotProxyUrl: "http://127.0.0.1:4002/v1" }
+          : {}),
       },
     ]);
   }
@@ -420,15 +427,24 @@ export function ConfigurationView({
                       </div>
                       <label className="toggle-row compact">
                         <span>
-                          <strong>Use LLM gateway</strong>
+                          <strong>
+                            {agent.kind === "vscode"
+                              ? "Use Copilot proxy"
+                              : "Use LLM gateway"}
+                          </strong>
                           <small>
-                            Apply the general gateway settings above.
+                            {agent.kind === "vscode"
+                              ? "User settings only; keeps Copilot sign-in."
+                              : "Apply the general gateway settings above."}
                           </small>
                         </span>
                         <input
                           type="checkbox"
-                          disabled={!gateway}
-                          checked={gateway && agent.useGateway}
+                          disabled={agent.kind !== "vscode" && !gateway}
+                          checked={
+                            (agent.kind === "vscode" || gateway) &&
+                            agent.useGateway
+                          }
                           onChange={(event) =>
                             updateAgent(agent.kind, {
                               useGateway: event.target.checked,
@@ -436,23 +452,53 @@ export function ConfigurationView({
                           }
                         />
                       </label>
-                      <label className="field">
-                        <span>Additional settings (YAML)</span>
-                        <textarea
-                          rows={7}
-                          spellCheck={false}
-                          placeholder={definition.placeholder}
-                          value={agent.settings}
-                          onChange={(event) =>
-                            updateAgent(agent.kind, {
-                              settings: event.target.value,
-                            })
-                          }
-                        />
-                        <small>
-                          Use the agent’s native configuration keys.
-                        </small>
-                      </label>
+                      {agent.kind === "vscode" ? (
+                        <>
+                          <div className="field">
+                            <label htmlFor={`${formId}-copilot-proxy`}>
+                              Copilot proxy URL
+                            </label>
+                            <input
+                              id={`${formId}-copilot-proxy`}
+                              type="url"
+                              value={agent.copilotProxyUrl ?? ""}
+                              required={agent.useGateway}
+                              aria-describedby={`${formId}-copilot-proxy-help`}
+                              onChange={(event) =>
+                                updateAgent(agent.kind, {
+                                  copilotProxyUrl: event.target.value,
+                                })
+                              }
+                            />
+                            <small id={`${formId}-copilot-proxy-help`}>
+                              Must end in /v1. For local bearer passthrough, use
+                              the loopback listener, not the JWT gateway.
+                            </small>
+                          </div>
+                          <p className="agent-hint">
+                            Requires a user-mode daemon. Targets the configured
+                            VS Code User settings file, not every profile.
+                          </p>
+                        </>
+                      ) : (
+                        <label className="field">
+                          <span>Additional settings (YAML)</span>
+                          <textarea
+                            rows={7}
+                            spellCheck={false}
+                            placeholder={definition.placeholder}
+                            value={agent.settings}
+                            onChange={(event) =>
+                              updateAgent(agent.kind, {
+                                settings: event.target.value,
+                              })
+                            }
+                          />
+                          <small>
+                            Use the agent’s native configuration keys.
+                          </small>
+                        </label>
+                      )}
                     </section>
                   );
                 })}
@@ -473,11 +519,27 @@ export function ConfigurationView({
               type="button"
               className="button secondary"
               onClick={copyYaml}
+              disabled={errors.length > 0}
+              aria-describedby={errors.length ? `${formId}-errors` : undefined}
             >
               {copied ? <Check size={14} /> : <Copy size={14} />}
               {copied ? "Copied" : "Copy"}
             </button>
           </div>
+          {errors.length > 0 && (
+            <p
+              className="configuration-error"
+              id={`${formId}-errors`}
+              role="status"
+            >
+              <CircleAlert
+                className="configuration-error-icon"
+                size={14}
+                aria-hidden="true"
+              />
+              {errors.join(" ")}
+            </p>
+          )}
           {/* biome-ignore lint/a11y/noNoninteractiveTabindex: Keyboard users need to focus this scrollable preview. */}
           <pre tabIndex={0}>
             <code>{yaml}</code>
@@ -528,15 +590,22 @@ const configurableAgents: Array<{
     placeholder: "model: grok-4.6",
     initialSettings: "model: grok-4.6",
   },
+  {
+    kind: "vscode",
+    label: "VS Code",
+    iconKind: "vscode",
+    placeholder: "",
+  },
 ];
 
 const sandboxUnsupportedAgents = new Set<AgentKind>([
   "claudeDesktop",
   "openCode",
   "grok",
+  "vscode",
 ]);
 
-function daemonConfigYaml(options: {
+interface ConfigurationOptions {
   gateway: boolean;
   gatewayUrl: string;
   controllerJwt: boolean;
@@ -549,7 +618,39 @@ function daemonConfigYaml(options: {
   toolUseTelemetry: boolean;
   toolInputTelemetry: boolean;
   agents: AgentDraft[];
-}) {
+}
+
+function configurationErrors(options: ConfigurationOptions) {
+  const errors: string[] = [];
+  for (const agent of options.agents) {
+    if (agent.kind === "vscode" && agent.useGateway) {
+      try {
+        const url = new URL(agent.copilotProxyUrl ?? "");
+        const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(
+          url.hostname,
+        );
+        if (
+          (url.protocol !== "https:" &&
+            !(url.protocol === "http:" && loopback)) ||
+          url.username ||
+          url.password ||
+          url.search ||
+          url.hash ||
+          !url.pathname.replace(/\/+$/, "").endsWith("/v1")
+        ) {
+          throw new Error("Invalid proxy URL");
+        }
+      } catch {
+        errors.push(
+          "VS Code needs an HTTPS or loopback HTTP proxy URL ending in /v1, without credentials, query or fragment.",
+        );
+      }
+    }
+  }
+  return errors;
+}
+
+function daemonConfigYaml(options: ConfigurationOptions) {
   const lines: string[] = [];
   if (options.gateway) {
     lines.push("llmGateway:", `  url: ${yamlString(options.gatewayUrl)}`);
@@ -591,12 +692,23 @@ function daemonConfigYaml(options: {
     for (const agent of options.agents) {
       const settings = agent.settings.trim();
       const disablesGateway = options.gateway && !agent.useGateway;
-      if (!settings && !disablesGateway) {
+      const managedSettings: string[] = [];
+      if (agent.kind === "vscode") {
+        managedSettings.push(`useLlmGateway: ${agent.useGateway}`);
+        if (agent.copilotProxyUrl !== undefined) {
+          managedSettings.push(
+            `copilotProxyUrl: ${yamlString(agent.copilotProxyUrl)}`,
+          );
+        }
+      } else if (disablesGateway) {
+        managedSettings.push("useLlmGateway: false");
+      }
+      if (!settings && managedSettings.length === 0) {
         lines.push(`  ${agent.kind}: {}`);
         continue;
       }
       lines.push(`  ${agent.kind}:`);
-      if (disablesGateway) lines.push("    useLlmGateway: false");
+      lines.push(...managedSettings.map((line) => `    ${line}`));
       if (settings) {
         lines.push(...settings.split("\n").map((line) => `    ${line}`));
       }
@@ -630,13 +742,22 @@ function agentDrafts(programs: DaemonConfigDocument["programs"]): AgentDraft[] {
     const program = programs[kind];
     if (!program) return [];
     const { useLlmGateway, ...settings } = program;
-    return [
-      {
-        kind,
-        useGateway: useLlmGateway !== false,
-        settings: objectYaml(settings),
-      },
-    ];
+    const draft: AgentDraft = {
+      kind,
+      useGateway: useLlmGateway !== false,
+      settings: "",
+    };
+    if (kind === "vscode") {
+      const { copilotProxyUrl, ...additional } = settings;
+      draft.copilotProxyUrl =
+        typeof copilotProxyUrl === "string" ? copilotProxyUrl : "";
+      draft.settings = Object.keys(additional).length
+        ? objectYaml(additional)
+        : "";
+    } else {
+      draft.settings = Object.keys(settings).length ? objectYaml(settings) : "";
+    }
+    return [draft];
   });
 }
 
