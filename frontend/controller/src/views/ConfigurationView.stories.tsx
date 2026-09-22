@@ -52,6 +52,16 @@ export const ActiveSandbox: Story = {
   },
 };
 
+export const GeneratedYamlScrolls: Story = {
+  args: { initialConfig: activeDaemonConfig },
+  play: async ({ canvasElement }) => {
+    const preview = canvasElement.querySelector(".output-card pre");
+    await expect(preview).toBeTruthy();
+    const overflowY = getComputedStyle(preview as Element).overflowY;
+    await expect(["auto", "scroll"]).toContain(overflowY);
+  },
+};
+
 export const BuildsYaml: Story = {
   play: async ({ canvas, canvasElement }) => {
     const gatewayUrl = canvas.getByLabelText("Gateway URL");
