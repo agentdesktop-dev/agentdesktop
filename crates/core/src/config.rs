@@ -16,6 +16,9 @@ use url::Url;
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DaemonConfig {
+    /// Local daemon startup settings. Not accepted in controller-delivered policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon: Option<DaemonStartupConfig>,
     /// Controller connection settings. Omit this field to run without fleet management.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub controller: Option<ControllerConnectionConfig>,
@@ -41,9 +44,80 @@ pub struct DaemonConfig {
     pub inventory_interval: Duration,
 }
 
+/// Settings read only at local daemon startup. Paths use the process working directory.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DaemonStartupConfig {
+    /// Manage the current user’s tool settings instead of system settings.
+    #[serde(default)]
+    pub user: bool,
+    /// Persistent daemon state directory.
+    #[serde(default)]
+    pub state_dir: Option<PathBuf>,
+    /// Local API Unix socket or Windows named pipe.
+    #[serde(default)]
+    pub socket: Option<PathBuf>,
+    /// Override the OIDC callback bind address.
+    #[serde(default)]
+    pub oidc_callback_listen: Option<SocketAddr>,
+    /// Claude Code paths.
+    #[serde(default)]
+    pub claude_code: ToolConfigPath,
+    /// Claude Desktop paths.
+    #[serde(default)]
+    pub claude_desktop: ClaudeDesktopStartupConfig,
+    /// Codex paths.
+    #[serde(default)]
+    pub codex: ToolConfigPath,
+    /// OpenCode paths.
+    #[serde(default)]
+    pub open_code: OpenCodeStartupConfig,
+    /// Grok Build paths.
+    #[serde(default)]
+    pub grok: ToolConfigPath,
+}
+
+/// Local Claude Desktop paths.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClaudeDesktopStartupConfig {
+    /// Configuration file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<PathBuf>,
+    /// Credential helper path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_helper: Option<PathBuf>,
+}
+
+/// Local tool configuration path.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolConfigPath {
+    /// Configuration file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<PathBuf>,
+}
+
+/// Local OpenCode paths.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OpenCodeStartupConfig {
+    /// Configuration file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<PathBuf>,
+    /// Credential plugin path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<PathBuf>,
+}
+
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
+            daemon: None,
             controller: None,
             llm_gateway: None,
             sandbox: None,
@@ -556,7 +630,8 @@ pub enum ProgramAuthentication {
 pub fn load_daemon(path: &Path) -> anyhow::Result<DaemonConfig> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("read configuration from {}", path.display()))?;
-    parse_daemon(&contents).with_context(|| format!("parse configuration from {}", path.display()))
+    parse_local_daemon(&contents)
+        .with_context(|| format!("parse configuration from {}", path.display()))
 }
 
 /// Loads and validates a controller YAML configuration file from `path`.
@@ -632,6 +707,14 @@ fn resolve_relative(path: &mut PathBuf, directory: &Path) {
 
 /// Parses and validates a daemon YAML configuration document.
 pub fn parse_daemon(contents: &str) -> anyhow::Result<DaemonConfig> {
+    let config = parse_local_daemon(contents)?;
+    if config.daemon.is_some() {
+        anyhow::bail!("daemon startup settings are only allowed in the local configuration file");
+    }
+    Ok(config)
+}
+
+fn parse_local_daemon(contents: &str) -> anyhow::Result<DaemonConfig> {
     let config: DaemonConfig =
         crate::serdes::yamlviajson::from_str(contents).context("parse daemon configuration")?;
     if let Some(controller) = &config.controller
@@ -845,6 +928,29 @@ fn is_true(value: &bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{DaemonConfig, LlmGatewayAuthentication, parse_controller, parse_daemon};
+
+    #[test]
+    fn startup_settings_are_local_only_and_reject_unknown_fields() {
+        let yaml = "daemon:\n  user: true\n  stateDir: /tmp/device\n  socket: /tmp/device.sock\n";
+        let config = super::parse_local_daemon(yaml).unwrap();
+        let startup = config.daemon.unwrap();
+        assert!(startup.user);
+        assert_eq!(
+            startup.state_dir.unwrap(),
+            std::path::Path::new("/tmp/device")
+        );
+        assert_eq!(
+            startup.socket.unwrap(),
+            std::path::Path::new("/tmp/device.sock")
+        );
+        assert!(
+            parse_daemon(yaml)
+                .unwrap_err()
+                .to_string()
+                .contains("only allowed in the local")
+        );
+        assert!(super::parse_local_daemon("daemon: { stateDr: /tmp/device }").is_err());
+    }
 
     #[test]
     fn daemon_configuration_supports_local_and_managed_options() {
