@@ -126,7 +126,9 @@ export function ModelRuntimeInventory({
 
 export function ToolIcon({ kind }: { kind: string }) {
   const icon = toolIcons[kind.toLowerCase()];
-  const monochrome = ["opencode", "vscode", "cursor"].includes(kind.toLowerCase());
+  const monochrome = ["opencode", "vscode", "cursor"].includes(
+    kind.toLowerCase(),
+  );
   return icon ? (
     <img
       className={`tool-icon${monochrome ? " theme-monochrome" : ""}`}
