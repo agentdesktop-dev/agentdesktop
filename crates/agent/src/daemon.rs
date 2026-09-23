@@ -33,7 +33,10 @@ use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 
 #[cfg(windows)]
 use crate::windows_security::SecurityDescriptor;
-use crate::{api, enrollment::EnrollmentState, gateway_oidc, reconcile, remote, secure_fs};
+use crate::{
+    api, enrollment::EnrollmentState, gateway_oidc, inventory_watch::InventoryWatch, reconcile,
+    remote, secure_fs,
+};
 
 #[cfg(unix)]
 const LOCAL_API_GROUP: &str = "agentdesktop";
@@ -505,12 +508,25 @@ async fn refresh_inventory(
     interval: Duration,
     reconciler: reconcile::Reconciler,
 ) {
-    refresh_inventory_with(sender, interval, || reconciler.discover()).await;
+    let (changes_sender, changes) = mpsc::unbounded_channel();
+    let watch = match InventoryWatch::new(changes_sender) {
+        Ok(watch) => Some(watch),
+        Err(error) => {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                "inventory file watching unavailable; refreshing on the interval only"
+            );
+            None
+        }
+    };
+    refresh_inventory_with(sender, interval, changes, watch, || reconciler.discover()).await;
 }
 
 async fn refresh_inventory_with<F, Fut>(
     sender: watch::Sender<Arc<agentdesktop_core::model::Discovery>>,
     interval: Duration,
+    mut changes: mpsc::UnboundedReceiver<()>,
+    mut watch: Option<InventoryWatch>,
     mut discover: F,
 ) where
     F: FnMut() -> Fut,
@@ -522,10 +538,18 @@ async fn refresh_inventory_with<F, Fut>(
         tracing::error!("inventory interval must be greater than zero; not refreshing inventory");
         return;
     }
+    if let Some(watch) = watch.as_mut() {
+        watch.sync(&sender.borrow().clone());
+    }
     let mut ticker = time::interval_at(time::Instant::now() + interval, interval);
     ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
     loop {
-        ticker.tick().await;
+        // A closed change channel disables its branch rather than ending the
+        // loop, so a watcher that could not start leaves the interval running.
+        let trigger = tokio::select! {
+            _ = ticker.tick() => "interval",
+            Some(()) = changes.recv() => "change",
+        };
         if sender.is_closed() {
             return;
         }
@@ -533,8 +557,11 @@ async fn refresh_inventory_with<F, Fut>(
         if **sender.borrow() == discovery {
             continue;
         }
-        tracing::info!("inventory changed");
+        tracing::info!(trigger, "inventory changed");
         log_discovery(&discovery);
+        if let Some(watch) = watch.as_mut() {
+            watch.sync(&discovery);
+        }
         if sender.send(Arc::new(discovery)).is_err() {
             return;
         }
@@ -909,7 +936,7 @@ mod tests {
 
     use agentdesktop_core::config::parse_daemon;
     use agentdesktop_core::model::{Agent, Discovery};
-    use tokio::sync::watch;
+    use tokio::sync::{mpsc, watch};
 
     fn discovery(kinds: &[&str]) -> Discovery {
         Discovery {
@@ -930,7 +957,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn refuses_to_schedule_a_zero_interval() {
         let (sender, receiver) = watch::channel(Arc::new(discovery(&["codex"])));
-        super::refresh_inventory_with(sender, Duration::ZERO, || async {
+        let (_changes_sender, changes) = mpsc::unbounded_channel();
+        super::refresh_inventory_with(sender, Duration::ZERO, changes, None, || async {
             panic!("a zero interval must not schedule a scan")
         })
         .await;
@@ -941,20 +969,27 @@ mod tests {
     async fn publishes_inventory_only_when_it_changes() {
         let (sender, mut receiver) = watch::channel(Arc::new(discovery(&["codex"])));
         let scans = Arc::new(AtomicUsize::new(0));
+        let (_changes_sender, changes) = mpsc::unbounded_channel();
         let refresher = tokio::spawn({
             let scans = Arc::clone(&scans);
-            super::refresh_inventory_with(sender, Duration::from_secs(60), move || {
-                let scan = scans.fetch_add(1, Ordering::SeqCst);
-                // The first scan repeats the boot snapshot; every later scan
-                // reports a newly installed tool.
-                async move {
-                    if scan == 0 {
-                        discovery(&["codex"])
-                    } else {
-                        discovery(&["codex", "cursor"])
+            super::refresh_inventory_with(
+                sender,
+                Duration::from_secs(60),
+                changes,
+                None,
+                move || {
+                    let scan = scans.fetch_add(1, Ordering::SeqCst);
+                    // The first scan repeats the boot snapshot; every later scan
+                    // reports a newly installed tool.
+                    async move {
+                        if scan == 0 {
+                            discovery(&["codex"])
+                        } else {
+                            discovery(&["codex", "cursor"])
+                        }
                     }
-                }
-            })
+                },
+            )
         });
 
         // Paused time auto-advances between ticks, so this resolves on the
@@ -975,12 +1010,39 @@ mod tests {
         refresher.abort();
     }
 
+    /// Real time, and an interval far longer than the test will wait, so only
+    /// the change signal can account for the refresh.
+    #[tokio::test]
+    async fn refreshes_on_a_change_signal_without_waiting_for_the_interval() {
+        let (sender, mut receiver) = watch::channel(Arc::new(discovery(&["codex"])));
+        let (changes_sender, changes) = mpsc::unbounded_channel();
+        let refresher = tokio::spawn(super::refresh_inventory_with(
+            sender,
+            Duration::from_secs(3600),
+            changes,
+            None,
+            || async { discovery(&["codex", "cursor"]) },
+        ));
+
+        changes_sender.send(()).expect("refresher is listening");
+        tokio::time::timeout(Duration::from_secs(5), receiver.changed())
+            .await
+            .expect("a change signal must refresh before the interval elapses")
+            .expect("refresher is alive");
+        assert_eq!(receiver.borrow_and_update().agents.len(), 2);
+
+        refresher.abort();
+    }
+
     #[tokio::test(start_paused = true)]
     async fn stops_refreshing_once_every_reader_is_gone() {
         let (sender, receiver) = watch::channel(Arc::new(discovery(&["codex"])));
+        let (_changes_sender, changes) = mpsc::unbounded_channel();
         let refresher = tokio::spawn(super::refresh_inventory_with(
             sender,
             Duration::from_secs(60),
+            changes,
+            None,
             || async { discovery(&["codex", "cursor"]) },
         ));
         drop(receiver);
