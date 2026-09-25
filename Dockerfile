@@ -32,6 +32,6 @@ RUN --mount=type=cache,id=agentdesktop-target-${TARGETARCH},target=/app/target \
     esac && \
     cp "target/${BUILD_PROFILE}/agentdesktop-controller" /agentdesktop-controller
 
-FROM cgr.dev/chainguard/glibc-dynamic:latest
+FROM cgr.dev/chainguard/glibc-dynamic:latest@sha256:6acf5a19a988abdaf0f3d30247561431a206034e702871442bed66a2c68cc1a2
 COPY --from=builder /agentdesktop-controller /agentdesktop-controller
 ENTRYPOINT ["/agentdesktop-controller"]
