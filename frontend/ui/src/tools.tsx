@@ -13,6 +13,7 @@ import codexIcon from "./assets/codex.svg";
 import copilotIcon from "./assets/copilot.svg";
 import cursorIcon from "./assets/cursor.svg";
 import grokIcon from "./assets/grok.svg";
+import grokBotIcon from "./assets/grok-bot.png";
 import ollamaIcon from "./assets/ollama.svg";
 import openCodeIcon from "./assets/opencode.svg";
 
@@ -51,6 +52,8 @@ const toolIcons: Record<string, string> = {
   claude_desktop: claudeDesktopIcon,
   grok: grokIcon,
   "grok-build": grokIcon,
+  "grok-bot": grokBotIcon,
+  grok_bot: grokBotIcon,
   cursor: cursorIcon,
   opencode: openCodeIcon,
   vscode: copilotIcon,
@@ -65,6 +68,8 @@ export function friendlyTool(kind: string) {
     "claude-desktop": "Claude Desktop",
     grok: "Grok Build",
     "grok-build": "Grok Build",
+    "grok-bot": "Grok Bot",
+    grok_bot: "Grok Bot",
     opencode: "OpenCode",
     vscode: "VS Code",
     cursor: "Cursor",
@@ -123,7 +128,9 @@ export function ModelRuntimeInventory({
 
 export function ToolIcon({ kind }: { kind: string }) {
   const icon = toolIcons[kind.toLowerCase()];
-  const monochrome = ["opencode", "vscode", "cursor"].includes(kind.toLowerCase());
+  const monochrome = ["opencode", "vscode", "cursor"].includes(
+    kind.toLowerCase(),
+  );
   return icon ? (
     <img
       className={`tool-icon${monochrome ? " theme-monochrome" : ""}`}
