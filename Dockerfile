@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.26
 
-FROM docker.io/library/node:26.8.2-bookworm AS ui
+FROM docker.io/library/node:26.9.0-bookworm AS ui
 WORKDIR /app/frontend
 ENV CI=true
 COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
