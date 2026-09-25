@@ -76,6 +76,7 @@ struct ResolvedDaemonArgs {
     codex: ResolvedToolConfigPath,
     open_code: ResolvedOpenCodeStartupConfig,
     grok: ResolvedToolConfigPath,
+    pi: ResolvedPiStartupConfig,
     once: bool,
     dry_run: bool,
 }
@@ -92,6 +93,11 @@ struct ResolvedClaudeDesktopStartupConfig {
 struct ResolvedOpenCodeStartupConfig {
     config: PathBuf,
     plugin: PathBuf,
+}
+
+struct ResolvedPiStartupConfig {
+    models: PathBuf,
+    settings: PathBuf,
 }
 
 impl DaemonArgs {
@@ -149,6 +155,16 @@ impl DaemonArgs {
                         .grok
                         .config
                         .unwrap_or_else(reconcile::default_grok_managed_config_path),
+                },
+                pi: ResolvedPiStartupConfig {
+                    models: startup
+                        .pi
+                        .models
+                        .unwrap_or_else(reconcile::default_pi_models_path),
+                    settings: startup
+                        .pi
+                        .settings
+                        .unwrap_or_else(reconcile::default_pi_settings_path),
                 },
                 once: self.once || self.dry_run,
                 dry_run: self.dry_run,
@@ -216,6 +232,14 @@ impl DaemonArgs {
                         .map(PathBuf::from)
                         .unwrap_or_else(|| home.join(".grok"))
                         .join("managed_config.toml")
+                }),
+            },
+            pi: ResolvedPiStartupConfig {
+                models: startup.pi.models.unwrap_or_else(|| {
+                    crate::provider::pi::user_pi_agent_dir(&home).join("models.json")
+                }),
+                settings: startup.pi.settings.unwrap_or_else(|| {
+                    crate::provider::pi::user_pi_agent_dir(&home).join("settings.json")
                 }),
             },
             once: self.once || self.dry_run,
@@ -299,6 +323,8 @@ where
         args.open_code.config.clone(),
         args.open_code.plugin.clone(),
         args.grok.config.clone(),
+        args.pi.models.clone(),
+        args.pi.settings.clone(),
         agentdesktop_client_executable()?,
         socket.clone(),
     );
@@ -660,6 +686,11 @@ fn validate_one_shot(config: &agentdesktop_core::config::DaemonConfig) -> anyhow
                 .grok
                 .as_ref()
                 .is_some_and(|program| program.use_llm_gateway),
+            config
+                .programs
+                .pi
+                .as_ref()
+                .is_some_and(|program| program.use_llm_gateway),
         ]
         .into_iter()
         .any(|used| used);
@@ -910,6 +941,37 @@ mod tests {
     use agentdesktop_core::config::parse_daemon;
     use agentdesktop_core::model::{Agent, Discovery};
     use tokio::sync::watch;
+
+    #[test]
+    fn pi_startup_paths_override_defaults_in_both_scopes() {
+        for user in [false, true] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(
+                file.path(),
+                format!(
+                    "daemon:\n  user: {user}\n  pi:\n    models: custom/pi-models.json\n    settings: custom/pi-settings.json\n"
+                ),
+            )
+            .unwrap();
+            let config = agentdesktop_core::config::load_daemon(file.path()).unwrap();
+            let args = super::DaemonArgs {
+                user: false,
+                once: false,
+                dry_run: false,
+                config: None,
+            };
+            let resolved = args
+                .resolve(
+                    config.daemon.unwrap(),
+                    file.path().to_path_buf(),
+                    agentdesktop_core::DEFAULT_SOCKET_PATH.into(),
+                )
+                .unwrap();
+            assert_eq!(resolved.user, user);
+            assert_eq!(resolved.pi.models, Path::new("custom/pi-models.json"));
+            assert_eq!(resolved.pi.settings, Path::new("custom/pi-settings.json"));
+        }
+    }
 
     fn discovery(kinds: &[&str]) -> Discovery {
         Discovery {
@@ -1315,6 +1377,32 @@ programs:
             client_executable_for_daemon(Path::new("/usr/bin/agentdesktop")),
             Path::new("/usr/bin/agentdesktop")
         );
+    }
+
+    #[test]
+    fn one_shot_rejects_authenticated_pi_gateway() {
+        for authentication in [
+            "    type: oidc\n    issuer: https://login.example.com\n    clientId: agentdesktop\n",
+            "    type: controllerJwt\n    audience: agentgateway\n    allowedClientIds: [pi]\n",
+        ] {
+            let config = parse_daemon(&format!(
+                "llmGateway:\n  url: https://gateway.example.com\n  authentication:\n{authentication}programs:\n  pi:\n    model: selected\n"
+            )).unwrap();
+            let error =
+                validate_one_shot(&config).expect_err("Pi credentials require a running daemon");
+            assert!(error.to_string().contains("credential helpers"));
+        }
+    }
+
+    #[test]
+    fn one_shot_accepts_pi_without_runtime_credentials() {
+        for yaml in [
+            "programs:\n  pi: {}\n",
+            "llmGateway:\n  url: https://gateway.example.com\nprograms:\n  pi:\n    model: selected\n",
+            "llmGateway:\n  url: https://gateway.example.com\n  authentication:\n    type: oidc\n    issuer: https://login.example.com\n    clientId: agentdesktop\nprograms:\n  pi:\n    useLlmGateway: false\n",
+        ] {
+            validate_one_shot(&parse_daemon(yaml).unwrap()).unwrap();
+        }
     }
 
     #[test]

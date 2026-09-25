@@ -74,7 +74,8 @@ export type AgentKind =
   | "claudeDesktop"
   | "codex"
   | "openCode"
-  | "grok";
+  | "grok"
+  | "pi";
 
 export type AgentDraft = {
   kind: AgentKind;

@@ -17,6 +17,7 @@ mod json_merge;
 mod metadata;
 pub mod ollama;
 pub mod opencode;
+pub mod pi;
 pub(crate) mod shared;
 pub mod vscode;
 
