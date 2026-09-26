@@ -6,13 +6,13 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use agentdesktop_core::{
     config::{DaemonConfig, LlmGatewayAuthentication, ProgramAuthentication, valid_client_id},
     model::{
-        DaemonInfo, Discovery, EnrollmentStatus, LlmGatewayCredential, TelemetryEvent,
+        DaemonInfo, Discovery, EnrollmentStatus, Health, LlmGatewayCredential, TelemetryEvent,
         TelemetryEventKind,
     },
 };
@@ -25,15 +25,11 @@ pub struct AppState {
     pub daemon_info: DaemonInfo,
     pub discovery: watch::Receiver<Arc<Discovery>>,
     pub enrollment: EnrollmentState,
+    pub controller_status: Option<remote::ControllerConnectionState>,
     pub state_dir: PathBuf,
     pub oidc_callback_listen: Option<SocketAddr>,
     pub telemetry: Option<mpsc::Sender<TelemetryEvent>>,
     pub logout: Option<mpsc::Sender<remote::LogoutRequest>>,
-}
-
-#[derive(Serialize)]
-struct Health {
-    status: &'static str,
 }
 
 #[derive(Deserialize)]
@@ -127,8 +123,15 @@ fn validate_telemetry(event: &TelemetryEventKind) -> Result<(), (StatusCode, Str
     Ok(())
 }
 
-async fn health() -> Json<Health> {
-    Json(Health { status: "ok" })
+async fn health(State(state): State<AppState>) -> Json<Health> {
+    let controller = match &state.controller_status {
+        Some(controller_status) => Some(controller_status.get().await),
+        None => None,
+    };
+    Json(Health {
+        status: "ok".to_owned(),
+        controller,
+    })
 }
 
 async fn daemon_info(State(state): State<AppState>) -> Json<DaemonInfo> {
