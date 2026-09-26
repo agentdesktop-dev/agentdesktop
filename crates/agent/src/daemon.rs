@@ -379,25 +379,18 @@ where
         let state_dir = args.state_dir.clone();
         let oidc_callback_listen = args.oidc_callback_listen;
         let remote_enrollment = enrollment.clone();
-        tokio::spawn(async move {
-            if let Err(error) = remote::run(
-                controller,
-                remote_discovery,
-                state_dir,
-                oidc_callback_listen,
-                reconciler,
-                remote_enrollment.clone(),
-                remote::Requests {
-                    telemetry: telemetry_receiver,
-                    logout: logout_receiver,
-                },
-            )
-            .await
-            {
-                remote_enrollment.set("failed").await;
-                tracing::error!(error = %format!("{error:#}"), "controller integration disabled");
-            }
-        });
+        tokio::spawn(remote::run(
+            controller,
+            remote_discovery,
+            state_dir,
+            oidc_callback_listen,
+            reconciler,
+            remote_enrollment,
+            remote::Requests {
+                telemetry: telemetry_receiver,
+                logout: logout_receiver,
+            },
+        ));
     }
     let app = api::router(api::AppState {
         config,

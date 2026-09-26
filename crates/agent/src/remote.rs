@@ -1,4 +1,5 @@
 use std::{
+    convert::Infallible,
     future::Future,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -62,11 +63,77 @@ pub async fn run(
     reconciler: Reconciler,
     enrollment: EnrollmentState,
     requests: Requests,
-) -> anyhow::Result<()> {
+) {
     let Requests {
         mut telemetry,
         mut logout,
     } = requests;
+    let mut delay = INITIAL_RETRY_DELAY;
+    loop {
+        let started = time::Instant::now();
+        let Err(error) = run_session(
+            &controller,
+            &mut discovered,
+            &state_dir,
+            oidc_callback_listen,
+            &reconciler,
+            &enrollment,
+            &mut telemetry,
+            &mut logout,
+        )
+        .await;
+        // A session that stayed up for a while failed for a new reason; do not
+        // penalize it with the backoff accumulated by earlier failures.
+        if started.elapsed() > MAX_RETRY_DELAY {
+            delay = INITIAL_RETRY_DELAY;
+        }
+        enrollment.set("failed").await;
+        tracing::error!(
+            controller = %controller.address,
+            retry_in_seconds = delay.as_secs(),
+            error = %format!("{error:#}"),
+            "controller integration failed; restarting"
+        );
+        tokio::select! {
+            _ = time::sleep(delay) => delay = next_retry_delay(delay),
+            Some(request) = logout.recv() => {
+                logout_between_sessions(request, &state_dir.join("identity.json"), &enrollment)
+                    .await;
+                delay = INITIAL_RETRY_DELAY;
+            }
+        }
+    }
+}
+
+async fn logout_between_sessions(
+    request: LogoutRequest,
+    identity_path: &Path,
+    enrollment: &EnrollmentState,
+) {
+    match identity::load(identity_path) {
+        Ok(Some(identity)) => {
+            complete_logout(request, identity_path, &identity, enrollment).await;
+        }
+        Ok(None) => complete_unenrolled_logout(request, enrollment).await,
+        Err(error) => {
+            let _ = request
+                .completion
+                .send(Err(format!("read local organization identity: {error:#}")));
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_session(
+    controller: &ControllerConnectionConfig,
+    discovered: &mut watch::Receiver<Arc<AgentDiscovery>>,
+    state_dir: &Path,
+    oidc_callback_listen: Option<SocketAddr>,
+    reconciler: &Reconciler,
+    enrollment: &EnrollmentState,
+    telemetry: &mut mpsc::Receiver<ModelTelemetryEvent>,
+    logout: &mut mpsc::Receiver<LogoutRequest>,
+) -> anyhow::Result<Infallible> {
     let identity_path = state_dir.join("identity.json");
     loop {
         let mut identity = match identity::load(&identity_path)? {
@@ -77,10 +144,10 @@ pub async fn run(
             None => {
                 let identity = enroll_with_retry(
                     &controller.address,
-                    &enrollment,
-                    &mut logout,
+                    enrollment,
+                    logout,
                     INITIAL_RETRY_DELAY,
-                    || oidc::enroll(&controller, &enrollment, oidc_callback_listen),
+                    || oidc::enroll(controller, enrollment, oidc_callback_listen),
                 )
                 .await;
                 identity::save(&identity_path, &identity)?;
@@ -95,7 +162,7 @@ pub async fn run(
             let refresh_result = tokio::select! {
                 result = refresh_oauth_if_needed(&mut identity, &identity_path) => result,
                 Some(request) = logout.recv() => {
-                    if complete_logout(request, &identity_path, &identity, &enrollment).await {
+                    if complete_logout(request, &identity_path, &identity, enrollment).await {
                         break;
                     }
                     continue;
@@ -115,10 +182,26 @@ pub async fn run(
                     );
                     break;
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    // Network failures and token endpoint outages are transient: the
+                    // stored refresh token is still valid, so keep the identity and retry
+                    // instead of tearing down the controller integration.
+                    warn!(
+                        controller = %controller.address,
+                        retry_in_seconds = delay.as_secs(),
+                        error = %format!("{error:#}"),
+                        "OIDC access token refresh failed; retaining current identity and retrying"
+                    );
+                    if wait_before_retry(delay, logout, &identity_path, &identity, enrollment).await
+                    {
+                        break;
+                    }
+                    delay = next_retry_delay(delay);
+                    continue;
+                }
             }
             if certificate_needs_renewal(&identity) {
-                match renew_device_certificate(&controller, &identity).await {
+                match renew_device_certificate(controller, &identity).await {
                     Ok(renewed) => {
                         identity::save(&identity_path, &renewed)?;
                         identity = renewed;
@@ -132,15 +215,15 @@ pub async fn run(
             identity::save(&identity_path, &identity)?;
             let connection = tokio::select! {
                 result = connect(
-                    &controller,
+                    controller,
                     &identity,
-                    &mut discovered,
-                    &state_dir,
-                    &reconciler,
-                    &mut telemetry,
+                    discovered,
+                    state_dir,
+                    reconciler,
+                    telemetry,
                 ) => Some(result),
                 Some(request) = logout.recv() => {
-                    if complete_logout(request, &identity_path, &identity, &enrollment).await {
+                    if complete_logout(request, &identity_path, &identity, enrollment).await {
                         None
                     } else {
                         continue;
@@ -175,16 +258,27 @@ pub async fn run(
                 }
             }
 
-            let logged_out = tokio::select! {
-                _ = time::sleep(delay) => false,
-                Some(request) = logout.recv() => {
-                    complete_logout(request, &identity_path, &identity, &enrollment).await
-                }
-            };
-            if logged_out {
+            if wait_before_retry(delay, logout, &identity_path, &identity, enrollment).await {
                 break;
             }
             delay = next_retry_delay(delay);
+        }
+    }
+}
+
+/// Sleeps for `delay`, completing any logout request that arrives meanwhile.
+/// Returns `true` when the local session was logged out.
+async fn wait_before_retry(
+    delay: Duration,
+    logout: &mut mpsc::Receiver<LogoutRequest>,
+    identity_path: &Path,
+    identity: &Identity,
+    enrollment: &EnrollmentState,
+) -> bool {
+    tokio::select! {
+        _ = time::sleep(delay) => false,
+        Some(request) = logout.recv() => {
+            complete_logout(request, identity_path, identity, enrollment).await
         }
     }
 }
@@ -775,6 +869,41 @@ mod tests {
         assert!(!is_oauth_refresh_rejected(&anyhow::anyhow!(
             "network unavailable"
         )));
+    }
+
+    #[tokio::test]
+    async fn network_failures_during_refresh_are_transient() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed_address = closed.local_addr().unwrap();
+        drop(closed);
+        let connect_error: anyhow::Error = reqwest::Client::new()
+            .post(format!("http://{closed_address}/token"))
+            .send()
+            .await
+            .unwrap_err()
+            .into();
+        assert!(!is_oauth_refresh_rejected(
+            &connect_error.context("refresh OIDC access token")
+        ));
+
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let silent_address = silent.local_addr().unwrap();
+        let _accepted = tokio::spawn(async move {
+            let _connection = silent.accept().await;
+            std::future::pending::<()>().await;
+        });
+        let timeout_error: anyhow::Error = reqwest::Client::builder()
+            .timeout(Duration::from_millis(50))
+            .build()
+            .unwrap()
+            .post(format!("http://{silent_address}/token"))
+            .send()
+            .await
+            .unwrap_err()
+            .into();
+        assert!(!is_oauth_refresh_rejected(
+            &timeout_error.context("refresh OIDC access token")
+        ));
     }
 
     #[test]
