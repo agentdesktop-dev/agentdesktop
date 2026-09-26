@@ -43,8 +43,13 @@ fn executable_candidates() -> Vec<PathBuf> {
 
 fn discover_mcp_servers() -> Vec<McpServer> {
     let mut servers = Vec::new();
-    if let Some(managed) = managed_root().map(|root| root.join("managed-mcp.json")) {
-        servers.extend(mcp_servers_from_json(&managed));
+    if let Some(root) = managed_root() {
+        servers.extend(mcp_servers_from_json(&root.join("managed-mcp.json")));
+        // Servers pushed through the `managedMcpServers` managed setting — including the
+        // ones Agentdesktop itself writes to `managed-settings.d/50-agentdesktop.json`.
+        for path in managed_settings_files(&root) {
+            servers.extend(managed_mcp_servers_from_json(&path));
+        }
     }
 
     for home in metadata::user_home_dirs() {
@@ -74,6 +79,25 @@ fn managed_root() -> Option<PathBuf> {
     return Some(PathBuf::from("/Library/Application Support/ClaudeCode"));
     #[cfg(windows)]
     return metadata::env_path("ProgramFiles").map(|path| path.join("ClaudeCode"));
+}
+
+/// `managed-settings.json` followed by the `managed-settings.d/*.json` drop-ins in the
+/// lexical order Claude Code merges them.
+fn managed_settings_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = vec![root.join("managed-settings.json")];
+    if let Ok(entries) = fs::read_dir(root.join("managed-settings.d")) {
+        let mut drop_ins: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .collect();
+        drop_ins.sort();
+        files.extend(drop_ins);
+    }
+    files
 }
 
 fn installed_plugin_roots(home: &Path) -> Vec<PathBuf> {
@@ -112,32 +136,76 @@ fn mcp_servers_from_value(document: &Value, source: &Path) -> Vec<McpServer> {
     };
     servers
         .iter()
-        .filter_map(|(name, value)| {
-            let server = value.as_object()?;
-            let command = server
-                .get("command")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            let url = server.get("url").and_then(Value::as_str).map(str::to_owned);
-            let transport = server
-                .get("type")
-                .and_then(Value::as_str)
-                .map(|transport| match transport {
-                    "streamable-http" => "http",
-                    other => other,
-                })
-                .or_else(|| url.as_ref().map(|_| "http"))
-                .or_else(|| command.as_ref().map(|_| "stdio"))?;
-            Some(McpServer {
-                name: name.clone(),
-                transport: transport.to_owned(),
-                command,
-                url,
-                enabled: server.get("disabled").and_then(Value::as_bool) != Some(true),
-                source: source.to_path_buf(),
-            })
-        })
+        .filter_map(|(name, value)| mcp_server_from_entry(name, value, source))
         .collect()
+}
+
+fn managed_mcp_servers_from_json(path: &Path) -> Vec<McpServer> {
+    let Ok(contents) = fs::read(path) else {
+        return Vec::new();
+    };
+    let Ok(document) = serde_json::from_slice::<Value>(&contents) else {
+        return Vec::new();
+    };
+    document
+        .get("managedMcpServers")
+        .map(|servers| managed_mcp_servers_from_value(servers, path))
+        .unwrap_or_default()
+}
+
+/// Reads a `managedMcpServers` value. Claude Code uses an object keyed by server name;
+/// Claude Desktop uses an array of entries carrying a `name`, which MDM payloads encode as
+/// a JSON string because property lists cannot hold arbitrary JSON.
+pub(in crate::provider) fn managed_mcp_servers_from_value(
+    servers: &Value,
+    source: &Path,
+) -> Vec<McpServer> {
+    match servers {
+        Value::String(encoded) => serde_json::from_str::<Value>(encoded)
+            .ok()
+            .filter(|decoded| !decoded.is_string())
+            .map(|decoded| managed_mcp_servers_from_value(&decoded, source))
+            .unwrap_or_default(),
+        Value::Object(servers) => servers
+            .iter()
+            .filter_map(|(name, value)| mcp_server_from_entry(name, value, source))
+            .collect(),
+        Value::Array(servers) => servers
+            .iter()
+            .filter_map(|value| {
+                let name = value.get("name").and_then(Value::as_str)?;
+                mcp_server_from_entry(name, value, source)
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn mcp_server_from_entry(name: &str, value: &Value, source: &Path) -> Option<McpServer> {
+    let server = value.as_object()?;
+    let command = server
+        .get("command")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let url = server.get("url").and_then(Value::as_str).map(str::to_owned);
+    let transport = server
+        .get("type")
+        .or_else(|| server.get("transport"))
+        .and_then(Value::as_str)
+        .map(|transport| match transport {
+            "streamable-http" => "http",
+            other => other,
+        })
+        .or_else(|| url.as_ref().map(|_| "http"))
+        .or_else(|| command.as_ref().map(|_| "stdio"))?;
+    Some(McpServer {
+        name: name.to_owned(),
+        transport: transport.to_owned(),
+        command,
+        url,
+        enabled: server.get("disabled").and_then(Value::as_bool) != Some(true),
+        source: source.to_path_buf(),
+    })
 }
 
 #[cfg(test)]
@@ -146,7 +214,7 @@ mod tests {
 
     use serde_json::json;
 
-    use super::mcp_servers_from_value;
+    use super::{managed_mcp_servers_from_value, mcp_servers_from_value};
 
     #[test]
     fn reads_claude_servers_without_credentials_or_arguments() {
@@ -199,5 +267,61 @@ mod tests {
 
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, "global");
+    }
+
+    #[test]
+    fn reads_claude_code_managed_servers_keyed_by_name() {
+        let servers = managed_mcp_servers_from_value(
+            &json!({
+                "github": {
+                    "type": "http",
+                    "url": "https://gateway.example.com/github/mcp",
+                    "headers": { "Authorization": "secret" }
+                },
+                "local": { "command": "server", "args": ["secret"] }
+            }),
+            Path::new("managed-settings.d/50-agentdesktop.json"),
+        );
+
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].name, "github");
+        assert_eq!(servers[0].transport, "http");
+        assert_eq!(servers[1].name, "local");
+        assert_eq!(servers[1].transport, "stdio");
+    }
+
+    #[test]
+    fn reads_claude_desktop_managed_servers_encoded_as_a_json_string() {
+        let encoded = json!([
+            {
+                "name": "github",
+                "transport": "http",
+                "url": "https://gateway.example.com/github/mcp",
+                "oauth": true
+            },
+            { "transport": "http", "url": "https://unnamed.example.com/mcp" }
+        ])
+        .to_string();
+
+        let servers = managed_mcp_servers_from_value(
+            &json!(encoded),
+            Path::new("com.anthropic.claudefordesktop.plist"),
+        );
+
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "github");
+        assert_eq!(servers[0].transport, "http");
+        assert_eq!(
+            servers[0].url.as_deref(),
+            Some("https://gateway.example.com/github/mcp")
+        );
+    }
+
+    #[test]
+    fn ignores_malformed_managed_servers() {
+        let source = Path::new("managed-settings.json");
+        assert!(managed_mcp_servers_from_value(&json!("not json"), source).is_empty());
+        assert!(managed_mcp_servers_from_value(&json!("\"nested\""), source).is_empty());
+        assert!(managed_mcp_servers_from_value(&json!(42), source).is_empty());
     }
 }
