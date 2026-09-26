@@ -1,4 +1,4 @@
-use super::ClaudeDesktop;
+use super::{ClaudeDesktop, default_claude_desktop_managed_settings_path};
 
 use std::{
     collections::BTreeSet,
@@ -6,6 +6,7 @@ use std::{
 };
 
 use agentdesktop_core::model::{Agent, McpServer};
+use serde_json::Value;
 
 use crate::provider::{claude_code::discovery as claude_code, metadata};
 
@@ -90,15 +91,37 @@ fn discover_version(executable: &Path) -> Option<String> {
 }
 
 fn discover_mcp_servers() -> Vec<McpServer> {
+    let managed = default_claude_desktop_managed_settings_path();
+    let mut servers = managed_settings(&managed)
+        .and_then(|settings| {
+            settings
+                .get("managedMcpServers")
+                .map(|servers| claude_code::managed_mcp_servers_from_value(servers, &managed))
+        })
+        .unwrap_or_default();
+
     let mut paths = BTreeSet::new();
     for home in metadata::user_home_dirs() {
         paths.insert(home.join(".config/Claude/claude_desktop_config.json"));
         paths.insert(home.join(".config/Claude-3p/claude_desktop_config.json"));
         paths.insert(home.join("Library/Application Support/Claude/claude_desktop_config.json"));
+        // Third-party (gateway) deployments keep their state in a separate directory.
+        paths.insert(home.join("Library/Application Support/Claude-3p/claude_desktop_config.json"));
         paths.insert(home.join("AppData/Roaming/Claude/claude_desktop_config.json"));
     }
-    paths
-        .into_iter()
-        .flat_map(|path| claude_code::mcp_servers_from_json(&path))
-        .collect()
+    servers.extend(
+        paths
+            .into_iter()
+            .flat_map(|path| claude_code::mcp_servers_from_json(&path)),
+    );
+    servers
+}
+
+/// Reads Claude Desktop's system-managed settings in the platform's native format — see
+/// `default_claude_desktop_managed_settings_path`.
+fn managed_settings(path: &Path) -> Option<Value> {
+    #[cfg(target_os = "macos")]
+    return plist::from_file(path).ok();
+    #[cfg(not(target_os = "macos"))]
+    return serde_json::from_slice(&std::fs::read(path).ok()?).ok();
 }
