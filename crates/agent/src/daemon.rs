@@ -14,7 +14,7 @@ use std::{
 
 use agentdesktop_core::{
     DEFAULT_CONFIG_PATH, DEFAULT_SOCKET_PATH, VERSION, config,
-    model::{DaemonControllerInfo, DaemonInfo, DaemonScope},
+    model::{ControllerConnectionError, DaemonControllerInfo, DaemonInfo, DaemonScope},
     telemetry,
 };
 use anyhow::{Context, bail};
@@ -296,6 +296,13 @@ where
     // discards everything written to stdout. Give the system daemon a log
     // file it controls itself so its logs exist regardless of that.
     let log_dir = (!args.user && !args.once).then(|| args.state_dir.join("logs"));
+    // Logs can carry hostnames, paths, and controller addresses. Create the
+    // state and log directories owner-only before the logger can create them
+    // with the process umask.
+    if let Some(log_dir) = &log_dir {
+        secure_fs::ensure_private_dir(&args.state_dir)?;
+        secure_fs::ensure_private_dir(log_dir)?;
+    }
     let _log_flush = telemetry::setup_logging(
         if args.once { "warn" } else { "info" },
         false,
@@ -411,7 +418,7 @@ where
             {
                 remote_enrollment.set("failed").await;
                 remote_controller_status
-                    .mark_disconnected(Some(format!("{error:#}")))
+                    .mark_disconnected(Some(ControllerConnectionError::Stopped))
                     .await;
                 tracing::error!(error = %format!("{error:#}"), "controller integration disabled");
             }

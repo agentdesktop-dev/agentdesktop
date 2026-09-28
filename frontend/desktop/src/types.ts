@@ -22,9 +22,21 @@ export interface PlatformCapabilities {
  */
 export interface ControllerConnectionStatus {
   connected: boolean;
-  lastConnectedUnixSeconds?: number;
-  lastError?: string;
+  /** Last time the controller stream was observed alive. */
+  lastSeenUnixSeconds?: number;
+  lastError?: ControllerConnectionError;
 }
+
+/**
+ * Coarse reason for the most recent controller failure. The daemon keeps the
+ * full error chain in its logs and never returns it to the local API.
+ */
+export type ControllerConnectionError =
+  | "unreachable"
+  | "identityRejected"
+  | "sessionExpired"
+  | "stopped"
+  | "unknown";
 
 export interface DaemonInfo {
   version: string;

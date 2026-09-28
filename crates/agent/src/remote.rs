@@ -23,7 +23,7 @@ use tracing::{debug, info, warn};
 use agentdesktop_core::{
     config::{self, ControllerConnectionConfig},
     model::{
-        ControllerConnectionStatus, Discovery as AgentDiscovery,
+        ControllerConnectionError, ControllerConnectionStatus, Discovery as AgentDiscovery,
         TelemetryEvent as ModelTelemetryEvent, TelemetryEventKind,
     },
 };
@@ -74,11 +74,15 @@ pub struct ControllerConnectionState {
 impl ControllerConnectionState {
     pub fn new() -> Self {
         Self {
-            status: Arc::new(RwLock::new(ControllerConnectionStatus {
-                connected: false,
-                last_connected_unix_seconds: None,
-                last_error: None,
-            })),
+            status: Arc::new(RwLock::new(Self::initial())),
+        }
+    }
+
+    fn initial() -> ControllerConnectionStatus {
+        ControllerConnectionStatus {
+            connected: false,
+            last_seen_unix_seconds: None,
+            last_error: None,
         }
     }
 
@@ -89,16 +93,36 @@ impl ControllerConnectionState {
     pub(crate) async fn mark_connected(&self) {
         let mut status = self.status.write().await;
         status.connected = true;
-        status.last_connected_unix_seconds = Some(unix_time_seconds());
+        status.last_seen_unix_seconds = Some(unix_time_seconds());
         status.last_error = None;
     }
 
-    pub(crate) async fn mark_disconnected(&self, error: Option<String>) {
+    /// Records that the open stream is still alive (heartbeat sent or
+    /// controller message received) without changing the connection state.
+    pub(crate) async fn mark_seen(&self) {
         let mut status = self.status.write().await;
+        if status.connected {
+            status.last_seen_unix_seconds = Some(unix_time_seconds());
+        }
+    }
+
+    /// Records a closed stream. A live stream that closes was, by definition,
+    /// seen until now, so its last-seen time advances to the close.
+    pub(crate) async fn mark_disconnected(&self, error: Option<ControllerConnectionError>) {
+        let mut status = self.status.write().await;
+        if status.connected {
+            status.last_seen_unix_seconds = Some(unix_time_seconds());
+        }
         status.connected = false;
         if error.is_some() {
             status.last_error = error;
         }
+    }
+
+    /// Forgets everything about the previous organization session, so a
+    /// signed-out device does not keep reporting the old controller state.
+    pub(crate) async fn reset(&self) {
+        *self.status.write().await = Self::initial();
     }
 }
 
@@ -151,7 +175,7 @@ pub async fn run(
             let refresh_result = tokio::select! {
                 result = refresh_oauth_if_needed(&mut identity, &identity_path) => result,
                 Some(request) = logout.recv() => {
-                    if complete_logout(request, &identity_path, &identity, &enrollment).await {
+                    if complete_logout(request, &identity_path, &identity, &enrollment, &controller_status).await {
                         break;
                     }
                     continue;
@@ -164,7 +188,7 @@ pub async fn run(
                     identity::delete(&identity_path, &identity.device_id)?;
                     enrollment.set("starting").await;
                     controller_status
-                        .mark_disconnected(Some(error_chain.clone()))
+                        .mark_disconnected(Some(ControllerConnectionError::SessionExpired))
                         .await;
                     warn!(
                         controller = %controller.address,
@@ -200,7 +224,7 @@ pub async fn run(
                     &controller_status,
                 ) => Some(result),
                 Some(request) = logout.recv() => {
-                    if complete_logout(request, &identity_path, &identity, &enrollment).await {
+                    if complete_logout(request, &identity_path, &identity, &enrollment, &controller_status).await {
                         None
                     } else {
                         continue;
@@ -220,7 +244,7 @@ pub async fn run(
                     identity::delete(&identity_path, &identity.device_id)?;
                     enrollment.set("starting").await;
                     controller_status
-                        .mark_disconnected(Some(error_chain.clone()))
+                        .mark_disconnected(Some(ControllerConnectionError::IdentityRejected))
                         .await;
                     warn!(
                         controller = %controller.address,
@@ -233,7 +257,7 @@ pub async fn run(
                 Err(error) => {
                     let error_chain = format!("{error:#}");
                     controller_status
-                        .mark_disconnected(Some(error_chain.clone()))
+                        .mark_disconnected(Some(ControllerConnectionError::Unreachable))
                         .await;
                     warn!(
                         controller = %controller.address,
@@ -247,7 +271,7 @@ pub async fn run(
             let logged_out = tokio::select! {
                 _ = time::sleep(delay) => false,
                 Some(request) = logout.recv() => {
-                    complete_logout(request, &identity_path, &identity, &enrollment).await
+                    complete_logout(request, &identity_path, &identity, &enrollment, &controller_status).await
                 }
             };
             if logged_out {
@@ -314,11 +338,13 @@ async fn complete_logout(
     identity_path: &Path,
     identity: &Identity,
     enrollment: &EnrollmentState,
+    controller_status: &ControllerConnectionState,
 ) -> bool {
     let result = identity::delete(identity_path, &identity.device_id)
         .map_err(|error| format!("remove local organization identity: {error:#}"));
     if result.is_ok() {
         enrollment.set("starting").await;
+        controller_status.reset().await;
         info!(device_id = %identity.device_id, "logged out local organization session");
     }
     let logged_out = result.is_ok();
@@ -428,6 +454,7 @@ async fn connect(
                         .unwrap_or_default()
                         .as_secs(),
                 })).await?;
+                controller_status.mark_seen().await;
             }
             Some(event) = telemetry.recv() => {
                 send(&sender, agent_message::Message::Telemetry(telemetry_to_proto(event))).await?;
@@ -439,6 +466,7 @@ async fn connect(
                 let Some(message) = message.context("read controller stream")? else {
                     return Ok(());
                 };
+                controller_status.mark_seen().await;
                 if let Some(controller_message::Message::DaemonConfig(config)) = message.message {
                     info!(
                         revision = config.revision,
@@ -775,7 +803,7 @@ mod tests {
         is_unauthenticated, next_inventory, next_retry_delay, normalize_hostname,
     };
     use crate::enrollment::EnrollmentState;
-    use agentdesktop_core::model::Discovery as AgentDiscovery;
+    use agentdesktop_core::model::{ControllerConnectionError, Discovery as AgentDiscovery};
     use tokio::{sync::watch, time};
 
     fn empty_inventory() -> AgentDiscovery {
@@ -898,7 +926,7 @@ mod tests {
     async fn controller_connection_state_starts_disconnected() {
         let status = ControllerConnectionState::new().get().await;
         assert!(!status.connected);
-        assert_eq!(status.last_connected_unix_seconds, None);
+        assert_eq!(status.last_seen_unix_seconds, None);
         assert_eq!(status.last_error, None);
     }
 
@@ -909,31 +937,65 @@ mod tests {
 
         let status = state.get().await;
         assert!(status.connected);
-        assert!(status.last_connected_unix_seconds.is_some());
+        assert!(status.last_seen_unix_seconds.is_some());
         assert_eq!(status.last_error, None);
     }
 
+    /// Backdates the last-seen time so tests can observe it advancing without
+    /// sleeping across a one-second boundary.
+    async fn backdate_last_seen(state: &ControllerConnectionState) {
+        state.status.write().await.last_seen_unix_seconds = Some(1);
+    }
+
     #[tokio::test]
-    async fn controller_connection_state_disconnect_clears_connected_but_keeps_last_success() {
+    async fn controller_connection_state_mark_seen_advances_only_while_connected() {
+        let state = ControllerConnectionState::new();
+        state.mark_seen().await;
+        assert_eq!(state.get().await.last_seen_unix_seconds, None);
+
+        state.mark_connected().await;
+        backdate_last_seen(&state).await;
+        state.mark_seen().await;
+        assert!(state.get().await.last_seen_unix_seconds > Some(1));
+
+        state.mark_disconnected(None).await;
+        backdate_last_seen(&state).await;
+        state.mark_seen().await;
+        assert_eq!(state.get().await.last_seen_unix_seconds, Some(1));
+    }
+
+    #[tokio::test]
+    async fn controller_connection_state_disconnect_records_when_the_stream_was_last_seen() {
         let state = ControllerConnectionState::new();
         state.mark_connected().await;
-        let connected_at = state.get().await.last_connected_unix_seconds;
+        backdate_last_seen(&state).await;
 
         state
-            .mark_disconnected(Some("controller unavailable".to_owned()))
+            .mark_disconnected(Some(ControllerConnectionError::Unreachable))
             .await;
 
         let status = state.get().await;
         assert!(!status.connected);
-        assert_eq!(status.last_connected_unix_seconds, connected_at);
-        assert_eq!(status.last_error, Some("controller unavailable".to_owned()));
+        assert!(status.last_seen_unix_seconds > Some(1));
+        assert_eq!(
+            status.last_error,
+            Some(ControllerConnectionError::Unreachable)
+        );
+
+        // Further failures while already disconnected must not look like
+        // fresh contact with the controller.
+        backdate_last_seen(&state).await;
+        state
+            .mark_disconnected(Some(ControllerConnectionError::Unreachable))
+            .await;
+        assert_eq!(state.get().await.last_seen_unix_seconds, Some(1));
     }
 
     #[tokio::test]
     async fn controller_connection_state_reconnect_clears_the_previous_error() {
         let state = ControllerConnectionState::new();
         state
-            .mark_disconnected(Some("controller unavailable".to_owned()))
+            .mark_disconnected(Some(ControllerConnectionError::Unreachable))
             .await;
         state.mark_connected().await;
 
@@ -946,7 +1008,7 @@ mod tests {
     async fn controller_connection_state_disconnect_without_an_error_keeps_the_previous_one() {
         let state = ControllerConnectionState::new();
         state
-            .mark_disconnected(Some("controller unavailable".to_owned()))
+            .mark_disconnected(Some(ControllerConnectionError::IdentityRejected))
             .await;
         // A clean stream close (e.g. the periodic OIDC-refresh reconnect)
         // reports no error; it should not silently erase the last real one.
@@ -954,7 +1016,23 @@ mod tests {
 
         assert_eq!(
             state.get().await.last_error,
-            Some("controller unavailable".to_owned())
+            Some(ControllerConnectionError::IdentityRejected)
+        );
+    }
+
+    #[tokio::test]
+    async fn controller_connection_state_reset_forgets_the_previous_session() {
+        let state = ControllerConnectionState::new();
+        state.mark_connected().await;
+        state
+            .mark_disconnected(Some(ControllerConnectionError::SessionExpired))
+            .await;
+
+        state.reset().await;
+
+        assert_eq!(
+            state.get().await,
+            ControllerConnectionState::new().get().await
         );
     }
 }

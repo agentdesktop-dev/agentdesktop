@@ -56,7 +56,7 @@ export const managedConnector = {
     daemon: managedDaemonInfo,
     controller: {
       connected: true,
-      lastConnectedUnixSeconds: Date.now() / 1000,
+      lastSeenUnixSeconds: Date.now() / 1000,
     },
   },
 } satisfies ConnectorSnapshot;
@@ -75,8 +75,8 @@ export const reconnectingConnector = {
     daemon: managedDaemonInfo,
     controller: {
       connected: false,
-      lastConnectedUnixSeconds: Date.now() / 1000 - 900,
-      lastError: "controller connection failed: connection refused",
+      lastSeenUnixSeconds: Date.now() / 1000 - 900,
+      lastError: "unreachable",
     },
   },
 } satisfies ConnectorSnapshot;

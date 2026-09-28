@@ -466,6 +466,11 @@ p {
   background: var(--surface);
 }
 
+.status-row-icon.warning {
+  color: var(--warning-strong);
+  background: var(--warning-soft);
+}
+
 .status-row > div {
   min-width: 0;
   display: flex;

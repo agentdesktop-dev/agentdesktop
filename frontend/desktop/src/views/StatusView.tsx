@@ -16,6 +16,7 @@ import { DaemonInformation } from "../components/DaemonInformation";
 import type {
   Bootstrap,
   ConnectorSnapshot,
+  ControllerConnectionError,
   Discovery,
   ManagedDeviceSnapshot,
 } from "../types";
@@ -57,6 +58,23 @@ function formatRelativeTime(unixSeconds: number | undefined): string | null {
   return `${Math.round(hours / 24)}d ago`;
 }
 
+function describeControllerError(
+  error: ControllerConnectionError | undefined,
+): string {
+  switch (error) {
+    case "unreachable":
+      return "Controller is unreachable; retrying";
+    case "identityRejected":
+      return "Device identity was rejected; re-enrolling";
+    case "sessionExpired":
+      return "Organization session expired; re-enrolling";
+    case "stopped":
+      return "Controller integration stopped; restart Agent Desktop";
+    default:
+      return "Reconnecting to your organization's controller";
+  }
+}
+
 function Definition({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div className="definition-row">
@@ -87,8 +105,9 @@ export function StatusView({
   const controllerConnection = managed ? runtime?.controller : undefined;
   const controllerConnected = controllerConnection?.connected ?? false;
   const controllerLastSeen = formatRelativeTime(
-    controllerConnection?.lastConnectedUnixSeconds,
+    controllerConnection?.lastSeenUnixSeconds,
   );
+  const controllerStopped = controllerConnection?.lastError === "stopped";
   const [confirmingLogout, setConfirmingLogout] = useState(false);
   const agents = discovery?.agents ?? [];
   const capabilityCount = agents.reduce(
@@ -177,9 +196,7 @@ export function StatusView({
                   ? "Live status is unavailable"
                   : controllerConnected
                     ? "Reporting device status to your organization"
-                    : controllerConnection.lastError
-                      ? `Reconnecting — ${controllerConnection.lastError}`
-                      : "Reconnecting to your organization's controller"}
+                    : describeControllerError(controllerConnection.lastError)}
               </span>
             </div>
             <span
@@ -189,9 +206,11 @@ export function StatusView({
                 ? "Unavailable"
                 : controllerConnected
                   ? "Connected"
-                  : controllerLastSeen
-                    ? `Reconnecting (seen ${controllerLastSeen})`
-                    : "Reconnecting"}
+                  : controllerStopped
+                    ? "Stopped"
+                    : controllerLastSeen
+                      ? `Reconnecting (seen ${controllerLastSeen})`
+                      : "Reconnecting"}
             </span>
           </div>
         ) : null}
