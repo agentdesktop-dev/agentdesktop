@@ -182,7 +182,7 @@ async fn run_session(
                     );
                     break;
                 }
-                Err(error) => {
+                Err(error) if is_transient_refresh_failure(&error) => {
                     // Network failures and token endpoint outages are transient: the
                     // stored refresh token is still valid, so keep the identity and retry
                     // instead of tearing down the controller integration.
@@ -199,6 +199,9 @@ async fn run_session(
                     delay = next_retry_delay(delay);
                     continue;
                 }
+                // Local identity store failures and unsupported token types are not
+                // fixed by waiting; let the supervisor report them as failed.
+                Err(error) => return Err(error),
             }
             if certificate_needs_renewal(&identity) {
                 match renew_device_certificate(controller, &identity).await {
@@ -370,6 +373,14 @@ fn is_oauth_refresh_rejected(error: &anyhow::Error) -> bool {
                     | reqwest::StatusCode::FORBIDDEN
             )
         })
+}
+
+/// Refresh failures that came from talking to the token endpoint (connection
+/// errors, timeouts, non-rejecting HTTP statuses) and may succeed on retry.
+fn is_transient_refresh_failure(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<reqwest::Error>().is_some())
 }
 
 pub async fn llm_gateway_credential(
@@ -794,8 +805,9 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        MAX_RETRY_DELAY, enroll_with_retry, is_oauth_refresh_rejected, is_unauthenticated,
-        next_inventory, next_retry_delay, normalize_hostname,
+        MAX_RETRY_DELAY, enroll_with_retry, is_oauth_refresh_rejected,
+        is_transient_refresh_failure, is_unauthenticated, next_inventory, next_retry_delay,
+        normalize_hostname,
     };
     use crate::enrollment::EnrollmentState;
     use agentdesktop_core::model::Discovery as AgentDiscovery;
@@ -869,6 +881,22 @@ mod tests {
         assert!(!is_oauth_refresh_rejected(&anyhow::anyhow!(
             "network unavailable"
         )));
+        assert!(is_transient_refresh_failure(
+            &status_error(reqwest::StatusCode::SERVICE_UNAVAILABLE)
+                .context("OIDC token endpoint rejected refresh token")
+        ));
+    }
+
+    /// Identity store failures are not retried in place; they must reach the
+    /// supervisor so enrollment is reported as failed.
+    #[test]
+    fn local_identity_failures_are_not_transient() {
+        let error = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            .context("persist rotated OIDC refresh token");
+        assert!(!is_transient_refresh_failure(&error));
+        assert!(!is_transient_refresh_failure(&anyhow::anyhow!(
+            "OIDC token endpoint returned unsupported token type"
+        )));
     }
 
     #[tokio::test]
@@ -882,9 +910,9 @@ mod tests {
             .await
             .unwrap_err()
             .into();
-        assert!(!is_oauth_refresh_rejected(
-            &connect_error.context("refresh OIDC access token")
-        ));
+        let connect_error = connect_error.context("refresh OIDC access token");
+        assert!(!is_oauth_refresh_rejected(&connect_error));
+        assert!(is_transient_refresh_failure(&connect_error));
 
         let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let silent_address = silent.local_addr().unwrap();
@@ -901,9 +929,9 @@ mod tests {
             .await
             .unwrap_err()
             .into();
-        assert!(!is_oauth_refresh_rejected(
-            &timeout_error.context("refresh OIDC access token")
-        ));
+        let timeout_error = timeout_error.context("refresh OIDC access token");
+        assert!(!is_oauth_refresh_rejected(&timeout_error));
+        assert!(is_transient_refresh_failure(&timeout_error));
     }
 
     #[test]
