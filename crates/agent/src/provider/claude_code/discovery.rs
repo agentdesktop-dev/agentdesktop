@@ -1,7 +1,7 @@
 use super::ClaudeCode;
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -11,13 +11,15 @@ use serde_json::Value;
 
 use crate::provider::metadata;
 
-pub(super) fn discover() -> Option<Agent> {
+/// `settings_path` is the managed settings file the reconciler writes, so a
+/// `daemon.claudeCode.config` override is inventoried from the same place.
+pub(super) fn discover(settings_path: &Path) -> Option<Agent> {
     let executable = metadata::find_executable("claude", executable_candidates())?;
     Some(Agent {
         version: metadata::version_after_component(&executable, "versions"),
         executable,
         kind: ClaudeCode::ID.to_owned(),
-        mcp_servers: discover_mcp_servers(),
+        mcp_servers: discover_mcp_servers(settings_path),
         skills: metadata::discover_skills(skill_roots()),
     })
 }
@@ -41,16 +43,18 @@ fn executable_candidates() -> Vec<PathBuf> {
     candidates.into_iter().collect()
 }
 
-fn discover_mcp_servers() -> Vec<McpServer> {
+fn discover_mcp_servers(settings_path: &Path) -> Vec<McpServer> {
+    let root = managed_root();
     let mut servers = Vec::new();
-    if let Some(root) = managed_root() {
+    if let Some(root) = &root {
         servers.extend(mcp_servers_from_json(&root.join("managed-mcp.json")));
-        // Servers pushed through the `managedMcpServers` managed setting — including the
-        // ones Agentdesktop itself writes to `managed-settings.d/50-agentdesktop.json`.
-        for path in managed_settings_files(&root) {
-            servers.extend(managed_mcp_servers_from_json(&path));
-        }
     }
+    // Servers pushed through the `managedMcpServers` managed setting — including the
+    // ones Agentdesktop itself writes to its configured settings file.
+    servers.extend(merged_managed_mcp_servers(&managed_settings_sources(
+        root.as_deref(),
+        settings_path,
+    )));
 
     for home in metadata::user_home_dirs() {
         let user = home.join(".claude.json");
@@ -98,6 +102,29 @@ fn managed_settings_files(root: &Path) -> Vec<PathBuf> {
         files.extend(drop_ins);
     }
     files
+}
+
+/// The managed settings files under `root`, plus Agentdesktop's own settings file when
+/// it has been configured outside that root. The configured file is merged last because
+/// it is the one Agentdesktop reconciles.
+fn managed_settings_sources(root: Option<&Path>, settings_path: &Path) -> Vec<PathBuf> {
+    let mut files = root.map(managed_settings_files).unwrap_or_default();
+    if !files.iter().any(|path| path == settings_path) {
+        files.push(settings_path.to_path_buf());
+    }
+    files
+}
+
+/// Merges `managedMcpServers` across settings files by server name, with later files
+/// overriding earlier ones, so each effective server is reported once.
+fn merged_managed_mcp_servers(files: &[PathBuf]) -> Vec<McpServer> {
+    let mut merged = BTreeMap::new();
+    for path in files {
+        for server in managed_mcp_servers_from_json(path) {
+            merged.insert(server.name.clone(), server);
+        }
+    }
+    merged.into_values().collect()
 }
 
 fn installed_plugin_roots(home: &Path) -> Vec<PathBuf> {
@@ -210,11 +237,79 @@ fn mcp_server_from_entry(name: &str, value: &Value, source: &Path) -> Option<Mcp
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{fs, path::Path};
 
     use serde_json::json;
 
-    use super::{managed_mcp_servers_from_value, mcp_servers_from_value};
+    use super::{
+        managed_mcp_servers_from_value, managed_settings_sources, mcp_servers_from_value,
+        merged_managed_mcp_servers,
+    };
+
+    fn write_managed_servers(path: &Path, servers: serde_json::Value) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            path,
+            serde_json::to_vec(&json!({ "managedMcpServers": servers })).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn later_managed_settings_files_override_servers_by_name() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("managed-settings.json");
+        let drop_in = root.path().join("managed-settings.d/50-agentdesktop.json");
+        write_managed_servers(
+            &base,
+            json!({
+                "github": { "type": "http", "url": "https://old.example.com/mcp" },
+                "local": { "command": "server" }
+            }),
+        );
+        write_managed_servers(
+            &drop_in,
+            json!({ "github": { "type": "http", "url": "https://new.example.com/mcp" } }),
+        );
+
+        let servers =
+            merged_managed_mcp_servers(&managed_settings_sources(Some(root.path()), &drop_in));
+
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].name, "github");
+        assert_eq!(
+            servers[0].url.as_deref(),
+            Some("https://new.example.com/mcp")
+        );
+        assert_eq!(servers[0].source, drop_in);
+        assert_eq!(servers[1].name, "local");
+        assert_eq!(servers[1].source, base);
+    }
+
+    #[test]
+    fn configured_settings_path_outside_the_managed_root_is_inventoried_last() {
+        let root = tempfile::tempdir().unwrap();
+        let custom = tempfile::tempdir().unwrap();
+        let drop_in = root.path().join("managed-settings.d/10-other.json");
+        let configured = custom.path().join("agentdesktop.json");
+        write_managed_servers(&drop_in, json!({ "github": { "command": "stale" } }));
+        write_managed_servers(
+            &configured,
+            json!({ "github": { "type": "http", "url": "https://gateway.example.com/mcp" } }),
+        );
+
+        let sources = managed_settings_sources(Some(root.path()), &configured);
+        assert_eq!(sources.last(), Some(&configured));
+        assert_eq!(
+            sources.iter().filter(|path| **path == configured).count(),
+            1
+        );
+
+        let servers = merged_managed_mcp_servers(&sources);
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].transport, "http");
+        assert_eq!(servers[0].source, configured);
+    }
 
     #[test]
     fn reads_claude_servers_without_credentials_or_arguments() {
