@@ -14,7 +14,7 @@ use std::{
 
 use agentdesktop_core::{
     DEFAULT_CONFIG_PATH, DEFAULT_SOCKET_PATH, VERSION, config,
-    model::{ControllerConnectionError, DaemonControllerInfo, DaemonInfo, DaemonScope},
+    model::{DaemonControllerInfo, DaemonInfo, DaemonScope},
     telemetry,
 };
 use anyhow::{Context, bail};
@@ -399,30 +399,19 @@ where
         let state_dir = args.state_dir.clone();
         let oidc_callback_listen = args.oidc_callback_listen;
         let remote_enrollment = enrollment.clone();
-        let remote_controller_status = controller_status.clone();
-        tokio::spawn(async move {
-            if let Err(error) = remote::run(
-                controller,
-                remote_discovery,
-                state_dir,
-                oidc_callback_listen,
-                reconciler,
-                remote_enrollment.clone(),
-                remote_controller_status.clone(),
-                remote::Requests {
-                    telemetry: telemetry_receiver,
-                    logout: logout_receiver,
-                },
-            )
-            .await
-            {
-                remote_enrollment.set("failed").await;
-                remote_controller_status
-                    .mark_disconnected(Some(ControllerConnectionError::Stopped))
-                    .await;
-                tracing::error!(error = %format!("{error:#}"), "controller integration disabled");
-            }
-        });
+        tokio::spawn(remote::run(
+            controller,
+            remote_discovery,
+            state_dir,
+            oidc_callback_listen,
+            reconciler,
+            remote_enrollment,
+            controller_status.clone(),
+            remote::Requests {
+                telemetry: telemetry_receiver,
+                logout: logout_receiver,
+            },
+        ));
     }
     let has_controller = config.controller.is_some();
     let app = api::router(api::AppState {

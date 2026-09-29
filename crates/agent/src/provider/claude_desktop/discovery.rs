@@ -6,16 +6,19 @@ use std::{
 };
 
 use agentdesktop_core::model::{Agent, McpServer};
+use serde_json::Value;
 
 use crate::provider::{claude_code::discovery as claude_code, metadata};
 
-pub(super) fn discover() -> Option<Agent> {
+/// `managed_settings_path` is the managed settings file the reconciler writes, so a
+/// `daemon.claudeDesktop.config` override is inventoried from the same place.
+pub(super) fn discover(managed_settings_path: &Path) -> Option<Agent> {
     let executable = metadata::find_executable(ClaudeDesktop::ID, executable_candidates())?;
     Some(Agent {
         version: discover_version(&executable),
         executable,
         kind: ClaudeDesktop::ID.to_owned(),
-        mcp_servers: discover_mcp_servers(),
+        mcp_servers: discover_mcp_servers(managed_settings_path),
         skills: Vec::new(),
     })
 }
@@ -89,16 +92,78 @@ fn discover_version(executable: &Path) -> Option<String> {
         .find_map(|archive| metadata::electron_asar_version(&archive, "Claude"))
 }
 
-fn discover_mcp_servers() -> Vec<McpServer> {
+fn discover_mcp_servers(managed: &Path) -> Vec<McpServer> {
+    let mut servers = managed_settings(managed)
+        .and_then(|settings| {
+            settings
+                .get("managedMcpServers")
+                .map(|servers| claude_code::managed_mcp_servers_from_value(servers, managed))
+        })
+        .unwrap_or_default();
+
     let mut paths = BTreeSet::new();
     for home in metadata::user_home_dirs() {
         paths.insert(home.join(".config/Claude/claude_desktop_config.json"));
         paths.insert(home.join(".config/Claude-3p/claude_desktop_config.json"));
         paths.insert(home.join("Library/Application Support/Claude/claude_desktop_config.json"));
+        // Third-party (gateway) deployments keep their state in a separate directory.
+        paths.insert(home.join("Library/Application Support/Claude-3p/claude_desktop_config.json"));
         paths.insert(home.join("AppData/Roaming/Claude/claude_desktop_config.json"));
     }
-    paths
-        .into_iter()
-        .flat_map(|path| claude_code::mcp_servers_from_json(&path))
-        .collect()
+    servers.extend(
+        paths
+            .into_iter()
+            .flat_map(|path| claude_code::mcp_servers_from_json(&path)),
+    );
+    servers
+}
+
+/// Reads Claude Desktop's system-managed settings in the platform's native format — see
+/// `default_claude_desktop_managed_settings_path`.
+fn managed_settings(path: &Path) -> Option<Value> {
+    #[cfg(target_os = "macos")]
+    return plist::from_file(path).ok();
+    #[cfg(not(target_os = "macos"))]
+    return serde_json::from_slice(&std::fs::read(path).ok()?).ok();
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::discover_mcp_servers;
+
+    #[test]
+    fn inventories_managed_servers_from_the_configured_settings_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings = json!({
+            "managedMcpServers": json!([
+                { "name": "github", "transport": "http", "url": "https://gateway.example.com/mcp" }
+            ])
+            .to_string()
+        });
+        #[cfg(target_os = "macos")]
+        let path = {
+            let path = directory.path().join("custom.plist");
+            plist::to_file_xml(&path, &settings).unwrap();
+            path
+        };
+        #[cfg(not(target_os = "macos"))]
+        let path = {
+            let path = directory.path().join("custom.json");
+            std::fs::write(&path, serde_json::to_vec(&settings).unwrap()).unwrap();
+            path
+        };
+
+        let servers = discover_mcp_servers(&path);
+        let github = servers
+            .iter()
+            .find(|server| server.source == path)
+            .expect("managed server from the configured path");
+        assert_eq!(github.name, "github");
+        assert_eq!(
+            github.url.as_deref(),
+            Some("https://gateway.example.com/mcp")
+        );
+    }
 }

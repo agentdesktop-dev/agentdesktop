@@ -108,8 +108,9 @@ pub enum ControllerConnectionError {
     IdentityRejected,
     /// The organization session could not be refreshed; the daemon is re-enrolling.
     SessionExpired,
-    /// Controller integration stopped after an unrecoverable local error.
-    Stopped,
+    /// A local error (for example, the identity store) ended the controller
+    /// session; the daemon is restarting it.
+    LocalError,
     /// A reason reported by a newer daemon that this build does not know.
     #[serde(other)]
     Unknown,
