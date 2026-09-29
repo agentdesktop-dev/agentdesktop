@@ -17,8 +17,6 @@ on:
         type: boolean
 
 env:
-  CARGO_TERM_COLOR: always
-  CI: true
   CONTROLLER_IMAGE: ghcr.io/${{ github.repository_owner }}/agentdesktop-controller
   CHART_REGISTRY: ghcr.io/${{ github.repository_owner }}/charts
 
@@ -32,8 +30,20 @@ jobs:
         id: version
         shell: bash
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_REF: ${{ github.ref }}
           VERSION_INPUT: ${{ inputs.version || github.ref_name }}
         run: |
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" && "${RELEASE_REF}" != "refs/heads/main" ]]; then
+            case "${RELEASE_REF}" in
+              refs/tags/v*.*.*) ;;
+              *)
+                echo "Manual releases must run from main or an existing v*.*.* tag" >&2
+                exit 1
+                ;;
+            esac
+          fi
+
           VERSION="${VERSION_INPUT}"
           VERSION="${VERSION#v}"
           if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
@@ -42,629 +52,43 @@ jobs:
           fi
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
 
-  build-controller-image:
+  linux:
     needs: setup
-    runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: read
-      packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-24.04
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-    steps:
-      - name: Prepare platform name
-        shell: bash
-        run: |
-          platform="${{ matrix.platform }}"
-          echo "PLATFORM_PAIR=${platform//\//-}" >> "${GITHUB_ENV}"
-
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
-      - name: Build and push by digest
-        id: build
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          platforms: ${{ matrix.platform }}
-          tags: ${{ env.CONTROLLER_IMAGE }}
-          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=controller-${{ env.PLATFORM_PAIR }}
-          cache-to: type=gha,scope=controller-${{ env.PLATFORM_PAIR }},mode=max
-
-      - name: Export digest
-        shell: bash
-        run: |
-          mkdir -p "${{ runner.temp }}/digests"
-          digest="${{ steps.build.outputs.digest }}"
-          touch "${{ runner.temp }}/digests/${digest#sha256:}"
-
-      - name: Upload digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: controller-digest-${{ env.PLATFORM_PAIR }}
-          path: ${{ runner.temp }}/digests/*
-          if-no-files-found: error
-          retention-days: 1
-
-  push-controller-image:
-    needs:
-      - setup
-      - build-controller-image
-    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
       id-token: write
-    steps:
-      - name: Download digests
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          path: ${{ runner.temp }}/digests
-          pattern: controller-digest-*
-          merge-multiple: true
+    uses: ./.github/workflows/release-linux.yml
+    with:
+      version: ${{ needs.setup.outputs.version }}
 
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
-      - name: Create and push manifest
-        working-directory: ${{ runner.temp }}/digests
-        shell: bash
-        env:
-          VERSION: ${{ needs.setup.outputs.version }}
-        run: |
-          tags=(-t "${CONTROLLER_IMAGE}:v${VERSION}")
-          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
-            tags+=(-t "${CONTROLLER_IMAGE}:latest")
-          fi
-          images=()
-          for digest in *; do
-            images+=("${CONTROLLER_IMAGE}@sha256:${digest}")
-          done
-          docker buildx imagetools create "${tags[@]}" "${images[@]}"
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-
-      - name: Sign versioned image
-        env:
-          VERSION: ${{ needs.setup.outputs.version }}
-        run: cosign sign --yes "${CONTROLLER_IMAGE}:v${VERSION}"
-
-      - name: Sign latest image
-        if: github.event_name == 'push'
-        run: cosign sign --yes "${CONTROLLER_IMAGE}:latest"
-
-  push-helm-chart:
-    needs:
-      - setup
-      - push-controller-image
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Log in to GitHub Container Registry
-        shell: bash
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
-
-      - name: Package and push chart
-        shell: bash
-        env:
-          VERSION: ${{ needs.setup.outputs.version }}
-        run: |
-          mkdir -p "${{ runner.temp }}/charts"
-          helm package deploy/helm/agentdesktop-controller \
-            --version "${VERSION}" \
-            --app-version "v${VERSION}" \
-            --destination "${{ runner.temp }}/charts"
-          helm push \
-            "${{ runner.temp }}/charts/agentdesktop-controller-${VERSION}.tgz" \
-            "oci://${CHART_REGISTRY}"
-
-  build-binaries:
+  macos:
     needs: setup
-    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os_name: linux
-            arch: amd64
-            target: x86_64-unknown-linux-gnu
-            runner: ubuntu-22.04
-            extension: ""
-          - os_name: linux
-            arch: arm64
-            target: aarch64-unknown-linux-gnu
-            runner: ubuntu-22.04-arm
-            extension: ""
-          - os_name: darwin
-            arch: amd64
-            target: x86_64-apple-darwin
-            runner: macos-15-intel
-            extension: ""
-          - os_name: darwin
-            arch: arm64
-            target: aarch64-apple-darwin
-            runner: macos-26
-            extension: ""
-          - os_name: windows
-            arch: amd64
-            target: x86_64-pc-windows-msvc
-            runner: windows-2025
-            extension: .exe
-          - os_name: windows
-            arch: arm64
-            target: aarch64-pc-windows-msvc
-            runner: windows-11-arm
-            extension: .exe
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
+    uses: ./.github/workflows/release-macos.yml
+    with:
+      version: ${{ needs.setup.outputs.version }}
+    secrets:
+      APPLE_APPLICATION_CERTIFICATE: ${{ secrets.APPLE_APPLICATION_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
 
-      - name: Install Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: frontend/.nvmrc
-
-      - name: Install Linux desktop dependencies
-        if: matrix.os_name == 'linux'
-        shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            libwebkit2gtk-4.1-dev \
-            libxdo-dev \
-            libssl-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev
-
-      - name: Install Rust target
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: "1.98"
-          targets: ${{ matrix.target }}
-
-      - name: Build frontend
-        shell: bash
-        working-directory: frontend
-        run: |
-          npm install --global pnpm@11.25.0
-          pnpm install --frozen-lockfile
-          pnpm --filter @agentdesktop/desktop-web build
-
-      - name: Build binary
-        shell: bash
-        run: cargo build --locked --release --package agentdesktop --target "${{ matrix.target }}"
-
-      - name: Import macOS signing identity
-        if: matrix.os_name == 'darwin'
-        shell: bash
-        env:
-          APPLE_APPLICATION_CERTIFICATE: ${{ secrets.APPLE_APPLICATION_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-        run: bash .github/scripts/import-macos-signing.sh
-
-      - name: Sign macOS binary
-        if: matrix.os_name == 'darwin'
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-        run: |
-          binary="target/${TARGET}/release/agentdesktop"
-          codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
-            --identifier dev.agentdesktop.tray --options runtime --timestamp=none "$binary"
-          codesign --verify --strict --verbose=2 \
-            -R="identifier \"dev.agentdesktop.tray\" and certificate leaf = H\"${APPLE_SIGNING_IDENTITY}\"" "$binary"
-
-      - name: Stage binary and checksum
-        shell: bash
-        env:
-          OUTPUT_NAME: agentdesktop-${{ matrix.os_name }}-${{ matrix.arch }}${{ matrix.extension }}
-        run: |
-          mkdir -p release
-          cp "target/${{ matrix.target }}/release/agentdesktop${{ matrix.extension }}" "release/${OUTPUT_NAME}"
-          if command -v sha256sum >/dev/null 2>&1; then
-            (cd release && sha256sum "${OUTPUT_NAME}" > "${OUTPUT_NAME}.sha256")
-          else
-            (cd release && shasum -a 256 "${OUTPUT_NAME}" > "${OUTPUT_NAME}.sha256")
-          fi
-
-      - name: Remove macOS signing identity
-        if: always() && matrix.os_name == 'darwin'
-        timeout-minutes: 2
-        shell: bash
-        run: |
-          # remove-trusted-cert can hang on headless macOS runners:
-          # https://github.com/actions/runner-images/issues/12116
-          # Leave public trust metadata to disposable GitHub-hosted VM teardown.
-          # Delete exported files first, even if keychain deletion later fails.
-          rm -f "${RUNNER_TEMP}/agentdesktop-signing.pem" "${RUNNER_TEMP}/agentdesktop-signing.p12"
-          if [ -f "${RUNNER_TEMP}/agentdesktop-signing.keychain-db" ]; then
-            security delete-keychain "${RUNNER_TEMP}/agentdesktop-signing.keychain-db"
-          fi
-
-      - name: Upload binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: release-binary-${{ matrix.os_name }}-${{ matrix.arch }}
-          path: release/agentdesktop-*
-          if-no-files-found: error
-
-  build-macos-installers:
+  windows:
     needs: setup
-    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            target: x86_64-apple-darwin
-            runner: macos-15-intel
-          - arch: arm64
-            target: aarch64-apple-darwin
-            runner: macos-26
-    env:
-      AGENTDESKTOP_VERSION: ${{ needs.setup.outputs.version }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: frontend/.nvmrc
-
-      - name: Install Rust target
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: "1.98"
-          targets: ${{ matrix.target }}
-
-      - name: Install frontend dependencies
-        working-directory: frontend
-        shell: bash
-        run: |
-          npm install --global pnpm@11.25.0
-          pnpm install --frozen-lockfile
-
-      - name: Import macOS signing identity
-        shell: bash
-        env:
-          APPLE_APPLICATION_CERTIFICATE: ${{ secrets.APPLE_APPLICATION_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-        run: bash .github/scripts/import-macos-signing.sh
-
-      - name: Build PKG
-        working-directory: frontend
-        shell: bash
-        run: pnpm --filter @agentdesktop/desktop-web dist:mac -- --target "${{ matrix.target }}"
-
-      - name: Verify application signature
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-        run: |
-          app="target/${TARGET}/release/bundle/macos/agentdesktop.app"
-          codesign --verify --deep --strict --verbose=2 "$app"
-          codesign --verify --strict \
-            -R="identifier \"dev.agentdesktop.tray\" and certificate leaf = H\"${APPLE_SIGNING_IDENTITY}\"" \
-            "$app/Contents/MacOS/agentdesktop"
-
-      - name: Stage PKG
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-          ARCH: ${{ matrix.arch }}
-          OUTPUT_NAME: agentdesktop-macos-${{ matrix.arch }}.pkg
-        run: |
-          source_path="target/${TARGET}/release/bundle/pkg/Agent Desktop_${AGENTDESKTOP_VERSION}_${ARCH}.pkg"
-          test -f "${source_path}"
-          mkdir -p release
-          cp "${source_path}" "release/${OUTPUT_NAME}"
-
-      # Production notarization placeholder: notarize and staple the signed
-      # package here, before calculating its checksum or smoke-testing it.
-      # - name: Notarize and staple PKG
-      #   shell: bash
-      #   env:
-      #     OUTPUT_NAME: agentdesktop-macos-${{ matrix.arch }}.pkg
-      #     APPLE_ID: ${{ secrets.APPLE_ID }}
-      #     APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-      #     APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      #   run: |
-      #     xcrun notarytool submit "release/${OUTPUT_NAME}" \
-      #       --apple-id "${APPLE_ID}" \
-      #       --password "${APPLE_APP_SPECIFIC_PASSWORD}" \
-      #       --team-id "${APPLE_TEAM_ID}" \
-      #       --wait
-      #     xcrun stapler staple "release/${OUTPUT_NAME}"
-
-      - name: Checksum PKG
-        shell: bash
-        env:
-          OUTPUT_NAME: agentdesktop-macos-${{ matrix.arch }}.pkg
-        run: |
-          (cd release && shasum -a 256 "${OUTPUT_NAME}" > "${OUTPUT_NAME}.sha256")
-
-      - name: Smoke test PKG install and replacement
-        shell: bash
-        env:
-          OUTPUT_NAME: agentdesktop-macos-${{ matrix.arch }}.pkg
-        run: |
-          wait_for_daemon() {
-            deadline=$((SECONDS + 30))
-            until sudo "/Applications/agentdesktop.app/Contents/MacOS/agentdesktop" status; do
-              if (( SECONDS >= deadline )); then
-                echo "Installed CLI could not reach the Agent Desktop daemon" >&2
-                return 1
-              fi
-              sleep 1
-            done
-          }
-
-          daemon_pid() {
-            sudo launchctl print system/dev.agentdesktop.daemon |
-              awk '$1 == "pid" && $2 == "=" { print $3; exit }'
-          }
-
-          sudo installer -pkg "release/${OUTPUT_NAME}" -target /
-          sudo launchctl print system/dev.agentdesktop.daemon > /dev/null
-          wait_for_daemon
-
-          first_pid="$(daemon_pid)"
-          test -n "${first_pid}"
-          config_hash="$(sudo shasum -a 256 /etc/agentdesktop/config.yaml | awk '{ print $1 }')"
-          sudo touch /var/lib/agentdesktop/upgrade-smoke-marker
-
-          sudo installer -pkg "release/${OUTPUT_NAME}" -target /
-          sudo launchctl print system/dev.agentdesktop.daemon > /dev/null
-          wait_for_daemon
-
-          second_pid="$(daemon_pid)"
-          test -n "${second_pid}"
-          if [ "${first_pid}" = "${second_pid}" ]; then
-            echo "Agent Desktop daemon was not restarted during package replacement" >&2
-            exit 1
-          fi
-          test "${config_hash}" = "$(sudo shasum -a 256 /etc/agentdesktop/config.yaml | awk '{ print $1 }')"
-          sudo test -f /var/lib/agentdesktop/upgrade-smoke-marker
-
-      - name: Remove smoke-test installation
-        if: always()
-        shell: bash
-        run: |
-          sudo launchctl bootout system/dev.agentdesktop.daemon || true
-          sudo rm -f /Library/LaunchDaemons/dev.agentdesktop.daemon.plist
-          sudo rm -rf "/Applications/agentdesktop.app"
-          sudo rm -rf /etc/agentdesktop /var/lib/agentdesktop /var/run/agentdesktop
-          sudo rm -f /var/run/agentdesktop-relaunch
-          sudo pkgutil --forget dev.agentdesktop.installer || true
-
-      - name: Remove macOS signing identity
-        if: always()
-        timeout-minutes: 2
-        shell: bash
-        run: |
-          # remove-trusted-cert can hang on headless macOS runners:
-          # https://github.com/actions/runner-images/issues/12116
-          # Leave public trust metadata to disposable GitHub-hosted VM teardown.
-          # Delete exported files first, even if keychain deletion later fails.
-          rm -f "${RUNNER_TEMP}/agentdesktop-signing.pem" "${RUNNER_TEMP}/agentdesktop-signing.p12"
-          if [ -f "${RUNNER_TEMP}/agentdesktop-signing.keychain-db" ]; then
-            security delete-keychain "${RUNNER_TEMP}/agentdesktop-signing.keychain-db"
-          fi
-
-      - name: Upload PKG (self-signed application)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: macos-installer-${{ matrix.arch }}
-          path: release/agentdesktop-macos-*
-          if-no-files-found: error
-
-  build-windows-installers:
-    needs: setup
-    runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            target: x86_64-pc-windows-msvc
-            runner: windows-2025
-          - arch: arm64
-            target: aarch64-pc-windows-msvc
-            runner: windows-11-arm
-    env:
-      AGENTDESKTOP_VERSION: ${{ needs.setup.outputs.version }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: frontend/.nvmrc
-
-      - name: Install Rust target
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: "1.98"
-          targets: ${{ matrix.target }}
-
-      - name: Install frontend dependencies
-        working-directory: frontend
-        shell: bash
-        run: |
-          npm install --global pnpm@11.25.0
-          pnpm install --frozen-lockfile
-
-      - name: Build MSI
-        working-directory: frontend
-        shell: bash
-        run: pnpm --filter @agentdesktop/desktop-web dist:win -- --target "${{ matrix.target }}"
-
-      - name: Stage MSI
-        shell: pwsh
-        env:
-          TARGET: ${{ matrix.target }}
-          OUTPUT_NAME: agentdesktop-windows-${{ matrix.arch }}.msi
-        run: |
-          $installers = @(Get-ChildItem "target/$env:TARGET/release/bundle/msi" -Filter *.msi)
-          if ($installers.Count -ne 1) {
-            throw "Expected one MSI, found $($installers.Count)"
-          }
-          New-Item -ItemType Directory -Force release | Out-Null
-          Copy-Item $installers[0].FullName "release/$env:OUTPUT_NAME"
-
-      # Production signing placeholder: sign the staged MSI here with the
-      # selected Authenticode provider before checksumming or smoke-testing it.
-      # - name: Sign MSI
-      #   shell: pwsh
-      #   env:
-      #     AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      #     AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      #     AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-      #     OUTPUT_NAME: agentdesktop-windows-${{ matrix.arch }}.msi
-      #   run: |
-      #     # Invoke Azure Artifact Signing or signtool for release/$env:OUTPUT_NAME here.
-
-      - name: Checksum MSI
-        shell: pwsh
-        env:
-          OUTPUT_NAME: agentdesktop-windows-${{ matrix.arch }}.msi
-        run: |
-          $hash = (Get-FileHash "release/$env:OUTPUT_NAME" -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $env:OUTPUT_NAME" | Set-Content "release/$env:OUTPUT_NAME.sha256" -Encoding ascii
-
-      - name: Smoke test MSI install and replacement
-        shell: pwsh
-        env:
-          OUTPUT_NAME: agentdesktop-windows-${{ matrix.arch }}.msi
-        run: |
-          function Assert-MsiSuccess($process, $operation) {
-            if ($process.ExitCode -notin @(0, 3010)) {
-              throw "MSI $operation failed with exit code $($process.ExitCode)"
-            }
-          }
-
-          function Wait-ForAgentDesktopService {
-            $service = Get-Service AgentDesktop
-            $service.WaitForStatus("Running", [TimeSpan]::FromSeconds(30))
-            $deadline = (Get-Date).AddSeconds(30)
-            do {
-              & "$env:ProgramFiles\Agent Desktop\agentdesktop.exe" status
-              if ($LASTEXITCODE -eq 0) {
-                return
-              }
-              Start-Sleep -Seconds 1
-            } while ((Get-Date) -lt $deadline)
-            throw "Installed CLI could not reach the Agent Desktop service"
-          }
-
-          $installer = (Resolve-Path "release/$env:OUTPUT_NAME").Path
-          $install = Start-Process msiexec.exe -ArgumentList @("/i", "`"$installer`"", "/qn", "/norestart") -Wait -PassThru
-          Assert-MsiSuccess $install "installation"
-          Wait-ForAgentDesktopService
-
-          $configPath = "$env:ProgramData\AgentDesktop\config.yaml"
-          $stateMarker = "$env:ProgramData\AgentDesktop\state\upgrade-smoke-marker"
-          $configHash = (Get-FileHash $configPath -Algorithm SHA256).Hash
-          New-Item -ItemType Directory -Force (Split-Path $stateMarker) | Out-Null
-          New-Item -ItemType File -Force $stateMarker | Out-Null
-
-          $tray = Start-Process "$env:ProgramFiles\Agent Desktop\agentdesktop.exe" -PassThru
-          Start-Sleep -Seconds 3
-          if ($tray.HasExited) {
-            throw "Agent Desktop tray process exited before replacement"
-          }
-
-          $replace = Start-Process msiexec.exe -ArgumentList @(
-            "/i",
-            "`"$installer`"",
-            "/qn",
-            "/norestart",
-            "REINSTALL=ALL",
-            "REINSTALLMODE=vomus"
-          ) -Wait -PassThru
-          Assert-MsiSuccess $replace "replacement"
-          $tray.Refresh()
-          if (-not $tray.HasExited) {
-            throw "Agent Desktop tray process remains after replacement"
-          }
-
-          Wait-ForAgentDesktopService
-          if ((Get-FileHash $configPath -Algorithm SHA256).Hash -ne $configHash) {
-            throw "Agent Desktop configuration changed during replacement"
-          }
-          if (-not (Test-Path $stateMarker)) {
-            throw "Agent Desktop state was removed during replacement"
-          }
-
-          $uninstall = Start-Process msiexec.exe -ArgumentList @("/x", "`"$installer`"", "/qn", "/norestart") -Wait -PassThru
-          Assert-MsiSuccess $uninstall "uninstall"
-          if (Get-Service AgentDesktop -ErrorAction SilentlyContinue) {
-            throw "Agent Desktop service remains after uninstall"
-          }
-
-      - name: Upload unsigned MSI
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: unsigned-windows-installer-${{ matrix.arch }}
-          path: release/agentdesktop-windows-*
-          if-no-files-found: error
+      id-token: write
+    uses: ./.github/workflows/release-windows.yml
+    with:
+      version: ${{ needs.setup.outputs.version }}
 
   release:
     if: github.event_name == 'push' || !inputs.skip_github_release
     needs:
       - setup
-      - push-controller-image
-      - push-helm-chart
-      - build-binaries
-      - build-macos-installers
-      - build-windows-installers
+      - linux
+      - macos
+      - windows
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -674,6 +98,13 @@ jobs:
         with:
           path: release
           pattern: release-binary-*
+          merge-multiple: true
+
+      - name: Download signed Windows installers
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: release
+          pattern: signed-windows-installer-*
           merge-multiple: true
 
       - name: Create GitHub release
@@ -689,5 +120,6 @@ jobs:
             - Controller image: `${{ env.CONTROLLER_IMAGE }}:v${{ needs.setup.outputs.version }}`
             - Helm chart: `oci://${{ env.CHART_REGISTRY }}/agentdesktop-controller:${{ needs.setup.outputs.version }}`
             - Agentdesktop binaries for amd64 and arm64 on Linux, macOS, and Windows are attached below.
+            - Signed Windows MSI installers for amd64 and arm64 are attached below.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
