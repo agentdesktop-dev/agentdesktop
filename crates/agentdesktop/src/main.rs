@@ -17,7 +17,7 @@ use agentdesktop_agent::{
 };
 use agentdesktop_client as client;
 use agentdesktop_core::{
-    DEFAULT_SOCKET_PATH,
+    DEFAULT_SOCKET_PATH, VERSION,
     config::DaemonConfig,
     model::{ControllerConnectionStatus, DaemonInfo, Discovery, EnrollmentStatus, Health},
 };
@@ -46,7 +46,7 @@ const TRAY_OFFLINE_ICON: &[u8] =
     include_bytes!("../../../frontend/desktop/assets/tray-icon-offline.png");
 
 #[derive(Parser)]
-#[command(about = "Agent Desktop UI, daemon, and command-line tools")]
+#[command(about = "Agent Desktop UI, daemon, and command-line tools", version = VERSION)]
 struct Args {
     /// Override the local endpoint exposed by the daemon (Unix socket or Windows named pipe).
     #[arg(long, global = true)]
