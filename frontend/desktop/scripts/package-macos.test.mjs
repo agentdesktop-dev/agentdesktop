@@ -120,7 +120,7 @@ test("installer hooks replace running processes without losing state", () => {
 });
 
 const releaseWorkflow = readFileSync(
-  path.resolve(nativeDirectory, "../../.github/workflows/release.yml"),
+  path.resolve(nativeDirectory, "../../.github/workflows/release-macos.yml"),
   "utf8",
 );
 const signingCleanupSteps = [

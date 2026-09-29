@@ -75,7 +75,10 @@ test("bundle-only packages signed executables without rewriting them", () => {
 });
 
 test("default mode keeps the local build-and-bundle behavior", () => {
-  const mode = resolveWindowsPackageMode(["--target", "x86_64-pc-windows-msvc"]);
+  const mode = resolveWindowsPackageMode([
+    "--target",
+    "x86_64-pc-windows-msvc",
+  ]);
 
   assert.equal(mode.buildService, true);
   assert.equal(mode.requireApplication, false);
