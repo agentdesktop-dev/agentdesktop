@@ -444,7 +444,7 @@ async fn read_connector_status_at(endpoint: &std::path::Path) -> ConnectorSnapsh
         Ok(health) => health,
         Err(error) => {
             return ConnectorSnapshot::offline(format!(
-                "The Agent Desktop daemon is unavailable: {error}"
+                "The agentdesktop daemon is unavailable: {error}"
             ));
         }
     };

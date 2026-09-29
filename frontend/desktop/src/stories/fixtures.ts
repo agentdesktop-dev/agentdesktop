@@ -83,7 +83,7 @@ export const reconnectingConnector = {
 
 export const offlineConnector: ConnectorSnapshot = {
   state: "offline",
-  detail: "The Agent Desktop daemon is unavailable.",
+  detail: "The agentdesktop daemon is unavailable.",
   runtime: null,
 };
 

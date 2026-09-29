@@ -68,8 +68,8 @@ function describeControllerError(
       return "Device identity was rejected; re-enrolling";
     case "sessionExpired":
       return "Organization session expired; re-enrolling";
-    case "stopped":
-      return "Controller integration stopped; restart Agent Desktop";
+    case "localError":
+      return "agentdesktop hit a local error; restarting the controller session";
     default:
       return "Reconnecting to your organization's controller";
   }
@@ -107,7 +107,6 @@ export function StatusView({
   const controllerLastSeen = formatRelativeTime(
     controllerConnection?.lastSeenUnixSeconds,
   );
-  const controllerStopped = controllerConnection?.lastError === "stopped";
   const [confirmingLogout, setConfirmingLogout] = useState(false);
   const agents = discovery?.agents ?? [];
   const capabilityCount = agents.reduce(
@@ -206,11 +205,9 @@ export function StatusView({
                 ? "Unavailable"
                 : controllerConnected
                   ? "Connected"
-                  : controllerStopped
-                    ? "Stopped"
-                    : controllerLastSeen
-                      ? `Reconnecting (seen ${controllerLastSeen})`
-                      : "Reconnecting"}
+                  : controllerLastSeen
+                    ? `Reconnecting (seen ${controllerLastSeen})`
+                    : "Reconnecting"}
             </span>
           </div>
         ) : null}

@@ -35,7 +35,7 @@ export type ControllerConnectionError =
   | "unreachable"
   | "identityRejected"
   | "sessionExpired"
-  | "stopped"
+  | "localError"
   | "unknown";
 
 export interface DaemonInfo {
