@@ -215,6 +215,26 @@ async fn logout_between_sessions(
             controller_status.reset().await;
             complete_unenrolled_logout(request, enrollment).await;
         }
+        // An identity that cannot be read cannot be used either, so signing out
+        // only has to remove it. Refusing would leave the device stuck with it.
+        Err(error) if identity::is_unreadable(&error) => {
+            warn!(
+                identity_path = %identity_path.display(),
+                error = %format!("{error:#}"),
+                "removing unreadable device identity on sign-out"
+            );
+            match identity::discard(identity_path) {
+                Ok(()) => {
+                    controller_status.reset().await;
+                    complete_unenrolled_logout(request, enrollment).await;
+                }
+                Err(error) => {
+                    let _ = request.completion.send(Err(format!(
+                        "remove local organization identity: {error:#}"
+                    )));
+                }
+            }
+        }
         Err(error) => {
             let _ = request
                 .completion
@@ -237,7 +257,21 @@ async fn run_session(
 ) -> anyhow::Result<Infallible> {
     let identity_path = state_dir.join("identity.json");
     loop {
-        let mut identity = match identity::load(&identity_path)? {
+        let stored = match identity::load(&identity_path) {
+            Ok(stored) => stored,
+            Err(error) if identity::is_unreadable(&error) => {
+                warn!(
+                    identity_path = %identity_path.display(),
+                    error = %format!("{error:#}"),
+                    "stored device identity is unreadable, for example after the app's code signature changed; removing it and restarting enrollment"
+                );
+                identity::discard(&identity_path)?;
+                enrollment.set("starting").await;
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        let mut identity = match stored {
             Some(identity) => {
                 enrollment.set("enrolled").await;
                 identity
@@ -885,11 +919,25 @@ async fn refresh_oauth_if_needed(
     let oauth = &identity.oauth;
     if oauth.expires_at_unix_seconds <= unix_time_seconds().saturating_add(120) {
         let _guard = OAUTH_REFRESH_MUTEX.lock().await;
-        if let Some(stored) = identity::load(identity_path)?
-            && stored.oauth.expires_at_unix_seconds > unix_time_seconds().saturating_add(120)
-        {
-            *identity = stored;
-            return Ok(());
+        match identity::load(identity_path) {
+            Ok(Some(stored))
+                if stored.oauth.expires_at_unix_seconds
+                    > unix_time_seconds().saturating_add(120) =>
+            {
+                *identity = stored;
+                return Ok(());
+            }
+            Ok(_) => {}
+            // The identity in memory still works. Refresh it, and the save below
+            // replaces the stored copy that can no longer be read.
+            Err(error) if identity::is_unreadable(&error) => {
+                warn!(
+                    device_id = %identity.device_id,
+                    error = %format!("{error:#}"),
+                    "stored device identity is unreadable; refreshing from the in-memory copy"
+                );
+            }
+            Err(error) => return Err(error),
         }
         oidc::refresh(identity).await?;
         identity::save(identity_path, identity).context("persist rotated OIDC refresh token")?;
