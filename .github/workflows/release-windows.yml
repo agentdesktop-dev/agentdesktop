@@ -1,0 +1,434 @@
+name: Release Windows
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Canonical release version without a v prefix
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  CI: true
+
+jobs:
+  build-windows-binaries:
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-pc-windows-msvc
+            runner: windows-2025
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+    env:
+      AGENTDESKTOP_VERSION: ${{ inputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: frontend/.nvmrc
+
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: "1.98"
+          targets: ${{ matrix.target }}
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        shell: bash
+        run: |
+          npm install --global pnpm@11.25.0
+          pnpm install --frozen-lockfile
+
+      - name: Build Windows binaries
+        working-directory: frontend
+        shell: bash
+        run: pnpm --filter @agentdesktop/desktop-web dist:win -- --build-only --target "${{ matrix.target }}"
+
+      - name: Verify embedded release version
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          $binaries = @(
+            "target/$env:TARGET/release/agentdesktop.exe"
+            "target/$env:TARGET/release/agentdesktop-service.exe"
+          )
+          & .github/scripts/verify-windows-version.ps1 -Path $binaries -Version $env:AGENTDESKTOP_VERSION
+
+      - name: Stage unsigned Windows binaries
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          $releaseDirectory = "target/$env:TARGET/release"
+          $binaries = @("agentdesktop.exe", "agentdesktop-service.exe")
+          New-Item -ItemType Directory -Force unsigned | Out-Null
+          foreach ($binary in $binaries) {
+            $source = Join-Path $releaseDirectory $binary
+            if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+              throw "Windows binary not found: $source"
+            }
+            Copy-Item -LiteralPath $source -Destination unsigned
+          }
+
+      - name: Upload unsigned Windows binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: unsigned-windows-binaries-${{ matrix.arch }}
+          path: unsigned/*.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  sign-windows-binaries:
+    needs: build-windows-binaries
+    runs-on: windows-2025
+    environment: production-signing
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - amd64
+          - arm64
+    env:
+      AZURE_CORE_OUTPUT: none
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download unsigned Windows binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: unsigned-windows-binaries-${{ matrix.arch }}
+          path: signing
+
+      - name: Log in to Azure with OIDC
+        uses: azure/login@053f7285eb20bf5469ef084617b0b24d3cec53fc # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign Windows binaries
+        uses: azure/artifact-signing-action@208f8af4bf26cf2af8597424e3cb5582801523ba # v2.0.0
+        with:
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
+          files: |
+            ${{ github.workspace }}\signing\agentdesktop.exe
+            ${{ github.workspace }}\signing\agentdesktop-service.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify Windows binary signatures
+        shell: pwsh
+        run: |
+          $binaries = @(
+            "signing/agentdesktop.exe"
+            "signing/agentdesktop-service.exe"
+          )
+          & .github/scripts/verify-windows-signature.ps1 -Path $binaries
+
+      - name: Stage signed standalone binary and checksum
+        shell: pwsh
+        env:
+          OUTPUT_NAME: agentdesktop-windows-${{ matrix.arch }}.exe
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item -LiteralPath signing/agentdesktop.exe -Destination "release/$env:OUTPUT_NAME"
+          $hash = (Get-FileHash "release/$env:OUTPUT_NAME" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $env:OUTPUT_NAME" | Set-Content "release/$env:OUTPUT_NAME.sha256" -Encoding ascii
+
+      - name: Upload signed Windows payload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signed-windows-payload-${{ matrix.arch }}
+          path: signing/*.exe
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload signed standalone Windows binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-binary-windows-${{ matrix.arch }}
+          path: release/agentdesktop-windows-*
+          if-no-files-found: error
+
+  build-windows-installers:
+    needs: sign-windows-binaries
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-pc-windows-msvc
+            runner: windows-2025
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+    env:
+      AGENTDESKTOP_VERSION: ${{ inputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: frontend/.nvmrc
+
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: "1.98"
+          targets: ${{ matrix.target }}
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        shell: bash
+        run: |
+          npm install --global pnpm@11.25.0
+          pnpm install --frozen-lockfile
+
+      - name: Download signed Windows payload
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signed-windows-payload-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release
+
+      - name: Verify packaged Windows payload signatures
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          $binaries = @(
+            "target/$env:TARGET/release/agentdesktop.exe"
+            "target/$env:TARGET/release/agentdesktop-service.exe"
+          )
+          & .github/scripts/verify-windows-signature.ps1 -Path $binaries
+
+      - name: Build MSI from signed Windows payload
+        working-directory: frontend
+        shell: bash
+        run: pnpm --filter @agentdesktop/desktop-web dist:win -- --bundle-only --target "${{ matrix.target }}"
+
+      - name: Stage MSI
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          OUTPUT_NAME: agentdesktop-windows-${{ matrix.arch }}.msi
+        run: |
+          $installers = @(Get-ChildItem "target/$env:TARGET/release/bundle/msi" -Filter *.msi)
+          if ($installers.Count -ne 1) {
+            throw "Expected one MSI, found $($installers.Count)"
+          }
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item $installers[0].FullName "release/$env:OUTPUT_NAME"
+
+      - name: Upload unsigned MSI
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: unsigned-windows-installer-${{ matrix.arch }}
+          path: release/*.msi
+          if-no-files-found: error
+          retention-days: 1
+
+  sign-windows-installers:
+    needs: build-windows-installers
+    runs-on: windows-2025
+    environment: production-signing
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - amd64
+          - arm64
+    env:
+      AZURE_CORE_OUTPUT: none
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download unsigned MSI
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: unsigned-windows-installer-${{ matrix.arch }}
+          path: release
+
+      - name: Log in to Azure with OIDC
+        uses: azure/login@053f7285eb20bf5469ef084617b0b24d3cec53fc # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign MSI
+        uses: azure/artifact-signing-action@208f8af4bf26cf2af8597424e3cb5582801523ba # v2.0.0
+        with:
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
+          files: ${{ github.workspace }}\release\agentdesktop-windows-${{ matrix.arch }}.msi
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify MSI signature
+        shell: pwsh
+        env:
+          OUTPUT_NAME: agentdesktop-windows-${{ matrix.arch }}.msi
+        run: |
+          & .github/scripts/verify-windows-signature.ps1 -Path "release/$env:OUTPUT_NAME"
+
+      - name: Checksum signed MSI
+        shell: pwsh
+        env:
+          OUTPUT_NAME: agentdesktop-windows-${{ matrix.arch }}.msi
+        run: |
+          $hash = (Get-FileHash "release/$env:OUTPUT_NAME" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $env:OUTPUT_NAME" | Set-Content "release/$env:OUTPUT_NAME.sha256" -Encoding ascii
+
+      - name: Upload signed MSI
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signed-windows-installer-${{ matrix.arch }}
+          path: release/agentdesktop-windows-*
+          if-no-files-found: error
+
+  test-windows-installers:
+    needs: sign-windows-installers
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: windows-2025
+          - arch: arm64
+            runner: windows-11-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download signed MSI
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signed-windows-installer-${{ matrix.arch }}
+          path: release
+
+      - name: Verify signed MSI
+        shell: pwsh
+        env:
+          OUTPUT_NAME: agentdesktop-windows-${{ matrix.arch }}.msi
+        run: |
+          & .github/scripts/verify-windows-signature.ps1 -Path "release/$env:OUTPUT_NAME"
+
+      - name: Smoke test MSI install, replacement, and uninstall
+        shell: pwsh
+        env:
+          OUTPUT_NAME: agentdesktop-windows-${{ matrix.arch }}.msi
+        run: |
+          function Assert-MsiSuccess($process, $operation) {
+            if ($process.ExitCode -notin @(0, 3010)) {
+              throw "MSI $operation failed with exit code $($process.ExitCode)"
+            }
+          }
+
+          function Wait-ForAgentDesktopService {
+            $service = Get-Service AgentDesktop
+            $service.WaitForStatus("Running", [TimeSpan]::FromSeconds(30))
+            $deadline = (Get-Date).AddSeconds(30)
+            do {
+              & "$env:ProgramFiles\Agent Desktop\agentdesktop.exe" status
+              if ($LASTEXITCODE -eq 0) {
+                return
+              }
+              Start-Sleep -Seconds 1
+            } while ((Get-Date) -lt $deadline)
+            throw "Installed CLI could not reach the Agent Desktop service"
+          }
+
+          $installer = (Resolve-Path "release/$env:OUTPUT_NAME").Path
+          $install = Start-Process msiexec.exe -ArgumentList @("/i", "`"$installer`"", "/qn", "/norestart") -Wait -PassThru
+          Assert-MsiSuccess $install "installation"
+          Wait-ForAgentDesktopService
+
+          $installedBinaries = @(
+            "$env:ProgramFiles\Agent Desktop\agentdesktop.exe"
+            "$env:ProgramFiles\Agent Desktop\agentdesktop-service.exe"
+          )
+          & .github/scripts/verify-windows-signature.ps1 -Path $installedBinaries
+
+          $configPath = "$env:ProgramData\AgentDesktop\config.yaml"
+          $stateMarker = "$env:ProgramData\AgentDesktop\state\upgrade-smoke-marker"
+          $configHash = (Get-FileHash $configPath -Algorithm SHA256).Hash
+          New-Item -ItemType Directory -Force (Split-Path $stateMarker) | Out-Null
+          New-Item -ItemType File -Force $stateMarker | Out-Null
+
+          $tray = Start-Process "$env:ProgramFiles\Agent Desktop\agentdesktop.exe" -PassThru
+          Start-Sleep -Seconds 3
+          if ($tray.HasExited) {
+            throw "Agent Desktop tray process exited before replacement"
+          }
+
+          $replace = Start-Process msiexec.exe -ArgumentList @(
+            "/i",
+            "`"$installer`"",
+            "/qn",
+            "/norestart",
+            "REINSTALL=ALL",
+            "REINSTALLMODE=vomus"
+          ) -Wait -PassThru
+          Assert-MsiSuccess $replace "replacement"
+          $tray.Refresh()
+          if (-not $tray.HasExited) {
+            throw "Agent Desktop tray process remains after replacement"
+          }
+
+          Wait-ForAgentDesktopService
+          if ((Get-FileHash $configPath -Algorithm SHA256).Hash -ne $configHash) {
+            throw "Agent Desktop configuration changed during replacement"
+          }
+          if (-not (Test-Path $stateMarker)) {
+            throw "Agent Desktop state was removed during replacement"
+          }
+
+          $uninstall = Start-Process msiexec.exe -ArgumentList @("/x", "`"$installer`"", "/qn", "/norestart") -Wait -PassThru
+          Assert-MsiSuccess $uninstall "uninstall"
+          if (Get-Service AgentDesktop -ErrorAction SilentlyContinue) {
+            throw "Agent Desktop service remains after uninstall"
+          }
