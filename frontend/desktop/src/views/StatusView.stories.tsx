@@ -10,6 +10,7 @@ import {
   managedDaemonInfo,
   offlineConnector,
   populatedDiscovery,
+  reconnectingConnector,
   standaloneConnector,
   standaloneDaemonInfo,
   unconfiguredDevice,
@@ -329,6 +330,20 @@ export const DaemonOffline: Story = {
     await expect(
       canvas.queryByText("Not configured (standalone)"),
     ).not.toBeInTheDocument();
+  },
+};
+
+export const ReconnectingToController: Story = {
+  args: {
+    connector: reconnectingConnector,
+  },
+  play: async ({ canvas }) => {
+    await expect(
+      canvas.getByText("Controller is unreachable; retrying"),
+    ).toBeVisible();
+    await expect(
+      canvas.getByText(/^Reconnecting \(seen 15m ago\)$/),
+    ).toBeVisible();
   },
 };
 
