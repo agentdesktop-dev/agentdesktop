@@ -4,7 +4,8 @@ pub use plan::ReconcilePlan;
 
 use crate::provider::{
     Provider, ReconcileContext, claude_code::ClaudeCode, claude_desktop::ClaudeDesktop,
-    codex::Codex, cursor::Cursor, grok::Grok, ollama::Ollama, opencode::OpenCode, vscode::VsCode,
+    codex::Codex, cursor::Cursor, grok::Grok, grok_bot::GrokBot, ollama::Ollama,
+    opencode::OpenCode, vscode::VsCode,
 };
 use agentdesktop_core::{config::DaemonConfig, model::Discovery};
 use serde_json::Value;
@@ -73,6 +74,7 @@ impl Reconciler {
                 Box::new(Grok {
                     managed_config_path: grok_managed_config_path,
                 }),
+                Box::new(GrokBot),
                 Box::new(Ollama),
             ]),
         }
