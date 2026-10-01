@@ -70,8 +70,50 @@ pub struct Skill {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Health {
     pub status: String,
+    /// Present only when the daemon has a controller configured. Reflects
+    /// whether the daemon's own connection to the controller is currently
+    /// live, independent of local process health: a daemon can be fully
+    /// healthy locally while its controller stream is down (auth rejection,
+    /// network partition, stuck retry loop, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller: Option<ControllerConnectionStatus>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ControllerConnectionStatus {
+    pub connected: bool,
+    /// Last time the daemon observed its controller stream alive: when the
+    /// stream opened, a heartbeat was handed to it, or a controller message
+    /// arrived. Retained across disconnects so the UI can say how long the
+    /// device has been out of contact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_unix_seconds: Option<u64>,
+    /// Coarse reason for the most recent failure. Deliberately a closed set:
+    /// the full error chain (addresses, paths, upstream messages) stays in the
+    /// daemon logs and is never returned to the local API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<ControllerConnectionError>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ControllerConnectionError {
+    /// The controller could not be reached or the stream failed; retrying.
+    Unreachable,
+    /// The controller rejected the device identity; the daemon is re-enrolling.
+    IdentityRejected,
+    /// The organization session could not be refreshed; the daemon is re-enrolling.
+    SessionExpired,
+    /// A local error (for example, the identity store) ended the controller
+    /// session; the daemon is restarting it.
+    LocalError,
+    /// A reason reported by a newer daemon that this build does not know.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Read-only startup information reported by the running daemon, not the desktop host.
@@ -157,4 +199,30 @@ pub enum TelemetryEventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_input: Option<serde_json::Value>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ControllerConnectionError, ControllerConnectionStatus};
+
+    #[test]
+    fn controller_connection_error_is_a_closed_camel_case_set() {
+        let status = ControllerConnectionStatus {
+            connected: false,
+            last_seen_unix_seconds: Some(1),
+            last_error: Some(ControllerConnectionError::IdentityRejected),
+        };
+        assert_eq!(
+            serde_json::to_value(&status).unwrap(),
+            serde_json::json!({
+                "connected": false,
+                "lastSeenUnixSeconds": 1,
+                "lastError": "identityRejected",
+            })
+        );
+
+        let newer: ControllerConnectionStatus =
+            serde_json::from_str(r#"{"connected":false,"lastError":"somethingNew"}"#).unwrap();
+        assert_eq!(newer.last_error, Some(ControllerConnectionError::Unknown));
+    }
 }

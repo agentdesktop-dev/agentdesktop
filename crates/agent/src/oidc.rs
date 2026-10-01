@@ -477,7 +477,11 @@ pub(crate) async fn wait_for_authorization_code_with_page(
     println!("Open this URL to connect Agentdesktop:\n{prompt_url}");
     if open_browser {
         tracing::info!(%authorization_url, %prompt_url, "opening Agentdesktop authorization page");
-        if let Err(error) = open::that(prompt_url.as_str()) {
+        // Detached: `open::that` waits for the launcher to exit, and a stuck
+        // `xdg-open` (no display, portal call hanging) would block this runtime
+        // worker with the just-spawned callback server behind it, so the page
+        // the user is told to open never answers.
+        if let Err(error) = open::that_detached(prompt_url.as_str()) {
             tracing::warn!(%error, "could not open the browser automatically");
         }
     } else {

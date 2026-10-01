@@ -15,6 +15,29 @@ export interface PlatformCapabilities {
   os: string;
 }
 
+/**
+ * The daemon's own live connection to the controller, independent of local
+ * process health. `null` for a standalone (unmanaged) daemon, which has no
+ * controller to connect to.
+ */
+export interface ControllerConnectionStatus {
+  connected: boolean;
+  /** Last time the controller stream was observed alive. */
+  lastSeenUnixSeconds?: number;
+  lastError?: ControllerConnectionError;
+}
+
+/**
+ * Coarse reason for the most recent controller failure. The daemon keeps the
+ * full error chain in its logs and never returns it to the local API.
+ */
+export type ControllerConnectionError =
+  | "unreachable"
+  | "identityRejected"
+  | "sessionExpired"
+  | "localError"
+  | "unknown";
+
 export interface DaemonInfo {
   version: string;
   scope: "user" | "system";
@@ -33,6 +56,7 @@ export interface ConnectorRuntime {
   gateway: string;
   platform: PlatformCapabilities;
   daemon: DaemonInfo;
+  controller: ControllerConnectionStatus | null;
 }
 
 export interface ConnectorSnapshot {

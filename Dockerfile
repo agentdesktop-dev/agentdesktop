@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.26
 
-FROM docker.io/library/node:26.8.2-bookworm AS ui
+FROM docker.io/library/node:26.10.0-bookworm AS ui
 WORKDIR /app/frontend
 ENV CI=true
 COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
@@ -15,7 +15,7 @@ COPY images/ /app/images/
 RUN --mount=type=cache,id=agentdesktop-pnpm,target=/pnpm/store \
     pnpm --filter @agentdesktop/controller-web build
 
-FROM docker.io/library/rust:1.98.0-trixie AS builder
+FROM docker.io/library/rust:1.98.1-trixie AS builder
 ARG TARGETARCH
 ARG BUILD_PROFILE=release
 WORKDIR /app

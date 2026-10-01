@@ -45,9 +45,30 @@ struct StoredSecrets {
     oauth: OAuthCredentials,
 }
 
+/// Marks a [`load`] failure where identity metadata exists but the identity
+/// itself cannot be used: the metadata is corrupt, or a secret is missing or
+/// unreadable. On macOS the usual cause is a change of the app's code
+/// signature: Keychain items stay bound to the old signature, and the daemon
+/// can no longer read them. Waiting or retrying does not help, so callers
+/// should [`discard`] the identity and enroll again.
+#[derive(Debug)]
+pub struct IdentityUnreadable;
+
+impl std::fmt::Display for IdentityUnreadable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("stored device identity is unreadable")
+    }
+}
+
+pub fn is_unreadable(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<IdentityUnreadable>().is_some()
+}
+
 pub fn load(path: &Path) -> anyhow::Result<Option<Identity>> {
     let stored: StoredIdentity = match fs::read(path) {
-        Ok(contents) => serde_json::from_slice(&contents).context("parse device identity")?,
+        Ok(contents) => serde_json::from_slice(&contents)
+            .context("parse device identity")
+            .context(IdentityUnreadable)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(error).with_context(|| format!("read identity from {}", path.display()));
@@ -56,13 +77,8 @@ pub fn load(path: &Path) -> anyhow::Result<Option<Identity>> {
     let secrets = secret_store(path)?;
     #[cfg(target_os = "linux")]
     migrate_legacy_linux_secrets(path, &secrets, &stored.device_id)?;
-    let client_private_key_pem = secrets
-        .get(TLS_KEY_SERVICE, &stored.device_id)
-        .context("read device TLS private key")?;
-    let oauth = secrets
-        .get(OAUTH_SERVICE, &stored.device_id)
-        .context("read OAuth credentials")?;
-    let oauth = serde_json::from_str(&oauth).context("decode stored OAuth credentials")?;
+    let (client_private_key_pem, oauth) =
+        read_secrets(&secrets, &stored.device_id).context(IdentityUnreadable)?;
     Ok(Some(Identity {
         device_id: stored.device_id,
         client_certificate_pem: stored.client_certificate_pem,
@@ -75,24 +91,48 @@ pub fn load(path: &Path) -> anyhow::Result<Option<Identity>> {
     }))
 }
 
+fn read_secrets(
+    secrets: &SecretStore,
+    device_id: &str,
+) -> anyhow::Result<(String, OAuthCredentials)> {
+    let client_private_key_pem = secrets
+        .get(TLS_KEY_SERVICE, device_id)
+        .context("read device TLS private key")?;
+    let oauth = secrets
+        .get(OAUTH_SERVICE, device_id)
+        .context("read OAuth credentials")?;
+    let oauth = serde_json::from_str(&oauth).context("decode stored OAuth credentials")?;
+    Ok((client_private_key_pem, oauth))
+}
+
 pub fn save(path: &Path, identity: &Identity) -> anyhow::Result<()> {
     let parent = path.parent().context("identity path has no parent")?;
     secure_fs::ensure_private_dir(parent)?;
     let secrets = SecretStore::new(parent)?;
-    secrets
-        .set(
+    let oauth = serde_json::to_string(&identity.oauth)?;
+    for (service, secret, operation) in [
+        (
             TLS_KEY_SERVICE,
-            &identity.device_id,
-            &identity.client_private_key_pem,
-        )
-        .context("store device TLS private key")?;
-    secrets
-        .set(
-            OAUTH_SERVICE,
-            &identity.device_id,
-            &serde_json::to_string(&identity.oauth)?,
-        )
-        .context("store OAuth credentials")?;
+            identity.client_private_key_pem.as_str(),
+            "store device TLS private key",
+        ),
+        (OAUTH_SERVICE, oauth.as_str(), "store OAuth credentials"),
+    ] {
+        // The macOS Keychain adds a new item whenever looking up the existing
+        // one fails, including when the item is there but unreadable (after a
+        // code-signature change), and leaves the unreadable copy behind as a
+        // duplicate. Remove such an item first. Readable items are updated in
+        // place, so a healthy identity is never deleted. If the item cannot be
+        // removed, fail rather than store a duplicate next to it.
+        if secrets.get_optional(service, &identity.device_id).is_err() {
+            secrets
+                .delete(service, &identity.device_id)
+                .with_context(|| format!("remove unreadable item before: {operation}"))?;
+        }
+        secrets
+            .set(service, &identity.device_id, secret)
+            .context(operation)?;
+    }
     write_metadata(
         path,
         &identity.device_id,
@@ -103,23 +143,63 @@ pub fn save(path: &Path, identity: &Identity) -> anyhow::Result<()> {
     )
 }
 
+/// Removes the identity's secrets and metadata.
+///
+/// Only failing to remove the metadata is an error. Once it is gone the device
+/// is unenrolled and nothing reads the old secrets again, so a secret that
+/// cannot be removed (for example a Keychain item the app can no longer
+/// access after a code-signature change) is logged rather than leaving the
+/// device stuck with an identity it cannot use or sign out of.
 pub fn delete(path: &Path, device_id: &str) -> anyhow::Result<()> {
-    let secrets = secret_store(path)?;
-    secrets
-        .delete(TLS_KEY_SERVICE, device_id)
-        .context("delete device TLS private key")?;
-    secrets
-        .delete(OAUTH_SERVICE, device_id)
-        .context("delete OAuth credentials")?;
-    #[cfg(target_os = "linux")]
-    delete_legacy_linux_secrets(path)?;
+    let secrets_result = delete_secrets(path, device_id);
     match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
-            Err(error).with_context(|| format!("remove rejected identity {}", path.display()))
+            return Err(error)
+                .with_context(|| format!("remove device identity {}", path.display()));
         }
     }
+    if let Err(error) = secrets_result {
+        tracing::warn!(
+            device_id,
+            error = %format!("{error:#}"),
+            "removed device identity, but some of its secrets could not be removed"
+        );
+    }
+    Ok(())
+}
+
+/// Removes an identity that [`load`] reported as [unreadable](is_unreadable).
+/// Its secrets are removed too when the metadata still names the device.
+pub fn discard(path: &Path) -> anyhow::Result<()> {
+    let device_id = fs::read(path)
+        .ok()
+        .and_then(|contents| serde_json::from_slice::<StoredIdentity>(&contents).ok())
+        .map(|stored| stored.device_id);
+    match device_id {
+        Some(device_id) => delete(path, &device_id),
+        None => match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => {
+                Err(error).with_context(|| format!("remove device identity {}", path.display()))
+            }
+        },
+    }
+}
+
+fn delete_secrets(path: &Path, device_id: &str) -> anyhow::Result<()> {
+    let secrets = secret_store(path)?;
+    let tls_key = secrets
+        .delete(TLS_KEY_SERVICE, device_id)
+        .context("delete device TLS private key");
+    let oauth = secrets
+        .delete(OAUTH_SERVICE, device_id)
+        .context("delete OAuth credentials");
+    #[cfg(target_os = "linux")]
+    delete_legacy_linux_secrets(path)?;
+    tls_key.and(oauth)
 }
 
 fn secret_store(identity_path: &Path) -> anyhow::Result<SecretStore> {
@@ -136,16 +216,20 @@ fn migrate_legacy_linux_secrets(
     device_id: &str,
 ) -> anyhow::Result<()> {
     let path = legacy_linux_secrets_path(identity_path)?;
+    // Legacy secrets that cannot be read leave the identity unusable, just like
+    // an unreadable secret in the store. Failing to migrate them is not.
     let contents = match fs::read(&path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {
             return Err(error)
-                .with_context(|| format!("read legacy device secrets from {}", path.display()));
+                .with_context(|| format!("read legacy device secrets from {}", path.display()))
+                .context(IdentityUnreadable);
         }
     };
-    let secrets: StoredSecrets =
-        serde_json::from_slice(&contents).context("parse legacy stored device secrets")?;
+    let secrets: StoredSecrets = serde_json::from_slice(&contents)
+        .context("parse legacy stored device secrets")
+        .context(IdentityUnreadable)?;
     store.set(TLS_KEY_SERVICE, device_id, &secrets.client_private_key_pem)?;
     store.set(
         OAUTH_SERVICE,
@@ -200,18 +284,20 @@ fn write_metadata(
 mod tests {
     use std::{fs, os::unix::fs::PermissionsExt};
 
-    use super::{Identity, OAuthCredentials, delete, load, save};
+    use super::{Identity, OAuthCredentials, delete, discard, is_unreadable, load, save};
 
-    #[test]
-    fn linux_secrets_round_trip_outside_identity_metadata() {
+    fn temp_directory() -> std::path::PathBuf {
         let directory = std::env::temp_dir().join(format!(
             "agentdesktop-identity-{}-{}",
             std::process::id(),
             rand::random::<u64>()
         ));
         fs::create_dir(&directory).unwrap();
-        let path = directory.join("identity.json");
-        let identity = Identity {
+        directory
+    }
+
+    fn test_identity() -> Identity {
+        Identity {
             device_id: "device-1".to_owned(),
             client_certificate_pem: "certificate".to_owned(),
             client_private_key_pem: "private-key".to_owned(),
@@ -223,7 +309,18 @@ mod tests {
             },
             oauth_token_endpoint: "https://issuer.example/token".to_owned(),
             oauth_client_id: "client-1".to_owned(),
-        };
+        }
+    }
+
+    fn secret_count(directory: &std::path::Path) -> usize {
+        fs::read_dir(directory.join("secrets")).unwrap().count()
+    }
+
+    #[test]
+    fn linux_secrets_round_trip_outside_identity_metadata() {
+        let directory = temp_directory();
+        let path = directory.join("identity.json");
+        let identity = test_identity();
 
         save(&path, &identity).unwrap();
 
@@ -250,6 +347,83 @@ mod tests {
         delete(&path, "device-1").unwrap();
         assert!(!path.exists());
         assert!(secret_paths.iter().all(|path| !path.exists()));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn missing_secret_is_unreadable_and_discard_unenrolls() {
+        let directory = temp_directory();
+        let path = directory.join("identity.json");
+        save(&path, &test_identity()).unwrap();
+        let secret = fs::read_dir(directory.join("secrets"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        fs::remove_file(secret).unwrap();
+
+        let error = load(&path).unwrap_err();
+        assert!(is_unreadable(&error), "{error:#}");
+
+        discard(&path).unwrap();
+        assert!(!path.exists());
+        assert_eq!(secret_count(&directory), 0);
+        assert!(load(&path).unwrap().is_none());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn corrupt_metadata_is_unreadable_and_discard_unenrolls() {
+        let directory = temp_directory();
+        let path = directory.join("identity.json");
+        fs::write(&path, b"not json").unwrap();
+
+        let error = load(&path).unwrap_err();
+        assert!(is_unreadable(&error), "{error:#}");
+
+        discard(&path).unwrap();
+        assert!(!path.exists());
+        assert!(load(&path).unwrap().is_none());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn corrupt_legacy_secrets_are_unreadable_and_discard_unenrolls() {
+        let directory = temp_directory();
+        let path = directory.join("identity.json");
+        save(&path, &test_identity()).unwrap();
+        let legacy = directory.join("identity-secrets.json");
+        fs::write(&legacy, b"not json").unwrap();
+
+        let error = load(&path).unwrap_err();
+        assert!(is_unreadable(&error), "{error:#}");
+
+        discard(&path).unwrap();
+        assert!(!path.exists());
+        assert!(!legacy.exists());
+        assert_eq!(secret_count(&directory), 0);
+        assert!(load(&path).unwrap().is_none());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn save_replaces_an_unreadable_secret() {
+        let directory = temp_directory();
+        let path = directory.join("identity.json");
+        let identity = test_identity();
+        save(&path, &identity).unwrap();
+        for entry in fs::read_dir(directory.join("secrets")).unwrap() {
+            fs::write(entry.unwrap().path(), [0xff, 0xfe]).unwrap();
+        }
+        assert!(is_unreadable(&load(&path).unwrap_err()));
+
+        save(&path, &identity).unwrap();
+
+        let loaded = load(&path).unwrap().unwrap();
+        assert_eq!(loaded.client_private_key_pem, "private-key");
+        assert_eq!(loaded.oauth.refresh_token, "refresh-token");
+        assert_eq!(secret_count(&directory), 2);
         fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -1,4 +1,5 @@
 use std::{
+    convert::Infallible,
     future::Future,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -10,7 +11,7 @@ use anyhow::{Context, bail};
 use rcgen::{CertificateParams, ExtendedKeyUsagePurpose, KeyPair, KeyUsagePurpose};
 use sha2::{Digest, Sha256};
 use tokio::{
-    sync::{Mutex, mpsc, oneshot, watch},
+    sync::{Mutex, RwLock, mpsc, oneshot, watch},
     time,
 };
 use tokio_stream::wrappers::ReceiverStream;
@@ -23,7 +24,8 @@ use tracing::{debug, info, warn};
 use agentdesktop_core::{
     config::{self, ControllerConnectionConfig},
     model::{
-        Discovery as AgentDiscovery, TelemetryEvent as ModelTelemetryEvent, TelemetryEventKind,
+        ControllerConnectionError, ControllerConnectionStatus, Discovery as AgentDiscovery,
+        TelemetryEvent as ModelTelemetryEvent, TelemetryEventKind,
     },
 };
 use agentdesktop_proto::fleet::{
@@ -54,6 +56,84 @@ pub struct Requests {
     pub logout: mpsc::Receiver<LogoutRequest>,
 }
 
+/// Tracks whether the daemon's connection to the controller is currently
+/// live. This is the only source of truth for controller connectivity: it is
+/// updated exclusively by the controller stream-management code (this
+/// module and its caller in `daemon.rs`) and read by the local API
+/// (`/v1/health`) so the desktop UI can distinguish "the daemon process is
+/// healthy" from "the daemon is actually talking to the controller right
+/// now" — a daemon can hold valid enrollment credentials and answer local
+/// requests fine for an arbitrarily long time while its controller stream is
+/// stuck retrying (auth rejection, network partition, etc.), and neither the
+/// process itself nor its cached enrollment state ever reflects that on
+/// their own.
+#[derive(Clone)]
+pub struct ControllerConnectionState {
+    status: Arc<RwLock<ControllerConnectionStatus>>,
+}
+
+impl ControllerConnectionState {
+    pub fn new() -> Self {
+        Self {
+            status: Arc::new(RwLock::new(Self::initial())),
+        }
+    }
+
+    fn initial() -> ControllerConnectionStatus {
+        ControllerConnectionStatus {
+            connected: false,
+            last_seen_unix_seconds: None,
+            last_error: None,
+        }
+    }
+
+    pub async fn get(&self) -> ControllerConnectionStatus {
+        self.status.read().await.clone()
+    }
+
+    pub(crate) async fn mark_connected(&self) {
+        let mut status = self.status.write().await;
+        status.connected = true;
+        status.last_seen_unix_seconds = Some(unix_time_seconds());
+        status.last_error = None;
+    }
+
+    /// Records that the open stream is still alive (heartbeat sent or
+    /// controller message received) without changing the connection state.
+    pub(crate) async fn mark_seen(&self) {
+        let mut status = self.status.write().await;
+        if status.connected {
+            status.last_seen_unix_seconds = Some(unix_time_seconds());
+        }
+    }
+
+    /// Records a closed stream. A live stream that closes was, by definition,
+    /// seen until now, so its last-seen time advances to the close.
+    pub(crate) async fn mark_disconnected(&self, error: Option<ControllerConnectionError>) {
+        let mut status = self.status.write().await;
+        if status.connected {
+            status.last_seen_unix_seconds = Some(unix_time_seconds());
+        }
+        status.connected = false;
+        if error.is_some() {
+            status.last_error = error;
+        }
+    }
+
+    /// Forgets everything about the previous organization session, so a
+    /// signed-out device does not keep reporting the old controller state.
+    pub(crate) async fn reset(&self) {
+        *self.status.write().await = Self::initial();
+    }
+}
+
+impl Default for ControllerConnectionState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     controller: ControllerConnectionConfig,
     mut discovered: watch::Receiver<Arc<AgentDiscovery>>,
@@ -61,15 +141,137 @@ pub async fn run(
     oidc_callback_listen: Option<SocketAddr>,
     reconciler: Reconciler,
     enrollment: EnrollmentState,
+    controller_status: ControllerConnectionState,
     requests: Requests,
-) -> anyhow::Result<()> {
+) {
     let Requests {
         mut telemetry,
         mut logout,
     } = requests;
+    let mut delay = INITIAL_RETRY_DELAY;
+    loop {
+        let started = time::Instant::now();
+        let Err(error) = run_session(
+            &controller,
+            &mut discovered,
+            &state_dir,
+            oidc_callback_listen,
+            &reconciler,
+            &enrollment,
+            &controller_status,
+            &mut telemetry,
+            &mut logout,
+        )
+        .await;
+        // A session that stayed up for a while failed for a new reason; do not
+        // penalize it with the backoff accumulated by earlier failures.
+        if started.elapsed() > MAX_RETRY_DELAY {
+            delay = INITIAL_RETRY_DELAY;
+        }
+        enrollment.set("failed").await;
+        controller_status
+            .mark_disconnected(Some(ControllerConnectionError::LocalError))
+            .await;
+        tracing::error!(
+            controller = %controller.address,
+            retry_in_seconds = delay.as_secs(),
+            error = %format!("{error:#}"),
+            "controller integration failed; restarting"
+        );
+        tokio::select! {
+            _ = time::sleep(delay) => delay = next_retry_delay(delay),
+            Some(request) = logout.recv() => {
+                logout_between_sessions(
+                    request,
+                    &state_dir.join("identity.json"),
+                    &enrollment,
+                    &controller_status,
+                )
+                .await;
+                delay = INITIAL_RETRY_DELAY;
+            }
+        }
+    }
+}
+
+async fn logout_between_sessions(
+    request: LogoutRequest,
+    identity_path: &Path,
+    enrollment: &EnrollmentState,
+    controller_status: &ControllerConnectionState,
+) {
+    match identity::load(identity_path) {
+        Ok(Some(identity)) => {
+            complete_logout(
+                request,
+                identity_path,
+                &identity,
+                enrollment,
+                controller_status,
+            )
+            .await;
+        }
+        Ok(None) => {
+            controller_status.reset().await;
+            complete_unenrolled_logout(request, enrollment).await;
+        }
+        // An identity that cannot be read cannot be used either, so signing out
+        // only has to remove it. Refusing would leave the device stuck with it.
+        Err(error) if identity::is_unreadable(&error) => {
+            warn!(
+                identity_path = %identity_path.display(),
+                error = %format!("{error:#}"),
+                "removing unreadable device identity on sign-out"
+            );
+            match identity::discard(identity_path) {
+                Ok(()) => {
+                    controller_status.reset().await;
+                    complete_unenrolled_logout(request, enrollment).await;
+                }
+                Err(error) => {
+                    let _ = request.completion.send(Err(format!(
+                        "remove local organization identity: {error:#}"
+                    )));
+                }
+            }
+        }
+        Err(error) => {
+            let _ = request
+                .completion
+                .send(Err(format!("read local organization identity: {error:#}")));
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_session(
+    controller: &ControllerConnectionConfig,
+    discovered: &mut watch::Receiver<Arc<AgentDiscovery>>,
+    state_dir: &Path,
+    oidc_callback_listen: Option<SocketAddr>,
+    reconciler: &Reconciler,
+    enrollment: &EnrollmentState,
+    controller_status: &ControllerConnectionState,
+    telemetry: &mut mpsc::Receiver<ModelTelemetryEvent>,
+    logout: &mut mpsc::Receiver<LogoutRequest>,
+) -> anyhow::Result<Infallible> {
     let identity_path = state_dir.join("identity.json");
     loop {
-        let mut identity = match identity::load(&identity_path)? {
+        let stored = match identity::load(&identity_path) {
+            Ok(stored) => stored,
+            Err(error) if identity::is_unreadable(&error) => {
+                warn!(
+                    identity_path = %identity_path.display(),
+                    error = %format!("{error:#}"),
+                    "stored device identity is unreadable, for example after the app's code signature changed; removing it and restarting enrollment"
+                );
+                identity::discard(&identity_path)?;
+                enrollment.set("starting").await;
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        let mut identity = match stored {
             Some(identity) => {
                 enrollment.set("enrolled").await;
                 identity
@@ -77,10 +279,10 @@ pub async fn run(
             None => {
                 let identity = enroll_with_retry(
                     &controller.address,
-                    &enrollment,
-                    &mut logout,
+                    enrollment,
+                    logout,
                     INITIAL_RETRY_DELAY,
-                    || oidc::enroll(&controller, &enrollment, oidc_callback_listen),
+                    || oidc::enroll(controller, enrollment, oidc_callback_listen),
                 )
                 .await;
                 identity::save(&identity_path, &identity)?;
@@ -95,7 +297,7 @@ pub async fn run(
             let refresh_result = tokio::select! {
                 result = refresh_oauth_if_needed(&mut identity, &identity_path) => result,
                 Some(request) = logout.recv() => {
-                    if complete_logout(request, &identity_path, &identity, &enrollment).await {
+                    if complete_logout(request, &identity_path, &identity, enrollment, controller_status).await {
                         break;
                     }
                     continue;
@@ -107,6 +309,9 @@ pub async fn run(
                     let error_chain = format!("{error:#}");
                     identity::delete(&identity_path, &identity.device_id)?;
                     enrollment.set("starting").await;
+                    controller_status
+                        .mark_disconnected(Some(ControllerConnectionError::SessionExpired))
+                        .await;
                     warn!(
                         controller = %controller.address,
                         identity_path = %identity_path.display(),
@@ -115,10 +320,37 @@ pub async fn run(
                     );
                     break;
                 }
+                Err(error) if is_transient_refresh_failure(&error) => {
+                    // Network failures and token endpoint outages are transient: the
+                    // stored refresh token is still valid, so keep the identity and retry
+                    // instead of tearing down the controller integration.
+                    warn!(
+                        controller = %controller.address,
+                        retry_in_seconds = delay.as_secs(),
+                        error = %format!("{error:#}"),
+                        "OIDC access token refresh failed; retaining current identity and retrying"
+                    );
+                    if wait_before_retry(
+                        delay,
+                        logout,
+                        &identity_path,
+                        &identity,
+                        enrollment,
+                        controller_status,
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                    delay = next_retry_delay(delay);
+                    continue;
+                }
+                // Local identity store failures and unsupported token types are not
+                // fixed by waiting; let the supervisor report them as failed.
                 Err(error) => return Err(error),
             }
             if certificate_needs_renewal(&identity) {
-                match renew_device_certificate(&controller, &identity).await {
+                match renew_device_certificate(controller, &identity).await {
                     Ok(renewed) => {
                         identity::save(&identity_path, &renewed)?;
                         identity = renewed;
@@ -132,15 +364,16 @@ pub async fn run(
             identity::save(&identity_path, &identity)?;
             let connection = tokio::select! {
                 result = connect(
-                    &controller,
+                    controller,
                     &identity,
-                    &mut discovered,
-                    &state_dir,
-                    &reconciler,
-                    &mut telemetry,
+                    discovered,
+                    state_dir,
+                    reconciler,
+                    telemetry,
+                    controller_status,
                 ) => Some(result),
                 Some(request) = logout.recv() => {
-                    if complete_logout(request, &identity_path, &identity, &enrollment).await {
+                    if complete_logout(request, &identity_path, &identity, enrollment, controller_status).await {
                         None
                     } else {
                         continue;
@@ -151,11 +384,17 @@ pub async fn run(
                 break;
             };
             match connection {
-                Ok(()) => warn!("controller stream closed"),
+                Ok(()) => {
+                    controller_status.mark_disconnected(None).await;
+                    warn!("controller stream closed");
+                }
                 Err(error) if is_unauthenticated(&error) => {
                     let error_chain = format!("{error:#}");
                     identity::delete(&identity_path, &identity.device_id)?;
                     enrollment.set("starting").await;
+                    controller_status
+                        .mark_disconnected(Some(ControllerConnectionError::IdentityRejected))
+                        .await;
                     warn!(
                         controller = %controller.address,
                         identity_path = %identity_path.display(),
@@ -166,6 +405,9 @@ pub async fn run(
                 }
                 Err(error) => {
                     let error_chain = format!("{error:#}");
+                    controller_status
+                        .mark_disconnected(Some(ControllerConnectionError::Unreachable))
+                        .await;
                     warn!(
                         controller = %controller.address,
                         retry_in_seconds = delay.as_secs(),
@@ -175,16 +417,37 @@ pub async fn run(
                 }
             }
 
-            let logged_out = tokio::select! {
-                _ = time::sleep(delay) => false,
-                Some(request) = logout.recv() => {
-                    complete_logout(request, &identity_path, &identity, &enrollment).await
-                }
-            };
-            if logged_out {
+            if wait_before_retry(
+                delay,
+                logout,
+                &identity_path,
+                &identity,
+                enrollment,
+                controller_status,
+            )
+            .await
+            {
                 break;
             }
             delay = next_retry_delay(delay);
+        }
+    }
+}
+
+/// Sleeps for `delay`, completing any logout request that arrives meanwhile.
+/// Returns `true` when the local session was logged out.
+async fn wait_before_retry(
+    delay: Duration,
+    logout: &mut mpsc::Receiver<LogoutRequest>,
+    identity_path: &Path,
+    identity: &Identity,
+    enrollment: &EnrollmentState,
+    controller_status: &ControllerConnectionState,
+) -> bool {
+    tokio::select! {
+        _ = time::sleep(delay) => false,
+        Some(request) = logout.recv() => {
+            complete_logout(request, identity_path, identity, enrollment, controller_status).await
         }
     }
 }
@@ -245,11 +508,13 @@ async fn complete_logout(
     identity_path: &Path,
     identity: &Identity,
     enrollment: &EnrollmentState,
+    controller_status: &ControllerConnectionState,
 ) -> bool {
     let result = identity::delete(identity_path, &identity.device_id)
         .map_err(|error| format!("remove local organization identity: {error:#}"));
     if result.is_ok() {
         enrollment.set("starting").await;
+        controller_status.reset().await;
         info!(device_id = %identity.device_id, "logged out local organization session");
     }
     let logged_out = result.is_ok();
@@ -276,6 +541,14 @@ fn is_oauth_refresh_rejected(error: &anyhow::Error) -> bool {
                     | reqwest::StatusCode::FORBIDDEN
             )
         })
+}
+
+/// Refresh failures that came from talking to the token endpoint (connection
+/// errors, timeouts, non-rejecting HTTP statuses) and may succeed on retry.
+fn is_transient_refresh_failure(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<reqwest::Error>().is_some())
 }
 
 pub async fn llm_gateway_credential(
@@ -310,6 +583,7 @@ async fn connect(
     state_dir: &Path,
     reconciler: &Reconciler,
     telemetry: &mut mpsc::Receiver<ModelTelemetryEvent>,
+    controller_status: &ControllerConnectionState,
 ) -> anyhow::Result<()> {
     let mut client = client(controller, Some(identity)).await?;
     let (sender, receiver) = mpsc::channel(16);
@@ -338,6 +612,7 @@ async fn connect(
     send_inventory(&sender, &snapshot).await?;
 
     info!(address = %controller.address, "connected to controller");
+    controller_status.mark_connected().await;
     let mut heartbeat = time::interval(controller.heartbeat_interval);
     let reconnect_at = identity.oauth.expires_at_unix_seconds.saturating_sub(60);
     let oauth_reconnect = time::sleep(Duration::from_secs(
@@ -357,6 +632,7 @@ async fn connect(
                         .unwrap_or_default()
                         .as_secs(),
                 })).await?;
+                controller_status.mark_seen().await;
             }
             Some(event) = telemetry.recv() => {
                 send(&sender, agent_message::Message::Telemetry(telemetry_to_proto(event))).await?;
@@ -368,6 +644,7 @@ async fn connect(
                 let Some(message) = message.context("read controller stream")? else {
                     return Ok(());
                 };
+                controller_status.mark_seen().await;
                 if let Some(controller_message::Message::DaemonConfig(config)) = message.message {
                     info!(
                         revision = config.revision,
@@ -642,11 +919,25 @@ async fn refresh_oauth_if_needed(
     let oauth = &identity.oauth;
     if oauth.expires_at_unix_seconds <= unix_time_seconds().saturating_add(120) {
         let _guard = OAUTH_REFRESH_MUTEX.lock().await;
-        if let Some(stored) = identity::load(identity_path)?
-            && stored.oauth.expires_at_unix_seconds > unix_time_seconds().saturating_add(120)
-        {
-            *identity = stored;
-            return Ok(());
+        match identity::load(identity_path) {
+            Ok(Some(stored))
+                if stored.oauth.expires_at_unix_seconds
+                    > unix_time_seconds().saturating_add(120) =>
+            {
+                *identity = stored;
+                return Ok(());
+            }
+            Ok(_) => {}
+            // The identity in memory still works. Refresh it, and the save below
+            // replaces the stored copy that can no longer be read.
+            Err(error) if identity::is_unreadable(&error) => {
+                warn!(
+                    device_id = %identity.device_id,
+                    error = %format!("{error:#}"),
+                    "stored device identity is unreadable; refreshing from the in-memory copy"
+                );
+            }
+            Err(error) => return Err(error),
         }
         oidc::refresh(identity).await?;
         identity::save(identity_path, identity).context("persist rotated OIDC refresh token")?;
@@ -700,11 +991,12 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        MAX_RETRY_DELAY, enroll_with_retry, is_oauth_refresh_rejected, is_unauthenticated,
-        next_inventory, next_retry_delay, normalize_hostname,
+        ControllerConnectionState, MAX_RETRY_DELAY, enroll_with_retry, is_oauth_refresh_rejected,
+        is_transient_refresh_failure, is_unauthenticated, next_inventory, next_retry_delay,
+        normalize_hostname,
     };
     use crate::enrollment::EnrollmentState;
-    use agentdesktop_core::model::Discovery as AgentDiscovery;
+    use agentdesktop_core::model::{ControllerConnectionError, Discovery as AgentDiscovery};
     use tokio::{sync::watch, time};
 
     fn empty_inventory() -> AgentDiscovery {
@@ -775,6 +1067,57 @@ mod tests {
         assert!(!is_oauth_refresh_rejected(&anyhow::anyhow!(
             "network unavailable"
         )));
+        assert!(is_transient_refresh_failure(
+            &status_error(reqwest::StatusCode::SERVICE_UNAVAILABLE)
+                .context("OIDC token endpoint rejected refresh token")
+        ));
+    }
+
+    /// Identity store failures are not retried in place; they must reach the
+    /// supervisor so enrollment is reported as failed.
+    #[test]
+    fn local_identity_failures_are_not_transient() {
+        let error = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            .context("persist rotated OIDC refresh token");
+        assert!(!is_transient_refresh_failure(&error));
+        assert!(!is_transient_refresh_failure(&anyhow::anyhow!(
+            "OIDC token endpoint returned unsupported token type"
+        )));
+    }
+
+    #[tokio::test]
+    async fn network_failures_during_refresh_are_transient() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed_address = closed.local_addr().unwrap();
+        drop(closed);
+        let connect_error: anyhow::Error = reqwest::Client::new()
+            .post(format!("http://{closed_address}/token"))
+            .send()
+            .await
+            .unwrap_err()
+            .into();
+        let connect_error = connect_error.context("refresh OIDC access token");
+        assert!(!is_oauth_refresh_rejected(&connect_error));
+        assert!(is_transient_refresh_failure(&connect_error));
+
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let silent_address = silent.local_addr().unwrap();
+        let _accepted = tokio::spawn(async move {
+            let _connection = silent.accept().await;
+            std::future::pending::<()>().await;
+        });
+        let timeout_error: anyhow::Error = reqwest::Client::builder()
+            .timeout(Duration::from_millis(50))
+            .build()
+            .unwrap()
+            .post(format!("http://{silent_address}/token"))
+            .send()
+            .await
+            .unwrap_err()
+            .into();
+        let timeout_error = timeout_error.context("refresh OIDC access token");
+        assert!(!is_oauth_refresh_rejected(&timeout_error));
+        assert!(is_transient_refresh_failure(&timeout_error));
     }
 
     #[test]
@@ -821,5 +1164,119 @@ mod tests {
 
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert_eq!(identity, "identity");
+    }
+
+    #[tokio::test]
+    async fn controller_connection_state_starts_disconnected() {
+        let status = ControllerConnectionState::new().get().await;
+        assert!(!status.connected);
+        assert_eq!(status.last_seen_unix_seconds, None);
+        assert_eq!(status.last_error, None);
+    }
+
+    #[tokio::test]
+    async fn controller_connection_state_reports_a_successful_connection() {
+        let state = ControllerConnectionState::new();
+        state.mark_connected().await;
+
+        let status = state.get().await;
+        assert!(status.connected);
+        assert!(status.last_seen_unix_seconds.is_some());
+        assert_eq!(status.last_error, None);
+    }
+
+    /// Backdates the last-seen time so tests can observe it advancing without
+    /// sleeping across a one-second boundary.
+    async fn backdate_last_seen(state: &ControllerConnectionState) {
+        state.status.write().await.last_seen_unix_seconds = Some(1);
+    }
+
+    #[tokio::test]
+    async fn controller_connection_state_mark_seen_advances_only_while_connected() {
+        let state = ControllerConnectionState::new();
+        state.mark_seen().await;
+        assert_eq!(state.get().await.last_seen_unix_seconds, None);
+
+        state.mark_connected().await;
+        backdate_last_seen(&state).await;
+        state.mark_seen().await;
+        assert!(state.get().await.last_seen_unix_seconds > Some(1));
+
+        state.mark_disconnected(None).await;
+        backdate_last_seen(&state).await;
+        state.mark_seen().await;
+        assert_eq!(state.get().await.last_seen_unix_seconds, Some(1));
+    }
+
+    #[tokio::test]
+    async fn controller_connection_state_disconnect_records_when_the_stream_was_last_seen() {
+        let state = ControllerConnectionState::new();
+        state.mark_connected().await;
+        backdate_last_seen(&state).await;
+
+        state
+            .mark_disconnected(Some(ControllerConnectionError::Unreachable))
+            .await;
+
+        let status = state.get().await;
+        assert!(!status.connected);
+        assert!(status.last_seen_unix_seconds > Some(1));
+        assert_eq!(
+            status.last_error,
+            Some(ControllerConnectionError::Unreachable)
+        );
+
+        // Further failures while already disconnected must not look like
+        // fresh contact with the controller.
+        backdate_last_seen(&state).await;
+        state
+            .mark_disconnected(Some(ControllerConnectionError::Unreachable))
+            .await;
+        assert_eq!(state.get().await.last_seen_unix_seconds, Some(1));
+    }
+
+    #[tokio::test]
+    async fn controller_connection_state_reconnect_clears_the_previous_error() {
+        let state = ControllerConnectionState::new();
+        state
+            .mark_disconnected(Some(ControllerConnectionError::Unreachable))
+            .await;
+        state.mark_connected().await;
+
+        let status = state.get().await;
+        assert!(status.connected);
+        assert_eq!(status.last_error, None);
+    }
+
+    #[tokio::test]
+    async fn controller_connection_state_disconnect_without_an_error_keeps_the_previous_one() {
+        let state = ControllerConnectionState::new();
+        state
+            .mark_disconnected(Some(ControllerConnectionError::IdentityRejected))
+            .await;
+        // A clean stream close (e.g. the periodic OIDC-refresh reconnect)
+        // reports no error; it should not silently erase the last real one.
+        state.mark_disconnected(None).await;
+
+        assert_eq!(
+            state.get().await.last_error,
+            Some(ControllerConnectionError::IdentityRejected)
+        );
+    }
+
+    #[tokio::test]
+    async fn controller_connection_state_reset_forgets_the_previous_session() {
+        let state = ControllerConnectionState::new();
+        state.mark_connected().await;
+        state
+            .mark_disconnected(Some(ControllerConnectionError::SessionExpired))
+            .await;
+
+        state.reset().await;
+
+        assert_eq!(
+            state.get().await,
+            ControllerConnectionState::new().get().await
+        );
     }
 }

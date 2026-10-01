@@ -72,7 +72,9 @@ impl ClaudeCode {
 impl Provider for ClaudeCode {
     async fn discover(&self) -> Discovery {
         Discovery {
-            agents: discovery::discover().into_iter().collect(),
+            agents: discovery::discover(&self.settings_path)
+                .into_iter()
+                .collect(),
             model_runtimes: Vec::new(),
         }
     }

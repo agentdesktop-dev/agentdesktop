@@ -33,7 +33,9 @@ impl ClaudeDesktop {
 impl Provider for ClaudeDesktop {
     async fn discover(&self) -> Discovery {
         Discovery {
-            agents: discovery::discover().into_iter().collect(),
+            agents: discovery::discover(&self.managed_settings_path)
+                .into_iter()
+                .collect(),
             model_runtimes: Vec::new(),
         }
     }
