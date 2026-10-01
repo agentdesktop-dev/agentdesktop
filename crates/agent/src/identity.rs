@@ -122,10 +122,12 @@ pub fn save(path: &Path, identity: &Identity) -> anyhow::Result<()> {
         // one fails, including when the item is there but unreadable (after a
         // code-signature change), and leaves the unreadable copy behind as a
         // duplicate. Remove such an item first. Readable items are updated in
-        // place, so a healthy identity is never deleted. Best effort: the store
-        // below reports any real failure.
+        // place, so a healthy identity is never deleted. If the item cannot be
+        // removed, fail rather than store a duplicate next to it.
         if secrets.get_optional(service, &identity.device_id).is_err() {
-            let _ = secrets.delete(service, &identity.device_id);
+            secrets
+                .delete(service, &identity.device_id)
+                .with_context(|| format!("remove unreadable item before: {operation}"))?;
         }
         secrets
             .set(service, &identity.device_id, secret)
@@ -214,16 +216,20 @@ fn migrate_legacy_linux_secrets(
     device_id: &str,
 ) -> anyhow::Result<()> {
     let path = legacy_linux_secrets_path(identity_path)?;
+    // Legacy secrets that cannot be read leave the identity unusable, just like
+    // an unreadable secret in the store. Failing to migrate them is not.
     let contents = match fs::read(&path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {
             return Err(error)
-                .with_context(|| format!("read legacy device secrets from {}", path.display()));
+                .with_context(|| format!("read legacy device secrets from {}", path.display()))
+                .context(IdentityUnreadable);
         }
     };
-    let secrets: StoredSecrets =
-        serde_json::from_slice(&contents).context("parse legacy stored device secrets")?;
+    let secrets: StoredSecrets = serde_json::from_slice(&contents)
+        .context("parse legacy stored device secrets")
+        .context(IdentityUnreadable)?;
     store.set(TLS_KEY_SERVICE, device_id, &secrets.client_private_key_pem)?;
     store.set(
         OAUTH_SERVICE,
@@ -378,6 +384,25 @@ mod tests {
 
         discard(&path).unwrap();
         assert!(!path.exists());
+        assert!(load(&path).unwrap().is_none());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn corrupt_legacy_secrets_are_unreadable_and_discard_unenrolls() {
+        let directory = temp_directory();
+        let path = directory.join("identity.json");
+        save(&path, &test_identity()).unwrap();
+        let legacy = directory.join("identity-secrets.json");
+        fs::write(&legacy, b"not json").unwrap();
+
+        let error = load(&path).unwrap_err();
+        assert!(is_unreadable(&error), "{error:#}");
+
+        discard(&path).unwrap();
+        assert!(!path.exists());
+        assert!(!legacy.exists());
+        assert_eq!(secret_count(&directory), 0);
         assert!(load(&path).unwrap().is_none());
         fs::remove_dir_all(directory).unwrap();
     }
