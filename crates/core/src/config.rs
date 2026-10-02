@@ -76,6 +76,23 @@ pub struct DaemonStartupConfig {
     /// Grok Build paths.
     #[serde(default)]
     pub grok: ToolConfigPath,
+    /// Local loopback LLM proxy.
+    #[serde(default)]
+    pub llm_proxy: LlmProxyStartupConfig,
+}
+
+/// Local loopback LLM proxy settings. User mode only: the proxy hands out the
+/// current user's gateway credential, so a system daemon never runs one.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LlmProxyStartupConfig {
+    /// Loopback address to listen on. Unset disables the proxy. Rejected in system mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen: Option<SocketAddr>,
+    /// Credential policy client ID used by the proxy. Defaults to `vscode`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
 }
 
 /// Local Claude Desktop paths.
@@ -177,6 +194,51 @@ pub struct LlmGatewayConfig {
     /// Authentication mechanism used when connecting to this gateway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authentication: Option<LlmGatewayAuthentication>,
+    /// Base URL the local LLM proxy forwards to, when it differs from `url`.
+    ///
+    /// `url` is shared by every program that sets `useLlmGateway`, so it can
+    /// only carry one path prefix. A gateway that puts each provider behind its
+    /// own prefix therefore cannot serve both a program and the proxy from one
+    /// value. Setting this leaves `url` to the programs and gives the proxy its
+    /// own target. The same rules as for `url` apply.
+    #[serde(rename = "proxyUrl", default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
+    pub proxy_url: Option<Url>,
+    /// GitHub App OAuth used by the local proxy for the x-llm-token header.
+    #[serde(
+        rename = "githubOAuth",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub github_oauth: Option<GitHubOAuthConfig>,
+}
+
+/// GitHub App user authorization for Copilot requests through the local proxy.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitHubOAuthConfig {
+    /// Where the GitHub credential comes from.
+    #[serde(default)]
+    pub source: GitHubTokenSource,
+    /// GitHub App client ID. Required when `source` is `deviceFlow`, where the
+    /// App must also enable Device Flow. Unused when `source` is `request`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+}
+
+/// Where the local proxy gets the credential it puts in `x-llm-token`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum GitHubTokenSource {
+    /// The daemon obtains its own token through GitHub App device authorization.
+    #[default]
+    DeviceFlow,
+    /// The calling client already holds a credential and sends it; the proxy
+    /// moves it aside and adds the gateway identity. Used by clients such as
+    /// VS Code Copilot that manage their own GitHub session.
+    Request,
 }
 
 /// Authentication mechanisms supported by an LLM gateway.
@@ -775,6 +837,41 @@ fn validate_daemon(
         if gateway.url.query().is_some() || gateway.url.fragment().is_some() {
             anyhow::bail!("LLM gateway URL cannot include a query or fragment");
         }
+        if let Some(proxy_url) = &gateway.proxy_url {
+            if !matches!(proxy_url.scheme(), "http" | "https") {
+                anyhow::bail!(
+                    "LLM gateway proxyUrl must use HTTP or HTTPS, got {}",
+                    proxy_url.scheme()
+                );
+            }
+            if proxy_url.host().is_none() {
+                anyhow::bail!("LLM gateway proxyUrl must include a host");
+            }
+            if !proxy_url.username().is_empty() || proxy_url.password().is_some() {
+                anyhow::bail!("LLM gateway proxyUrl cannot include credentials");
+            }
+            if proxy_url.query().is_some() || proxy_url.fragment().is_some() {
+                anyhow::bail!("LLM gateway proxyUrl cannot include a query or fragment");
+            }
+        }
+        if let Some(github) = &gateway.github_oauth {
+            match github.source {
+                GitHubTokenSource::DeviceFlow => {
+                    let client_id = github.client_id.as_deref().unwrap_or_default();
+                    if client_id.trim().is_empty() {
+                        anyhow::bail!(
+                            "llmGateway.githubOAuth.clientId is required when source is deviceFlow"
+                        );
+                    }
+                }
+                // clientId is accepted and ignored here, so that switching
+                // source back and forth does not require editing two fields.
+                GitHubTokenSource::Request => {}
+            }
+            if gateway.authentication.is_none() {
+                anyhow::bail!("llmGateway.githubOAuth requires gateway authentication");
+            }
+        }
         if let Some(authentication) = &gateway.authentication {
             match authentication {
                 LlmGatewayAuthentication::ControllerJwt {
@@ -1237,6 +1334,31 @@ llmGateway:
         .expect_err("invalid gateway should fail");
 
         assert!(error.to_string().contains("must use HTTP or HTTPS"));
+    }
+
+    #[test]
+    fn rejects_an_invalid_llm_gateway_proxy_url() {
+        for (proxy_url, message) in [
+            (
+                "ftp://gateway.example.com",
+                "proxyUrl must use HTTP or HTTPS",
+            ),
+            ("file:///etc/passwd", "proxyUrl must use HTTP or HTTPS"),
+            (
+                "https://user:secret@gateway.example.com",
+                "proxyUrl cannot include credentials",
+            ),
+            (
+                "https://gateway.example.com/?a=b",
+                "proxyUrl cannot include a query",
+            ),
+        ] {
+            let error = parse_daemon(&format!(
+                "llmGateway:\n  url: https://gateway.example.com\n  proxyUrl: {proxy_url}\n"
+            ))
+            .expect_err(proxy_url);
+            assert!(error.to_string().contains(message), "{proxy_url}: {error}");
+        }
     }
 
     #[test]

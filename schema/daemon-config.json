@@ -195,6 +195,11 @@
           "$ref": "#/$defs/ToolConfigPath",
           "default": {}
         },
+        "llmProxy": {
+          "description": "Local loopback LLM proxy.",
+          "$ref": "#/$defs/LlmProxyStartupConfig",
+          "default": {}
+        },
         "oidcCallbackListen": {
           "description": "Override the OIDC callback bind address.",
           "type": [
@@ -231,6 +236,40 @@
         }
       },
       "additionalProperties": false
+    },
+    "GitHubOAuthConfig": {
+      "description": "GitHub App user authorization for Copilot requests through the local proxy.",
+      "type": "object",
+      "properties": {
+        "clientId": {
+          "description": "GitHub App client ID. Required when `source` is `deviceFlow`, where the\nApp must also enable Device Flow. Unused when `source` is `request`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "description": "Where the GitHub credential comes from.",
+          "$ref": "#/$defs/GitHubTokenSource",
+          "default": "deviceFlow"
+        }
+      },
+      "additionalProperties": false
+    },
+    "GitHubTokenSource": {
+      "description": "Where the local proxy gets the credential it puts in `x-llm-token`.",
+      "oneOf": [
+        {
+          "description": "The daemon obtains its own token through GitHub App device authorization.",
+          "type": "string",
+          "const": "deviceFlow"
+        },
+        {
+          "description": "The calling client already holds a credential and sends it; the proxy\nmoves it aside and adds the gateway identity. Used by clients such as\nVS Code Copilot that manage their own GitHub session.",
+          "type": "string",
+          "const": "request"
+        }
+      ]
     },
     "GrokConfig": {
       "description": "Settings reconciled into Grok Build's organization-managed configuration.\n\nValues under `managedConfig` are written to Grok's `managed_config.toml`.\nWhen generated LLM-gateway settings overlap with those values,\nagentdesktop's generated values take precedence.\nOnly system mode is supported. Grok can delete or replace the user-level\nmanaged file during startup, so `--user` rejects `programs.grok`.",
@@ -353,6 +392,24 @@
             }
           ]
         },
+        "githubOAuth": {
+          "description": "GitHub App OAuth used by the local proxy for the x-llm-token header.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitHubOAuthConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "proxyUrl": {
+          "description": "Base URL the local LLM proxy forwards to, when it differs from `url`.\n\n`url` is shared by every program that sets `useLlmGateway`, so it can\nonly carry one path prefix. A gateway that puts each provider behind its\nown prefix therefore cannot serve both a program and the proxy from one\nvalue. Setting this leaves `url` to the programs and gives the proxy its\nown target. The same rules as for `url` apply.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "url": {
           "description": "Base HTTP or HTTPS URL of the LLM gateway.\n\nThe URL must include a host and cannot include credentials, a query, or a fragment.",
           "type": "string"
@@ -362,6 +419,27 @@
       "required": [
         "url"
       ]
+    },
+    "LlmProxyStartupConfig": {
+      "description": "Local loopback LLM proxy settings. User mode only: the proxy hands out the\ncurrent user's gateway credential, so a system daemon never runs one.",
+      "type": "object",
+      "properties": {
+        "clientId": {
+          "description": "Credential policy client ID used by the proxy. Defaults to `vscode`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "listen": {
+          "description": "Loopback address to listen on. Unset disables the proxy. Rejected in system mode.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "OpenCodeConfig": {
       "description": "Settings reconciled into OpenCode's system-managed configuration.\n\nValues under `managedConfig` are written to OpenCode's managed JSONC file.\nWhen generated LLM gateway settings overlap with those values,\nAgentdesktop's generated values take precedence.",

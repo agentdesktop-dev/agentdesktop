@@ -16,6 +16,9 @@
 |`daemon.codex.config`|string|Configuration file.|
 |`daemon.grok`|object|Grok Build paths.|
 |`daemon.grok.config`|string|Configuration file.|
+|`daemon.llmProxy`|object|Local loopback LLM proxy.|
+|`daemon.llmProxy.clientId`|string|Credential policy client ID used by the proxy. Defaults to `vscode`.|
+|`daemon.llmProxy.listen`|string|Loopback address to listen on. Unset disables the proxy. Rejected in system mode.|
 |`daemon.oidcCallbackListen`|string|Override the OIDC callback bind address.|
 |`daemon.openCode`|object|OpenCode paths.|
 |`daemon.openCode.config`|string|Configuration file.|
@@ -35,6 +38,10 @@
 |`llmGateway.authentication.redirectUri`|string|Loopback redirect URI registered for the native client.|
 |`llmGateway.authentication.scopes`|[]string|Scopes requested during sign-in.|
 |`llmGateway.authentication.type`|enum|Possible values: `oidc`.|
+|`llmGateway.githubOAuth`|object|GitHub App OAuth used by the local proxy for the x-llm-token header.|
+|`llmGateway.githubOAuth.clientId`|string|GitHub App client ID. Required when `source` is `deviceFlow`, where the<br>App must also enable Device Flow. Unused when `source` is `request`.|
+|`llmGateway.githubOAuth.source`|enum|Where the GitHub credential comes from.<br>Possible values: `deviceFlow`, `request`.|
+|`llmGateway.proxyUrl`|string|Base URL the local LLM proxy forwards to, when it differs from `url`.<br><br>`url` is shared by every program that sets `useLlmGateway`, so it can<br>only carry one path prefix. A gateway that puts each provider behind its<br>own prefix therefore cannot serve both a program and the proxy from one<br>value. Setting this leaves `url` to the programs and gives the proxy its<br>own target. The same rules as for `url` apply.|
 |`llmGateway.url`|string|Base HTTP or HTTPS URL of the LLM gateway.<br><br>The URL must include a host and cannot include credentials, a query, or a fragment.|
 |`programs`|object|Per-program settings reconciled on this device.|
 |`programs.claudeCode`|object|Claude Code managed-settings configuration. Arbitrary keys are passed through directly.|

@@ -52,6 +52,7 @@ impl Reconciler {
                 merge_user_settings,
                 credential_helper,
                 socket,
+                llm_proxy: None,
             },
             providers: Arc::new(vec![
                 Box::new(ClaudeCode {
@@ -76,6 +77,12 @@ impl Reconciler {
                 Box::new(Ollama),
             ]),
         }
+    }
+
+    /// Attach the bound loopback LLM proxy so reconcilers can point client files at it.
+    pub fn with_llm_proxy(mut self, llm_proxy: Option<crate::llm_proxy::LlmProxyContext>) -> Self {
+        self.context.llm_proxy = llm_proxy;
+        self
     }
 
     /// Plan every provider, including cleanup for disabled providers, before

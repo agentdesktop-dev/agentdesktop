@@ -12,9 +12,10 @@ use std::{
     os::unix::fs::{FileTypeExt, PermissionsExt},
 };
 
+use agentdesktop_core::config::GitHubTokenSource;
 use agentdesktop_core::{
     DEFAULT_CONFIG_PATH, DEFAULT_SOCKET_PATH, VERSION, config,
-    model::{DaemonControllerInfo, DaemonInfo, DaemonScope},
+    model::{DaemonControllerInfo, DaemonInfo, DaemonScope, LlmProxyInfo},
     telemetry,
 };
 use anyhow::{Context, bail};
@@ -33,7 +34,9 @@ use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 
 #[cfg(windows)]
 use crate::windows_security::SecurityDescriptor;
-use crate::{api, enrollment::EnrollmentState, gateway_oidc, reconcile, remote, secure_fs};
+use crate::{
+    api, enrollment::EnrollmentState, gateway_oidc, llm_proxy, reconcile, remote, secure_fs,
+};
 
 #[cfg(unix)]
 const LOCAL_API_GROUP: &str = "agentdesktop";
@@ -71,6 +74,8 @@ struct ResolvedDaemonArgs {
     state_dir: PathBuf,
     socket: PathBuf,
     oidc_callback_listen: Option<SocketAddr>,
+    llm_proxy_listen: Option<SocketAddr>,
+    llm_proxy_client_id: String,
     claude_code: ResolvedToolConfigPath,
     claude_desktop: ResolvedClaudeDesktopStartupConfig,
     codex: ResolvedToolConfigPath,
@@ -103,6 +108,29 @@ impl DaemonArgs {
     ) -> anyhow::Result<ResolvedDaemonArgs> {
         let user = self.user || startup.user;
         let socket = startup.socket.clone().unwrap_or(socket);
+        let llm_proxy_listen = startup.llm_proxy.listen;
+        // The proxy issues the current user's gateway credential to whatever
+        // connects on loopback; a system daemon has no single user to act for.
+        // Checked first so a system-mode operator sees this reason, not a
+        // secondary one about the address or the run mode.
+        if !user && llm_proxy_listen.is_some() {
+            // clientId without listen is inert in either mode; only listen is rejected.
+            bail!("daemon.llmProxy.listen requires --user (or daemon.user: true)");
+        }
+        if llm_proxy_listen.is_some_and(|address| !address.ip().is_loopback()) {
+            bail!("daemon.llmProxy.listen must be a loopback address");
+        }
+        if llm_proxy_listen.is_some() && (self.once || self.dry_run) {
+            bail!("daemon.llmProxy.listen cannot be combined with --once or --dry-run");
+        }
+        let llm_proxy_client_id = startup
+            .llm_proxy
+            .client_id
+            .clone()
+            .unwrap_or_else(|| "vscode".to_owned());
+        if llm_proxy_listen.is_some() && !config::valid_client_id(&llm_proxy_client_id) {
+            bail!("invalid daemon.llmProxy.clientId");
+        }
         if !user {
             return Ok(ResolvedDaemonArgs {
                 user: false,
@@ -112,6 +140,8 @@ impl DaemonArgs {
                     .unwrap_or_else(|| PathBuf::from(agentdesktop_core::DEFAULT_STATE_DIR)),
                 socket,
                 oidc_callback_listen: startup.oidc_callback_listen,
+                llm_proxy_listen: None,
+                llm_proxy_client_id: llm_proxy_client_id.clone(),
                 claude_code: ResolvedToolConfigPath {
                     config: startup.claude_code.config.unwrap_or_else(|| {
                         reconcile::default_claude_code_managed_settings_dir()
@@ -177,6 +207,8 @@ impl DaemonArgs {
             state_dir: state_dir.clone(),
             socket,
             oidc_callback_listen: startup.oidc_callback_listen,
+            llm_proxy_listen,
+            llm_proxy_client_id,
             claude_code: ResolvedToolConfigPath {
                 config: startup
                     .claude_code
@@ -309,6 +341,27 @@ where
         log_dir.as_deref(),
     )?;
     let socket = args.socket.clone();
+    // Bind the loopback proxy before the reconciler exists, so anything that
+    // writes the proxy address into a managed file gets the bind result, never
+    // a configured address the daemon does not own. A failed bind is reported
+    // through daemon-info and the proxy stays off; the daemon keeps enrolling
+    // and reconciling, since a port taken by some other process must not take
+    // the device out of the fleet.
+    let (mut proxy_listener, mut llm_proxy) =
+        bind_llm_proxy(args.llm_proxy_listen, &args.llm_proxy_client_id).await;
+    let pairing = attach_llm_proxy_pairing(&mut proxy_listener, &mut llm_proxy, &args.state_dir);
+    let proxy_context = match (&proxy_listener, &pairing) {
+        (Some(listener), Some(pairing)) => {
+            listener
+                .local_addr()
+                .ok()
+                .map(|address| llm_proxy::LlmProxyContext {
+                    address,
+                    pairing: pairing.clone(),
+                })
+        }
+        _ => None,
+    };
     let reconciler = reconcile::Reconciler::new(
         args.user,
         args.claude_code.config.clone(),
@@ -320,7 +373,8 @@ where
         args.grok.config.clone(),
         agentdesktop_client_executable()?,
         socket.clone(),
-    );
+    )
+    .with_llm_proxy(proxy_context);
     if args.once {
         if args.dry_run {
             validate_dry_run(&config)?;
@@ -337,9 +391,14 @@ where
         return Ok(());
     }
 
-    let daemon_info = describe_daemon(&config, &args.config, &args.state_dir, args.user);
+    let daemon_info = describe_daemon(&config, &args.config, &args.state_dir, args.user, llm_proxy);
     secure_fs::ensure_private_dir(&args.state_dir)?;
-    start_gateway_authentication(&config, args.state_dir.clone(), args.oidc_callback_listen);
+    start_gateway_authentication(
+        &config,
+        args.state_dir.clone(),
+        args.oidc_callback_listen,
+        proxy_listener.is_some(),
+    );
     let enrollment = EnrollmentState::new(config.controller.is_some());
     let controller_status = remote::ControllerConnectionState::new();
     let local_config = config.clone();
@@ -414,7 +473,7 @@ where
         ));
     }
     let has_controller = config.controller.is_some();
-    let app = api::router(api::AppState {
+    let state = api::AppState {
         config,
         daemon_info,
         discovery: inventory,
@@ -424,15 +483,120 @@ where
         oidc_callback_listen: args.oidc_callback_listen,
         telemetry,
         logout,
-    });
+    };
+    let app = api::router(state.clone());
+    // The proxy is optional at runtime too: if serving fails (for example the
+    // TLS root store cannot be built), log it and keep the daemon running
+    // without the proxy rather than dropping the device out of the fleet.
+    let proxy = async move {
+        if let Some(listener) = proxy_listener
+            && let Err(error) = llm_proxy::serve(
+                listener,
+                state,
+                llm_proxy::ProxyConfig {
+                    default_client_id: args.llm_proxy_client_id,
+                    pairing: pairing.expect("pairing exists whenever the listener does"),
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                error = %format!("{error:#}"),
+                "local LLM proxy stopped; proxy unavailable until the daemon restarts"
+            );
+        }
+        std::future::pending::<anyhow::Result<()>>().await
+    };
 
     tracing::info!(socket = %socket.display(), "agent daemon listening");
     #[cfg(unix)]
-    serve_unix(&socket, local_api_access()?, app, shutdown).await?;
+    let local_api = serve_unix(&socket, local_api_access()?, app, shutdown);
     #[cfg(windows)]
-    serve_named_pipe(&socket, app, shutdown).await?;
+    let local_api = serve_named_pipe(&socket, app, shutdown);
+    tokio::select! {
+        result = local_api => result?,
+        result = proxy => result?,
+    }
 
     Ok(())
+}
+
+/// Load or create the pairing value for a bound proxy. Without a pairing value
+/// the proxy would accept anyone on the host, so a failure to obtain one
+/// switches the proxy off like a failed bind: the listener is dropped and
+/// daemon-info reports `bound: false` with the reason.
+fn attach_llm_proxy_pairing(
+    proxy_listener: &mut Option<tokio::net::TcpListener>,
+    llm_proxy: &mut Option<LlmProxyInfo>,
+    state_dir: &Path,
+) -> Option<std::sync::Arc<str>> {
+    proxy_listener.as_ref()?;
+    match llm_proxy::load_or_create_pairing(state_dir) {
+        Ok(pairing) => Some(pairing),
+        Err(error) => {
+            tracing::error!(
+                error = %format!("{error:#}"),
+                "LLM proxy pairing unavailable; proxy disabled until the daemon restarts"
+            );
+            *proxy_listener = None;
+            if let Some(info) = llm_proxy.as_mut() {
+                info.bound = false;
+                info.error = Some(format!("pairing unavailable: {error:#}"));
+            }
+            None
+        }
+    }
+}
+
+/// Bind the loopback LLM proxy listener, if one is configured.
+///
+/// Returns the listener and the state to report through daemon-info. A bind
+/// failure is logged and reported as `bound: false` rather than propagated:
+/// the proxy is optional, the rest of the daemon is not.
+///
+/// Invariant for callers: this runs before the initial `reconciler.apply`, so a
+/// reconciler that writes the proxy address into a client file must take the
+/// address from this result and must not write it when `bound` is false. The
+/// accept loop starts later, after discovery; connections in between queue in
+/// the listen backlog.
+async fn bind_llm_proxy(
+    listen: Option<SocketAddr>,
+    client_id: &str,
+) -> (Option<tokio::net::TcpListener>, Option<LlmProxyInfo>) {
+    let Some(address) = listen else {
+        return (None, None);
+    };
+    match tokio::net::TcpListener::bind(address).await {
+        Ok(listener) => {
+            let bound = listener.local_addr().unwrap_or(address);
+            tracing::info!(address = %bound, "local LLM proxy listening");
+            (
+                Some(listener),
+                Some(LlmProxyInfo {
+                    listen: bound.to_string(),
+                    bound: true,
+                    client_id: client_id.to_owned(),
+                    error: None,
+                }),
+            )
+        }
+        Err(error) => {
+            tracing::error!(
+                address = %address,
+                %error,
+                "local LLM proxy could not bind; proxy and its GitHub sign-in step disabled until the daemon restarts"
+            );
+            (
+                None,
+                Some(LlmProxyInfo {
+                    listen: address.to_string(),
+                    bound: false,
+                    client_id: client_id.to_owned(),
+                    error: Some(error.to_string()),
+                }),
+            )
+        }
+    }
 }
 
 fn describe_daemon(
@@ -440,6 +604,7 @@ fn describe_daemon(
     config_path: &Path,
     state_directory: &Path,
     user: bool,
+    llm_proxy: Option<LlmProxyInfo>,
 ) -> DaemonInfo {
     let controller = config
         .controller
@@ -463,6 +628,7 @@ fn describe_daemon(
         state_directory: path_for_display(state_directory),
         inventory_interval: config.inventory_interval,
         controller,
+        llm_proxy,
     }
 }
 
@@ -561,11 +727,13 @@ fn start_gateway_authentication(
     config: &agentdesktop_core::config::DaemonConfig,
     state_dir: PathBuf,
     callback_listen: Option<SocketAddr>,
+    proxy_enabled: bool,
 ) {
     let Some(gateway) = config.llm_gateway.as_ref() else {
         return;
     };
     let authentication = gateway.authentication.clone();
+    let github = gateway.github_oauth.clone().filter(|_| proxy_enabled);
     let subscription = config.programs.claude_code.as_ref().is_some_and(|program| {
         program.auth == Some(agentdesktop_core::config::ProgramAuthentication::Subscription)
     }) || config
@@ -600,6 +768,15 @@ fn start_gateway_authentication(
                     gateway_oidc::LoginOptions {
                         callback_listen,
                         subscription_available: subscription,
+                        // Only the device flow has anything for the user to
+                        // sign in to. With source: request the credential comes
+                        // from the client, so the sign-in page must not offer a
+                        // GitHub step that would never be used.
+                        github_client_id: github.as_ref().and_then(|github| {
+                            matches!(github.source, GitHubTokenSource::DeviceFlow)
+                                .then(|| github.client_id.clone())
+                                .flatten()
+                        }),
                     },
                 )
                 .await?;
@@ -615,6 +792,17 @@ fn start_gateway_authentication(
                 )
                 .await?;
                 tracing::info!("Anthropic subscription authentication ready");
+            }
+            if let Some(github) = github {
+                // source: request has no credential of its own to acquire; the
+                // client supplies one per request.
+                if let (GitHubTokenSource::DeviceFlow, Some(client_id)) =
+                    (github.source, github.client_id.as_deref())
+                {
+                    tracing::info!("starting GitHub App authentication");
+                    crate::github_oauth::credential(client_id, &state_dir, None).await?;
+                    tracing::info!("GitHub App authentication ready");
+                }
             }
             Ok(())
         }
@@ -913,7 +1101,7 @@ fn effective_uid() -> u32 {
 mod tests {
     use std::{
         io,
-        path::Path,
+        path::{Path, PathBuf},
         pin::Pin,
         sync::{
             Arc,
@@ -923,8 +1111,10 @@ mod tests {
         time::Duration,
     };
 
-    use agentdesktop_core::config::parse_daemon;
-    use agentdesktop_core::model::{Agent, Discovery};
+    use super::{DaemonArgs, bind_llm_proxy};
+    use agentdesktop_core::DEFAULT_SOCKET_PATH;
+    use agentdesktop_core::config::{self, parse_daemon};
+    use agentdesktop_core::model::{Agent, Discovery, LlmProxyInfo};
     use tokio::sync::watch;
 
     fn discovery(kinds: &[&str]) -> Discovery {
@@ -1018,7 +1208,13 @@ mod tests {
     #[test]
     fn daemon_information_reports_standalone_defaults_and_resolved_paths() {
         let config = parse_daemon("{}").unwrap();
-        let info = describe_daemon(&config, Path::new("config.yaml"), Path::new("state"), true);
+        let info = describe_daemon(
+            &config,
+            Path::new("config.yaml"),
+            Path::new("state"),
+            true,
+            None,
+        );
 
         assert_eq!(info.version, agentdesktop_core::VERSION);
         assert_eq!(info.scope, super::DaemonScope::User);
@@ -1074,7 +1270,13 @@ mod tests {
             "controller:\n  address: https://controller.example.com\n  caCertificatePath: ''\n",
         )
         .unwrap();
-        let info = describe_daemon(&config, Path::new("config.yaml"), Path::new("state"), false);
+        let info = describe_daemon(
+            &config,
+            Path::new("config.yaml"),
+            Path::new("state"),
+            false,
+            None,
+        );
         assert_eq!(
             info.controller.unwrap().ca_certificate_path.as_deref(),
             Some("")
@@ -1101,7 +1303,7 @@ programs:
         )
         .unwrap();
         let config = agentdesktop_core::config::load_daemon(&config_path).unwrap();
-        let info = describe_daemon(&config, &config_path, root.path(), false);
+        let info = describe_daemon(&config, &config_path, root.path(), false, None);
         assert_eq!(info.scope, super::DaemonScope::System);
         let controller = info.controller.as_ref().unwrap();
         assert_eq!(controller.heartbeat_interval, Duration::from_secs(45));
@@ -1201,7 +1403,7 @@ programs:
         // Keep invalid-byte paths in memory: filesystems such as APFS reject
         // these filenames, but the diagnostic projection must handle them.
         let config = parse_daemon("{}").unwrap();
-        let info = describe_daemon(&config, &config_path, &state_dir, true);
+        let info = describe_daemon(&config, &config_path, &state_dir, true, None);
         let (_, inventory) = watch::channel(Arc::new(discovery(&[])));
         let app = crate::api::router(crate::api::AppState {
             config,
@@ -1409,5 +1611,225 @@ programs:
         )
         .expect("valid local configuration");
         validate_dry_run(&local).expect("local dry run works");
+    }
+    fn daemon_args(user: bool) -> DaemonArgs {
+        DaemonArgs {
+            user,
+            once: false,
+            dry_run: false,
+            config: None,
+        }
+    }
+
+    fn resolve_error(args: DaemonArgs, startup: config::DaemonStartupConfig) -> anyhow::Error {
+        match args.resolve(
+            startup,
+            PathBuf::from("config.yaml"),
+            PathBuf::from(DEFAULT_SOCKET_PATH),
+        ) {
+            Ok(_) => panic!("resolve succeeded unexpectedly"),
+            Err(error) => error,
+        }
+    }
+
+    fn startup_with_llm_proxy(listen: &str) -> config::DaemonStartupConfig {
+        let mut startup = config::DaemonStartupConfig::default();
+        startup.llm_proxy.listen = Some(listen.parse().unwrap());
+        startup
+    }
+
+    #[test]
+    fn system_mode_rejects_a_configured_llm_proxy() {
+        let error = resolve_error(
+            daemon_args(false),
+            startup_with_llm_proxy("127.0.0.1:18095"),
+        );
+        assert!(
+            error.to_string().contains("requires --user"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn system_mode_runs_no_llm_proxy_by_default() {
+        let resolved = daemon_args(false)
+            .resolve(
+                config::DaemonStartupConfig::default(),
+                PathBuf::from("config.yaml"),
+                PathBuf::from(DEFAULT_SOCKET_PATH),
+            )
+            .unwrap();
+        assert_eq!(resolved.llm_proxy_listen, None);
+    }
+
+    #[test]
+    fn user_mode_keeps_the_configured_llm_proxy_address_and_default_client_id() {
+        // Pin the state dir and socket so XDG variables do not matter. resolve()
+        // still needs a home directory (HOME / USERPROFILE), like every user-mode
+        // daemon start.
+        let mut startup = startup_with_llm_proxy("127.0.0.1:18095");
+        startup.state_dir = Some(PathBuf::from("/tmp/agentdesktop-test-state"));
+        startup.socket = Some(PathBuf::from("/tmp/agentdesktop-test.sock"));
+        let resolved = daemon_args(true)
+            .resolve(
+                startup,
+                PathBuf::from("config.yaml"),
+                PathBuf::from(DEFAULT_SOCKET_PATH),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved.llm_proxy_listen,
+            Some("127.0.0.1:18095".parse().unwrap())
+        );
+        assert_eq!(resolved.llm_proxy_client_id, "vscode");
+    }
+
+    #[test]
+    fn client_id_is_only_validated_when_a_listen_address_is_set() {
+        let mut startup = config::DaemonStartupConfig::default();
+        startup.llm_proxy.client_id = Some("not valid!".to_owned());
+        let resolved = daemon_args(false)
+            .resolve(
+                startup.clone(),
+                PathBuf::from("config.yaml"),
+                PathBuf::from(DEFAULT_SOCKET_PATH),
+            )
+            .map(|_| ());
+        assert!(
+            resolved.is_ok(),
+            "clientId without listen must not fail startup"
+        );
+        let mut user_startup = startup.clone();
+        user_startup.state_dir = Some(PathBuf::from("/tmp/agentdesktop-test-state"));
+        user_startup.socket = Some(PathBuf::from("/tmp/agentdesktop-test.sock"));
+        let resolved = daemon_args(true)
+            .resolve(
+                user_startup,
+                PathBuf::from("config.yaml"),
+                PathBuf::from(DEFAULT_SOCKET_PATH),
+            )
+            .map(|resolved| resolved.llm_proxy_listen);
+        assert!(
+            matches!(resolved, Ok(None)),
+            "clientId without listen is inert in user mode too"
+        );
+        startup.llm_proxy.listen = Some("127.0.0.1:18095".parse().unwrap());
+        let error = resolve_error(daemon_args(true), startup);
+        assert!(error.to_string().contains("clientId"));
+    }
+
+    #[test]
+    fn llm_proxy_rejects_non_loopback_and_one_shot_runs() {
+        let error = resolve_error(daemon_args(true), startup_with_llm_proxy("0.0.0.0:18095"));
+        assert!(error.to_string().contains("loopback"));
+        let mut once = daemon_args(true);
+        once.once = true;
+        let error = resolve_error(once, startup_with_llm_proxy("127.0.0.1:18095"));
+        assert!(error.to_string().contains("--once"));
+        let mut dry_run = daemon_args(true);
+        dry_run.dry_run = true;
+        let error = resolve_error(dry_run, startup_with_llm_proxy("127.0.0.1:18095"));
+        assert!(error.to_string().contains("--once"));
+    }
+
+    #[test]
+    fn system_mode_reports_the_user_mode_rule_before_other_checks() {
+        // A system-mode operator with a non-loopback address must see the real
+        // reason, not the loopback rule.
+        let error = resolve_error(daemon_args(false), startup_with_llm_proxy("0.0.0.0:18095"));
+        assert!(error.to_string().contains("requires --user"), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn llm_proxy_bind_failure_is_reported_not_fatal() {
+        let taken = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = taken.local_addr().unwrap();
+        let (listener, info) = bind_llm_proxy(Some(address), "vscode").await;
+        assert!(listener.is_none());
+        let info = info.expect("proxy info");
+        assert_eq!(info.listen, address.to_string());
+        assert!(!info.bound);
+        assert_eq!(info.client_id, "vscode");
+        assert!(info.error.as_deref().is_some_and(|error| !error.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn llm_proxy_bind_reports_the_bound_address() {
+        let (listener, info) =
+            bind_llm_proxy(Some("127.0.0.1:0".parse().unwrap()), "copilot-cli").await;
+        let listener = listener.expect("listener bound");
+        let info = info.expect("proxy info");
+        assert!(info.bound);
+        assert_eq!(info.listen, listener.local_addr().unwrap().to_string());
+        assert_eq!(info.client_id, "copilot-cli");
+        let (none, info) = bind_llm_proxy(None, "vscode").await;
+        assert!(none.is_none() && info.is_none());
+    }
+
+    #[tokio::test]
+    async fn pairing_failure_switches_the_proxy_off_and_reports_it() {
+        // A state directory that is a regular file: reading the pairing file
+        // fails (not a directory), which is neither "missing" nor "unusable", so
+        // no pairing is created and the proxy is switched off.
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("state-as-file");
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        let (mut listener, mut info) =
+            bind_llm_proxy(Some("127.0.0.1:0".parse().unwrap()), "copilot-cli").await;
+        assert!(listener.is_some());
+        let pairing = super::attach_llm_proxy_pairing(&mut listener, &mut info, &blocked);
+        assert!(pairing.is_none());
+        assert!(
+            listener.is_none(),
+            "the listener is dropped when no pairing exists"
+        );
+        let info = info.expect("proxy info");
+        assert!(!info.bound);
+        assert!(
+            info.error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("pairing unavailable"))
+        );
+        // A usable state directory keeps the listener and yields the pairing.
+        let (mut listener, mut info) =
+            bind_llm_proxy(Some("127.0.0.1:0".parse().unwrap()), "copilot-cli").await;
+        let pairing = super::attach_llm_proxy_pairing(&mut listener, &mut info, dir.path());
+        assert!(pairing.is_some() && listener.is_some() && info.unwrap().bound);
+    }
+
+    #[test]
+    fn daemon_information_reports_the_llm_proxy_state() {
+        let config = parse_daemon("{}").unwrap();
+        let proxy = LlmProxyInfo {
+            listen: "127.0.0.1:18095".to_owned(),
+            bound: true,
+            client_id: "vscode".to_owned(),
+            error: None,
+        };
+        let info = describe_daemon(
+            &config,
+            Path::new("config.yaml"),
+            Path::new("state"),
+            true,
+            Some(proxy.clone()),
+        );
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["llmProxy"]["bound"], serde_json::Value::Bool(true));
+        assert_eq!(json["llmProxy"]["listen"], "127.0.0.1:18095");
+        assert_eq!(json["llmProxy"]["clientId"], "vscode");
+        assert!(json["llmProxy"].get("error").is_none());
+        let without = describe_daemon(
+            &config,
+            Path::new("config.yaml"),
+            Path::new("state"),
+            true,
+            None,
+        );
+        assert!(
+            serde_json::to_value(&without)
+                .unwrap()
+                .get("llmProxy")
+                .is_none()
+        );
     }
 }
