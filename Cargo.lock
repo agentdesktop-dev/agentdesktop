@@ -21,7 +21,7 @@ dependencies = [
 
 [[package]]
 name = "agentdesktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agentdesktop-agent",
  "agentdesktop-client",
@@ -42,7 +42,7 @@ dependencies = [
 
 [[package]]
 name = "agentdesktop-agent"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agentdesktop-client",
  "agentdesktop-core",
@@ -87,7 +87,7 @@ dependencies = [
 
 [[package]]
 name = "agentdesktop-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -102,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "agentdesktop-controller"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agentdesktop-core",
  "agentdesktop-proto",
@@ -137,7 +137,7 @@ dependencies = [
 
 [[package]]
 name = "agentdesktop-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "humantime-serde",
@@ -155,7 +155,7 @@ dependencies = [
 
 [[package]]
 name = "agentdesktop-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "prost",
  "protox",
