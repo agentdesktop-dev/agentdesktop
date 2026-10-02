@@ -1,10 +1,12 @@
 use std::{
     collections::BTreeSet,
+    env, fs,
     io::Read,
     path::{Path, PathBuf},
 };
 
 use agentdesktop_core::model::{Agent, McpServer};
+use serde_json::Value;
 
 use crate::provider::{metadata, vscode::discovery as vscode};
 
@@ -157,32 +159,266 @@ fn discover_mcp_servers() -> Vec<McpServer> {
 
 /// Files `pi-mcp-adapter` loads as normal MCP config.
 ///
+/// Global files are always included. Project files are only the working
+/// directory's `.mcp.json` and `.pi/mcp.json`, plus ancestors when a
+/// user-global config opts in through `settings.ancestorConfigRoots`.
+/// `PI_MCP_CONFIG_MODE=exclusive` keeps only the Pi agent `mcp.json`.
 /// Host-specific Cursor/Claude/Codex files are not included: the adapter only
 /// imports those after `/mcp setup` writes them into a Pi-owned file.
 fn mcp_config_paths() -> Vec<PathBuf> {
+    let current = env::current_dir().ok();
+    mcp_config_paths_with(
+        &metadata::user_home_dirs(),
+        current.as_deref(),
+        pi_mcp_exclusive_mode(),
+        user_pi_agent_dir,
+    )
+}
+
+fn mcp_config_paths_with(
+    homes: &[PathBuf],
+    cwd: Option<&Path>,
+    exclusive: bool,
+    agent_dir: impl Fn(&Path) -> PathBuf,
+) -> Vec<PathBuf> {
     let mut paths = BTreeSet::new();
-    for home in metadata::user_home_dirs() {
-        let agent_dir = user_pi_agent_dir(&home);
-        paths.insert(agent_dir.join("mcp.json"));
+    for home in homes {
+        let agent_mcp = agent_dir(home).join("mcp.json");
+        if exclusive {
+            paths.insert(agent_mcp);
+            continue;
+        }
         paths.insert(home.join(".config/mcp/mcp.json"));
         paths.insert(home.join(".agents/mcp.json"));
         paths.insert(home.join(".agents/mcp/mcp.json"));
+        paths.insert(agent_mcp);
     }
-    paths.extend(metadata::current_dir_ancestors(Path::new(".mcp.json")));
-    paths.extend(metadata::current_dir_ancestors(Path::new(".pi/mcp.json")));
+    if exclusive {
+        return paths.into_iter().collect();
+    }
+    if let Some(cwd) = cwd {
+        let cwd = canonicalize_dir(cwd).unwrap_or_else(|| cwd.to_path_buf());
+        paths.insert(cwd.join(".mcp.json"));
+        paths.insert(cwd.join(".pi/mcp.json"));
+        for home in homes {
+            let Some(root) = configured_ancestor_root(home, &cwd, &agent_dir) else {
+                continue;
+            };
+            for directory in ancestor_project_dirs(&cwd, &root) {
+                paths.insert(directory.join(".mcp.json"));
+                paths.insert(directory.join(".pi/mcp.json"));
+            }
+        }
+    }
     paths.into_iter().collect()
 }
 
+fn pi_mcp_exclusive_mode() -> bool {
+    env::var("PI_MCP_CONFIG_MODE").is_ok_and(|value| value.trim().eq_ignore_ascii_case("exclusive"))
+}
+
+/// Last user-global `settings.ancestorConfigRoots` that pi-mcp-adapter would honor.
+///
+/// Later global files replace earlier ones. An empty or invalid value disables
+/// ancestor loading. Project files cannot enable it.
+fn configured_ancestor_root(
+    home: &Path,
+    cwd: &Path,
+    agent_dir: &impl Fn(&Path) -> PathBuf,
+) -> Option<PathBuf> {
+    let mut configured = None;
+    for path in global_mcp_sources(home, agent_dir) {
+        match read_ancestor_setting(&path) {
+            AncestorSetting::Unset => {}
+            AncestorSetting::Clear => configured = Some(Vec::new()),
+            AncestorSetting::Roots(roots) => configured = Some(roots),
+        }
+    }
+    let roots = configured.filter(|roots| !roots.is_empty())?;
+    let home_id = canonicalize_dir(home)?;
+    let mut valid = Vec::new();
+    for entry in roots {
+        let Some(expanded) = expand_ancestor_root(&entry, home) else {
+            continue;
+        };
+        let Some(root) = canonicalize_dir(&expanded) else {
+            continue;
+        };
+        // The deepest existing directory under the user's home that contains
+        // the working directory wins. A root equal to the working directory
+        // adds no parent files.
+        if root.starts_with(&home_id) && root_contains_cwd(&root, cwd) {
+            valid.push(root);
+        }
+    }
+    valid.sort_by_key(|path| std::cmp::Reverse(path.as_os_str().len()));
+    valid.into_iter().next()
+}
+
+fn global_mcp_sources(home: &Path, agent_dir: &impl Fn(&Path) -> PathBuf) -> Vec<PathBuf> {
+    let user = agent_dir(home).join("mcp.json");
+    let generic = home.join(".config/mcp/mcp.json");
+    let mut sources = Vec::new();
+    if generic != user {
+        sources.push(generic.clone());
+    }
+    for relative in [
+        Path::new(".agents/mcp.json"),
+        Path::new(".agents/mcp/mcp.json"),
+    ] {
+        let path = home.join(relative);
+        if path != user && path != generic {
+            sources.push(path);
+        }
+    }
+    sources.push(user);
+    sources
+}
+
+enum AncestorSetting {
+    Unset,
+    Clear,
+    Roots(Vec<String>),
+}
+
+fn read_ancestor_setting(path: &Path) -> AncestorSetting {
+    let Ok(bytes) = fs::read(path) else {
+        return AncestorSetting::Unset;
+    };
+    let Ok(text) = str::from_utf8(&bytes) else {
+        return AncestorSetting::Unset;
+    };
+    let Ok(value) = json5::from_str::<Value>(text.trim_start_matches('\u{feff}')) else {
+        return AncestorSetting::Unset;
+    };
+    let Some(roots) = value.pointer("/settings/ancestorConfigRoots") else {
+        return AncestorSetting::Unset;
+    };
+    let Some(entries) = roots.as_array() else {
+        return AncestorSetting::Clear;
+    };
+    if entries.is_empty() {
+        return AncestorSetting::Clear;
+    }
+    AncestorSetting::Roots(
+        entries
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
+fn expand_ancestor_root(entry: &str, home: &Path) -> Option<PathBuf> {
+    entry
+        .strip_prefix("~/")
+        .map(|rest| home.join(rest))
+        .or_else(|| {
+            let path = PathBuf::from(entry);
+            path.is_absolute().then_some(path)
+        })
+}
+
+fn ancestor_project_dirs(cwd: &Path, root: &Path) -> Vec<PathBuf> {
+    let Some(cwd) = canonicalize_dir(cwd) else {
+        return Vec::new();
+    };
+    let Some(root) = canonicalize_dir(root) else {
+        return Vec::new();
+    };
+    let mut dirs = Vec::new();
+    let Some(mut current) = cwd.parent().map(Path::to_path_buf) else {
+        return dirs;
+    };
+    while current.starts_with(&root) {
+        dirs.insert(0, current.clone());
+        if current == root {
+            break;
+        }
+        let Some(parent) = current.parent().map(Path::to_path_buf) else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        current = parent;
+    }
+    dirs
+}
+
+fn root_contains_cwd(root: &Path, cwd: &Path) -> bool {
+    let Some(cwd) = canonicalize_dir(cwd) else {
+        return false;
+    };
+    let Some(root) = canonicalize_dir(root) else {
+        return false;
+    };
+    cwd.starts_with(root)
+}
+
+fn canonicalize_dir(path: &Path) -> Option<PathBuf> {
+    let canonical = fs::canonicalize(path).ok()?;
+    canonical.is_dir().then_some(canonical)
+}
+
+/// Skill directories Pi loads.
+///
+/// User skills come from the Pi agent directory and `~/.agents/skills`.
+/// Project `.pi/skills` is only the working directory. Project `.agents/skills`
+/// walks from the working directory through the git repository root, or the
+/// filesystem root when the working directory is not in a repository.
 fn skill_roots() -> Vec<PathBuf> {
+    let current = env::current_dir().ok();
+    skill_roots_in(&metadata::user_home_dirs(), current.as_deref())
+}
+
+fn skill_roots_in(homes: &[PathBuf], cwd: Option<&Path>) -> Vec<PathBuf> {
     let mut roots = BTreeSet::new();
-    for home in metadata::user_home_dirs() {
-        let agent_dir = user_pi_agent_dir(&home);
-        roots.insert(agent_dir.join("skills"));
+    for home in homes {
+        roots.insert(user_pi_agent_dir(home).join("skills"));
         roots.insert(home.join(".agents/skills"));
     }
-    roots.extend(metadata::current_dir_ancestors(Path::new(".pi/skills")));
-    roots.extend(metadata::current_dir_ancestors(Path::new(".agents/skills")));
+    if let Some(cwd) = cwd {
+        let cwd = canonicalize_dir(cwd).unwrap_or_else(|| cwd.to_path_buf());
+        roots.insert(cwd.join(".pi/skills"));
+        roots.extend(agents_skill_dirs(&cwd));
+    }
     roots.into_iter().collect()
+}
+
+fn agents_skill_dirs(start: &Path) -> Vec<PathBuf> {
+    let start = canonicalize_dir(start).unwrap_or_else(|| start.to_path_buf());
+    let git_root = git_repo_root(&start);
+    let mut dir = start;
+    let mut dirs = Vec::new();
+    loop {
+        dirs.push(dir.join(".agents/skills"));
+        if git_root.as_ref().is_some_and(|root| &dir == root) {
+            break;
+        }
+        let Some(parent) = dir.parent().map(Path::to_path_buf) else {
+            break;
+        };
+        if parent == dir {
+            break;
+        }
+        dir = parent;
+    }
+    dirs
+}
+
+fn git_repo_root(start: &Path) -> Option<PathBuf> {
+    let mut dir = start.to_path_buf();
+    loop {
+        if dir.join(".git").exists() {
+            return Some(dir);
+        }
+        let parent = dir.parent()?.to_path_buf();
+        if parent == dir {
+            return None;
+        }
+        dir = parent;
+    }
 }
 
 #[cfg(test)]
@@ -194,7 +430,10 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{is_pi, mcp_config_paths, package_version, skill_roots};
+    use super::{
+        is_pi, mcp_config_paths, mcp_config_paths_with, package_version, skill_roots,
+        skill_roots_in,
+    };
     use crate::provider::pi::user_pi_agent_dir;
     use crate::provider::vscode::discovery::mcp_servers_from_value;
 
@@ -499,6 +738,147 @@ fi
             servers
                 .iter()
                 .all(|server| server.source.ends_with("mcp.json"))
+        );
+    }
+
+    #[test]
+    fn project_mcp_stays_in_the_working_directory_unless_opted_in() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let repo = home.join("repo");
+        let project = repo.join("child");
+        let outside = home.join("outside");
+        fs::create_dir_all(project.join(".pi")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::create_dir_all(repo.join(".pi")).unwrap();
+        let project_id = fs::canonicalize(&project).unwrap();
+        let repo_id = fs::canonicalize(&repo).unwrap();
+        let outside_id = fs::canonicalize(&outside).unwrap();
+        let home_id = fs::canonicalize(&home).unwrap();
+        let agent = |home: &Path| home.join(".pi/agent");
+        let paths =
+            mcp_config_paths_with(std::slice::from_ref(&home), Some(&project), false, agent);
+        assert!(paths.contains(&project_id.join(".mcp.json")));
+        assert!(paths.contains(&project_id.join(".pi/mcp.json")));
+        assert!(!paths.contains(&repo_id.join(".mcp.json")));
+        assert!(!paths.contains(&repo_id.join(".pi/mcp.json")));
+        assert!(!paths.contains(&outside_id.join(".mcp.json")));
+        assert!(paths.contains(&home.join(".config/mcp/mcp.json")));
+        assert!(paths.contains(&home.join(".agents/mcp.json")));
+        assert!(paths.contains(&home.join(".agents/mcp/mcp.json")));
+        assert!(paths.contains(&agent(&home).join("mcp.json")));
+
+        // A project file cannot widen discovery.
+        fs::write(
+            project.join(".mcp.json"),
+            r#"{"settings":{"ancestorConfigRoots":["~/"]}}"#,
+        )
+        .unwrap();
+        let paths =
+            mcp_config_paths_with(std::slice::from_ref(&home), Some(&project), false, agent);
+        assert!(!paths.contains(&repo_id.join(".mcp.json")));
+
+        fs::create_dir_all(home.join(".config/mcp")).unwrap();
+        fs::write(
+            home.join(".config/mcp/mcp.json"),
+            r#"{"settings":{"ancestorConfigRoots":["~/repo"]}}"#,
+        )
+        .unwrap();
+        let paths =
+            mcp_config_paths_with(std::slice::from_ref(&home), Some(&project), false, agent);
+        assert!(paths.contains(&repo_id.join(".mcp.json")));
+        assert!(paths.contains(&repo_id.join(".pi/mcp.json")));
+        assert!(!paths.contains(&outside_id.join(".mcp.json")));
+        assert!(!paths.contains(&home_id.join(".mcp.json")));
+
+        // The Pi agent file is the last global source, so it can turn the opt-in off.
+        fs::create_dir_all(home.join(".pi/agent")).unwrap();
+        fs::write(
+            agent(&home).join("mcp.json"),
+            r#"{"settings":{"ancestorConfigRoots":[]}}"#,
+        )
+        .unwrap();
+        let paths =
+            mcp_config_paths_with(std::slice::from_ref(&home), Some(&project), false, agent);
+        assert!(!paths.contains(&repo_id.join(".mcp.json")));
+
+        let paths = mcp_config_paths_with(std::slice::from_ref(&home), Some(&project), true, agent);
+        assert_eq!(paths, vec![agent(&home).join("mcp.json")]);
+    }
+
+    #[test]
+    fn ancestor_mcp_ignores_roots_outside_the_home_or_working_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let project = home.join("work/child");
+        let elsewhere = home.join("elsewhere");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::create_dir_all(home.join(".pi/agent")).unwrap();
+        fs::write(
+            home.join(".pi/agent/mcp.json"),
+            format!(
+                r#"{{"settings":{{"ancestorConfigRoots":["{}", "~/elsewhere"]}}}}"#,
+                root.path().display()
+            ),
+        )
+        .unwrap();
+        let paths =
+            mcp_config_paths_with(std::slice::from_ref(&home), Some(&project), false, |home| {
+                home.join(".pi/agent")
+            });
+        let root_id = fs::canonicalize(root.path()).unwrap();
+        let elsewhere_id = fs::canonicalize(&elsewhere).unwrap();
+        let work_id = fs::canonicalize(home.join("work")).unwrap();
+        assert!(!paths.contains(&root_id.join(".mcp.json")));
+        assert!(!paths.contains(&elsewhere_id.join(".mcp.json")));
+        assert!(!paths.contains(&work_id.join(".mcp.json")));
+    }
+
+    #[test]
+    fn skill_roots_follow_pi_project_scopes() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let repo = root.path().join("repo");
+        let project = repo.join("child");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::write(repo.join(".git"), "gitdir: /unused").unwrap();
+
+        let project = fs::canonicalize(&project).unwrap();
+        let repo = fs::canonicalize(&repo).unwrap();
+        let paths = skill_roots_in(std::slice::from_ref(&home), Some(&project));
+        assert!(paths.contains(&project.join(".pi/skills")));
+        assert!(paths.contains(&project.join(".agents/skills")));
+        assert!(paths.contains(&repo.join(".agents/skills")));
+        assert!(!paths.contains(&repo.join(".pi/skills")));
+        assert!(
+            !paths.contains(
+                &fs::canonicalize(root.path())
+                    .unwrap()
+                    .join(".agents/skills")
+            )
+        );
+        assert!(!paths.contains(&fs::canonicalize(root.path()).unwrap().join(".pi/skills")));
+        assert!(paths.contains(&home.join(".agents/skills")));
+        assert!(paths.contains(&user_pi_agent_dir(&home).join("skills")));
+
+        let loose = root.path().join("loose/child");
+        fs::create_dir_all(&loose).unwrap();
+        let loose = fs::canonicalize(&loose).unwrap();
+        let paths = skill_roots_in(&[home], Some(&loose));
+        assert!(paths.contains(&loose.join(".pi/skills")));
+        assert!(!paths.contains(&loose.parent().unwrap().join(".pi/skills")));
+        assert!(paths.contains(&loose.parent().unwrap().join(".agents/skills")));
+        assert!(
+            paths.contains(
+                &loose
+                    .parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join(".agents/skills")
+            )
         );
     }
 

@@ -498,6 +498,9 @@ pub struct ProgramsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grok: Option<GrokConfig>,
     /// Pi coding-agent harness managed configuration.
+    ///
+    /// Requires `--user`. Cannot be combined with Claude Desktop or Grok Build,
+    /// which require system mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pi: Option<PiConfig>,
 }
@@ -659,7 +662,8 @@ pub struct PiConfig {
     /// Each value is an arbitrary Pi `models.json` model object. The map key
     /// sets its `id`. Generated gateway `baseUrl` and `apiKey` values take
     /// precedence, including per-model URLs. When this map is non-empty,
-    /// `model` must name one of its keys.
+    /// `model` must name one of its keys. Every key must contain a
+    /// non-whitespace character.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub models: BTreeMap<String, serde_json::Value>,
     /// Pi API dialect for the managed provider. Defaults to `anthropic-messages`.
@@ -958,6 +962,12 @@ fn validate_daemon(
             anyhow::bail!("Grok Build model {model} is not declared in models");
         }
     }
+    if programs.pi.is_some() && programs.claude_desktop.is_some() {
+        anyhow::bail!("programs.pi requires --user, which cannot apply programs.claudeDesktop");
+    }
+    if programs.pi.is_some() && programs.grok.is_some() {
+        anyhow::bail!("programs.pi requires --user, which cannot apply programs.grok");
+    }
     if let Some(pi) = &programs.pi
         && llm_gateway.is_some()
         && pi.use_llm_gateway
@@ -967,6 +977,9 @@ fn validate_daemon(
             .as_deref()
             .filter(|model| !model.trim().is_empty())
             .context("Pi requires model when llmGateway is configured")?;
+        if pi.models.keys().any(|model| model.trim().is_empty()) {
+            anyhow::bail!("Pi model IDs cannot be empty");
+        }
         if !pi.models.is_empty() && !pi.models.contains_key(model) {
             anyhow::bail!("Pi model {model} is not declared in models");
         }
@@ -1450,5 +1463,45 @@ programs:
                 .to_string()
                 .contains("Pi model missing is not declared in models")
         );
+    }
+
+    #[test]
+    fn pi_rejects_empty_model_ids() {
+        let error = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  pi:
+    model: claude-sonnet-4-5
+    models:
+      claude-sonnet-4-5: {}
+      "": {}
+"#,
+        )
+        .expect_err("empty Pi model id should fail");
+
+        assert!(error.to_string().contains("Pi model IDs cannot be empty"));
+    }
+
+    #[test]
+    fn pi_rejects_system_only_program_combinations() {
+        for (name, message) in [
+            (
+                "claudeDesktop",
+                "programs.pi requires --user, which cannot apply programs.claudeDesktop",
+            ),
+            (
+                "grok",
+                "programs.pi requires --user, which cannot apply programs.grok",
+            ),
+        ] {
+            let error = parse_daemon(&format!("programs:\n  pi: {{}}\n  {name}: {{}}\n"))
+                .expect_err("Pi combined with a system-only program should fail");
+            assert!(
+                error.to_string().contains(message),
+                "missing {message} in {error}"
+            );
+        }
     }
 }

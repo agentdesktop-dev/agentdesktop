@@ -441,7 +441,7 @@
           ]
         },
         "models": {
-          "description": "Extra Pi model objects, keyed by model ID.\n\nEach value is an arbitrary Pi `models.json` model object. The map key\nsets its `id`. Generated gateway `baseUrl` and `apiKey` values take\nprecedence, including per-model URLs. When this map is non-empty,\n`model` must name one of its keys.",
+          "description": "Extra Pi model objects, keyed by model ID.\n\nEach value is an arbitrary Pi `models.json` model object. The map key\nsets its `id`. Generated gateway `baseUrl` and `apiKey` values take\nprecedence, including per-model URLs. When this map is non-empty,\n`model` must name one of its keys. Every key must contain a\nnon-whitespace character.",
           "type": "object",
           "additionalProperties": true
         },
@@ -543,7 +543,7 @@
           ]
         },
         "pi": {
-          "description": "Pi coding-agent harness managed configuration.",
+          "description": "Pi coding-agent harness managed configuration.\n\nRequires `--user`. Cannot be combined with Claude Desktop or Grok Build,\nwhich require system mode.",
           "anyOf": [
             {
               "$ref": "#/$defs/PiConfig"

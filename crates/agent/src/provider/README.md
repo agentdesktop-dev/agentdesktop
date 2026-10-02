@@ -10,7 +10,9 @@ file.
 
 Pi stores configuration in `~/.pi/agent` (or `PI_CODING_AGENT_DIR`, with `~`
 expanded to the user's home). Management requires `--user`; system mode
-rejects `programs.pi` because Pi does not read `/etc/pi/agent`. Authenticated
+rejects `programs.pi` because Pi does not read `/etc/pi/agent`. Pi cannot be
+combined with Claude Desktop or Grok Build, because those programs require
+system mode. Authenticated
 gateway configuration also requires a running daemon and rejects `--once`.
 User mode merges `providers.agentdesktop` into `models.json` and sets the
 default model in `settings.json`. Model map keys determine catalog IDs, and
@@ -25,9 +27,16 @@ preserving user configuration values. `settings.json` requires standard JSON.
 Discovery recognizes npm's Windows command shims as well as symlinked launchers,
 verifying the Pi package manifest without executing the launcher.
 MCP inventory comes from `pi-mcp-adapter` config files
-(`~/.pi/agent/mcp.json`, `.pi/mcp.json`, `.mcp.json`, and shared
-`~/.config/mcp/mcp.json` / `~/.agents/mcp.json` / `~/.agents/mcp/mcp.json`).
-Both `.agents` paths are supported by the [adapter's configuration loader](https://github.com/nicobailon/pi-mcp-adapter/blob/33bdc38d8dd3802f2b51ba1fe37e30ed7ae6a29a/config.ts#L15-L19).
+(`~/.pi/agent/mcp.json`, the working directory's `.pi/mcp.json` and
+`.mcp.json`, and shared `~/.config/mcp/mcp.json` / `~/.agents/mcp.json` /
+`~/.agents/mcp/mcp.json`). Ancestor project files are included only when a
+user-global config sets `settings.ancestorConfigRoots` to an existing
+directory under the home that contains the working directory. Both `.agents`
+paths are supported by the [adapter's configuration loader](https://github.com/nicobailon/pi-mcp-adapter/blob/33bdc38d8dd3802f2b51ba1fe37e30ed7ae6a29a/config.ts#L15-L19).
+`PI_MCP_CONFIG_MODE=exclusive` inventories only the Pi agent `mcp.json`.
+Skill inventory reads `~/.pi/agent/skills`, `~/.agents/skills`, the working
+directory's `.pi/skills`, and `.agents/skills` from the working directory
+through the git repository root.
 Host-specific Cursor/Claude
 files are not scanned until the adapter imports them into a Pi-owned file.
 
