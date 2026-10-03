@@ -64,6 +64,21 @@ pub fn is_unreadable(error: &anyhow::Error) -> bool {
     error.downcast_ref::<IdentityUnreadable>().is_some()
 }
 
+/// The enrolled device ID alone, without opening the secret store. Used where
+/// only the identity's *name* matters (cache tagging), so a keyring that is
+/// locked or unavailable does not turn a lookup into a failure.
+pub fn load_device_id(path: &Path) -> anyhow::Result<Option<String>> {
+    match fs::read(path) {
+        Ok(contents) => {
+            let stored: StoredIdentity =
+                serde_json::from_slice(&contents).context("parse device identity")?;
+            Ok(Some(stored.device_id))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("read identity from {}", path.display())),
+    }
+}
+
 pub fn load(path: &Path) -> anyhow::Result<Option<Identity>> {
     let stored: StoredIdentity = match fs::read(path) {
         Ok(contents) => serde_json::from_slice(&contents)

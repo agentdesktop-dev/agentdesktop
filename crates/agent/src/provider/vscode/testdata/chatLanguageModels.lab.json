@@ -1,0 +1,20 @@
+[
+  {
+    "name": "agentdesktop",
+    "vendor": "customendpoint",
+    "apiKey": "unused",
+    "apiType": "chat-completions",
+    "models": [
+      {
+        "id": "gpt-4.1-mini",
+        "name": "gpt-4.1-mini (agentdesktop)",
+        "url": "http://127.0.0.1:18095/vscode-copilot/v1/chat/completions",
+        "toolCalling": true,
+        "vision": false,
+        "maxInputTokens": 128000,
+        "maxOutputTokens": 16000,
+        "requestHeaders": { "x-agentdesktop-pairing": "PAIRING-FIXTURE" }
+      }
+    ]
+  }
+]

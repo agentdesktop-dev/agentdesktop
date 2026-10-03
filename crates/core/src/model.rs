@@ -129,6 +129,26 @@ pub struct DaemonInfo {
     #[serde(with = "humantime_serde")]
     pub inventory_interval: Duration,
     pub controller: Option<DaemonControllerInfo>,
+    /// Local loopback LLM proxy, when configured. Absent in system mode and when
+    /// `daemon.llmProxy.listen` is unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_proxy: Option<LlmProxyInfo>,
+}
+
+/// State of the daemon's loopback LLM proxy listener.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmProxyInfo {
+    /// Configured address; the bound address once the listener is up.
+    pub listen: String,
+    /// Whether the listener is bound. `false` means the bind failed at startup;
+    /// the daemon keeps running with the proxy off until it is restarted.
+    pub bound: bool,
+    /// Credential policy client ID the proxy presents to the gateway.
+    pub client_id: String,
+    /// Why the bind failed, when `bound` is `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]

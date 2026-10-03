@@ -46,6 +46,10 @@ use crate::{
 static OAUTH_REFRESH_MUTEX: Mutex<()> = Mutex::const_new(());
 const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+/// Bound on the controller connection and call when fetching an LLM gateway
+/// credential, so a controller that accepts and then stalls cannot hold the
+/// caller (or a detached fetch) open indefinitely.
+const CREDENTIAL_CALL_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct LogoutRequest {
     pub completion: oneshot::Sender<Result<(), String>>,
@@ -560,15 +564,28 @@ pub async fn llm_gateway_credential(
         identity::load(&state_dir.join("identity.json"))?.context("device is not enrolled")?;
     let identity_path = state_dir.join("identity.json");
     refresh_oauth_if_needed(&mut identity, &identity_path).await?;
-    let mut client = client(controller, Some(&identity)).await?;
-    let mut request = Request::new(LlmGatewayCredentialRequest {
-        client_id: client_id.to_owned(),
-    });
-    authenticate_request(&identity, &mut request)?;
-    let response = client
-        .get_llm_gateway_credential(request)
+    // The refresh above is not cut off (its result is saved); the controller
+    // connection and call are bounded together.
+    let call = async {
+        let mut client = client(controller, Some(&identity)).await?;
+        let mut request = Request::new(LlmGatewayCredentialRequest {
+            client_id: client_id.to_owned(),
+        });
+        authenticate_request(&identity, &mut request)?;
+        client
+            .get_llm_gateway_credential(request)
+            .await
+            .context("request LLM gateway credential")
+    };
+    let response = tokio::time::timeout(CREDENTIAL_CALL_TIMEOUT, call)
         .await
-        .context("request LLM gateway credential")?
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "controller at {} did not answer within {}s",
+                controller.address,
+                CREDENTIAL_CALL_TIMEOUT.as_secs()
+            )
+        })??
         .into_inner();
     Ok(agentdesktop_core::model::LlmGatewayCredential {
         credential: response.credential,

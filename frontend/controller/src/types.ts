@@ -74,7 +74,9 @@ export type AgentKind =
   | "claudeDesktop"
   | "codex"
   | "openCode"
-  | "grok";
+  | "grok"
+  | "copilot"
+  | "vscode";
 
 export type AgentDraft = {
   kind: AgentKind;
@@ -95,6 +97,7 @@ export type SandboxConfigDocument = {
 export type DaemonConfigDocument = {
   llmGateway?: {
     url: string;
+    proxyUrl?: string;
     authentication?: {
       type: string;
       audience?: string;

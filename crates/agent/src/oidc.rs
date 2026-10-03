@@ -27,7 +27,7 @@ use crate::{
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const BRAND_MARK_SVG: &str = include_str!("../../../images/mark.svg");
 
-fn page(title: &str, content: &str) -> String {
+pub(crate) fn page(title: &str, content: &str) -> String {
     format!(
         r##"<!doctype html>
 <html lang="en">
@@ -77,7 +77,10 @@ fn callback_page(title: &str, message: &str) -> String {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum AuthorizationPage {
-    Identity { subscription_available: bool },
+    Identity {
+        subscription_available: bool,
+        github_available: bool,
+    },
     Subscription,
 }
 
@@ -86,13 +89,19 @@ impl AuthorizationPage {
         match self {
             Self::Identity {
                 subscription_available,
+                github_available,
             } => page(
                 "Connect Agentdesktop",
                 &format!(
                     r#"<p>Agentdesktop needs your identity before it can issue credentials to configured agents.</p>
-{}
+{}{}
 <div class="actions"><a class="button" href="/continue">Continue to sign in</a></div>"#,
-                    checklist(false, subscription_available, SubscriptionState::Pending)
+                    checklist(false, subscription_available, SubscriptionState::Pending),
+                    if github_available {
+                        "<div class=\"steps\"><div class=\"step\"><span class=\"check\" aria-hidden=\"true\"></span><div><strong>GitHub Copilot</strong><span>Connect your GitHub account after organization sign-in.</span></div></div></div>"
+                    } else {
+                        ""
+                    }
                 ),
             ),
             Self::Subscription => page(
@@ -110,7 +119,25 @@ impl AuthorizationPage {
     fn success_html(self) -> String {
         match self {
             Self::Identity {
+                github_available: true,
+                subscription_available: false,
+            } => page(
+                "Connect GitHub",
+                r#"<p>Organization sign-in is complete. Preparing GitHub authorization…</p>
+<script>
+async function advance() {
+  try {
+    const response = await fetch('/flow-ready', { cache: 'no-store' });
+    if (response.ok) { location.replace('/'); return; }
+  } catch (_) {}
+  setTimeout(advance, 400);
+}
+setTimeout(advance, 400);
+</script>"#,
+            ),
+            Self::Identity {
                 subscription_available: true,
+                ..
             } => page(
                 "Connect Agentdesktop",
                 &format!(
@@ -131,6 +158,7 @@ setTimeout(advance, 400);
             ),
             Self::Identity {
                 subscription_available: false,
+                ..
             } => page(
                 "Agentdesktop connected",
                 &format!(
@@ -429,6 +457,7 @@ pub(crate) async fn wait_for_authorization_code(
         callback_listen,
         AuthorizationPage::Identity {
             subscription_available: false,
+            github_available: false,
         },
         true,
     )
@@ -485,7 +514,7 @@ pub(crate) async fn wait_for_authorization_code_with_page(
             tracing::warn!(%error, "could not open the browser automatically");
         }
     } else {
-        tracing::info!(%authorization_url, %prompt_url, "continuing in existing Agentdesktop authorization page");
+        tracing::info!(%prompt_url, "continuing in existing Agentdesktop authorization page");
     }
 
     let authorization_code = tokio::time::timeout(CALLBACK_TIMEOUT, result_receiver)
@@ -576,7 +605,7 @@ async fn continued_flow_ready() -> Response {
     response
 }
 
-async fn bind_callback(
+pub(crate) async fn bind_callback(
     redirect_uri: &Url,
     callback_listen: Option<SocketAddr>,
 ) -> anyhow::Result<tokio::net::TcpListener> {
@@ -674,6 +703,7 @@ mod tests {
     fn identity_page_only_mentions_subscription_when_configured() {
         let without_subscription = AuthorizationPage::Identity {
             subscription_available: false,
+            github_available: false,
         }
         .html();
         assert!(without_subscription.contains("Organization sign-in"));
@@ -681,11 +711,20 @@ mod tests {
 
         let with_subscription = AuthorizationPage::Identity {
             subscription_available: true,
+            github_available: false,
         }
         .html();
         assert!(with_subscription.contains("Organization sign-in"));
         assert!(with_subscription.contains("Model provider subscription"));
         assert!(with_subscription.contains("Optional"));
+
+        let with_github = AuthorizationPage::Identity {
+            subscription_available: false,
+            github_available: true,
+        };
+        assert!(with_github.html().contains("GitHub Copilot"));
+        assert!(!without_subscription.contains("GitHub Copilot"));
+        assert!(with_github.success_html().contains("location.replace('/')"));
     }
 
     #[test]
@@ -708,6 +747,7 @@ mod tests {
     fn identity_completion_advances_same_tab_and_skip_preserves_checklist() {
         let identity_complete = AuthorizationPage::Identity {
             subscription_available: true,
+            github_available: false,
         }
         .success_html();
         assert_eq!(

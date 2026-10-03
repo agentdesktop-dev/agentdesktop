@@ -4,7 +4,8 @@ pub use plan::ReconcilePlan;
 
 use crate::provider::{
     Provider, ReconcileContext, claude_code::ClaudeCode, claude_desktop::ClaudeDesktop,
-    codex::Codex, cursor::Cursor, grok::Grok, ollama::Ollama, opencode::OpenCode, vscode::VsCode,
+    codex::Codex, copilot::Copilot, cursor::Cursor, grok::Grok, ollama::Ollama, opencode::OpenCode,
+    vscode::VsCode,
 };
 use agentdesktop_core::{config::DaemonConfig, model::Discovery};
 use serde_json::Value;
@@ -23,8 +24,10 @@ pub use crate::provider::{
         default_claude_desktop_credential_helper_path, default_claude_desktop_managed_settings_path,
     },
     codex::default_codex_managed_config_path,
+    copilot::default_copilot_providers_path,
     grok::default_grok_managed_config_path,
     opencode::{default_open_code_managed_config_path, default_open_code_plugin_path},
+    vscode::{default_vscode_chat_models_path, default_vscode_settings_path},
 };
 
 #[derive(Clone)]
@@ -44,6 +47,9 @@ impl Reconciler {
         open_code_managed_config_path: PathBuf,
         open_code_plugin_path: PathBuf,
         grok_managed_config_path: PathBuf,
+        copilot_providers_path: Option<PathBuf>,
+        vscode_chat_models_path: Option<PathBuf>,
+        vscode_settings_path: Option<PathBuf>,
         credential_helper: PathBuf,
         socket: PathBuf,
     ) -> Self {
@@ -52,6 +58,7 @@ impl Reconciler {
                 merge_user_settings,
                 credential_helper,
                 socket,
+                llm_proxy: None,
             },
             providers: Arc::new(vec![
                 Box::new(ClaudeCode {
@@ -68,14 +75,26 @@ impl Reconciler {
                     managed_config_path: open_code_managed_config_path,
                     plugin_path: open_code_plugin_path,
                 }),
-                Box::new(VsCode),
+                Box::new(VsCode {
+                    chat_models_path: vscode_chat_models_path,
+                    settings_path: vscode_settings_path,
+                }),
                 Box::new(Cursor),
                 Box::new(Grok {
                     managed_config_path: grok_managed_config_path,
                 }),
+                Box::new(Copilot {
+                    providers_path: copilot_providers_path,
+                }),
                 Box::new(Ollama),
             ]),
         }
+    }
+
+    /// Attach the bound loopback LLM proxy so reconcilers can point client files at it.
+    pub fn with_llm_proxy(mut self, llm_proxy: Option<crate::llm_proxy::LlmProxyContext>) -> Self {
+        self.context.llm_proxy = llm_proxy;
+        self
     }
 
     /// Plan every provider, including cleanup for disabled providers, before
@@ -274,6 +293,9 @@ programs:
             root.join("opencode/config.json"),
             root.join("opencode/plugin.js"),
             root.join("grok/managed_config.toml"),
+            Some(root.join("copilot/providers.json")),
+            None,
+            None,
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
@@ -312,12 +334,167 @@ programs:
             root.join("opencode/config.json"),
             root.join("opencode/plugin.js"),
             root.join("grok/managed_config.toml"),
+            Some(root.join("copilot/providers.json")),
+            None,
+            None,
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
 
         let error = reconciler.apply(&config).expect_err("user mode must fail");
         assert!(error.to_string().contains("Grok Build"));
+        assert!(!root.exists(), "preflight failure must not write any files");
+    }
+
+    #[test]
+    fn copilot_directory_is_created_owner_only_through_the_reconciler() {
+        // The private-directory request must survive `ReconcilePlan::append`,
+        // which the daemon always goes through (it was once dropped there).
+        let root = std::env::temp_dir().join(format!(
+            "agentdesktop-reconcile-copilot-dir-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  copilot:
+    models:
+      gpt-4.1: {}
+"#,
+        )
+        .unwrap();
+        let providers = root.join("copilot/.copilot/providers.json");
+        let reconciler = Reconciler::new(
+            true,
+            root.join("claude/settings.json"),
+            root.join("claude-desktop/settings.json"),
+            root.join("claude-desktop/helper"),
+            root.join("codex/config.toml"),
+            root.join("opencode/config.json"),
+            root.join("opencode/plugin.js"),
+            root.join("grok/managed_config.toml"),
+            Some(providers.clone()),
+            None,
+            None,
+            root.join("bin/agentdesktop"),
+            root.join("agentdesktop.sock"),
+        )
+        .with_llm_proxy(Some(crate::llm_proxy::LlmProxyContext {
+            address: "127.0.0.1:18095".parse().unwrap(),
+            pairing: std::sync::Arc::from("PAIRING-RECONCILER"),
+        }));
+        reconciler.apply(&config).expect("apply");
+        assert!(providers.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(providers.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700, "directory created through the reconciler");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn vscode_directory_is_created_owner_only_through_the_reconciler() {
+        // Same private-directory request as the Copilot CLI test above, for
+        // the VS Code user profile directory.
+        let root = std::env::temp_dir().join(format!(
+            "agentdesktop-reconcile-vscode-dir-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  vscode:
+    models:
+      gpt-4.1-mini: {}
+"#,
+        )
+        .unwrap();
+        let chat_models = root.join("vscode/User/chatLanguageModels.json");
+        let reconciler = Reconciler::new(
+            true,
+            root.join("claude/settings.json"),
+            root.join("claude-desktop/settings.json"),
+            root.join("claude-desktop/helper"),
+            root.join("codex/config.toml"),
+            root.join("opencode/config.json"),
+            root.join("opencode/plugin.js"),
+            root.join("grok/managed_config.toml"),
+            Some(root.join("copilot/providers.json")),
+            Some(chat_models.clone()),
+            Some(chat_models.with_file_name("settings.json")),
+            root.join("bin/agentdesktop"),
+            root.join("agentdesktop.sock"),
+        )
+        .with_llm_proxy(Some(crate::llm_proxy::LlmProxyContext {
+            address: "127.0.0.1:18095".parse().unwrap(),
+            pairing: std::sync::Arc::from("PAIRING-RECONCILER"),
+        }));
+        reconciler.apply(&config).expect("apply");
+        assert!(chat_models.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(chat_models.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700, "directory created through the reconciler");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn system_mode_rejects_copilot_before_writing_other_settings() {
+        let root = std::env::temp_dir().join(format!(
+            "agentdesktop-reconcile-system-copilot-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let config = parse_daemon(
+            r#"
+programs:
+  claudeCode: {}
+  copilot: {}
+"#,
+        )
+        .unwrap();
+        // The Copilot CLI program is the inverse of Grok: it manages a file in
+        // the user's home, so a system daemon (no providers path) rejects it
+        // before any provider writes.
+        let reconciler = Reconciler::new(
+            false,
+            root.join("claude/settings.json"),
+            root.join("claude-desktop/settings.json"),
+            root.join("claude-desktop/helper"),
+            root.join("codex/config.toml"),
+            root.join("opencode/config.json"),
+            root.join("opencode/plugin.js"),
+            root.join("grok/managed_config.toml"),
+            None,
+            None,
+            None,
+            root.join("bin/agentdesktop"),
+            root.join("agentdesktop.sock"),
+        );
+
+        let error = reconciler
+            .apply(&config)
+            .expect_err("system mode must fail");
+        assert!(error.to_string().contains("GitHub Copilot CLI"), "{error}");
+        assert!(error.to_string().contains("--user"), "{error}");
         assert!(!root.exists(), "preflight failure must not write any files");
     }
 
@@ -367,6 +544,9 @@ programs:
             root.join("opencode/config.json"),
             root.join("opencode/plugin.js"),
             root.join("grok/managed_config.toml"),
+            Some(root.join("copilot/providers.json")),
+            None,
+            None,
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
@@ -408,6 +588,9 @@ programs:
                 root.join("opencode/config.json"),
                 root.join("opencode/plugin.js"),
                 root.join("grok/managed_config.toml"),
+                Some(root.join("copilot/providers.json")),
+                None,
+                None,
                 root.join("bin/agentdesktop"),
                 root.join("agentdesktop.sock"),
             );

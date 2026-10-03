@@ -19,6 +19,17 @@ export const standaloneDaemonInfo: DaemonInfo = {
   stateDirectory: "/Users/developer/.local/state/agentdesktop",
   inventoryInterval: "15m",
   controller: null,
+  llmProxy: { listen: "127.0.0.1:18095", bound: true, clientId: "copilot-cli" },
+};
+
+export const proxyUnboundDaemonInfo: DaemonInfo = {
+  ...standaloneDaemonInfo,
+  llmProxy: {
+    listen: "127.0.0.1:18095",
+    bound: false,
+    clientId: "copilot-cli",
+    error: "Address already in use (os error 98)",
+  },
 };
 
 export const managedDaemonInfo: DaemonInfo = {

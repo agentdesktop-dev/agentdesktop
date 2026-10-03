@@ -11,6 +11,7 @@ use crate::reconcile::ReconcilePlan;
 pub mod claude_code;
 pub mod claude_desktop;
 pub mod codex;
+pub mod copilot;
 pub mod cursor;
 pub mod grok;
 mod json_merge;
@@ -43,4 +44,9 @@ pub struct ReconcileContext {
     pub merge_user_settings: bool,
     pub credential_helper: PathBuf,
     pub socket: PathBuf,
+    /// The bound loopback LLM proxy, for programs whose client files point at
+    /// it instead of a credential helper. `None` when the proxy is off, its bind
+    /// failed, or no pairing could be created: such programs must then remove
+    /// or neutralise any pointer they wrote earlier, never leave a stale one.
+    pub llm_proxy: Option<crate::llm_proxy::LlmProxyContext>,
 }
