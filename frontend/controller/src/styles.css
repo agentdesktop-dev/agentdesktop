@@ -487,6 +487,23 @@ code {
   color: var(--muted);
 }
 
+.badge.warning {
+  color: var(--warning-strong);
+  border-color: var(--warning-border);
+}
+
+.program-state {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.program-state code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .config-summary {
   padding-bottom: 14px;
 }
@@ -869,6 +886,7 @@ code {
 .toggle-row input {
   width: 16px;
   height: 16px;
+  flex-shrink: 0;
   accent-color: var(--accent-button);
 }
 
@@ -1228,6 +1246,11 @@ code {
   justify-content: center;
   color: var(--muted);
   text-align: center;
+}
+
+.empty-state.compact {
+  min-height: 0;
+  padding: 16px;
 }
 
 .empty-state h3,

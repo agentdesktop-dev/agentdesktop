@@ -2,7 +2,11 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, userEvent } from "storybook/test";
 
 import { ControllerStoryFrame } from "../stories/ControllerStoryFrame";
-import { activeDaemonConfig, sandboxDaemonConfig } from "../stories/fixtures";
+import {
+  activeDaemonConfig,
+  copilotFailOpenDaemonConfig,
+  sandboxDaemonConfig,
+} from "../stories/fixtures";
 import { ConfigurationView } from "./ConfigurationView";
 
 const meta = {
@@ -49,6 +53,31 @@ export const ActiveSandbox: Story = {
       'allowedDomains:\n      - "api.github.com"',
     );
     await expect(output?.textContent).toContain('denied:\n      - "~/.ssh"');
+  },
+};
+
+export const CopilotFailOpen: Story = {
+  args: { initialConfig: copilotFailOpenDaemonConfig },
+  play: async ({ canvas, canvasElement }) => {
+    const toggle = canvas.getByRole("checkbox", {
+      name: /Fail open without the local proxy/,
+    });
+    await expect(toggle).toBeChecked();
+    const output = canvasElement.querySelector(".output-card code");
+    await expect(output).toHaveTextContent("whenProxyUnavailable: failOpen");
+    await userEvent.click(toggle);
+    await expect(output).not.toHaveTextContent("whenProxyUnavailable");
+  },
+};
+
+export const NoProxyPolicyWithoutCopilot: Story = {
+  args: { initialConfig: activeDaemonConfig },
+  play: async ({ canvas }) => {
+    await expect(
+      canvas.queryByRole("checkbox", {
+        name: /Fail open without the local proxy/,
+      }),
+    ).toBeNull();
   },
 };
 

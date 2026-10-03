@@ -84,17 +84,17 @@ fn mcp_config_paths() -> Vec<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-fn user_profile_root(home: &Path) -> PathBuf {
+pub(super) fn user_profile_root(home: &Path) -> PathBuf {
     home.join("Library/Application Support/Code/User")
 }
 
 #[cfg(target_os = "linux")]
-fn user_profile_root(home: &Path) -> PathBuf {
+pub(super) fn user_profile_root(home: &Path) -> PathBuf {
     home.join(".config/Code/User")
 }
 
 #[cfg(windows)]
-fn user_profile_root(home: &Path) -> PathBuf {
+pub(super) fn user_profile_root(home: &Path) -> PathBuf {
     home.join("AppData/Roaming/Code/User")
 }
 

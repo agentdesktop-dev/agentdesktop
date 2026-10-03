@@ -13,6 +13,10 @@ impl Ollama {
 
 #[async_trait::async_trait]
 impl Provider for Ollama {
+    fn id(&self) -> &'static str {
+        Self::ID
+    }
+
     async fn discover(&self) -> Discovery {
         Discovery {
             agents: Vec::new(),
