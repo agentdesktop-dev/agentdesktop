@@ -15,10 +15,11 @@ const SECRET_SERVICE: &str = "dev.agentdesktop.gateway-oidc";
 const EXPIRY_SKEW_SECONDS: u64 = 60;
 static LOGIN: Mutex<()> = Mutex::const_new(());
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct LoginOptions {
     pub callback_listen: Option<SocketAddr>,
     pub subscription_available: bool,
+    pub github_client_id: Option<String>,
 }
 
 pub struct CredentialAcquisition {
@@ -131,6 +132,7 @@ async fn credential_inner(
         login.callback_listen,
         oidc::AuthorizationPage::Identity {
             subscription_available: login.subscription_available,
+            github_available: login.github_client_id.is_some(),
         },
         true,
     )
@@ -151,6 +153,17 @@ async fn credential_inner(
         token_endpoint: metadata.token_endpoint.to_string(),
     };
     save(&store, &account, &stored)?;
+    if let Some(client_id) = login
+        .github_client_id
+        .filter(|_| !login.subscription_available)
+    {
+        crate::github_oauth::credential(
+            &client_id,
+            state_dir,
+            Some((redirect_uri, login.callback_listen)),
+        )
+        .await?;
+    }
     Ok(CredentialAcquisition {
         credential: as_credential(&stored),
         interactive: true,

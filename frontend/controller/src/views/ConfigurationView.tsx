@@ -24,6 +24,7 @@ export function ConfigurationView({
   const initializedFromController = useRef(false);
   const [gateway, setGateway] = useState(true);
   const [gatewayUrl, setGatewayUrl] = useState("https://gateway.example.com");
+  const [gatewayProxyUrl, setGatewayProxyUrl] = useState("");
   const [controllerJwt, setControllerJwt] = useState(true);
   const [audience, setAudience] = useState("agentgateway");
   const [sessionNewTelemetry, setSessionNewTelemetry] = useState(false);
@@ -48,6 +49,7 @@ export function ConfigurationView({
   const yaml = daemonConfigYaml({
     gateway,
     gatewayUrl,
+    gatewayProxyUrl,
     controllerJwt,
     audience,
     sandboxEnabled,
@@ -75,6 +77,7 @@ export function ConfigurationView({
     setGateway(Boolean(llmGateway));
     if (llmGateway) {
       setGatewayUrl(llmGateway.url);
+      setGatewayProxyUrl(llmGateway.proxyUrl ?? "");
       setControllerJwt(llmGateway.authentication?.type === "controllerJwt");
       setAudience(llmGateway.authentication?.audience ?? "agentgateway");
     }
@@ -176,6 +179,21 @@ export function ConfigurationView({
                       value={gatewayUrl}
                       onChange={(event) => setGatewayUrl(event.target.value)}
                     />
+                  </label>
+                  <label className="field full-width">
+                    <span>Pass-through URL (proxyUrl, optional)</span>
+                    <input
+                      value={gatewayProxyUrl}
+                      placeholder="https://gateway.example.com/copilot-proxy"
+                      onChange={(event) =>
+                        setGatewayProxyUrl(event.target.value)
+                      }
+                    />
+                    <small>
+                      Gateway route that forwards to the provider with the
+                      client's own token. Required for VS Code Copilot Chat on
+                      GitHub's models (copilotChat: githubModels).
+                    </small>
                   </label>
                   <label className="toggle-row compact full-width">
                     <span>
@@ -528,17 +546,35 @@ const configurableAgents: Array<{
     placeholder: "model: grok-4.6",
     initialSettings: "model: grok-4.6",
   },
+  {
+    kind: "copilot",
+    label: "GitHub Copilot CLI",
+    iconKind: "copilot",
+    placeholder: "models:\n  gpt-4.1:\n    wireModel: gpt-4.1-mini",
+    initialSettings: "models:\n  gpt-4.1: {}",
+  },
+  {
+    kind: "vscode",
+    label: "VS Code (Copilot Chat)",
+    iconKind: "vscode",
+    placeholder:
+      "copilotChat: githubModels\n# or own models through the gateway:\n# models:\n#   gpt-4.1-mini:\n#     maxInputTokens: 128000",
+    initialSettings: "models:\n  gpt-4.1-mini: {}",
+  },
 ];
 
 const sandboxUnsupportedAgents = new Set<AgentKind>([
   "claudeDesktop",
   "openCode",
   "grok",
+  "copilot",
+  "vscode",
 ]);
 
 function daemonConfigYaml(options: {
   gateway: boolean;
   gatewayUrl: string;
+  gatewayProxyUrl: string;
   controllerJwt: boolean;
   audience: string;
   sandboxEnabled: boolean;
@@ -553,12 +589,15 @@ function daemonConfigYaml(options: {
   const lines: string[] = [];
   if (options.gateway) {
     lines.push("llmGateway:", `  url: ${yamlString(options.gatewayUrl)}`);
+    if (options.gatewayProxyUrl.trim()) {
+      lines.push(`  proxyUrl: ${yamlString(options.gatewayProxyUrl.trim())}`);
+    }
     if (options.controllerJwt) {
       lines.push(
         "  authentication:",
         "    type: controllerJwt",
         `    audience: ${yamlString(options.audience)}`,
-        "    allowedClientIds: [claude-code, claude-desktop, codex, opencode, grok]",
+        "    allowedClientIds: [claude-code, claude-desktop, codex, opencode, grok, copilot-cli, vscode-copilot]",
       );
     }
     lines.push("");

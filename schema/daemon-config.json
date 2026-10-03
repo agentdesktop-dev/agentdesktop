@@ -171,6 +171,58 @@
         "address"
       ]
     },
+    "CopilotConfig": {
+      "description": "Settings reconciled into GitHub Copilot CLI's `providers.json`.\n\n`providers.json` is merged, never owned outright: the CLI has no\nmanaged-settings equivalent for providers, and users may have their own\nBYOK entries. See `provider::copilot::reconcile` in the agent crate for\nhow this is turned into the merged document. User mode only: the file\nlives in the user's Copilot directory, so a system daemon rejects the\nprogram.",
+      "type": "object",
+      "properties": {
+        "models": {
+          "description": "Copilot CLI model entries, keyed by the model ID the CLI shows\n(`copilot --model agentdesktop/<id>`).\n\nAt least one is required when a top-level `llmGateway` is configured.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/CopilotModel"
+          }
+        },
+        "useLlmGateway": {
+          "description": "Whether this program uses the top-level LLM gateway.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "CopilotModel": {
+      "description": "One Copilot CLI model entry. The entry's `id` is the map key; `provider`\nand `modelId` are the typed fields below; any other key (for example\n`wireModel`, the name sent upstream when it differs) is passed through to\nthe CLI unchanged.",
+      "type": "object",
+      "properties": {
+        "modelId": {
+          "description": "The CLI's `modelId` for the entry. Defaults to the entry's ID. The\nname sent to the gateway is `wireModel` when that pass-through key is\nset, else this one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "description": "Which managed provider entry serves the model.",
+          "$ref": "#/$defs/CopilotProvider",
+          "default": "agentdesktop"
+        }
+      },
+      "additionalProperties": true
+    },
+    "CopilotProvider": {
+      "description": "The two provider entries agentdesktop writes into `providers.json`, one per\nAPI shape the proxy's `/copilot-cli` route serves.",
+      "oneOf": [
+        {
+          "description": "OpenAI-compatible, `http://<listen>/copilot-cli/v1`.",
+          "type": "string",
+          "const": "agentdesktop"
+        },
+        {
+          "description": "Anthropic, `http://<listen>/copilot-cli`.",
+          "type": "string",
+          "const": "agentdesktop-anthropic"
+        }
+      ]
+    },
     "DaemonStartupConfig": {
       "description": "Settings read only at local daemon startup. Paths use the process working directory.",
       "type": "object",
@@ -190,9 +242,19 @@
           "$ref": "#/$defs/ToolConfigPath",
           "default": {}
         },
+        "copilot": {
+          "description": "GitHub Copilot CLI paths (`config` = the `providers.json` to manage;\ndefaults to `COPILOT_PROVIDERS_CONFIG`, `$COPILOT_HOME/providers.json`,\nthen `~/.copilot/providers.json`).",
+          "$ref": "#/$defs/ToolConfigPath",
+          "default": {}
+        },
         "grok": {
           "description": "Grok Build paths.",
           "$ref": "#/$defs/ToolConfigPath",
+          "default": {}
+        },
+        "llmProxy": {
+          "description": "Local loopback LLM proxy.",
+          "$ref": "#/$defs/LlmProxyStartupConfig",
           "default": {}
         },
         "oidcCallbackListen": {
@@ -228,9 +290,48 @@
           "description": "Manage the current user’s tool settings instead of system settings.",
           "type": "boolean",
           "default": false
+        },
+        "vscode": {
+          "description": "VS Code paths (`config` = the `chatLanguageModels.json` to manage under\nthe `ownModels` variant of `copilotChat`, `settings` = the user\n`settings.json` to manage under the `githubModels` variant; each\ndefaults to its file inside the per-OS VS Code user profile\ndirectory).",
+          "$ref": "#/$defs/VsCodeStartupConfig",
+          "default": {}
         }
       },
       "additionalProperties": false
+    },
+    "GitHubOAuthConfig": {
+      "description": "GitHub App user authorization for Copilot requests through the local proxy.",
+      "type": "object",
+      "properties": {
+        "clientId": {
+          "description": "GitHub App client ID. Required when `source` is `deviceFlow`, where the\nApp must also enable Device Flow. Unused when `source` is `request`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "description": "Where the GitHub credential comes from.",
+          "$ref": "#/$defs/GitHubTokenSource",
+          "default": "deviceFlow"
+        }
+      },
+      "additionalProperties": false
+    },
+    "GitHubTokenSource": {
+      "description": "Where the local proxy gets the credential it puts in `x-llm-token`.",
+      "oneOf": [
+        {
+          "description": "The daemon obtains its own token through GitHub App device authorization.",
+          "type": "string",
+          "const": "deviceFlow"
+        },
+        {
+          "description": "The calling client already holds a credential and sends it; the proxy\nmoves it aside and adds the gateway identity. Used by clients such as\nVS Code Copilot that manage their own GitHub session.",
+          "type": "string",
+          "const": "request"
+        }
+      ]
     },
     "GrokConfig": {
       "description": "Settings reconciled into Grok Build's organization-managed configuration.\n\nValues under `managedConfig` are written to Grok's `managed_config.toml`.\nWhen generated LLM-gateway settings overlap with those values,\nagentdesktop's generated values take precedence.\nOnly system mode is supported. Grok can delete or replace the user-level\nmanaged file during startup, so `--user` rejects `programs.grok`.",
@@ -353,6 +454,24 @@
             }
           ]
         },
+        "githubOAuth": {
+          "description": "GitHub App OAuth used by the local proxy for the x-llm-token header.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitHubOAuthConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "proxyUrl": {
+          "description": "Base URL the local LLM proxy forwards to, when it differs from `url`.\n\n`url` is shared by every program that sets `useLlmGateway`, so it can\nonly carry one path prefix. A gateway that puts each provider behind its\nown prefix therefore cannot serve both a program and the proxy from one\nvalue. Setting this leaves `url` to the programs and gives the proxy its\nown target. The same rules as for `url` apply.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "url": {
           "description": "Base HTTP or HTTPS URL of the LLM gateway.\n\nThe URL must include a host and cannot include credentials, a query, or a fragment.",
           "type": "string"
@@ -362,6 +481,27 @@
       "required": [
         "url"
       ]
+    },
+    "LlmProxyStartupConfig": {
+      "description": "Local loopback LLM proxy settings. User mode only: the proxy hands out the\ncurrent user's gateway credential, so a system daemon never runs one.",
+      "type": "object",
+      "properties": {
+        "clientId": {
+          "description": "Credential policy client ID used by the proxy. Defaults to `vscode`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "listen": {
+          "description": "Loopback address to listen on. Unset disables the proxy. Rejected in system mode.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "OpenCodeConfig": {
       "description": "Settings reconciled into OpenCode's system-managed configuration.\n\nValues under `managedConfig` are written to OpenCode's managed JSONC file.\nWhen generated LLM gateway settings overlap with those values,\nAgentdesktop's generated values take precedence.",
@@ -459,6 +599,17 @@
             }
           ]
         },
+        "copilot": {
+          "description": "GitHub Copilot CLI managed configuration.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CopilotConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "grok": {
           "description": "Grok Build managed configuration.",
           "anyOf": [
@@ -475,6 +626,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/OpenCodeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "vscode": {
+          "description": "VS Code Copilot Chat managed configuration (own models through the\nloopback proxy, or GitHub's models through the gateway).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VsCodeConfig"
             },
             {
               "type": "null"
@@ -578,6 +740,106 @@
       "properties": {
         "config": {
           "description": "Configuration file.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "VsCodeConfig": {
+      "description": "Settings reconciled into VS Code's Copilot Chat configuration. Under\n`copilotChat: ownModels` this is `chatLanguageModels.json`, pointing\nCopilot Chat's built-in \"Custom Endpoint\" model provider at the local LLM\nproxy's `/vscode-copilot` route; under `copilotChat: githubModels`\nit is the user `settings.json`, pointing Copilot Chat's\nCAPI endpoint at the loopback proxy's `/vscode-copilot-capi/<pairing>`\nroute so VS Code keeps GitHub's own models and its own Copilot token while\nthe daemon adds the gateway identity. See `provider::vscode::reconcile`\nand `provider::vscode::settings` in the agent crate for how each is turned\ninto its merged document. User mode only: both files live in the user's\nVS Code profile directory, so a system daemon rejects the program.",
+      "type": "object",
+      "properties": {
+        "copilotChat": {
+          "description": "Which Copilot Chat model source VS Code is pointed at: agentdesktop's\nown custom models (`ownModels`), or GitHub's own models reached\nthrough the gateway (`githubModels`).",
+          "$ref": "#/$defs/VsCodeCopilotChat",
+          "default": "ownModels"
+        },
+        "models": {
+          "description": "Custom model entries exposed to VS Code's Copilot Chat model picker,\nkeyed by the model ID VS Code sends as `model`. Only meaningful under\n`copilotChat: ownModels`; `githubModels` rejects a non-empty map.\n\nAt least one is required when a top-level `llmGateway` is configured\nand `copilotChat` is `ownModels`.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/VsCodeModel"
+          }
+        },
+        "useLlmGateway": {
+          "description": "Whether this program uses the top-level LLM gateway.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "VsCodeCopilotChat": {
+      "description": "Which Copilot Chat model source VS Code is pointed at.",
+      "oneOf": [
+        {
+          "description": "Custom models served through the local LLM proxy's `/vscode-copilot`\nroute (VS Code's \"Custom Endpoint\" provider).",
+          "type": "string",
+          "const": "ownModels"
+        },
+        {
+          "description": "GitHub's own models, reached through the gateway's pass-through route\n(`llmGateway.proxyUrl`) with the user's GitHub Copilot token forwarded:\nthe daemon points `github.copilot.advanced.debug.overrideCapiUrl` in\nthe user `settings.json` at the loopback proxy's\n`/vscode-copilot-capi/<pairing>` route. `models` must be empty.",
+          "type": "string",
+          "const": "githubModels"
+        }
+      ]
+    },
+    "VsCodeModel": {
+      "description": "One VS Code custom model entry. The entry's `id` is the map key; other\ntyped fields below match VS Code's `chatLanguageModels.json` model shape;\nany other key is passed through to VS Code unchanged.",
+      "type": "object",
+      "properties": {
+        "maxInputTokens": {
+          "description": "Maximum input tokens accepted by the model.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "maxOutputTokens": {
+          "description": "Maximum output tokens produced by the model.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "name": {
+          "description": "Display name shown in VS Code's model picker. Defaults to\n`\"<id> (agentdesktop)\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "toolCalling": {
+          "description": "Whether the model supports tool calling.",
+          "type": "boolean"
+        },
+        "vision": {
+          "description": "Whether the model supports image input.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": true
+    },
+    "VsCodeStartupConfig": {
+      "description": "VS Code paths: own type (not the shared `ToolConfigPath`) because the\n`githubModels` variant of `copilotChat` manages a second\nfile, the user's `settings.json`, alongside `chatLanguageModels.json`.",
+      "type": "object",
+      "properties": {
+        "config": {
+          "description": "`chatLanguageModels.json` to manage (the `ownModels` variant of\n`copilotChat`). Defaults to that file inside the per-OS VS Code user\nprofile directory.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "settings": {
+          "description": "The user `settings.json` to manage (the `githubModels` variant of\n`copilotChat`). Defaults to that file inside the per-OS VS Code user\nprofile directory.",
           "type": [
             "string",
             "null"

@@ -27,16 +27,21 @@ agentdesktop-proto.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 base64.workspace = true
+bytes.workspace = true
 clap.workspace = true
 hostname.workspace = true
 hyper.workspace = true
-hyper-util.workspace = true
+hyper-rustls.workspace = true
+hyper-util = { workspace = true, features = ["client-legacy", "http1"] }
+http-body-util.workspace = true
 json5.workspace = true
+jsonc-parser.workspace = true
 memchr.workspace = true
 open.workspace = true
 rand.workspace = true
 rcgen.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
@@ -51,6 +56,10 @@ url.workspace = true
 
 [dev-dependencies]
 futures-util = "0.3"
+# Hand-rolled RFC 6455 handshake for the vscode-copilot-capi WebSocket
+# tunnel tests (llm_proxy.rs): Sec-WebSocket-Accept is
+# base64(sha1(key + the RFC 6455 GUID)).
+sha1 = "0.11"
 tempfile = "3"
 testcontainers = "0.28"
 tracing-subscriber.workspace = true

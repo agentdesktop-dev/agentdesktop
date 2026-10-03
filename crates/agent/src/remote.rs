@@ -30,9 +30,9 @@ use agentdesktop_core::{
 };
 use agentdesktop_proto::fleet::{
     AgentMessage, ConfigState, ConfigStatus, Discovery, Heartbeat, Hello, Inventory,
-    LlmGatewayCredentialRequest, RenewDeviceCertificateRequest, SessionNewEvent, TelemetryEvent,
-    ToolUseEvent, agent_message, controller_message, fleet_agent_client::FleetAgentClient,
-    telemetry_event,
+    LlmGatewayCredentialRequest, ProgramState as ProtoProgramState, ProgramStatus,
+    RenewDeviceCertificateRequest, SessionNewEvent, TelemetryEvent, ToolUseEvent, agent_message,
+    controller_message, fleet_agent_client::FleetAgentClient, telemetry_event,
 };
 
 use crate::{
@@ -46,6 +46,10 @@ use crate::{
 static OAUTH_REFRESH_MUTEX: Mutex<()> = Mutex::const_new(());
 const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+/// Bound on the controller connection and call when fetching an LLM gateway
+/// credential, so a controller that accepts and then stalls cannot hold the
+/// caller (or a detached fetch) open indefinitely.
+const CREDENTIAL_CALL_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct LogoutRequest {
     pub completion: oneshot::Sender<Result<(), String>>,
@@ -560,15 +564,28 @@ pub async fn llm_gateway_credential(
         identity::load(&state_dir.join("identity.json"))?.context("device is not enrolled")?;
     let identity_path = state_dir.join("identity.json");
     refresh_oauth_if_needed(&mut identity, &identity_path).await?;
-    let mut client = client(controller, Some(&identity)).await?;
-    let mut request = Request::new(LlmGatewayCredentialRequest {
-        client_id: client_id.to_owned(),
-    });
-    authenticate_request(&identity, &mut request)?;
-    let response = client
-        .get_llm_gateway_credential(request)
+    // The refresh above is not cut off (its result is saved); the controller
+    // connection and call are bounded together.
+    let call = async {
+        let mut client = client(controller, Some(&identity)).await?;
+        let mut request = Request::new(LlmGatewayCredentialRequest {
+            client_id: client_id.to_owned(),
+        });
+        authenticate_request(&identity, &mut request)?;
+        client
+            .get_llm_gateway_credential(request)
+            .await
+            .context("request LLM gateway credential")
+    };
+    let response = tokio::time::timeout(CREDENTIAL_CALL_TIMEOUT, call)
         .await
-        .context("request LLM gateway credential")?
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "controller at {} did not answer within {}s",
+                controller.address,
+                CREDENTIAL_CALL_TIMEOUT.as_secs()
+            )
+        })??
         .into_inner();
     Ok(agentdesktop_core::model::LlmGatewayCredential {
         credential: response.credential,
@@ -703,6 +720,7 @@ fn apply_daemon_config(
     config: agentdesktop_proto::fleet::DaemonConfig,
     reconciler: &Reconciler,
 ) -> ConfigStatus {
+    let mut programs = Vec::new();
     let result = (|| -> anyhow::Result<()> {
         let actual_hash = Sha256::digest(&config.yaml);
         if actual_hash.as_slice() != config.sha256 {
@@ -716,7 +734,18 @@ fn apply_daemon_config(
         let yaml = std::str::from_utf8(&config.yaml).context("configuration is not UTF-8")?;
         let daemon_config = config::parse_daemon(yaml)?;
         debug!(revision = config.revision, "parsed daemon configuration");
-        reconciler.apply(&daemon_config)?;
+        let (report, applied) = reconciler.apply_with_report(&daemon_config);
+        report.log();
+        programs = report
+            .programs
+            .iter()
+            .map(|outcome| ProgramStatus {
+                program: outcome.program.to_owned(),
+                state: program_state_proto(outcome.state).into(),
+                detail: outcome.detail.clone(),
+            })
+            .collect();
+        applied?;
         secure_fs::ensure_private_dir(state_dir)?;
         let path = state_dir.join("remote-config.yaml");
         secure_fs::atomic_write(&path, &config.yaml, 0o600)?;
@@ -728,17 +757,39 @@ fn apply_daemon_config(
         Ok(())
     })();
 
+    // `programs_reported` says this agent reports per-program status; the
+    // list is empty when the configuration was not applied at all (hash or
+    // parse error), and holds the apply's outcomes otherwise, also when a
+    // later step (persisting the configuration) failed.
     match result {
         Ok(()) => ConfigStatus {
             revision: config.revision,
             state: ConfigState::Applied.into(),
             error: String::new(),
+            programs,
+            programs_reported: true,
         },
         Err(error) => ConfigStatus {
             revision: config.revision,
             state: ConfigState::Failed.into(),
             error: format!("{error:#}"),
+            programs,
+            programs_reported: true,
         },
+    }
+}
+
+/// The proto value of a program's outcome.
+fn program_state_proto(state: crate::reconcile::ProgramState) -> ProtoProgramState {
+    use crate::reconcile::ProgramState;
+    match state {
+        ProgramState::Applied => ProtoProgramState::Applied,
+        ProgramState::Unchanged => ProtoProgramState::Unchanged,
+        ProgramState::Removed => ProtoProgramState::Removed,
+        ProgramState::Conflict => ProtoProgramState::Conflict,
+        ProgramState::Inactive => ProtoProgramState::Inactive,
+        ProgramState::Blocked => ProtoProgramState::Blocked,
+        ProgramState::Failed => ProtoProgramState::Failed,
     }
 }
 
@@ -1278,5 +1329,70 @@ mod tests {
             state.get().await,
             ControllerConnectionState::new().get().await
         );
+    }
+
+    // --- Per-program configuration status -----------------------------------
+
+    fn test_reconciler(root: &std::path::Path) -> crate::reconcile::Reconciler {
+        crate::reconcile::Reconciler::new(
+            true,
+            root.join("claude/settings.json"),
+            root.join("claude-desktop/settings.json"),
+            root.join("claude-desktop/helper"),
+            root.join("codex/config.toml"),
+            root.join("opencode/config.json"),
+            root.join("opencode/plugin.js"),
+            root.join("grok/managed_config.toml"),
+            Some(root.join("copilot/providers.json")),
+            None,
+            None,
+            root.join("bin/agentdesktop"),
+            root.join("agentdesktop.sock"),
+        )
+    }
+
+    #[test]
+    fn hash_error_reports_empty_programs_and_programs_reported_true() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "agentdesktop-remote-hash-error-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let reconciler = test_reconciler(&state_dir);
+        let config = agentdesktop_proto::fleet::DaemonConfig {
+            revision: 7,
+            yaml: b"programs: {}\n".to_vec(),
+            sha256: vec![0u8; 32],
+        };
+
+        let status = super::apply_daemon_config(&state_dir, config, &reconciler);
+
+        assert_eq!(
+            status.state,
+            agentdesktop_proto::fleet::ConfigState::Failed as i32
+        );
+        assert!(status.error.contains("hash"));
+        assert!(status.programs.is_empty());
+        assert!(status.programs_reported);
+        let _ = std::fs::remove_dir_all(&state_dir);
+    }
+
+    #[test]
+    fn mapping_every_program_state_to_the_proto_enum() {
+        use crate::reconcile::ProgramState;
+        use agentdesktop_proto::fleet::ProgramState as ProtoProgramState;
+
+        let cases = [
+            (ProgramState::Applied, ProtoProgramState::Applied),
+            (ProgramState::Unchanged, ProtoProgramState::Unchanged),
+            (ProgramState::Removed, ProtoProgramState::Removed),
+            (ProgramState::Conflict, ProtoProgramState::Conflict),
+            (ProgramState::Inactive, ProtoProgramState::Inactive),
+            (ProgramState::Blocked, ProtoProgramState::Blocked),
+            (ProgramState::Failed, ProtoProgramState::Failed),
+        ];
+        for (state, expected) in cases {
+            assert_eq!(super::program_state_proto(state), expected, "{state:?}");
+        }
     }
 }
