@@ -52,12 +52,16 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.23.1",
+ "bytes",
  "clap",
  "futures-util",
  "hostname",
+ "http-body-util",
  "hyper",
+ "hyper-rustls",
  "hyper-util",
  "json5",
+ "jsonc-parser",
  "keyring",
  "keyring-core",
  "libc",
@@ -67,9 +71,11 @@ dependencies = [
  "rand",
  "rcgen",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha1",
  "sha2 0.11.0",
  "similar",
  "tempfile",
@@ -2497,6 +2503,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustls",
+ "rustls-native-certs",
  "tokio",
  "tokio-rustls",
  "tower-service",
@@ -3010,6 +3017,15 @@ checksum = "733a844dbd6fef128e98cb4487b887cb55454d92cd9994b1bafe004fabbe670c"
 dependencies = [
  "serde",
  "ucd-trie",
+]
+
+[[package]]
+name = "jsonc-parser"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ecded084f9b9a718d39668a42657c32253663d1f6afb3fbb9134f0305f73f48"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

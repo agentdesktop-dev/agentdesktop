@@ -11,6 +11,7 @@ use crate::reconcile::ReconcilePlan;
 pub mod claude_code;
 pub mod claude_desktop;
 pub mod codex;
+pub mod copilot;
 pub mod cursor;
 pub mod grok;
 mod json_merge;
@@ -23,6 +24,10 @@ pub mod vscode;
 /// An integration with a developer tool or local model runtime.
 #[async_trait::async_trait]
 pub trait Provider: Send + Sync {
+    /// The provider's ID (the inventory's agent kind and the program key in
+    /// configuration status reports).
+    fn id(&self) -> &'static str;
+
     async fn discover(&self) -> Discovery;
 
     /// Propose configuration changes, including cleanup when disabled.
@@ -43,4 +48,9 @@ pub struct ReconcileContext {
     pub merge_user_settings: bool,
     pub credential_helper: PathBuf,
     pub socket: PathBuf,
+    /// The bound loopback LLM proxy, for programs whose client files point at
+    /// it instead of a credential helper. `None` when the proxy is off, its bind
+    /// failed, or no pairing could be created: such programs must then remove
+    /// or neutralise any pointer they wrote earlier, never leave a stale one.
+    pub llm_proxy: Option<crate::llm_proxy::LlmProxyContext>,
 }

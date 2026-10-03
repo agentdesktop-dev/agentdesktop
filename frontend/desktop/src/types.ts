@@ -49,6 +49,13 @@ export interface DaemonInfo {
     caCertificatePath: string | null;
     heartbeatInterval: string;
   } | null;
+  llmProxy?: {
+    /** Bound address when `bound`, configured address otherwise. */
+    listen: string;
+    bound: boolean;
+    clientId: string;
+    error?: string;
+  };
 }
 
 export interface ConnectorRuntime {

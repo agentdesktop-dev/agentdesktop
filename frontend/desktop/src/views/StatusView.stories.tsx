@@ -10,6 +10,7 @@ import {
   managedDaemonInfo,
   offlineConnector,
   populatedDiscovery,
+  proxyUnboundDaemonInfo,
   reconnectingConnector,
   standaloneConnector,
   standaloneDaemonInfo,
@@ -102,6 +103,9 @@ export const StandaloneReady: Story = {
       local.getByText(standaloneDaemonInfo.configPath),
     ).toBeVisible();
     await expect(local.getByText("Not configured (standalone)")).toBeVisible();
+    await expect(
+      local.getByText("127.0.0.1:18095 (client copilot-cli)"),
+    ).toBeVisible();
     await expect(local.getAllByRole("button", { name: /^Copy / })).toHaveLength(
       2,
     );
@@ -116,6 +120,31 @@ export const StandaloneReady: Story = {
         name: "Controller-provided configuration",
       }),
     ).not.toBeInTheDocument();
+  },
+};
+
+export const StandaloneProxyUnbound: Story = {
+  args: {
+    connector: {
+      ...standaloneConnector,
+      runtime: {
+        ...standaloneConnector.runtime,
+        daemon: proxyUnboundDaemonInfo,
+      },
+    },
+    discovery: emptyDiscovery,
+    managedDevice: unconfiguredDevice,
+  },
+  play: async ({ canvas }) => {
+    await userEvent.click(canvas.getByText("Advanced"));
+    const local = within(
+      canvas.getByRole("region", { name: "Daemon information" }),
+    );
+    await expect(
+      local.getByText(
+        "127.0.0.1:18095 (not bound: Address already in use (os error 98))",
+      ),
+    ).toBeVisible();
   },
 };
 

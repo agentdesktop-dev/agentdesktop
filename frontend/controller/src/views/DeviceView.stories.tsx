@@ -6,6 +6,7 @@ import {
   deviceDetail,
   emptyDeviceDetail,
   failedDeviceDetail,
+  oldAgentDeviceDetail,
 } from "../stories/fixtures";
 import { DeviceView } from "./DeviceView";
 
@@ -64,6 +65,25 @@ export const BrowsesDiscoveredCapabilities: Story = {
 
 export const ConfigurationFailed: Story = {
   args: { device: failedDeviceDetail },
+  play: async ({ canvas }) => {
+    await expect(canvas.getByText("Managed programs")).toBeVisible();
+    await expect(canvas.getByText("Conflict")).toBeVisible();
+    await expect(canvas.getByText("Blocked")).toBeVisible();
+    await expect(
+      canvas.getByText("not applied: vscode conflicted"),
+    ).toBeVisible();
+  },
+};
+
+export const OlderAgentWithoutProgramStatus: Story = {
+  args: { device: oldAgentDeviceDetail },
+  play: async ({ canvas }) => {
+    await expect(
+      canvas.getByText(
+        "Per-program status is not reported by this agent version",
+      ),
+    ).toBeVisible();
+  },
 };
 
 export const NoActivityOrTools: Story = {
