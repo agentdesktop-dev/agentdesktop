@@ -3,7 +3,7 @@ use std::{io::Read, path::PathBuf};
 use agentdesktop_client as client;
 use agentdesktop_core::{
     config::DaemonConfig,
-    model::{Discovery, Health, LlmGatewayCredential, TelemetryEventKind},
+    model::{Discovery, EnrollmentStatus, Health, LlmGatewayCredential, TelemetryEventKind},
 };
 use clap::Subcommand;
 use serde::Deserialize;
@@ -14,6 +14,8 @@ const MAX_HOOK_INPUT_BYTES: u64 = 1024 * 1024;
 pub enum ClientCommand {
     /// Check whether the daemon is reachable.
     Status,
+    /// Print the device's enrollment status and any pending sign-in URL.
+    Enrollment,
     /// Discover locally installed agents.
     Discover,
     /// Print the daemon's local startup configuration.
@@ -62,6 +64,16 @@ pub async fn run(command: ClientCommand, socket: PathBuf) -> anyhow::Result<()> 
         ClientCommand::Status => {
             let health: Health = client::get(&socket, "/v1/health").await?;
             println!("{}", health.status);
+        }
+        ClientCommand::Enrollment => {
+            let enrollment: EnrollmentStatus = client::get(&socket, "/v1/enrollment").await?;
+            println!("{}", enrollment.status);
+            if let Some(url) = enrollment.authorization_url {
+                println!("Sign in at: {url}");
+            }
+            if let Some(code) = enrollment.user_code {
+                println!("Code: {code}");
+            }
         }
         ClientCommand::Discover => {
             let discovery: Discovery = client::get(&socket, "/v1/discovery").await?;

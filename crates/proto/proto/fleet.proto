@@ -19,6 +19,10 @@ message EnrollResponse {
 message BeginEnrollmentRequest {
   string hostname = 1;
   string code_challenge = 2;
+  // Use the OAuth 2.0 Device Authorization Grant (RFC 8628) instead of a
+  // browser redirect, for hosts without a local browser. code_challenge is
+  // ignored when set.
+  bool device_authorization = 3;
 }
 
 message BeginEnrollmentResponse {
@@ -28,6 +32,13 @@ message BeginEnrollmentResponse {
   string redirect_uri = 4;
   string token_endpoint = 5;
   string client_id = 6;
+  // Set only for device authorization enrollments.
+  string device_code = 7;
+  string user_code = 8;
+  string verification_uri = 9;
+  string verification_uri_complete = 10;
+  uint64 interval_seconds = 11;
+  uint64 expires_in_seconds = 12;
 }
 
 message CompleteEnrollmentRequest {

@@ -64,10 +64,12 @@ impl FleetAgent for FleetAgentService {
             .as_ref()
             .ok_or_else(|| Status::failed_precondition("OIDC enrollment is disabled"))?;
         let request = request.into_inner();
-        let response = oidc
-            .begin(request.hostname, &request.code_challenge)
-            .await
-            .map_err(invalid_enrollment)?;
+        let response = if request.device_authorization {
+            oidc.begin_device(request.hostname).await
+        } else {
+            oidc.begin(request.hostname, &request.code_challenge).await
+        }
+        .map_err(invalid_enrollment)?;
         Ok(Response::new(response))
     }
 

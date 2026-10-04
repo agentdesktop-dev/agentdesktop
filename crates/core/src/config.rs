@@ -341,6 +341,15 @@ pub struct ControllerConnectionConfig {
     #[serde(default = "default_heartbeat_interval", with = "humantime_serde")]
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub heartbeat_interval: Duration,
+    /// Enroll with the OAuth 2.0 Device Authorization Grant (RFC 8628) instead
+    /// of a browser redirect to a local callback.
+    ///
+    /// Use this on hosts without a local browser, such as servers reached over
+    /// SSH. The daemon logs a verification URL and user code to approve from
+    /// any other device. The identity provider must support device
+    /// authorization for the controller's client.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub device_authorization: bool,
 }
 
 /// Startup configuration for the Agentdesktop fleet controller.

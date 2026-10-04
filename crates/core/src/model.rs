@@ -175,6 +175,10 @@ pub struct EnrollmentStatus {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization_url: Option<String>,
+    /// Code the user confirms at `authorization_url` during device
+    /// authorization enrollment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_code: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

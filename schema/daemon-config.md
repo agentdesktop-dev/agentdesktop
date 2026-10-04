@@ -5,6 +5,7 @@
 |`controller`|object|Controller connection settings. Omit this field to run without fleet management.|
 |`controller.address`|string|HTTPS address of the controller's fleet API.|
 |`controller.caCertificatePath`|string|Path to a PEM-encoded CA certificate used to verify the controller.<br><br>Omit this field to use the operating system's trusted certificate roots.|
+|`controller.deviceAuthorization`|boolean|Enroll with the OAuth 2.0 Device Authorization Grant (RFC 8628) instead<br>of a browser redirect to a local callback.<br><br>Use this on hosts without a local browser, such as servers reached over<br>SSH. The daemon logs a verification URL and user code to approve from<br>any other device. The identity provider must support device<br>authorization for the controller's client.|
 |`controller.heartbeatInterval`|string|Interval between device heartbeats. Defaults to `30s`.|
 |`daemon`|object|Local daemon startup settings. Not accepted in controller-delivered policy.|
 |`daemon.claudeCode`|object|Claude Code paths.|

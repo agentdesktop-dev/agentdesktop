@@ -942,10 +942,12 @@ mod enrollment_tests {
             EnrollmentStatus {
                 status: "starting".to_owned(),
                 authorization_url: None,
+                user_code: None,
             },
             EnrollmentStatus {
                 status: "awaitingAuthentication".to_owned(),
                 authorization_url: Some("https://login.example/authorize".to_owned()),
+                user_code: None,
             },
         ]);
         let mut opened = Vec::new();
