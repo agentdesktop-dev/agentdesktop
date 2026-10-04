@@ -54,6 +54,21 @@ pub async fn get<T>(endpoint: &Path, path: &str) -> anyhow::Result<T>
 where
     T: DeserializeOwned,
 {
+    request(endpoint, "GET", path).await
+}
+
+/// Sends a POST without a request body and decodes the JSON response.
+pub async fn post<T>(endpoint: &Path, path: &str) -> anyhow::Result<T>
+where
+    T: DeserializeOwned,
+{
+    request(endpoint, "POST", path).await
+}
+
+async fn request<T>(endpoint: &Path, method: &str, path: &str) -> anyhow::Result<T>
+where
+    T: DeserializeOwned,
+{
     let stream = connect(endpoint).await?;
     let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
         .await
@@ -66,7 +81,7 @@ where
     });
 
     let request = Request::builder()
-        .method("GET")
+        .method(method)
         .uri(path)
         .header("host", "localhost")
         .body(Empty::<Bytes>::new())?;

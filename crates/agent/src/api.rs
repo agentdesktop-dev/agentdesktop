@@ -12,8 +12,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 use agentdesktop_core::{
     config::{DaemonConfig, LlmGatewayAuthentication, ProgramAuthentication, valid_client_id},
     model::{
-        DaemonInfo, Discovery, EnrollmentStatus, Health, LlmGatewayCredential, TelemetryEvent,
-        TelemetryEventKind,
+        DaemonInfo, Discovery, EnrollmentStatus, Health, LlmGatewayCredential,
+        LlmGatewayLoginStatus, TelemetryEvent, TelemetryEventKind,
     },
 };
 
@@ -49,6 +49,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/logout", post(logout))
         .route("/v1/telemetry", post(telemetry))
         .route("/v1/llm-gateway/credential", get(llm_gateway_credential))
+        .route("/v1/llm-gateway/login", post(llm_gateway_login))
         .with_state(state)
 }
 
@@ -273,6 +274,7 @@ pub(crate) async fn gateway_credential(
             redirect_uri,
             scopes,
             allow_insecure,
+            device_authorization,
         }) => gateway_oidc::credential(
             issuer,
             client_id,
@@ -297,6 +299,7 @@ pub(crate) async fn gateway_credential(
                         .flatten()
                     })
                 },
+                device_authorization: *device_authorization,
             },
         )
         .await
@@ -310,7 +313,14 @@ pub(crate) async fn gateway_credential(
             "LLM gateway has no authentication configured"
         )),
     }
-    .map_err(|error| (StatusCode::BAD_GATEWAY, format!("{error:#}")))?;
+    .map_err(|error| {
+        let status = if error.is::<gateway_oidc::SignInRequired>() {
+            StatusCode::UNAUTHORIZED
+        } else {
+            StatusCode::BAD_GATEWAY
+        };
+        (status, format!("{error:#}"))
+    })?;
     if uses_subscription {
         subscription::compose(
             identity,
@@ -323,6 +333,38 @@ pub(crate) async fn gateway_credential(
         Ok(identity)
     }
     .map_err(|error| (StatusCode::BAD_GATEWAY, format!("{error:#}")))
+}
+
+async fn llm_gateway_login(
+    State(state): State<AppState>,
+) -> Result<Json<LlmGatewayLoginStatus>, (StatusCode, String)> {
+    let effective = load_effective_config(&state.config, &state.state_dir).map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("read applied configuration: {error:#}"),
+        )
+    })?;
+    let Some(LlmGatewayAuthentication::Oidc {
+        issuer,
+        client_id,
+        scopes,
+        allow_insecure,
+        device_authorization: true,
+        ..
+    }) = effective
+        .llm_gateway
+        .as_ref()
+        .and_then(|gateway| gateway.authentication.as_ref())
+    else {
+        return Err((
+            StatusCode::FAILED_DEPENDENCY,
+            "LLM gateway sign-in with device authorization is not configured".to_owned(),
+        ));
+    };
+    gateway_oidc::device_login(issuer, client_id, scopes, *allow_insecure, &state.state_dir)
+        .await
+        .map(Json)
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("{error:#}")))
 }
 
 fn program_uses_subscription(config: &DaemonConfig, client_id: &str) -> bool {

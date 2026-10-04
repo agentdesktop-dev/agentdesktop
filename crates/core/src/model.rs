@@ -188,6 +188,20 @@ pub struct LlmGatewayCredential {
     pub expires_at_unix_seconds: u64,
 }
 
+/// LLM gateway sign-in state for OIDC device authorization.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmGatewayLoginStatus {
+    /// `signedIn` or `awaitingAuthentication`.
+    pub status: String,
+    /// Page where the user approves the sign-in from any device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_url: Option<String>,
+    /// Code the user confirms at `verification_url`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_code: Option<String>,
+}
+
 /// A timestamped telemetry observation emitted by a managed device.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]

@@ -271,6 +271,19 @@ pub enum LlmGatewayAuthentication {
         /// Permit loopback HTTP endpoints for isolated local development.
         #[serde(rename = "allowInsecure", default)]
         allow_insecure: bool,
+        /// Sign in with the OAuth 2.0 Device Authorization Grant (RFC 8628)
+        /// instead of a browser redirect to a local callback.
+        ///
+        /// Use this on hosts without a local browser, such as servers reached
+        /// over SSH. Run `agentdesktop-headless login` to get a verification
+        /// URL and user code to approve from any other device. The identity
+        /// provider must support device authorization for this client.
+        #[serde(
+            rename = "deviceAuthorization",
+            default,
+            skip_serializing_if = "std::ops::Not::not"
+        )]
+        device_authorization: bool,
     },
 }
 
@@ -906,6 +919,7 @@ fn validate_daemon(
                     redirect_uri,
                     scopes,
                     allow_insecure,
+                    ..
                 } => {
                     if issuer.host().is_none() {
                         anyhow::bail!("LLM gateway OIDC issuer must include a host");
@@ -977,6 +991,21 @@ fn validate_daemon(
         if subscription && llm_gateway.is_some_and(|gateway| gateway.authentication.is_none()) {
             anyhow::bail!(
                 "programs.{name}.auth subscription requires oidc or controllerJwt gateway authentication"
+            );
+        }
+        if subscription
+            && llm_gateway.is_some_and(|gateway| {
+                matches!(
+                    gateway.authentication,
+                    Some(LlmGatewayAuthentication::Oidc {
+                        device_authorization: true,
+                        ..
+                    })
+                )
+            })
+        {
+            anyhow::bail!(
+                "programs.{name}.auth subscription requires a browser sign-in and cannot be combined with llmGateway OIDC deviceAuthorization"
             );
         }
     }
@@ -1202,6 +1231,51 @@ llmGateway:
                 .unwrap_err()
                 .to_string()
                 .contains("loopback")
+        );
+    }
+
+    #[test]
+    fn oidc_device_authorization_is_opt_in() {
+        let daemon = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: oidc
+    issuer: https://login.example.com
+    clientId: agentdesktop
+    deviceAuthorization: true
+"#,
+        )
+        .expect("valid OIDC device authorization configuration");
+        let Some(LlmGatewayAuthentication::Oidc {
+            device_authorization,
+            ..
+        }) = daemon
+            .llm_gateway
+            .and_then(|gateway| gateway.authentication)
+        else {
+            panic!("expected OIDC authentication");
+        };
+        assert!(device_authorization);
+
+        let subscription = r#"
+llmGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: oidc
+    issuer: https://login.example.com
+    clientId: agentdesktop
+    deviceAuthorization: true
+programs:
+  claudeCode:
+    auth: subscription
+"#;
+        assert!(
+            parse_daemon(subscription)
+                .unwrap_err()
+                .to_string()
+                .contains("deviceAuthorization")
         );
     }
 

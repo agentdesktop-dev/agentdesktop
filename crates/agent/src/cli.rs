@@ -3,7 +3,10 @@ use std::{io::Read, path::PathBuf};
 use agentdesktop_client as client;
 use agentdesktop_core::{
     config::DaemonConfig,
-    model::{Discovery, EnrollmentStatus, Health, LlmGatewayCredential, TelemetryEventKind},
+    model::{
+        Discovery, EnrollmentStatus, Health, LlmGatewayCredential, LlmGatewayLoginStatus,
+        TelemetryEventKind,
+    },
 };
 use clap::Subcommand;
 use serde::Deserialize;
@@ -26,6 +29,9 @@ pub enum ClientCommand {
         #[arg(long, default_value = "agentdesktop")]
         client_id: String,
     },
+    /// Sign in to the LLM gateway with OIDC device authorization and print
+    /// the verification URL and code to approve from any device.
+    Login,
     /// Handle an event emitted by a managed developer-tool hook.
     Hook {
         #[command(subcommand)]
@@ -72,6 +78,17 @@ pub async fn run(command: ClientCommand, socket: PathBuf) -> anyhow::Result<()> 
                 println!("Sign in at: {url}");
             }
             if let Some(code) = enrollment.user_code {
+                println!("Code: {code}");
+            }
+        }
+        ClientCommand::Login => {
+            let login: LlmGatewayLoginStatus =
+                client::post(&socket, "/v1/llm-gateway/login").await?;
+            println!("{}", login.status);
+            if let Some(url) = login.verification_url {
+                println!("Sign in at: {url}");
+            }
+            if let Some(code) = login.user_code {
                 println!("Code: {code}");
             }
         }

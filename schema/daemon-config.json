@@ -347,6 +347,10 @@
               "description": "Public OpenID Connect client identifier.",
               "type": "string"
             },
+            "deviceAuthorization": {
+              "description": "Sign in with the OAuth 2.0 Device Authorization Grant (RFC 8628)\ninstead of a browser redirect to a local callback.\n\nUse this on hosts without a local browser, such as servers reached\nover SSH. Run `agentdesktop-headless login` to get a verification\nURL and user code to approve from any other device. The identity\nprovider must support device authorization for this client.",
+              "type": "boolean"
+            },
             "issuer": {
               "description": "Exact OpenID Connect issuer URL.",
               "type": "string"

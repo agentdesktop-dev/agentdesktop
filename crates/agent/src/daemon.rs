@@ -755,8 +755,23 @@ fn start_gateway_authentication(
                 redirect_uri,
                 scopes,
                 allow_insecure,
+                device_authorization,
             }) = authentication
             {
+                if device_authorization {
+                    // Logs the verification URL and code, then signs in in the
+                    // background once the user approves from any device.
+                    tracing::info!(%issuer, "starting LLM gateway OIDC device authorization");
+                    gateway_oidc::device_login(
+                        &issuer,
+                        &client_id,
+                        &scopes,
+                        allow_insecure,
+                        &state_dir,
+                    )
+                    .await?;
+                    return Ok(());
+                }
                 tracing::info!(%issuer, "starting LLM gateway OIDC authentication");
                 let acquired = gateway_oidc::credential(
                     &issuer,
@@ -777,6 +792,7 @@ fn start_gateway_authentication(
                                 .then(|| github.client_id.clone())
                                 .flatten()
                         }),
+                        device_authorization: false,
                     },
                 )
                 .await?;

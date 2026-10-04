@@ -35,6 +35,7 @@
 |`llmGateway.authentication.type`|enum|Possible values: `controllerJwt`.|
 |`llmGateway.authentication.allowInsecure`|boolean|Permit loopback HTTP endpoints for isolated local development.|
 |`llmGateway.authentication.clientId`|string|Public OpenID Connect client identifier.|
+|`llmGateway.authentication.deviceAuthorization`|boolean|Sign in with the OAuth 2.0 Device Authorization Grant (RFC 8628)<br>instead of a browser redirect to a local callback.<br><br>Use this on hosts without a local browser, such as servers reached<br>over SSH. Run `agentdesktop-headless login` to get a verification<br>URL and user code to approve from any other device. The identity<br>provider must support device authorization for this client.|
 |`llmGateway.authentication.issuer`|string|Exact OpenID Connect issuer URL.|
 |`llmGateway.authentication.redirectUri`|string|Loopback redirect URI registered for the native client.|
 |`llmGateway.authentication.scopes`|[]string|Scopes requested during sign-in.|
