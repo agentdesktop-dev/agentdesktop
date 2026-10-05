@@ -142,6 +142,10 @@ mod windows {
 
 #[cfg(windows)]
 fn main() -> anyhow::Result<()> {
+    if std::env::args_os().any(|argument| argument.to_str() == Some("--version")) {
+        println!("agentdesktop-service {}", agentdesktop_core::VERSION);
+        return Ok(());
+    }
     windows::run()
 }
 

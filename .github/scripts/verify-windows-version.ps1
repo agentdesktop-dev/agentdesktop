@@ -23,10 +23,11 @@ foreach ($candidate in $Path) {
     continue
   }
 
-  # The service has no version resource; agentdesktop_core::VERSION embeds
-  # AGENTDESKTOP_VERSION verbatim, so the release string must be present.
-  $text = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($resolvedPath))
-  if (-not $text.Contains($Version)) {
-    throw "$resolvedPath does not embed release version '$Version'"
+  $versionOutput = & $resolvedPath --version
+  $exitCode = $LASTEXITCODE
+  $versionOutput = ($versionOutput -join "`n").Trim()
+  $expectedOutput = "agentdesktop-service $Version"
+  if ($exitCode -ne 0 -or $versionOutput -ne $expectedOutput) {
+    throw "$resolvedPath reports '$versionOutput' (exit code $exitCode), expected '$expectedOutput'"
   }
 }

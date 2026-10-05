@@ -8,7 +8,8 @@ installs:
 - A default machine configuration under `%ProgramData%\AgentDesktop`.
 - A startup entry that launches the tray application for interactive users.
 
-The generated MSI is unsigned until Windows code signing is configured.
+Locally generated MSIs are unsigned. Release MSIs are signed and verified by the
+GitHub Actions release workflow before publication.
 
 ## Build host
 
@@ -223,4 +224,14 @@ settings.
 
 
 ## Production signing
-Need to set up Azure artifact signing service: https://learn.microsoft.com/en-us/azure/artifact-signing/
+
+The release workflow signs the standalone Windows binaries with Azure Artifact
+Signing, builds each MSI from the signed binaries without patching them, then
+signs and verifies the MSI. Signing runs in the protected `production-signing`
+GitHub environment using Azure OIDC. See [Azure Artifact Signing] for service
+setup details.
+
+Local builds described above do not run this signing workflow and must not be
+distributed as signed production release artifacts.
+
+[Azure Artifact Signing]: https://learn.microsoft.com/en-us/azure/artifact-signing/
