@@ -436,6 +436,12 @@ where
         reconciler
             .apply(&initial_config)
             .context("apply initial daemon configuration")?;
+        // With a controller, the cached controller configuration is what is in effect
+        // from here, and start_gateway_authentication above only saw the local file.
+        // Without one the two are the same configuration and it already ran.
+        if config.controller.is_some() {
+            gateway_oidc::start_device_login_if_configured(&initial_config, &args.state_dir);
+        }
     } else {
         tracing::info!(
             "preserving managed files until the controller provides daemon configuration"

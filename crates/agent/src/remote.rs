@@ -37,6 +37,7 @@ use agentdesktop_proto::fleet::{
 
 use crate::{
     enrollment::EnrollmentState,
+    gateway_oidc,
     identity::{self, Identity},
     oidc,
     reconcile::Reconciler,
@@ -737,6 +738,10 @@ fn apply_daemon_config(
         secure_fs::ensure_private_dir(state_dir)?;
         let path = state_dir.join("remote-config.yaml");
         secure_fs::atomic_write(&path, &config.yaml, 0o600)?;
+        // Managed gateway policy that asks for device authorization has to start its
+        // sign-in here: the startup path only sees the local file. Idempotent, so a
+        // repeated or unchanged update returns the pending grant instead of a new one.
+        gateway_oidc::start_device_login_if_configured(&daemon_config, state_dir);
         info!(
             revision = config.revision,
             path = %path.display(),

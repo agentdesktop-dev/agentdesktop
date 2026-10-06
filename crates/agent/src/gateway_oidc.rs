@@ -1,4 +1,10 @@
-use std::{collections::BTreeMap, net::SocketAddr, path::Path, time::Duration};
+use std::{
+    collections::BTreeMap,
+    net::SocketAddr,
+    path::Path,
+    sync::{Arc, Mutex as StdMutex},
+    time::Duration,
+};
 
 use agentdesktop_core::http::ClientExt;
 use agentdesktop_core::model::{LlmGatewayCredential, LlmGatewayLoginStatus};
@@ -17,6 +23,21 @@ static LOGIN: Mutex<()> = Mutex::const_new(());
 /// Device authorization sign-ins waiting for approval, keyed by token account.
 static PENDING_DEVICE_LOGINS: std::sync::Mutex<BTreeMap<String, PendingDeviceLogin>> =
     std::sync::Mutex::new(BTreeMap::new());
+/// One lock per token account, held only while a device grant is being requested from
+/// the identity provider. It is what stops two concurrent `login` calls from each
+/// starting a grant, without holding the global [`LOGIN`] lock across network I/O.
+static STARTING_DEVICE_LOGINS: StdMutex<BTreeMap<String, Arc<Mutex<()>>>> =
+    StdMutex::new(BTreeMap::new());
+/// Upper bound for the identity provider's device-grant discovery and request. The
+/// default HTTP client has no timeout, so without this a stalled provider would hold
+/// the per-account start lock (and every `login` queued behind it) forever.
+const DEVICE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Longest a device code is honoured, whatever the provider advertises. RFC 8628
+/// examples use 1800 seconds; this also keeps `Instant + expires_in` from overflowing
+/// on a hostile or broken `expires_in`.
+const MAX_DEVICE_LIFETIME: Duration = Duration::from_secs(30 * 60);
+/// Longest poll interval honoured, for the same reason.
+const MAX_DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub struct LoginOptions {
@@ -248,34 +269,28 @@ pub async fn device_login(
     allow_insecure: bool,
     state_dir: &Path,
 ) -> anyhow::Result<LlmGatewayLoginStatus> {
-    let _login = LOGIN.lock().await;
-    let store = SecretStore::new(state_dir)?;
     let account = account(issuer, client_id);
-    if stored_credential(&store, &account, client_id)
-        .await?
-        .is_some()
-    {
-        return Ok(signed_in());
-    }
-    if let Some(pending) = pending_device_login(&account) {
-        return Ok(awaiting(pending));
+    if let Some(status) = device_login_status(&account, client_id, state_dir).await? {
+        return Ok(status);
     }
 
-    let metadata = discover(issuer, allow_insecure).await?;
-    let endpoint = metadata
-        .device_authorization_endpoint
-        .context("OIDC provider does not support device authorization")?;
-    let device = reqwest::Client::new()
-        .post(endpoint)
-        .form(&device_authorization_form(client_id, scopes))
-        .send()
-        .await
-        .context("request OIDC device authorization")?
-        .error_for_status()
-        .context("OIDC device authorization endpoint returned an error")?
-        .json::<DeviceAuthorizationResponse>()
-        .await
-        .context("decode OIDC device authorization response")?;
+    // Serialise starting a grant per account, NOT with the global LOGIN lock: the
+    // provider round-trip below can be slow, and holding LOGIN across it would block
+    // every concurrent /credential and /login call. Callers that lose the race wait
+    // here, then find the winner's pending grant in the re-check and return it, so
+    // no duplicate grant is ever requested.
+    let start_lock = starting_lock(&account);
+    let _starting = start_lock.lock().await;
+    if let Some(status) = device_login_status(&account, client_id, state_dir).await? {
+        return Ok(status);
+    }
+
+    let (metadata, device) = tokio::time::timeout(
+        DEVICE_REQUEST_TIMEOUT,
+        request_device_grant(issuer, client_id, scopes, allow_insecure),
+    )
+    .await
+    .context("OIDC device authorization timed out")??;
     let pending = pending_from(&device);
     tracing::info!(
         verification_uri = %device.verification_uri,
@@ -301,6 +316,127 @@ pub async fn device_login(
         }
     });
     Ok(awaiting(pending))
+}
+
+/// Starts a device sign-in for the gateway if `config` asks for one, in the
+/// background, logging the verification URL and code. Safe to call on every
+/// configuration apply: [`device_login`] returns the existing pending grant, or
+/// `signedIn`, instead of starting another.
+///
+/// Managed `llmGateway` policy arrives after the daemon has started (from the cached
+/// controller configuration, then from each update), so the startup path that only
+/// sees the local file cannot be the only place a grant is started.
+pub fn start_device_login_if_configured(
+    config: &agentdesktop_core::config::DaemonConfig,
+    state_dir: &Path,
+) {
+    let Some(agentdesktop_core::config::LlmGatewayAuthentication::Oidc {
+        issuer,
+        client_id,
+        scopes,
+        allow_insecure,
+        device_authorization: true,
+        ..
+    }) = config
+        .llm_gateway
+        .as_ref()
+        .and_then(|gateway| gateway.authentication.as_ref())
+    else {
+        return;
+    };
+    let (issuer, client_id, scopes, allow_insecure, state_dir) = (
+        issuer.clone(),
+        client_id.clone(),
+        scopes.clone(),
+        *allow_insecure,
+        state_dir.to_owned(),
+    );
+    tokio::spawn(async move {
+        tracing::info!(%issuer, "starting LLM gateway OIDC device authorization");
+        if let Err(error) =
+            device_login(&issuer, &client_id, &scopes, allow_insecure, &state_dir).await
+        {
+            tracing::error!(
+                error = %format!("{error:#}"),
+                "LLM gateway device authorization failed to start"
+            );
+        }
+    });
+}
+
+/// `signedIn` or the pending grant for `account`, if there is one. Takes the global
+/// lock only for the duration of the (local) token-store read.
+async fn device_login_status(
+    account: &str,
+    client_id: &str,
+    state_dir: &Path,
+) -> anyhow::Result<Option<LlmGatewayLoginStatus>> {
+    let _login = LOGIN.lock().await;
+    let store = SecretStore::new(state_dir)?;
+    if stored_credential(&store, account, client_id)
+        .await?
+        .is_some()
+    {
+        return Ok(Some(signed_in()));
+    }
+    Ok(pending_device_login(account).map(awaiting))
+}
+
+fn starting_lock(account: &str) -> Arc<Mutex<()>> {
+    STARTING_DEVICE_LOGINS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(account.to_owned())
+        .or_default()
+        .clone()
+}
+
+/// Discovery plus the device-authorization request, with the response validated.
+async fn request_device_grant(
+    issuer: &Url,
+    client_id: &str,
+    scopes: &[String],
+    allow_insecure: bool,
+) -> anyhow::Result<(ProviderMetadata, DeviceAuthorizationResponse)> {
+    let metadata = discover(issuer, allow_insecure).await?;
+    let endpoint = metadata
+        .device_authorization_endpoint
+        .clone()
+        .context("OIDC provider does not support device authorization")?;
+    let device = reqwest::Client::new()
+        .post(endpoint)
+        .form(&device_authorization_form(client_id, scopes))
+        .send()
+        .await
+        .context("request OIDC device authorization")?
+        .error_for_status()
+        .context("OIDC device authorization endpoint returned an error")?
+        .json::<DeviceAuthorizationResponse>()
+        .await
+        .context("decode OIDC device authorization response")?;
+    Ok((metadata, validate_device(device)?))
+}
+
+/// Rejects a device-authorization response that could not be acted on, and caps its
+/// timing. Mirrors the controller's `device_enrollment_response` checks: an empty code
+/// or a non-URL verification address would publish an unusable `awaitingAuthentication`
+/// status, and an unbounded `expires_in` overflows `Instant + Duration` in the
+/// background poll task, which would panic before it cleared the pending entry.
+fn validate_device(
+    mut device: DeviceAuthorizationResponse,
+) -> anyhow::Result<DeviceAuthorizationResponse> {
+    if device.device_code.is_empty() || device.user_code.is_empty() {
+        bail!("OIDC device authorization response has no device or user code");
+    }
+    Url::parse(&device.verification_uri).context("OIDC device verification URI is invalid")?;
+    device.verification_uri_complete = device
+        .verification_uri_complete
+        .filter(|uri| Url::parse(uri).is_ok());
+    device.expires_in = device.expires_in.min(MAX_DEVICE_LIFETIME.as_secs());
+    if device.expires_in == 0 {
+        bail!("OIDC device authorization has already expired");
+    }
+    Ok(device)
 }
 
 async fn complete_device_login(
@@ -357,6 +493,7 @@ fn poll_interval(device: &DeviceAuthorizationResponse) -> Duration {
         .interval
         .filter(|seconds| *seconds > 0)
         .map_or(oidc::DEFAULT_DEVICE_POLL_INTERVAL, Duration::from_secs)
+        .min(MAX_DEVICE_POLL_INTERVAL)
 }
 
 fn lock_pending() -> std::sync::MutexGuard<'static, BTreeMap<String, PendingDeviceLogin>> {
@@ -474,12 +611,185 @@ fn now() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+
     use url::Url;
 
     use super::{
-        DeviceAuthorizationResponse, PendingDeviceLogin, SignInRequired, authorization_url,
-        device_authorization_form, pending_from, poll_interval,
+        DeviceAuthorizationResponse, LOGIN, MAX_DEVICE_LIFETIME, MAX_DEVICE_POLL_INTERVAL,
+        PendingDeviceLogin, SignInRequired, authorization_url, device_authorization_form,
+        device_login, lock_pending, pending_from, poll_interval, validate_device,
     };
+
+    fn device(value: serde_json::Value) -> DeviceAuthorizationResponse {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn device_response_validation_rejects_unusable_grants() {
+        let valid = serde_json::json!({
+            "device_code": "device",
+            "user_code": "ABCD-EFGH",
+            "verification_uri": "https://idp.example/activate",
+            "expires_in": 600,
+        });
+        assert!(validate_device(device(valid.clone())).is_ok());
+        for (field, value) in [
+            ("device_code", serde_json::json!("")),
+            ("user_code", serde_json::json!("")),
+            ("verification_uri", serde_json::json!("not a url")),
+            ("expires_in", serde_json::json!(0)),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            assert!(
+                validate_device(device(invalid)).is_err(),
+                "{field} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn device_response_validation_bounds_timing_and_drops_bad_complete_uri() {
+        let validated = validate_device(device(serde_json::json!({
+            "device_code": "device",
+            "user_code": "CODE",
+            "verification_uri": "https://idp.example/activate",
+            "verification_uri_complete": "not a url",
+            // Large enough to overflow Instant + Duration if used as given.
+            "expires_in": u64::MAX,
+            "interval": u64::MAX,
+        })))
+        .unwrap();
+        assert_eq!(validated.expires_in, MAX_DEVICE_LIFETIME.as_secs());
+        assert!(validated.verification_uri_complete.is_none());
+        assert_eq!(poll_interval(&validated), MAX_DEVICE_POLL_INTERVAL);
+        // The user is sent to the plain verification URI, not the malformed one.
+        assert_eq!(
+            pending_from(&validated).verification_url,
+            "https://idp.example/activate"
+        );
+    }
+
+    /// Serves OIDC discovery plus a device-authorization endpoint on loopback. `delay`
+    /// holds the device-authorization response back; `requests` counts the grants asked for.
+    async fn mock_idp(delay: Duration, requests: Arc<AtomicUsize>) -> Url {
+        use axum::{Json, Router, routing::get, routing::post};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let discovery = serde_json::json!({
+            "authorization_endpoint": format!("{base}/authorize"),
+            "token_endpoint": format!("{base}/token"),
+            "device_authorization_endpoint": format!("{base}/device"),
+        });
+        let app = Router::new()
+            .route(
+                "/.well-known/openid-configuration",
+                get(move || {
+                    let discovery = discovery.clone();
+                    async move { Json(discovery) }
+                }),
+            )
+            .route(
+                "/device",
+                post(move || {
+                    let requests = requests.clone();
+                    async move {
+                        requests.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(delay).await;
+                        Json(serde_json::json!({
+                            "device_code": "device",
+                            "user_code": "ABCD-EFGH",
+                            "verification_uri": "https://idp.example/activate",
+                            "expires_in": 600,
+                            "interval": 60,
+                        }))
+                    }
+                }),
+            )
+            // Never approve: the background poll just keeps waiting.
+            .route(
+                "/token",
+                post(|| async {
+                    (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        r#"{"error":"authorization_pending"}"#,
+                    )
+                }),
+            );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        Url::parse(&base).unwrap()
+    }
+
+    // Regression test for two findings at once. Concurrent `login` calls must share ONE
+    // grant (an obvious fix for the lock problem — just dropping the lock — would start
+    // several), and a slow provider must not hold the global LOGIN lock, which every
+    // /credential call takes.
+    #[tokio::test]
+    async fn concurrent_logins_share_one_grant_without_blocking_the_global_lock() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let issuer = mock_idp(Duration::from_millis(600), requests.clone()).await;
+        let state_dir = tempfile::tempdir().unwrap();
+
+        let logins: Vec<_> = (0..4)
+            .map(|_| {
+                let issuer = issuer.clone();
+                let state_dir = state_dir.path().to_owned();
+                tokio::spawn(async move {
+                    device_login(&issuer, "client", &["openid".to_owned()], true, &state_dir).await
+                })
+            })
+            .collect();
+
+        // While the provider is still thinking, the global lock must be free.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), LOGIN.lock())
+                .await
+                .is_ok(),
+            "device_login held the global LOGIN lock across the provider round-trip"
+        );
+
+        for login in logins {
+            let status = login.await.unwrap().expect("login succeeds");
+            assert_eq!(status.status, "awaitingAuthentication");
+            assert_eq!(status.user_code.as_deref(), Some("ABCD-EFGH"));
+        }
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "concurrent logins must share a single device grant"
+        );
+        lock_pending().clear();
+    }
+
+    // A provider that never answers must fail the login rather than hold the per-account
+    // start lock, and every login queued behind it, forever.
+    #[tokio::test(start_paused = true)]
+    async fn stalled_provider_times_out_instead_of_wedging_login() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let issuer = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        tokio::spawn(async move {
+            // Accept and hold every connection without answering.
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                requests.fetch_add(1, Ordering::SeqCst);
+                held.push(socket);
+            }
+        });
+        let state_dir = tempfile::tempdir().unwrap();
+        let result = device_login(&issuer, "stalled", &[], true, state_dir.path()).await;
+        assert!(result.is_err(), "a stalled provider must fail the login");
+    }
 
     #[test]
     fn authorization_request_uses_pkce_and_configured_scopes() {

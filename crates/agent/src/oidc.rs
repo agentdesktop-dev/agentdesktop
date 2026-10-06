@@ -516,7 +516,11 @@ pub(crate) async fn poll_device_token(
     let deadline = tokio::time::Instant::now() + expires_in;
     let client = reqwest::Client::new();
     loop {
-        tokio::time::sleep(interval).await;
+        // Never sleep past the deadline. The interval is IdP-controlled and grows by
+        // DEVICE_POLL_SLOW_DOWN on every slow_down, so it can exceed what's left of
+        // expires_in; sleeping the full interval would then keep the task (and any
+        // pending login it represents) alive long after the code expired.
+        tokio::time::sleep_until((tokio::time::Instant::now() + interval).min(deadline)).await;
         let now = tokio::time::Instant::now();
         if now >= deadline {
             bail!("device authorization code expired before it was approved");
@@ -875,6 +879,28 @@ mod tests {
         classify_device_token_error, poll_device_token,
     };
     use crate::identity::{Identity, OAuthCredentials};
+
+    // The poll interval is provider-controlled and grows on every slow_down, so it can
+    // exceed what is left of expires_in. Sleeping the whole interval kept the task, and
+    // the pending login it stands for, alive long after the code had expired.
+    #[tokio::test(start_paused = true)]
+    async fn poll_device_token_does_not_sleep_past_the_deadline() {
+        let started = tokio::time::Instant::now();
+        let result = poll_device_token(
+            "http://127.0.0.1:1/token",
+            "client",
+            "device-code",
+            Duration::from_secs(3600),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(
+            started.elapsed() <= Duration::from_secs(6),
+            "slept {:?} against a 5s expires_in",
+            started.elapsed()
+        );
+    }
 
     // Regression test for the actual bug this fix targets. The pre-request deadline
     // check only runs again once a request RETURNS, so a peer that accepts the
