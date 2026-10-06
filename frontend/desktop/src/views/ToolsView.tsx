@@ -97,7 +97,7 @@ export function ToolsView({ discovery, unavailable }: ToolsViewProps) {
               <strong>No supported tools found</strong>
               <span>
                 Agent Desktop can inventory VS Code, Claude Code, Claude
-                Desktop, Codex, OpenCode, and Grok Build.
+                Desktop, Codex, OpenCode, Grok Build, and Grok Bot.
               </span>
             </div>
           </div>
