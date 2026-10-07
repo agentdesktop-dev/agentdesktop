@@ -22,6 +22,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
+    env:
+      AGENTDESKTOP_VERSION: ${{ inputs.version }}
     strategy:
       fail-fast: false
       matrix:

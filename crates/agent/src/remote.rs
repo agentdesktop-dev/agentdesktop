@@ -37,6 +37,7 @@ use agentdesktop_proto::fleet::{
 
 use crate::{
     enrollment::EnrollmentState,
+    gateway_oidc,
     identity::{self, Identity},
     oidc,
     reconcile::Reconciler,
@@ -46,6 +47,10 @@ use crate::{
 static OAUTH_REFRESH_MUTEX: Mutex<()> = Mutex::const_new(());
 const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+/// Bound on the controller connection and call when fetching an LLM gateway
+/// credential, so a controller that accepts and then stalls cannot hold the
+/// caller (or a detached fetch) open indefinitely.
+const CREDENTIAL_CALL_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct LogoutRequest {
     pub completion: oneshot::Sender<Result<(), String>>,
@@ -215,6 +220,26 @@ async fn logout_between_sessions(
             controller_status.reset().await;
             complete_unenrolled_logout(request, enrollment).await;
         }
+        // An identity that cannot be read cannot be used either, so signing out
+        // only has to remove it. Refusing would leave the device stuck with it.
+        Err(error) if identity::is_unreadable(&error) => {
+            warn!(
+                identity_path = %identity_path.display(),
+                error = %format!("{error:#}"),
+                "removing unreadable device identity on sign-out"
+            );
+            match identity::discard(identity_path) {
+                Ok(()) => {
+                    controller_status.reset().await;
+                    complete_unenrolled_logout(request, enrollment).await;
+                }
+                Err(error) => {
+                    let _ = request.completion.send(Err(format!(
+                        "remove local organization identity: {error:#}"
+                    )));
+                }
+            }
+        }
         Err(error) => {
             let _ = request
                 .completion
@@ -237,7 +262,21 @@ async fn run_session(
 ) -> anyhow::Result<Infallible> {
     let identity_path = state_dir.join("identity.json");
     loop {
-        let mut identity = match identity::load(&identity_path)? {
+        let stored = match identity::load(&identity_path) {
+            Ok(stored) => stored,
+            Err(error) if identity::is_unreadable(&error) => {
+                warn!(
+                    identity_path = %identity_path.display(),
+                    error = %format!("{error:#}"),
+                    "stored device identity is unreadable, for example after the app's code signature changed; removing it and restarting enrollment"
+                );
+                identity::discard(&identity_path)?;
+                enrollment.set("starting").await;
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        let mut identity = match stored {
             Some(identity) => {
                 enrollment.set("enrolled").await;
                 identity
@@ -526,15 +565,28 @@ pub async fn llm_gateway_credential(
         identity::load(&state_dir.join("identity.json"))?.context("device is not enrolled")?;
     let identity_path = state_dir.join("identity.json");
     refresh_oauth_if_needed(&mut identity, &identity_path).await?;
-    let mut client = client(controller, Some(&identity)).await?;
-    let mut request = Request::new(LlmGatewayCredentialRequest {
-        client_id: client_id.to_owned(),
-    });
-    authenticate_request(&identity, &mut request)?;
-    let response = client
-        .get_llm_gateway_credential(request)
+    // The refresh above is not cut off (its result is saved); the controller
+    // connection and call are bounded together.
+    let call = async {
+        let mut client = client(controller, Some(&identity)).await?;
+        let mut request = Request::new(LlmGatewayCredentialRequest {
+            client_id: client_id.to_owned(),
+        });
+        authenticate_request(&identity, &mut request)?;
+        client
+            .get_llm_gateway_credential(request)
+            .await
+            .context("request LLM gateway credential")
+    };
+    let response = tokio::time::timeout(CREDENTIAL_CALL_TIMEOUT, call)
         .await
-        .context("request LLM gateway credential")?
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "controller at {} did not answer within {}s",
+                controller.address,
+                CREDENTIAL_CALL_TIMEOUT.as_secs()
+            )
+        })??
         .into_inner();
     Ok(agentdesktop_core::model::LlmGatewayCredential {
         credential: response.credential,
@@ -686,6 +738,10 @@ fn apply_daemon_config(
         secure_fs::ensure_private_dir(state_dir)?;
         let path = state_dir.join("remote-config.yaml");
         secure_fs::atomic_write(&path, &config.yaml, 0o600)?;
+        // Managed gateway policy that asks for device authorization has to start its
+        // sign-in here: the startup path only sees the local file. Idempotent, so a
+        // repeated or unchanged update returns the pending grant instead of a new one.
+        gateway_oidc::start_device_login_if_configured(&daemon_config, state_dir);
         info!(
             revision = config.revision,
             path = %path.display(),
@@ -885,11 +941,25 @@ async fn refresh_oauth_if_needed(
     let oauth = &identity.oauth;
     if oauth.expires_at_unix_seconds <= unix_time_seconds().saturating_add(120) {
         let _guard = OAUTH_REFRESH_MUTEX.lock().await;
-        if let Some(stored) = identity::load(identity_path)?
-            && stored.oauth.expires_at_unix_seconds > unix_time_seconds().saturating_add(120)
-        {
-            *identity = stored;
-            return Ok(());
+        match identity::load(identity_path) {
+            Ok(Some(stored))
+                if stored.oauth.expires_at_unix_seconds
+                    > unix_time_seconds().saturating_add(120) =>
+            {
+                *identity = stored;
+                return Ok(());
+            }
+            Ok(_) => {}
+            // The identity in memory still works. Refresh it, and the save below
+            // replaces the stored copy that can no longer be read.
+            Err(error) if identity::is_unreadable(&error) => {
+                warn!(
+                    device_id = %identity.device_id,
+                    error = %format!("{error:#}"),
+                    "stored device identity is unreadable; refreshing from the in-memory copy"
+                );
+            }
+            Err(error) => return Err(error),
         }
         oidc::refresh(identity).await?;
         identity::save(identity_path, identity).context("persist rotated OIDC refresh token")?;

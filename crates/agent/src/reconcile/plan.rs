@@ -14,6 +14,7 @@ use std::{
 pub struct ReconcilePlan {
     observed: RefCell<BTreeMap<PathBuf, Option<Vec<u8>>>>,
     operations: RefCell<Vec<FileChange>>,
+    private_dirs: PrivateDirs,
     report: DryRunReport,
 }
 
@@ -22,6 +23,12 @@ struct FileChange {
     contents: Option<Vec<u8>>,
     permissions: u32,
 }
+
+/// A directory to create owner-only before the file changes are applied.
+/// Used for a directory that will hold a secret-bearing file and does not
+/// exist yet; an existing directory is left as it is.
+#[derive(Default)]
+struct PrivateDirs(RefCell<Vec<PathBuf>>);
 
 impl ReconcilePlan {
     pub fn render(&self) -> String {
@@ -61,6 +68,11 @@ impl ReconcilePlan {
                 path.display()
             );
         }
+        for dir in self.private_dirs.0.into_inner() {
+            if !dir.exists() {
+                crate::secure_fs::ensure_private_dir(&dir)?;
+            }
+        }
         for change in self.operations.into_inner() {
             match change.contents {
                 Some(contents) => {
@@ -93,6 +105,10 @@ impl ReconcilePlan {
             }
             observations.insert(path, expected);
         }
+        self.private_dirs
+            .0
+            .get_mut()
+            .extend(other.private_dirs.0.into_inner());
         let operations = self.operations.get_mut();
         for change in other.operations.into_inner() {
             anyhow::ensure!(
@@ -142,6 +158,11 @@ impl ReconcilePlan {
             permissions,
         });
         Ok(())
+    }
+
+    /// Create `dir` owner-only at apply time if it does not exist by then.
+    pub(crate) fn ensure_private_dir(&self, dir: &Path) {
+        self.private_dirs.0.borrow_mut().push(dir.to_owned());
     }
 
     pub(crate) fn remove_file(&self, path: &Path) -> io::Result<()> {

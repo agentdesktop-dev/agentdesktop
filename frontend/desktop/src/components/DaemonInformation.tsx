@@ -89,6 +89,14 @@ export function DaemonInformation({
       ["Heartbeat interval", info.controller.heartbeatInterval],
     );
   }
+  if (info?.llmProxy) {
+    fields.push([
+      "Local LLM proxy",
+      info.llmProxy.bound
+        ? `${info.llmProxy.listen} (client ${info.llmProxy.clientId})`
+        : `${info.llmProxy.listen} (not bound${info.llmProxy.error ? `: ${info.llmProxy.error}` : ""})`,
+    ]);
+  }
 
   return (
     <section className="daemon-information" aria-labelledby={headingId}>

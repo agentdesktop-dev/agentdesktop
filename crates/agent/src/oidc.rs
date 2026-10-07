@@ -1,7 +1,10 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use agentdesktop_core::config::ControllerConnectionConfig;
-use agentdesktop_proto::fleet::{BeginEnrollmentRequest, CompleteEnrollmentRequest};
+use agentdesktop_proto::fleet::{
+    BeginEnrollmentRequest, BeginEnrollmentResponse, CompleteEnrollmentRequest,
+    fleet_agent_client::FleetAgentClient,
+};
 use anyhow::{Context, bail};
 use axum::{
     Router,
@@ -12,10 +15,13 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::Rng;
-use rcgen::{CertificateParams, ExtendedKeyUsagePurpose, KeyPair, KeyUsagePurpose};
+use rcgen::{
+    CertificateParams, CertificateSigningRequest, ExtendedKeyUsagePurpose, KeyPair, KeyUsagePurpose,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, oneshot};
+use tonic::transport::Channel;
 use url::Url;
 
 use crate::{
@@ -25,9 +31,14 @@ use crate::{
 };
 
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// RFC 8628 section 3.2: clients poll every 5 seconds unless told otherwise.
+pub(crate) const DEFAULT_DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// RFC 8628 section 3.5: `slow_down` increases the interval by 5 seconds.
+const DEVICE_POLL_SLOW_DOWN: Duration = Duration::from_secs(5);
+const DEVICE_CODE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_code";
 const BRAND_MARK_SVG: &str = include_str!("../../../images/mark.svg");
 
-fn page(title: &str, content: &str) -> String {
+pub(crate) fn page(title: &str, content: &str) -> String {
     format!(
         r##"<!doctype html>
 <html lang="en">
@@ -77,7 +88,10 @@ fn callback_page(title: &str, message: &str) -> String {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum AuthorizationPage {
-    Identity { subscription_available: bool },
+    Identity {
+        subscription_available: bool,
+        github_available: bool,
+    },
     Subscription,
 }
 
@@ -86,13 +100,19 @@ impl AuthorizationPage {
         match self {
             Self::Identity {
                 subscription_available,
+                github_available,
             } => page(
                 "Connect Agentdesktop",
                 &format!(
                     r#"<p>Agentdesktop needs your identity before it can issue credentials to configured agents.</p>
-{}
+{}{}
 <div class="actions"><a class="button" href="/continue">Continue to sign in</a></div>"#,
-                    checklist(false, subscription_available, SubscriptionState::Pending)
+                    checklist(false, subscription_available, SubscriptionState::Pending),
+                    if github_available {
+                        "<div class=\"steps\"><div class=\"step\"><span class=\"check\" aria-hidden=\"true\"></span><div><strong>GitHub Copilot</strong><span>Connect your GitHub account after organization sign-in.</span></div></div></div>"
+                    } else {
+                        ""
+                    }
                 ),
             ),
             Self::Subscription => page(
@@ -110,7 +130,25 @@ impl AuthorizationPage {
     fn success_html(self) -> String {
         match self {
             Self::Identity {
+                github_available: true,
+                subscription_available: false,
+            } => page(
+                "Connect GitHub",
+                r#"<p>Organization sign-in is complete. Preparing GitHub authorization…</p>
+<script>
+async function advance() {
+  try {
+    const response = await fetch('/flow-ready', { cache: 'no-store' });
+    if (response.ok) { location.replace('/'); return; }
+  } catch (_) {}
+  setTimeout(advance, 400);
+}
+setTimeout(advance, 400);
+</script>"#,
+            ),
+            Self::Identity {
                 subscription_available: true,
+                ..
             } => page(
                 "Connect Agentdesktop",
                 &format!(
@@ -131,6 +169,7 @@ setTimeout(advance, 400);
             ),
             Self::Identity {
                 subscription_available: false,
+                ..
             } => page(
                 "Agentdesktop connected",
                 &format!(
@@ -246,19 +285,17 @@ pub async fn enroll(
     enrollment: &EnrollmentState,
     callback_listen: Option<SocketAddr>,
 ) -> anyhow::Result<Identity> {
+    if controller.device_authorization {
+        return enroll_with_device_authorization(controller, enrollment).await;
+    }
     let (verifier, challenge) = pkce();
     let mut client = remote::client(controller, None).await?;
-    let device_key = KeyPair::generate().context("generate device TLS private key")?;
-    let mut certificate_params = CertificateParams::new(Vec::<String>::new())?;
-    certificate_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-    certificate_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
-    let csr = certificate_params
-        .serialize_request(&device_key)
-        .context("create device certificate signing request")?;
-    let begin = client
+    let (device_key, csr) = device_csr()?;
+    let mut begin = client
         .begin_enrollment(BeginEnrollmentRequest {
             hostname: remote::hostname(),
             code_challenge: challenge,
+            device_authorization: false,
         })
         .await
         .context("begin OIDC enrollment")?
@@ -271,7 +308,7 @@ pub async fn enroll(
     let authorization_code = wait_for_authorization_code(
         &begin.authorization_url,
         &redirect_uri,
-        begin.state,
+        std::mem::take(&mut begin.state),
         callback_listen,
     )
     .await?;
@@ -285,6 +322,83 @@ pub async fn enroll(
         &verifier,
     )
     .await?;
+    complete_enrollment(&mut client, begin, &device_key, &csr, tokens).await
+}
+
+/// Enrolls with the OAuth 2.0 Device Authorization Grant (RFC 8628).
+///
+/// The controller starts the device authorization with the identity provider
+/// and returns a user code. The daemon publishes the verification URL and code
+/// through the enrollment status and logs, then polls the token endpoint until
+/// the user approves the request from another device.
+async fn enroll_with_device_authorization(
+    controller: &ControllerConnectionConfig,
+    enrollment: &EnrollmentState,
+) -> anyhow::Result<Identity> {
+    let mut client = remote::client(controller, None).await?;
+    let (device_key, csr) = device_csr()?;
+    let begin = client
+        .begin_enrollment(BeginEnrollmentRequest {
+            hostname: remote::hostname(),
+            code_challenge: String::new(),
+            device_authorization: true,
+        })
+        .await
+        .context("begin OIDC device authorization enrollment")?
+        .into_inner();
+    if begin.device_code.is_empty() || begin.user_code.is_empty() {
+        bail!("controller does not support device authorization enrollment");
+    }
+
+    let verification_url = if begin.verification_uri_complete.is_empty() {
+        begin.verification_uri.clone()
+    } else {
+        begin.verification_uri_complete.clone()
+    };
+    tracing::info!(
+        verification_uri = %begin.verification_uri,
+        verification_uri_complete = %begin.verification_uri_complete,
+        user_code = %begin.user_code,
+        "approve device enrollment: open the verification URL on any device and confirm the code"
+    );
+    enrollment
+        .awaiting_device_authorization(verification_url, begin.user_code.clone())
+        .await;
+
+    let interval = match begin.interval_seconds {
+        0 => DEFAULT_DEVICE_POLL_INTERVAL,
+        seconds => Duration::from_secs(seconds),
+    };
+    let tokens = poll_device_token(
+        &begin.token_endpoint,
+        &begin.client_id,
+        &begin.device_code,
+        interval,
+        Duration::from_secs(begin.expires_in_seconds),
+    )
+    .await?;
+    enrollment.set("enrolling").await;
+    complete_enrollment(&mut client, begin, &device_key, &csr, tokens).await
+}
+
+fn device_csr() -> anyhow::Result<(KeyPair, CertificateSigningRequest)> {
+    let device_key = KeyPair::generate().context("generate device TLS private key")?;
+    let mut certificate_params = CertificateParams::new(Vec::<String>::new())?;
+    certificate_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    certificate_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    let csr = certificate_params
+        .serialize_request(&device_key)
+        .context("create device certificate signing request")?;
+    Ok((device_key, csr))
+}
+
+async fn complete_enrollment(
+    client: &mut FleetAgentClient<Channel>,
+    begin: BeginEnrollmentResponse,
+    device_key: &KeyPair,
+    csr: &CertificateSigningRequest,
+    tokens: TokenResponse,
+) -> anyhow::Result<Identity> {
     let id_token = tokens
         .id_token
         .context("OIDC token response did not contain an ID token")?;
@@ -362,6 +476,96 @@ pub(crate) async fn exchange_authorization_code(
     Ok(response)
 }
 
+#[derive(Deserialize)]
+struct TokenErrorResponse {
+    error: String,
+    error_description: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DevicePoll {
+    Pending,
+    SlowDown,
+    Failed(String),
+}
+
+/// Classifies an RFC 8628 section 3.5 token endpoint error response.
+fn classify_device_token_error(body: &[u8]) -> DevicePoll {
+    let Ok(error) = serde_json::from_slice::<TokenErrorResponse>(body) else {
+        return DevicePoll::Failed("OIDC token endpoint returned an unreadable error".to_owned());
+    };
+    match error.error.as_str() {
+        "authorization_pending" => DevicePoll::Pending,
+        "slow_down" => DevicePoll::SlowDown,
+        "access_denied" => DevicePoll::Failed("device authorization was denied".to_owned()),
+        "expired_token" => DevicePoll::Failed("device authorization code expired".to_owned()),
+        other => DevicePoll::Failed(match error.error_description {
+            Some(description) => format!("OIDC token endpoint returned {other}: {description}"),
+            None => format!("OIDC token endpoint returned {other}"),
+        }),
+    }
+}
+
+pub(crate) async fn poll_device_token(
+    token_endpoint: &str,
+    client_id: &str,
+    device_code: &str,
+    mut interval: Duration,
+    expires_in: Duration,
+) -> anyhow::Result<TokenResponse> {
+    let deadline = tokio::time::Instant::now() + expires_in;
+    let client = reqwest::Client::new();
+    loop {
+        // Never sleep past the deadline. The interval is IdP-controlled and grows by
+        // DEVICE_POLL_SLOW_DOWN on every slow_down, so it can exceed what's left of
+        // expires_in; sleeping the full interval would then keep the task (and any
+        // pending login it represents) alive long after the code expired.
+        tokio::time::sleep_until((tokio::time::Instant::now() + interval).min(deadline)).await;
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            bail!("device authorization code expired before it was approved");
+        }
+        // Bound the request (connect through response body) by whatever's left of
+        // expires_in, not just the pre-request deadline check above. Without this, a
+        // token endpoint that accepts the connection and then stalls — never sending a
+        // response at all — leaves the request outstanding indefinitely: the deadline
+        // check only runs again once `send()` (or the subsequent `.json()`/`.bytes()`
+        // body read) actually returns, which a stalled peer never does. Polling could
+        // then hang past the advertised expires_in forever instead of failing at it.
+        let remaining = deadline - now;
+        let response = client
+            .post(token_endpoint)
+            .form(&[
+                ("grant_type", DEVICE_CODE_GRANT_TYPE),
+                ("device_code", device_code),
+                ("client_id", client_id),
+            ])
+            .timeout(remaining)
+            .send()
+            .await
+            .context("poll OIDC token endpoint for device authorization")?;
+        if response.status().is_success() {
+            let response = response
+                .json::<TokenResponse>()
+                .await
+                .context("decode OIDC token response")?;
+            if !response.token_type.eq_ignore_ascii_case("Bearer") {
+                bail!("OIDC token endpoint returned unsupported token type");
+            }
+            return Ok(response);
+        }
+        let body = response
+            .bytes()
+            .await
+            .context("read OIDC token endpoint error")?;
+        match classify_device_token_error(&body) {
+            DevicePoll::Pending => {}
+            DevicePoll::SlowDown => interval += DEVICE_POLL_SLOW_DOWN,
+            DevicePoll::Failed(message) => bail!(message),
+        }
+    }
+}
+
 pub async fn refresh(identity: &mut Identity) -> anyhow::Result<()> {
     let endpoint = &identity.oauth_token_endpoint;
     let client_id = &identity.oauth_client_id;
@@ -429,6 +633,7 @@ pub(crate) async fn wait_for_authorization_code(
         callback_listen,
         AuthorizationPage::Identity {
             subscription_available: false,
+            github_available: false,
         },
         true,
     )
@@ -485,7 +690,7 @@ pub(crate) async fn wait_for_authorization_code_with_page(
             tracing::warn!(%error, "could not open the browser automatically");
         }
     } else {
-        tracing::info!(%authorization_url, %prompt_url, "continuing in existing Agentdesktop authorization page");
+        tracing::info!(%prompt_url, "continuing in existing Agentdesktop authorization page");
     }
 
     let authorization_code = tokio::time::timeout(CALLBACK_TIMEOUT, result_receiver)
@@ -576,7 +781,7 @@ async fn continued_flow_ready() -> Response {
     response
 }
 
-async fn bind_callback(
+pub(crate) async fn bind_callback(
     redirect_uri: &Url,
     callback_listen: Option<SocketAddr>,
 ) -> anyhow::Result<tokio::net::TcpListener> {
@@ -667,13 +872,130 @@ pub(crate) fn pkce() -> (String, String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthorizationPage, TokenResponse, apply_refreshed_tokens};
+    use std::time::{Duration, Instant};
+
+    use super::{
+        AuthorizationPage, DevicePoll, TokenResponse, apply_refreshed_tokens,
+        classify_device_token_error, poll_device_token,
+    };
     use crate::identity::{Identity, OAuthCredentials};
+
+    // The poll interval is provider-controlled and grows on every slow_down, so it can
+    // exceed what is left of expires_in. Sleeping the whole interval kept the task, and
+    // the pending login it stands for, alive long after the code had expired.
+    #[tokio::test(start_paused = true)]
+    async fn poll_device_token_does_not_sleep_past_the_deadline() {
+        let started = tokio::time::Instant::now();
+        let result = poll_device_token(
+            "http://127.0.0.1:1/token",
+            "client",
+            "device-code",
+            Duration::from_secs(3600),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(
+            started.elapsed() <= Duration::from_secs(6),
+            "slept {:?} against a 5s expires_in",
+            started.elapsed()
+        );
+    }
+
+    // Regression test for the actual bug this fix targets. The pre-request deadline
+    // check only runs again once a request RETURNS, so a peer that accepts the
+    // connection and then never answers at all previously left polling stuck past
+    // expires_in indefinitely — the per-request .timeout() is what actually bounds it.
+    //
+    // A real elapsed-time wait, not tokio::time::pause: poll_device_token's HTTP calls
+    // go through a real reqwest::Client over real sockets, which doesn't observe
+    // tokio's virtual clock.
+    #[tokio::test]
+    async fn poll_device_token_times_out_against_a_stalling_peer() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stalling listener");
+        let addr = listener.local_addr().expect("stalling listener local addr");
+        let server = tokio::spawn(async move {
+            // Accept and hold every connection open, writing nothing back, for as
+            // long as the test might run — simulating a token endpoint that accepts
+            // the connection and then never answers.
+            loop {
+                if let Ok((socket, _)) = listener.accept().await {
+                    tokio::spawn(async move {
+                        let _socket = socket;
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                    });
+                }
+            }
+        });
+
+        let token_endpoint = format!("http://{addr}/token");
+        let expires_in = Duration::from_secs(2);
+        let started = Instant::now();
+        let result = poll_device_token(
+            &token_endpoint,
+            "client",
+            "device-code",
+            Duration::from_millis(50),
+            expires_in,
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        server.abort();
+        assert!(
+            result.is_err(),
+            "a stalling peer must fail the poll, not hang forever"
+        );
+        // Generous slack over the 2s expires_in: proves the request itself was bounded
+        // rather than left outstanding — a regression here would hang for the full 30s
+        // the mock connection holds itself open for (or until the test harness's own
+        // timeout), not fail anywhere near expires_in.
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "poll_device_token took {elapsed:?} against a 2s expires_in — the per-request \
+             timeout did not bound the stalled connection"
+        );
+    }
+
+    #[test]
+    fn classifies_device_token_errors() {
+        assert_eq!(
+            classify_device_token_error(br#"{"error":"authorization_pending"}"#),
+            DevicePoll::Pending
+        );
+        assert_eq!(
+            classify_device_token_error(br#"{"error":"slow_down"}"#),
+            DevicePoll::SlowDown
+        );
+        assert_eq!(
+            classify_device_token_error(br#"{"error":"expired_token"}"#),
+            DevicePoll::Failed("device authorization code expired".to_owned())
+        );
+        assert_eq!(
+            classify_device_token_error(br#"{"error":"access_denied"}"#),
+            DevicePoll::Failed("device authorization was denied".to_owned())
+        );
+        assert_eq!(
+            classify_device_token_error(
+                br#"{"error":"invalid_client","error_description":"grant not allowed"}"#
+            ),
+            DevicePoll::Failed(
+                "OIDC token endpoint returned invalid_client: grant not allowed".to_owned()
+            )
+        );
+        assert!(matches!(
+            classify_device_token_error(b"<html>bad gateway</html>"),
+            DevicePoll::Failed(_)
+        ));
+    }
 
     #[test]
     fn identity_page_only_mentions_subscription_when_configured() {
         let without_subscription = AuthorizationPage::Identity {
             subscription_available: false,
+            github_available: false,
         }
         .html();
         assert!(without_subscription.contains("Organization sign-in"));
@@ -681,11 +1003,20 @@ mod tests {
 
         let with_subscription = AuthorizationPage::Identity {
             subscription_available: true,
+            github_available: false,
         }
         .html();
         assert!(with_subscription.contains("Organization sign-in"));
         assert!(with_subscription.contains("Model provider subscription"));
         assert!(with_subscription.contains("Optional"));
+
+        let with_github = AuthorizationPage::Identity {
+            subscription_available: false,
+            github_available: true,
+        };
+        assert!(with_github.html().contains("GitHub Copilot"));
+        assert!(!without_subscription.contains("GitHub Copilot"));
+        assert!(with_github.success_html().contains("location.replace('/')"));
     }
 
     #[test]
@@ -708,6 +1039,7 @@ mod tests {
     fn identity_completion_advances_same_tab_and_skip_preserves_checklist() {
         let identity_complete = AuthorizationPage::Identity {
             subscription_available: true,
+            github_available: false,
         }
         .success_html();
         assert_eq!(
