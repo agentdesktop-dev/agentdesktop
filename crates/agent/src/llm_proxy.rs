@@ -145,7 +145,7 @@ impl CredentialCache {
     }
 
     /// A cached credential for the key and device, if one is still valid.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     fn get(&self, key: &str, device_id: &str) -> Option<String> {
         self.lookup(key, device_id)
             .map(|(credential, _)| credential)
