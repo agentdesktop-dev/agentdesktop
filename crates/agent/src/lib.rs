@@ -6,6 +6,7 @@ pub mod enrollment;
 pub mod gateway_oidc;
 mod github_oauth;
 pub mod identity;
+mod inventory_watch;
 mod llm_proxy;
 pub mod oidc;
 pub mod provider;

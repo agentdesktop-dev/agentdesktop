@@ -66,6 +66,8 @@ dependencies = [
  "keyring-core",
  "libc",
  "memchr",
+ "notify",
+ "notify-debouncer-full",
  "open",
  "plist",
  "rand",
