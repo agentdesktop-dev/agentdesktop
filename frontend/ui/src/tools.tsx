@@ -56,6 +56,7 @@ const toolIcons: Record<string, string> = {
   opencode: openCodeIcon,
   pi: piIcon,
   vscode: copilotIcon,
+  copilot: copilotIcon,
 };
 
 export function friendlyTool(kind: string) {
@@ -71,6 +72,7 @@ export function friendlyTool(kind: string) {
     pi: "Pi",
     vscode: "VS Code",
     cursor: "Cursor",
+    copilot: "GitHub Copilot CLI",
   };
   return names[kind.toLowerCase()] ?? kind;
 }
@@ -126,7 +128,7 @@ export function ModelRuntimeInventory({
 
 export function ToolIcon({ kind }: { kind: string }) {
   const icon = toolIcons[kind.toLowerCase()];
-  const monochrome = ["opencode", "vscode", "cursor"].includes(
+  const monochrome = ["opencode", "vscode", "cursor", "copilot"].includes(
     kind.toLowerCase(),
   );
   return icon ? (

@@ -3,7 +3,9 @@ use sqlx::{AnyPool, any::AnyPoolOptions};
 use std::{collections::BTreeMap, path::PathBuf};
 
 use agentdesktop_core::model::{LocalModel, McpServer, ModelRuntime, Skill};
-use agentdesktop_proto::fleet::{ConfigStatus, Hello, Inventory, TelemetryEvent, telemetry_event};
+use agentdesktop_proto::fleet::{
+    ConfigStatus, Hello, Inventory, ProgramState, TelemetryEvent, telemetry_event,
+};
 use serde::Serialize;
 
 #[derive(Clone)]
@@ -116,6 +118,82 @@ pub struct DeviceDetail {
     pub discoveries: Vec<DeviceDiscovery>,
     pub model_runtimes: Vec<ModelRuntime>,
     pub recent_events: Vec<TelemetryEventRecord>,
+    /// Per-program configuration status, in the order the agent reported it.
+    pub programs: Vec<ProgramStatusRecord>,
+    /// `None` when this device has no configuration status at all; `Some(_)`
+    /// once one has been reported, reflecting the reporting agent's
+    /// `ConfigStatus.programs_reported`.
+    pub programs_reported: Option<bool>,
+}
+
+/// Bounds on what an agent reports per program, as for telemetry fields.
+pub(crate) fn validate_program_status(status: &ConfigStatus) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        status.programs.len() <= 32,
+        "too many programs in configuration status"
+    );
+    let mut seen = std::collections::BTreeSet::new();
+    for program in &status.programs {
+        anyhow::ensure!(
+            !program.program.is_empty()
+                && program.program.len() <= 64
+                && program
+                    .program
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'),
+            "invalid program in configuration status"
+        );
+        anyhow::ensure!(
+            seen.insert(program.program.as_str()),
+            "duplicate program in configuration status"
+        );
+        anyhow::ensure!(
+            program.detail.len() <= 2048,
+            "program detail too long in configuration status"
+        );
+    }
+    Ok(())
+}
+
+/// The stored name of a program state; values this controller does not know
+/// are `unspecified`.
+fn program_state_name(state: i64) -> &'static str {
+    match i32::try_from(state)
+        .ok()
+        .and_then(|state| ProgramState::try_from(state).ok())
+    {
+        Some(ProgramState::Applied) => "applied",
+        Some(ProgramState::Unchanged) => "unchanged",
+        Some(ProgramState::Removed) => "removed",
+        Some(ProgramState::Conflict) => "conflict",
+        Some(ProgramState::Inactive) => "inactive",
+        Some(ProgramState::Blocked) => "blocked",
+        Some(ProgramState::Failed) => "failed",
+        Some(ProgramState::Unspecified) | None => "unspecified",
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct ProgramStatusRow {
+    program: String,
+    state: i64,
+    detail: String,
+    revision: i64,
+    updated_at: i64,
+}
+
+/// One managed program's stored configuration status. `revision` is the
+/// controller revision the report answered; it does not change across hot
+/// reloads of the same revision.
+#[derive(Clone, Debug, Serialize)]
+pub struct ProgramStatusRecord {
+    pub program: String,
+    /// `applied`, `unchanged`, `removed`, `conflict`, `inactive`, `blocked`,
+    /// `failed`, or `unspecified` for a state this controller does not know.
+    pub state: String,
+    pub detail: String,
+    pub revision: i64,
+    pub updated_at: i64,
 }
 
 #[derive(sqlx::FromRow)]
@@ -316,11 +394,38 @@ impl Database {
             .map(|discovery: &DeviceDiscovery| discovery.kind.clone())
             .collect();
         let recent_events = self.recent_telemetry(device_id, 50).await?;
+        let programs_reported: Option<i64> = sqlx::query_scalar(
+            "SELECT programs_reported FROM device_config_status WHERE device_id = $1",
+        )
+        .bind(device_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("load configuration status reporting")?;
+        let rows: Vec<ProgramStatusRow> = sqlx::query_as(
+            "SELECT program, state, detail, revision, updated_at FROM device_program_status
+             WHERE device_id = $1 ORDER BY position ASC",
+        )
+        .bind(device_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("load program configuration status")?;
+        let programs = rows
+            .into_iter()
+            .map(|row| ProgramStatusRecord {
+                program: row.program,
+                state: program_state_name(row.state).to_owned(),
+                detail: row.detail,
+                revision: row.revision,
+                updated_at: row.updated_at,
+            })
+            .collect();
         Ok(Some(DeviceDetail {
             device,
             discoveries,
             model_runtimes,
             recent_events,
+            programs,
+            programs_reported: programs_reported.map(|reported| reported != 0),
         }))
     }
 
@@ -440,7 +545,9 @@ impl Database {
         Ok(())
     }
 
-    pub async fn update_config_status(
+    /// Stores only the device-wide status (revision, state, error) and keeps
+    /// the program rows and `programs_reported` of the last accepted report.
+    pub async fn update_device_config_state(
         &self,
         device_id: &str,
         status: &ConfigStatus,
@@ -462,6 +569,60 @@ impl Database {
         .bind(unix_time_seconds())
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    pub async fn update_config_status(
+        &self,
+        device_id: &str,
+        status: &ConfigStatus,
+    ) -> anyhow::Result<()> {
+        validate_program_status(status)?;
+        let now = unix_time_seconds();
+        let revision = i64::try_from(status.revision).unwrap_or(i64::MAX);
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO device_config_status
+                (device_id, revision, state, error, updated_at, programs_reported)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (device_id) DO UPDATE SET
+                revision = excluded.revision,
+                state = excluded.state,
+                error = excluded.error,
+                updated_at = excluded.updated_at,
+                programs_reported = excluded.programs_reported",
+        )
+        .bind(device_id)
+        .bind(revision)
+        .bind(i64::from(status.state))
+        .bind(&status.error)
+        .bind(now)
+        .bind(i64::from(status.programs_reported))
+        .execute(&mut *transaction)
+        .await?;
+        // The report replaces the previous one: a program missing from it is
+        // gone from the table.
+        sqlx::query("DELETE FROM device_program_status WHERE device_id = $1")
+            .bind(device_id)
+            .execute(&mut *transaction)
+            .await?;
+        for (position, program) in status.programs.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO device_program_status
+                    (device_id, program, position, revision, state, detail, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            )
+            .bind(device_id)
+            .bind(&program.program)
+            .bind(i64::try_from(position).unwrap_or(i64::MAX))
+            .bind(revision)
+            .bind(i64::from(program.state))
+            .bind(&program.detail)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -570,8 +731,8 @@ mod tests {
     use std::{collections::BTreeMap, path::PathBuf};
 
     use agentdesktop_proto::fleet::{
-        Discovery, Inventory, LocalModel, McpServer, ModelRuntime, Skill, TelemetryEvent,
-        ToolUseEvent, telemetry_event,
+        ConfigState, ConfigStatus, Discovery, Inventory, LocalModel, McpServer, ModelRuntime,
+        ProgramState, ProgramStatus, Skill, TelemetryEvent, ToolUseEvent, telemetry_event,
     };
 
     use super::Database;
@@ -671,6 +832,269 @@ mod tests {
             .await
             .expect("load device principal");
         assert_eq!(principal.idp_claims.unwrap()["email"], "john@example.com");
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    // --- Per-program configuration status -----------------------------------
+
+    async fn test_database(name: &str) -> (Database, PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "agentdesktop-program-status-{name}-{}-{}.db",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let database = Database::connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .await
+            .expect("connect test database");
+        database
+            .enroll_device("device", "host", "issuer", "subject", None)
+            .await
+            .expect("enroll device");
+        (database, path)
+    }
+
+    fn program_status(program: &str, state: ProgramState, detail: &str) -> ProgramStatus {
+        ProgramStatus {
+            program: program.to_owned(),
+            state: state.into(),
+            detail: detail.to_owned(),
+        }
+    }
+
+    fn config_status(programs: Vec<ProgramStatus>, programs_reported: bool) -> ConfigStatus {
+        ConfigStatus {
+            revision: 1,
+            state: ConfigState::Applied.into(),
+            error: String::new(),
+            programs,
+            programs_reported,
+        }
+    }
+
+    #[tokio::test]
+    async fn program_status_rows_are_stored_replaced_and_ordered_by_position() {
+        let (database, path) = test_database("stores-and-replaces").await;
+
+        database
+            .update_config_status(
+                "device",
+                &config_status(
+                    vec![
+                        program_status(
+                            "vscode",
+                            ProgramState::Conflict,
+                            "conflict at settings.json",
+                        ),
+                        program_status("claude-code", ProgramState::Applied, ""),
+                    ],
+                    true,
+                ),
+            )
+            .await
+            .expect("store the first report");
+        let device = database
+            .get_device("device")
+            .await
+            .expect("load device")
+            .expect("device exists");
+        assert_eq!(
+            device
+                .programs
+                .iter()
+                .map(|program| program.program.as_str())
+                .collect::<Vec<_>>(),
+            vec!["vscode", "claude-code"],
+            "rows come back ordered by position, the order they were reported in"
+        );
+
+        // A program missing from the next report is deleted, not left stale.
+        database
+            .update_config_status(
+                "device",
+                &config_status(
+                    vec![program_status("claude-code", ProgramState::Unchanged, "")],
+                    true,
+                ),
+            )
+            .await
+            .expect("store the second report");
+        let device = database
+            .get_device("device")
+            .await
+            .expect("load device")
+            .expect("device exists");
+        assert_eq!(
+            device
+                .programs
+                .iter()
+                .map(|program| program.program.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude-code"],
+            "vscode was replaced away, not appended to"
+        );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn programs_reported_is_none_without_a_status_and_the_stored_flag_once_one_exists() {
+        let (database, path) = test_database("programs-reported").await;
+
+        let device = database
+            .get_device("device")
+            .await
+            .expect("load device")
+            .expect("device exists");
+        assert_eq!(
+            device.programs_reported, None,
+            "no configuration status has been reported yet"
+        );
+
+        database
+            .update_config_status("device", &config_status(Vec::new(), false))
+            .await
+            .expect("store a status without per-program reporting");
+        let device = database
+            .get_device("device")
+            .await
+            .expect("load device")
+            .expect("device exists");
+        assert_eq!(
+            device.programs_reported,
+            Some(false),
+            "an old agent's status carries no programs"
+        );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn update_config_status_rejects_out_of_bounds_program_status() {
+        let (database, path) = test_database("bounds-rejected").await;
+
+        let too_many = (0..33)
+            .map(|index| program_status(&format!("program-{index}"), ProgramState::Applied, ""))
+            .collect();
+        assert!(
+            database
+                .update_config_status("device", &config_status(too_many, true))
+                .await
+                .is_err(),
+            "more than 32 programs must be rejected"
+        );
+
+        assert!(
+            database
+                .update_config_status(
+                    "device",
+                    &config_status(
+                        vec![program_status("Not-Valid", ProgramState::Applied, "")],
+                        true
+                    ),
+                )
+                .await
+                .is_err(),
+            "a program outside [a-z0-9-] must be rejected"
+        );
+
+        assert!(
+            database
+                .update_config_status(
+                    "device",
+                    &config_status(
+                        vec![program_status(&"a".repeat(65), ProgramState::Applied, "")],
+                        true
+                    ),
+                )
+                .await
+                .is_err(),
+            "a program longer than 64 bytes must be rejected"
+        );
+
+        assert!(
+            database
+                .update_config_status(
+                    "device",
+                    &config_status(
+                        vec![program_status(
+                            "claude-code",
+                            ProgramState::Applied,
+                            &"x".repeat(2049)
+                        )],
+                        true
+                    ),
+                )
+                .await
+                .is_err(),
+            "a detail longer than 2048 bytes must be rejected"
+        );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn unknown_program_state_round_trips_as_unspecified() {
+        let (database, path) = test_database("unknown-state").await;
+
+        let mut status = program_status("claude-code", ProgramState::Applied, "");
+        status.state = 99; // Not a defined ProgramState value.
+        database
+            .update_config_status("device", &config_status(vec![status], true))
+            .await
+            .expect("store a status with a future/unknown state");
+
+        let device = database
+            .get_device("device")
+            .await
+            .expect("load device")
+            .expect("device exists");
+        assert_eq!(device.programs[0].state, "unspecified");
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn program_status_rows_cascade_on_device_delete() {
+        let (database, path) = test_database("cascade-delete").await;
+        database
+            .update_config_status(
+                "device",
+                &config_status(
+                    vec![program_status("claude-code", ProgramState::Applied, "")],
+                    true,
+                ),
+            )
+            .await
+            .expect("store a report");
+
+        let count_rows = || async {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM device_program_status WHERE device_id = $1",
+            )
+            .bind("device")
+            .fetch_one(&database.pool)
+            .await
+            .expect("count device_program_status rows")
+        };
+        assert_eq!(count_rows().await, 1);
+
+        assert!(
+            database
+                .delete_device("device")
+                .await
+                .expect("delete device")
+        );
+        assert_eq!(
+            count_rows().await,
+            0,
+            "device_program_status cascades on device delete"
+        );
 
         drop(database);
         let _ = std::fs::remove_file(path);

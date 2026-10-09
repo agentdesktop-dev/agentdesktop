@@ -208,6 +208,30 @@ const deviceSkills = [
 
 export const deviceDetail: DeviceDetail = {
   ...macDevice,
+  programs: [
+    {
+      program: "claude-code",
+      state: "applied",
+      detail: "",
+      revision: 12,
+      updated_at: now - 60,
+    },
+    {
+      program: "vscode",
+      state: "unchanged",
+      detail: "",
+      revision: 12,
+      updated_at: now - 60,
+    },
+    {
+      program: "copilot",
+      state: "removed",
+      detail: "",
+      revision: 12,
+      updated_at: now - 60,
+    },
+  ],
+  programs_reported: true,
   discoveries: [
     {
       kind: "vscode",
@@ -254,6 +278,51 @@ export const deviceDetail: DeviceDetail = {
 export const failedDeviceDetail: DeviceDetail = {
   ...deviceDetail,
   ...failedDevice,
+  programs: [
+    {
+      program: "claude-code",
+      state: "blocked",
+      detail: "not applied: vscode conflicted",
+      revision: 12,
+      updated_at: now - 60,
+    },
+    {
+      program: "copilot",
+      state: "inactive",
+      detail:
+        "local LLM proxy not available; see llmProxy.error in daemon-info, or set daemon.llmProxy.listen; the managed entries stay and the tool fails until the proxy is back (whenProxyUnavailable: failClosed)",
+      revision: 12,
+      updated_at: now - 60,
+    },
+    {
+      program: "vscode",
+      state: "conflict",
+      detail:
+        "settings at /Users/developer/Library/Application Support/Code/User/settings.json: conflicting or invalid existing configuration",
+      revision: 12,
+      updated_at: now - 60,
+    },
+    {
+      program: "codex",
+      state: "failed",
+      detail: "multiple providers plan to modify /etc/codex/config.toml",
+      revision: 12,
+      updated_at: now - 60,
+    },
+    {
+      program: "grok",
+      state: "unspecified",
+      detail: "",
+      revision: 12,
+      updated_at: now - 60,
+    },
+  ],
+};
+
+export const oldAgentDeviceDetail: DeviceDetail = {
+  ...deviceDetail,
+  programs: [],
+  programs_reported: false,
 };
 
 export const emptyDeviceDetail: DeviceDetail = {
@@ -261,6 +330,8 @@ export const emptyDeviceDetail: DeviceDetail = {
   discoveries: [],
   model_runtimes: [],
   recent_events: [],
+  programs: [],
+  programs_reported: true,
 };
 
 export const controllerSettings: ControllerSettings = {
@@ -280,6 +351,19 @@ export const activeDaemonConfig: DaemonConfigDocument = {
   programs: {
     claudeCode: { permissions: { defaultMode: "plan" } },
     openCode: { useLlmGateway: false, autoupdate: false },
+  },
+};
+
+export const copilotFailOpenDaemonConfig: DaemonConfigDocument = {
+  llmGateway: {
+    url: "https://gateway.example.internal",
+    proxyUrl: "https://gateway.example.internal/copilot-proxy",
+    whenProxyUnavailable: "failOpen",
+    authentication: { type: "controllerJwt", audience: "agentgateway" },
+  },
+  programs: {
+    copilot: { models: { "gpt-4.1": {} } },
+    vscode: { copilotChat: "githubModels" },
   },
 };
 

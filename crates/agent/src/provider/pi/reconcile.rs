@@ -14,9 +14,14 @@ use crate::reconcile::ReconcilePlan;
 
 const PROVIDER_NAME: &str = "agentdesktop";
 const DEFAULT_API: &str = "anthropic-messages";
+/// `models.json` may hold the user's own provider API keys: a file we write
+/// is owner-only, and the dry-run report shows the action and path only.
 const MODELS_OPTIONS: json_merge::MergeOptions = json_merge::MergeOptions {
+    mode: 0o600,
+    keyed_arrays: &[],
+    redact_diff: true,
+    // Pi accepts comments and trailing commas in models.json.
     format: json_merge::JsonFormat::Jsonc,
-    permissions: 0o600,
     replace_paths: &[],
 };
 
@@ -31,18 +36,17 @@ pub(super) fn plan(
     let models_state = json_merge::state_path(models_path);
     let settings_state = json_merge::state_path(settings_path);
     let Some((config, gateway)) = config else {
-        json_merge::plan_remove(
+        json_merge::plan_remove_with(
             models_path,
             &models_state,
-            MODELS_OPTIONS,
             "models",
             Pi::DISPLAY_NAME,
+            MODELS_OPTIONS,
             plan,
         )?;
         json_merge::plan_remove(
             settings_path,
             &settings_state,
-            json_merge::MergeOptions::default(),
             "settings",
             Pi::DISPLAY_NAME,
             plan,
@@ -50,9 +54,13 @@ pub(super) fn plan(
         return Ok(());
     };
 
-    json_merge::plan_merge(
+    json_merge::plan_merge_with(
         models_path,
         &models_state,
+        managed_models(config, gateway, credential_helper, socket)?,
+        false,
+        "models",
+        Pi::DISPLAY_NAME,
         json_merge::MergeOptions {
             replace_paths: if gateway.is_some() {
                 &["/providers/agentdesktop/models"]
@@ -61,16 +69,11 @@ pub(super) fn plan(
             },
             ..MODELS_OPTIONS
         },
-        managed_models(config, gateway, credential_helper, socket)?,
-        false,
-        "models",
-        Pi::DISPLAY_NAME,
         plan,
     )?;
     json_merge::plan_merge(
         settings_path,
         &settings_state,
-        json_merge::MergeOptions::default(),
         managed_settings(config, gateway)?,
         false,
         "settings",
@@ -286,38 +289,59 @@ mod tests {
     fn models_reconcile_repairs_permissions_without_content_changes() {
         use std::os::unix::fs::PermissionsExt;
 
-        // Cover both an active provider and cleanup of a previous merge.
-        for cleanup in [false, true] {
-            let root = tempfile::tempdir().unwrap();
-            let models = root.path().join("models.json");
-            fs::write(
-                &models,
-                r#"{"providers":{"personal":{"apiKey":"test-secret"}}}"#,
-            )
-            .unwrap();
-            let config = Some("programs:\n  pi: {}\n");
-            reconcile_fixture(&models, config).apply().unwrap();
-            let before = fs::read(&models).unwrap();
-            // Simulate a file written by the old 0644 merge implementation.
-            fs::set_permissions(&models, fs::Permissions::from_mode(0o644)).unwrap();
-            let changes = reconcile_fixture(&models, if cleanup { None } else { config });
-            assert!(
-                changes.render().contains("UPDATE  Pi models"),
-                "{}",
-                changes.render()
-            );
-            changes.apply().unwrap();
-            assert_eq!(fs::read(&models).unwrap(), before);
-            assert_eq!(
-                fs::metadata(&models).unwrap().permissions().mode() & 0o077,
-                0
-            );
-            if !cleanup {
-                let repeated = reconcile_fixture(&models, config);
-                assert!(repeated.render().contains("Summary: 0 changes"));
-                repeated.apply().unwrap();
-            }
-        }
+        let root = tempfile::tempdir().unwrap();
+        let models = root.path().join("models.json");
+        fs::write(
+            &models,
+            r#"{"providers":{"personal":{"apiKey":"test-secret"}}}"#,
+        )
+        .unwrap();
+        let config = Some("programs:\n  pi: {}\n");
+        reconcile_fixture(&models, config).apply().unwrap();
+        let before = fs::read(&models).unwrap();
+        // Loosened after the merge, for example by another program.
+        fs::set_permissions(&models, fs::Permissions::from_mode(0o644)).unwrap();
+        let changes = reconcile_fixture(&models, config);
+        assert!(
+            changes.render().contains("UPDATE  Pi models"),
+            "{}",
+            changes.render()
+        );
+        changes.apply().unwrap();
+        assert_eq!(fs::read(&models).unwrap(), before);
+        assert_eq!(
+            fs::metadata(&models).unwrap().permissions().mode() & 0o077,
+            0
+        );
+        let repeated = reconcile_fixture(&models, config);
+        assert!(repeated.render().contains("Summary: 0 changes"));
+        repeated.apply().unwrap();
+    }
+
+    #[test]
+    fn models_dry_run_omits_file_contents() {
+        let root = tempfile::tempdir().unwrap();
+        let models = root.path().join("models.json");
+        fs::write(
+            &models,
+            r#"{"providers":{"personal":{"apiKey":"test-secret"}}}"#,
+        )
+        .unwrap();
+        let config = "llmGateway:\n  url: https://gateway.example.com\nprograms:\n  pi:\n    model: selected\n";
+        let merge = reconcile_fixture(&models, Some(config));
+        assert!(merge.render().contains("UPDATE  Pi models"));
+        assert!(
+            !merge.render().contains("test-secret"),
+            "{}",
+            merge.render()
+        );
+        merge.apply().unwrap();
+        let removal = reconcile_fixture(&models, None);
+        assert!(
+            !removal.render().contains("test-secret"),
+            "{}",
+            removal.render()
+        );
     }
 
     #[test]

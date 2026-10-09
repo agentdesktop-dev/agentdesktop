@@ -1,5 +1,5 @@
 name: Rust build cache
-description: Set up Rust and restore source-aware build artifacts
+description: Set up Rust and restore cached dependency builds
 
 inputs:
   cache-key:
@@ -19,18 +19,10 @@ runs:
         toolchain: "1.98"
         components: clippy,rustfmt
 
-    # Cargo relies heavily on mtimes. Restoring source mtimes allows cached
-    # workspace artifacts to remain valid on a fresh checkout.
-    - name: Restore source mtimes
-      shell: bash
-      run: |
-        curl --fail --silent --show-error --location \
-          https://raw.githubusercontent.com/howardjohn/git-restore-mtime-action/b77092831982028ae46f86c64831e6e0dde7ee8f/git-restore-mtime |
-          python3 - --commit-time
-
     - name: Restore Rust cache
       uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       with:
         shared-key: ${{ inputs.cache-key }}
-        cache-workspace-crates: true
+        # Cargo judges workspace crates by mtime, so cached builds can mask source changes.
+        cache-workspace-crates: false
         save-if: ${{ inputs.save }}

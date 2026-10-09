@@ -1,0 +1,54 @@
+<p id="description">Connect your GitHub account to use Copilot through Agentdesktop.</p>
+<div class="steps">
+  <div class="step"><span class="check complete" aria-hidden="true">✓</span><div>
+    <strong>Organization sign-in</strong><span>Connected</span>
+  </div></div>
+  <div class="step"><span class="check" id="check" aria-hidden="true"></span><div>
+    <strong>GitHub Copilot</strong><span id="github-status">Copy this code, then enter it on GitHub.</span>
+    <div id="pending">
+    <div><code id="code" style="display:block;margin-top:12px;font-size:24px;letter-spacing:2px;user-select:all">{{user_code}}</code></div>
+  <div class="actions">
+    <button type="button" class="button" id="copy" style="border:0;cursor:pointer">Copy code</button>
+    <a class="skip" href="https://github.com/login/device" target="_blank" rel="noopener noreferrer">Continue to GitHub ↗</a>
+  </div>
+    </div>
+  </div></div>
+</div>
+<p id="status" role="status" style="margin-top:24px">Waiting for GitHub authorization. Keep this page open.</p>
+<script>
+const status = document.getElementById('status');
+document.getElementById('copy').onclick = async () => {
+  try {
+    await navigator.clipboard.writeText(document.getElementById('code').textContent);
+    document.getElementById('copy').textContent = 'Copied';
+  } catch (_) { status.textContent = 'Select and copy the code above, then continue to GitHub.'; }
+};
+async function poll() {
+  try {
+    const response = await fetch('status', { cache: 'no-store' });
+    if (!response.ok) throw new Error('Sign-in page unavailable');
+    const state = await response.text();
+    if (state === 'connected') {
+      document.getElementById('pending').hidden = true;
+      document.querySelector('h1').textContent = 'Agentdesktop connected';
+      document.getElementById('description').textContent = 'All configured connections are complete. You can close this window.';
+      document.getElementById('check').classList.add('complete');
+      document.getElementById('check').textContent = '✓';
+      document.getElementById('github-status').textContent = 'Connected';
+      status.textContent = '';
+      return;
+    }
+    if (state === 'failed') {
+      document.getElementById('pending').hidden = true;
+      document.getElementById('github-status').textContent = 'Not connected';
+      status.textContent = 'GitHub authorization did not complete. Retry your request to start again.';
+      return;
+    }
+  } catch (_) {
+    status.textContent = 'The sign-in session is no longer available. Retry your request to start again.';
+    return;
+  }
+  setTimeout(poll, 1000);
+}
+poll();
+</script>

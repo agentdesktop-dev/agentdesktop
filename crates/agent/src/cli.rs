@@ -3,7 +3,10 @@ use std::{io::Read, path::PathBuf};
 use agentdesktop_client as client;
 use agentdesktop_core::{
     config::DaemonConfig,
-    model::{Discovery, Health, LlmGatewayCredential, TelemetryEventKind},
+    model::{
+        Discovery, EnrollmentStatus, Health, LlmGatewayCredential, LlmGatewayLoginStatus,
+        TelemetryEventKind,
+    },
 };
 use clap::Subcommand;
 use serde::Deserialize;
@@ -14,6 +17,8 @@ const MAX_HOOK_INPUT_BYTES: u64 = 1024 * 1024;
 pub enum ClientCommand {
     /// Check whether the daemon is reachable.
     Status,
+    /// Print the device's enrollment status and any pending sign-in URL.
+    Enrollment,
     /// Discover locally installed agents.
     Discover,
     /// Print the daemon's local startup configuration.
@@ -24,6 +29,9 @@ pub enum ClientCommand {
         #[arg(long, default_value = "agentdesktop")]
         client_id: String,
     },
+    /// Sign in to the LLM gateway with OIDC device authorization and print
+    /// the verification URL and code to approve from any device.
+    Login,
     /// Handle an event emitted by a managed developer-tool hook.
     Hook {
         #[command(subcommand)]
@@ -62,6 +70,27 @@ pub async fn run(command: ClientCommand, socket: PathBuf) -> anyhow::Result<()> 
         ClientCommand::Status => {
             let health: Health = client::get(&socket, "/v1/health").await?;
             println!("{}", health.status);
+        }
+        ClientCommand::Enrollment => {
+            let enrollment: EnrollmentStatus = client::get(&socket, "/v1/enrollment").await?;
+            println!("{}", enrollment.status);
+            if let Some(url) = enrollment.authorization_url {
+                println!("Sign in at: {url}");
+            }
+            if let Some(code) = enrollment.user_code {
+                println!("Code: {code}");
+            }
+        }
+        ClientCommand::Login => {
+            let login: LlmGatewayLoginStatus =
+                client::post(&socket, "/v1/llm-gateway/login").await?;
+            println!("{}", login.status);
+            if let Some(url) = login.verification_url {
+                println!("Sign in at: {url}");
+            }
+            if let Some(code) = login.user_code {
+                println!("Code: {code}");
+            }
         }
         ClientCommand::Discover => {
             let discovery: Discovery = client::get(&socket, "/v1/discovery").await?;

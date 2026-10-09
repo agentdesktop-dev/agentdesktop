@@ -20,7 +20,7 @@ import {
   friendlyOs,
 } from "../format";
 import { Link } from "../router";
-import type { DeviceDetail } from "../types";
+import type { DeviceDetail, ProgramStatus } from "../types";
 
 export interface DeviceViewProps {
   deleteError: string | null;
@@ -105,6 +105,44 @@ export function DeviceView({
           )}
         </section>
       </div>
+      {device.programs_reported !== null && (
+        <section className="card table-card">
+          <CardHeader
+            title="Managed programs"
+            description="Outcome of the latest apply, per program"
+          />
+          {!device.programs_reported ? (
+            <p className="empty-state compact">
+              Per-program status is not reported by this agent version
+            </p>
+          ) : device.programs.length ? (
+            <div className="event-list">
+              {device.programs.map((program) => (
+                <div className="event-row" key={program.program}>
+                  <span className="event-source">
+                    <ToolIcon kind={program.program} />
+                    <strong>{friendlyTool(program.program)}</strong>
+                  </span>
+                  <span className="program-state">
+                    <ProgramBadge state={program.state} />
+                    {program.detail && (
+                      <code title={program.detail}>{program.detail}</code>
+                    )}
+                  </span>
+                  <time>
+                    {program.revision !== device.config_revision
+                      ? `r${program.revision} · `
+                      : ""}
+                    {formatTime(program.updated_at)}
+                  </time>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="empty-state compact">No managed programs</p>
+          )}
+        </section>
+      )}
       <section className="card table-card">
         <CardHeader
           title="Recent activity"
@@ -301,4 +339,29 @@ function telemetryDetail(
   if (value === undefined) return "No input reported";
   const encoded = JSON.stringify(value);
   return encoded.length > 180 ? `${encoded.slice(0, 177)}…` : encoded;
+}
+
+const programStateLabels: Record<ProgramStatus["state"], string> = {
+  applied: "Applied",
+  unchanged: "Unchanged",
+  removed: "Removed",
+  conflict: "Conflict",
+  inactive: "Inactive",
+  blocked: "Blocked",
+  failed: "Failed",
+  unspecified: "Unknown",
+};
+
+function ProgramBadge({ state }: { state: ProgramStatus["state"] }) {
+  const tone =
+    state === "conflict" || state === "failed" || state === "blocked"
+      ? "danger"
+      : state === "inactive"
+        ? "warning"
+        : "neutral";
+  return (
+    <span className={`badge ${tone}`}>
+      {programStateLabels[state] ?? state}
+    </span>
+  );
 }

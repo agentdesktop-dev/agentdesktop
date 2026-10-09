@@ -32,6 +32,10 @@ impl Pi {
 
 #[async_trait::async_trait]
 impl Provider for Pi {
+    fn id(&self) -> &'static str {
+        Self::ID
+    }
+
     async fn discover(&self) -> Discovery {
         Discovery {
             agents: discovery::discover().into_iter().collect(),
@@ -136,6 +140,7 @@ mod tests {
             settings_path: root.path().join("settings.json"),
         };
         let ctx = ReconcileContext {
+            llm_proxy: None,
             merge_user_settings: false,
             credential_helper: root.path().join("agentdesktop"),
             socket: root.path().join("agentdesktop.sock"),
@@ -158,6 +163,7 @@ mod tests {
             settings_path: root.path().join("settings.json"),
         };
         let mut ctx = ReconcileContext {
+            llm_proxy: None,
             merge_user_settings: true,
             credential_helper: root.path().join("agentdesktop"),
             socket: root.path().join("agentdesktop.sock"),

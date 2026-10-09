@@ -12,8 +12,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 use agentdesktop_core::{
     config::{DaemonConfig, LlmGatewayAuthentication, ProgramAuthentication, valid_client_id},
     model::{
-        DaemonInfo, Discovery, EnrollmentStatus, Health, LlmGatewayCredential, TelemetryEvent,
-        TelemetryEventKind,
+        DaemonInfo, Discovery, EnrollmentStatus, Health, LlmGatewayCredential,
+        LlmGatewayLoginStatus, TelemetryEvent, TelemetryEventKind,
     },
 };
 
@@ -49,6 +49,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/logout", post(logout))
         .route("/v1/telemetry", post(telemetry))
         .route("/v1/llm-gateway/credential", get(llm_gateway_credential))
+        .route("/v1/llm-gateway/login", post(llm_gateway_login))
         .with_state(state)
 }
 
@@ -155,7 +156,7 @@ async fn effective_config(
         })
 }
 
-fn load_effective_config(
+pub(crate) fn load_effective_config(
     config: &DaemonConfig,
     state_dir: &std::path::Path,
 ) -> anyhow::Result<DaemonConfig> {
@@ -235,13 +236,24 @@ async fn llm_gateway_credential(
             format!("read applied configuration: {error:#}"),
         )
     })?;
+    gateway_credential(&state, &effective, &query.client_id, true)
+        .await
+        .map(Json)
+}
+
+pub(crate) async fn gateway_credential(
+    state: &AppState,
+    effective: &DaemonConfig,
+    client_id: &str,
+    include_subscription: bool,
+) -> Result<LlmGatewayCredential, (StatusCode, String)> {
     let gateway = effective.llm_gateway.as_ref().ok_or_else(|| {
         (
             StatusCode::FAILED_DEPENDENCY,
             "daemon has no LLM gateway configured".to_owned(),
         )
     })?;
-    let uses_subscription = program_uses_subscription(&effective, &query.client_id);
+    let uses_subscription = include_subscription && program_uses_subscription(effective, client_id);
     let (identity, continue_in_browser) = match gateway.authentication.as_ref() {
         Some(LlmGatewayAuthentication::ControllerJwt { .. }) => {
             let controller = state.config.controller.as_ref().ok_or_else(|| {
@@ -252,7 +264,7 @@ async fn llm_gateway_credential(
             })?;
             // Local transport permissions authenticate the user, not the calling
             // process. The client ID selects an allowed policy within that boundary.
-            remote::llm_gateway_credential(controller, &state.state_dir, &query.client_id)
+            remote::llm_gateway_credential(controller, &state.state_dir, client_id)
                 .await
                 .map(|credential| (credential, false))
         }
@@ -262,6 +274,7 @@ async fn llm_gateway_credential(
             redirect_uri,
             scopes,
             allow_insecure,
+            device_authorization,
         }) => gateway_oidc::credential(
             issuer,
             client_id,
@@ -272,6 +285,21 @@ async fn llm_gateway_credential(
             gateway_oidc::LoginOptions {
                 callback_listen: state.oidc_callback_listen,
                 subscription_available: uses_subscription,
+                github_client_id: if include_subscription {
+                    None
+                } else {
+                    // Same reasoning as the daemon login path: a GitHub sign-in
+                    // step only makes sense for the device flow.
+                    gateway.github_oauth.as_ref().and_then(|github| {
+                        matches!(
+                            github.source,
+                            agentdesktop_core::config::GitHubTokenSource::DeviceFlow
+                        )
+                        .then(|| github.client_id.clone())
+                        .flatten()
+                    })
+                },
+                device_authorization: *device_authorization,
             },
         )
         .await
@@ -285,7 +313,14 @@ async fn llm_gateway_credential(
             "LLM gateway has no authentication configured"
         )),
     }
-    .map_err(|error| (StatusCode::BAD_GATEWAY, format!("{error:#}")))?;
+    .map_err(|error| {
+        let status = if error.is::<gateway_oidc::SignInRequired>() {
+            StatusCode::UNAUTHORIZED
+        } else {
+            StatusCode::BAD_GATEWAY
+        };
+        (status, format!("{error:#}"))
+    })?;
     if uses_subscription {
         subscription::compose(
             identity,
@@ -297,8 +332,39 @@ async fn llm_gateway_credential(
     } else {
         Ok(identity)
     }
-    .map(Json)
     .map_err(|error| (StatusCode::BAD_GATEWAY, format!("{error:#}")))
+}
+
+async fn llm_gateway_login(
+    State(state): State<AppState>,
+) -> Result<Json<LlmGatewayLoginStatus>, (StatusCode, String)> {
+    let effective = load_effective_config(&state.config, &state.state_dir).map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("read applied configuration: {error:#}"),
+        )
+    })?;
+    let Some(LlmGatewayAuthentication::Oidc {
+        issuer,
+        client_id,
+        scopes,
+        allow_insecure,
+        device_authorization: true,
+        ..
+    }) = effective
+        .llm_gateway
+        .as_ref()
+        .and_then(|gateway| gateway.authentication.as_ref())
+    else {
+        return Err((
+            StatusCode::FAILED_DEPENDENCY,
+            "LLM gateway sign-in with device authorization is not configured".to_owned(),
+        ));
+    };
+    gateway_oidc::device_login(issuer, client_id, scopes, *allow_insecure, &state.state_dir)
+        .await
+        .map(Json)
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("{error:#}")))
 }
 
 fn program_uses_subscription(config: &DaemonConfig, client_id: &str) -> bool {

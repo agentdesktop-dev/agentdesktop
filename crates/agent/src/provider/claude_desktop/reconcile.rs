@@ -32,7 +32,6 @@ pub(super) fn plan(
             || !json_merge::plan_remove(
                 settings_path,
                 &settings_state,
-                json_merge::MergeOptions::default(),
                 "managed settings",
                 ClaudeDesktop::DISPLAY_NAME,
                 plan,
@@ -195,13 +194,17 @@ fn write_owned(
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
     let action = match existing.as_deref() {
-        Some(existing) if existing == contents => {
+        Some(existing)
+            if existing == contents && !crate::reconcile::grants_beyond(path, permissions) =>
+        {
             if !owned {
                 plan.write_file(owner_path, OWNER_MARKER, 0o644)?;
             }
             "unchanged"
         }
-        Some(_) if owned => "update",
+        // Identical bytes at a mode looser than planned are rewritten, like
+        // an owned file (the arm above claims identical bytes as ours).
+        Some(existing) if owned || existing == contents => "update",
         Some(existing) => {
             plan.record_diff(
                 ClaudeDesktop::DISPLAY_NAME,
@@ -384,6 +387,69 @@ programs:
             dict.get("inferenceGatewayBaseUrl")
                 .and_then(plist::Value::as_string),
             Some("https://gateway.example.com/")
+        );
+    }
+
+    #[cfg(unix)]
+    fn mode_repair_fixture() -> (tempfile::TempDir, agentdesktop_core::config::DaemonConfig) {
+        let config = parse_daemon(
+            r#"
+programs:
+  claudeDesktop: {}
+"#,
+        )
+        .expect("valid daemon configuration");
+        (tempfile::tempdir().unwrap(), config)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn identical_bytes_with_looser_mode_is_an_update_at_the_planned_mode() {
+        let (dir, config) = mode_repair_fixture();
+        let path = dir.path().join("managed-settings.json");
+        let marker = super::owner_path(&path);
+        let helper = dir.path().join("helper.sh");
+        // System mode: `merge_existing = false`.
+        let plan_fn = |plan: &crate::reconcile::ReconcilePlan| {
+            super::plan(
+                &path,
+                false,
+                &helper,
+                Path::new("agentdesktop"),
+                Path::new("agentdesktop.sock"),
+                Some((config.programs.claude_desktop.as_ref().unwrap(), None)),
+                plan,
+            )
+        };
+        crate::reconcile::plan::mode_repair::assert_identical_bytes_with_looser_mode_is_an_update(
+            &[&path, &marker],
+            0o644,
+            &plan_fn,
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn identical_bytes_within_mode_is_unchanged() {
+        let (dir, config) = mode_repair_fixture();
+        let path = dir.path().join("managed-settings.json");
+        let marker = super::owner_path(&path);
+        let helper = dir.path().join("helper.sh");
+        // System mode: `merge_existing = false`.
+        let plan_fn = |plan: &crate::reconcile::ReconcilePlan| {
+            super::plan(
+                &path,
+                false,
+                &helper,
+                Path::new("agentdesktop"),
+                Path::new("agentdesktop.sock"),
+                Some((config.programs.claude_desktop.as_ref().unwrap(), None)),
+                plan,
+            )
+        };
+        crate::reconcile::plan::mode_repair::assert_identical_bytes_within_mode_is_unchanged(
+            &[&path, &marker],
+            &plan_fn,
         );
     }
 }

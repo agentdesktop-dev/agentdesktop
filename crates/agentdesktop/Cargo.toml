@@ -1,6 +1,6 @@
 [package]
 name = "agentdesktop"
-version = "0.1.0"
+version.workspace = true
 description = "Agent Desktop UI, daemon, and command-line application."
 edition = "2024"
 publish = false

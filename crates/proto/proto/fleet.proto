@@ -19,6 +19,10 @@ message EnrollResponse {
 message BeginEnrollmentRequest {
   string hostname = 1;
   string code_challenge = 2;
+  // Use the OAuth 2.0 Device Authorization Grant (RFC 8628) instead of a
+  // browser redirect, for hosts without a local browser. code_challenge is
+  // ignored when set.
+  bool device_authorization = 3;
 }
 
 message BeginEnrollmentResponse {
@@ -28,6 +32,13 @@ message BeginEnrollmentResponse {
   string redirect_uri = 4;
   string token_endpoint = 5;
   string client_id = 6;
+  // Set only for device authorization enrollments.
+  string device_code = 7;
+  string user_code = 8;
+  string verification_uri = 9;
+  string verification_uri_complete = 10;
+  uint64 interval_seconds = 11;
+  uint64 expires_in_seconds = 12;
 }
 
 message CompleteEnrollmentRequest {
@@ -157,10 +168,39 @@ message ConfigStatus {
   uint64 revision = 1;
   ConfigState state = 2;
   string error = 3;
+  // Per-program outcomes of this apply, in the agent's provider order. Empty
+  // when the configuration was not applied at all (hash or parse error), and
+  // from agents that do not report per-program status: `programs_reported`
+  // distinguishes the two.
+  repeated ProgramStatus programs = 4;
+  // Whether this agent version reports per-program status at all. An older
+  // agent never sets this field, so it reads back as `false`.
+  bool programs_reported = 5;
 }
 
 enum ConfigState {
   CONFIG_STATE_UNSPECIFIED = 0;
   CONFIG_STATE_APPLIED = 1;
   CONFIG_STATE_FAILED = 2;
+}
+
+// One managed program's outcome from an apply. `program` is the provider ID
+// (for example `claude-code`, `vscode`); `detail` is at most 1024 bytes and
+// carries paths, fixed reasons and error chains of the kind sent in
+// `ConfigStatus.error`, which do not quote managed file content.
+message ProgramStatus {
+  string program = 1;
+  ProgramState state = 2;
+  string detail = 3;
+}
+
+enum ProgramState {
+  PROGRAM_STATE_UNSPECIFIED = 0;
+  PROGRAM_STATE_APPLIED = 1;
+  PROGRAM_STATE_UNCHANGED = 2;
+  PROGRAM_STATE_REMOVED = 3;
+  PROGRAM_STATE_CONFLICT = 4;
+  PROGRAM_STATE_INACTIVE = 5;
+  PROGRAM_STATE_BLOCKED = 6;
+  PROGRAM_STATE_FAILED = 7;
 }

@@ -2,6 +2,12 @@
 
 Features currently implemented by agentdesktop.
 
+VS Code managed configuration (Copilot Chat custom models in the user's
+`chatLanguageModels.json`, or the Copilot Chat API override in the user's
+`settings.json` under `copilotChat: githubModels`) and GitHub Copilot CLI
+managed configuration (the user's `providers.json`) require user mode; all of
+these files point at the daemon's loopback LLM proxy. The Copilot CLI's MCP and skills inventory under
+`~/.copilot` is read by the VS Code adapter.
 Grok Build managed configuration requires system mode. Linux and macOS use
 `/etc/grok/managed_config.toml`; Windows uses the system drive's
 `\etc\grok\managed_config.toml`. `--user` rejects `programs.grok` because
@@ -20,8 +26,10 @@ gateway URLs override per-model endpoints, using each model's API dialect.
 The gateway owns the entire `providers.agentdesktop.models` catalog while
 enabled; stale entries are replaced, and the prior catalog is restored on
 cleanup. Other providers and user additions are preserved. On Unix,
-`models.json` is written with owner-only permissions (`0600`), including
-cleanup, and reconciliation repairs permissions on existing managed files.
+`models.json` is written with owner-only permissions (`0600`), and
+reconciliation repairs a looser mode on the managed file; cleanup keeps the
+file's current mode. Dry runs report the `models.json` action and path
+without its contents, which may include the user's own API keys.
 Commented `models.json` files are accepted and rewritten as standard JSON,
 preserving user configuration values. `settings.json` requires standard JSON.
 Discovery recognizes npm's Windows command shims as well as symlinked launchers,
@@ -42,23 +50,25 @@ files are not scanned until the adapter imports them into a Pi-owned file.
 
 ✅ Implemented · ◯ Not implemented · — Not applicable
 
-| Feature | [Claude Code](claude_code/) | [Claude Desktop](claude_desktop/) | [Codex](codex/) | [OpenCode](opencode/) | [VS Code](vscode/) | [Ollama](ollama/) | [Cursor](cursor/) | [Grok Build](grok/) | [Pi](pi/) |
-| --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Installation and version discovery | ✅ | ✅ | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ |
-| Local model discovery | — | — | — | — | — | ✅ | — | — | — |
-| MCP server discovery | ✅ | ✅ | ✅ | ◯ | ✅ | — | ✅ | ✅ | ✅ |
-| Skill discovery | ✅ | ◯ | ✅ | ◯ | ✅ | — | ✅ | ✅ | ✅ |
-| Managed configuration | ✅ | ✅ | ✅ | ✅ | ◯ | ◯ | ◯ | ✅ | ✅ |
-| LLM gateway routing | ✅ | ✅ | ✅ | ✅ | ◯ | — | ◯ | ✅ | ✅ |
-| Gateway credentials | ✅ | ✅ | ✅ | ✅ | ◯ | — | ◯ | ✅ | ✅ |
-| Sandbox configuration | ✅ | ◯ | ✅ | ◯ | ◯ | — | ◯ | ◯ | ◯ |
-| Tool-use telemetry | ✅ | ◯ | ◯ | ◯ | ◯ | — | ◯ | ◯ | ◯ |
-| Session-start telemetry | ✅ | ◯ | ◯ | ◯ | ◯ | — | ◯ | ◯ | ◯ |
+| Feature | [Claude Code](claude_code/) | [Claude Desktop](claude_desktop/) | [Codex](codex/) | [OpenCode](opencode/) | [VS Code](vscode/) | [Ollama](ollama/) | [Cursor](cursor/) | [Grok Build](grok/) | [GitHub Copilot CLI](copilot/) | [Pi](pi/) |
+| --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| Installation and version discovery | ✅ | ✅ | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | ✅ |
+| Local model discovery | — | — | — | — | — | ✅ | — | — | — | — |
+| MCP server discovery | ✅ | ✅ | ✅ | ◯ | ✅ | — | ✅ | ✅ | — | ✅ |
+| Skill discovery | ✅ | ◯ | ✅ | ◯ | ✅ | — | ✅ | ✅ | — | ✅ |
+| Managed configuration | ✅ | ✅ | ✅ | ✅ | ✅ | ◯ | ◯ | ✅ | ✅ | ✅ |
+| LLM gateway routing | ✅ | ✅ | ✅ | ✅ | ✅ | — | ◯ | ✅ | ✅ | ✅ |
+| Gateway credentials | ✅ | ✅ | ✅ | ✅ | ✅ | — | ◯ | ✅ | ✅ | ✅ |
+| Sandbox configuration | ✅ | ◯ | ✅ | ◯ | ◯ | — | ◯ | ◯ | ◯ | ◯ |
+| Tool-use telemetry | ✅ | ◯ | ◯ | ◯ | ◯ | — | ◯ | ◯ | ◯ | ◯ |
+| Session-start telemetry | ✅ | ◯ | ◯ | ◯ | ◯ | — | ◯ | ◯ | ◯ | ◯ |
 
 - ◯ describes a gap in agentdesktop; it does not mean the upstream provider
   cannot support the feature.
 - Managed configuration includes dry runs and removal of agentdesktop-owned
-  settings. Claude Code also supports merging into user settings; Claude Desktop
+  settings (no dry run for the GitHub Copilot CLI providers file and the VS
+  Code chat language models and settings files: their loopback proxy cannot
+  run in one-shot mode). Claude Code also supports merging into user settings; Claude Desktop
   requires system-managed settings.
 - Discovery is best effort; versions may be unavailable. Ollama discovers models
   through its running local API. Grok Build versions require its optional

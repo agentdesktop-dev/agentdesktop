@@ -24,6 +24,8 @@ export function ConfigurationView({
   const initializedFromController = useRef(false);
   const [gateway, setGateway] = useState(true);
   const [gatewayUrl, setGatewayUrl] = useState("https://gateway.example.com");
+  const [gatewayProxyUrl, setGatewayProxyUrl] = useState("");
+  const [proxyFailOpen, setProxyFailOpen] = useState(false);
   const [controllerJwt, setControllerJwt] = useState(true);
   const [audience, setAudience] = useState("agentgateway");
   const [sessionNewTelemetry, setSessionNewTelemetry] = useState(false);
@@ -45,9 +47,12 @@ export function ConfigurationView({
     return [definition?.label ?? agent.kind];
   });
   const sandboxUnavailable = incompatibleSandboxAgentNames.length > 0;
+  const usesLocalProxy = agents.some((agent) => proxyAgents.has(agent.kind));
   const yaml = daemonConfigYaml({
     gateway,
     gatewayUrl,
+    gatewayProxyUrl,
+    proxyFailOpen: proxyFailOpen && usesLocalProxy,
     controllerJwt,
     audience,
     sandboxEnabled,
@@ -75,6 +80,8 @@ export function ConfigurationView({
     setGateway(Boolean(llmGateway));
     if (llmGateway) {
       setGatewayUrl(llmGateway.url);
+      setGatewayProxyUrl(llmGateway.proxyUrl ?? "");
+      setProxyFailOpen(llmGateway.whenProxyUnavailable === "failOpen");
       setControllerJwt(llmGateway.authentication?.type === "controllerJwt");
       setAudience(llmGateway.authentication?.audience ?? "agentgateway");
     }
@@ -177,6 +184,41 @@ export function ConfigurationView({
                       onChange={(event) => setGatewayUrl(event.target.value)}
                     />
                   </label>
+                  <label className="field full-width">
+                    <span>Pass-through URL (proxyUrl, optional)</span>
+                    <input
+                      value={gatewayProxyUrl}
+                      placeholder="https://gateway.example.com/copilot-proxy"
+                      onChange={(event) =>
+                        setGatewayProxyUrl(event.target.value)
+                      }
+                    />
+                    <small>
+                      Gateway route that forwards to the provider with the
+                      client's own token. Required for VS Code Copilot Chat on
+                      GitHub's models (copilotChat: githubModels).
+                    </small>
+                  </label>
+                  {usesLocalProxy && (
+                    <label className="toggle-row compact full-width">
+                      <span>
+                        <strong>Fail open without the local proxy</strong>
+                        <small>
+                          Off (default): while the local proxy is down, Copilot
+                          fails instead of reaching GitHub past the gateway,
+                          once the daemon has pointed it at the proxy. On: the
+                          Copilot entries are removed until it is back.
+                        </small>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={proxyFailOpen}
+                        onChange={(event) =>
+                          setProxyFailOpen(event.target.checked)
+                        }
+                      />
+                    </label>
+                  )}
                   <label className="toggle-row compact full-width">
                     <span>
                       <strong>Controller JWT</strong>
@@ -529,6 +571,21 @@ const configurableAgents: Array<{
     initialSettings: "model: grok-4.6",
   },
   {
+    kind: "copilot",
+    label: "GitHub Copilot CLI",
+    iconKind: "copilot",
+    placeholder: "models:\n  gpt-4.1:\n    wireModel: gpt-4.1-mini",
+    initialSettings: "models:\n  gpt-4.1: {}",
+  },
+  {
+    kind: "vscode",
+    label: "VS Code (Copilot Chat)",
+    iconKind: "vscode",
+    placeholder:
+      "copilotChat: githubModels\n# or own models through the gateway:\n# models:\n#   gpt-4.1-mini:\n#     maxInputTokens: 128000",
+    initialSettings: "models:\n  gpt-4.1-mini: {}",
+  },
+  {
     kind: "pi",
     label: "Pi",
     iconKind: "pi",
@@ -541,12 +598,16 @@ const sandboxUnsupportedAgents = new Set<AgentKind>([
   "claudeDesktop",
   "openCode",
   "grok",
+  "copilot",
+  "vscode",
   "pi",
 ]);
 
 function daemonConfigYaml(options: {
   gateway: boolean;
   gatewayUrl: string;
+  gatewayProxyUrl: string;
+  proxyFailOpen: boolean;
   controllerJwt: boolean;
   audience: string;
   sandboxEnabled: boolean;
@@ -561,12 +622,18 @@ function daemonConfigYaml(options: {
   const lines: string[] = [];
   if (options.gateway) {
     lines.push("llmGateway:", `  url: ${yamlString(options.gatewayUrl)}`);
+    if (options.gatewayProxyUrl.trim()) {
+      lines.push(`  proxyUrl: ${yamlString(options.gatewayProxyUrl.trim())}`);
+    }
+    if (options.proxyFailOpen) {
+      lines.push("  whenProxyUnavailable: failOpen");
+    }
     if (options.controllerJwt) {
       lines.push(
         "  authentication:",
         "    type: controllerJwt",
         `    audience: ${yamlString(options.audience)}`,
-        "    allowedClientIds: [claude-code, claude-desktop, codex, opencode, grok, pi]",
+        "    allowedClientIds: [claude-code, claude-desktop, codex, opencode, grok, copilot-cli, vscode-copilot, pi]",
       );
     }
     lines.push("");
@@ -612,6 +679,10 @@ function daemonConfigYaml(options: {
   }
   return `${lines.join("\n")}\n`;
 }
+
+// Programs that reach the gateway through the daemon's local LLM proxy; only
+// they are affected by llmGateway.whenProxyUnavailable.
+const proxyAgents = new Set<string>(["copilot", "vscode"]);
 
 function yamlString(value: string) {
   return JSON.stringify(value);

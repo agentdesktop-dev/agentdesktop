@@ -72,8 +72,9 @@ async fn handle(
     };
     let authorization = headers.get("authorization").and_then(|v| v.to_str().ok());
     let api_key = headers.get("x-api-key").and_then(|v| v.to_str().ok());
+    let llm_token = headers.get("x-llm-token").and_then(|v| v.to_str().ok());
     tracing::debug!(%method, path, "Gateway fixture request");
-    requests.lock().unwrap().push(json!({"path": path, "method": method.as_str(), "authorization": authorization, "apiKey": api_key, "body": body}));
+    requests.lock().unwrap().push(json!({"path": path, "method": method.as_str(), "authorization": authorization, "apiKey": api_key, "llmToken": llm_token, "body": body}));
     if path == "/health" {
         return Json(json!({"ready": true})).into_response();
     }

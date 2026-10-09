@@ -16,7 +16,25 @@ export type Device = {
   installed_tools: string[];
 };
 
+export type ProgramStatus = {
+  program: string;
+  state:
+    | "applied"
+    | "unchanged"
+    | "removed"
+    | "conflict"
+    | "inactive"
+    | "blocked"
+    | "failed"
+    | "unspecified";
+  detail: string;
+  revision: number;
+  updated_at: number;
+};
+
 export type DeviceDetail = Device & {
+  programs: ProgramStatus[];
+  programs_reported: boolean | null;
   discoveries: Array<{
     kind: string;
     version: string;
@@ -75,6 +93,8 @@ export type AgentKind =
   | "codex"
   | "openCode"
   | "grok"
+  | "copilot"
+  | "vscode"
   | "pi";
 
 export type AgentDraft = {
@@ -96,6 +116,8 @@ export type SandboxConfigDocument = {
 export type DaemonConfigDocument = {
   llmGateway?: {
     url: string;
+    proxyUrl?: string;
+    whenProxyUnavailable?: "failClosed" | "failOpen";
     authentication?: {
       type: string;
       audience?: string;

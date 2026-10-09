@@ -10,6 +10,9 @@ use tracing::debug;
 use crate::provider::shared::{deep_merge, responses_base_url};
 use crate::reconcile::ReconcilePlan;
 
+/// Mode of the managed file; a looser mode is repaired on the next apply.
+const MANAGED_FILE_MODE: u32 = 0o644;
+
 const MANAGED_HEADER: &str = "# Managed by agentdesktop. Manual changes will be replaced.\n";
 const PROVIDER_NAME: &str = "agentdesktop";
 
@@ -45,7 +48,11 @@ pub(super) fn plan(
         }
     };
     let action = match existing.as_deref() {
-        Some(existing) if existing == contents => {
+        // Identical bytes at a mode looser than planned: rewritten (update).
+        Some(existing)
+            if existing == contents
+                && !crate::reconcile::grants_beyond(path, MANAGED_FILE_MODE) =>
+        {
             debug!(
                 program = Grok::ID,
                 action = "unchanged",
@@ -70,7 +77,7 @@ pub(super) fn plan(
         None => "create",
     };
 
-    plan.write_file(path, &contents, 0o644)?;
+    plan.write_file(path, &contents, MANAGED_FILE_MODE)?;
     debug!(
         program = Grok::ID,
         action,
@@ -468,6 +475,60 @@ programs:
         assert_eq!(
             settings["auth_provider"]["agentdesktop"]["timeout_secs"],
             600
+        );
+    }
+
+    #[cfg(unix)]
+    fn mode_repair_fixture() -> (tempfile::TempDir, agentdesktop_core::config::DaemonConfig) {
+        let config = parse_daemon(
+            r#"
+programs:
+  grok:
+    model: grok-4.6
+"#,
+        )
+        .expect("valid daemon configuration");
+        (tempfile::tempdir().unwrap(), config)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn identical_bytes_with_looser_mode_is_an_update_at_the_planned_mode() {
+        let (dir, config) = mode_repair_fixture();
+        let path = dir.path().join("config.toml");
+        let plan_fn = |plan: &crate::reconcile::ReconcilePlan| {
+            super::plan(
+                &path,
+                Path::new("agentdesktop"),
+                Path::new("agentdesktop.sock"),
+                Some((config.programs.grok.as_ref().unwrap(), None)),
+                plan,
+            )
+        };
+        crate::reconcile::plan::mode_repair::assert_identical_bytes_with_looser_mode_is_an_update(
+            &[&path],
+            0o644,
+            &plan_fn,
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn identical_bytes_within_mode_is_unchanged() {
+        let (dir, config) = mode_repair_fixture();
+        let path = dir.path().join("config.toml");
+        let plan_fn = |plan: &crate::reconcile::ReconcilePlan| {
+            super::plan(
+                &path,
+                Path::new("agentdesktop"),
+                Path::new("agentdesktop.sock"),
+                Some((config.programs.grok.as_ref().unwrap(), None)),
+                plan,
+            )
+        };
+        crate::reconcile::plan::mode_repair::assert_identical_bytes_within_mode_is_unchanged(
+            &[&path],
+            &plan_fn,
         );
     }
 }

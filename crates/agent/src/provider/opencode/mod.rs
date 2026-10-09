@@ -31,6 +31,10 @@ impl OpenCode {
 
 #[async_trait::async_trait]
 impl Provider for OpenCode {
+    fn id(&self) -> &'static str {
+        Self::ID
+    }
+
     async fn discover(&self) -> Discovery {
         Discovery {
             agents: discovery::discover().into_iter().collect(),

@@ -1,0 +1,81 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+# Two paths for GitHub Copilot through one gateway:
+#  - llm:   the gateway's own models (Copilot CLI, VS Code on own models), billed by your provider key
+#  - routes/copilot-proxy: GitHub's models (VS Code on GitHub's models), the developer's Copilot
+#    token passed through, billed by the Copilot seat
+# Both require the developer's Dex token, which Agentdesktop adds on the loopback proxy.
+frontendPolicies:
+  logging:
+    add:
+      user: jwt.email
+
+gateways:
+  gateway:
+    port: 4001
+
+routes:
+- name: reachability
+  gateways: gateway
+  matches:
+  - method: HEAD
+    path:
+      exact: /
+  policies:
+    directResponse:
+      status: 200
+
+# llmGateway.proxyUrl points here. Agentdesktop sends the developer's identity in
+# Authorization and VS Code's own Copilot token in x-llm-token; the route checks the
+# identity, restores the Copilot token as the bearer and forwards to GitHub.
+- name: copilot-proxy
+  gateways: gateway
+  matches:
+  - path:
+      pathPrefix: /copilot-proxy
+  policies:
+    jwtAuth:
+      mode: strict
+      issuer: http://127.0.0.1:5557/dex
+      audiences: [agentdesktop-local]
+      jwks:
+        url: http://dex:5557/dex/keys
+    urlRewrite:
+      authority:
+        # Copilot Business; other plans use another host (VS Code's Copilot Chat log shows it)
+        full: api.business.githubcopilot.com
+      path:
+        prefix: /
+    timeout:
+      requestTimeout: 120s
+  backends:
+  - host: api.business.githubcopilot.com:443
+    policies:
+      backendTLS:
+        alpn: [http/1.1]   # the WebSocket upgrade VS Code uses cannot travel over HTTP/2
+      backendAuth:
+        passthrough: {}
+      transformations:
+        request:
+          set:
+            authorization: '"Bearer " + request.headers["x-llm-token"]'
+          remove:
+          - x-llm-token
+
+llm:
+  gateways: gateway
+  policies:
+    jwtAuth:
+      mode: strict
+      issuer: http://127.0.0.1:5557/dex
+      audiences: [agentdesktop-local]
+      jwks:
+        url: http://dex:5557/dex/keys
+  models:
+  - name: "gpt-4.1-mini"
+    provider: openai
+    params:
+      apiKey: $OPENAI_API_KEY
+  - name: "gpt-4.1"
+    provider: openai
+    params:
+      apiKey: $OPENAI_API_KEY
