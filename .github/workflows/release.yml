@@ -58,6 +58,7 @@ jobs:
       contents: read
       packages: write
       id-token: write
+      attestations: write
     uses: ./.github/workflows/release-linux.yml
     with:
       version: ${{ needs.setup.outputs.version }}
@@ -121,5 +122,6 @@ jobs:
             - Helm chart: `oci://${{ env.CHART_REGISTRY }}/agentdesktop-controller:${{ needs.setup.outputs.version }}`
             - Agentdesktop binaries for amd64 and arm64 on Linux, macOS, and Windows are attached below.
             - Signed Windows MSI installers for amd64 and arm64 are attached below.
+            - Linux binaries include keyless Sigstore build provenance. Verify a downloaded binary with `gh attestation verify <FILE> --repo ${{ github.repository }}`.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
