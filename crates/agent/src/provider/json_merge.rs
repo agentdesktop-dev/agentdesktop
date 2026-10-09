@@ -17,6 +17,29 @@ struct MergeState {
     after: Value,
 }
 
+/// How an existing user file is parsed. The merged file is always written as
+/// standard JSON.
+#[derive(Clone, Copy)]
+pub(super) enum JsonFormat {
+    Json,
+    /// JSON with comments and trailing commas; they are not kept when the
+    /// file is rewritten.
+    Jsonc,
+}
+
+impl JsonFormat {
+    fn parse(&self, contents: &[u8]) -> anyhow::Result<Value> {
+        match self {
+            Self::Json => Ok(serde_json::from_slice(contents)?),
+            Self::Jsonc => {
+                let contents = std::str::from_utf8(contents)?;
+                // Normalize commented input to ordinary JSON when writing it.
+                Ok(json5::from_str(contents.trim_start_matches('\u{feff}'))?)
+            }
+        }
+    }
+}
+
 pub(super) fn state_path(path: &Path) -> PathBuf {
     let name = path
         .file_name()
@@ -48,6 +71,11 @@ pub(super) struct MergeOptions {
     /// Record actions without file content, for a file that holds secrets:
     /// the dry-run report then shows the action and the path only.
     pub(super) redact_diff: bool,
+    /// How the existing file is parsed.
+    pub(super) format: JsonFormat,
+    /// JSON pointers to values managed as a whole, rather than merged
+    /// additively; removal restores the user's original value.
+    pub(super) replace_paths: &'static [&'static str],
 }
 
 impl Default for MergeOptions {
@@ -56,6 +84,8 @@ impl Default for MergeOptions {
             mode: 0o644,
             keyed_arrays: &[],
             redact_diff: false,
+            format: JsonFormat::Json,
+            replace_paths: &[],
         }
     }
 }
@@ -130,11 +160,12 @@ pub(super) fn plan_merge_with(
         }
     };
     // An empty (or whitespace-only) file holds nothing to keep and is not a
-    // conflict; the merge fills it. Comments or trailing commas are: the file
-    // is rewritten as plain JSON, so they would be lost silently.
+    // conflict; the merge fills it. Comments or trailing commas are, unless
+    // `options.format` accepts them: the file is rewritten as plain JSON, so
+    // they would be lost silently.
     let mut combined = match existing.as_deref() {
         Some(contents) if contents.iter().all(u8::is_ascii_whitespace) => empty_root(),
-        Some(contents) => match serde_json::from_slice::<Value>(contents) {
+        Some(contents) => match options.format.parse(contents) {
             Ok(value)
                 if value.is_object() == managed.is_object()
                     && value.is_array() == managed.is_array() =>
@@ -165,6 +196,14 @@ pub(super) fn plan_merge_with(
         remove_keyed(&mut combined, keyed, &managed);
     }
     let before = combined.clone();
+    // Snapshot the user's original values before replacing any owned subtree.
+    for pointer in options.replace_paths {
+        if managed.pointer(pointer).is_some()
+            && let Some(existing) = combined.pointer_mut(pointer)
+        {
+            *existing = Value::Null;
+        }
+    }
     merge_overlay(&mut combined, managed);
 
     let mut contents = serde_json::to_vec_pretty(&combined)
@@ -260,7 +299,7 @@ pub(super) fn plan_remove_with(
         remove_file(state_path, display_name, plan)?;
         return Ok(true);
     }
-    let settings = match serde_json::from_slice::<Value>(&existing) {
+    let settings = match options.format.parse(&existing) {
         Ok(value)
             if value.is_object() == state.after.is_object()
                 && value.is_array() == state.after.is_array() =>
@@ -451,6 +490,33 @@ fn rollback_value(
         let after = after
             .and_then(Value::as_array)
             .map_or(&[][..], Vec::as_slice);
+        // Additive merges keep the original array as a prefix. A replacement
+        // must restore its order and duplicate entries, then retain user edits.
+        if !after.starts_with(before) {
+            let mut result = before.to_vec();
+            let mut restored = before.to_vec();
+            let mut added = current_array.clone();
+            for value in after {
+                if let Some(index) = restored.iter().position(|entry| entry == value) {
+                    restored.remove(index);
+                }
+                if let Some(index) = added.iter().position(|entry| entry == value) {
+                    added.remove(index);
+                } else if let Some(index) = result.iter().position(|entry| entry == value) {
+                    // Respect a user's removal of a retained original entry.
+                    result.remove(index);
+                }
+            }
+            for value in added {
+                if let Some(index) = restored.iter().position(|entry| entry == &value) {
+                    // An original entry restored by the user is already present.
+                    restored.remove(index);
+                } else {
+                    result.push(value);
+                }
+            }
+            return Some(Value::Array(result));
+        }
         let mut result = current_array.clone();
         for added in after.iter().filter(|value| !before.contains(value)) {
             if let Some(index) = result.iter().position(|value| value == added) {
@@ -718,6 +784,7 @@ mod tests {
             mode: 0o600,
             keyed_arrays: ROOT_KEYED,
             redact_diff: true,
+            ..MergeOptions::default()
         }
     }
 

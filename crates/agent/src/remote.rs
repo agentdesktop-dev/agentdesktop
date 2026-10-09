@@ -1543,6 +1543,8 @@ mod tests {
             Some(root.join("copilot/providers.json")),
             None,
             None,
+            root.join("pi/models.json"),
+            root.join("pi/settings.json"),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         )

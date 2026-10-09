@@ -88,6 +88,7 @@ struct ResolvedDaemonArgs {
     vscode_chat_models: Option<PathBuf>,
     /// VS Code's user `settings.json`; `None` in system mode (user-only program).
     vscode_settings: Option<PathBuf>,
+    pi: ResolvedPiStartupConfig,
     /// `daemon.reconcileInterval`; `None` means no periodic re-apply.
     reconcile_interval: Option<Duration>,
     once: bool,
@@ -106,6 +107,11 @@ struct ResolvedClaudeDesktopStartupConfig {
 struct ResolvedOpenCodeStartupConfig {
     config: PathBuf,
     plugin: PathBuf,
+}
+
+struct ResolvedPiStartupConfig {
+    models: PathBuf,
+    settings: PathBuf,
 }
 
 impl DaemonArgs {
@@ -211,6 +217,16 @@ impl DaemonArgs {
                 },
                 vscode_chat_models: None,
                 vscode_settings: None,
+                pi: ResolvedPiStartupConfig {
+                    models: startup
+                        .pi
+                        .models
+                        .unwrap_or_else(reconcile::default_pi_models_path),
+                    settings: startup
+                        .pi
+                        .settings
+                        .unwrap_or_else(reconcile::default_pi_settings_path),
+                },
                 reconcile_interval: startup.reconcile_interval,
                 once: self.once || self.dry_run,
                 dry_run: self.dry_run,
@@ -298,6 +314,14 @@ impl DaemonArgs {
                     .settings
                     .unwrap_or_else(|| reconcile::default_vscode_settings_path(&home)),
             ),
+            pi: ResolvedPiStartupConfig {
+                models: startup.pi.models.unwrap_or_else(|| {
+                    crate::provider::pi::user_pi_agent_dir(&home).join("models.json")
+                }),
+                settings: startup.pi.settings.unwrap_or_else(|| {
+                    crate::provider::pi::user_pi_agent_dir(&home).join("settings.json")
+                }),
+            },
             reconcile_interval: startup.reconcile_interval,
             once: self.once || self.dry_run,
             dry_run: self.dry_run,
@@ -423,6 +447,8 @@ where
         args.copilot_providers.clone(),
         args.vscode_chat_models.clone(),
         args.vscode_settings.clone(),
+        args.pi.models.clone(),
+        args.pi.settings.clone(),
         agentdesktop_client_executable()?,
         socket.clone(),
     )
@@ -1009,6 +1035,11 @@ fn validate_one_shot(config: &agentdesktop_core::config::DaemonConfig) -> anyhow
                 .vscode
                 .as_ref()
                 .is_some_and(|program| program.use_llm_gateway),
+            config
+                .programs
+                .pi
+                .as_ref()
+                .is_some_and(|program| program.use_llm_gateway),
         ]
         .into_iter()
         .any(|used| used);
@@ -1261,6 +1292,37 @@ mod tests {
     use agentdesktop_core::config::{self, parse_daemon};
     use agentdesktop_core::model::{Agent, Discovery, LlmProxyInfo};
     use tokio::sync::{mpsc, watch};
+
+    #[test]
+    fn pi_startup_paths_override_defaults_in_both_scopes() {
+        for user in [false, true] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(
+                file.path(),
+                format!(
+                    "daemon:\n  user: {user}\n  pi:\n    models: custom/pi-models.json\n    settings: custom/pi-settings.json\n"
+                ),
+            )
+            .unwrap();
+            let config = agentdesktop_core::config::load_daemon(file.path()).unwrap();
+            let args = super::DaemonArgs {
+                user: false,
+                once: false,
+                dry_run: false,
+                config: None,
+            };
+            let resolved = args
+                .resolve(
+                    config.daemon.unwrap(),
+                    file.path().to_path_buf(),
+                    agentdesktop_core::DEFAULT_SOCKET_PATH.into(),
+                )
+                .unwrap();
+            assert_eq!(resolved.user, user);
+            assert_eq!(resolved.pi.models, Path::new("custom/pi-models.json"));
+            assert_eq!(resolved.pi.settings, Path::new("custom/pi-settings.json"));
+        }
+    }
 
     fn discovery(kinds: &[&str]) -> Discovery {
         Discovery {
@@ -1715,6 +1777,32 @@ programs:
             client_executable_for_daemon(Path::new("/usr/bin/agentdesktop")),
             Path::new("/usr/bin/agentdesktop")
         );
+    }
+
+    #[test]
+    fn one_shot_rejects_authenticated_pi_gateway() {
+        for authentication in [
+            "    type: oidc\n    issuer: https://login.example.com\n    clientId: agentdesktop\n",
+            "    type: controllerJwt\n    audience: agentgateway\n    allowedClientIds: [pi]\n",
+        ] {
+            let config = parse_daemon(&format!(
+                "llmGateway:\n  url: https://gateway.example.com\n  authentication:\n{authentication}programs:\n  pi:\n    model: selected\n"
+            )).unwrap();
+            let error =
+                validate_one_shot(&config).expect_err("Pi credentials require a running daemon");
+            assert!(error.to_string().contains("credential helpers"));
+        }
+    }
+
+    #[test]
+    fn one_shot_accepts_pi_without_runtime_credentials() {
+        for yaml in [
+            "programs:\n  pi: {}\n",
+            "llmGateway:\n  url: https://gateway.example.com\nprograms:\n  pi:\n    model: selected\n",
+            "llmGateway:\n  url: https://gateway.example.com\n  authentication:\n    type: oidc\n    issuer: https://login.example.com\n    clientId: agentdesktop\nprograms:\n  pi:\n    useLlmGateway: false\n",
+        ] {
+            validate_one_shot(&parse_daemon(yaml).unwrap()).unwrap();
+        }
     }
 
     #[test]

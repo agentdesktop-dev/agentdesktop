@@ -26,6 +26,9 @@
 |`daemon.openCode`|object|OpenCode paths.|
 |`daemon.openCode.config`|string|Configuration file.|
 |`daemon.openCode.plugin`|string|Credential plugin path.|
+|`daemon.pi`|object|Pi paths.|
+|`daemon.pi.models`|string|Model catalog file.|
+|`daemon.pi.settings`|string|Settings file.|
 |`daemon.reconcileInterval`|string|Opt-in interval between periodic re-applies of the current<br>configuration, which repair drift (a managed file deleted or edited by<br>hand, a fixed conflict, a loosened mode) without rewriting anything<br>unchanged. Unset means no periodic re-apply; a controller-managed<br>device still re-applies the controller's configuration on every<br>reconnect. Must be greater than zero and at most 30 days; read at<br>startup only (restart the daemon after changing it).|
 |`daemon.socket`|string|Local API Unix socket or Windows named pipe.|
 |`daemon.stateDir`|string|Persistent daemon state directory.|
@@ -77,6 +80,12 @@
 |`programs.openCode.model`|string|Model ID selected from `models` when using the LLM gateway.<br><br>This is required when a top-level `llmGateway` is configured.|
 |`programs.openCode.models`|object|Models exposed by the managed LLM gateway provider, keyed by model ID.<br><br>Each value is an arbitrary OpenCode model configuration object. At least<br>one model is required when a top-level `llmGateway` is configured.|
 |`programs.openCode.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
+|`programs.pi`|object|Pi coding-agent harness managed configuration.<br><br>Requires `--user`. Cannot be combined with Claude Desktop or Grok Build,<br>which require system mode.|
+|`programs.pi.api`|string|Pi API dialect for the managed provider. Defaults to `anthropic-messages`.|
+|`programs.pi.managedConfig`|object|Arbitrary values merged into Pi's `models.json`.|
+|`programs.pi.model`|string|Model ID selected when pointing Pi at the LLM gateway.<br><br>This is required when a top-level `llmGateway` is configured. If `models`<br>is empty, agentdesktop creates a catalog entry with this ID.|
+|`programs.pi.models`|object|Extra Pi model objects, keyed by model ID.<br><br>Each value is an arbitrary Pi `models.json` model object. The map key<br>sets its `id`. Generated gateway `baseUrl` and `apiKey` values take<br>precedence, including per-model URLs. When this map is non-empty,<br>`model` must name one of its keys. Every key must contain a<br>non-whitespace character.|
+|`programs.pi.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
 |`programs.vscode`|object|VS Code Copilot Chat managed configuration (own models through the<br>loopback proxy, or GitHub's models through the gateway).|
 |`programs.vscode.copilotChat`|enum|Which Copilot Chat model source VS Code is pointed at: agentdesktop's<br>own custom models (`ownModels`), or GitHub's own models reached<br>through the gateway (`githubModels`).<br>Possible values: `ownModels`, `githubModels`.|
 |`programs.vscode.models`|object|Custom model entries exposed to VS Code's Copilot Chat model picker,<br>keyed by the model ID VS Code sends as `model`. Only meaningful under<br>`copilotChat: ownModels`; `githubModels` rejects a non-empty map.<br><br>At least one is required when a top-level `llmGateway` is configured<br>and `copilotChat` is `ownModels`.|

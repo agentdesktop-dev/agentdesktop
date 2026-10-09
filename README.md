@@ -738,6 +738,7 @@ backup taken before the upgrade.
 | VS Code | Yes | User mode (Copilot Chat) | MCP and skills | — |
 | Grok Build | Yes | System mode | MCP and skills | — |
 | GitHub Copilot CLI | Yes | User mode | — | — |
+| Pi | Yes | User mode | MCP and skills | — |
 
 > **Don't see your tool?** We're actively expanding this list and would love
 > your help. [Open an integration request](https://github.com/agentdesktop-dev/agentdesktop/issues/new)
