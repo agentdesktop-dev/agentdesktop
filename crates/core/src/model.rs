@@ -133,6 +133,25 @@ pub struct DaemonInfo {
     /// `daemon.llmProxy.listen` is unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_proxy: Option<LlmProxyInfo>,
+    /// Receiver for usage from a gateway on this machine, when
+    /// `daemon.usage` is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_receiver: Option<UsageReceiverInfo>,
+}
+
+/// State of the daemon's receiver for gateway usage.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageReceiverInfo {
+    /// Configured address; the bound address once the listener is up.
+    pub listen: String,
+    /// Whether the receiver accepts exports. `false` means its listener,
+    /// token, or database failed at startup; it stays off until the daemon
+    /// restarts.
+    pub bound: bool,
+    /// Why the receiver is off, when `bound` is `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// State of the daemon's loopback LLM proxy listener.
@@ -200,6 +219,62 @@ pub struct LlmGatewayLoginStatus {
     /// Code the user confirms at `verification_url`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_code: Option<String>,
+}
+
+/// Token and cost totals over a set of LLM gateway requests.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageTotals {
+    pub requests: u64,
+    pub errors: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    /// API-billed cost in US dollars at the gateway's catalog prices.
+    pub cost_usd: f64,
+    /// Subscription-billed requests priced at API rates. A subscription is
+    /// not billed per token, so this is never part of `cost_usd`.
+    pub subscription_cost_usd: f64,
+    pub subscription_requests: u64,
+    /// Requests for models the gateway has no price for.
+    pub unpriced_requests: u64,
+}
+
+/// Usage totals for one value of a breakdown dimension.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageGroup {
+    pub key: String,
+    pub totals: UsageTotals,
+}
+
+/// Usage totals for one time bucket.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageBucket {
+    pub start_unix_seconds: u64,
+    pub totals: UsageTotals,
+}
+
+/// LLM gateway usage recorded for this device by its controller, or by the
+/// daemon itself when it has no controller.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceUsage {
+    /// False when the controller does not collect usage.
+    pub enabled: bool,
+    pub from_unix_seconds: u64,
+    pub to_unix_seconds: u64,
+    pub bucket_seconds: u64,
+    pub totals: UsageTotals,
+    pub buckets: Vec<UsageBucket>,
+    pub by_tool: Vec<UsageGroup>,
+    pub by_model: Vec<UsageGroup>,
+    /// Configured tools whose traffic does not reach the gateway's usage
+    /// records, such as VS Code with `copilotChat: githubModels`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unmetered_tools: Vec<String>,
 }
 
 /// A timestamped telemetry observation emitted by a managed device.

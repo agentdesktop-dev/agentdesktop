@@ -8,13 +8,15 @@ services:
     - ./dex.yaml:/etc/dex/config.yaml:ro
 
   agentgateway:
-    image: cr.agentgateway.dev/agentgateway:v1.4.1
+    image: cr.agentgateway.dev/agentgateway:v1.6.0
     command: -f /etc/agentgateway/config.yaml
+    # Host networking lets Agentgateway reach the daemon's usage receiver on
+    # 127.0.0.1. The gateway itself listens only on 127.0.0.1:4001.
+    network_mode: host
     depends_on:
     - dex
-    ports:
-    - 127.0.0.1:4001:4001
     environment:
       ANTHROPIC_API_KEY:
+      AGENTDESKTOP_USAGE_TOKEN:
     volumes:
     - ./agentgateway.yaml:/etc/agentgateway/config.yaml:ro

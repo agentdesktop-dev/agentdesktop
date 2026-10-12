@@ -3,9 +3,11 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   Bootstrap,
   ConnectorSnapshot,
+  DeviceUsage,
   Discovery,
   ManagedDeviceSnapshot,
   Settings,
+  UsageRange,
 } from "./types";
 
 export async function desktopReady(): Promise<void> {
@@ -30,6 +32,13 @@ export async function getManagedDeviceStatus(): Promise<ManagedDeviceSnapshot> {
 
 export async function getDiscovery(): Promise<Discovery> {
   return invoke<Discovery>("get_discovery");
+}
+
+export async function getDeviceUsage(
+  range: UsageRange,
+  utcOffsetMinutes: number,
+): Promise<DeviceUsage> {
+  return invoke<DeviceUsage>("get_device_usage", { range, utcOffsetMinutes });
 }
 
 export async function logoutManagedDevice(): Promise<void> {

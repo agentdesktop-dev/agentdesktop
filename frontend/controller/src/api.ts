@@ -9,6 +9,7 @@ export function useApi<T>(path: string) {
     const controller = new AbortController();
     let active = true;
     setLoading(true);
+    setError(null);
     fetch(path, { signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) throw new Error(await response.text());

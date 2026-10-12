@@ -5,6 +5,7 @@ fn main() {
     let ui_dir = manifest_dir.join("../../frontend/controller");
 
     for path in [
+        "migrations",
         "../../frontend/pnpm-lock.yaml",
         "../../frontend/ui/src",
         "../../frontend/controller/index.html",

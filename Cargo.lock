@@ -47,6 +47,7 @@ dependencies = [
  "agentdesktop-client",
  "agentdesktop-core",
  "agentdesktop-proto",
+ "agentdesktop-usage",
  "anyhow",
  "apple-native-keyring-store",
  "async-trait",
@@ -114,6 +115,7 @@ version = "0.1.1"
 dependencies = [
  "agentdesktop-core",
  "agentdesktop-proto",
+ "agentdesktop-usage",
  "anyhow",
  "aws-lc-rs",
  "axum",
@@ -170,6 +172,25 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+]
+
+[[package]]
+name = "agentdesktop-usage"
+version = "0.1.1"
+dependencies = [
+ "agentdesktop-core",
+ "agentdesktop-proto",
+ "anyhow",
+ "aws-lc-rs",
+ "base64 0.23.1",
+ "serde",
+ "sha2 0.11.0",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tonic",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

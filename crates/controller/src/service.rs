@@ -2,9 +2,10 @@ use std::pin::Pin;
 
 use agentdesktop_proto::fleet::{
     AgentMessage, BeginEnrollmentRequest, BeginEnrollmentResponse, CompleteEnrollmentRequest,
-    ConfigStatus, ControllerMessage, DeviceCertificateResponse, EnrollResponse,
-    LlmGatewayCredentialRequest, LlmGatewayCredentialResponse, RenewDeviceCertificateRequest,
-    agent_message, controller_message, fleet_agent_server::FleetAgent,
+    ConfigStatus, ControllerMessage, DeviceCertificateResponse, DeviceUsageRequest,
+    DeviceUsageResponse, EnrollResponse, LlmGatewayCredentialRequest, LlmGatewayCredentialResponse,
+    RenewDeviceCertificateRequest, agent_message, controller_message,
+    fleet_agent_server::FleetAgent,
 };
 use futures_core::Stream;
 use tokio::{sync::mpsc, time};
@@ -15,6 +16,7 @@ use uuid::Uuid;
 use x509_parser::{extensions::GeneralName, parse_x509_certificate};
 
 use agentdesktop_core::config::LlmGatewayAuthentication;
+use agentdesktop_usage::UsageError;
 
 use crate::{
     daemon_config::DaemonConfigStore,
@@ -31,6 +33,7 @@ pub struct FleetAgentService {
     daemon_config: DaemonConfigStore,
     gateway_jwt_issuer: Option<GatewayJwtIssuer>,
     device_certificate_issuer: Option<DeviceCertificateIssuer>,
+    usage_enabled: bool,
 }
 
 impl FleetAgentService {
@@ -47,7 +50,14 @@ impl FleetAgentService {
             daemon_config,
             gateway_jwt_issuer,
             device_certificate_issuer,
+            usage_enabled: false,
         }
+    }
+
+    /// Tells devices that the controller collects gateway usage.
+    pub fn with_usage_collection(mut self, enabled: bool) -> Self {
+        self.usage_enabled = enabled;
+        self
     }
 }
 
@@ -124,7 +134,10 @@ impl FleetAgent for FleetAgentService {
         request: Request<LlmGatewayCredentialRequest>,
     ) -> Result<Response<LlmGatewayCredentialResponse>, Status> {
         let device_id = self.authenticate_device(&request).await?;
-        let client_id = request.into_inner().client_id;
+        let LlmGatewayCredentialRequest {
+            client_id,
+            subscription,
+        } = request.into_inner();
         if !agentdesktop_core::config::valid_client_id(&client_id) {
             return Err(Status::invalid_argument("invalid client_id"));
         }
@@ -177,6 +190,7 @@ impl FleetAgent for FleetAgentService {
                 &client_id,
                 audience,
                 principal.idp_claims.as_ref(),
+                subscription,
             )
             .map_err(internal)?;
         info!(
@@ -184,12 +198,32 @@ impl FleetAgent for FleetAgentService {
             expires_at_unix_seconds,
             enrolled_by_issuer = principal.issuer,
             client_id,
+            subscription,
             "issued LLM gateway credential"
         );
         Ok(Response::new(LlmGatewayCredentialResponse {
             credential,
             expires_at_unix_seconds,
         }))
+    }
+
+    async fn get_device_usage(
+        &self,
+        request: Request<DeviceUsageRequest>,
+    ) -> Result<Response<DeviceUsageResponse>, Status> {
+        let device_id = self.authenticate_device(&request).await?;
+        agentdesktop_usage::device_usage(
+            &self.database.usage(),
+            Some(&device_id),
+            request.get_ref(),
+            self.usage_enabled,
+        )
+        .await
+        .map(Response::new)
+        .map_err(|error| match error {
+            UsageError::InvalidQuery(message) => Status::invalid_argument(message),
+            UsageError::Storage(error) => internal(error),
+        })
     }
 
     async fn connect(

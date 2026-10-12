@@ -6,6 +6,7 @@ use agentdesktop_core::model::{LocalModel, McpServer, ModelRuntime, Skill};
 use agentdesktop_proto::fleet::{
     ConfigStatus, Hello, Inventory, ProgramState, TelemetryEvent, telemetry_event,
 };
+use agentdesktop_usage::UsageStore;
 use serde::Serialize;
 
 #[derive(Clone)]
@@ -256,6 +257,15 @@ impl Database {
             .await
             .context("run database migrations")?;
         Ok(Self { pool })
+    }
+
+    pub(crate) fn pool(&self) -> &AnyPool {
+        &self.pool
+    }
+
+    /// The usage tables of this database.
+    pub fn usage(&self) -> UsageStore {
+        UsageStore::new(self.pool.clone())
     }
 
     pub async fn enroll_device(

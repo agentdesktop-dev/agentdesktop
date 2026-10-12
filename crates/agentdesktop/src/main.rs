@@ -19,7 +19,9 @@ use agentdesktop_client as client;
 use agentdesktop_core::{
     DEFAULT_SOCKET_PATH, VERSION,
     config::DaemonConfig,
-    model::{ControllerConnectionStatus, DaemonInfo, Discovery, EnrollmentStatus, Health},
+    model::{
+        ControllerConnectionStatus, DaemonInfo, DeviceUsage, Discovery, EnrollmentStatus, Health,
+    },
 };
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -592,6 +594,19 @@ async fn get_discovery() -> Result<Discovery, String> {
 }
 
 #[tauri::command]
+async fn get_device_usage(range: String, utc_offset_minutes: i32) -> Result<DeviceUsage, String> {
+    if !matches!(range.as_str(), "24h" | "7d" | "30d") {
+        return Err(format!("unknown usage range {range}"));
+    }
+    client::get(
+        &socket_path(),
+        &format!("/v1/usage?range={range}&utcOffsetMinutes={utc_offset_minutes}"),
+    )
+    .await
+    .map_err(|error| format!("{error:#}"))
+}
+
+#[tauri::command]
 async fn logout_managed_device() -> Result<(), String> {
     client::post_json(&socket_path(), "/v1/logout", &())
         .await
@@ -713,6 +728,7 @@ fn run_desktop() -> anyhow::Result<()> {
             get_connector_status,
             get_managed_device_status,
             get_discovery,
+            get_device_usage,
             logout_managed_device,
             setup_managed_device
         ])

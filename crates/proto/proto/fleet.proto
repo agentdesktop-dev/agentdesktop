@@ -7,6 +7,7 @@ service FleetAgent {
   rpc CompleteEnrollment(CompleteEnrollmentRequest) returns (EnrollResponse);
   rpc RenewDeviceCertificate(RenewDeviceCertificateRequest) returns (DeviceCertificateResponse);
   rpc GetLlmGatewayCredential(LlmGatewayCredentialRequest) returns (LlmGatewayCredentialResponse);
+  rpc GetDeviceUsage(DeviceUsageRequest) returns (DeviceUsageResponse);
   rpc Connect(stream AgentMessage) returns (stream ControllerMessage);
 }
 
@@ -63,11 +64,62 @@ message DeviceCertificateResponse {
 message LlmGatewayCredentialRequest {
   reserved 1;
   string client_id = 2;
+  // The daemon sends the credential together with a subscription token, so
+  // the gateway bills the request to the subscription. The controller marks
+  // the credential so usage records can report it apart from API spend.
+  bool subscription = 3;
 }
 
 message LlmGatewayCredentialResponse {
   string credential = 1;
   uint64 expires_at_unix_seconds = 2;
+}
+
+// Usage for the calling device. The controller takes the device from the
+// authenticated client certificate; a request cannot name another device.
+message DeviceUsageRequest {
+  // One of "24h", "7d", or "30d".
+  string range = 1;
+  // Daily buckets start at local midnight for this offset from UTC.
+  sint32 utc_offset_minutes = 2;
+}
+
+message UsageTotals {
+  uint64 requests = 1;
+  uint64 errors = 2;
+  uint64 input_tokens = 3;
+  uint64 output_tokens = 4;
+  uint64 cache_read_tokens = 5;
+  uint64 cache_write_tokens = 6;
+  // API-billed cost in billionths of a US dollar at gateway catalog prices.
+  int64 cost_nanos = 7;
+  // Subscription-billed requests priced at API rates. Not part of cost_nanos.
+  int64 subscription_cost_nanos = 8;
+  uint64 subscription_requests = 9;
+  // Requests for models the gateway has no price for.
+  uint64 unpriced_requests = 10;
+}
+
+message UsageGroup {
+  string key = 1;
+  UsageTotals totals = 2;
+}
+
+message UsageBucket {
+  uint64 start_unix_seconds = 1;
+  UsageTotals totals = 2;
+}
+
+message DeviceUsageResponse {
+  // False when the controller does not collect usage.
+  bool enabled = 1;
+  uint64 from_unix_seconds = 2;
+  uint64 to_unix_seconds = 3;
+  uint64 bucket_seconds = 4;
+  UsageTotals totals = 5;
+  repeated UsageBucket buckets = 6;
+  repeated UsageGroup by_tool = 7;
+  repeated UsageGroup by_model = 8;
 }
 
 message AgentMessage {

@@ -3,7 +3,7 @@ use std::{net::SocketAddr, time::SystemTime};
 use anyhow::Context;
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{StatusCode, Uri, header},
     response::{IntoResponse, Response},
     routing::get,
@@ -13,11 +13,13 @@ use serde::Serialize;
 use tracing::info;
 
 use agentdesktop_core::config::DaemonConfig;
+use agentdesktop_usage::{UsageError, UsageQuery, UsageReport};
 
 use crate::{
     daemon_config::DaemonConfigStore,
     database::{Database, DeviceDetail, DeviceSummary},
     gateway_jwt::{self, GatewayJwks},
+    usage,
 };
 
 #[derive(Clone)]
@@ -34,6 +36,7 @@ pub struct ControllerSettings {
     pub oidc_enabled: bool,
     pub tls_enabled: bool,
     pub gateway_jwt_enabled: bool,
+    pub usage_enabled: bool,
 }
 
 impl AdminState {
@@ -78,6 +81,7 @@ pub async fn serve(
             get(device).delete(delete_device),
         )
         .route("/api/v1/settings", get(settings))
+        .route("/api/v1/usage", get(usage_report))
         .fallback(get(asset))
         .with_state(state)
         .merge(gateway_jwt::routes(gateway_jwks));
@@ -143,6 +147,22 @@ async fn settings(State(state): State<AdminState>) -> Json<ControllerSettings> {
     Json(state.settings)
 }
 
+async fn usage_report(
+    State(state): State<AdminState>,
+    Query(query): Query<UsageQuery>,
+) -> Result<Json<UsageReport>, AdminError> {
+    let labels = usage::labels(&state.database).await?;
+    Ok(Json(
+        agentdesktop_usage::report(
+            &state.database.usage(),
+            &query,
+            state.settings.usage_enabled,
+            &labels,
+        )
+        .await?,
+    ))
+}
+
 #[derive(Serialize)]
 struct ActiveDaemonConfig {
     config: Option<DaemonConfig>,
@@ -199,6 +219,7 @@ fn unix_time_seconds() -> i64 {
 enum AdminError {
     Internal(anyhow::Error),
     NotFound,
+    BadRequest(&'static str),
 }
 
 impl From<anyhow::Error> for AdminError {
@@ -207,10 +228,20 @@ impl From<anyhow::Error> for AdminError {
     }
 }
 
+impl From<UsageError> for AdminError {
+    fn from(error: UsageError) -> Self {
+        match error {
+            UsageError::InvalidQuery(message) => Self::BadRequest(message),
+            UsageError::Storage(error) => Self::Internal(error),
+        }
+    }
+}
+
 impl IntoResponse for AdminError {
     fn into_response(self) -> Response {
         match self {
             Self::NotFound => (StatusCode::NOT_FOUND, "device not found").into_response(),
+            Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message).into_response(),
             Self::Internal(error) => {
                 tracing::error!(%error, "admin API operation failed");
                 (StatusCode::INTERNAL_SERVER_ERROR, "controller state error").into_response()

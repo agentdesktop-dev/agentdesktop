@@ -29,6 +29,9 @@
 |`daemon.reconcileInterval`|string|Opt-in interval between periodic re-applies of the current<br>configuration, which repair drift (a managed file deleted or edited by<br>hand, a fixed conflict, a loosened mode) without rewriting anything<br>unchanged. Unset means no periodic re-apply; a controller-managed<br>device still re-applies the controller's configuration on every<br>reconnect. Must be greater than zero and at most 30 days; read at<br>startup only (restart the daemon after changing it).|
 |`daemon.socket`|string|Local API Unix socket or Windows named pipe.|
 |`daemon.stateDir`|string|Persistent daemon state directory.|
+|`daemon.usage`|object|Usage collection without a controller, from a gateway on this machine.|
+|`daemon.usage.listen`|string|Loopback address that receives agentgateway's OTLP/gRPC export.|
+|`daemon.usage.tokenFile`|string|Path to a file containing the bearer token agentgateway sends with each export. The token must be at least 32 characters.|
 |`daemon.user`|boolean|Manage the current user’s tool settings instead of system settings.|
 |`daemon.vscode`|object|VS Code paths (`config` = the `chatLanguageModels.json` to manage under<br>the `ownModels` variant of `copilotChat`, `settings` = the user<br>`settings.json` to manage under the `githubModels` variant; each<br>defaults to its file inside the per-OS VS Code user profile<br>directory).|
 |`daemon.vscode.config`|string|`chatLanguageModels.json` to manage (the `ownModels` variant of<br>`copilotChat`). Defaults to that file inside the per-OS VS Code user<br>profile directory.|

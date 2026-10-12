@@ -81,6 +81,10 @@ struct Claims<'a> {
     email_verified: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     idp: Option<&'a BTreeMap<String, serde_json::Value>>,
+    /// `subscription` when the request is billed to the user's subscription,
+    /// so gateway usage records can report it apart from API spend.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    billing: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -120,6 +124,7 @@ impl GatewayJwtIssuer {
         client_id: &str,
         audience: &str,
         idp: Option<&BTreeMap<String, serde_json::Value>>,
+        subscription: bool,
     ) -> anyhow::Result<(String, u64)> {
         let issued_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -145,6 +150,7 @@ impl GatewayJwtIssuer {
                     .and_then(|claims| claims.get("email_verified"))
                     .and_then(serde_json::Value::as_bool),
                 idp,
+                billing: subscription.then_some("subscription"),
             },
             &self.key,
         )
@@ -210,7 +216,7 @@ mod tests {
         )
         .expect("create issuer");
         let (credential, _) = issuer
-            .issue("user", "device", "codex", "agentgateway", None)
+            .issue("user", "device", "codex", "agentgateway", None, false)
             .expect("issue credential");
         let header = decode_header(&credential).expect("decode credential header");
         assert_eq!(header.kid.as_deref(), Some("agentdesktop"));
@@ -249,6 +255,7 @@ mod tests {
             email: Some("john@example.com"),
             email_verified: Some(true),
             idp: Some(&idp),
+            billing: None,
         })
         .expect("serialize claims");
 
@@ -259,5 +266,25 @@ mod tests {
         assert_eq!(claims["client_id"], "codex");
         assert_eq!(claims["idp"]["groups"][0], "engineering");
         assert!(claims.get("device_id").is_none());
+        assert!(claims.get("billing").is_none());
+    }
+
+    #[test]
+    fn subscription_credentials_are_marked() {
+        let claims = serde_json::to_value(Claims {
+            iss: "agentdesktop-controller",
+            sub: "user-123",
+            aud: "agentgateway",
+            iat: 100,
+            exp: 200,
+            act: Actor { sub: "device-123" },
+            client_id: "claude-code",
+            email: None,
+            email_verified: None,
+            idp: None,
+            billing: Some("subscription"),
+        })
+        .expect("serialize claims");
+        assert_eq!(claims["billing"], "subscription");
     }
 }

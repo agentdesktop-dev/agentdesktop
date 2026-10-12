@@ -10,12 +10,17 @@ use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use agentdesktop_core::{
-    config::{DaemonConfig, LlmGatewayAuthentication, ProgramAuthentication, valid_client_id},
+    config::{
+        ControllerConnectionConfig, DaemonConfig, LlmGatewayAuthentication, ProgramAuthentication,
+        VsCodeCopilotChat, valid_client_id,
+    },
     model::{
-        DaemonInfo, Discovery, EnrollmentStatus, Health, LlmGatewayCredential,
+        DaemonInfo, DeviceUsage, Discovery, EnrollmentStatus, Health, LlmGatewayCredential,
         LlmGatewayLoginStatus, TelemetryEvent, TelemetryEventKind,
     },
 };
+use agentdesktop_proto::fleet::DeviceUsageRequest;
+use agentdesktop_usage::{UsageError, UsageStore};
 
 use crate::{enrollment::EnrollmentState, gateway_oidc, remote, subscription};
 
@@ -30,11 +35,21 @@ pub struct AppState {
     pub oidc_callback_listen: Option<SocketAddr>,
     pub telemetry: Option<mpsc::Sender<TelemetryEvent>>,
     pub logout: Option<mpsc::Sender<remote::LogoutRequest>>,
+    /// This device's usage, recorded by the daemon itself (`daemon.usage`).
+    pub usage: Option<UsageStore>,
 }
 
 #[derive(Deserialize)]
 struct CredentialQuery {
     client_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageQuery {
+    range: String,
+    #[serde(default)]
+    utc_offset_minutes: i32,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -50,6 +65,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/telemetry", post(telemetry))
         .route("/v1/llm-gateway/credential", get(llm_gateway_credential))
         .route("/v1/llm-gateway/login", post(llm_gateway_login))
+        .route("/v1/usage", get(device_usage))
         .with_state(state)
 }
 
@@ -262,9 +278,12 @@ pub(crate) async fn gateway_credential(
                     "controller JWT authentication requires a controller".to_owned(),
                 )
             })?;
+            if uses_subscription {
+                return controller_subscription_credential(state, controller, client_id).await;
+            }
             // Local transport permissions authenticate the user, not the calling
             // process. The client ID selects an allowed policy within that boundary.
-            remote::llm_gateway_credential(controller, &state.state_dir, client_id)
+            remote::llm_gateway_credential(controller, &state.state_dir, client_id, false)
                 .await
                 .map(|credential| (credential, false))
         }
@@ -335,6 +354,107 @@ pub(crate) async fn gateway_credential(
     .map_err(|error| (StatusCode::BAD_GATEWAY, format!("{error:#}")))
 }
 
+/// A subscription credential composed with a controller identity. The
+/// subscription is resolved first so the controller marks the identity as
+/// subscription-billed only when a subscription token is sent with it.
+async fn controller_subscription_credential(
+    state: &AppState,
+    controller: &ControllerConnectionConfig,
+    client_id: &str,
+) -> Result<LlmGatewayCredential, (StatusCode, String)> {
+    let bad_gateway = |error: anyhow::Error| (StatusCode::BAD_GATEWAY, format!("{error:#}"));
+    let subscription =
+        subscription::credential(&state.state_dir, state.oidc_callback_listen, false)
+            .await
+            .map_err(bad_gateway)?;
+    let identity = remote::llm_gateway_credential(
+        controller,
+        &state.state_dir,
+        client_id,
+        subscription.is_some(),
+    )
+    .await
+    .map_err(bad_gateway)?;
+    Ok(subscription::combine(subscription, identity))
+}
+
+async fn device_usage(
+    State(state): State<AppState>,
+    Query(query): Query<UsageQuery>,
+) -> Result<Json<DeviceUsage>, (StatusCode, String)> {
+    if !matches!(query.range.as_str(), "24h" | "7d" | "30d") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "range must be 24h, 7d, or 30d".to_owned(),
+        ));
+    }
+    let effective = load_effective_config(&state.config, &state.state_dir).map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("read applied configuration: {error:#}"),
+        )
+    })?;
+    let mut usage = match (&state.usage, &state.config.controller) {
+        (Some(store), _) => {
+            let request = DeviceUsageRequest {
+                range: query.range,
+                utc_offset_minutes: query.utc_offset_minutes,
+            };
+            agentdesktop_usage::device_usage(store, None, &request, true)
+                .await
+                .map(remote::device_usage_from_proto)
+                .map_err(|error| match error {
+                    UsageError::InvalidQuery(message) => {
+                        (StatusCode::BAD_REQUEST, message.to_owned())
+                    }
+                    UsageError::Storage(error) => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("read usage: {error:#}"),
+                    ),
+                })?
+        }
+        (None, Some(controller)) => remote::device_usage(
+            controller,
+            &state.state_dir,
+            &query.range,
+            query.utc_offset_minutes,
+        )
+        .await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("{error:#}")))?,
+        (None, None) => {
+            return Err((
+                StatusCode::FAILED_DEPENDENCY,
+                match &state.daemon_info.usage_receiver {
+                    Some(receiver) => format!(
+                        "usage database is unavailable: {}",
+                        receiver.error.as_deref().unwrap_or("unknown error")
+                    ),
+                    None => "daemon has no controller or daemon.usage configured".to_owned(),
+                },
+            ));
+        }
+    };
+    usage.unmetered_tools = unmetered_tools(&effective);
+    Ok(Json(usage))
+}
+
+/// Configured tools whose gateway traffic has no usage records: VS Code on
+/// GitHub's own models reaches GitHub through the gateway's pass-through
+/// route, which is not an LLM route.
+fn unmetered_tools(config: &DaemonConfig) -> Vec<String> {
+    config
+        .programs
+        .vscode
+        .as_ref()
+        .filter(|vscode| {
+            config.llm_gateway.is_some()
+                && vscode.use_llm_gateway
+                && vscode.copilot_chat == VsCodeCopilotChat::GithubModels
+        })
+        .map(|_| vec!["vscode-copilot".to_owned()])
+        .unwrap_or_default()
+}
+
 async fn llm_gateway_login(
     State(state): State<AppState>,
 ) -> Result<Json<LlmGatewayLoginStatus>, (StatusCode, String)> {
@@ -389,7 +509,22 @@ mod tests {
 
     use agentdesktop_core::config::parse_daemon;
 
-    use super::{load_effective_config, program_uses_subscription};
+    use super::{load_effective_config, program_uses_subscription, unmetered_tools};
+
+    #[test]
+    fn vscode_on_github_models_is_reported_as_unmetered() {
+        let github_models = parse_daemon(
+            "llmGateway:\n  url: https://gateway.example\n  proxyUrl: https://gateway.example/copilot-proxy\nprograms:\n  vscode:\n    copilotChat: githubModels\n",
+        )
+        .unwrap();
+        assert_eq!(unmetered_tools(&github_models), vec!["vscode-copilot"]);
+
+        let own_models = parse_daemon(
+            "llmGateway:\n  url: https://gateway.example\nprograms:\n  vscode:\n    models:\n      gpt-4.1-mini: {}\n",
+        )
+        .unwrap();
+        assert!(unmetered_tools(&own_models).is_empty());
+    }
 
     #[test]
     fn subscription_is_selected_by_requesting_agent() {

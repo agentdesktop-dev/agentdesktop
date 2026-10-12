@@ -623,6 +623,9 @@ routes:
           - x-llm-token
 ```
 
+This route is a pass-through, not an LLM route, so requests on it have no
+token or cost records; see [Token and cost usage](#token-and-cost-usage).
+
 ## Periodic re-apply (opt-in)
 
 The daemon applies its configuration at startup and whenever the controller
@@ -705,6 +708,97 @@ by this agent version", and an older controller ignores the new fields. The
 controller's database migration is one-way: once this controller has run, an
 older controller refuses the same database, so roll back from a database
 backup taken before the upgrade.
+
+## Token and cost usage
+
+A controller can record the tokens and cost of the LLM requests that
+agentgateway proxies for enrolled devices. agentgateway (v1.6 or later) exports one OTLP log record per request to the controller's fleet API; the controller keeps the LLM requests and drops the rest. The controller UI shows usage across the fleet under **Usage**, by user, device, tool, model, and provider, and per device on the device page. The desktop app shows **Usage** for the device it runs on.
+
+Turn collection on in the controller configuration with a token of at least 32
+characters (for example `openssl rand -hex 32`):
+
+```yaml
+usage:
+  tokenFile: /etc/agentdesktop/usage-token
+```
+
+Then send agentgateway's access log to the fleet API with that token. `root`
+is the CA that signed the controller's TLS certificate. The added fields carry
+the user, device, tool, and billing from the controller JWT; usage without
+them is shown as unknown.
+
+```yaml
+frontendPolicies:
+  accessLog:
+    otlp:
+      host: https://controller.example.com:8443
+      policies:
+        backendTLS:
+          root: /etc/agentgateway/controller-ca.pem
+        backendAuth:
+          key:
+            value: $AGENTDESKTOP_USAGE_TOKEN
+      fields:
+        add:
+          agentdesktop.subject: jwt.sub
+          agentdesktop.device: jwt.act.sub
+          agentdesktop.client: jwt.client_id
+          agentdesktop.billing: jwt.billing
+```
+
+- **Cost** is the price agentgateway's model catalog gives each request.
+  Requests to models without a catalog price count toward tokens but not
+  cost, and the UI says how many there were.
+- **Subscription (API rates)** is what requests billed to a Claude
+  subscription (`auth: subscription`) would have cost at API rates. It is
+  shown on its own and never added to cost. The controller marks the
+  credentials it issues for such requests with a `billing: subscription`
+  claim; daemons older than the controller's usage support don't ask for the
+  mark, so their subscription requests count as cost.
+- **Not metered:** VS Code with `copilotChat: githubModels` reaches GitHub
+  through the gateway's pass-through route, which is not an LLM route, so its
+  requests leave no usage records. The desktop app says so when the program is
+  configured that way.
+- Hourly totals are kept for 90 days and daily totals for 13 months.
+  agentgateway does not retry an export, so requests made while the controller
+  is unreachable are not counted. Usage stays after a device is deleted.
+- `GET /api/v1/usage` on the admin listener returns the data behind the UI:
+  `range` is `24h`, `7d` (default), `30d`, or `90d`; `by` lists breakdowns
+  (`user`, `device`, `tool`, `provider`, `model`); the same names filter by
+  value (`?device=<id>`).
+
+### In standalone mode
+
+A daemon without a controller (i.e., in standalone mode) can keep the usage of its own machine when agentgateway runs there too. Give the daemon a loopback address and a token
+file:
+
+```yaml
+daemon:
+  usage:
+    listen: 127.0.0.1:4319
+    tokenFile: /etc/agentdesktop/usage-token
+```
+
+Send agentgateway's access log to that address. The OIDC token a standalone
+gateway sees doesn't name the tool, so also log the user agent, from which the
+daemon recognizes Claude Code and Codex:
+
+```yaml
+frontendPolicies:
+  accessLog:
+    otlp:
+      host: http://127.0.0.1:4319
+      policies:
+        backendAuth:
+          key:
+            value: $AGENTDESKTOP_USAGE_TOKEN
+      fields:
+        add:
+          user_agent.original: request.headers["user-agent"]
+```
+
+The desktop app then shows **Usage**. [`examples/standalone`](examples/standalone)
+runs this setup.
 
 ## Core capabilities
 

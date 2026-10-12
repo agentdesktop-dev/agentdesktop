@@ -2,7 +2,14 @@ import { useTheme } from "@agentdesktop/ui";
 import agentdesktopLogo from "@brand/logo.svg";
 import agentdesktopLogoLight from "@brand/logo-light.svg";
 import agentdesktopMark from "@brand/mark.svg";
-import { Gauge, Laptop, LoaderCircle, RefreshCw, Settings } from "lucide-react";
+import {
+  ChartColumn,
+  Gauge,
+  Laptop,
+  LoaderCircle,
+  RefreshCw,
+  Settings,
+} from "lucide-react";
 import type { ReactNode } from "react";
 
 import type { Notice, View } from "../useDesktopModel";
@@ -16,6 +23,8 @@ export interface DesktopShellProps {
   onRefresh: () => void;
   pageTitle: string;
   refreshError: string | null;
+  /** Whether this device has controller usage to show. */
+  showUsage?: boolean;
   view: View;
 }
 
@@ -28,6 +37,7 @@ export function DesktopShell({
   onRefresh,
   pageTitle,
   refreshError,
+  showUsage = false,
   view,
 }: DesktopShellProps) {
   const { theme } = useTheme();
@@ -53,7 +63,7 @@ export function DesktopShell({
               onClick={() => onNavigate("home")}
             >
               <Gauge size={18} />
-              Status
+              <span className="desktop-nav-label">Status</span>
             </button>
             <button
               type="button"
@@ -62,8 +72,19 @@ export function DesktopShell({
               onClick={() => onNavigate("tools")}
             >
               <Laptop size={18} />
-              Tools
+              <span className="desktop-nav-label">Tools</span>
             </button>
+            {showUsage ? (
+              <button
+                type="button"
+                className={view === "usage" ? "active" : ""}
+                aria-current={view === "usage" ? "page" : undefined}
+                onClick={() => onNavigate("usage")}
+              >
+                <ChartColumn size={18} />
+                <span className="desktop-nav-label">Usage</span>
+              </button>
+            ) : null}
             <button
               type="button"
               className={view === "settings" ? "active" : ""}
@@ -71,7 +92,7 @@ export function DesktopShell({
               onClick={() => onNavigate("settings")}
             >
               <Settings size={18} />
-              Settings
+              <span className="desktop-nav-label">Settings</span>
             </button>
           </nav>
         </aside>

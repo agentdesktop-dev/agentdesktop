@@ -1408,9 +1408,10 @@ mod tests {
                 config,
                 daemon_info: DaemonInfo { version: "test".into(), scope: DaemonScope::User,
                     config_path: String::new(), state_directory: String::new(),
-                    inventory_interval: Duration::from_secs(60), controller: None, llm_proxy: None },
+                    inventory_interval: Duration::from_secs(60), controller: None, llm_proxy: None,
+                    usage_receiver: None },
                 discovery, enrollment: EnrollmentState::new(false), state_dir: dir.path().to_owned(),
-                oidc_callback_listen: None, telemetry: None, logout: None,
+                oidc_callback_listen: None, telemetry: None, logout: None, usage: None,
             };
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let proxy_address = listener.local_addr().unwrap();
@@ -2037,6 +2038,7 @@ mod tests {
                     inventory_interval: Duration::from_secs(60),
                     controller: None,
                     llm_proxy: None,
+                    usage_receiver: None,
                 },
                 discovery,
                 enrollment: EnrollmentState::new(true),
@@ -2044,6 +2046,7 @@ mod tests {
                 oidc_callback_listen: None,
                 telemetry: None,
                 logout: None,
+                usage: None,
             };
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let proxy_address = listener.local_addr().unwrap();
@@ -2424,6 +2427,7 @@ mod tests {
                 inventory_interval: Duration::from_secs(60),
                 controller: None,
                 llm_proxy: None,
+                usage_receiver: None,
             },
             discovery,
             enrollment: EnrollmentState::new(false),
@@ -2431,6 +2435,7 @@ mod tests {
             oidc_callback_listen: None,
             telemetry: None,
             logout: None,
+            usage: None,
         };
         (dir, state)
     }
@@ -2600,6 +2605,7 @@ mod tests {
                 inventory_interval: Duration::from_secs(60),
                 controller: None,
                 llm_proxy: None,
+                usage_receiver: None,
             },
             discovery,
             enrollment: EnrollmentState::new(false),
@@ -2607,6 +2613,7 @@ mod tests {
             oidc_callback_listen: None,
             telemetry: None,
             logout: None,
+            usage: None,
         };
         (dir, state)
     }
@@ -2667,6 +2674,7 @@ mod tests {
                 inventory_interval: Duration::from_secs(60),
                 controller: None,
                 llm_proxy: None,
+                usage_receiver: None,
             },
             discovery,
             enrollment: EnrollmentState::new(false),
@@ -2674,6 +2682,7 @@ mod tests {
             oidc_callback_listen: None,
             telemetry: None,
             logout: None,
+            usage: None,
         };
         (dir, state)
     }

@@ -298,6 +298,17 @@
           ],
           "default": null
         },
+        "usage": {
+          "description": "Usage collection without a controller, from a gateway on this machine.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageStartupConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "user": {
           "description": "Manage the current user’s tool settings instead of system settings.",
           "type": "boolean",
@@ -782,6 +793,25 @@
         }
       },
       "additionalProperties": false
+    },
+    "UsageStartupConfig": {
+      "description": "Token and cost collection for a daemon without a controller. agentgateway\non this machine exports its access logs (`frontendPolicies.accessLog.otlp`)\nto the daemon, which keeps this device's usage for the desktop app.",
+      "type": "object",
+      "properties": {
+        "listen": {
+          "description": "Loopback address that receives agentgateway's OTLP/gRPC export.",
+          "type": "string"
+        },
+        "tokenFile": {
+          "description": "Path to a file containing the bearer token agentgateway sends with each export. The token must be at least 32 characters.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "listen",
+        "tokenFile"
+      ]
     },
     "VsCodeConfig": {
       "description": "Settings reconciled into VS Code's Copilot Chat configuration. Under\n`copilotChat: ownModels` this is `chatLanguageModels.json`, pointing\nCopilot Chat's built-in \"Custom Endpoint\" model provider at the local LLM\nproxy's `/vscode-copilot` route; under `copilotChat: githubModels`\nit is the user `settings.json`, pointing Copilot Chat's\nCAPI endpoint at the loopback proxy's `/vscode-copilot-capi/<pairing>`\nroute so VS Code keeps GitHub's own models and its own Copilot token while\nthe daemon adds the gateway identity. See `provider::vscode::reconcile`\nand `provider::vscode::settings` in the agent crate for how each is turned\ninto its merged document. User mode only: both files live in the user's\nVS Code profile directory, so a system daemon rejects the program.",

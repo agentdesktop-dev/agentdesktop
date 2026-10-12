@@ -59,6 +59,11 @@ export function SettingsView({
             description="Short-lived LLM gateway credentials"
             enabled={data.gateway_jwt_enabled}
           />
+          <SettingRow
+            title="Usage collection"
+            description="Token and cost records from agentgateway"
+            enabled={data.usage_enabled}
+          />
         </section>
       )}
       <section className="local-notice">

@@ -4,8 +4,20 @@ import {
   ModelRuntimeInventory,
   ToolIcon,
   ToolInventory,
+  UsageBreakdownTable,
+  UsageMetrics,
+  UsageNotes,
 } from "@agentdesktop/ui";
-import { ArrowLeft, Box, CircleAlert, Code2, Cpu, Trash2 } from "lucide-react";
+import {
+  ArrowLeft,
+  Box,
+  ChartColumn,
+  ChevronRight,
+  CircleAlert,
+  Code2,
+  Cpu,
+  Trash2,
+} from "lucide-react";
 import { useEffect, useRef } from "react";
 
 import {
@@ -20,7 +32,7 @@ import {
   friendlyOs,
 } from "../format";
 import { Link } from "../router";
-import type { DeviceDetail, ProgramStatus } from "../types";
+import type { DeviceDetail, ProgramStatus, UsageReport } from "../types";
 
 export interface DeviceViewProps {
   deleteError: string | null;
@@ -30,6 +42,8 @@ export interface DeviceViewProps {
   onDeleteCancel: () => void;
   onDeleteConfirm: () => void;
   onDeleteRequest: () => void;
+  /** This device's last 30 days, when the controller has usage. */
+  usage?: UsageReport | null;
 }
 
 export function DeviceView({
@@ -40,6 +54,7 @@ export function DeviceView({
   onDeleteCancel,
   onDeleteConfirm,
   onDeleteRequest,
+  usage,
 }: DeviceViewProps) {
   const modelCount = device.model_runtimes.reduce(
     (total, runtime) => total + runtime.models.length,
@@ -143,6 +158,9 @@ export function DeviceView({
           )}
         </section>
       )}
+      {usage && (usage.enabled || usage.totals.requests > 0) ? (
+        <DeviceUsage deviceId={device.id} usage={usage} />
+      ) : null}
       <section className="card table-card">
         <CardHeader
           title="Recent activity"
@@ -259,6 +277,54 @@ export function DeviceView({
         />
       )}
     </div>
+  );
+}
+
+function DeviceUsage({
+  deviceId,
+  usage,
+}: {
+  deviceId: string;
+  usage: UsageReport;
+}) {
+  const tools = usage.breakdowns.tool ?? [];
+  const models = usage.breakdowns.model ?? [];
+  return (
+    <section className="card table-card device-usage">
+      <CardHeader
+        title="Usage"
+        description="Last 30 days"
+        action={
+          <Link
+            href={`/usage?${new URLSearchParams({ range: "30d", device: deviceId })}`}
+            className="text-link"
+          >
+            View in Usage <ChevronRight size={14} />
+          </Link>
+        }
+      />
+      {usage.totals.requests ? (
+        <>
+          <UsageMetrics totals={usage.totals} />
+          <UsageNotes totals={usage.totals} />
+          <UsageBreakdownTable
+            dimension="tool"
+            label="Usage by tool"
+            rows={tools}
+          />
+          <UsageBreakdownTable
+            dimension="model"
+            label="Usage by model"
+            rows={models}
+          />
+        </>
+      ) : (
+        <div className="empty-inline">
+          <ChartColumn size={20} />
+          <span>No LLM gateway usage in the last 30 days.</span>
+        </div>
+      )}
+    </section>
   );
 }
 

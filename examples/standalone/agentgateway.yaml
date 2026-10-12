@@ -1,13 +1,25 @@
 # yaml-language-server: $schema=https://agentgateway.dev/schema/config
 frontendPolicies:
-  logging:
+  accessLog:
     add:
       oauth.client: jwt.aud
       user: jwt.email
+    # Token and cost usage for the desktop app (`daemon.usage` in config.yaml).
+    otlp:
+      host: http://127.0.0.1:4319
+      policies:
+        backendAuth:
+          key:
+            value: $AGENTDESKTOP_USAGE_TOKEN
+      fields:
+        add:
+          # Names the tool (Claude Code, Codex) behind each request.
+          user_agent.original: request.headers["user-agent"]
 
 gateways:
   gateway:
     port: 4001
+    bindAddress: 127.0.0.1
 
 routes:
 - name: reachability
@@ -28,7 +40,7 @@ llm:
       issuer: http://127.0.0.1:5557/dex
       audiences: [agentdesktop-local]
       jwks:
-        url: http://dex:5557/dex/keys
+        url: http://127.0.0.1:5557/dex/keys
   models:
   # Claude desktop requires an explicit model
   - name: "claude-haiku-4-5"

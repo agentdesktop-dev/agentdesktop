@@ -24,6 +24,7 @@ async-trait = "0.1"
 agentdesktop-client.workspace = true
 agentdesktop-core.workspace = true
 agentdesktop-proto.workspace = true
+agentdesktop-usage.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 base64.workspace = true

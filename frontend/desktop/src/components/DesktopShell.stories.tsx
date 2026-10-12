@@ -45,6 +45,20 @@ export const DiscoveringTools: Story = {
   },
 };
 
+export const ManagedDeviceNavigation: Story = {
+  args: { showUsage: true },
+  play: async ({ args, canvas }) => {
+    await userEvent.click(canvas.getByRole("button", { name: "Usage" }));
+    await expect(args.onNavigate).toHaveBeenCalledWith("usage");
+  },
+};
+
+export const StandaloneHasNoUsage: Story = {
+  play: async ({ canvas }) => {
+    await expect(canvas.queryByRole("button", { name: "Usage" })).toBeNull();
+  },
+};
+
 export const Refreshing: Story = {
   args: { isRefreshing: true },
 };
