@@ -20,6 +20,8 @@ export function useApi<T>(path: string) {
       })
       .catch((reason: Error) => {
         if (active && reason.name !== "AbortError") {
+          // Data kept from an earlier path no longer matches this request.
+          setData(null);
           setError(reason.message || "Request failed");
         }
       })

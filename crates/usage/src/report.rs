@@ -52,7 +52,9 @@ pub struct UsageReport {
     pub to_unix_seconds: i64,
     pub bucket_seconds: i64,
     pub totals: model::UsageTotals,
-    /// Totals for the equally long period before this one.
+    /// Totals for the equally long period before this one. Usage older than
+    /// 90 days is kept per UTC day, so that far back the period starts at
+    /// the nearest UTC midnight.
     pub previous_totals: model::UsageTotals,
     pub active_users: i64,
     pub active_devices: i64,
@@ -96,7 +98,8 @@ pub async fn report(
     labels: &Labels,
 ) -> Result<UsageReport, UsageError> {
     let range = query.range.as_deref().unwrap_or("7d");
-    let window = Window::preset(range, unix_now(), query.utc_offset_minutes.unwrap_or(0)).ok_or(
+    let now = unix_now();
+    let window = Window::preset(range, now, query.utc_offset_minutes.unwrap_or(0)).ok_or(
         UsageError::InvalidQuery("unknown usage range or UTC offset"),
     )?;
     let dimensions = query
@@ -123,7 +126,7 @@ pub async fn report(
     }
 
     let current = store::summary(store, window.start, window.end, &filter).await?;
-    let previous_window = window.previous();
+    let previous_window = window.previous(now);
     let previous =
         store::summary(store, previous_window.start, previous_window.end, &filter).await?;
     let buckets = buckets(
@@ -289,7 +292,7 @@ mod tests {
 
     use super::{UsageError, UsageFilterOption, UsageQuery, device_usage, report};
     use crate::{
-        DAY, Filter, HOUR, Labels, UsageIngest, UsageStore,
+        DAY, Filter, HOUR, Labels, UsageIngest, UsageStore, Window,
         otlp::tests::{DEVICE_ID, attribute, llm_record, standalone_record, text},
         store::{
             self,
@@ -615,5 +618,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(remaining, 0, "daily usage expires after 13 months");
+    }
+
+    #[tokio::test]
+    async fn the_previous_ninety_days_count_whole_compacted_days() {
+        let (store, _directory) = test_store().await;
+        let now = unix_now();
+        // UTC-05:00: the previous 90 days start at 05:00 UTC, in usage already
+        // compacted into UTC days.
+        let window = Window::preset("90d", now, -300).unwrap();
+        let first_day = window.start - 90 * DAY;
+        let records = [
+            first_day - 12 * HOUR,
+            first_day + 10 * HOUR,
+            window.start - HOUR,
+        ]
+        .into_iter()
+        .map(|at| llm_record(at, Vec::new()))
+        .collect();
+        assert!(export(&store, records).await.is_none());
+        store::compact(&store, now).await.unwrap();
+
+        let fleet = report(
+            &store,
+            &UsageQuery {
+                range: Some("90d".to_owned()),
+                utc_offset_minutes: Some(-300),
+                ..Default::default()
+            },
+            true,
+            &Labels::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fleet.totals.requests, 0);
+        assert_eq!(
+            fleet.previous_totals.requests, 2,
+            "the first day counts in full, the day before it not at all"
+        );
     }
 }

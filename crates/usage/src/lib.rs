@@ -321,10 +321,16 @@ impl Window {
         })
     }
 
-    /// The equally long period just before this one.
-    fn previous(&self) -> Self {
+    /// The equally long period just before this one. Usage older than the
+    /// hourly retention is kept per UTC day, so a period reaching that far
+    /// starts at the nearest UTC midnight instead of splitting a day.
+    fn previous(&self, now: i64) -> Self {
+        let mut start = self.start - (self.end - self.start);
+        if start < now - HOURLY_RETENTION {
+            start = (start + DAY / 2).div_euclid(DAY) * DAY;
+        }
         Self {
-            start: self.start - (self.end - self.start),
+            start,
             end: self.start,
             ..*self
         }
@@ -384,10 +390,26 @@ mod tests {
         let today_utc = NOW.div_euclid(DAY) * DAY;
         assert_eq!(window.bucket_index(today_utc + 3 * HOUR), Some(5));
         assert_eq!(window.bucket_index(today_utc + 6 * HOUR), Some(6));
-        assert_eq!(window.previous().end, window.start);
+        assert_eq!(window.previous(NOW).end, window.start);
         assert_eq!(
-            window.previous().end - window.previous().start,
+            window.previous(NOW).end - window.previous(NOW).start,
             window.end - window.start
+        );
+    }
+
+    #[test]
+    fn a_previous_period_past_hourly_retention_starts_at_a_utc_midnight() {
+        // UTC-05:00 days start at 05:00 UTC, but usage that old is kept per
+        // UTC day.
+        let window = Window::preset("90d", NOW, -300).unwrap();
+        let previous = window.previous(NOW);
+        assert_eq!(previous.end, window.start);
+        assert_eq!(previous.start, window.start - 90 * DAY - 5 * HOUR);
+        // UTC+02:00 days start two hours before a UTC midnight.
+        let window = Window::preset("90d", NOW, 120).unwrap();
+        assert_eq!(
+            window.previous(NOW).start,
+            window.start - 90 * DAY + 2 * HOUR
         );
     }
 

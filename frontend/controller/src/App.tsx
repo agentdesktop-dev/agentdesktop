@@ -36,7 +36,9 @@ function ControllerRoute({ path }: { path: string }) {
   if (path === "/") return <OverviewPage />;
   if (path === "/devices") return <DevicesPage />;
   if (path.startsWith("/devices/")) {
-    return <DevicePage id={decodeURIComponent(path.slice(9))} />;
+    const id = decodeURIComponent(path.slice(9));
+    // A new device starts without the previous device's data.
+    return <DevicePage key={id} id={id} />;
   }
   if (path === "/configuration") return <ConfigurationPage />;
   if (path === "/usage") return <UsagePage />;
