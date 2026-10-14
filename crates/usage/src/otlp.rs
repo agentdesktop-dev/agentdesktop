@@ -27,6 +27,8 @@ use super::{
 const MIN_TOKEN_LENGTH: usize = 32;
 const MAX_LABEL_BYTES: usize = 128;
 const MAX_SUBJECT_BYTES: usize = 256;
+const MAX_TOKENS_PER_REQUEST: i64 = 1_000_000_000;
+const MAX_COST_NANOS_PER_REQUEST: i64 = 1_000_000_000_000_000;
 /// A record stamped further ahead than this is counted when received.
 const MAX_CLOCK_SKEW: i64 = 5 * 60;
 
@@ -213,14 +215,22 @@ fn parse_record(record: &LogRecord, now: i64) -> Result<Option<UsageRecord>, Str
     let count = |key: &str| match attributes.get(key) {
         None => Ok(0),
         Some(value) => integer(value)
-            .filter(|count| *count >= 0)
-            .ok_or_else(|| format!("{key} must be a non-negative integer")),
+            .filter(|count| (0..=MAX_TOKENS_PER_REQUEST).contains(count))
+            .ok_or_else(|| {
+                format!("{key} must be an integer between 0 and {MAX_TOKENS_PER_REQUEST}")
+            }),
     };
     let input_tokens = count(INPUT_TOKENS)?;
     let output_tokens = count(OUTPUT_TOKENS)?;
     let cost_nanos = attributes
         .get(COST)
-        .map(|value| cost_nanos(value).ok_or_else(|| format!("{COST} must be a dollar amount")))
+        .map(|value| {
+            cost_nanos(value)
+                .filter(|amount| *amount <= MAX_COST_NANOS_PER_REQUEST)
+                .ok_or_else(|| {
+                    format!("{COST} must be a dollar amount no greater than $1,000,000 per request")
+                })
+        })
         .transpose()?;
     let status = attributes
         .get(STATUS)
@@ -234,11 +244,11 @@ fn parse_record(record: &LogRecord, now: i64) -> Result<Option<UsageRecord>, Str
         id: record_id(record),
         key: RollupKey {
             bucket_start: occurred_at.div_euclid(HOUR) * HOUR,
-            subject: label(subject, MAX_SUBJECT_BYTES, "subject")?,
+            subject: label(subject, MAX_SUBJECT_BYTES)?,
             device_id,
             client_id: client_id.to_owned(),
-            provider: label(provider, MAX_LABEL_BYTES, "provider")?,
-            model: label(model, MAX_LABEL_BYTES, "model")?,
+            provider: label(provider, MAX_LABEL_BYTES)?,
+            model: label(model, MAX_LABEL_BYTES)?,
             billing,
         },
         measures: Measures {
@@ -257,12 +267,9 @@ fn parse_record(record: &LogRecord, now: i64) -> Result<Option<UsageRecord>, Str
     }))
 }
 
-fn label(value: &str, max_bytes: usize, name: &str) -> Result<String, String> {
-    if value.len() > max_bytes {
-        return Err(format!("{name} is longer than {max_bytes} bytes"));
-    }
-    if value.chars().any(char::is_control) {
-        return Err(format!("{name} contains control characters"));
+fn label(value: &str, max_bytes: usize) -> Result<String, String> {
+    if value.len() > max_bytes || value.chars().any(char::is_control) {
+        return Ok(String::new());
     }
     Ok(value.to_owned())
 }
@@ -410,7 +417,9 @@ pub(super) mod tests {
     use agentdesktop_proto::otlp_logs::{AnyValue, KeyValue, LogRecord, any_value::Value};
     use tonic::{Code, Request, service::Interceptor};
 
-    use super::{Billing, HOUR, UsageTokenCheck, decimal_nanos, parse_record};
+    use super::{
+        Billing, HOUR, MAX_TOKENS_PER_REQUEST, UsageTokenCheck, decimal_nanos, parse_record,
+    };
 
     pub(crate) const DEVICE_ID: &str = "7ca03414-bb20-4c80-98ef-7b0538b988ba";
     // 2026-03-10T15:20:00Z
@@ -536,9 +545,13 @@ pub(super) mod tests {
 
         for bad in [
             attribute("gen_ai.usage.input_tokens", Value::IntValue(-1)),
+            attribute(
+                "gen_ai.usage.input_tokens",
+                Value::IntValue(MAX_TOKENS_PER_REQUEST + 1),
+            ),
             attribute("agw.ai.usage.cost.total", text("-0.5")),
             attribute("agw.ai.usage.cost.total", text("free")),
-            attribute("gen_ai.response.model", text(&"m".repeat(129))),
+            attribute("agw.ai.usage.cost.total", text("1000001")),
         ] {
             let key = bad.key.clone();
             let mut record = llm_record(NOW, Vec::new());
@@ -549,6 +562,26 @@ pub(super) mod tests {
                 "{key} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn invalid_labels_do_not_drop_usage_measures() {
+        let usage = parse_record(
+            &llm_record(
+                NOW,
+                vec![
+                    attribute("gen_ai.response.model", text(&"m".repeat(129))),
+                    attribute("agentdesktop.subject", text("bad\nsubject")),
+                ],
+            ),
+            NOW,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(usage.key.model, "");
+        assert_eq!(usage.key.subject, "");
+        assert_eq!(usage.measures.input_tokens, 1200);
+        assert_eq!(usage.measures.cost_nanos, 8_100_000);
     }
 
     #[test]

@@ -724,8 +724,10 @@ usage:
 
 Then send agentgateway's access log to the fleet API with that token. `root`
 is the CA that signed the controller's TLS certificate. The added fields carry
-the user, device, tool, and billing from the controller JWT; usage without
-them is shown as unknown.
+the user, device, and tool from the controller JWT. Billing is derived from the
+composite credential in the `Authorization` header, so subscription usage is
+recognized for both controller-JWT and OIDC gateways. Usage without the added
+fields is shown as unknown.
 
 ```yaml
 frontendPolicies:
@@ -743,7 +745,10 @@ frontendPolicies:
           agentdesktop.subject: jwt.sub
           agentdesktop.device: jwt.act.sub
           agentdesktop.client: jwt.client_id
-          agentdesktop.billing: jwt.billing
+          agentdesktop.billing: >-
+            request.headers["authorization"].startsWith("Bearer agentdesktop:")
+              ? "subscription"
+              : "api"
 ```
 
 - **Cost** is the price agentgateway's model catalog gives each request.

@@ -12,7 +12,10 @@ function errorMessage(error: unknown): string {
 /** This device's usage for `range`, kept current while `active`. */
 export function useDeviceUsage(active: boolean) {
   const [range, setRange] = useState<UsageRange>("7d");
-  const [usage, setUsage] = useState<DeviceUsage | null>(null);
+  const [result, setResult] = useState<{
+    range: UsageRange;
+    usage: DeviceUsage;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   // Only the newest request may update state.
@@ -27,7 +30,7 @@ export function useDeviceUsage(active: boolean) {
         -new Date().getTimezoneOffset(),
       );
       if (request === latest.current) {
-        setUsage(next);
+        setResult({ range: nextRange, usage: next });
         setError(null);
       }
     } catch (reason: unknown) {
@@ -49,6 +52,8 @@ export function useDeviceUsage(active: boolean) {
       setLoading(false);
     };
   }, [active, range, load]);
+
+  const usage = result?.range === range ? result.usage : null;
 
   return {
     error,

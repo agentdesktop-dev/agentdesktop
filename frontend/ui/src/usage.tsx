@@ -213,7 +213,9 @@ export function UsageMetrics({
 }
 
 function bucketLabel(startUnixSeconds: number, bucketSeconds: number) {
-  const date = new Date(startUnixSeconds * 1000);
+  const midpoint =
+    bucketSeconds >= 86400 ? startUnixSeconds + bucketSeconds / 2 : startUnixSeconds;
+  const date = new Date(midpoint * 1000);
   return new Intl.DateTimeFormat(
     undefined,
     bucketSeconds < 86400

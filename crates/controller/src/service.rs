@@ -15,7 +15,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 use x509_parser::{extensions::GeneralName, parse_x509_certificate};
 
-use agentdesktop_core::config::LlmGatewayAuthentication;
+use agentdesktop_core::config::{LlmGatewayAuthentication, ProgramAuthentication, ProgramsConfig};
 use agentdesktop_usage::UsageError;
 
 use crate::{
@@ -58,6 +58,20 @@ impl FleetAgentService {
     pub fn with_usage_collection(mut self, enabled: bool) -> Self {
         self.usage_enabled = enabled;
         self
+    }
+}
+
+fn subscription_is_configured_for_client(programs: &ProgramsConfig, client_id: &str) -> bool {
+    match client_id {
+        "claude-code" => programs
+            .claude_code
+            .as_ref()
+            .is_some_and(|program| program.auth == Some(ProgramAuthentication::Subscription)),
+        "claude-desktop" => programs
+            .claude_desktop
+            .as_ref()
+            .is_some_and(|program| program.auth == Some(ProgramAuthentication::Subscription)),
+        _ => false,
     }
 }
 
@@ -169,6 +183,16 @@ impl FleetAgent for FleetAgentService {
                 client_id, "rejected disallowed LLM gateway client"
             );
             return Err(Status::permission_denied("client_id is not allowed"));
+        }
+        let subscription_requested = subscription;
+        let subscription = subscription_requested
+            && subscription_is_configured_for_client(&config.programs, &client_id);
+        if subscription_requested && !subscription {
+            warn!(
+                device_id,
+                client_id,
+                "ignored subscription billing claim without subscription auth configuration"
+            );
         }
         let issuer = self.gateway_jwt_issuer.as_ref().ok_or_else(|| {
             Status::failed_precondition("controller gateway JWT issuer is not configured")
@@ -611,8 +635,30 @@ mod tests {
     use rcgen::{CertificateParams, KeyPair};
     use tonic::Code;
 
-    use super::{FleetAgentService, device_id_from_certificate};
+    use super::{
+        FleetAgentService, device_id_from_certificate, subscription_is_configured_for_client,
+    };
     use crate::{daemon_config::DaemonConfigStore, database::Database, oidc::OidcPrincipal};
+
+    #[test]
+    fn subscription_billing_requires_server_configured_program_auth() {
+        let config = agentdesktop_core::config::parse_daemon(
+            "llmGateway:\n  url: https://gateway.example.com\n  authentication:\n    type: oidc\n    issuer: https://issuer.example.com\n    clientId: desktop\nprograms:\n  claudeCode:\n    auth: subscription\n",
+        )
+        .unwrap();
+        assert!(subscription_is_configured_for_client(
+            &config.programs,
+            "claude-code"
+        ));
+        assert!(!subscription_is_configured_for_client(
+            &config.programs,
+            "claude-desktop"
+        ));
+        assert!(!subscription_is_configured_for_client(
+            &config.programs,
+            "codex"
+        ));
+    }
 
     #[tokio::test]
     async fn device_authentication_binds_oidc_issuer_and_subject() {
