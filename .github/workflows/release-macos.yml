@@ -7,11 +7,6 @@ on:
         description: Canonical release version without a v prefix
         required: true
         type: string
-    secrets:
-      APPLE_APPLICATION_CERTIFICATE:
-        required: true
-      APPLE_CERTIFICATE_PASSWORD:
-        required: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,6 +15,7 @@ env:
 jobs:
   build-macos-binaries:
     runs-on: ${{ matrix.runner }}
+    environment: production-signing
     permissions:
       contents: read
     env:
@@ -68,6 +64,8 @@ jobs:
         env:
           APPLE_APPLICATION_CERTIFICATE: ${{ secrets.APPLE_APPLICATION_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_INSTALLER_CERTIFICATE: ${{ secrets.APPLE_INSTALLER_CERTIFICATE }}
+          APPLE_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_PASSWORD }}
         run: bash .github/scripts/import-macos-signing.sh
 
       - name: Sign macOS binary
@@ -77,9 +75,22 @@ jobs:
         run: |
           binary="target/${TARGET}/release/agentdesktop"
           codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
-            --identifier dev.agentdesktop.tray --options runtime --timestamp=none "$binary"
+            --identifier dev.agentdesktop.tray --options runtime --timestamp "$binary"
           codesign --verify --strict --verbose=2 \
-            -R="identifier \"dev.agentdesktop.tray\" and certificate leaf = H\"${APPLE_SIGNING_IDENTITY}\"" "$binary"
+            -R="anchor apple generic and identifier \"dev.agentdesktop.tray\" and certificate leaf = H\"${APPLE_SIGNING_IDENTITY}\"" "$binary"
+
+      - name: Notarize macOS binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ vars.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ vars.APPLE_API_ISSUER }}
+        run: |
+          # Bare binaries cannot be stapled; Gatekeeper looks up their ticket online.
+          archive="${RUNNER_TEMP}/agentdesktop-notarize.zip"
+          ditto -c -k "target/${TARGET}/release/agentdesktop" "$archive"
+          bash .github/scripts/notarize-macos.sh "$archive"
 
       - name: Stage binary and checksum
         shell: bash
@@ -95,11 +106,8 @@ jobs:
         timeout-minutes: 2
         shell: bash
         run: |
-          # remove-trusted-cert can hang on headless macOS runners:
-          # https://github.com/actions/runner-images/issues/12116
-          # Leave public trust metadata to disposable GitHub-hosted VM teardown.
           # Delete exported files first, even if keychain deletion later fails.
-          rm -f "${RUNNER_TEMP}/agentdesktop-signing.pem" "${RUNNER_TEMP}/agentdesktop-signing.p12"
+          rm -f "${RUNNER_TEMP}/agentdesktop-signing.p12" "${RUNNER_TEMP}/agentdesktop-notary.p8"
           if [ -f "${RUNNER_TEMP}/agentdesktop-signing.keychain-db" ]; then
             security delete-keychain "${RUNNER_TEMP}/agentdesktop-signing.keychain-db"
           fi
@@ -113,6 +121,7 @@ jobs:
 
   build-macos-installers:
     runs-on: ${{ matrix.runner }}
+    environment: production-signing
     permissions:
       contents: read
     strategy:
@@ -156,6 +165,8 @@ jobs:
         env:
           APPLE_APPLICATION_CERTIFICATE: ${{ secrets.APPLE_APPLICATION_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_INSTALLER_CERTIFICATE: ${{ secrets.APPLE_INSTALLER_CERTIFICATE }}
+          APPLE_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_PASSWORD }}
         run: bash .github/scripts/import-macos-signing.sh
 
       - name: Build PKG
@@ -171,7 +182,7 @@ jobs:
           app="target/${TARGET}/release/bundle/macos/agentdesktop.app"
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign --verify --strict \
-            -R="identifier \"dev.agentdesktop.tray\" and certificate leaf = H\"${APPLE_SIGNING_IDENTITY}\"" \
+            -R="anchor apple generic and identifier \"dev.agentdesktop.tray\" and certificate leaf = H\"${APPLE_SIGNING_IDENTITY}\"" \
             "$app/Contents/MacOS/agentdesktop"
 
       - name: Stage PKG
@@ -186,22 +197,16 @@ jobs:
           mkdir -p release
           cp "${source_path}" "release/${OUTPUT_NAME}"
 
-      # Production notarization placeholder: notarize and staple the signed
-      # package here, before calculating its checksum or smoke-testing it.
-      # - name: Notarize and staple PKG
-      #   shell: bash
-      #   env:
-      #     OUTPUT_NAME: agentdesktop-macos-${{ matrix.arch }}.pkg
-      #     APPLE_ID: ${{ secrets.APPLE_ID }}
-      #     APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-      #     APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      #   run: |
-      #     xcrun notarytool submit "release/${OUTPUT_NAME}" \
-      #       --apple-id "${APPLE_ID}" \
-      #       --password "${APPLE_APP_SPECIFIC_PASSWORD}" \
-      #       --team-id "${APPLE_TEAM_ID}" \
-      #       --wait
-      #     xcrun stapler staple "release/${OUTPUT_NAME}"
+      - name: Notarize and staple PKG
+        shell: bash
+        env:
+          OUTPUT_NAME: agentdesktop-macos-${{ matrix.arch }}.pkg
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ vars.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ vars.APPLE_API_ISSUER }}
+        run: |
+          bash .github/scripts/notarize-macos.sh "release/${OUTPUT_NAME}"
+          xcrun stapler staple "release/${OUTPUT_NAME}"
 
       - name: Checksum PKG
         shell: bash
@@ -269,16 +274,13 @@ jobs:
         timeout-minutes: 2
         shell: bash
         run: |
-          # remove-trusted-cert can hang on headless macOS runners:
-          # https://github.com/actions/runner-images/issues/12116
-          # Leave public trust metadata to disposable GitHub-hosted VM teardown.
           # Delete exported files first, even if keychain deletion later fails.
-          rm -f "${RUNNER_TEMP}/agentdesktop-signing.pem" "${RUNNER_TEMP}/agentdesktop-signing.p12"
+          rm -f "${RUNNER_TEMP}/agentdesktop-signing.p12" "${RUNNER_TEMP}/agentdesktop-notary.p8"
           if [ -f "${RUNNER_TEMP}/agentdesktop-signing.keychain-db" ]; then
             security delete-keychain "${RUNNER_TEMP}/agentdesktop-signing.keychain-db"
           fi
 
-      - name: Upload PKG (self-signed application)
+      - name: Upload PKG
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: macos-installer-${{ matrix.arch }}
