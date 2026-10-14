@@ -6,7 +6,7 @@ pub(crate) use plan::grants_beyond;
 use crate::provider::{
     Provider, ReconcileContext, claude_code::ClaudeCode, claude_desktop::ClaudeDesktop,
     codex::Codex, copilot::Copilot, cursor::Cursor, grok::Grok, ollama::Ollama, opencode::OpenCode,
-    vscode::VsCode,
+    pi::Pi, vscode::VsCode,
 };
 use agentdesktop_core::{
     config::{DaemonConfig, ProgramsConfig},
@@ -31,6 +31,7 @@ pub use crate::provider::{
     copilot::default_copilot_providers_path,
     grok::default_grok_managed_config_path,
     opencode::{default_open_code_managed_config_path, default_open_code_plugin_path},
+    pi::{default_pi_models_path, default_pi_settings_path},
     vscode::{default_vscode_chat_models_path, default_vscode_settings_path},
 };
 
@@ -60,6 +61,8 @@ impl Reconciler {
         copilot_providers_path: Option<PathBuf>,
         vscode_chat_models_path: Option<PathBuf>,
         vscode_settings_path: Option<PathBuf>,
+        pi_models_path: PathBuf,
+        pi_settings_path: PathBuf,
         credential_helper: PathBuf,
         socket: PathBuf,
     ) -> Self {
@@ -95,6 +98,10 @@ impl Reconciler {
                 }),
                 Box::new(Copilot {
                     providers_path: copilot_providers_path,
+                }),
+                Box::new(Pi {
+                    models_path: pi_models_path,
+                    settings_path: pi_settings_path,
                 }),
                 Box::new(Ollama),
             ]),
@@ -595,6 +602,7 @@ pub fn configured_programs(programs: &ProgramsConfig) -> Vec<&'static str> {
         grok,
         copilot,
         vscode,
+        pi,
     } = programs;
     [
         (claude_code.is_some(), ClaudeCode::ID),
@@ -604,6 +612,7 @@ pub fn configured_programs(programs: &ProgramsConfig) -> Vec<&'static str> {
         (grok.is_some(), Grok::ID),
         (copilot.is_some(), Copilot::ID),
         (vscode.is_some(), VsCode::ID),
+        (pi.is_some(), Pi::ID),
     ]
     .into_iter()
     .filter_map(|(configured, id)| configured.then_some(id))
@@ -776,6 +785,8 @@ programs:
             Some(root.join("copilot/providers.json")),
             None,
             None,
+            root.join("pi/models.json"),
+            root.join("pi/settings.json"),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
@@ -817,6 +828,8 @@ programs:
             Some(root.join("copilot/providers.json")),
             None,
             None,
+            root.join("pi/models.json"),
+            root.join("pi/settings.json"),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
@@ -824,6 +837,91 @@ programs:
         let error = reconciler.apply(&config).expect_err("user mode must fail");
         assert!(error.to_string().contains("Grok Build"));
         assert!(!root.exists(), "preflight failure must not write any files");
+    }
+
+    #[test]
+    fn system_mode_rejects_pi_before_writing_other_settings() {
+        let fixture = Fixture::new();
+        let config = parse_daemon("programs:\n  claudeCode: {}\n  pi: {}\n").unwrap();
+        let error = fixture
+            .reconciler
+            .apply(&config)
+            .expect_err("Pi requires user mode");
+        assert!(error.to_string().contains("--user"));
+        assert!(
+            !fixture.root.exists(),
+            "preflight failure must not write any files"
+        );
+    }
+
+    #[test]
+    fn user_mode_reconciles_pi_models_and_settings() {
+        let root = std::env::temp_dir().join(format!(
+            "agentdesktop-reconcile-user-pi-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  pi:
+    model: claude-sonnet-4-5
+"#,
+        )
+        .unwrap();
+        let reconciler = Reconciler::new(
+            true,
+            root.join("claude/settings.json"),
+            root.join("claude-desktop/settings.json"),
+            root.join("claude-desktop/helper"),
+            root.join("codex/config.toml"),
+            root.join("opencode/config.json"),
+            root.join("opencode/plugin.js"),
+            root.join("grok/managed_config.toml"),
+            Some(root.join("copilot/providers.json")),
+            None,
+            None,
+            root.join("pi/models.json"),
+            root.join("pi/settings.json"),
+            root.join("bin/agentdesktop"),
+            root.join("agentdesktop.sock"),
+        );
+
+        reconciler
+            .apply(&config)
+            .expect("Pi is supported in user mode");
+        let models = String::from_utf8(fs::read(root.join("pi/models.json")).unwrap()).unwrap();
+        assert!(models.contains("agentdesktop"));
+        assert!(models.contains("claude-sonnet-4-5"));
+        let settings = String::from_utf8(fs::read(root.join("pi/settings.json")).unwrap()).unwrap();
+        assert!(settings.contains("defaultProvider"));
+
+        let repeated = reconciler.plan(&config).unwrap();
+        assert!(repeated.render().contains("Summary: 0 changes"));
+        repeated.apply().unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("pi/models.json")).unwrap(),
+            models
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("pi/settings.json")).unwrap(),
+            settings
+        );
+
+        reconciler
+            .apply(&parse_daemon("programs: {}").unwrap())
+            .unwrap();
+        for path in [
+            "models.json",
+            ".models.json.agentdesktop",
+            "settings.json",
+            ".settings.json.agentdesktop",
+        ] {
+            assert!(!root.join("pi").join(path).exists());
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -859,6 +957,8 @@ programs:
             Some(providers.clone()),
             None,
             None,
+            root.join("pi/models.json"),
+            root.join("pi/settings.json"),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         )
@@ -914,6 +1014,8 @@ programs:
             Some(root.join("copilot/providers.json")),
             Some(chat_models.clone()),
             Some(chat_models.with_file_name("settings.json")),
+            root.join("pi/models.json"),
+            root.join("pi/settings.json"),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         )
@@ -966,6 +1068,8 @@ programs:
             None,
             None,
             None,
+            root.join("pi/models.json"),
+            root.join("pi/settings.json"),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
@@ -1027,6 +1131,8 @@ programs:
             Some(root.join("copilot/providers.json")),
             None,
             None,
+            root.join("pi/models.json"),
+            root.join("pi/settings.json"),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
@@ -1071,6 +1177,8 @@ programs:
                 Some(root.join("copilot/providers.json")),
                 None,
                 None,
+                root.join("pi/models.json"),
+                root.join("pi/settings.json"),
                 root.join("bin/agentdesktop"),
                 root.join("agentdesktop.sock"),
             );
@@ -1094,7 +1202,7 @@ llmGateway:
   authentication:
     type: controllerJwt
     audience: agentgateway
-    allowedClientIds: [claude-code, claude-desktop, codex, opencode, grok]
+    allowedClientIds: [claude-code, claude-desktop, codex, opencode, grok, pi]
 programs:
   claudeCode: {}
   claudeDesktop: {}
@@ -1247,6 +1355,8 @@ programs:
             Some(root.join("copilot/providers.json")),
             Some(root.join("vscode/User/chatLanguageModels.json")),
             Some(root.join("vscode/User/settings.json")),
+            root.join("pi/models.json"),
+            root.join("pi/settings.json"),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         )
@@ -1368,6 +1478,39 @@ programs:
         assert!(
             program_outcome(&report, "copilot").is_none(),
             "an unconfigured, idle provider gets no row"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pi_reports_applied_unchanged_removed_then_no_row() {
+        let root = new_root("pi");
+        let configured = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  pi:
+    model: claude-sonnet-4-5
+"#,
+        )
+        .unwrap();
+        let disabled = parse_daemon("programs: {}").unwrap();
+        let reconciler = full_reconciler(&root);
+        let mut states = Vec::new();
+        for config in [&configured, &configured, &disabled, &disabled] {
+            let (report, result) = reconciler.apply_with_report(config);
+            result.expect("apply succeeds");
+            states.push(program_outcome(&report, "pi").map(|outcome| outcome.state));
+        }
+        assert_eq!(
+            states,
+            [
+                Some(ProgramState::Applied),
+                Some(ProgramState::Unchanged),
+                Some(ProgramState::Removed),
+                None,
+            ]
         );
         let _ = fs::remove_dir_all(&root);
     }
@@ -1699,6 +1842,7 @@ programs:
             "copilot",
             "vscode",
             "opencode",
+            "pi",
         ] {
             assert!(
                 program_outcome(&report, absent).is_none(),

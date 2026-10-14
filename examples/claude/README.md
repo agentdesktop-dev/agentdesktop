@@ -70,6 +70,19 @@ agentdesktop
 Now that agentdesktop is running, Claude Code can be run.
 It will show the configured `Managed by Agentdesktop` and direct traffic through the gateway.
 
+## Pi
+
+Pi requires user-mode configuration. To include Pi, remove `programs.claudeDesktop`
+from `claude-code.yaml` and uncomment `programs.pi`. Run the daemon as the user
+who runs Pi:
+
+```console
+agentdesktop daemon --user --config examples/claude/agentdesktop.yaml
+```
+
+After enrollment, run `pi`; the managed default model uses the gateway. Keep the
+daemon running so Pi can request gateway credentials.
+
 ## Stop the scenario
 
 Stop the foreground daemon and controller with Ctrl-C, then stop Dex and

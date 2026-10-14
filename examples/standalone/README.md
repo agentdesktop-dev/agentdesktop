@@ -62,13 +62,20 @@ $ agentdesktop daemon --config examples/standalone/config.yaml --user
 When we run `claude`, we can now see the message we programmed (`Using the local Agentgateway through Agentdesktop`),
 and messages we send will traverse Agentgateway.
 
+## Pi
+
+The user-mode configuration also enables Pi with `claude-sonnet-4-5`. Run `pi`
+while the daemon is running to use that model through the gateway. Pi requires
+`--user`; authenticated gateway configuration cannot be applied with `--once`.
+
 ## Claude Desktop
 
 In the Claude Code example, we ran with `--user`. This runs the daemon as an unprivileged user.
 
 Claude Desktop, however, requires root configuration.
 
-Uncomment the Claude Desktop configuration in `config.yaml` and save the file.
+Remove `programs.pi` and uncomment the Claude Desktop configuration in
+`config.yaml`, then save the file.
 Then run the daemon as root:
 
 ```sh
