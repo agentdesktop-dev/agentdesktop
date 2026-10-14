@@ -47,7 +47,7 @@ libc = "0.2"
 open = "5.4"
 pem-rfc7468 = { version = "1", features = ["alloc"] }
 prost = "0.14"
-protox = "0.9"
+protox = "0.10"
 rand = "0.10"
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 reqwest = { version = "0.13", default-features = false, features = ["charset", "form", "http2", "json", "rustls"] }
