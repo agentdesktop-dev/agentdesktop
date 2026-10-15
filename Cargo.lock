@@ -51,6 +51,7 @@ dependencies = [
  "anyhow",
  "apple-native-keyring-store",
  "async-trait",
+ "aws-lc-rs",
  "axum",
  "base64 0.23.1",
  "bytes",

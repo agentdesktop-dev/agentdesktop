@@ -58,6 +58,8 @@ toml.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+# The Windows secret envelope (secret_store.rs) is tested on every platform.
+aws-lc-rs.workspace = true
 futures-util = "0.3"
 # Hand-rolled RFC 6455 handshake for the vscode-copilot-capi WebSocket
 # tunnel tests (llm_proxy.rs): Sec-WebSocket-Accept is
@@ -78,6 +80,7 @@ keyring-core.workspace = true
 plist = "1.10"
 
 [target.'cfg(windows)'.dependencies]
+aws-lc-rs.workspace = true
 keyring.workspace = true
 windows-service = "0.8.1"
 windows-sys = { version = "0.61", features = [
