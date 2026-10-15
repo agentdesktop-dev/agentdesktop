@@ -437,6 +437,14 @@ where
         socket.clone(),
     )
     .with_llm_proxy(proxy_context);
+    let choice = crate::program_choice::load(&args.state_dir);
+    if choice != agentdesktop_core::model::ProgramChoice::All {
+        tracing::info!(
+            ?choice,
+            "the device user chose the programs to manage; honored while the configuration sets programSelection.allowUserChoice"
+        );
+    }
+    reconciler.set_program_choice(choice);
     if args.once {
         if args.dry_run {
             validate_dry_run(&config)?;
@@ -465,8 +473,9 @@ where
         usage_receiver,
         ..describe_daemon(&config, &args.config, &args.state_dir, args.user, llm_proxy)
     };
+    // A program the device user opted out of does not ask for a sign-in.
     start_gateway_authentication(
-        &config,
+        &reconcile::apply_program_choice(&config, &reconciler.program_choice()).0,
         args.state_dir.clone(),
         args.oidc_callback_listen,
         proxy_listener.is_some(),
@@ -527,8 +536,16 @@ where
             revision: None,
             config: Arc::new(config),
         }));
+    // Re-apply outcomes, from the tick and from program choice changes, go to
+    // the controller.
     let (tick_status_sender, tick_status_receiver) = watch::channel(None);
-    let tick_enabled = args.reconcile_interval.is_some();
+    let reapply_statuses = config.controller.is_some().then_some(tick_status_sender);
+    let program_control = api::ProgramControl::new(
+        reconciler.clone(),
+        current_config.subscribe(),
+        reapply_statuses.clone(),
+        args.state_dir.clone(),
+    );
     if let Some(interval) = args.reconcile_interval {
         tracing::info!(
             interval_seconds = interval.as_secs_f64(),
@@ -538,7 +555,7 @@ where
             reconciler.clone(),
             current_config_receiver,
             interval,
-            config.controller.is_some().then_some(tick_status_sender),
+            reapply_statuses,
         ));
     }
     let discovery = reconciler.discover().await;
@@ -571,7 +588,7 @@ where
                 telemetry: telemetry_receiver,
                 logout: logout_receiver,
                 current: remote_current_config,
-                tick_statuses: tick_enabled.then_some(tick_status_receiver),
+                tick_statuses: Some(tick_status_receiver),
             },
         ));
     }
@@ -587,6 +604,7 @@ where
         telemetry,
         logout,
         usage: usage_store,
+        programs: Some(program_control),
     };
     let app = api::router(state.clone());
     // The proxy is optional at runtime too: if serving fails (for example the
@@ -1604,6 +1622,7 @@ programs:
             telemetry: None,
             logout: None,
             usage: None,
+            programs: None,
         });
 
         for (method, expected_status) in [("GET", "200 OK"), ("POST", "405 Method Not Allowed")] {
@@ -1742,6 +1761,7 @@ programs:
             telemetry: None,
             logout: None,
             usage: store,
+            programs: None,
         });
         let (mut client, server) = tokio::io::duplex(64 * 1024);
         let connection = tokio::spawn(serve_local_connection(server, app));
@@ -1827,6 +1847,7 @@ programs:
             telemetry: None,
             logout: None,
             usage: None,
+            programs: None,
         });
 
         for endpoint in ["/v1/health", "/v1/config", "/v1/daemon-info"] {

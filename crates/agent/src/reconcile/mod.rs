@@ -10,11 +10,12 @@ use crate::provider::{
 };
 use agentdesktop_core::{
     config::{DaemonConfig, ProgramsConfig},
-    model::Discovery,
+    model::{Discovery, ProgramChoice},
 };
 use serde_json::Value;
 use similar::TextDiff;
 use std::{
+    borrow::Cow,
     cell::RefCell,
     fmt::Write,
     path::{Path, PathBuf},
@@ -44,6 +45,9 @@ pub struct Reconciler {
     /// `plan_with_report` and `dry_run` take no lock. The report feeds the
     /// tick's log rule.
     last_apply: Arc<std::sync::Mutex<Option<ApplyReport>>>,
+    /// The device user's program choice, honored while the configuration
+    /// sets `programSelection.allowUserChoice`.
+    choice: Arc<std::sync::RwLock<ProgramChoice>>,
 }
 
 impl Reconciler {
@@ -99,6 +103,7 @@ impl Reconciler {
                 Box::new(Ollama),
             ]),
             last_apply: Arc::new(std::sync::Mutex::new(None)),
+            choice: Arc::new(std::sync::RwLock::new(ProgramChoice::All)),
         }
     }
 
@@ -108,12 +113,39 @@ impl Reconciler {
         self
     }
 
+    /// The device user's program choice. Every clone shares it.
+    pub fn program_choice(&self) -> ProgramChoice {
+        self.choice
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Replaces the device user's program choice for every later plan; it
+    /// takes effect at the next apply.
+    pub fn set_program_choice(&self, choice: ProgramChoice) {
+        *self
+            .choice
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = choice;
+    }
+
+    /// The report of the last apply from any source, `None` before the first.
+    /// Waits for an apply in progress.
+    pub fn last_report(&self) -> Option<ApplyReport> {
+        self.last_apply
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// Plan every provider, including cleanup for disabled providers, before
     /// applying any writes. A later provider's failure leaves all files intact.
     pub fn plan(&self, config: &DaemonConfig) -> anyhow::Result<ReconcilePlan> {
+        let (config, _) = apply_program_choice(config, &self.program_choice());
         let mut plan = ReconcilePlan::default();
         for provider in self.providers.iter() {
-            plan.append(provider.plan(&self.context, config)?)?;
+            plan.append(provider.plan(&self.context, &config)?)?;
         }
         Ok(plan)
     }
@@ -144,6 +176,7 @@ impl Reconciler {
     /// `plan` fails is recorded as failed and the others are still planned,
     /// so each program's outcome is known. Nothing is written here.
     pub fn plan_with_report(&self, config: &DaemonConfig) -> AttributedPlan {
+        let (config, opted_out) = apply_program_choice(config, &self.program_choice());
         let configured = configured_programs(&config.programs);
         let mut plan = ReconcilePlan::default();
         let mut entries: Vec<ProgramEntry> = Vec::new();
@@ -153,6 +186,7 @@ impl Reconciler {
             let mut entry = ProgramEntry {
                 program,
                 configured: configured.contains(&program),
+                opted_out: opted_out.contains(&program),
                 failed: None,
                 changes: false,
                 conflicts: Vec::new(),
@@ -160,7 +194,7 @@ impl Reconciler {
                 paths: Vec::new(),
                 operations: 0..0,
             };
-            match provider.plan(&self.context, config) {
+            match provider.plan(&self.context, &config) {
                 Err(error) => {
                     entry.failed = Some(format!("{error:#}"));
                     first_error.get_or_insert(error);
@@ -276,7 +310,7 @@ pub(crate) fn fail_closed_without_proxy(
 }
 
 /// A program's outcome, by precedence (highest first): Failed > Conflict >
-/// Blocked > Inactive > Applied/Removed > Unchanged.
+/// Blocked > Inactive > OptedOut > Applied/Removed > Unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProgramState {
     /// The program is configured and its files were changed by this apply.
@@ -294,6 +328,10 @@ pub enum ProgramState {
     /// The program had changes, but none of them was written because the
     /// apply was refused or stopped.
     Blocked,
+    /// The program is configured, but the device user opted out of it (as
+    /// `programSelection.allowUserChoice` permits): its managed content is
+    /// removed, and stays removed.
+    OptedOut,
     /// The program's plan failed, it disagreed with another program's plan,
     /// one of its writes failed, or one of its files changed before the
     /// apply.
@@ -310,6 +348,7 @@ impl ProgramState {
             Self::Conflict => "conflict",
             Self::Inactive => "inactive",
             Self::Blocked => "blocked",
+            Self::OptedOut => "opted_out",
             Self::Failed => "failed",
         }
     }
@@ -436,6 +475,8 @@ fn truncate_detail(mut detail: String) -> String {
 struct ProgramEntry {
     program: &'static str,
     configured: bool,
+    /// Configured, but left out by the device user's program choice.
+    opted_out: bool,
     failed: Option<String>,
     changes: bool,
     conflicts: Vec<String>,
@@ -453,6 +494,9 @@ impl ProgramEntry {
         }
         if let Some(reason) = &self.inactive {
             return Some((ProgramState::Inactive, reason.clone()));
+        }
+        if self.opted_out {
+            return Some((ProgramState::OptedOut, String::new()));
         }
         match (self.changes, self.configured) {
             (true, true) => Some((ProgramState::Applied, String::new())),
@@ -582,6 +626,62 @@ fn outcome(program: &'static str, state: ProgramState, detail: String) -> Progra
         state,
         detail: truncate_detail(detail),
     }
+}
+
+/// The provider IDs of every program a configuration can manage, in provider
+/// order: the programs a device user can choose.
+pub const MANAGED_PROGRAMS: [&str; 7] = [
+    ClaudeCode::ID,
+    ClaudeDesktop::ID,
+    Codex::ID,
+    OpenCode::ID,
+    Grok::ID,
+    Copilot::ID,
+    VsCode::ID,
+];
+
+/// `config` without the configured programs `choice` leaves out, and those
+/// programs' provider IDs, when `programSelection.allowUserChoice` is set.
+/// Otherwise `config` as it is: the choice is kept but not honored. The
+/// destructure is exhaustive, like [`configured_programs`].
+pub fn apply_program_choice<'a>(
+    config: &'a DaemonConfig,
+    choice: &ProgramChoice,
+) -> (Cow<'a, DaemonConfig>, Vec<&'static str>) {
+    fn leave_out<T>(
+        program: &mut Option<T>,
+        id: &'static str,
+        choice: &ProgramChoice,
+        opted_out: &mut Vec<&'static str>,
+    ) {
+        if program.is_some() && !choice.includes(id) {
+            *program = None;
+            opted_out.push(id);
+        }
+    }
+
+    if !config.program_selection.allow_user_choice || *choice == ProgramChoice::All {
+        return (Cow::Borrowed(config), Vec::new());
+    }
+    let mut chosen = config.clone();
+    let ProgramsConfig {
+        claude_code,
+        claude_desktop,
+        codex,
+        open_code,
+        grok,
+        copilot,
+        vscode,
+    } = &mut chosen.programs;
+    let mut opted_out = Vec::new();
+    leave_out(claude_code, ClaudeCode::ID, choice, &mut opted_out);
+    leave_out(claude_desktop, ClaudeDesktop::ID, choice, &mut opted_out);
+    leave_out(codex, Codex::ID, choice, &mut opted_out);
+    leave_out(open_code, OpenCode::ID, choice, &mut opted_out);
+    leave_out(grok, Grok::ID, choice, &mut opted_out);
+    leave_out(copilot, Copilot::ID, choice, &mut opted_out);
+    leave_out(vscode, VsCode::ID, choice, &mut opted_out);
+    (Cow::Owned(chosen), opted_out)
 }
 
 /// The provider IDs of the configured programs. The destructure is
@@ -720,7 +820,11 @@ mod tests {
 
     use agentdesktop_core::config::parse_daemon;
 
-    use super::{ApplyReport, DryRunReport, ProgramOutcome, ProgramState, Reconciler};
+    use agentdesktop_core::model::ProgramChoice;
+
+    use super::{
+        ApplyReport, DryRunReport, ProgramOutcome, ProgramState, Reconciler, apply_program_choice,
+    };
 
     #[test]
     fn dry_run_report_shows_changes_and_hides_unchanged_files() {
@@ -1333,6 +1437,142 @@ programs:
             Some(ProgramState::Unchanged)
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    const CHOICE_CONFIG: &str = r#"
+programSelection: { allowUserChoice: true }
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  claudeCode: {}
+  codex: {}
+"#;
+
+    fn only(programs: &[&str]) -> ProgramChoice {
+        ProgramChoice::Selected {
+            programs: programs
+                .iter()
+                .map(|program| (*program).to_owned())
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn opting_out_removes_owned_settings_until_opting_back_in() {
+        let root = new_root("opted-out");
+        let config = parse_daemon(CHOICE_CONFIG).unwrap();
+        let codex_config = root.join("codex/config.toml");
+        let reconciler = full_reconciler(&root);
+        reconciler
+            .apply_with_report(&config)
+            .1
+            .expect("apply every program");
+        assert!(codex_config.exists());
+
+        reconciler.set_program_choice(only(&["claude-code"]));
+        let (report, result) = reconciler.apply_with_report(&config);
+        result.expect("apply the choice");
+        assert_eq!(
+            program_outcome(&report, "codex").map(|outcome| outcome.state),
+            Some(ProgramState::OptedOut)
+        );
+        assert_eq!(
+            program_outcome(&report, "claude-code").map(|outcome| outcome.state),
+            Some(ProgramState::Unchanged)
+        );
+        assert!(!codex_config.exists(), "the owned Codex file is removed");
+
+        let (report, result) = reconciler.apply_with_report(&config);
+        result.expect("apply the choice again");
+        assert_eq!(
+            program_outcome(&report, "codex").map(|outcome| outcome.state),
+            Some(ProgramState::OptedOut),
+            "an opted-out program keeps its row, unlike a removed one"
+        );
+        assert_eq!(reconciler.last_report(), Some(report));
+
+        reconciler.set_program_choice(ProgramChoice::All);
+        let (report, result) = reconciler.apply_with_report(&config);
+        result.expect("apply after opting back in");
+        assert_eq!(
+            program_outcome(&report, "codex").map(|outcome| outcome.state),
+            Some(ProgramState::Applied)
+        );
+        assert!(codex_config.exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_choice_is_kept_but_ignored_unless_the_policy_allows_it() {
+        let root = new_root("choice-not-allowed");
+        let config = parse_daemon(&CHOICE_CONFIG.replace("allowUserChoice: true", "")).unwrap();
+        let reconciler = full_reconciler(&root);
+        reconciler.set_program_choice(ProgramChoice::None);
+
+        let (report, result) = reconciler.apply_with_report(&config);
+        result.expect("apply");
+        assert!(
+            report
+                .programs
+                .iter()
+                .all(|outcome| outcome.state == ProgramState::Applied),
+            "every configured program is managed: {report:?}"
+        );
+        assert!(root.join("codex/config.toml").exists());
+        assert_eq!(reconciler.program_choice(), ProgramChoice::None);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_program_configured_after_a_selection_stays_unmanaged() {
+        let root = new_root("selected-later");
+        let reconciler = full_reconciler(&root);
+        reconciler.set_program_choice(only(&["claude-code"]));
+        let claude_only = parse_daemon(&CHOICE_CONFIG.replace("  codex: {}\n", "")).unwrap();
+        assert!(claude_only.programs.codex.is_none());
+        reconciler
+            .apply_with_report(&claude_only)
+            .1
+            .expect("apply Claude Code");
+
+        let with_codex = parse_daemon(CHOICE_CONFIG).unwrap();
+        let rendered = reconciler.plan(&with_codex).unwrap().render();
+        assert!(
+            !rendered.contains("config.toml"),
+            "a dry run honors the choice too: {rendered}"
+        );
+        let (report, result) = reconciler.apply_with_report(&with_codex);
+        result.expect("apply with Codex configured");
+        assert_eq!(
+            program_outcome(&report, "codex").map(|outcome| outcome.state),
+            Some(ProgramState::OptedOut)
+        );
+        assert!(!root.join("codex/config.toml").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn managed_programs_are_every_program_key() {
+        let every = parse_daemon(
+            "programs: { claudeCode: {}, claudeDesktop: {}, codex: {}, openCode: {}, grok: {}, copilot: {}, vscode: {} }",
+        )
+        .unwrap();
+        assert_eq!(
+            super::configured_programs(&every.programs),
+            super::MANAGED_PROGRAMS
+        );
+    }
+
+    #[test]
+    fn apply_program_choice_lists_what_it_leaves_out_in_provider_order() {
+        let config = parse_daemon(CHOICE_CONFIG).unwrap();
+        let (chosen, opted_out) = apply_program_choice(&config, &ProgramChoice::None);
+        assert_eq!(opted_out, vec!["claude-code", "codex"]);
+        assert!(chosen.programs.claude_code.is_none() && chosen.programs.codex.is_none());
+
+        let (chosen, opted_out) = apply_program_choice(&config, &ProgramChoice::All);
+        assert!(opted_out.is_empty());
+        assert!(matches!(chosen, std::borrow::Cow::Borrowed(_)));
     }
 
     #[test]

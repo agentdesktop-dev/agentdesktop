@@ -34,6 +34,13 @@ pub struct DaemonConfig {
     /// Per-program settings reconciled on this device.
     #[serde(default, skip_serializing_if = "ProgramsConfig::is_empty")]
     pub programs: ProgramsConfig,
+    /// Whether the device user may choose which configured programs are managed.
+    ///
+    /// A daemon that predates this setting rejects a configuration that
+    /// contains it, so upgrade devices before setting it in
+    /// controller-delivered policy.
+    #[serde(default, skip_serializing_if = "ProgramSelectionConfig::is_default")]
+    pub program_selection: ProgramSelectionConfig,
     /// Interval between inventory refreshes. Defaults to `15m`, and must be
     /// greater than zero.
     ///
@@ -197,6 +204,7 @@ impl Default for DaemonConfig {
             sandbox: None,
             telemetry: TelemetryConfig::default(),
             programs: ProgramsConfig::default(),
+            program_selection: ProgramSelectionConfig::default(),
             inventory_interval: default_inventory_interval(),
         }
     }
@@ -645,6 +653,28 @@ fn default_inventory_interval() -> Duration {
 
 fn default_heartbeat_interval() -> Duration {
     Duration::from_secs(30)
+}
+
+/// Whether the device user may choose which configured programs are managed.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProgramSelectionConfig {
+    /// Let the device user opt out of all configured programs, or choose the
+    /// ones to manage, with `agentdesktop programs set`.
+    /// Agentdesktop removes the settings it wrote for a program the user opts
+    /// out of, and reports the program as opted out.
+    ///
+    /// Defaults to `false`: every configured program is managed and a choice
+    /// stored on the device is ignored until this is enabled again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_user_choice: bool,
+}
+
+impl ProgramSelectionConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 /// Settings for developer tools managed by Agentdesktop.
@@ -1595,6 +1625,23 @@ programs: { claudeCode: { useLlmGateway: false } }
         assert!(daemon.controller.is_some());
         assert!(daemon.llm_gateway.is_some());
         assert!(!daemon.programs.claude_code.unwrap().use_llm_gateway);
+    }
+
+    #[test]
+    fn user_program_choice_is_off_unless_the_policy_allows_it() {
+        let default = parse_daemon("programs: {}").expect("valid daemon configuration");
+        assert!(!default.program_selection.allow_user_choice);
+        assert!(
+            !serde_json::to_string(&default)
+                .unwrap()
+                .contains("programSelection"),
+            "the default is not serialized"
+        );
+
+        let allowed = parse_daemon("programSelection: { allowUserChoice: true }")
+            .expect("valid daemon configuration");
+        assert!(allowed.program_selection.allow_user_choice);
+        assert!(parse_daemon("programSelection: { allowUserChoise: true }").is_err());
     }
 
     #[test]

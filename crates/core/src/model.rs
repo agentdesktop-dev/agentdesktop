@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, path::PathBuf, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -188,6 +192,65 @@ pub struct DaemonControllerInfo {
     pub heartbeat_interval: Duration,
 }
 
+/// The configured programs the device user wants Agentdesktop to manage.
+/// Honored only while the policy sets `programSelection.allowUserChoice`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", tag = "mode")]
+pub enum ProgramChoice {
+    /// Every configured program, including programs configured later.
+    #[default]
+    All,
+    /// No program: Agentdesktop removes the settings it wrote for each one.
+    None,
+    /// Only these programs, by provider ID (for example `claude-code`).
+    /// Programs configured later stay unmanaged until chosen.
+    Selected { programs: BTreeSet<String> },
+}
+
+impl ProgramChoice {
+    /// Whether this choice keeps `program` (a provider ID) managed.
+    pub fn includes(&self, program: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::None => false,
+            Self::Selected { programs } => programs.contains(program),
+        }
+    }
+}
+
+/// Which configured programs are managed on this device, and whether the
+/// device user may change that.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgramManagement {
+    /// Whether the policy lets the device user choose
+    /// (`programSelection.allowUserChoice`).
+    pub user_choice_allowed: bool,
+    /// The device user's stored choice; ignored while `user_choice_allowed`
+    /// is `false`.
+    pub choice: ProgramChoice,
+    /// The programs the policy configures, in reconcile order. Empty before
+    /// the device has a configuration.
+    pub programs: Vec<ManagedProgram>,
+}
+
+/// One configured program and its last reconcile outcome.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedProgram {
+    /// Provider ID, for example `claude-code`.
+    pub program: String,
+    /// Whether Agentdesktop manages this program: `false` when the device
+    /// user opted out of it.
+    pub managed: bool,
+    /// Outcome of the last apply (`applied`, `unchanged`, `opted_out`, …);
+    /// absent until the program has been applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnrollmentStatus {
@@ -316,7 +379,7 @@ pub enum TelemetryEventKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{ControllerConnectionError, ControllerConnectionStatus};
+    use super::{ControllerConnectionError, ControllerConnectionStatus, ProgramChoice};
 
     #[test]
     fn controller_connection_error_is_a_closed_camel_case_set() {
@@ -337,5 +400,24 @@ mod tests {
         let newer: ControllerConnectionStatus =
             serde_json::from_str(r#"{"connected":false,"lastError":"somethingNew"}"#).unwrap();
         assert_eq!(newer.last_error, Some(ControllerConnectionError::Unknown));
+    }
+
+    #[test]
+    fn program_choice_is_tagged_by_mode() {
+        let selected = ProgramChoice::Selected {
+            programs: ["codex".to_owned()].into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&selected).unwrap(),
+            serde_json::json!({ "mode": "selected", "programs": ["codex"] })
+        );
+        assert_eq!(
+            serde_json::from_str::<ProgramChoice>(r#"{"mode":"none"}"#).unwrap(),
+            ProgramChoice::None
+        );
+        assert!(ProgramChoice::default().includes("claude-code"));
+        assert!(!ProgramChoice::None.includes("claude-code"));
+        assert!(selected.includes("codex"));
+        assert!(!selected.includes("claude-code"));
     }
 }

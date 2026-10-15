@@ -24,8 +24,9 @@ pub(crate) struct CurrentConfig {
     pub(crate) config: Arc<DaemonConfig>,
 }
 
-/// One tick's outcome, forwarded to the connection loop for reporting. A
-/// tick never persists anything or changes the current configuration.
+/// One tick's outcome, or the outcome of a re-apply after the device user
+/// changed their program choice, forwarded to the connection loop for
+/// reporting. Neither persists anything or changes the current configuration.
 #[derive(Clone)]
 pub(crate) struct TickStatus {
     /// The revision of the configuration this tick applied, read with it
@@ -97,12 +98,7 @@ pub(crate) async fn run_tick(
     run_tick_with(current, interval, statuses, move |_| {
         // Read again under the apply lock: a push that took the lock first
         // may have replaced the configuration this tick woke up with.
-        let (revision, previous, report, result) = reconciler.apply_read_under_lock(|| {
-            latest
-                .borrow()
-                .as_ref()
-                .map(|current| (current.revision, Arc::clone(&current.config)))
-        })?;
+        let (revision, previous, report, result) = apply_current(&reconciler, &latest)?;
         // Outcome lines and the failure warning only when something changed,
         // so a conflict that persists does not repeat every interval.
         if crate::reconcile::should_log(previous.as_ref(), &report) {
@@ -114,6 +110,27 @@ pub(crate) async fn run_tick(
         Some((revision, report, result))
     })
     .await
+}
+
+/// Applies the current configuration, read under the apply lock, and returns
+/// its revision, the report of the apply before it (from any source), and
+/// this apply's outcome. `None` when there is no current configuration.
+#[allow(clippy::type_complexity)]
+pub(crate) fn apply_current(
+    reconciler: &Reconciler,
+    current: &watch::Receiver<Option<CurrentConfig>>,
+) -> Option<(
+    Option<u64>,
+    Option<ApplyReport>,
+    ApplyReport,
+    anyhow::Result<()>,
+)> {
+    reconciler.apply_read_under_lock(|| {
+        current
+            .borrow()
+            .as_ref()
+            .map(|current| (current.revision, Arc::clone(&current.config)))
+    })
 }
 
 #[cfg(test)]

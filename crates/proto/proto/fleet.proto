@@ -255,4 +255,8 @@ enum ProgramState {
   PROGRAM_STATE_INACTIVE = 5;
   PROGRAM_STATE_BLOCKED = 6;
   PROGRAM_STATE_FAILED = 7;
+  // The program is configured, but the device user opted out of it (the
+  // policy's `programSelection.allowUserChoice` permits this); its managed
+  // content is removed. An older controller reads this as unspecified.
+  PROGRAM_STATE_OPTED_OUT = 8;
 }

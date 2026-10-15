@@ -66,7 +66,8 @@ pub struct Requests {
     /// The daemon's current configuration, replaced by each pushed
     /// configuration that parses (read by the reconcile tick).
     pub(crate) current: watch::Sender<Option<CurrentConfig>>,
-    /// Reconcile tick outcomes, when the tick is enabled.
+    /// Outcomes of re-applying the current configuration: reconcile ticks,
+    /// and program choice changes made through the local API.
     pub(crate) tick_statuses: Option<watch::Receiver<Option<TickStatus>>>,
 }
 
@@ -977,6 +978,7 @@ fn program_state_proto(state: crate::reconcile::ProgramState) -> ProtoProgramSta
         ProgramState::Conflict => ProtoProgramState::Conflict,
         ProgramState::Inactive => ProtoProgramState::Inactive,
         ProgramState::Blocked => ProtoProgramState::Blocked,
+        ProgramState::OptedOut => ProtoProgramState::OptedOut,
         ProgramState::Failed => ProtoProgramState::Failed,
     }
 }
@@ -1029,6 +1031,7 @@ fn status_keys(programs: &[ProgramStatus]) -> Vec<(&str, crate::reconcile::Progr
                 Ok(ProtoProgramState::Conflict) => ProgramState::Conflict,
                 Ok(ProtoProgramState::Inactive) => ProgramState::Inactive,
                 Ok(ProtoProgramState::Blocked) => ProgramState::Blocked,
+                Ok(ProtoProgramState::OptedOut) => ProgramState::OptedOut,
                 Ok(ProtoProgramState::Failed | ProtoProgramState::Unspecified) | Err(_) => {
                     ProgramState::Failed
                 }
