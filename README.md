@@ -805,6 +805,53 @@ frontendPolicies:
 The desktop app then shows **Usage**. [`examples/standalone`](examples/standalone)
 runs this setup.
 
+### Browser PAC
+
+Browsers have no per-tool LLM setting, so organizations steer browser AI
+traffic with a proxy auto-config (PAC) file delivered by MDM or GPO. The daemon
+reports which PAC each browser's policy sets: `PAC: absent`, or `PAC: found`
+with its URL, one value per device (`differs` when browsers disagree).
+`agentdesktop discover`, the desktop app and the controller's device pages show
+it.
+
+It reads:
+
+- Linux: Chrome, Edge and Chromium policy JSON under `/etc/opt/chrome`,
+  `/etc/opt/edge`, `/etc/chromium` and `/etc/chromium-browser` (`managed/` and
+  `recommended/`), and Firefox `policies.json` under `/etc/firefox/policies`
+  and the install's `distribution/` directory.
+- Windows: Chrome and Edge policy under `HKLM\SOFTWARE\Policies\…` (`ProxySettings`,
+  or the legacy `ProxyMode` and `ProxyPacUrl`; the `Recommended` subkey counts as
+  user-overridable), Firefox under `HKLM\SOFTWARE\Policies\Mozilla\Firefox\Proxy`
+  or the install's `distribution\policies.json`. Per-user policy (`HKCU`) is
+  read only when the daemon runs as the user (`--user`).
+- macOS: not yet.
+
+It sends the browser name, packaging, PAC URL, whether the value is
+user-overridable (`recommended`) or locked (Firefox), and the policy source. It
+also fetches each PAC URL directly, as a browser would (results are reused for
+five minutes), and reports the SHA-256 and size of the body, or why the fetch
+failed, never its content: the hash is the PAC's identity. The controller
+overview groups devices by PAC URL and hash, so devices that get a different
+PAC, or cannot reach it, stand out. It never evaluates the PAC and never
+changes browser settings.
+
+The controller can compare the reported PAC with an expected one. The setting
+lives in the controller configuration, not in the configuration sent to
+devices, so daemons of any version accept the fleet configuration:
+
+```yaml
+browserEgress:
+  compliance:
+    pacUrl: https://pac.corp.example/ai-egress.pac
+```
+
+The controller evaluates this when a page is loaded and shows each device as
+compliant or not compliant with the reason: no PAC, a different URL, browsers
+that differ, a policy that cannot be read, or a policy the user can override.
+It is a compliance check only. Changing the expected URL takes a controller
+restart.
+
 ## Core capabilities
 
 - **AI tool discovery:** detect supported developer tools and their versions

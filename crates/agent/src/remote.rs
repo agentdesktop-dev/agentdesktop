@@ -1094,6 +1094,33 @@ async fn send_inventory(
                         .collect(),
                 })
                 .collect(),
+            browser_pacs: discovered
+                .browser_pacs
+                .iter()
+                .map(|browser| agentdesktop_proto::fleet::BrowserPac {
+                    browser: browser.browser.clone(),
+                    packaging: browser.packaging.clone(),
+                    pac_url: browser.pac_url.clone().unwrap_or_default(),
+                    recommended: browser.recommended,
+                    locked: browser.locked,
+                    source: browser
+                        .source
+                        .as_ref()
+                        .map(|source| source.display().to_string())
+                        .unwrap_or_default(),
+                    detail: browser.detail.clone().unwrap_or_default(),
+                })
+                .collect(),
+            pac_fetches: discovered
+                .pac_fetches
+                .iter()
+                .map(|fetch| agentdesktop_proto::fleet::PacFetch {
+                    url: fetch.url.clone(),
+                    sha256: fetch.sha256.clone().unwrap_or_default(),
+                    size: fetch.size.unwrap_or_default(),
+                    error: fetch.error.clone().unwrap_or_default(),
+                })
+                .collect(),
         }),
     )
     .await?;
@@ -1345,6 +1372,8 @@ mod tests {
         AgentDiscovery {
             agents: Vec::new(),
             model_runtimes: Vec::new(),
+            browser_pacs: Vec::new(),
+            pac_fetches: Vec::new(),
         }
     }
 

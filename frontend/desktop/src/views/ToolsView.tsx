@@ -1,11 +1,22 @@
 import {
   CardHeader,
+  friendlyBrowser,
   ModelRuntimeInventory,
   ToolInventory,
 } from "@agentdesktop/ui";
-import { AlertCircle, Box, Cpu } from "lucide-react";
+import { AlertCircle, Box, Cpu, Globe } from "lucide-react";
 
-import type { Discovery } from "../types";
+import type { BrowserPac, Discovery } from "../types";
+
+/** One PAC value for the device: the URL when every browser agrees. */
+function devicePac(browsers: BrowserPac[]): string {
+  const urls = new Set(browsers.map((browser) => browser.pacUrl ?? ""));
+  if (urls.size > 1) {
+    return "PAC: differs between browsers";
+  }
+  const [url] = urls;
+  return url ? `PAC: found  ${url}` : "PAC: absent";
+}
 
 export interface ToolsViewProps {
   discovery: Discovery | null;
@@ -15,6 +26,8 @@ export interface ToolsViewProps {
 export function ToolsView({ discovery, unavailable }: ToolsViewProps) {
   const agents = discovery?.agents ?? [];
   const modelRuntimes = discovery?.modelRuntimes ?? [];
+  const browserPacs = discovery?.browserPacs ?? [];
+  const pacFetches = discovery?.pacFetches ?? [];
   const modelCount = modelRuntimes.reduce(
     (total, runtime) => total + runtime.models.length,
     0,
@@ -121,6 +134,51 @@ export function ToolsView({ discovery, unavailable }: ToolsViewProps) {
               <div>
                 <strong>No local models found</strong>
                 <span>Start Ollama before restarting Agent Desktop.</span>
+              </div>
+            </div>
+          )}
+        </section>
+      ) : null}
+      {!unavailable ? (
+        <section className="card table-card">
+          <CardHeader
+            title="Browser PAC"
+            description="The proxy auto-config URL set by browser policy, as observed on this device"
+          />
+          {browserPacs.length ? (
+            <div className="model-runtime-inventory">
+              <div className="empty-inline">
+                <Globe size={20} />
+                <div>
+                  <strong>{devicePac(browserPacs)}</strong>
+                  {pacFetches.map((fetch) => (
+                    <span key={fetch.url} title={fetch.sha256 ?? fetch.error}>
+                      {fetch.sha256
+                        ? `SHA-256 ${fetch.sha256.slice(0, 12)} · ${fetch.size} bytes`
+                        : `PAC not reachable: ${fetch.error ?? "unknown error"}`}
+                    </span>
+                  ))}
+                  {browserPacs.map((browser) => (
+                    <span key={browser.browser}>
+                      {friendlyBrowser(browser.browser)}:{" "}
+                      {browser.pacUrl ?? browser.detail ?? "no PAC in policy"}
+                      {browser.recommended
+                        ? " (recommended, user can change)"
+                        : ""}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="empty-inline">
+              <Globe size={20} />
+              <div>
+                <strong>No browser policy reported</strong>
+                <span>
+                  No supported browser was found, or browser policy is not read
+                  on this platform yet.
+                </span>
               </div>
             </div>
           )}

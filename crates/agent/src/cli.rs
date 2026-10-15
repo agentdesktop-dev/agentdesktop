@@ -4,8 +4,8 @@ use agentdesktop_client as client;
 use agentdesktop_core::{
     config::DaemonConfig,
     model::{
-        Discovery, EnrollmentStatus, Health, LlmGatewayCredential, LlmGatewayLoginStatus,
-        TelemetryEventKind,
+        DevicePac, Discovery, EnrollmentStatus, Health, LlmGatewayCredential,
+        LlmGatewayLoginStatus, TelemetryEventKind,
     },
 };
 use clap::Subcommand;
@@ -106,9 +106,42 @@ pub async fn run(command: ClientCommand, socket: PathBuf) -> anyhow::Result<()> 
                     agent.executable.display()
                 );
             }
-            for runtime in discovery.model_runtimes {
-                for model in runtime.models {
+            for runtime in &discovery.model_runtimes {
+                for model in &runtime.models {
                     println!("{}\tmodel\t{}", runtime.kind, model.name);
+                }
+            }
+            if !discovery.browser_pacs.is_empty() {
+                match DevicePac::from_browsers(&discovery.browser_pacs) {
+                    DevicePac::Absent => println!("PAC: absent"),
+                    DevicePac::Found(url) => println!("PAC: found\t{url}"),
+                    DevicePac::Differs => println!("PAC: differs between browsers"),
+                }
+                for fetch in &discovery.pac_fetches {
+                    match (&fetch.sha256, &fetch.error) {
+                        (Some(sha256), _) => println!(
+                            "PAC sha256\t{sha256}\t{} bytes\t{}",
+                            fetch.size.unwrap_or_default(),
+                            fetch.url
+                        ),
+                        (None, error) => println!(
+                            "PAC fetch failed\t{}\t{}",
+                            error.as_deref().unwrap_or("unknown error"),
+                            fetch.url
+                        ),
+                    }
+                }
+                for browser in &discovery.browser_pacs {
+                    println!(
+                        "{}\tpac\t{}{}",
+                        browser.browser,
+                        browser.pac_url.as_deref().unwrap_or("none"),
+                        if browser.recommended {
+                            "\t(recommended)"
+                        } else {
+                            ""
+                        }
+                    );
                 }
             }
         }

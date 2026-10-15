@@ -336,6 +336,29 @@ export const populatedDiscovery: Discovery = {
       models: [{ name: "gemma3:4b" }, { name: "qwen3:8b" }],
     },
   ],
+  pacFetches: [
+    {
+      url: "https://pac.corp.example/ai-egress.pac",
+      sha256:
+        "3f9a2c71d04be8a6c5e1f27d9b03a4c8e6f1d2a7b9c0e3f4a5b6c7d8e9f0a1b2",
+      size: 435,
+    },
+  ],
+  browserPacs: [
+    {
+      browser: "chrome",
+      packaging: "system",
+      pacUrl: "https://pac.corp.example/ai-egress.pac",
+      source: "/Library/Managed Preferences/com.google.Chrome.plist",
+    },
+    {
+      browser: "firefox",
+      packaging: "system",
+      pacUrl: "https://pac.corp.example/ai-egress.pac",
+      locked: true,
+      source: "/Library/Managed Preferences/org.mozilla.firefox.plist",
+    },
+  ],
 };
 
 export const emptyDiscovery: Discovery = { agents: [] };

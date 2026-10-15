@@ -32,6 +32,14 @@ export const macDevice: Device = {
   config_updated_at: now - 45,
   discovery_count: 2,
   installed_tools: ["vscode", "claude-code", "codex"],
+  browser_pac: {
+    state: "found",
+    url: "https://pac.corp.example/ai-egress.pac",
+    sha256: "3f9a2c71d04be8a6c5e1f27d9b03a4c8e6f1d2a7b9c0e3f4a5b6c7d8e9f0a1b2",
+    size: 435,
+    fetch_error: null,
+    compliance: { state: "compliant", reason: null },
+  },
 };
 
 export const linuxDevice: Device = {
@@ -45,6 +53,14 @@ export const linuxDevice: Device = {
   config_state: null,
   config_updated_at: null,
   installed_tools: ["opencode"],
+  browser_pac: {
+    state: "absent",
+    url: null,
+    sha256: null,
+    size: null,
+    fetch_error: null,
+    compliance: { state: "not_compliant", reason: "no PAC in browser policy" },
+  },
 };
 
 export const failedDevice: Device = {
@@ -55,6 +71,14 @@ export const failedDevice: Device = {
   architecture: "x86_64",
   config_state: 2,
   config_error: "The managed configuration contains an unsupported key.",
+  browser_pac: {
+    state: "not_reported",
+    url: null,
+    sha256: null,
+    size: null,
+    fetch_error: null,
+    compliance: { state: "not_reported", reason: null },
+  },
 };
 
 export const devices = [macDevice, linuxDevice, failedDevice];
@@ -66,6 +90,23 @@ export const overview: Overview = {
   config_failures: 1,
   active_revision: 4,
   recent_devices: devices,
+  browser_pac: {
+    found: 1,
+    absent: 1,
+    differs: 0,
+    not_reported: 1,
+    expected_pac_url: "https://pac.corp.example/ai-egress.pac",
+    compliant: 1,
+    not_compliant: 1,
+    versions: [
+      {
+        url: "https://pac.corp.example/ai-egress.pac",
+        sha256:
+          "3f9a2c71d04be8a6c5e1f27d9b03a4c8e6f1d2a7b9c0e3f4a5b6c7d8e9f0a1b2",
+        devices: 1,
+      },
+    ],
+  },
 };
 
 const deviceMcpServers = [
@@ -262,6 +303,34 @@ export const deviceDetail: DeviceDetail = {
       models: [{ name: "gemma3:4b" }, { name: "qwen3:8b" }],
     },
   ],
+  pac_fetches: [
+    {
+      url: "https://pac.corp.example/ai-egress.pac",
+      sha256:
+        "3f9a2c71d04be8a6c5e1f27d9b03a4c8e6f1d2a7b9c0e3f4a5b6c7d8e9f0a1b2",
+      size: 435,
+    },
+  ],
+  browser_pacs: [
+    {
+      browser: "chrome",
+      packaging: "system",
+      pac_url: "https://pac.corp.example/ai-egress.pac",
+      recommended: false,
+      locked: false,
+      source: "/Library/Managed Preferences/com.google.Chrome.plist",
+      detail: null,
+    },
+    {
+      browser: "firefox",
+      packaging: "system",
+      pac_url: "https://pac.corp.example/ai-egress.pac",
+      recommended: false,
+      locked: true,
+      source: "/Library/Managed Preferences/org.mozilla.firefox.plist",
+      detail: null,
+    },
+  ],
   recent_events: [
     {
       id: "event-session",
@@ -337,6 +406,16 @@ export const emptyDeviceDetail: DeviceDetail = {
   ...deviceDetail,
   discoveries: [],
   model_runtimes: [],
+  browser_pacs: [],
+  pac_fetches: [],
+  browser_pac: {
+    state: "not_reported",
+    url: null,
+    sha256: null,
+    size: null,
+    fetch_error: null,
+    compliance: null,
+  },
   recent_events: [],
   programs: [],
   programs_reported: true,
@@ -660,4 +739,33 @@ export const sandboxDaemonConfig: DaemonConfigDocument = {
     claudeCode: {},
     codex: {},
   },
+};
+
+export const differsDeviceDetail: DeviceDetail = {
+  ...deviceDetail,
+  browser_pac: {
+    state: "differs",
+    url: null,
+    sha256: null,
+    size: null,
+    fetch_error: null,
+    compliance: {
+      state: "not_compliant",
+      reason: "browsers set different PACs",
+    },
+  },
+  browser_pacs: [
+    { ...deviceDetail.browser_pacs[0] },
+    {
+      ...deviceDetail.browser_pacs[1],
+      pac_url: "https://old-pac.corp.example/ai-egress.pac",
+    },
+  ],
+  pac_fetches: [
+    ...deviceDetail.pac_fetches,
+    {
+      url: "https://old-pac.corp.example/ai-egress.pac",
+      error: "error sending request",
+    },
+  ],
 };

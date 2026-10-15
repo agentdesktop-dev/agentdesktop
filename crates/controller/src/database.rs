@@ -2,7 +2,7 @@ use anyhow::Context;
 use sqlx::{AnyPool, any::AnyPoolOptions};
 use std::{collections::BTreeMap, path::PathBuf};
 
-use agentdesktop_core::model::{LocalModel, McpServer, ModelRuntime, Skill};
+use agentdesktop_core::model::{BrowserPac, LocalModel, McpServer, ModelRuntime, PacFetch, Skill};
 use agentdesktop_proto::fleet::{
     ConfigStatus, Hello, Inventory, ProgramState, TelemetryEvent, telemetry_event,
 };
@@ -37,6 +37,15 @@ pub struct DeviceSummary {
     pub config_updated_at: Option<i64>,
     pub discovery_count: i64,
     pub installed_tools: Vec<String>,
+    /// The PAC browser policy sets and, with a fleet compliance profile, the
+    /// compliance result. Filled in by the admin API at read time.
+    pub browser_pac: crate::browser_pac::DeviceBrowserPac,
+    /// The reported browser rows `browser_pac` is derived from.
+    #[serde(skip)]
+    pub browser_pacs: Vec<BrowserPac>,
+    /// The reported PAC fetches (identity per PAC URL).
+    #[serde(skip)]
+    pub pac_fetches: Vec<PacFetch>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -75,6 +84,9 @@ impl From<DeviceRow> for DeviceSummary {
             config_updated_at: row.config_updated_at,
             discovery_count: row.discovery_count,
             installed_tools: Vec::new(),
+            browser_pac: Default::default(),
+            browser_pacs: Vec::new(),
+            pac_fetches: Vec::new(),
         }
     }
 }
@@ -118,6 +130,10 @@ pub struct DeviceDetail {
     pub device: DeviceSummary,
     pub discoveries: Vec<DeviceDiscovery>,
     pub model_runtimes: Vec<ModelRuntime>,
+    /// The PAC each browser's policy sets, as reported.
+    pub browser_pacs: Vec<BrowserPacRecord>,
+    /// One fetch per PAC URL: SHA-256 and size of the body, or the error.
+    pub pac_fetches: Vec<PacFetch>,
     pub recent_events: Vec<TelemetryEventRecord>,
     /// Per-program configuration status, in the order the agent reported it.
     pub programs: Vec<ProgramStatusRecord>,
@@ -154,6 +170,35 @@ pub(crate) fn validate_program_status(status: &ConfigStatus) -> anyhow::Result<(
         );
     }
     Ok(())
+}
+
+/// Bound on browser rows per device; a device has a handful of browsers.
+const MAX_BROWSER_PACS: usize = 16;
+
+/// Bounds on a reported browser row, as for program status. Rows outside
+/// them are not stored.
+fn accepted_browser_pac(browser: &agentdesktop_proto::fleet::BrowserPac) -> bool {
+    !browser.browser.is_empty()
+        && browser.browser.len() <= 32
+        && browser
+            .browser
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && browser.packaging.len() <= 32
+        && browser.pac_url.len() <= 2048
+        && browser.source.len() <= 4096
+        && browser.detail.len() <= 2048
+}
+
+/// Bounds on a reported PAC fetch: a URL, a hex SHA-256 or an error.
+fn accepted_pac_fetch(fetch: &agentdesktop_proto::fleet::PacFetch) -> bool {
+    !fetch.url.is_empty()
+        && fetch.url.len() <= 2048
+        && (fetch.sha256.is_empty()
+            || (fetch.sha256.len() == 64
+                && fetch.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())))
+        && fetch.error.len() <= 2048
+        && fetch.size <= 1024 * 1024
 }
 
 /// The stored name of a program state; values this controller does not know
@@ -195,6 +240,82 @@ pub struct ProgramStatusRecord {
     pub detail: String,
     pub revision: i64,
     pub updated_at: i64,
+}
+
+/// One reported browser row, as served by the admin API.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct BrowserPacRecord {
+    pub browser: String,
+    pub packaging: String,
+    pub pac_url: Option<String>,
+    pub recommended: bool,
+    pub locked: bool,
+    pub source: Option<String>,
+    pub detail: Option<String>,
+}
+
+impl From<&BrowserPac> for BrowserPacRecord {
+    fn from(browser: &BrowserPac) -> Self {
+        Self {
+            browser: browser.browser.clone(),
+            packaging: browser.packaging.clone(),
+            pac_url: browser.pac_url.clone(),
+            recommended: browser.recommended,
+            locked: browser.locked,
+            source: browser
+                .source
+                .as_ref()
+                .map(|source| source.display().to_string()),
+            detail: browser.detail.clone(),
+        }
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct BrowserPacRow {
+    device_id: String,
+    browser: String,
+    packaging: String,
+    pac_url: String,
+    recommended: i64,
+    locked: i64,
+    source: String,
+    detail: String,
+}
+
+impl From<BrowserPacRow> for BrowserPac {
+    fn from(row: BrowserPacRow) -> Self {
+        Self {
+            browser: row.browser,
+            packaging: row.packaging,
+            pac_url: (!row.pac_url.is_empty()).then_some(row.pac_url),
+            recommended: row.recommended != 0,
+            locked: row.locked != 0,
+            source: (!row.source.is_empty()).then(|| PathBuf::from(row.source)),
+            detail: (!row.detail.is_empty()).then_some(row.detail),
+        }
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct PacFetchRow {
+    device_id: String,
+    url: String,
+    sha256: String,
+    size: i64,
+    error: String,
+}
+
+impl From<PacFetchRow> for PacFetch {
+    fn from(row: PacFetchRow) -> Self {
+        let fetched = !row.sha256.is_empty();
+        Self {
+            url: row.url,
+            sha256: fetched.then_some(row.sha256),
+            size: fetched.then_some(row.size.max(0) as u64),
+            error: (!row.error.is_empty()).then_some(row.error),
+        }
+    }
 }
 
 #[derive(sqlx::FromRow)]
@@ -346,10 +467,83 @@ impl Database {
         for (device_id, kind) in discovered_tools {
             tools_by_device.entry(device_id).or_default().push(kind);
         }
+        let mut pacs_by_device = self.browser_pacs(None).await?;
+        let mut fetches_by_device = self.pac_fetches(None).await?;
         for device in &mut devices {
             device.installed_tools = tools_by_device.remove(&device.id).unwrap_or_default();
+            device.browser_pacs = pacs_by_device.remove(&device.id).unwrap_or_default();
+            device.pac_fetches = fetches_by_device.remove(&device.id).unwrap_or_default();
         }
         Ok(devices)
+    }
+
+    /// Reported PAC fetches, per device; one device when `device_id` is set.
+    async fn pac_fetches(
+        &self,
+        device_id: Option<&str>,
+    ) -> anyhow::Result<BTreeMap<String, Vec<PacFetch>>> {
+        let rows: Vec<PacFetchRow> = match device_id {
+            Some(device_id) => {
+                sqlx::query_as(
+                    "SELECT device_id, url, sha256, size, error
+                     FROM pac_fetches WHERE device_id = $1 ORDER BY url",
+                )
+                .bind(device_id)
+                .fetch_all(&self.pool)
+                .await
+            }
+            None => {
+                sqlx::query_as(
+                    "SELECT device_id, url, sha256, size, error
+                     FROM pac_fetches ORDER BY device_id, url",
+                )
+                .fetch_all(&self.pool)
+                .await
+            }
+        }
+        .context("load PAC fetches")?;
+        let mut by_device: BTreeMap<String, Vec<PacFetch>> = BTreeMap::new();
+        for row in rows {
+            by_device
+                .entry(row.device_id.clone())
+                .or_default()
+                .push(row.into());
+        }
+        Ok(by_device)
+    }
+
+    /// Reported browser PAC rows, per device; one device when `device_id` is set.
+    async fn browser_pacs(
+        &self,
+        device_id: Option<&str>,
+    ) -> anyhow::Result<BTreeMap<String, Vec<BrowserPac>>> {
+        let rows: Vec<BrowserPacRow> =
+            match device_id {
+                Some(device_id) => sqlx::query_as(
+                    "SELECT device_id, browser, packaging, pac_url, recommended, locked, source,
+                            detail
+                     FROM browser_pacs WHERE device_id = $1 ORDER BY browser",
+                )
+                .bind(device_id)
+                .fetch_all(&self.pool)
+                .await,
+                None => sqlx::query_as(
+                    "SELECT device_id, browser, packaging, pac_url, recommended, locked, source,
+                            detail
+                     FROM browser_pacs ORDER BY device_id, browser",
+                )
+                .fetch_all(&self.pool)
+                .await,
+            }
+            .context("load browser PAC policy")?;
+        let mut by_device: BTreeMap<String, Vec<BrowserPac>> = BTreeMap::new();
+        for row in rows {
+            by_device
+                .entry(row.device_id.clone())
+                .or_default()
+                .push(row.into());
+        }
+        Ok(by_device)
     }
 
     pub async fn get_device(&self, device_id: &str) -> anyhow::Result<Option<DeviceDetail>> {
@@ -403,6 +597,18 @@ impl Database {
             .iter()
             .map(|discovery: &DeviceDiscovery| discovery.kind.clone())
             .collect();
+        device.browser_pacs = self
+            .browser_pacs(Some(device_id))
+            .await?
+            .remove(device_id)
+            .unwrap_or_default();
+        let browser_pacs = device.browser_pacs.iter().map(Into::into).collect();
+        device.pac_fetches = self
+            .pac_fetches(Some(device_id))
+            .await?
+            .remove(device_id)
+            .unwrap_or_default();
+        let pac_fetches = device.pac_fetches.clone();
         let recent_events = self.recent_telemetry(device_id, 50).await?;
         let programs_reported: Option<i64> = sqlx::query_scalar(
             "SELECT programs_reported FROM device_config_status WHERE device_id = $1",
@@ -433,6 +639,8 @@ impl Database {
             device,
             discoveries,
             model_runtimes,
+            browser_pacs,
+            pac_fetches,
             recent_events,
             programs,
             programs_reported: programs_reported.map(|reported| reported != 0),
@@ -548,6 +756,56 @@ impl Database {
             .bind(device_id)
             .bind(&runtime.kind)
             .bind(models_json)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        sqlx::query("DELETE FROM browser_pacs WHERE device_id = $1")
+            .bind(device_id)
+            .execute(&mut *transaction)
+            .await?;
+        for browser in inventory
+            .browser_pacs
+            .iter()
+            .filter(|browser| accepted_browser_pac(browser))
+            .take(MAX_BROWSER_PACS)
+        {
+            sqlx::query(
+                "INSERT INTO browser_pacs
+                    (device_id, browser, packaging, pac_url, recommended, locked, source, detail)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 ON CONFLICT (device_id, browser) DO NOTHING",
+            )
+            .bind(device_id)
+            .bind(&browser.browser)
+            .bind(&browser.packaging)
+            .bind(&browser.pac_url)
+            .bind(i64::from(browser.recommended))
+            .bind(i64::from(browser.locked))
+            .bind(&browser.source)
+            .bind(&browser.detail)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        sqlx::query("DELETE FROM pac_fetches WHERE device_id = $1")
+            .bind(device_id)
+            .execute(&mut *transaction)
+            .await?;
+        for fetch in inventory
+            .pac_fetches
+            .iter()
+            .filter(|fetch| accepted_pac_fetch(fetch))
+            .take(MAX_BROWSER_PACS)
+        {
+            sqlx::query(
+                "INSERT INTO pac_fetches (device_id, url, sha256, size, error)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (device_id, url) DO NOTHING",
+            )
+            .bind(device_id)
+            .bind(&fetch.url)
+            .bind(&fetch.sha256)
+            .bind(fetch.size as i64)
+            .bind(&fetch.error)
             .execute(&mut *transaction)
             .await?;
         }
@@ -741,11 +999,12 @@ mod tests {
     use std::{collections::BTreeMap, path::PathBuf};
 
     use agentdesktop_proto::fleet::{
-        ConfigState, ConfigStatus, Discovery, Inventory, LocalModel, McpServer, ModelRuntime,
-        ProgramState, ProgramStatus, Skill, TelemetryEvent, ToolUseEvent, telemetry_event,
+        BrowserPac, ConfigState, ConfigStatus, Discovery, Inventory, LocalModel, McpServer,
+        ModelRuntime, PacFetch, ProgramState, ProgramStatus, Skill, TelemetryEvent, ToolUseEvent,
+        telemetry_event,
     };
 
-    use super::Database;
+    use super::{BrowserPacRecord, Database};
 
     #[tokio::test]
     async fn persists_device_inventory_and_telemetry() {
@@ -795,6 +1054,32 @@ mod tests {
                             name: "qwen3:8b".to_owned(),
                         }],
                     }],
+                    browser_pacs: vec![
+                        BrowserPac {
+                            browser: "chrome".to_owned(),
+                            packaging: "system".to_owned(),
+                            pac_url: "https://pac.corp.example/ai.pac".to_owned(),
+                            source: "/etc/opt/chrome/policies/managed/egress.json".to_owned(),
+                            ..Default::default()
+                        },
+                        BrowserPac {
+                            browser: "INVALID name".to_owned(),
+                            ..Default::default()
+                        },
+                    ],
+                    pac_fetches: vec![
+                        PacFetch {
+                            url: "https://pac.corp.example/ai.pac".to_owned(),
+                            sha256: "ab".repeat(32),
+                            size: 435,
+                            error: String::new(),
+                        },
+                        PacFetch {
+                            url: "https://bad.example/p.pac".to_owned(),
+                            sha256: "not-hex".to_owned(),
+                            ..Default::default()
+                        },
+                    ],
                 },
             )
             .await
@@ -833,6 +1118,30 @@ mod tests {
             "llm-research"
         );
         assert_eq!(device.model_runtimes[0].kind, "ollama");
+        assert_eq!(
+            device.browser_pacs,
+            vec![BrowserPacRecord {
+                browser: "chrome".to_owned(),
+                packaging: "system".to_owned(),
+                pac_url: Some("https://pac.corp.example/ai.pac".to_owned()),
+                recommended: false,
+                locked: false,
+                source: Some("/etc/opt/chrome/policies/managed/egress.json".to_owned()),
+                detail: None,
+            }]
+        );
+        assert_eq!(device.device.browser_pacs.len(), 1);
+        assert_eq!(
+            device.pac_fetches,
+            vec![agentdesktop_core::model::PacFetch {
+                url: "https://pac.corp.example/ai.pac".to_owned(),
+                sha256: Some("ab".repeat(32)),
+                size: Some(435),
+                error: None,
+            }]
+        );
+        let listed = database.list_devices().await.unwrap();
+        assert_eq!(listed[0].browser_pacs, device.device.browser_pacs);
         assert_eq!(device.model_runtimes[0].models[0].name, "qwen3:8b");
         assert_eq!(device.recent_events.len(), 1);
         assert_eq!(device.recent_events[0].event_type, "tool.use");

@@ -41,6 +41,8 @@ impl Provider for ClaudeDesktop {
                 .into_iter()
                 .collect(),
             model_runtimes: Vec::new(),
+            browser_pacs: Vec::new(),
+            pac_fetches: Vec::new(),
         }
     }
 

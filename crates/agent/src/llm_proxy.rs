@@ -1402,7 +1402,7 @@ mod tests {
                 "refreshToken": null, "refreshExpiresAt": 0,
             }).to_string()).unwrap();
             let config = parse_daemon(&format!("llmGateway:\n  url: http://{address}/gateway\n  githubOAuth:\n    clientId: github-test\n  authentication:\n    type: oidc\n    issuer: https://issuer.example/\n    clientId: proxy-test\n")).unwrap();
-            let (_, discovery) = watch::channel(Arc::new(Discovery { agents: vec![], model_runtimes: vec![] }));
+            let (_, discovery) = watch::channel(Arc::new(Discovery { agents: vec![], model_runtimes: vec![], browser_pacs: vec![], pac_fetches: vec![] }));
             let state = AppState {
                 controller_status: None,
                 config,
@@ -2026,6 +2026,8 @@ mod tests {
             let (_, discovery) = watch::channel(Arc::new(Discovery {
                 agents: vec![],
                 model_runtimes: vec![],
+                browser_pacs: Vec::new(),
+                pac_fetches: Vec::new(),
             }));
             let state = AppState {
                 controller_status: None,
@@ -2415,6 +2417,8 @@ mod tests {
         let (_, discovery) = watch::channel(Arc::new(Discovery {
             agents: vec![],
             model_runtimes: vec![],
+            browser_pacs: Vec::new(),
+            pac_fetches: Vec::new(),
         }));
         let state = AppState {
             controller_status: None,
@@ -2593,6 +2597,8 @@ mod tests {
         let (_, discovery) = watch::channel(Arc::new(Discovery {
             agents: vec![],
             model_runtimes: vec![],
+            browser_pacs: Vec::new(),
+            pac_fetches: Vec::new(),
         }));
         let state = AppState {
             controller_status: None,
@@ -2662,6 +2668,8 @@ mod tests {
         let (_, discovery) = watch::channel(Arc::new(Discovery {
             agents: vec![],
             model_runtimes: vec![],
+            browser_pacs: Vec::new(),
+            pac_fetches: Vec::new(),
         }));
         let state = AppState {
             controller_status: None,
