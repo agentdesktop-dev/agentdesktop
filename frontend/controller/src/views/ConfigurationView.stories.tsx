@@ -5,6 +5,7 @@ import { ControllerStoryFrame } from "../stories/ControllerStoryFrame";
 import {
   activeDaemonConfig,
   copilotFailOpenDaemonConfig,
+  programSelectionDaemonConfig,
   sandboxDaemonConfig,
 } from "../stories/fixtures";
 import { ConfigurationView } from "./ConfigurationView";
@@ -67,6 +68,39 @@ export const CopilotFailOpen: Story = {
     await expect(output).toHaveTextContent("whenProxyUnavailable: failOpen");
     await userEvent.click(toggle);
     await expect(output).not.toHaveTextContent("whenProxyUnavailable");
+  },
+};
+
+export const ActiveProgramSelection: Story = {
+  args: { initialConfig: programSelectionDaemonConfig },
+  play: async ({ canvas, canvasElement }) => {
+    await expect(
+      canvas.getByRole("checkbox", {
+        name: /Let device users choose which programs are managed/,
+      }),
+    ).toBeChecked();
+    await expect(
+      canvasElement.querySelector(".output-card code")?.textContent,
+    ).toContain("programSelection:\n  allowUserChoice: true\n\nprograms:");
+  },
+};
+
+export const BuildsProgramSelectionYaml: Story = {
+  play: async ({ canvas, canvasElement }) => {
+    const output = canvasElement.querySelector(".output-card code");
+    await expect(output).not.toHaveTextContent("programSelection");
+    await userEvent.click(canvas.getByText("Program selection"));
+    const toggle = canvas.getByRole("checkbox", {
+      name: /Let device users choose which programs are managed/,
+    });
+    await userEvent.click(toggle);
+    await expect(output?.textContent).toContain(
+      "programSelection:\n  allowUserChoice: true",
+    );
+    await expect(toggle).toHaveAccessibleDescription(/Upgrade devices first/);
+    await userEvent.click(toggle);
+    await expect(output).not.toHaveTextContent("programSelection");
+    await expect(canvas.queryByText(/Upgrade devices first/)).toBeNull();
   },
 };
 
@@ -176,6 +210,11 @@ export const AddsAgent: Story = {
 
 export const Dark: Story = {
   ...ActiveSandbox,
+  globals: { colorMode: "dark" },
+};
+
+export const DarkProgramSelection: Story = {
+  ...ActiveProgramSelection,
   globals: { colorMode: "dark" },
 };
 

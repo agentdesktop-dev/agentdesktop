@@ -327,6 +327,26 @@ export const failedDeviceDetail: DeviceDetail = {
   ],
 };
 
+export const optedOutDeviceDetail: DeviceDetail = {
+  ...deviceDetail,
+  programs: [
+    {
+      program: "claude-code",
+      state: "applied",
+      detail: "",
+      revision: 12,
+      updated_at: now - 60,
+    },
+    {
+      program: "codex",
+      state: "opted_out",
+      detail: "",
+      revision: 12,
+      updated_at: now - 60,
+    },
+  ],
+};
+
 export const oldAgentDeviceDetail: DeviceDetail = {
   ...deviceDetail,
   programs: [],
@@ -643,6 +663,14 @@ export const copilotFailOpenDaemonConfig: DaemonConfigDocument = {
   programs: {
     copilot: { models: { "gpt-4.1": {} } },
     vscode: { copilotChat: "githubModels" },
+  },
+};
+
+export const programSelectionDaemonConfig: DaemonConfigDocument = {
+  programSelection: { allowUserChoice: true },
+  programs: {
+    claudeCode: {},
+    codex: {},
   },
 };
 

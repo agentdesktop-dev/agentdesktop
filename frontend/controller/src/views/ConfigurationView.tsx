@@ -35,6 +35,7 @@ export function ConfigurationView({
   const [allowedDomains, setAllowedDomains] = useState("");
   const [writablePaths, setWritablePaths] = useState("");
   const [deniedPaths, setDeniedPaths] = useState("");
+  const [allowUserChoice, setAllowUserChoice] = useState(false);
   const [agents, setAgents] = useState<AgentDraft[]>([
     { kind: "claudeCode", useGateway: true, settings: "" },
   ]);
@@ -62,6 +63,7 @@ export function ConfigurationView({
     sessionNewTelemetry,
     toolUseTelemetry,
     toolInputTelemetry,
+    allowUserChoice,
     agents,
   });
   const availableAgents = configurableAgents.filter(
@@ -97,6 +99,9 @@ export function ConfigurationView({
     );
     setDeniedPaths(
       (initialConfig.sandbox?.filesystem?.denied ?? []).join("\n"),
+    );
+    setAllowUserChoice(
+      initialConfig.programSelection?.allowUserChoice === true,
     );
     setAgents(agentDrafts(initialConfig.programs));
   }, [initialConfig]);
@@ -274,7 +279,7 @@ export function ConfigurationView({
                 />
               </label>
               {sandboxUnavailable && (
-                <p className="sandbox-compatibility" id="sandbox-compatibility">
+                <p className="config-notice" id="sandbox-compatibility">
                   <CircleAlert size={14} />
                   Remove {incompatibleSandboxAgentNames.join(" and ")} to enable
                   sandboxing.
@@ -383,6 +388,43 @@ export function ConfigurationView({
                   />
                 </label>
               </div>
+            </div>
+          </details>
+          <details className="wizard-section" open={allowUserChoice}>
+            <summary className="wizard-section-summary">
+              <span className="wizard-section-title">
+                <strong>Program selection</strong>
+                <small>Decide whether device users can opt out.</small>
+              </span>
+              <ChevronRight size={15} />
+            </summary>
+            <div className="wizard-section-content">
+              <label className="toggle-row">
+                <span>
+                  <strong>
+                    Let device users choose which programs are managed
+                  </strong>
+                  <small>
+                    Users can opt out of configured programs on their device.
+                    Agentdesktop then removes the settings it wrote for them.
+                  </small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={allowUserChoice}
+                  aria-describedby={
+                    allowUserChoice ? "program-selection-upgrade" : undefined
+                  }
+                  onChange={(event) => setAllowUserChoice(event.target.checked)}
+                />
+              </label>
+              {allowUserChoice && (
+                <p className="config-notice" id="program-selection-upgrade">
+                  <CircleAlert size={14} />
+                  Daemons that predate this setting reject a configuration that
+                  contains it. Upgrade devices first.
+                </p>
+              )}
             </div>
           </details>
           <details className="wizard-section" open={agents.length > 0}>
@@ -609,6 +651,7 @@ function daemonConfigYaml(options: {
   sessionNewTelemetry: boolean;
   toolUseTelemetry: boolean;
   toolInputTelemetry: boolean;
+  allowUserChoice: boolean;
   agents: AgentDraft[];
 }) {
   const lines: string[] = [];
@@ -650,6 +693,9 @@ function daemonConfigYaml(options: {
       );
     }
     lines.push("");
+  }
+  if (options.allowUserChoice) {
+    lines.push("programSelection:", "  allowUserChoice: true", "");
   }
   if (options.agents.length === 0) {
     lines.push("programs: {}");
