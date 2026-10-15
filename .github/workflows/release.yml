@@ -68,6 +68,7 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/release-macos.yml
+    secrets: inherit
     with:
       version: ${{ needs.setup.outputs.version }}
 
