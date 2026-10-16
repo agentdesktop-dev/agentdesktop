@@ -66,7 +66,8 @@ pub struct Requests {
     /// The daemon's current configuration, replaced by each pushed
     /// configuration that parses (read by the reconcile tick).
     pub(crate) current: watch::Sender<Option<CurrentConfig>>,
-    /// Reconcile tick outcomes, when the tick is enabled.
+    /// Outcomes of re-applying the current configuration: reconcile ticks,
+    /// and program choice changes made through the local API.
     pub(crate) tick_statuses: Option<watch::Receiver<Option<TickStatus>>>,
 }
 
@@ -914,7 +915,10 @@ fn apply_parsed(
         // Managed gateway policy that asks for device authorization has to start its
         // sign-in here: the startup path only sees the local file. Idempotent, so a
         // repeated or unchanged update returns the pending grant instead of a new one.
-        gateway_oidc::start_device_login_if_configured(&daemon_config, state_dir);
+        // Not while the device user has opted out of every gateway program.
+        if reconciler.gateway_sign_in_wanted(&daemon_config) {
+            gateway_oidc::start_device_login_if_configured(&daemon_config, state_dir);
+        }
         Ok(())
     })();
     // `programs_reported` says this agent reports per-program status; the
@@ -977,6 +981,7 @@ fn program_state_proto(state: crate::reconcile::ProgramState) -> ProtoProgramSta
         ProgramState::Conflict => ProtoProgramState::Conflict,
         ProgramState::Inactive => ProtoProgramState::Inactive,
         ProgramState::Blocked => ProtoProgramState::Blocked,
+        ProgramState::OptedOut => ProtoProgramState::OptedOut,
         ProgramState::Failed => ProtoProgramState::Failed,
     }
 }
@@ -1029,6 +1034,7 @@ fn status_keys(programs: &[ProgramStatus]) -> Vec<(&str, crate::reconcile::Progr
                 Ok(ProtoProgramState::Conflict) => ProgramState::Conflict,
                 Ok(ProtoProgramState::Inactive) => ProgramState::Inactive,
                 Ok(ProtoProgramState::Blocked) => ProgramState::Blocked,
+                Ok(ProtoProgramState::OptedOut) => ProgramState::OptedOut,
                 Ok(ProtoProgramState::Failed | ProtoProgramState::Unspecified) | Err(_) => {
                     ProgramState::Failed
                 }
@@ -1698,6 +1704,7 @@ mod tests {
                 state,
                 detail: detail.to_owned(),
             }],
+            sequence: 0,
         }
     }
 

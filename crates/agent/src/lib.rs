@@ -9,6 +9,7 @@ pub mod identity;
 mod inventory_watch;
 mod llm_proxy;
 pub mod oidc;
+mod program_choice;
 pub mod provider;
 pub mod reconcile;
 pub mod remote;

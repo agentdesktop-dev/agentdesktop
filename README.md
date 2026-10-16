@@ -644,7 +644,9 @@ file, or the last configuration the controller pushed). A managed file that
 was deleted or edited by hand comes back, a file whose mode was loosened is
 tightened, and a conflict that was fixed is applied. Nothing is written when
 nothing changed, and a tick reports to the controller and logs its outcome lines only when the outcome changed; a provider warning that explains a conflict (for example the file it refuses to change) repeats with every apply until the conflict is fixed. Deleting a managed file is then no longer a way to opt out:
-switch the program off in the configuration or stop the daemon instead. The
+switch the program off in the configuration, [opt out of
+it](#user-choice-of-managed-programs-opt-in) where the configuration allows
+that, or stop the daemon instead. The
 tick cannot start a local LLM proxy that was not running when the daemon
 started (restart the daemon for that). Unset means no periodic re-apply; zero
 and more than 30 days are rejected. The interval is read at startup only. After a
@@ -658,6 +660,45 @@ Any apply (tick or not) leaves a managed file alone when it already holds the
 planned bytes, and rewrites it with the same bytes when its mode grants more
 than the daemon writes: for example a Claude Code user `settings.json` at
 0664 becomes 0644, a Copilot CLI `providers.json` at 0644 becomes 0600.
+
+## User choice of managed programs (opt-in)
+
+By default every program under `programs` is managed. To let device users opt
+out of all of them, or choose the ones to manage, allow it in the
+configuration (the local file, or the configuration the controller pushes):
+
+```yaml
+programSelection:
+  allowUserChoice: true
+```
+
+On the device:
+
+```bash
+agentdesktop programs                        # configured programs and their state
+agentdesktop programs set none               # opt out of every program
+agentdesktop programs set claude-code codex  # manage only these
+agentdesktop programs set all                # manage every configured program again
+```
+
+With `all` (the default), programs added to the configuration later are
+managed too; with `none` or a list, a program added later stays unmanaged
+until the user chooses it. For each program left out, the daemon removes the
+settings it wrote (gateway routing, credential helper, telemetry hooks and
+sandbox settings included), as it does when the program is removed from the
+configuration, and it re-applies right away. Once every program that uses the
+LLM gateway is left out, and no local LLM proxy is running, the daemon starts
+no gateway sign-in on its own. Discovery is unaffected: tools a user opted out
+of are still inventoried.
+
+The choice is stored in the daemon's state directory (`program-choice.json`)
+and belongs to the daemon, not to an OS user: with a system daemon, a choice
+made by any user who can reach the daemon socket applies to the whole machine.
+While `allowUserChoice` is off, `agentdesktop programs set` is refused and a
+stored choice is kept but ignored, so turning the setting off manages every
+program again and turning it back on restores the user's choice. A daemon that
+predates `programSelection` rejects a configuration that contains it: upgrade
+devices before setting it in the configuration the controller pushes.
 
 ## Start locally, grow into a fleet
 
@@ -685,10 +726,11 @@ device-wide state. The device page in the controller lists them under
 | `conflict` | A managed file holds configuration the daemon will not overwrite; the detail names the file. |
 | `inactive` | The program uses the LLM gateway but the local LLM proxy is not running (see `llmProxy.error` in daemon-info): its entries were left pointing at the loopback port (`whenProxyUnavailable: failClosed`, the default; the detail says when no entries were in place, so the tool keeps its own settings) or removed (`failOpen`). |
 | `blocked` | The program had changes, but none were written because another program conflicted or failed; the detail names that program. |
+| `opted_out` | The program is configured, but the device user [opted out of it](#user-choice-of-managed-programs-opt-in); its managed content was removed. An older controller shows this as `unspecified`. |
 | `failed` | Planning or writing this program failed; the detail carries the error. |
 
 When several apply, the first in the list `failed`, `conflict`, `blocked`,
-`inactive`, `applied`/`removed`, `unchanged` is shown. An apply is all or
+`inactive`, `opted_out`, `applied`/`removed`, `unchanged` is shown. An apply is all or
 nothing across programs: one conflict or failure means no file is written for
 any program, which is what `blocked` makes visible. Programs that are not
 configured and have nothing to clean up, and discovery-only tools, are not

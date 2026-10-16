@@ -16,13 +16,20 @@ use agentdesktop_core::{
     },
     model::{
         DaemonInfo, DeviceUsage, Discovery, EnrollmentStatus, Health, LlmGatewayCredential,
-        LlmGatewayLoginStatus, TelemetryEvent, TelemetryEventKind,
+        LlmGatewayLoginStatus, ManagedProgram, ProgramChoice, ProgramManagement, TelemetryEvent,
+        TelemetryEventKind,
     },
 };
 use agentdesktop_proto::fleet::DeviceUsageRequest;
 use agentdesktop_usage::{UsageError, UsageStore};
 
-use crate::{enrollment::EnrollmentState, gateway_oidc, remote, subscription};
+use crate::{
+    enrollment::EnrollmentState,
+    gateway_oidc, program_choice,
+    reconcile::{Reconciler, apply_program_choice, configured_programs},
+    remote, subscription,
+    tick::{self, CurrentConfig, TickStatus},
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -37,6 +44,144 @@ pub struct AppState {
     pub logout: Option<mpsc::Sender<remote::LogoutRequest>>,
     /// This device's usage, recorded by the daemon itself (`daemon.usage`).
     pub usage: Option<UsageStore>,
+    /// The device user's program choice; `None` serves no program routes.
+    pub programs: Option<ProgramControl>,
+}
+
+/// Reads and changes the device user's program choice, and re-applies the
+/// current configuration when it changes.
+#[derive(Clone)]
+pub struct ProgramControl {
+    reconciler: Reconciler,
+    current: watch::Receiver<Option<CurrentConfig>>,
+    /// Where a re-apply's outcome goes for the controller; `None` without one.
+    statuses: Option<watch::Sender<Option<TickStatus>>>,
+    state_dir: PathBuf,
+    /// Serializes changes, so the stored and the applied choice agree.
+    changing: Arc<std::sync::Mutex<()>>,
+}
+
+impl ProgramControl {
+    pub(crate) fn new(
+        reconciler: Reconciler,
+        current: watch::Receiver<Option<CurrentConfig>>,
+        statuses: Option<watch::Sender<Option<TickStatus>>>,
+        state_dir: PathBuf,
+    ) -> Self {
+        Self {
+            reconciler,
+            current,
+            statuses,
+            state_dir,
+            changing: Arc::default(),
+        }
+    }
+
+    /// The configured programs, whether each is managed under the device
+    /// user's choice, and each one's outcome from the last apply. Waits for
+    /// an apply in progress.
+    fn management(&self) -> ProgramManagement {
+        let choice = self.reconciler.program_choice();
+        let current = self.current.borrow().clone();
+        let Some(current) = current else {
+            return ProgramManagement {
+                user_choice_allowed: false,
+                choice,
+                programs: Vec::new(),
+            };
+        };
+        let report = self.reconciler.last_report();
+        let (_, opted_out) = apply_program_choice(&current.config, &choice);
+        let programs = configured_programs(&current.config.programs)
+            .into_iter()
+            .map(|program| {
+                let outcome = report
+                    .as_ref()
+                    .and_then(|report| report.programs.iter().find(|o| o.program == program));
+                ManagedProgram {
+                    program: program.to_owned(),
+                    managed: !opted_out.contains(&program),
+                    state: outcome.map(|outcome| outcome.state.as_str().to_owned()),
+                    detail: outcome
+                        .map(|outcome| outcome.detail.clone())
+                        .unwrap_or_default(),
+                }
+            })
+            .collect();
+        ProgramManagement {
+            user_choice_allowed: current.config.program_selection.allow_user_choice,
+            choice,
+            programs,
+        }
+    }
+
+    /// Stores `choice`, re-applies the current configuration with it, and
+    /// reports the outcome to the controller. Refused while the current
+    /// configuration does not allow a choice, or before there is one.
+    fn change(&self, choice: ProgramChoice) -> Result<ProgramManagement, (StatusCode, String)> {
+        program_choice::validate(&choice)
+            .map_err(|error| (StatusCode::BAD_REQUEST, format!("{error:#}")))?;
+        let _changing = self
+            .changing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let allowed = self
+            .current
+            .borrow()
+            .as_ref()
+            .map(|current| current.config.program_selection.allow_user_choice);
+        match allowed {
+            None => {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "this device has no configuration yet; choose once it has one".to_owned(),
+                ));
+            }
+            Some(false) => {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    "this device's policy manages every configured program (programSelection.allowUserChoice is off)".to_owned(),
+                ));
+            }
+            Some(true) => {}
+        }
+        program_choice::save(&self.state_dir, &choice).map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("save program choice: {error:#}"),
+            )
+        })?;
+        tracing::info!(?choice, "program choice changed");
+        self.reconciler.set_program_choice(choice);
+        if let Some((revision, _, report, result)) =
+            tick::apply_current(&self.reconciler, &self.current)
+        {
+            report.log();
+            let error = result.err().map(|error| format!("{error:#}"));
+            if let Some(error) = &error {
+                tracing::warn!(%error, "applying the changed program choice failed");
+            }
+            if let Some(statuses) = &self.statuses {
+                tick::publish(
+                    statuses,
+                    TickStatus {
+                        revision,
+                        report,
+                        error,
+                    },
+                );
+            }
+        }
+        // A choice that brings a gateway program back starts the sign-in that
+        // startup or the push skipped while it was left out (idempotent).
+        let current = self.current.borrow().clone();
+        if let Some(current) = current
+            && self.reconciler.gateway_sign_in_wanted(&current.config)
+        {
+            gateway_oidc::start_device_login_if_configured(&current.config, &self.state_dir);
+        }
+        Ok(self.management())
+    }
 }
 
 #[derive(Deserialize)]
@@ -66,7 +211,43 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/llm-gateway/credential", get(llm_gateway_credential))
         .route("/v1/llm-gateway/login", post(llm_gateway_login))
         .route("/v1/usage", get(device_usage))
+        .route("/v1/programs", get(programs))
+        .route("/v1/programs/choice", post(change_program_choice))
         .with_state(state)
+}
+
+fn program_control(state: &AppState) -> Result<ProgramControl, (StatusCode, String)> {
+    state.programs.clone().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "program management is not available".to_owned(),
+        )
+    })
+}
+
+/// Runs a program route's blocking work (it waits for an apply in progress).
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, (StatusCode, String)> + Send + 'static,
+) -> Result<Json<T>, (StatusCode, String)> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+        .map(Json)
+}
+
+async fn programs(
+    State(state): State<AppState>,
+) -> Result<Json<ProgramManagement>, (StatusCode, String)> {
+    let control = program_control(&state)?;
+    blocking(move || Ok(control.management())).await
+}
+
+async fn change_program_choice(
+    State(state): State<AppState>,
+    Json(choice): Json<ProgramChoice>,
+) -> Result<Json<ProgramManagement>, (StatusCode, String)> {
+    let control = program_control(&state)?;
+    blocking(move || control.change(choice)).await
 }
 
 async fn telemetry(
@@ -509,7 +690,9 @@ mod tests {
 
     use agentdesktop_core::config::parse_daemon;
 
-    use super::{load_effective_config, program_uses_subscription, unmetered_tools};
+    use super::{
+        ProgramControl, load_effective_config, program_uses_subscription, unmetered_tools,
+    };
 
     #[test]
     fn vscode_on_github_models_is_reported_as_unmetered() {
@@ -627,5 +810,137 @@ llmGateway:
             Some(agentdesktop_core::config::LlmGatewayAuthentication::Oidc { .. })
         ));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    mod programs {
+        use std::{path::Path, sync::Arc};
+
+        use agentdesktop_core::{config::parse_daemon, model::ProgramChoice};
+        use axum::http::StatusCode;
+        use tokio::sync::watch;
+
+        use super::ProgramControl;
+        use crate::{
+            reconcile::{ProgramState, Reconciler},
+            tick::{CurrentConfig, TickStatus},
+        };
+
+        const ALLOWED: &str = r#"
+programSelection: { allowUserChoice: true }
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  claudeCode: {}
+  codex: {}
+"#;
+
+        fn reconciler(root: &Path) -> Reconciler {
+            Reconciler::new(
+                true,
+                root.join("claude/settings.json"),
+                root.join("claude-desktop/settings.json"),
+                root.join("claude-desktop/helper"),
+                root.join("codex/config.toml"),
+                root.join("opencode/config.json"),
+                root.join("opencode/plugin.js"),
+                root.join("grok/managed_config.toml"),
+                None,
+                None,
+                None,
+                root.join("bin/agentdesktop"),
+                root.join("agentdesktop.sock"),
+            )
+        }
+
+        /// A control over `yaml` as the current configuration (none when
+        /// `None`), already applied, and the receiver of its reports.
+        fn control(
+            root: &Path,
+            yaml: Option<&str>,
+        ) -> (ProgramControl, watch::Receiver<Option<TickStatus>>) {
+            let reconciler = reconciler(root);
+            let current = yaml.map(|yaml| CurrentConfig {
+                revision: Some(7),
+                config: Arc::new(parse_daemon(yaml).unwrap()),
+            });
+            if let Some(current) = &current {
+                reconciler.apply(&current.config).unwrap();
+            }
+            let (_current, current) = watch::channel(current);
+            let (statuses, reports) = watch::channel(None);
+            (
+                ProgramControl::new(reconciler, current, Some(statuses), root.join("state")),
+                reports,
+            )
+        }
+
+        fn only(program: &str) -> ProgramChoice {
+            ProgramChoice::Selected {
+                programs: [program.to_owned()].into(),
+            }
+        }
+
+        #[test]
+        fn a_choice_is_stored_applied_and_reported() {
+            let root = tempfile::tempdir().unwrap();
+            let (control, reports) = control(root.path(), Some(ALLOWED));
+
+            let management = control.change(only("claude-code")).unwrap();
+            assert!(management.user_choice_allowed);
+            assert_eq!(management.choice, only("claude-code"));
+            let codex = management
+                .programs
+                .iter()
+                .find(|program| program.program == "codex")
+                .unwrap();
+            assert!(!codex.managed);
+            assert_eq!(codex.state.as_deref(), Some("opted_out"));
+            assert!(!root.path().join("codex/config.toml").exists());
+            assert_eq!(
+                crate::program_choice::load(&root.path().join("state")),
+                only("claude-code")
+            );
+
+            let report = reports.borrow().clone().expect("the re-apply is reported");
+            assert_eq!(report.revision, Some(7));
+            assert!(report.error.is_none());
+            assert!(report.report.programs.iter().any(|outcome| {
+                outcome.program == "codex" && outcome.state == ProgramState::OptedOut
+            }));
+        }
+
+        #[test]
+        fn a_choice_is_refused_unless_the_policy_allows_it() {
+            let root = tempfile::tempdir().unwrap();
+            let (locked, _) = control(
+                root.path(),
+                Some(&ALLOWED.replace("allowUserChoice: true", "")),
+            );
+            let (status, _) = locked.change(ProgramChoice::None).unwrap_err();
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert!(!root.path().join("state/program-choice.json").exists());
+            assert!(root.path().join("codex/config.toml").exists());
+            assert!(
+                locked
+                    .management()
+                    .programs
+                    .iter()
+                    .all(|program| program.managed)
+            );
+
+            let (unconfigured, _) = control(root.path(), None);
+            let (status, _) = unconfigured.change(ProgramChoice::None).unwrap_err();
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert!(unconfigured.management().programs.is_empty());
+        }
+
+        #[test]
+        fn a_choice_naming_an_unmanaged_program_is_a_bad_request() {
+            let root = tempfile::tempdir().unwrap();
+            let (control, _) = control(root.path(), Some(ALLOWED));
+            let (status, message) = control.change(only("cursor")).unwrap_err();
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(message.contains("cursor"), "{message}");
+        }
     }
 }
