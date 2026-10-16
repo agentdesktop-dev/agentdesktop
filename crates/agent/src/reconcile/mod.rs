@@ -139,6 +139,18 @@ impl Reconciler {
             .clone()
     }
 
+    /// Whether to start a gateway sign-in for `config` without a request:
+    /// always, unless the device user's choice leaves out every configured
+    /// program that uses the LLM gateway and no local LLM proxy is running,
+    /// so nothing on this device would use the sign-in.
+    pub fn gateway_sign_in_wanted(&self, config: &DaemonConfig) -> bool {
+        if self.context.llm_proxy.is_some() || !programs_use_llm_gateway(&config.programs) {
+            return true;
+        }
+        let (chosen, _) = apply_program_choice(config, &self.program_choice());
+        programs_use_llm_gateway(&chosen.programs)
+    }
+
     /// Plan every provider, including cleanup for disabled providers, before
     /// applying any writes. A later provider's failure leaves all files intact.
     pub fn plan(&self, config: &DaemonConfig) -> anyhow::Result<ReconcilePlan> {
@@ -263,7 +275,8 @@ impl Reconciler {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (value, config) = read()?;
-        let (report, result) = self.plan_with_report(&config).apply();
+        let (mut report, result) = self.plan_with_report(&config).apply();
+        report.sequence = last.as_ref().map_or(0, |previous| previous.sequence) + 1;
         let previous = last.replace(report.clone());
         Some((value, previous, report, result))
     }
@@ -368,6 +381,9 @@ pub struct ProgramOutcome {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ApplyReport {
     pub programs: Vec<ProgramOutcome>,
+    /// This apply's place in the order applies take the apply lock, from 1;
+    /// 0 for a report made without it ([`AttributedPlan::apply`] alone).
+    pub sequence: u64,
 }
 
 impl ApplyReport {
@@ -585,7 +601,13 @@ impl AttributedPlan {
                 Some(outcome(entry.program, state, detail))
             })
             .collect();
-        (ApplyReport { programs }, result)
+        (
+            ApplyReport {
+                programs,
+                sequence: 0,
+            },
+            result,
+        )
     }
 }
 
@@ -682,6 +704,34 @@ pub fn apply_program_choice<'a>(
     leave_out(copilot, Copilot::ID, choice, &mut opted_out);
     leave_out(vscode, VsCode::ID, choice, &mut opted_out);
     (Cow::Owned(chosen), opted_out)
+}
+
+/// Whether any configured program sends its traffic through the LLM gateway
+/// (`useLlmGateway`). The destructure is exhaustive, like
+/// [`configured_programs`].
+pub fn programs_use_llm_gateway(programs: &ProgramsConfig) -> bool {
+    let ProgramsConfig {
+        claude_code,
+        claude_desktop,
+        codex,
+        open_code,
+        grok,
+        copilot,
+        vscode,
+    } = programs;
+    [
+        claude_code.as_ref().map(|program| program.use_llm_gateway),
+        claude_desktop
+            .as_ref()
+            .map(|program| program.use_llm_gateway),
+        codex.as_ref().map(|program| program.use_llm_gateway),
+        open_code.as_ref().map(|program| program.use_llm_gateway),
+        grok.as_ref().map(|program| program.use_llm_gateway),
+        copilot.as_ref().map(|program| program.use_llm_gateway),
+        vscode.as_ref().map(|program| program.use_llm_gateway),
+    ]
+    .into_iter()
+    .any(|uses| uses == Some(true))
 }
 
 /// The provider IDs of the configured programs. The destructure is
@@ -1548,6 +1598,54 @@ programs:
             Some(ProgramState::OptedOut)
         );
         assert!(!root.join("codex/config.toml").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn each_apply_has_a_later_sequence_than_the_last() {
+        let root = new_root("sequence");
+        let config = parse_daemon(CHOICE_CONFIG).unwrap();
+        let reconciler = full_reconciler(&root);
+        let (first, _) = reconciler.apply_with_report(&config);
+        let (second, _) = reconciler.clone().apply_with_report(&config);
+        assert_eq!(first.sequence, 1);
+        assert_eq!(second.sequence, 2, "clones share the apply order");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn no_gateway_sign_in_once_every_gateway_program_is_opted_out() {
+        let root = new_root("gateway-sign-in");
+        let config = parse_daemon(CHOICE_CONFIG).unwrap();
+        let reconciler = full_reconciler(&root);
+        assert!(reconciler.gateway_sign_in_wanted(&config));
+
+        reconciler.set_program_choice(only(&["codex"]));
+        assert!(reconciler.gateway_sign_in_wanted(&config));
+
+        reconciler.set_program_choice(ProgramChoice::None);
+        assert!(!reconciler.gateway_sign_in_wanted(&config));
+        let not_allowed =
+            parse_daemon(&CHOICE_CONFIG.replace("allowUserChoice: true", "")).unwrap();
+        assert!(
+            reconciler.gateway_sign_in_wanted(&not_allowed),
+            "an ignored choice changes nothing"
+        );
+        let off_gateway = parse_daemon(
+            &CHOICE_CONFIG
+                .replace("claudeCode: {}", "claudeCode: { useLlmGateway: false }")
+                .replace("codex: {}", "codex: { useLlmGateway: false }"),
+        )
+        .unwrap();
+        assert!(
+            reconciler.gateway_sign_in_wanted(&off_gateway),
+            "nothing was taken off the gateway, so sign-in is as without a choice"
+        );
+        let with_proxy = reconciler.with_llm_proxy(Some(proxy_context("PAIRING-SIGN-IN")));
+        assert!(
+            with_proxy.gateway_sign_in_wanted(&config),
+            "the running proxy still needs the gateway"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -2419,6 +2517,7 @@ programs:
                 state,
                 detail: detail.to_owned(),
             }],
+            sequence: 0,
         }
     }
 
@@ -2476,6 +2575,7 @@ programs:
                     detail: String::new(),
                 },
             ],
+            sequence: 0,
         };
         let one = outcome_report(ProgramState::Unchanged, "");
         assert!(super::should_log(Some(&both), &one), "copilot vanished");

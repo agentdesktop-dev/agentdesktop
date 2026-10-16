@@ -162,12 +162,23 @@ impl ProgramControl {
                 tracing::warn!(%error, "applying the changed program choice failed");
             }
             if let Some(statuses) = &self.statuses {
-                statuses.send_replace(Some(TickStatus {
-                    revision,
-                    report,
-                    error,
-                }));
+                tick::publish(
+                    statuses,
+                    TickStatus {
+                        revision,
+                        report,
+                        error,
+                    },
+                );
             }
+        }
+        // A choice that brings a gateway program back starts the sign-in that
+        // startup or the push skipped while it was left out (idempotent).
+        let current = self.current.borrow().clone();
+        if let Some(current) = current
+            && self.reconciler.gateway_sign_in_wanted(&current.config)
+        {
+            gateway_oidc::start_device_login_if_configured(&current.config, &self.state_dir);
         }
         Ok(self.management())
     }

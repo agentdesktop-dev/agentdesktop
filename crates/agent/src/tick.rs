@@ -78,13 +78,33 @@ pub(crate) async fn run_tick_with<F>(
             continue;
         };
         if let Some(statuses) = &statuses {
-            statuses.send_replace(Some(TickStatus {
-                revision,
-                report,
-                error: result.err().map(|error| format!("{error:#}")),
-            }));
+            publish(
+                statuses,
+                TickStatus {
+                    revision,
+                    report,
+                    error: result.err().map(|error| format!("{error:#}")),
+                },
+            );
         }
     }
+}
+
+/// Publishes `status` to the connection loop unless the channel already holds
+/// the outcome of a later apply. A tick and a program choice change publish
+/// after releasing the apply lock, so they can publish out of apply order;
+/// both carry the same revision, which cannot tell them apart.
+pub(crate) fn publish(statuses: &watch::Sender<Option<TickStatus>>, status: TickStatus) {
+    statuses.send_if_modified(|current| {
+        if current
+            .as_ref()
+            .is_some_and(|current| current.report.sequence > status.report.sequence)
+        {
+            return false;
+        }
+        *current = Some(status);
+        true
+    });
 }
 
 /// [`run_tick_with`] applying through a real [`Reconciler`].
@@ -135,6 +155,40 @@ pub(crate) fn apply_current(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_earlier_apply_never_replaces_a_later_one() {
+        use super::{TickStatus, publish};
+        use crate::reconcile::ApplyReport;
+        let status = |sequence| TickStatus {
+            revision: Some(1),
+            report: ApplyReport {
+                programs: Vec::new(),
+                sequence,
+            },
+            error: None,
+        };
+        let (statuses, mut published) = tokio::sync::watch::channel(None);
+        publish(&statuses, status(2));
+        assert!(published.has_changed().unwrap());
+        published.borrow_and_update();
+
+        publish(&statuses, status(1));
+        assert!(
+            !published.has_changed().unwrap(),
+            "the stale outcome is dropped"
+        );
+        publish(&statuses, status(3));
+        assert_eq!(
+            published
+                .borrow_and_update()
+                .as_ref()
+                .unwrap()
+                .report
+                .sequence,
+            3
+        );
+    }
+
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},

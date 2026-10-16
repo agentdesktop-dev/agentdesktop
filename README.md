@@ -686,8 +686,10 @@ managed too; with `none` or a list, a program added later stays unmanaged
 until the user chooses it. For each program left out, the daemon removes the
 settings it wrote (gateway routing, credential helper, telemetry hooks and
 sandbox settings included), as it does when the program is removed from the
-configuration, and it re-applies right away. Discovery is unaffected: tools a
-user opted out of are still inventoried.
+configuration, and it re-applies right away. Once every program that uses the
+LLM gateway is left out, and no local LLM proxy is running, the daemon starts
+no gateway sign-in on its own. Discovery is unaffected: tools a user opted out
+of are still inventoried.
 
 The choice is stored in the daemon's state directory (`program-choice.json`)
 and belongs to the daemon, not to an OS user: with a system daemon, a choice
