@@ -6,6 +6,8 @@ import type {
   DeviceUsage,
   Discovery,
   ManagedDeviceSnapshot,
+  ProgramChoice,
+  ProgramManagement,
   Settings,
   UsageRange,
 } from "./types";
@@ -43,6 +45,16 @@ export async function getDeviceUsage(
 
 export async function logoutManagedDevice(): Promise<void> {
   return invoke<void>("logout_managed_device");
+}
+
+export async function getProgramManagement(): Promise<ProgramManagement> {
+  return invoke<ProgramManagement>("get_program_management");
+}
+
+export async function setProgramChoice(
+  choice: ProgramChoice,
+): Promise<ProgramManagement> {
+  return invoke<ProgramManagement>("set_program_choice", { choice });
 }
 
 export async function setupManagedDevice(): Promise<ManagedDeviceSnapshot> {

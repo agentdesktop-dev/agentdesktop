@@ -711,6 +711,86 @@ p {
   outline-offset: 2px;
 }
 
+.program-choice {
+  flex-wrap: wrap;
+}
+
+.inline-preference > .program-modes {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+}
+
+.program-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.program-mode input {
+  margin: 0;
+  accent-color: var(--accent-button);
+  cursor: inherit;
+}
+
+.program-mode:has(input:disabled) {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.program-policy {
+  padding: 13px 17px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.program-policy h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.program-policy p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.program-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.program-policy + .program-list > .program-row:first-child {
+  border-top: 0;
+}
+
+.program-row > div:first-child {
+  min-width: 0;
+}
+
+.inline-preference > .program-row-controls {
+  flex: 0 0 auto;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+}
+
+.program-row .switch:has(input:disabled) {
+  cursor: not-allowed;
+}
+
+.program-row .switch input:disabled + .switch-track {
+  opacity: 0.55;
+}
+
 .advanced-config-body {
   padding: 14px 17px 17px;
   display: flex;

@@ -7,6 +7,7 @@ import type {
   DeviceUsage,
   Discovery,
   ManagedDeviceSnapshot,
+  ProgramManagement,
 } from "../types";
 
 export const bootstrap: Bootstrap = {
@@ -439,4 +440,60 @@ export const noDeviceUsage: DeviceUsage = {
 export const usageNotCollected: DeviceUsage = {
   ...noDeviceUsage,
   enabled: false,
+};
+
+/** Every configured program managed, as the device user chose. */
+export const allProgramsManaged: ProgramManagement = {
+  userChoiceAllowed: true,
+  choice: { mode: "all" },
+  programs: [
+    { program: "claude-code", managed: true, state: "unchanged" },
+    { program: "codex", managed: true, state: "applied" },
+    {
+      program: "vscode",
+      managed: true,
+      state: "conflict",
+      detail: "settings.json already sets a value Agent Desktop manages",
+    },
+  ],
+};
+
+/** The device user manages only Claude Code and VS Code. */
+export const selectedProgramsManaged: ProgramManagement = {
+  userChoiceAllowed: true,
+  choice: { mode: "selected", programs: ["claude-code", "vscode"] },
+  programs: [
+    { program: "claude-code", managed: true, state: "unchanged" },
+    { program: "codex", managed: false, state: "opted_out" },
+    { program: "vscode", managed: true, state: "applied" },
+  ],
+};
+
+/** The device user opted out of every configured program. */
+export const noProgramsManaged: ProgramManagement = {
+  userChoiceAllowed: true,
+  choice: { mode: "none" },
+  programs: [
+    { program: "claude-code", managed: false, state: "opted_out" },
+    { program: "codex", managed: false, state: "opted_out" },
+    { program: "vscode", managed: false, state: "opted_out" },
+  ],
+};
+
+/** The policy does not let the device user choose. */
+export const organizationManagedPrograms: ProgramManagement = {
+  userChoiceAllowed: false,
+  choice: { mode: "all" },
+  programs: [
+    { program: "claude-code", managed: true, state: "unchanged" },
+    { program: "codex", managed: true, state: "applied" },
+    { program: "grok", managed: true },
+  ],
+};
+
+/** No configuration, or one that configures no programs. */
+export const noConfiguredPrograms: ProgramManagement = {
+  userChoiceAllowed: false,
+  choice: { mode: "all" },
+  programs: [],
 };

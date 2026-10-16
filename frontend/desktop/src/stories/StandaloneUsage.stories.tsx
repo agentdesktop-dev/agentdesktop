@@ -7,6 +7,7 @@ import {
   bootstrap,
   deviceUsage,
   emptyDiscovery,
+  noConfiguredPrograms,
   standaloneConnector,
   standaloneDaemonInfo,
   unconfiguredDevice,
@@ -39,6 +40,8 @@ const meta = {
           return unconfiguredDevice;
         case "get_discovery":
           return emptyDiscovery;
+        case "get_program_management":
+          return noConfiguredPrograms;
         case "get_remote_config":
           return null;
         case "get_device_usage":
