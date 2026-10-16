@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="1">
+  <title>agentdesktop</title>
+  <welcome file="welcome.html"/>
+  <options customize="never" require-scripts="false"/>
+  <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+  <choices-outline>
+    <line choice="agentdesktop"/>
+  </choices-outline>
+  <choice id="agentdesktop" title="agentdesktop" visible="false">
+    <pkg-ref id="dev.agentdesktop.installer"/>
+  </choice>
+  <pkg-ref id="dev.agentdesktop.installer">agentdesktop-component.pkg</pkg-ref>
+</installer-gui-script>
