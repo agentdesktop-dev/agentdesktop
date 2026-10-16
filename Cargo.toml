@@ -47,7 +47,12 @@ keyring = "4.2"
 keyring-core = "1"
 libc = "0.2"
 open = "5.4"
+opentelemetry = { version = "0.33.1", default-features = false, features = ["metrics", "internal-logs"] }
+opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["metrics", "grpc-tonic", "internal-logs", "tls-aws-lc", "tls-roots", "tls-webpki-roots"] }
+opentelemetry-prometheus = "0.33.1"
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["metrics", "rt-tokio", "internal-logs"] }
 pem-rfc7468 = { version = "1", features = ["alloc"] }
+prometheus = { version = "0.14", default-features = false }
 prost = "0.14"
 protox = "0.10"
 rand = "0.10"
