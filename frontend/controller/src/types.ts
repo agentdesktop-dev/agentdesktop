@@ -32,6 +32,7 @@ export type ProgramStatus = {
     | "conflict"
     | "inactive"
     | "blocked"
+    | "opted_out"
     | "failed"
     | "unspecified";
   detail: string;
@@ -156,6 +157,9 @@ export type DaemonConfigDocument = {
     events?: string[];
   };
   programs?: Partial<Record<AgentKind, Record<string, unknown>>>;
+  programSelection?: {
+    allowUserChoice?: boolean;
+  };
 };
 
 export type ActiveDaemonConfig = {
