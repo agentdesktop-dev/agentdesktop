@@ -6,6 +6,7 @@ use agentdesktop_controller::{
     database::Database,
     device_ca::DeviceCertificateIssuer,
     gateway_jwt::{self, GatewayJwtIssuer},
+    metrics::{self, Metrics},
     oidc::OidcProvider,
     service::FleetAgentService,
 };
@@ -109,6 +110,15 @@ async fn main() -> anyhow::Result<()> {
     let device_certificate_issuer = DeviceCertificateIssuer::from_pem(ca_certificate, &ca_key)
         .context("initialize device certificate issuer")?;
     tracing::info!("device certificate issuance enabled");
+    let fleet_metrics = Metrics::default();
+    let metrics_server = config.metrics_listen.map(|address| {
+        metrics::serve(
+            address,
+            fleet_metrics.clone(),
+            database.clone(),
+            daemon_config.clone(),
+        )
+    });
     let service = FleetAgentService::new(
         Some(oidc),
         database,
@@ -116,7 +126,8 @@ async fn main() -> anyhow::Result<()> {
         gateway_jwt_issuer,
         Some(device_certificate_issuer),
     )
-    .with_usage_collection(usage_ingest.is_some());
+    .with_usage_collection(usage_ingest.is_some())
+    .with_metrics(fleet_metrics);
 
     let certificate = std::fs::read(&tls.certificate)
         .with_context(|| format!("read TLS certificate from {}", tls.certificate.display()))?;
@@ -152,6 +163,12 @@ async fn main() -> anyhow::Result<()> {
             .context("serve fleet gRPC API")
     };
     let admin = admin::serve(admin_listen, admin_state, admin_gateway_jwks);
-    tokio::try_join!(fleet, admin)?;
+    let metrics = async move {
+        match metrics_server {
+            Some(server) => server.await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::try_join!(fleet, admin, metrics)?;
     Ok(())
 }

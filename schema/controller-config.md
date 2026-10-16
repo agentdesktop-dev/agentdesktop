@@ -14,6 +14,7 @@
 |`gatewayJwt.keyId`|string|Key identifier placed in generated JWT headers.|
 |`gatewayJwt.lifetime`|string|Lifetime of generated JWTs. Defaults to `5m`.|
 |`gatewayJwt.privateKey`|string|Path to the PEM-encoded RSA private signing key.<br><br>Relative paths are resolved from the controller configuration directory.|
+|`metricsListen`|string|Address on which the controller serves Prometheus metrics at `/metrics`.<br><br>Unset disables the endpoint. The endpoint has no authentication, so<br>expose it only to the metrics scraper. It reports fleet-wide counts and<br>never device hostnames, users, or tool inputs.|
 |`oidc`|object|OpenID Connect settings used for device enrollment and authorization.|
 |`oidc.clientId`|string|Public OpenID Connect client identifier.|
 |`oidc.issuer`|string|Exact OpenID Connect issuer URL.|

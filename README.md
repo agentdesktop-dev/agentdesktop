@@ -805,6 +805,45 @@ frontendPolicies:
 The desktop app then shows **Usage**. [`examples/standalone`](examples/standalone)
 runs this setup.
 
+## Controller metrics
+
+The controller can serve Prometheus metrics for fleet health. Set a listen
+address in the controller configuration:
+
+```yaml
+metricsListen: 0.0.0.0:9090
+```
+
+Unset (the default) serves nothing. `GET /metrics` on that address needs no
+authentication, so reach it only from the scraper (for example a Kubernetes
+`Service` that is not exposed outside the cluster). It is separate from
+`adminListen`, which must stay on loopback. Labels never carry hostnames,
+users, MCP server names, or tool inputs.
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `agentdesktop_build_info{version}` | gauge | Controller version. |
+| `agentdesktop_devices` | gauge | Enrolled devices. |
+| `agentdesktop_devices_online` | gauge | Devices seen in the last 90 seconds. |
+| `agentdesktop_devices_connected` | gauge | Devices with an open stream to this controller. |
+| `agentdesktop_device_oldest_seen_age_seconds` | gauge | Age of the least recently seen device. |
+| `agentdesktop_devices_by_version{os,agent_version}` | gauge | Devices per OS and agent version. |
+| `agentdesktop_devices_by_config_state{state}` | gauge | `applied`, `failed`, or `unreported`. |
+| `agentdesktop_devices_config_behind` | gauge | Devices on a configuration revision other than the active one. |
+| `agentdesktop_config_active_revision` | gauge | Active daemon configuration revision. |
+| `agentdesktop_inventory_mcp_servers` | gauge | MCP servers reported by all devices. |
+| `agentdesktop_inventory_skills` | gauge | Skills reported by all devices. |
+| `agentdesktop_telemetry_events_total{type}` | counter | Stored `session.new` and `tool.use` events. |
+| `agentdesktop_device_message_errors_total` | counter | Device messages that could not be stored. |
+
+Fleet state is read from the database at scrape time. The connected gauge and
+the two counters live in memory and start from zero when the controller
+restarts. With more than one controller replica, `agentdesktop_devices_connected`
+and the counters are per replica; sum them across replicas.
+
+These cover fleet health. Token and cost usage is in
+[Token and cost usage](#token-and-cost-usage).
+
 ## Core capabilities
 
 - **AI tool discovery:** detect supported developer tools and their versions
