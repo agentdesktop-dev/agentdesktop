@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use agentdesktop_core::config::DaemonConfig;
-use agentdesktop_core::model::Discovery;
+use agentdesktop_core::model::{DaemonScope, Discovery};
 
 use super::{Provider, ReconcileContext};
 use crate::reconcile::ReconcilePlan;
@@ -36,15 +36,14 @@ impl Provider for Pi {
     }
 
     fn plan(&self, ctx: &ReconcileContext, config: &DaemonConfig) -> anyhow::Result<ReconcilePlan> {
-        if !ctx.merge_user_settings && config.programs.pi.is_some() {
-            anyhow::bail!(
-                "Pi only reads user configuration; run agentdesktop with --user to manage programs.pi, or remove programs.pi from the system configuration"
-            );
-        }
-        let plan = ReconcilePlan::default();
-        if !ctx.merge_user_settings {
+        if let Some(plan) = ctx.skip_unless(
+            DaemonScope::User,
+            config.programs.pi.is_some(),
+            Self::DISPLAY_NAME,
+        ) {
             return Ok(plan);
         }
+        let plan = ReconcilePlan::default();
         let (Some(models_path), Some(settings_path)) = (&self.models_path, &self.settings_path)
         else {
             anyhow::bail!("Pi user configuration paths are unavailable");
@@ -90,7 +89,7 @@ mod tests {
     use super::{Pi, Provider, ReconcileContext};
 
     #[test]
-    fn rejects_configured_pi_in_system_mode() {
+    fn skips_configured_pi_in_system_mode() {
         let root = tempfile::tempdir().unwrap();
         let pi = Pi {
             models_path: Some(root.path().join("models.json")),
@@ -105,9 +104,11 @@ mod tests {
         let config =
             parse_daemon("programs:\n  pi:\n    managedConfig:\n      providers: {}\n").unwrap();
 
-        let error = pi.plan(&ctx, &config).err().expect("Pi needs user mode");
-        assert!(error.to_string().contains("--user"));
-        assert!(error.to_string().contains("programs.pi"));
+        let plan = pi
+            .plan(&ctx, &config)
+            .expect("Pi is skipped in system mode");
+        assert!(plan.inactive_reason().unwrap().contains("--user"));
+        plan.apply().unwrap();
         assert!(!pi.models_path.as_ref().unwrap().exists());
         assert!(!pi.settings_path.as_ref().unwrap().exists());
     }

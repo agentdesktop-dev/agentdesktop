@@ -22,6 +22,6 @@ programs:
 #  pi:
 #    useLlmGateway: true
 #    model: claude-sonnet-4-5
-#  Claude Desktop requires system mode; leave Pi disabled when enabling it.
+#  Claude Desktop requires system mode; user daemons skip it.
 #  claudeDesktop:
 #    useLlmGateway: true

@@ -2,6 +2,14 @@
 
 Features currently implemented by agentdesktop.
 
+A fleet policy can include programs for both daemon modes. Programs the current
+mode cannot manage are skipped and reported as **inactive**, with a reason in
+configuration status and dry-run output. Supported programs continue applying.
+Skipped programs' files and ownership metadata are left untouched, even when
+those programs are removed from the policy. Cleanup runs in the mode that manages
+the program. Claude Desktop and Grok Build require system mode; Pi, Copilot CLI,
+and VS Code require user mode.
+
 VS Code managed configuration (Copilot Chat custom models in the user's
 `chatLanguageModels.json`, or the Copilot Chat API override in the user's
 `settings.json` under `copilotChat: githubModels`) and GitHub Copilot CLI
@@ -10,16 +18,15 @@ these files point at the daemon's loopback LLM proxy. The Copilot CLI's MCP and 
 `~/.copilot` is read by the VS Code adapter.
 Grok Build managed configuration requires system mode. Linux and macOS use
 `/etc/grok/managed_config.toml`; Windows uses the system drive's
-`\etc\grok\managed_config.toml`. `--user` rejects `programs.grok` because
+`\etc\grok\managed_config.toml`. User daemons skip `programs.grok` because
 Grok's own configuration sync can delete or replace the user-level managed
 file.
 
 Pi stores configuration in `~/.pi/agent` (or `PI_CODING_AGENT_DIR`, with `~`
-expanded to the user's home). Management requires `--user`; system mode
-rejects `programs.pi` because Pi does not read `/etc/pi/agent`. Pi cannot be
-combined with Claude Desktop or Grok Build, because those programs require
-system mode. Authenticated
-gateway configuration also requires a running daemon and rejects `--once`.
+expanded to the user's home). Management requires `--user`; system daemons
+skip `programs.pi` because Pi does not read `/etc/pi/agent`. In user mode,
+authenticated gateway configuration also requires a running daemon and
+rejects `--once`.
 Pi executes its credential helper on every request. The daemon caches
 controller-issued credentials for up to 60 seconds per allowed client,
 gateway, audience, and enrolled device, with a 30-second expiry margin and

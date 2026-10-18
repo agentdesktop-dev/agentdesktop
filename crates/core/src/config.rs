@@ -664,6 +664,10 @@ fn default_heartbeat_interval() -> Duration {
 }
 
 /// Settings for developer tools managed by Agentdesktop.
+///
+/// A policy can mix user-only and system-only programs. Each daemon skips
+/// programs its mode cannot manage, reporting them as inactive with a reason.
+/// Skipped programs' files are left untouched, including during cleanup.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -671,7 +675,8 @@ pub struct ProgramsConfig {
     /// Claude Code managed-settings configuration. Arbitrary keys are passed through directly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_code: Option<ClaudeCodeConfig>,
-    /// Claude Desktop managed configuration. Arbitrary keys are passed through directly.
+    /// Claude Desktop system-managed configuration. User daemons skip it.
+    /// Arbitrary keys are passed through directly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_desktop: Option<ClaudeDesktopConfig>,
     /// Codex managed configuration.
@@ -692,8 +697,7 @@ pub struct ProgramsConfig {
     pub vscode: Option<VsCodeConfig>,
     /// Pi coding-agent harness managed configuration.
     ///
-    /// Requires `--user`. Cannot be combined with Claude Desktop or Grok Build,
-    /// which require system mode.
+    /// Managed in user mode (`--user`); system daemons skip it with an inactive reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pi: Option<PiConfig>,
 }
@@ -803,7 +807,7 @@ pub struct OpenCodeConfig {
 /// When generated LLM-gateway settings overlap with those values,
 /// agentdesktop's generated values take precedence.
 /// Only system mode is supported. Grok can delete or replace the user-level
-/// managed file during startup, so `--user` rejects `programs.grok`.
+/// managed file during startup, so user daemons skip it with an inactive reason.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -840,8 +844,8 @@ pub struct GrokConfig {
 /// managed-settings equivalent for providers, and users may have their own
 /// BYOK entries. See `provider::copilot::reconcile` in the agent crate for
 /// how this is turned into the merged document. User mode only: the file
-/// lives in the user's Copilot directory, so a system daemon rejects the
-/// program.
+/// lives in the user's Copilot directory, so system daemons skip it with an
+/// inactive reason.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -982,7 +986,7 @@ impl CopilotConfig {
 /// the daemon adds the gateway identity. See `provider::vscode::reconcile`
 /// and `provider::vscode::settings` in the agent crate for how each is turned
 /// into its merged document. User mode only: both files live in the user's
-/// VS Code profile directory, so a system daemon rejects the program.
+/// VS Code profile directory, so system daemons skip it with an inactive reason.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1153,7 +1157,7 @@ impl VsCodeConfig {
 ///
 /// Generated `providers.agentdesktop` values take precedence over overlapping
 /// `managedConfig` keys. Pi stores configuration under `~/.pi/agent` (or
-/// `PI_CODING_AGENT_DIR`), so management requires `--user`.
+/// `PI_CODING_AGENT_DIR`), so management requires `--user`. System daemons skip it.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1588,12 +1592,6 @@ fn validate_daemon(
                 }
             }
         }
-    }
-    if programs.pi.is_some() && programs.claude_desktop.is_some() {
-        anyhow::bail!("programs.pi requires --user, which cannot apply programs.claudeDesktop");
-    }
-    if programs.pi.is_some() && programs.grok.is_some() {
-        anyhow::bail!("programs.pi requires --user, which cannot apply programs.grok");
     }
     if let Some(pi) = &programs.pi
         && llm_gateway.is_some()
@@ -2295,23 +2293,10 @@ programs:
     }
 
     #[test]
-    fn pi_rejects_system_only_program_combinations() {
-        for (name, message) in [
-            (
-                "claudeDesktop",
-                "programs.pi requires --user, which cannot apply programs.claudeDesktop",
-            ),
-            (
-                "grok",
-                "programs.pi requires --user, which cannot apply programs.grok",
-            ),
-        ] {
-            let error = parse_daemon(&format!("programs:\n  pi: {{}}\n  {name}: {{}}\n"))
-                .expect_err("Pi combined with a system-only program should fail");
-            assert!(
-                error.to_string().contains(message),
-                "missing {message} in {error}"
-            );
-        }
+    fn accepts_mixed_user_and_system_programs() {
+        parse_daemon(
+            "programs:\n  pi: {}\n  claudeDesktop: {}\n  grok: {}\n  copilot: {}\n  vscode: {}",
+        )
+        .expect("each daemon manages the programs supported in its mode");
     }
 }

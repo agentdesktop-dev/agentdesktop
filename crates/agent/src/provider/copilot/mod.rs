@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use agentdesktop_core::config::DaemonConfig;
-use agentdesktop_core::model::Discovery;
+use agentdesktop_core::model::{DaemonScope, Discovery};
 
 use super::{Provider, ReconcileContext};
 use crate::reconcile::ReconcilePlan;
@@ -52,6 +52,14 @@ impl Provider for Copilot {
     }
 
     fn plan(&self, ctx: &ReconcileContext, config: &DaemonConfig) -> anyhow::Result<ReconcilePlan> {
+        if let Some(plan) = ctx.skip_unless(
+            DaemonScope::User,
+            config.programs.copilot.is_some(),
+            DISPLAY_NAME,
+        ) {
+            return Ok(plan);
+        }
+
         let configured = config.programs.copilot.as_ref().map(|program| {
             let gateway = config
                 .llm_gateway
@@ -64,18 +72,9 @@ impl Provider for Copilot {
             .as_ref()
             .map(|proxy| (proxy.address, &*proxy.pairing));
         let plan = ReconcilePlan::default();
-        // The inverse of Grok's check: the file lives in the user's home, so a
-        // system daemon has no providers path and rejects the program before
-        // any provider writes.
-        let Some(path) = self
-            .providers_path
-            .as_deref()
-            .filter(|_| ctx.merge_user_settings)
-        else {
+        let Some(path) = self.providers_path.as_deref() else {
             if configured.is_some() {
-                anyhow::bail!(
-                    "{DISPLAY_NAME} reads its providers from the user's own Copilot directory; remove programs.copilot or run agentdesktop with --user (daemon.user: true) so it can manage that file"
-                );
+                anyhow::bail!("{DISPLAY_NAME} user configuration path is unavailable");
             }
             return Ok(plan);
         };

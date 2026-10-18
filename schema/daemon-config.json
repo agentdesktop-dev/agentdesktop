@@ -176,7 +176,7 @@
       ]
     },
     "CopilotConfig": {
-      "description": "Settings reconciled into GitHub Copilot CLI's `providers.json`.\n\n`providers.json` is merged, never owned outright: the CLI has no\nmanaged-settings equivalent for providers, and users may have their own\nBYOK entries. See `provider::copilot::reconcile` in the agent crate for\nhow this is turned into the merged document. User mode only: the file\nlives in the user's Copilot directory, so a system daemon rejects the\nprogram.",
+      "description": "Settings reconciled into GitHub Copilot CLI's `providers.json`.\n\n`providers.json` is merged, never owned outright: the CLI has no\nmanaged-settings equivalent for providers, and users may have their own\nBYOK entries. See `provider::copilot::reconcile` in the agent crate for\nhow this is turned into the merged document. User mode only: the file\nlives in the user's Copilot directory, so system daemons skip it with an\ninactive reason.",
       "type": "object",
       "properties": {
         "models": {
@@ -362,7 +362,7 @@
       ]
     },
     "GrokConfig": {
-      "description": "Settings reconciled into Grok Build's organization-managed configuration.\n\nValues under `managedConfig` are written to Grok's `managed_config.toml`.\nWhen generated LLM-gateway settings overlap with those values,\nagentdesktop's generated values take precedence.\nOnly system mode is supported. Grok can delete or replace the user-level\nmanaged file during startup, so `--user` rejects `programs.grok`.",
+      "description": "Settings reconciled into Grok Build's organization-managed configuration.\n\nValues under `managedConfig` are written to Grok's `managed_config.toml`.\nWhen generated LLM-gateway settings overlap with those values,\nagentdesktop's generated values take precedence.\nOnly system mode is supported. Grok can delete or replace the user-level\nmanaged file during startup, so user daemons skip it with an inactive reason.",
       "type": "object",
       "properties": {
         "managedConfig": {
@@ -589,7 +589,7 @@
       "additionalProperties": false
     },
     "PiConfig": {
-      "description": "Settings reconciled into Pi's user `models.json` and `settings.json`.\n\nGenerated `providers.agentdesktop` values take precedence over overlapping\n`managedConfig` keys. Pi stores configuration under `~/.pi/agent` (or\n`PI_CODING_AGENT_DIR`), so management requires `--user`.",
+      "description": "Settings reconciled into Pi's user `models.json` and `settings.json`.\n\nGenerated `providers.agentdesktop` values take precedence over overlapping\n`managedConfig` keys. Pi stores configuration under `~/.pi/agent` (or\n`PI_CODING_AGENT_DIR`), so management requires `--user`. System daemons skip it.",
       "type": "object",
       "properties": {
         "api": {
@@ -655,7 +655,7 @@
       ]
     },
     "ProgramsConfig": {
-      "description": "Settings for developer tools managed by Agentdesktop.",
+      "description": "Settings for developer tools managed by Agentdesktop.\n\nA policy can mix user-only and system-only programs. Each daemon skips\nprograms its mode cannot manage, reporting them as inactive with a reason.\nSkipped programs' files are left untouched, including during cleanup.",
       "type": "object",
       "properties": {
         "claudeCode": {
@@ -670,7 +670,7 @@
           ]
         },
         "claudeDesktop": {
-          "description": "Claude Desktop managed configuration. Arbitrary keys are passed through directly.",
+          "description": "Claude Desktop system-managed configuration. User daemons skip it.\nArbitrary keys are passed through directly.",
           "anyOf": [
             {
               "$ref": "#/$defs/ClaudeDesktopConfig"
@@ -725,7 +725,7 @@
           ]
         },
         "pi": {
-          "description": "Pi coding-agent harness managed configuration.\n\nRequires `--user`. Cannot be combined with Claude Desktop or Grok Build,\nwhich require system mode.",
+          "description": "Pi coding-agent harness managed configuration.\n\nManaged in user mode (`--user`); system daemons skip it with an inactive reason.",
           "anyOf": [
             {
               "$ref": "#/$defs/PiConfig"
@@ -886,7 +886,7 @@
       ]
     },
     "VsCodeConfig": {
-      "description": "Settings reconciled into VS Code's Copilot Chat configuration. Under\n`copilotChat: ownModels` this is `chatLanguageModels.json`, pointing\nCopilot Chat's built-in \"Custom Endpoint\" model provider at the local LLM\nproxy's `/vscode-copilot` route; under `copilotChat: githubModels`\nit is the user `settings.json`, pointing Copilot Chat's\nCAPI endpoint at the loopback proxy's `/vscode-copilot-capi/<pairing>`\nroute so VS Code keeps GitHub's own models and its own Copilot token while\nthe daemon adds the gateway identity. See `provider::vscode::reconcile`\nand `provider::vscode::settings` in the agent crate for how each is turned\ninto its merged document. User mode only: both files live in the user's\nVS Code profile directory, so a system daemon rejects the program.",
+      "description": "Settings reconciled into VS Code's Copilot Chat configuration. Under\n`copilotChat: ownModels` this is `chatLanguageModels.json`, pointing\nCopilot Chat's built-in \"Custom Endpoint\" model provider at the local LLM\nproxy's `/vscode-copilot` route; under `copilotChat: githubModels`\nit is the user `settings.json`, pointing Copilot Chat's\nCAPI endpoint at the loopback proxy's `/vscode-copilot-capi/<pairing>`\nroute so VS Code keeps GitHub's own models and its own Copilot token while\nthe daemon adds the gateway identity. See `provider::vscode::reconcile`\nand `provider::vscode::settings` in the agent crate for how each is turned\ninto its merged document. User mode only: both files live in the user's\nVS Code profile directory, so system daemons skip it with an inactive reason.",
       "type": "object",
       "properties": {
         "copilotChat": {

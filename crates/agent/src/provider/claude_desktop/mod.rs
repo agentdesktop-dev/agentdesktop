@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use agentdesktop_core::config::DaemonConfig;
-use agentdesktop_core::model::Discovery;
+use agentdesktop_core::model::{DaemonScope, Discovery};
 
 use super::{Provider, ReconcileContext};
 use crate::reconcile::ReconcilePlan;
@@ -45,10 +45,12 @@ impl Provider for ClaudeDesktop {
     }
 
     fn plan(&self, ctx: &ReconcileContext, config: &DaemonConfig) -> anyhow::Result<ReconcilePlan> {
-        if ctx.merge_user_settings && config.programs.claude_desktop.is_some() {
-            anyhow::bail!(
-                "Claude Desktop does not read inference settings from its user preferences; remove programs.claudeDesktop or run Agentdesktop without --user as root so it can manage its Claude Desktop managed settings"
-            );
+        if let Some(plan) = ctx.skip_unless(
+            DaemonScope::System,
+            config.programs.claude_desktop.is_some(),
+            Self::DISPLAY_NAME,
+        ) {
+            return Ok(plan);
         }
         let configured = config.programs.claude_desktop.as_ref().map(|provider| {
             let gateway = config

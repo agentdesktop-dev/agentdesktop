@@ -85,7 +85,8 @@ cost by tool and model.
 Uncomment `programs.pi` in `config.yaml` to enable Pi with `claude-sonnet-4-5`.
 Run `pi` while the daemon is running to use that model through the gateway.
 Pi requires `--user`; authenticated gateway configuration cannot be applied
-with `--once`. Leave Pi commented out when using Claude Desktop.
+with `--once` in user mode. Pi and Claude Desktop can share a policy: user
+daemons skip Claude Desktop, and system daemons skip Pi, with an inactive reason.
 
 
 ## Claude Desktop

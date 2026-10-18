@@ -62,7 +62,7 @@
 |`programs.claudeCode`|object|Claude Code managed-settings configuration. Arbitrary keys are passed through directly.|
 |`programs.claudeCode.auth`|enum|Upstream authentication used by this agent.<br>Possible values: `subscription`.|
 |`programs.claudeCode.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
-|`programs.claudeDesktop`|object|Claude Desktop managed configuration. Arbitrary keys are passed through directly.|
+|`programs.claudeDesktop`|object|Claude Desktop system-managed configuration. User daemons skip it.<br>Arbitrary keys are passed through directly.|
 |`programs.claudeDesktop.auth`|enum|Upstream authentication used by this agent.<br>Possible values: `subscription`.|
 |`programs.claudeDesktop.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
 |`programs.codex`|object|Codex managed configuration.|
@@ -83,7 +83,7 @@
 |`programs.openCode.model`|string|Model ID selected from `models` when using the LLM gateway.<br><br>This is required when a top-level `llmGateway` is configured.|
 |`programs.openCode.models`|object|Models exposed by the managed LLM gateway provider, keyed by model ID.<br><br>Each value is an arbitrary OpenCode model configuration object. At least<br>one model is required when a top-level `llmGateway` is configured.|
 |`programs.openCode.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
-|`programs.pi`|object|Pi coding-agent harness managed configuration.<br><br>Requires `--user`. Cannot be combined with Claude Desktop or Grok Build,<br>which require system mode.|
+|`programs.pi`|object|Pi coding-agent harness managed configuration.<br><br>Managed in user mode (`--user`); system daemons skip it with an inactive reason.|
 |`programs.pi.api`|string|Pi API dialect for the managed provider. Defaults to `anthropic-messages`.|
 |`programs.pi.managedConfig`|object|Arbitrary values merged into Pi's `models.json`.|
 |`programs.pi.model`|string|Model ID selected when pointing Pi at the LLM gateway.<br><br>This is required when a top-level `llmGateway` is configured. If `models`<br>is empty, agentdesktop creates a catalog entry with this ID.|

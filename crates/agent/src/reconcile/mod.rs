@@ -294,8 +294,8 @@ pub enum ProgramState {
     Removed,
     /// A managed file held conflicting or invalid existing configuration.
     Conflict,
-    /// The program uses the gateway, a gateway is configured, and the
-    /// loopback proxy is absent.
+    /// The daemon's mode cannot manage this program, or the program uses a
+    /// configured gateway but the loopback proxy is absent. Detail explains why.
     Inactive,
     /// The program had changes, but none of them was written because the
     /// apply was refused or stopped.
@@ -343,9 +343,9 @@ impl ApplyReport {
     /// warning.
     pub fn log(&self) {
         for outcome in &self.programs {
-            // Inactive is a warning too: the program is configured for the
-            // gateway but its files are removed. The providers log the cause
-            // at debug level, since they plan on every apply.
+            // Inactive is a warning too: a configured program cannot be
+            // managed in this mode or cannot use the gateway. Detail explains
+            // the cause, including any effect on its existing files.
             let warning = matches!(
                 outcome.state,
                 ProgramState::Failed
@@ -621,6 +621,7 @@ pub fn configured_programs(programs: &ProgramsConfig) -> Vec<&'static str> {
 #[derive(Default)]
 struct DryRunReport {
     changes: RefCell<Vec<DryRunChange>>,
+    inactive: RefCell<Vec<String>>,
 }
 
 struct DryRunChange {
@@ -667,6 +668,10 @@ impl DryRunReport {
             .filter(|change| change.action == "conflict")
             .count();
         let mut output = String::from("Dry run — no files will be changed\n");
+
+        for reason in self.inactive.borrow().iter() {
+            let _ = write!(output, "\nINACTIVE  {reason}\n");
+        }
 
         for change in changes.iter().filter(|change| change.action != "unchanged") {
             let _ = write!(
@@ -758,99 +763,147 @@ mod tests {
     }
 
     #[test]
-    fn user_mode_rejects_claude_desktop_before_writing_other_settings() {
-        let root = std::env::temp_dir().join(format!(
-            "agentdesktop-reconcile-user-desktop-{}-{}",
-            std::process::id(),
-            rand::random::<u64>()
-        ));
+    fn mixed_mode_policy_applies_supported_programs_and_preserves_skipped_files() {
         let config = parse_daemon(
             r#"
+llmGateway:
+  url: https://gateway.example.com
 programs:
   claudeCode: {}
-  claudeDesktop: {}
+  claudeDesktop:
+    model: selected
+  grok:
+    model: selected
+  pi:
+    model: selected
+  copilot:
+    models:
+      selected: {}
+  vscode:
+    models:
+      selected: {}
 "#,
         )
-        .expect("valid configuration");
-        let reconciler = Reconciler::new(
-            true,
-            root.join("claude/settings.json"),
-            root.join("claude-desktop/settings.json"),
-            root.join("claude-desktop/helper"),
-            root.join("codex/config.toml"),
-            root.join("opencode/config.json"),
-            root.join("opencode/plugin.js"),
-            root.join("grok/managed_config.toml"),
-            Some(root.join("copilot/providers.json")),
-            None,
-            None,
-            Some(root.join("pi/models.json")),
-            Some(root.join("pi/settings.json")),
-            root.join("bin/agentdesktop"),
-            root.join("agentdesktop.sock"),
-        );
+        .expect("mixed fleet policy is valid");
+        let programs = [
+            ("claude-desktop", "claude-desktop", false),
+            ("grok", "grok", false),
+            ("pi", "pi", true),
+            ("copilot", "copilot", true),
+            ("vscode", "vscode", true),
+        ];
 
-        let error = reconciler.apply(&config).expect_err("user mode must fail");
+        fn snapshot(path: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+            let mut files = std::collections::BTreeMap::new();
+            for entry in fs::read_dir(path).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    files.extend(snapshot(&path));
+                } else {
+                    files.insert(path.clone(), fs::read(path).unwrap());
+                }
+            }
+            files
+        }
 
-        assert!(
-            error
-                .to_string()
-                .contains("Claude Desktop managed settings")
-        );
-        assert!(!root.exists(), "preflight failure must not write any files");
+        for user in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut reconciler =
+                full_reconciler(root.path()).with_llm_proxy(Some(proxy_context("PAIRING")));
+            // Seed owned files in the opposite mode, including ownership sidecars.
+            reconciler.context.merge_user_settings = !user;
+            let mut seed = config.clone();
+            seed.programs.claude_code = None;
+            reconciler
+                .apply(&seed)
+                .expect("seed the other mode's files");
+            let skipped: Vec<_> = programs
+                .iter()
+                .filter(|(_, _, required_user)| *required_user != user)
+                .map(|(id, dir, _)| (*id, snapshot(&root.path().join(dir))))
+                .collect();
+            assert!(skipped.iter().all(|(_, files)| !files.is_empty()));
+
+            reconciler.context.merge_user_settings = user;
+            let preview = reconciler.plan(&config).unwrap().render();
+            assert!(preview.contains("INACTIVE"), "{preview}");
+            assert!(preview.contains(if user {
+                "requires system mode"
+            } else {
+                "requires user mode"
+            }));
+            let (report, result) = reconciler.apply_with_report(&config);
+            result.expect("unsupported programs must not block supported programs");
+            assert_eq!(
+                program_outcome(&report, "claude-code").unwrap().state,
+                ProgramState::Applied
+            );
+            for (id, _, required_user) in programs {
+                let outcome = program_outcome(&report, id).unwrap();
+                if required_user == user {
+                    assert_eq!(outcome.state, ProgramState::Applied, "{id}");
+                } else {
+                    assert_eq!(outcome.state, ProgramState::Inactive, "{id}");
+                    assert!(
+                        outcome
+                            .detail
+                            .contains(if user { "system mode" } else { "user mode" }),
+                        "{}",
+                        outcome.detail
+                    );
+                }
+            }
+            for (id, files) in &skipped {
+                assert_eq!(&snapshot(&root.path().join(id)), files, "{id}");
+            }
+
+            let (report, result) = reconciler.apply_with_report(&parse_daemon("{}").unwrap());
+            result.expect("cleanup only affects programs supported in this mode");
+            for (id, files) in &skipped {
+                assert!(
+                    program_outcome(&report, id).is_none(),
+                    "disabled {id} has no status"
+                );
+                assert_eq!(&snapshot(&root.path().join(id)), files, "{id}");
+            }
+        }
     }
 
     #[test]
-    fn user_mode_rejects_grok_before_writing_other_settings() {
-        let root = std::env::temp_dir().join(format!(
-            "agentdesktop-reconcile-user-grok-{}-{}",
-            std::process::id(),
-            rand::random::<u64>()
-        ));
-        let config = parse_daemon(
-            r#"
-programs:
-  claudeCode: {}
-  grok: {}
-"#,
-        )
-        .unwrap();
-        let reconciler = Reconciler::new(
-            true,
-            root.join("claude/settings.json"),
-            root.join("claude-desktop/settings.json"),
-            root.join("claude-desktop/helper"),
-            root.join("codex/config.toml"),
-            root.join("opencode/config.json"),
-            root.join("opencode/plugin.js"),
-            root.join("grok/managed_config.toml"),
-            Some(root.join("copilot/providers.json")),
-            None,
-            None,
-            Some(root.join("pi/models.json")),
-            Some(root.join("pi/settings.json")),
-            root.join("bin/agentdesktop"),
-            root.join("agentdesktop.sock"),
-        );
-
-        let error = reconciler.apply(&config).expect_err("user mode must fail");
-        assert!(error.to_string().contains("Grok Build"));
-        assert!(!root.exists(), "preflight failure must not write any files");
-    }
-
-    #[test]
-    fn system_mode_rejects_pi_before_writing_other_settings() {
-        let fixture = Fixture::new();
-        let config = parse_daemon("programs:\n  claudeCode: {}\n  pi: {}\n").unwrap();
-        let error = fixture
-            .reconciler
-            .apply(&config)
-            .expect_err("Pi requires user mode");
-        assert!(error.to_string().contains("--user"));
-        assert!(
-            !fixture.root.exists(),
-            "preflight failure must not write any files"
-        );
+    fn skipped_programs_do_not_read_unmanageable_paths() {
+        for (user, yaml, paths) in [
+            (
+                true,
+                "programs:\n  claudeCode: {}\n  claudeDesktop: {}\n  grok: {}",
+                vec!["claude-desktop/settings.json", "grok/managed_config.toml"],
+            ),
+            (
+                false,
+                "programs:\n  claudeCode: {}\n  pi: {}\n  copilot: {}\n  vscode: {}",
+                vec![
+                    "pi/models.json",
+                    "copilot/providers.json",
+                    "vscode/User/settings.json",
+                ],
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            // Directories where files are expected would fail planning if read.
+            for path in &paths {
+                fs::create_dir_all(root.path().join(path)).unwrap();
+            }
+            let mut reconciler = full_reconciler(root.path());
+            reconciler.context.merge_user_settings = user;
+            let (report, result) = reconciler.apply_with_report(&parse_daemon(yaml).unwrap());
+            result.expect("skipped programs do no I/O");
+            assert_eq!(
+                program_outcome(&report, "claude-code").unwrap().state,
+                ProgramState::Applied
+            );
+            for path in paths {
+                assert!(root.path().join(path).is_dir());
+            }
+        }
     }
 
     #[test]
@@ -1035,50 +1088,6 @@ programs:
             assert_eq!(mode, 0o700, "directory created through the reconciler");
         }
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn system_mode_rejects_copilot_before_writing_other_settings() {
-        let root = std::env::temp_dir().join(format!(
-            "agentdesktop-reconcile-system-copilot-{}-{}",
-            std::process::id(),
-            rand::random::<u64>()
-        ));
-        let config = parse_daemon(
-            r#"
-programs:
-  claudeCode: {}
-  copilot: {}
-"#,
-        )
-        .unwrap();
-        // The Copilot CLI program is the inverse of Grok: it manages a file in
-        // the user's home, so a system daemon (no providers path) rejects it
-        // before any provider writes.
-        let reconciler = Reconciler::new(
-            false,
-            root.join("claude/settings.json"),
-            root.join("claude-desktop/settings.json"),
-            root.join("claude-desktop/helper"),
-            root.join("codex/config.toml"),
-            root.join("opencode/config.json"),
-            root.join("opencode/plugin.js"),
-            root.join("grok/managed_config.toml"),
-            None,
-            None,
-            None,
-            Some(root.join("pi/models.json")),
-            Some(root.join("pi/settings.json")),
-            root.join("bin/agentdesktop"),
-            root.join("agentdesktop.sock"),
-        );
-
-        let error = reconciler
-            .apply(&config)
-            .expect_err("system mode must fail");
-        assert!(error.to_string().contains("GitHub Copilot CLI"), "{error}");
-        assert!(error.to_string().contains("--user"), "{error}");
-        assert!(!root.exists(), "preflight failure must not write any files");
     }
 
     #[cfg(windows)]
@@ -1589,23 +1598,28 @@ programs:
     #[test]
     fn failed_provider_plan_does_not_stop_the_others() {
         let root = new_root("failed-plan-continues");
-        // Grok Build's managed config lives in a system location, so a
-        // user-mode daemon rejects it in `plan()` (see
-        // `user_mode_rejects_grok_before_writing_other_settings` above) while
-        // Claude Code plans normally: a real, deterministic plan failure.
+        // A directory where Pi expects a file is a real I/O failure. Grok is
+        // skipped in user mode and must remain inactive even when apply fails.
+        fs::create_dir_all(root.join("pi/models.json")).unwrap();
         let reconciler = full_reconciler(&root);
-        let config = parse_daemon("programs:\n  claudeCode: {}\n  grok: {}").unwrap();
+        let config = parse_daemon("programs:\n  claudeCode: {}\n  pi: {}\n  grok: {}").unwrap();
 
         let (report, result) = reconciler.apply_with_report(&config);
         assert!(result.is_err());
-        let grok = program_outcome(&report, "grok").expect("grok is reported");
-        assert_eq!(grok.state, ProgramState::Failed);
-        assert!(grok.detail.contains("Grok Build"), "{}", grok.detail);
         assert_eq!(
-            program_outcome(&report, "claude-code").map(|outcome| outcome.state),
-            Some(ProgramState::Blocked),
+            program_outcome(&report, "pi").unwrap().state,
+            ProgramState::Failed
+        );
+        assert_eq!(
+            program_outcome(&report, "grok").unwrap().state,
+            ProgramState::Inactive
+        );
+        assert_eq!(
+            program_outcome(&report, "claude-code").unwrap().state,
+            ProgramState::Blocked,
             "claude-code was still planned, but nothing is written because the apply fails"
         );
+        assert!(!root.join("claude/settings.json").exists());
         let _ = fs::remove_dir_all(&root);
     }
 

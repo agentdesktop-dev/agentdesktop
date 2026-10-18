@@ -78,8 +78,9 @@ It will show the configured `Managed by Agentdesktop` and direct traffic through
 
 ## Pi
 
-Pi requires user-mode configuration. To include Pi, remove `programs.claudeDesktop`
-from `claude-code.yaml` and uncomment `programs.pi`. Run the daemon as the user
+To include Pi, uncomment `programs.pi` in `claude-code.yaml`. The same policy can
+include Claude Desktop: user daemons manage Pi and skip Claude Desktop, while
+system daemons manage Claude Desktop and skip Pi. Run the daemon as the user
 who runs Pi:
 
 ```console
