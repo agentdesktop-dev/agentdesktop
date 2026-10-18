@@ -1,0 +1,23 @@
+[package]
+name = "agentdesktop-usage"
+description = "LLM token and cost usage from agentgateway access logs."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+agentdesktop-core.workspace = true
+agentdesktop-proto.workspace = true
+anyhow.workspace = true
+aws-lc-rs.workspace = true
+base64.workspace = true
+serde.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

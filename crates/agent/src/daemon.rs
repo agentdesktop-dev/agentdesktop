@@ -15,9 +15,10 @@ use std::{
 use agentdesktop_core::config::GitHubTokenSource;
 use agentdesktop_core::{
     DEFAULT_CONFIG_PATH, DEFAULT_SOCKET_PATH, VERSION, config,
-    model::{DaemonControllerInfo, DaemonInfo, DaemonScope, LlmProxyInfo},
+    model::{DaemonControllerInfo, DaemonInfo, DaemonScope, LlmProxyInfo, UsageReceiverInfo},
     telemetry,
 };
+use agentdesktop_usage::{UsageIngest, UsageStore};
 use anyhow::{Context, bail};
 use clap::Args;
 use hyper_util::{rt::TokioIo, service::TowerToHyperService};
@@ -29,6 +30,7 @@ use tokio::{
     sync::{mpsc, watch},
     time,
 };
+use tonic::transport::server::TcpIncoming;
 #[cfg(windows)]
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 
@@ -77,6 +79,8 @@ struct ResolvedDaemonArgs {
     oidc_callback_listen: Option<SocketAddr>,
     llm_proxy_listen: Option<SocketAddr>,
     llm_proxy_client_id: String,
+    /// `daemon.usage`; `None` for `--once` and `--dry-run`, which serve nothing.
+    usage: Option<config::UsageStartupConfig>,
     claude_code: ResolvedToolConfigPath,
     claude_desktop: ResolvedClaudeDesktopStartupConfig,
     codex: ResolvedToolConfigPath,
@@ -110,8 +114,8 @@ struct ResolvedOpenCodeStartupConfig {
 }
 
 struct ResolvedPiStartupConfig {
-    models: PathBuf,
-    settings: PathBuf,
+    models: Option<PathBuf>,
+    settings: Option<PathBuf>,
 }
 
 impl DaemonArgs {
@@ -146,6 +150,10 @@ impl DaemonArgs {
         if llm_proxy_listen.is_some() && !config::valid_client_id(&llm_proxy_client_id) {
             bail!("invalid daemon.llmProxy.clientId");
         }
+        let usage = startup
+            .usage
+            .clone()
+            .filter(|_| !(self.once || self.dry_run));
         // VS Code's chatLanguageModels.json and settings.json live in the
         // user's own profile, like the Copilot CLI providers file: a system
         // daemon has no user file to manage, so an explicit override is
@@ -171,6 +179,7 @@ impl DaemonArgs {
                 oidc_callback_listen: startup.oidc_callback_listen,
                 llm_proxy_listen: None,
                 llm_proxy_client_id: llm_proxy_client_id.clone(),
+                usage,
                 claude_code: ResolvedToolConfigPath {
                     config: startup.claude_code.config.unwrap_or_else(|| {
                         reconcile::default_claude_code_managed_settings_dir()
@@ -217,15 +226,14 @@ impl DaemonArgs {
                 },
                 vscode_chat_models: None,
                 vscode_settings: None,
-                pi: ResolvedPiStartupConfig {
-                    models: startup
-                        .pi
-                        .models
-                        .unwrap_or_else(reconcile::default_pi_models_path),
-                    settings: startup
-                        .pi
-                        .settings
-                        .unwrap_or_else(reconcile::default_pi_settings_path),
+                pi: {
+                    if startup.pi.models.is_some() || startup.pi.settings.is_some() {
+                        bail!("daemon.pi paths require --user (or daemon.user: true)");
+                    }
+                    ResolvedPiStartupConfig {
+                        models: None,
+                        settings: None,
+                    }
                 },
                 reconcile_interval: startup.reconcile_interval,
                 once: self.once || self.dry_run,
@@ -257,6 +265,7 @@ impl DaemonArgs {
             oidc_callback_listen: startup.oidc_callback_listen,
             llm_proxy_listen,
             llm_proxy_client_id,
+            usage,
             claude_code: ResolvedToolConfigPath {
                 config: startup
                     .claude_code
@@ -315,12 +324,12 @@ impl DaemonArgs {
                     .unwrap_or_else(|| reconcile::default_vscode_settings_path(&home)),
             ),
             pi: ResolvedPiStartupConfig {
-                models: startup.pi.models.unwrap_or_else(|| {
+                models: Some(startup.pi.models.unwrap_or_else(|| {
                     crate::provider::pi::user_pi_agent_dir(&home).join("models.json")
-                }),
-                settings: startup.pi.settings.unwrap_or_else(|| {
+                })),
+                settings: Some(startup.pi.settings.unwrap_or_else(|| {
                     crate::provider::pi::user_pi_agent_dir(&home).join("settings.json")
-                }),
+                })),
             },
             reconcile_interval: startup.reconcile_interval,
             once: self.once || self.dry_run,
@@ -469,8 +478,18 @@ where
         return Ok(());
     }
 
-    let daemon_info = describe_daemon(&config, &args.config, &args.state_dir, args.user, llm_proxy);
     secure_fs::ensure_private_dir(&args.state_dir)?;
+    let (usage_store, usage_receiver) = match &args.usage {
+        Some(usage) => {
+            let (store, receiver) = start_usage(usage, &args.state_dir).await;
+            (store, Some(receiver))
+        }
+        None => (None, None),
+    };
+    let daemon_info = DaemonInfo {
+        usage_receiver,
+        ..describe_daemon(&config, &args.config, &args.state_dir, args.user, llm_proxy)
+    };
     start_gateway_authentication(
         &config,
         args.state_dir.clone(),
@@ -592,6 +611,7 @@ where
         oidc_callback_listen: args.oidc_callback_listen,
         telemetry,
         logout,
+        usage: usage_store,
     };
     let app = api::router(state.clone());
     // The proxy is optional at runtime too: if serving fails (for example the
@@ -708,6 +728,67 @@ async fn bind_llm_proxy(
     }
 }
 
+/// Opens this device's usage database and starts the receiver that a gateway
+/// on this machine exports usage to. Like the LLM proxy, a failure is logged
+/// and reported through daemon-info instead of stopping the daemon; usage
+/// already recorded is still reported whenever the database opened.
+async fn start_usage(
+    usage: &config::UsageStartupConfig,
+    state_dir: &Path,
+) -> (Option<UsageStore>, UsageReceiverInfo) {
+    let off = |error: anyhow::Error| {
+        tracing::error!(
+            address = %usage.listen,
+            error = %format!("{error:#}"),
+            "usage receiver is off until the daemon restarts"
+        );
+        UsageReceiverInfo {
+            listen: usage.listen.to_string(),
+            bound: false,
+            error: Some(format!("{error:#}")),
+        }
+    };
+    let store = match UsageStore::open_sqlite(&state_dir.join("usage.db")).await {
+        Ok(store) => store,
+        Err(error) => return (None, off(error)),
+    };
+    agentdesktop_usage::spawn_maintenance(store.clone());
+    let receiver = async {
+        let token = agentdesktop_usage::load_token(&usage.token_file)?;
+        let listener = tokio::net::TcpListener::bind(usage.listen)
+            .await
+            .with_context(|| format!("bind {}", usage.listen))?;
+        anyhow::Ok((token, listener))
+    };
+    let (token, listener) = match receiver.await {
+        Ok(receiver) => receiver,
+        Err(error) => return (Some(store), off(error)),
+    };
+    let bound = listener.local_addr().unwrap_or(usage.listen);
+    tracing::info!(address = %bound, "usage receiver listening");
+    let service = UsageIngest::service(store.clone(), &token);
+    tokio::spawn(async move {
+        if let Err(error) = tonic::transport::Server::builder()
+            .add_service(service)
+            .serve_with_incoming(TcpIncoming::from(listener))
+            .await
+        {
+            tracing::error!(
+                error = %format!("{error:#}"),
+                "usage receiver stopped; usage is not recorded until the daemon restarts"
+            );
+        }
+    });
+    (
+        Some(store),
+        UsageReceiverInfo {
+            listen: bound.to_string(),
+            bound: true,
+            error: None,
+        },
+    )
+}
+
 fn describe_daemon(
     config: &config::DaemonConfig,
     config_path: &Path,
@@ -738,6 +819,7 @@ fn describe_daemon(
         inventory_interval: config.inventory_interval,
         controller,
         llm_proxy,
+        usage_receiver: None,
     }
 }
 
@@ -1294,7 +1376,7 @@ mod tests {
     use tokio::sync::{mpsc, watch};
 
     #[test]
-    fn pi_startup_paths_override_defaults_in_both_scopes() {
+    fn pi_startup_paths_require_user_mode() {
         for user in [false, true] {
             let file = tempfile::NamedTempFile::new().unwrap();
             std::fs::write(
@@ -1311,16 +1393,30 @@ mod tests {
                 dry_run: false,
                 config: None,
             };
-            let resolved = args
-                .resolve(
-                    config.daemon.unwrap(),
-                    file.path().to_path_buf(),
-                    agentdesktop_core::DEFAULT_SOCKET_PATH.into(),
-                )
-                .unwrap();
-            assert_eq!(resolved.user, user);
-            assert_eq!(resolved.pi.models, Path::new("custom/pi-models.json"));
-            assert_eq!(resolved.pi.settings, Path::new("custom/pi-settings.json"));
+            let result = args.resolve(
+                config.daemon.unwrap(),
+                file.path().to_path_buf(),
+                agentdesktop_core::DEFAULT_SOCKET_PATH.into(),
+            );
+            if !user {
+                assert!(
+                    result
+                        .err()
+                        .unwrap()
+                        .to_string()
+                        .contains("daemon.pi paths require --user")
+                );
+                continue;
+            }
+            let resolved = result.unwrap();
+            assert_eq!(
+                resolved.pi.models.as_deref(),
+                Some(Path::new("custom/pi-models.json"))
+            );
+            assert_eq!(
+                resolved.pi.settings.as_deref(),
+                Some(Path::new("custom/pi-settings.json"))
+            );
         }
     }
 
@@ -1582,6 +1678,7 @@ programs:
             oidc_callback_listen: None,
             telemetry: None,
             logout: None,
+            usage: None,
         });
 
         for (method, expected_status) in [("GET", "200 OK"), ("POST", "405 Method Not Allowed")] {
@@ -1632,6 +1729,153 @@ programs:
         }
     }
 
+    #[tokio::test]
+    async fn usage_exported_by_a_local_gateway_is_served_without_a_controller() {
+        use agentdesktop_core::model::DeviceUsage;
+        use agentdesktop_proto::otlp_logs::{
+            AnyValue, ExportLogsServiceRequest, KeyValue, LogRecord, ResourceLogs, ScopeLogs,
+            any_value::Value, logs_service_client::LogsServiceClient,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let token = "0123456789abcdef0123456789abcdef";
+        let token_file = root.path().join("usage-token");
+        std::fs::write(&token_file, format!("{token}\n")).unwrap();
+        let usage = config::UsageStartupConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            token_file,
+        };
+        let (store, receiver) = super::start_usage(&usage, root.path()).await;
+        assert!(receiver.bound, "{receiver:?}");
+        assert_ne!(receiver.listen, "127.0.0.1:0", "the bound port is reported");
+
+        let attribute = |key: &str, value: Value| KeyValue {
+            key: key.to_owned(),
+            value: Some(AnyValue { value: Some(value) }),
+        };
+        let text = |value: &str| Value::StringValue(value.to_owned());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let request = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                scope_logs: vec![ScopeLogs {
+                    log_records: vec![LogRecord {
+                        time_unix_nano: now,
+                        attributes: vec![
+                            attribute("gen_ai.provider.name", text("anthropic")),
+                            attribute("gen_ai.response.model", text("claude-sonnet-4-5")),
+                            attribute("gen_ai.usage.input_tokens", Value::IntValue(1200)),
+                            attribute("gen_ai.usage.output_tokens", Value::IntValue(300)),
+                            attribute("agw.ai.usage.cost.total", text("0.0081")),
+                            attribute("jwt.sub", text("local-user")),
+                            attribute(
+                                "user_agent.original",
+                                text("claude-cli/2.1.260 (external, cli)"),
+                            ),
+                        ],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+        let channel =
+            tonic::transport::Endpoint::from_shared(format!("http://{}", receiver.listen))
+                .unwrap()
+                .connect()
+                .await
+                .unwrap();
+        let mut client = LogsServiceClient::new(channel);
+        let refused = client
+            .export(request.clone())
+            .await
+            .expect_err("an export without the token is refused");
+        assert_eq!(refused.code(), tonic::Code::Unauthenticated);
+        let mut authorized = tonic::Request::new(request);
+        authorized
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        client.export(authorized).await.unwrap();
+
+        let config = parse_daemon("{}").unwrap();
+        let info = super::DaemonInfo {
+            usage_receiver: Some(receiver),
+            ..describe_daemon(&config, Path::new("config.yaml"), root.path(), true, None)
+        };
+        let (_, inventory) = watch::channel(Arc::new(discovery(&[])));
+        let app = crate::api::router(crate::api::AppState {
+            config,
+            daemon_info: info,
+            discovery: inventory,
+            enrollment: crate::enrollment::EnrollmentState::new(false),
+            controller_status: None,
+            state_dir: root.path().to_owned(),
+            oidc_callback_listen: None,
+            telemetry: None,
+            logout: None,
+            usage: store,
+        });
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let connection = tokio::spawn(serve_local_connection(server, app));
+        client
+            .write_all(
+                b"GET /v1/usage?range=24h&utcOffsetMinutes=0 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.unwrap();
+        connection.await.unwrap().unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        let (_, body) = response.split_once("\r\n\r\n").unwrap();
+        let usage: DeviceUsage = serde_json::from_str(body).unwrap();
+        assert!(usage.enabled);
+        assert_eq!(usage.totals.requests, 1);
+        assert_eq!(usage.totals.input_tokens, 1200);
+        assert!((usage.totals.cost_usd - 0.0081).abs() < 1e-9);
+        assert_eq!(usage.by_tool[0].key, "claude-code");
+        assert_eq!(usage.buckets.len(), 24);
+    }
+
+    #[tokio::test]
+    async fn a_usage_receiver_that_cannot_start_keeps_recorded_usage_available() {
+        let root = tempfile::tempdir().unwrap();
+        let usage = config::UsageStartupConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            token_file: root.path().join("missing-token"),
+        };
+        let (store, receiver) = super::start_usage(&usage, root.path()).await;
+        assert!(store.is_some(), "the database still opened");
+        assert!(!receiver.bound);
+        assert!(
+            receiver
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("read usage token")),
+            "{receiver:?}"
+        );
+
+        let taken = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        std::fs::write(&usage.token_file, "0123456789abcdef0123456789abcdef").unwrap();
+        let usage = config::UsageStartupConfig {
+            listen: taken.local_addr().unwrap(),
+            ..usage
+        };
+        let (store, receiver) = super::start_usage(&usage, root.path()).await;
+        assert!(store.is_some());
+        assert!(!receiver.bound);
+        assert!(
+            receiver
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("bind ")),
+            "{receiver:?}"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn daemon_information_api_handles_non_utf8_startup_paths() {
@@ -1657,6 +1901,7 @@ programs:
             oidc_callback_listen: None,
             telemetry: None,
             logout: None,
+            usage: None,
         });
 
         for endpoint in ["/v1/health", "/v1/config", "/v1/daemon-info"] {

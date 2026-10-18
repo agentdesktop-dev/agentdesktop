@@ -8,10 +8,12 @@ services:
     - ./dex.yaml:/etc/dex/config.yaml:ro
 
   agentgateway:
-    image: cr.agentgateway.dev/agentgateway:v1.4.1
+    image: cr.agentgateway.dev/agentgateway:v1.6.0
     command: -f /etc/agentgateway/config.yaml
     network_mode: host
     environment:
       ANTHROPIC_API_KEY:
+      AGENTDESKTOP_USAGE_TOKEN:
     volumes:
     - ./agentgateway.yaml:/etc/agentgateway/config.yaml:ro
+    - /tmp/agentdesktop-keys/device-ca.pem:/etc/agentgateway/controller-ca.pem:ro

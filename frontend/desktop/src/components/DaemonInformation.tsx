@@ -97,6 +97,14 @@ export function DaemonInformation({
         : `${info.llmProxy.listen} (not bound${info.llmProxy.error ? `: ${info.llmProxy.error}` : ""})`,
     ]);
   }
+  if (info?.usageReceiver) {
+    fields.push([
+      "Usage receiver",
+      info.usageReceiver.bound
+        ? info.usageReceiver.listen
+        : `${info.usageReceiver.listen} (off${info.usageReceiver.error ? `: ${info.usageReceiver.error}` : ""})`,
+    ]);
+  }
 
   return (
     <section className="daemon-information" aria-labelledby={headingId}>

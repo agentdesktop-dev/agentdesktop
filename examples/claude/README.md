@@ -9,9 +9,10 @@ checked-in configuration:
 ./examples/claude/create-keys.sh
 ```
 
-The script creates five files under `/tmp/agentdesktop-keys`: the controller
-certificate and private key, the device CA certificate and private key, and the
-gateway JWT signing key. It refuses to overwrite an existing key set.
+The script creates six files under `/tmp/agentdesktop-keys`: the controller
+certificate and private key, the device CA certificate and private key, the
+gateway JWT signing key, and the token Agentgateway uses to send token and cost
+usage to the controller. It refuses to overwrite an existing key set.
 
 Start Dex:
 
@@ -36,8 +37,13 @@ Network**. Linux supports host networking directly.
 
 ```console
 export ANTHROPIC_API_KEY=...
+export AGENTDESKTOP_USAGE_TOKEN="$(cat /tmp/agentdesktop-keys/usage-token)"
 docker compose -f examples/claude/compose.yaml up -d agentgateway
 ```
+
+Agentgateway sends one access-log record per request to the controller, which
+counts tokens and cost for each user, device, tool, and model. They appear under
+**Usage** in the controller UI and in the desktop app.
 
 Confirm that Agentgateway remains running and answers its reachability route:
 

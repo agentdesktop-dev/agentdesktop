@@ -437,6 +437,10 @@ mod tests {
             continued_url,
             format!("{}/", redirect.origin().ascii_serialization())
         );
+        // A fresh client: the first one may still pool a keep-alive
+        // connection to the aborted server on this same port, and a request
+        // sent on it is reset.
+        let client = reqwest::Client::new();
         assert_eq!(
             client
                 .get(format!("{continued_url}flow-ready"))

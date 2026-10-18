@@ -1,3 +1,10 @@
+import type {
+  UsageBucket,
+  UsageDimension,
+  UsageGroup,
+  UsageTotals,
+} from "@agentdesktop/ui";
+
 export type Device = {
   id: string;
   hostname: string;
@@ -85,7 +92,29 @@ export type ControllerSettings = {
   oidc_enabled: boolean;
   tls_enabled: boolean;
   gateway_jwt_enabled: boolean;
+  usage_enabled: boolean;
 };
+
+export type UsageRange = "24h" | "7d" | "30d" | "90d";
+
+/** `GET /api/v1/usage`. Unlike other admin endpoints, this one is camelCase. */
+export type UsageReport = {
+  enabled: boolean;
+  range: UsageRange;
+  fromUnixSeconds: number;
+  toUnixSeconds: number;
+  bucketSeconds: number;
+  totals: UsageTotals;
+  previousTotals: UsageTotals;
+  activeUsers: number;
+  activeDevices: number;
+  buckets: UsageBucket[];
+  breakdowns: Partial<Record<UsageDimension, UsageGroup[]>>;
+  /** Users whatever the user and device filters; devices of the chosen user. */
+  filterOptions: Record<"user" | "device", UsageFilterOption[]>;
+};
+
+export type UsageFilterOption = Pick<UsageGroup, "key" | "label">;
 
 export type AgentKind =
   | "claudeCode"

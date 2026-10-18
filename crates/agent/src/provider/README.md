@@ -20,6 +20,12 @@ rejects `programs.pi` because Pi does not read `/etc/pi/agent`. Pi cannot be
 combined with Claude Desktop or Grok Build, because those programs require
 system mode. Authenticated
 gateway configuration also requires a running daemon and rejects `--once`.
+Pi executes its credential helper on every request. The daemon caches
+controller-issued credentials for up to 60 seconds per allowed client,
+gateway, audience, and enrolled device, with a 30-second expiry margin and
+single-flight fetches. OIDC and subscription flows retain their own refresh
+behavior. This removes repeated controller round trips; Pi still launches
+the helper for each request.
 User mode merges `providers.agentdesktop` into `models.json` and sets the
 default model in `settings.json`. Model map keys determine catalog IDs, and
 gateway URLs override per-model endpoints, using each model's API dialect.
@@ -34,14 +40,20 @@ Commented `models.json` files are accepted and rewritten as standard JSON,
 preserving user configuration values. `settings.json` requires standard JSON.
 Discovery recognizes npm's Windows command shims as well as symlinked launchers,
 verifying the Pi package manifest without executing the launcher.
-MCP inventory comes from `pi-mcp-adapter` config files
+MCP inventory defaults to Pi's built-in user `mcp.json` and the working
+directory's `.pi/mcp.json` only when saved project trust (or
+`defaultProjectTrust: always`) permits it. Session-only trust cannot be
+inferred. Disabling `builtin:mcp` excludes these sources. When an enabled,
+installed `pi-mcp-adapter` is detected in Pi's package or extension settings,
+or its auto-loaded extension directories, discovery instead uses adapter files
 (`~/.pi/agent/mcp.json`, the working directory's `.pi/mcp.json` and
 `.mcp.json`, and shared `~/.config/mcp/mcp.json` / `~/.agents/mcp.json` /
 `~/.agents/mcp/mcp.json`). Ancestor project files are included only when a
 user-global config sets `settings.ancestorConfigRoots` to an existing
 directory under the home that contains the working directory. Both `.agents`
 paths are supported by the [adapter's configuration loader](https://github.com/nicobailon/pi-mcp-adapter/blob/33bdc38d8dd3802f2b51ba1fe37e30ed7ae6a29a/config.ts#L15-L19).
-`PI_MCP_CONFIG_MODE=exclusive` inventories only the Pi agent `mcp.json`.
+`PI_MCP_CONFIG_MODE=exclusive` applies only to the adapter and inventories
+only the Pi agent `mcp.json`.
 Skill inventory reads `~/.pi/agent/skills`, `~/.agents/skills`, the working
 directory's `.pi/skills`, and `.agents/skills` from the working directory
 through the git repository root.

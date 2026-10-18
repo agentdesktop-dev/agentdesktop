@@ -94,6 +94,9 @@ pub struct DaemonStartupConfig {
     /// Local loopback LLM proxy.
     #[serde(default)]
     pub llm_proxy: LlmProxyStartupConfig,
+    /// Usage collection without a controller, from a gateway on this machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<UsageStartupConfig>,
     /// Opt-in interval between periodic re-applies of the current
     /// configuration, which repair drift (a managed file deleted or edited by
     /// hand, a fixed conflict, a loosened mode) without rewriting anything
@@ -118,6 +121,19 @@ pub struct LlmProxyStartupConfig {
     /// Credential policy client ID used by the proxy. Defaults to `vscode`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+}
+
+/// Token and cost collection for a daemon without a controller. agentgateway
+/// on this machine exports its access logs (`frontendPolicies.accessLog.otlp`)
+/// to the daemon, which keeps this device's usage for the desktop app.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UsageStartupConfig {
+    /// Loopback address that receives agentgateway's OTLP/gRPC export.
+    pub listen: SocketAddr,
+    /// Path to a file containing the bearer token agentgateway sends with each export. The token must be at least 32 characters.
+    pub token_file: PathBuf,
 }
 
 /// Local Claude Desktop paths.
@@ -476,6 +492,9 @@ pub struct ControllerConfig {
     /// LLM gateway JWT signing settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_jwt: Option<ControllerGatewayJwtConfig>,
+    /// Token and cost collection from agentgateway access logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ControllerUsageConfig>,
     /// TLS identities used by the device-facing fleet API.
     ///
     /// A string selects a directory containing `controller.pem`,
@@ -536,6 +555,18 @@ pub struct ControllerGatewayJwtConfig {
     #[serde(default = "default_gateway_jwt_lifetime", with = "humantime_serde")]
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub lifetime: Duration,
+}
+
+/// Collection of LLM token and cost records that agentgateway exports to the
+/// fleet API as OTLP access logs over gRPC.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerUsageConfig {
+    /// Path to a file containing the bearer token agentgateway sends with each export. The token must be at least 32 characters.
+    ///
+    /// Relative paths are resolved from the controller configuration directory.
+    pub token_file: PathBuf,
 }
 
 /// TLS configuration for the fleet API and device certificate issuer.
@@ -1184,6 +1215,9 @@ pub fn load_controller(path: &Path) -> anyhow::Result<ControllerConfig> {
     if let Some(gateway) = &mut config.gateway_jwt {
         resolve_relative(&mut gateway.private_key, directory);
     }
+    if let Some(usage) = &mut config.usage {
+        resolve_relative(&mut usage.token_file, directory);
+    }
     match &mut config.tls {
         ControllerTlsConfig::Directory(path) => resolve_relative(path, directory),
         ControllerTlsConfig::Files(tls) => {
@@ -1274,6 +1308,20 @@ fn parse_local_daemon(contents: &str) -> anyhow::Result<DaemonConfig> {
         anyhow::bail!(
             "daemon.reconcileInterval must be greater than zero and at most 30 days (leave it unset for no periodic re-apply)"
         );
+    }
+    if let Some(usage) = config
+        .daemon
+        .as_ref()
+        .and_then(|daemon| daemon.usage.as_ref())
+    {
+        if config.controller.is_some() {
+            anyhow::bail!(
+                "daemon.usage is for a daemon without a controller; the controller collects usage for enrolled devices"
+            );
+        }
+        if !usage.listen.ip().is_loopback() {
+            anyhow::bail!("daemon.usage.listen must be a loopback address");
+        }
     }
     validate_daemon(
         config.llm_gateway.as_ref(),
@@ -1589,7 +1637,9 @@ fn is_true(value: &bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{DaemonConfig, LlmGatewayAuthentication, parse_controller, parse_daemon};
+    use super::{
+        DaemonConfig, LlmGatewayAuthentication, load_controller, parse_controller, parse_daemon,
+    };
 
     #[test]
     fn startup_settings_are_local_only_and_reject_unknown_fields() {
@@ -1721,6 +1771,34 @@ programs: { claudeCode: { useLlmGateway: false } }
     }
 
     #[test]
+    fn daemon_usage_listens_on_loopback_without_a_controller() {
+        let config = super::parse_local_daemon(
+            "daemon:\n  usage:\n    listen: 127.0.0.1:4319\n    tokenFile: /etc/agentdesktop/usage-token\n",
+        )
+        .expect("valid daemon configuration");
+        let usage = config.daemon.unwrap().usage.unwrap();
+        assert_eq!(usage.listen, "127.0.0.1:4319".parse().unwrap());
+        assert_eq!(
+            usage.token_file,
+            std::path::Path::new("/etc/agentdesktop/usage-token")
+        );
+
+        for (yaml, reason) in [
+            (
+                "daemon:\n  usage:\n    listen: 0.0.0.0:4319\n    tokenFile: usage-token\n",
+                "daemon.usage.listen must be a loopback address",
+            ),
+            (
+                "controller:\n  address: https://controller.example.com\ndaemon:\n  usage:\n    listen: 127.0.0.1:4319\n    tokenFile: usage-token\n",
+                "daemon.usage is for a daemon without a controller",
+            ),
+        ] {
+            let error = super::parse_local_daemon(yaml).expect_err(reason);
+            assert!(error.to_string().contains(reason), "{error}");
+        }
+    }
+
+    #[test]
     fn daemon_controller_requires_https() {
         let plaintext = r#"
 controller:
@@ -1763,6 +1841,39 @@ oidc:
     }
 
     #[test]
+    fn controller_usage_token_file_is_relative_to_the_configuration() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "agentdesktop-usage-config-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).expect("create configuration directory");
+        let path = directory.join("controller.yaml");
+        std::fs::write(
+            &path,
+            r#"
+tls: /etc/agentdesktop/tls
+oidc:
+  issuer: https://idp.example.com
+  clientId: agentdesktop
+usage:
+  tokenFile: secrets/usage-token
+"#,
+        )
+        .expect("write configuration");
+
+        let controller = load_controller(&path).expect("load controller configuration");
+        assert_eq!(
+            controller.usage.expect("usage configuration").token_file,
+            directory.join("secrets/usage-token")
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn checked_in_examples_use_their_declared_configuration_surface() {
         parse_controller(include_str!("../../../examples/claude/controller.yaml"))
             .expect("controller example");
@@ -1774,8 +1885,13 @@ oidc:
             "../../../examples/claude-subscription/config.yaml"
         ))
         .expect("Claude subscription user configuration example");
-        parse_daemon(include_str!("../../../examples/standalone/config.yaml"))
-            .expect("standalone daemon configuration example");
+        let standalone =
+            super::parse_local_daemon(include_str!("../../../examples/standalone/config.yaml"))
+                .expect("standalone daemon configuration example");
+        assert!(
+            standalone.daemon.and_then(|daemon| daemon.usage).is_some(),
+            "the standalone example receives usage from its gateway"
+        );
     }
 
     #[test]

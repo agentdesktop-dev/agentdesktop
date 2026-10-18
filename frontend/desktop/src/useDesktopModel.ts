@@ -25,7 +25,7 @@ import type {
   Settings,
 } from "./types";
 
-export type View = "home" | "tools" | "settings";
+export type View = "home" | "tools" | "usage" | "settings";
 export type Notice = { tone: "success" | "error"; message: string } | null;
 
 type StatusSource = "connector" | "managedDevice" | "discovery";
@@ -86,6 +86,16 @@ export function useDesktopModel() {
   const needsEnrollment = Boolean(
     managedDevice?.configured && managedDevice.enrollment !== "approved",
   );
+  // Usage comes from the controller of an enrolled device, or from the
+  // daemon itself when a gateway on this machine reports to it.
+  const showUsage =
+    Boolean(
+      managedDevice?.configured && managedDevice.enrollment === "approved",
+    ) || Boolean(connector?.runtime?.daemon.usageReceiver);
+
+  useEffect(() => {
+    if (view === "usage" && hasLoadedStatus && !showUsage) setView("home");
+  }, [view, hasLoadedStatus, showUsage]);
 
   function applyStatusUpdate(update: StatusUpdate) {
     const nextErrors: StatusErrors = {};
@@ -348,7 +358,9 @@ export function useDesktopModel() {
         ? "Enrollment"
         : view === "home"
           ? "Status"
-          : "Tools";
+          : view === "usage"
+            ? "Usage"
+            : "Tools";
 
   return {
     bootstrap,
@@ -372,6 +384,7 @@ export function useDesktopModel() {
     setColorMode,
     setOpenOnStartup,
     settings,
+    showUsage,
     view,
   };
 }

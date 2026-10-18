@@ -13,3 +13,6 @@ daemonConfig:
 
 gatewayJwt:
   privateKey: /tmp/agentdesktop-keys/gateway-jwt-key.pem
+
+usage:
+  tokenFile: /tmp/agentdesktop-keys/usage-token

@@ -146,8 +146,8 @@ test("both release signing cleanups always run with a short timeout", () => {
 
 const signingFiles = [
   "agentdesktop-signing.keychain-db",
-  "agentdesktop-signing.pem",
   "agentdesktop-signing.p12",
+  "agentdesktop-notary.p8",
 ];
 
 function signingCleanupFixture(t, files = signingFiles) {

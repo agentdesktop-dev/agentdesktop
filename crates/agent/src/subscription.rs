@@ -10,12 +10,20 @@ pub async fn compose(
     callback_listen: Option<SocketAddr>,
     continue_in_browser: bool,
 ) -> anyhow::Result<LlmGatewayCredential> {
-    let subscription =
-        anthropic_oauth::credential(state_dir, callback_listen, !continue_in_browser).await?;
+    let subscription = credential(state_dir, callback_listen, continue_in_browser).await?;
     Ok(combine(subscription, identity))
 }
 
-fn combine(
+/// The subscription credential, or `None` when the user skipped signing in.
+pub async fn credential(
+    state_dir: &Path,
+    callback_listen: Option<SocketAddr>,
+    continue_in_browser: bool,
+) -> anyhow::Result<Option<LlmGatewayCredential>> {
+    anthropic_oauth::credential(state_dir, callback_listen, !continue_in_browser).await
+}
+
+pub fn combine(
     subscription: Option<LlmGatewayCredential>,
     identity: LlmGatewayCredential,
 ) -> LlmGatewayCredential {

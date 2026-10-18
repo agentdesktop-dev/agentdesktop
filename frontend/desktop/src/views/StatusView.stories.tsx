@@ -15,6 +15,7 @@ import {
   standaloneConnector,
   standaloneDaemonInfo,
   unconfiguredDevice,
+  usageReceiverOffDaemonInfo,
 } from "../stories/fixtures";
 import { StatusView } from "./StatusView";
 
@@ -143,6 +144,32 @@ export const StandaloneProxyUnbound: Story = {
     await expect(
       local.getByText(
         "127.0.0.1:18095 (not bound: Address already in use (os error 98))",
+      ),
+    ).toBeVisible();
+  },
+};
+
+export const StandaloneUsageReceiverOff: Story = {
+  args: {
+    connector: {
+      ...standaloneConnector,
+      runtime: {
+        ...standaloneConnector.runtime,
+        daemon: usageReceiverOffDaemonInfo,
+      },
+    },
+    discovery: emptyDiscovery,
+    managedDevice: unconfiguredDevice,
+  },
+  play: async ({ canvas }) => {
+    await userEvent.click(canvas.getByText("Advanced"));
+    const local = within(
+      canvas.getByRole("region", { name: "Daemon information" }),
+    );
+    await expect(local.getByText("Usage receiver")).toBeVisible();
+    await expect(
+      local.getByText(
+        `127.0.0.1:4319 (off: ${usageReceiverOffDaemonInfo.usageReceiver?.error})`,
       ),
     ).toBeVisible();
   },

@@ -11,6 +11,7 @@ use agentdesktop_controller::{
 };
 use agentdesktop_core::{DEFAULT_CONTROLLER_CONFIG_PATH, config, telemetry};
 use agentdesktop_proto::fleet::fleet_agent_server::FleetAgentServer;
+use agentdesktop_usage::UsageIngest;
 use anyhow::Context;
 use clap::Parser;
 use tonic::{
@@ -71,6 +72,19 @@ async fn main() -> anyhow::Result<()> {
     }
     let gateway_jwks = gateway_jwt_issuer.as_ref().map(GatewayJwtIssuer::jwks);
     let admin_gateway_jwks = gateway_jwks.clone();
+    let usage_token = config
+        .usage
+        .as_ref()
+        .map(|usage| agentdesktop_usage::load_token(&usage.token_file))
+        .transpose()
+        .context("initialize usage collection")?;
+    let usage_ingest = usage_token
+        .as_deref()
+        .map(|token| UsageIngest::service(database.usage(), token));
+    if usage_ingest.is_some() {
+        tracing::info!("usage collection enabled");
+    }
+    agentdesktop_usage::spawn_maintenance(database.usage());
     let admin_state = AdminState::new(
         database.clone(),
         daemon_config.clone(),
@@ -80,6 +94,7 @@ async fn main() -> anyhow::Result<()> {
             oidc_enabled: true,
             tls_enabled: true,
             gateway_jwt_enabled: gateway_jwt_issuer.is_some(),
+            usage_enabled: usage_ingest.is_some(),
         },
     );
     let ca_certificate =
@@ -100,7 +115,8 @@ async fn main() -> anyhow::Result<()> {
         daemon_config,
         gateway_jwt_issuer,
         Some(device_certificate_issuer),
-    );
+    )
+    .with_usage_collection(usage_ingest.is_some());
 
     let certificate = std::fs::read(&tls.certificate)
         .with_context(|| format!("read TLS certificate from {}", tls.certificate.display()))?;
@@ -124,8 +140,11 @@ async fn main() -> anyhow::Result<()> {
     let admin_listen = config.admin_listen;
     tracing::info!(listen = %fleet_listen, "fleet controller listening");
     let fleet = async move {
-        let routes = Routes::from(gateway_jwt::routes(gateway_jwks))
+        let mut routes = Routes::from(gateway_jwt::routes(gateway_jwks))
             .add_service(FleetAgentServer::new(service));
+        if let Some(usage_ingest) = usage_ingest {
+            routes = routes.add_service(usage_ingest);
+        }
         server
             .add_routes(routes)
             .serve(fleet_listen)

@@ -49,7 +49,7 @@ const CREDENTIAL_EXPIRY_MARGIN: Duration = Duration::from_secs(30);
 /// revocation is enforced at issuance, the gateway validates tokens statelessly.
 const CREDENTIAL_CACHE_TTL: Duration = Duration::from_secs(60);
 
-/// Listener-local cache of controller-issued gateway credentials, one per client
+/// Per-server cache of controller-issued gateway credentials, one per client
 /// id. A controller fetch is a fresh mTLS connection and round trip; agent-mode
 /// sessions issue bursts of requests, so a short cache keeps them off the
 /// controller. Fetches are single-flight per key: concurrent misses wait for
@@ -107,6 +107,25 @@ fn now_unix() -> u64 {
 }
 
 impl CredentialCache {
+    /// Reuse the proxy's bounded cache for local credential-helper requests.
+    pub(crate) async fn get_credential<F, Fut, E>(
+        &self,
+        key: &str,
+        device_id: &str,
+        fetch: F,
+    ) -> Result<agentdesktop_core::model::LlmGatewayCredential, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut:
+            std::future::Future<Output = Result<agentdesktop_core::model::LlmGatewayCredential, E>>,
+    {
+        let (credential, expiry, _) = self.get_or_fetch(key, device_id, fetch).await?;
+        Ok(agentdesktop_core::model::LlmGatewayCredential {
+            credential,
+            expires_at_unix_seconds: expiry.unix,
+        })
+    }
+
     /// The lock a fetch for the key holds; one per key, kept for the
     /// listener's lifetime (keys are client id, gateway and audience).
     fn flight(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -1408,9 +1427,10 @@ mod tests {
                 config,
                 daemon_info: DaemonInfo { version: "test".into(), scope: DaemonScope::User,
                     config_path: String::new(), state_directory: String::new(),
-                    inventory_interval: Duration::from_secs(60), controller: None, llm_proxy: None },
+                    inventory_interval: Duration::from_secs(60), controller: None, llm_proxy: None,
+                    usage_receiver: None },
                 discovery, enrollment: EnrollmentState::new(false), state_dir: dir.path().to_owned(),
-                oidc_callback_listen: None, telemetry: None, logout: None,
+                oidc_callback_listen: None, telemetry: None, logout: None, usage: None,
             };
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let proxy_address = listener.local_addr().unwrap();
@@ -2037,6 +2057,7 @@ mod tests {
                     inventory_interval: Duration::from_secs(60),
                     controller: None,
                     llm_proxy: None,
+                    usage_receiver: None,
                 },
                 discovery,
                 enrollment: EnrollmentState::new(true),
@@ -2044,6 +2065,7 @@ mod tests {
                 oidc_callback_listen: None,
                 telemetry: None,
                 logout: None,
+                usage: None,
             };
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let proxy_address = listener.local_addr().unwrap();
@@ -2424,6 +2446,7 @@ mod tests {
                 inventory_interval: Duration::from_secs(60),
                 controller: None,
                 llm_proxy: None,
+                usage_receiver: None,
             },
             discovery,
             enrollment: EnrollmentState::new(false),
@@ -2431,6 +2454,7 @@ mod tests {
             oidc_callback_listen: None,
             telemetry: None,
             logout: None,
+            usage: None,
         };
         (dir, state)
     }
@@ -2600,6 +2624,7 @@ mod tests {
                 inventory_interval: Duration::from_secs(60),
                 controller: None,
                 llm_proxy: None,
+                usage_receiver: None,
             },
             discovery,
             enrollment: EnrollmentState::new(false),
@@ -2607,6 +2632,7 @@ mod tests {
             oidc_callback_listen: None,
             telemetry: None,
             logout: None,
+            usage: None,
         };
         (dir, state)
     }
@@ -2667,6 +2693,7 @@ mod tests {
                 inventory_interval: Duration::from_secs(60),
                 controller: None,
                 llm_proxy: None,
+                usage_receiver: None,
             },
             discovery,
             enrollment: EnrollmentState::new(false),
@@ -2674,6 +2701,7 @@ mod tests {
             oidc_callback_listen: None,
             telemetry: None,
             logout: None,
+            usage: None,
         };
         (dir, state)
     }

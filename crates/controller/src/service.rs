@@ -2,9 +2,10 @@ use std::pin::Pin;
 
 use agentdesktop_proto::fleet::{
     AgentMessage, BeginEnrollmentRequest, BeginEnrollmentResponse, CompleteEnrollmentRequest,
-    ConfigStatus, ControllerMessage, DeviceCertificateResponse, EnrollResponse,
-    LlmGatewayCredentialRequest, LlmGatewayCredentialResponse, RenewDeviceCertificateRequest,
-    agent_message, controller_message, fleet_agent_server::FleetAgent,
+    ConfigStatus, ControllerMessage, DeviceCertificateResponse, DeviceUsageRequest,
+    DeviceUsageResponse, EnrollResponse, LlmGatewayCredentialRequest, LlmGatewayCredentialResponse,
+    RenewDeviceCertificateRequest, agent_message, controller_message,
+    fleet_agent_server::FleetAgent,
 };
 use futures_core::Stream;
 use tokio::{sync::mpsc, time};
@@ -14,7 +15,8 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 use x509_parser::{extensions::GeneralName, parse_x509_certificate};
 
-use agentdesktop_core::config::LlmGatewayAuthentication;
+use agentdesktop_core::config::{LlmGatewayAuthentication, ProgramAuthentication, ProgramsConfig};
+use agentdesktop_usage::UsageError;
 
 use crate::{
     daemon_config::DaemonConfigStore,
@@ -31,6 +33,7 @@ pub struct FleetAgentService {
     daemon_config: DaemonConfigStore,
     gateway_jwt_issuer: Option<GatewayJwtIssuer>,
     device_certificate_issuer: Option<DeviceCertificateIssuer>,
+    usage_enabled: bool,
 }
 
 impl FleetAgentService {
@@ -47,7 +50,28 @@ impl FleetAgentService {
             daemon_config,
             gateway_jwt_issuer,
             device_certificate_issuer,
+            usage_enabled: false,
         }
+    }
+
+    /// Tells devices that the controller collects gateway usage.
+    pub fn with_usage_collection(mut self, enabled: bool) -> Self {
+        self.usage_enabled = enabled;
+        self
+    }
+}
+
+fn subscription_is_configured_for_client(programs: &ProgramsConfig, client_id: &str) -> bool {
+    match client_id {
+        "claude-code" => programs
+            .claude_code
+            .as_ref()
+            .is_some_and(|program| program.auth == Some(ProgramAuthentication::Subscription)),
+        "claude-desktop" => programs
+            .claude_desktop
+            .as_ref()
+            .is_some_and(|program| program.auth == Some(ProgramAuthentication::Subscription)),
+        _ => false,
     }
 }
 
@@ -124,7 +148,10 @@ impl FleetAgent for FleetAgentService {
         request: Request<LlmGatewayCredentialRequest>,
     ) -> Result<Response<LlmGatewayCredentialResponse>, Status> {
         let device_id = self.authenticate_device(&request).await?;
-        let client_id = request.into_inner().client_id;
+        let LlmGatewayCredentialRequest {
+            client_id,
+            subscription,
+        } = request.into_inner();
         if !agentdesktop_core::config::valid_client_id(&client_id) {
             return Err(Status::invalid_argument("invalid client_id"));
         }
@@ -157,6 +184,16 @@ impl FleetAgent for FleetAgentService {
             );
             return Err(Status::permission_denied("client_id is not allowed"));
         }
+        let subscription_requested = subscription;
+        let subscription = subscription_requested
+            && subscription_is_configured_for_client(&config.programs, &client_id);
+        if subscription_requested && !subscription {
+            warn!(
+                device_id,
+                client_id,
+                "ignored subscription billing claim without subscription auth configuration"
+            );
+        }
         let issuer = self.gateway_jwt_issuer.as_ref().ok_or_else(|| {
             Status::failed_precondition("controller gateway JWT issuer is not configured")
         })?;
@@ -177,6 +214,7 @@ impl FleetAgent for FleetAgentService {
                 &client_id,
                 audience,
                 principal.idp_claims.as_ref(),
+                subscription,
             )
             .map_err(internal)?;
         info!(
@@ -184,12 +222,32 @@ impl FleetAgent for FleetAgentService {
             expires_at_unix_seconds,
             enrolled_by_issuer = principal.issuer,
             client_id,
+            subscription,
             "issued LLM gateway credential"
         );
         Ok(Response::new(LlmGatewayCredentialResponse {
             credential,
             expires_at_unix_seconds,
         }))
+    }
+
+    async fn get_device_usage(
+        &self,
+        request: Request<DeviceUsageRequest>,
+    ) -> Result<Response<DeviceUsageResponse>, Status> {
+        let device_id = self.authenticate_device(&request).await?;
+        agentdesktop_usage::device_usage(
+            &self.database.usage(),
+            Some(&device_id),
+            request.get_ref(),
+            self.usage_enabled,
+        )
+        .await
+        .map(Response::new)
+        .map_err(|error| match error {
+            UsageError::InvalidQuery(message) => Status::invalid_argument(message),
+            UsageError::Storage(error) => internal(error),
+        })
     }
 
     async fn connect(
@@ -577,8 +635,30 @@ mod tests {
     use rcgen::{CertificateParams, KeyPair};
     use tonic::Code;
 
-    use super::{FleetAgentService, device_id_from_certificate};
+    use super::{
+        FleetAgentService, device_id_from_certificate, subscription_is_configured_for_client,
+    };
     use crate::{daemon_config::DaemonConfigStore, database::Database, oidc::OidcPrincipal};
+
+    #[test]
+    fn subscription_billing_requires_server_configured_program_auth() {
+        let config = agentdesktop_core::config::parse_daemon(
+            "llmGateway:\n  url: https://gateway.example.com\n  authentication:\n    type: oidc\n    issuer: https://issuer.example.com\n    clientId: desktop\nprograms:\n  claudeCode:\n    auth: subscription\n",
+        )
+        .unwrap();
+        assert!(subscription_is_configured_for_client(
+            &config.programs,
+            "claude-code"
+        ));
+        assert!(!subscription_is_configured_for_client(
+            &config.programs,
+            "claude-desktop"
+        ));
+        assert!(!subscription_is_configured_for_client(
+            &config.programs,
+            "codex"
+        ));
+    }
 
     #[tokio::test]
     async fn device_authentication_binds_oidc_issuer_and_subject() {

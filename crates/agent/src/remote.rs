@@ -24,15 +24,16 @@ use tracing::{debug, info, warn};
 use agentdesktop_core::{
     config::{self, ControllerConnectionConfig},
     model::{
-        ControllerConnectionError, ControllerConnectionStatus, Discovery as AgentDiscovery,
-        TelemetryEvent as ModelTelemetryEvent, TelemetryEventKind,
+        ControllerConnectionError, ControllerConnectionStatus, DeviceUsage,
+        Discovery as AgentDiscovery, TelemetryEvent as ModelTelemetryEvent, TelemetryEventKind,
+        UsageBucket, UsageGroup, UsageTotals,
     },
 };
 use agentdesktop_proto::fleet::{
-    AgentMessage, ConfigState, ConfigStatus, Discovery, Heartbeat, Hello, Inventory,
-    LlmGatewayCredentialRequest, ProgramState as ProtoProgramState, ProgramStatus,
-    RenewDeviceCertificateRequest, SessionNewEvent, TelemetryEvent, ToolUseEvent, agent_message,
-    controller_message, fleet_agent_client::FleetAgentClient, telemetry_event,
+    self as proto, AgentMessage, ConfigState, ConfigStatus, DeviceUsageRequest, Discovery,
+    Heartbeat, Hello, Inventory, LlmGatewayCredentialRequest, ProgramState as ProtoProgramState,
+    ProgramStatus, RenewDeviceCertificateRequest, SessionNewEvent, TelemetryEvent, ToolUseEvent,
+    agent_message, controller_message, fleet_agent_client::FleetAgentClient, telemetry_event,
 };
 
 use crate::{
@@ -52,6 +53,8 @@ const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
 /// credential, so a controller that accepts and then stalls cannot hold the
 /// caller (or a detached fetch) open indefinitely.
 const CREDENTIAL_CALL_TIMEOUT: Duration = Duration::from_secs(15);
+/// Bound on the controller connection and call when reading device usage.
+const USAGE_CALL_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct LogoutRequest {
     pub completion: oneshot::Sender<Result<(), String>>,
@@ -587,10 +590,13 @@ fn is_transient_refresh_failure(error: &anyhow::Error) -> bool {
         .any(|cause| cause.downcast_ref::<reqwest::Error>().is_some())
 }
 
+/// Requests a gateway credential for `client_id`. `subscription` tells the
+/// controller the credential is sent together with a subscription token.
 pub async fn llm_gateway_credential(
     controller: &ControllerConnectionConfig,
     state_dir: &Path,
     client_id: &str,
+    subscription: bool,
 ) -> anyhow::Result<agentdesktop_core::model::LlmGatewayCredential> {
     let mut identity =
         identity::load(&state_dir.join("identity.json"))?.context("device is not enrolled")?;
@@ -602,6 +608,7 @@ pub async fn llm_gateway_credential(
         let mut client = client(controller, Some(&identity)).await?;
         let mut request = Request::new(LlmGatewayCredentialRequest {
             client_id: client_id.to_owned(),
+            subscription,
         });
         authenticate_request(&identity, &mut request)?;
         client
@@ -623,6 +630,92 @@ pub async fn llm_gateway_credential(
         credential: response.credential,
         expires_at_unix_seconds: response.expires_at_unix_seconds,
     })
+}
+
+/// The gateway usage the controller recorded for this device. A controller
+/// without usage support reports usage as not collected.
+pub async fn device_usage(
+    controller: &ControllerConnectionConfig,
+    state_dir: &Path,
+    range: &str,
+    utc_offset_minutes: i32,
+) -> anyhow::Result<DeviceUsage> {
+    let identity_path = state_dir.join("identity.json");
+    let mut identity = identity::load(&identity_path)?.context("device is not enrolled")?;
+    refresh_oauth_if_needed(&mut identity, &identity_path).await?;
+    let call = async {
+        let mut client = client(controller, Some(&identity)).await?;
+        let mut request = Request::new(DeviceUsageRequest {
+            range: range.to_owned(),
+            utc_offset_minutes,
+        });
+        authenticate_request(&identity, &mut request)?;
+        anyhow::Ok(client.get_device_usage(request).await)
+    };
+    let result = tokio::time::timeout(USAGE_CALL_TIMEOUT, call)
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "controller at {} did not answer within {}s",
+                controller.address,
+                USAGE_CALL_TIMEOUT.as_secs()
+            )
+        })??;
+    let response = match result {
+        Ok(response) => response.into_inner(),
+        // A controller from before usage collection has no usage RPC.
+        Err(status) if status.code() == tonic::Code::Unimplemented => {
+            proto::DeviceUsageResponse::default()
+        }
+        Err(status) => return Err(status).context("request device usage"),
+    };
+    Ok(device_usage_from_proto(response))
+}
+
+pub(crate) fn device_usage_from_proto(response: proto::DeviceUsageResponse) -> DeviceUsage {
+    let groups = |groups: Vec<proto::UsageGroup>| -> Vec<UsageGroup> {
+        groups
+            .into_iter()
+            .map(|group| UsageGroup {
+                key: group.key,
+                totals: usage_totals_from_proto(group.totals),
+            })
+            .collect()
+    };
+    DeviceUsage {
+        enabled: response.enabled,
+        from_unix_seconds: response.from_unix_seconds,
+        to_unix_seconds: response.to_unix_seconds,
+        bucket_seconds: response.bucket_seconds,
+        totals: usage_totals_from_proto(response.totals),
+        buckets: response
+            .buckets
+            .into_iter()
+            .map(|bucket| UsageBucket {
+                start_unix_seconds: bucket.start_unix_seconds,
+                totals: usage_totals_from_proto(bucket.totals),
+            })
+            .collect(),
+        by_tool: groups(response.by_tool),
+        by_model: groups(response.by_model),
+        unmetered_tools: Vec::new(),
+    }
+}
+
+fn usage_totals_from_proto(totals: Option<proto::UsageTotals>) -> UsageTotals {
+    let totals = totals.unwrap_or_default();
+    UsageTotals {
+        requests: totals.requests,
+        errors: totals.errors,
+        input_tokens: totals.input_tokens,
+        output_tokens: totals.output_tokens,
+        cache_read_tokens: totals.cache_read_tokens,
+        cache_write_tokens: totals.cache_write_tokens,
+        cost_usd: totals.cost_nanos as f64 / 1e9,
+        subscription_cost_usd: totals.subscription_cost_nanos as f64 / 1e9,
+        subscription_requests: totals.subscription_requests,
+        unpriced_requests: totals.unpriced_requests,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1543,8 +1636,8 @@ mod tests {
             Some(root.join("copilot/providers.json")),
             None,
             None,
-            root.join("pi/models.json"),
-            root.join("pi/settings.json"),
+            Some(root.join("pi/models.json")),
+            Some(root.join("pi/settings.json")),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         )

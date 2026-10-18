@@ -192,6 +192,9 @@ login.
 
 - Inline completions and next edit suggestions go directly to GitHub; this
   example routes chat and agent mode only.
+- Requests on the `copilot-proxy` route (step 5) are passed through to GitHub
+  and leave no token or cost records, so a controller's usage view does not
+  include them.
 - `github.copilot.advanced.debug.overrideCapiUrl` is an undocumented VS Code
   setting; the fallback is VS Code's HTTP proxy setting pointed at the gateway.
 - Tested on Linux with VS Code 1.139, Copilot CLI 1.0.88 and a Copilot Business

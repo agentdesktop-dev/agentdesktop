@@ -157,14 +157,6 @@ fn discover_mcp_servers() -> Vec<McpServer> {
         .collect()
 }
 
-/// Files `pi-mcp-adapter` loads as normal MCP config.
-///
-/// Global files are always included. Project files are only the working
-/// directory's `.mcp.json` and `.pi/mcp.json`, plus ancestors when a
-/// user-global config opts in through `settings.ancestorConfigRoots`.
-/// `PI_MCP_CONFIG_MODE=exclusive` keeps only the Pi agent `mcp.json`.
-/// Host-specific Cursor/Claude/Codex files are not included: the adapter only
-/// imports those after `/mcp setup` writes them into a Pi-owned file.
 fn mcp_config_paths() -> Vec<PathBuf> {
     let current = env::current_dir().ok();
     mcp_config_paths_with(
@@ -175,7 +167,315 @@ fn mcp_config_paths() -> Vec<PathBuf> {
     )
 }
 
+/// Built-in MCP reads the user file and the trusted project's `.pi/mcp.json`.
+/// An enabled adapter replaces it and opts into the adapter's broader sources.
 fn mcp_config_paths_with(
+    homes: &[PathBuf],
+    cwd: Option<&Path>,
+    exclusive: bool,
+    agent_dir: impl Fn(&Path) -> PathBuf,
+) -> Vec<PathBuf> {
+    let mut paths = BTreeSet::new();
+    for home in homes {
+        let agent = agent_dir(home);
+        let settings = read_json(&agent.join("settings.json")).unwrap_or_default();
+        let trusted = cwd.is_some_and(|cwd| project_trusted(&agent, cwd, &settings));
+        if adapter_installed(home, &agent, cwd.filter(|_| trusted), &settings) {
+            paths.extend(adapter_mcp_config_paths_with(
+                std::slice::from_ref(home),
+                cwd,
+                exclusive,
+                &agent_dir,
+            ));
+            continue;
+        }
+        let project_settings = cwd
+            .filter(|_| trusted)
+            .and_then(|cwd| read_json(&cwd.join(".pi/settings.json")))
+            .unwrap_or_default();
+        let builtin_decision = |settings: &Value, project: bool| {
+            settings
+                .get("extensions")
+                .and_then(Value::as_array)
+                .and_then(|filters| {
+                    if project {
+                        ordered_overrides(Path::new("builtin:mcp"), Path::new(""), filters, false)
+                    } else {
+                        resource_enabled(Path::new("builtin:mcp"), Path::new(""), filters, false)
+                    }
+                })
+        };
+        let builtin_enabled = builtin_decision(&project_settings, true)
+            .or_else(|| builtin_decision(&settings, false))
+            .unwrap_or(true);
+        if builtin_enabled {
+            paths.insert(agent.join("mcp.json"));
+            if let Some(cwd) = cwd.filter(|_| trusted) {
+                paths.insert(
+                    canonicalize_dir(cwd)
+                        .unwrap_or_else(|| cwd.to_path_buf())
+                        .join(".pi/mcp.json"),
+                );
+            }
+        }
+    }
+    paths.into_iter().collect()
+}
+
+fn read_json(path: &Path) -> Option<Value> {
+    let contents = fs::read_to_string(path).ok()?;
+    json5::from_str(contents.trim_start_matches('\u{feff}')).ok()
+}
+
+/// Pi's nearest saved decision wins, then its user default. Session-only trust
+/// and extension-provided decisions cannot be inferred from files.
+fn project_trusted(agent: &Path, cwd: &Path, settings: &Value) -> bool {
+    let Some(cwd) = canonicalize_dir(cwd) else {
+        return false;
+    };
+    if let Some(trust) = read_json(&agent.join("trust.json")) {
+        for path in cwd.ancestors() {
+            if let Some(decision) = trust.as_object().and_then(|entries| {
+                entries.iter().find_map(|(key, value)| {
+                    // Canonicalize saved keys too: Windows canonical paths carry a
+                    // verbatim prefix, while Pi's saved paths normally do not.
+                    (canonicalize_dir(Path::new(key)).as_deref() == Some(path))
+                        .then(|| value.as_bool())
+                        .flatten()
+                })
+            }) {
+                return decision;
+            }
+        }
+    }
+    settings.get("defaultProjectTrust").and_then(Value::as_str) == Some("always")
+}
+
+fn adapter_installed(home: &Path, agent: &Path, project: Option<&Path>, settings: &Value) -> bool {
+    let project_dir = project.map(|p| p.join(".pi"));
+    let project_settings = project_dir
+        .as_ref()
+        .and_then(|p| read_json(&p.join("settings.json")))
+        .unwrap_or_default();
+    let mut packages: std::collections::BTreeMap<String, Option<PathBuf>> =
+        std::collections::BTreeMap::new();
+    let mut extensions = BTreeSet::new();
+    for (base, settings) in std::iter::once((agent, settings))
+        .chain(project_dir.as_deref().map(|base| (base, &project_settings)))
+    {
+        for entry in settings
+            .get("packages")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(source) = entry
+                .as_str()
+                .or_else(|| entry.get("source").and_then(Value::as_str))
+            else {
+                continue;
+            };
+            let (identity, package) =
+                if source == "npm:pi-mcp-adapter" || source.starts_with("npm:pi-mcp-adapter@") {
+                    let managed = base.join("npm/node_modules/pi-mcp-adapter");
+                    let package = if managed.exists() || base != agent {
+                        managed
+                    } else {
+                        // Older Pi versions installed user npm packages globally.
+                        [
+                            home.join(".npm-global/lib/node_modules/pi-mcp-adapter"),
+                            home.join("AppData/Roaming/npm/node_modules/pi-mcp-adapter"),
+                            PathBuf::from("/opt/homebrew/lib/node_modules/pi-mcp-adapter"),
+                            PathBuf::from("/usr/local/lib/node_modules/pi-mcp-adapter"),
+                        ]
+                        .into_iter()
+                        .find(|p| p.join("package.json").is_file())
+                        .unwrap_or(managed)
+                    };
+                    ("npm:pi-mcp-adapter".to_owned(), package)
+                } else if source.starts_with("git:") || source.starts_with("https://") {
+                    let source = source
+                        .trim_start_matches("git:")
+                        .trim_start_matches("https://");
+                    let source = source
+                        .split('@')
+                        .next()
+                        .unwrap_or(source)
+                        .trim_end_matches(".git");
+                    if source != "github.com/nicobailon/pi-mcp-adapter" {
+                        continue;
+                    }
+                    (format!("git:{source}"), base.join("git").join(source))
+                } else if source.starts_with("npm:") {
+                    continue;
+                } else {
+                    let package = expand_package_path(source, base, home);
+                    (
+                        package
+                            .canonicalize()
+                            .unwrap_or_else(|_| package.clone())
+                            .to_string_lossy()
+                            .into_owned(),
+                        package,
+                    )
+                };
+            let delta = entry.get("autoload").and_then(Value::as_bool) == Some(false);
+            let extension = if delta {
+                packages.get(&identity).cloned().flatten()
+            } else {
+                adapter_extension(&package)
+            }
+            .filter(|path| {
+                entry
+                    .get("extensions")
+                    .and_then(Value::as_array)
+                    .is_none_or(|filters| {
+                        let base = path.parent().unwrap_or(&package);
+                        if delta {
+                            ordered_overrides(path, base, filters, true).unwrap_or(true)
+                        } else {
+                            !filters.is_empty()
+                                && resource_enabled(path, base, filters, true).unwrap_or(true)
+                        }
+                    })
+            });
+            // Project declarations replace the user entry, including a disabled
+            // or not-yet-installed project package.
+            packages.insert(identity, extension);
+        }
+        for source in settings
+            .get("extensions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            if source.starts_with('-') || source.starts_with('!') {
+                continue;
+            }
+            let path = expand_package_path(source.trim_start_matches('+'), base, home);
+            extensions.extend(adapter_extension(&path));
+        }
+        if let Ok(entries) = fs::read_dir(base.join("extensions")) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().starts_with('.') {
+                    continue;
+                }
+                extensions.extend(adapter_extension(&entry.path()));
+            }
+        }
+    }
+    extensions.extend(packages.into_values().flatten());
+    extensions.into_iter().any(|path| {
+        let decision = |base, settings: &Value, project: bool| {
+            settings
+                .get("extensions")
+                .and_then(Value::as_array)
+                .and_then(|filters| {
+                    if project {
+                        ordered_overrides(&path, base, filters, false)
+                    } else {
+                        resource_enabled(&path, base, filters, false)
+                    }
+                })
+        };
+        project_dir
+            .as_deref()
+            .and_then(|base| decision(base, &project_settings, true))
+            .or_else(|| decision(agent, settings, false))
+            .unwrap_or(true)
+    })
+}
+
+/// Pi resource filters: glob includes/excludes, then exact force-includes and
+/// force-excludes. Top-level extension settings use only the override forms.
+fn resource_enabled(path: &Path, base: &Path, filters: &[Value], includes: bool) -> Option<bool> {
+    let matches = |pattern, exact| resource_matches(path, base, pattern, exact);
+    let filters: Vec<_> = filters.iter().filter_map(Value::as_str).collect();
+    let plain: Vec<_> = filters
+        .iter()
+        .filter(|f| !f.starts_with(['!', '+', '-']))
+        .collect();
+    let mut enabled = if includes && !plain.is_empty() {
+        Some(plain.iter().any(|f| matches(f, false)))
+    } else {
+        None
+    };
+    for (prefix, value, exact) in [('!', false, false), ('+', true, true), ('-', false, true)] {
+        if filters
+            .iter()
+            .filter_map(|f| f.strip_prefix(prefix))
+            .any(|f| matches(f, exact))
+        {
+            enabled = Some(value);
+        }
+    }
+    enabled
+}
+
+fn resource_matches(path: &Path, base: &Path, pattern: &str, exact: bool) -> bool {
+    let relative = path
+        .strip_prefix(base)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let absolute = path.to_string_lossy().replace('\\', "/");
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let pattern = pattern.replace('\\', "/");
+    let pattern = pattern.strip_prefix("./").unwrap_or(&pattern);
+    if exact {
+        pattern == relative || pattern == absolute
+    } else {
+        glob::Pattern::new(pattern)
+            .is_ok_and(|p| p.matches(&relative) || p.matches(&name) || p.matches(&absolute))
+    }
+}
+
+/// Project overrides are applied in order; the last matching entry wins.
+fn ordered_overrides(path: &Path, base: &Path, filters: &[Value], includes: bool) -> Option<bool> {
+    filters
+        .iter()
+        .filter_map(Value::as_str)
+        .filter_map(|filter| {
+            let (pattern, enabled, exact) = match filter.chars().next() {
+                Some('!') => (&filter[1..], false, false),
+                Some('-') => (&filter[1..], false, true),
+                Some('+') => (&filter[1..], true, true),
+                _ if includes => (filter, true, false),
+                _ => return None,
+            };
+            resource_matches(path, base, pattern, exact).then_some(enabled)
+        })
+        .next_back()
+}
+
+fn expand_package_path(source: &str, base: &Path, home: &Path) -> PathBuf {
+    if let Some(relative) = source.strip_prefix("~/") {
+        home.join(relative)
+    } else {
+        base.join(source)
+    }
+}
+
+fn adapter_extension(path: &Path) -> Option<PathBuf> {
+    let package = if path.is_file() {
+        if path.file_name()? != "index.ts" {
+            return None;
+        }
+        path.parent()?
+    } else {
+        path
+    };
+    let entry = package.join("index.ts");
+    (entry.is_file()
+        && read_json(&package.join("package.json"))?
+            .get("name")?
+            .as_str()?
+            == "pi-mcp-adapter")
+        .then_some(entry)
+}
+
+fn adapter_mcp_config_paths_with(
     homes: &[PathBuf],
     cwd: Option<&Path>,
     exclusive: bool,
@@ -431,11 +731,204 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        is_pi, mcp_config_paths, mcp_config_paths_with, package_version, skill_roots,
-        skill_roots_in,
+        adapter_mcp_config_paths_with as mcp_config_paths_with, is_pi, mcp_config_paths,
+        package_version, skill_roots, skill_roots_in,
     };
     use crate::provider::pi::user_pi_agent_dir;
     use crate::provider::vscode::discovery::mcp_servers_from_value;
+
+    #[test]
+    fn builtin_mcp_uses_only_native_paths_and_project_trust() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let project = home.join("repo/child");
+        let agent = home.join(".pi/agent");
+        fs::create_dir_all(project.join(".pi")).unwrap();
+        fs::create_dir_all(&agent).unwrap();
+        let project = fs::canonicalize(project).unwrap();
+        let paths = || {
+            super::mcp_config_paths_with(
+                std::slice::from_ref(&home),
+                Some(&project),
+                false,
+                |home| home.join(".pi/agent"),
+            )
+        };
+        assert_eq!(paths(), vec![agent.join("mcp.json")]);
+        fs::write(
+            agent.join("trust.json"),
+            serde_json::to_vec(&json!({
+                project.parent().unwrap().to_str().unwrap(): true
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let trusted = paths();
+        assert_eq!(trusted.len(), 2);
+        assert!(trusted.contains(&project.join(".pi/mcp.json")));
+        fs::write(
+            agent.join("trust.json"),
+            serde_json::to_vec(&json!({
+                project.parent().unwrap().to_str().unwrap(): true,
+                project.to_str().unwrap(): false
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(paths(), vec![agent.join("mcp.json")]);
+        fs::remove_file(agent.join("trust.json")).unwrap();
+        fs::write(
+            agent.join("settings.json"),
+            r#"{"defaultProjectTrust":"always"}"#,
+        )
+        .unwrap();
+        assert_eq!(paths().len(), 2);
+    }
+
+    #[test]
+    fn adapter_mcp_requires_an_enabled_installed_package() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let project = home.join("repo");
+        let agent = home.join(".pi/agent");
+        let package = agent.join("npm/node_modules/pi-mcp-adapter");
+        fs::create_dir_all(&package).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        let paths = || {
+            super::mcp_config_paths_with(
+                std::slice::from_ref(&home),
+                Some(&project),
+                false,
+                |home| home.join(".pi/agent"),
+            )
+        };
+        fs::write(
+            agent.join("settings.json"),
+            r#"{"packages":["npm:pi-mcp-adapter@2.34.0"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            paths(),
+            vec![agent.join("mcp.json")],
+            "declaration alone is not an install"
+        );
+        fs::write(
+            package.join("package.json"),
+            r#"{"name":"pi-mcp-adapter","version":"2.34.0","pi":{"extensions":["./index.ts"]}}"#,
+        )
+        .unwrap();
+        fs::write(package.join("index.ts"), "").unwrap();
+        assert!(paths().contains(&home.join(".agents/mcp.json")));
+        assert!(paths().iter().any(|p| p.ends_with(".mcp.json")));
+        fs::write(
+            agent.join("settings.json"),
+            r#"{"packages":[{"source":"npm:pi-mcp-adapter","extensions":[]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            paths(),
+            vec![agent.join("mcp.json")],
+            "disabled extensions do not replace builtin MCP"
+        );
+    }
+
+    #[test]
+    fn adapter_filters_and_project_overrides_control_mcp_sources() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path();
+        let agent = home.join(".pi/agent");
+        let project = home.join("project");
+        let package = agent.join("npm/node_modules/pi-mcp-adapter");
+        fs::create_dir_all(&package).unwrap();
+        fs::create_dir_all(project.join(".pi")).unwrap();
+        fs::write(package.join("package.json"), r#"{"name":"pi-mcp-adapter"}"#).unwrap();
+        fs::write(package.join("index.ts"), "").unwrap();
+        let paths = || {
+            super::mcp_config_paths_with(&[home.to_path_buf()], Some(&project), false, |home| {
+                home.join(".pi/agent")
+            })
+        };
+        for (filters, enabled) in [
+            (json!(["*.ts"]), true),
+            (json!(["*.ts", "!index.ts"]), false),
+            (json!(["!**", "+./index.ts"]), true),
+            (json!(["*.ts", "-./index.ts"]), false),
+        ] {
+            fs::write(
+                agent.join("settings.json"),
+                json!({"packages":[{"source":"npm:pi-mcp-adapter", "extensions":filters}]})
+                    .to_string(),
+            )
+            .unwrap();
+            assert_eq!(paths().contains(&home.join(".agents/mcp.json")), enabled);
+        }
+        fs::write(
+            agent.join("settings.json"),
+            r#"{"packages":["npm:pi-mcp-adapter"],"defaultProjectTrust":"always"}"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join(".pi/settings.json"),
+            r#"{"packages":[{"source":"npm:pi-mcp-adapter","extensions":[]}]}"#,
+        )
+        .unwrap();
+        assert!(!paths().contains(&home.join(".agents/mcp.json")));
+        fs::write(
+            project.join(".pi/settings.json"),
+            r#"{"packages":[{"source":"npm:pi-mcp-adapter","autoload":false,"extensions":[]}]}"#,
+        )
+        .unwrap();
+        assert!(
+            paths().contains(&home.join(".agents/mcp.json")),
+            "empty project delta preserves the user adapter"
+        );
+        // A project declaration cannot disable the user's adapter until trusted.
+        fs::write(
+            agent.join("settings.json"),
+            r#"{"packages":["npm:pi-mcp-adapter"]}"#,
+        )
+        .unwrap();
+        assert!(paths().contains(&home.join(".agents/mcp.json")));
+        fs::write(agent.join("settings.json"), r#"{"packages":["npm:pi-mcp-adapter"],"extensions":["-npm/node_modules/pi-mcp-adapter/index.ts"]}"#).unwrap();
+        assert!(!paths().contains(&home.join(".agents/mcp.json")));
+        // Native filters use the same precedence: force-exclude wins within
+        // a scope; a matching project override takes precedence over the user.
+        for filters in [
+            json!(["-builtin:mcp"]),
+            json!(["!builtin:*"]),
+            json!(["-builtin:mcp", "+builtin:mcp"]),
+        ] {
+            fs::write(
+                agent.join("settings.json"),
+                json!({"extensions": filters}).to_string(),
+            )
+            .unwrap();
+            assert!(paths().is_empty());
+        }
+        fs::write(
+            agent.join("settings.json"),
+            r#"{"extensions":["-builtin:mcp"],"defaultProjectTrust":"always"}"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join(".pi/settings.json"),
+            r#"{"extensions":["+builtin:mcp"]}"#,
+        )
+        .unwrap();
+        assert_eq!(paths().len(), 2);
+        fs::write(
+            project.join(".pi/settings.json"),
+            r#"{"extensions":["-builtin:mcp","+builtin:mcp"]}"#,
+        )
+        .unwrap();
+        assert_eq!(paths().len(), 2);
+        fs::write(agent.join("settings.json"), "{}").unwrap();
+        let hidden = agent.join("extensions/.disabled-pi-mcp-adapter");
+        fs::create_dir_all(&hidden).unwrap();
+        fs::write(hidden.join("package.json"), r#"{"name":"pi-mcp-adapter"}"#).unwrap();
+        fs::write(hidden.join("index.ts"), "").unwrap();
+        assert!(!paths().contains(&home.join(".agents/mcp.json")));
+    }
 
     #[test]
     fn accepts_earendil_pi_package_and_reads_version() {
@@ -879,25 +1372,6 @@ fi
                     .unwrap()
                     .join(".agents/skills")
             )
-        );
-    }
-
-    #[test]
-    fn scans_pi_owned_and_shared_mcp_files() {
-        let paths = mcp_config_paths();
-        for home in crate::provider::metadata::user_home_dirs() {
-            assert!(paths.contains(&user_pi_agent_dir(&home).join("mcp.json")));
-        }
-        assert!(
-            paths
-                .iter()
-                .any(|path| path.ends_with(std::path::Path::new(".config/mcp/mcp.json")))
-        );
-        assert!(paths.iter().any(|path| path.ends_with(".mcp.json")));
-        assert!(
-            paths
-                .iter()
-                .any(|path| path.ends_with(std::path::Path::new(".pi/mcp.json")))
         );
     }
 

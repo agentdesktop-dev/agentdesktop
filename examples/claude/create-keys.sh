@@ -9,6 +9,7 @@ key_files=(
   device-ca.pem
   device-ca-key.pem
   gateway-jwt-key.pem
+  usage-token
 )
 
 if ! command -v openssl >/dev/null 2>&1; then
@@ -39,6 +40,9 @@ trap 'rm -rf "${work_dir}"' EXIT
 
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
   -out "${work_dir}/gateway-jwt-key.pem"
+
+# Bearer token agentgateway sends with usage exports to the controller.
+openssl rand -hex 32 > "${work_dir}/usage-token"
 
 cat > "${work_dir}/ca.cnf" <<'EOF'
 [req]
@@ -98,6 +102,7 @@ install -m 600 \
   "${work_dir}/controller-key.pem" \
   "${work_dir}/device-ca-key.pem" \
   "${work_dir}/gateway-jwt-key.pem" \
+  "${work_dir}/usage-token" \
   "${key_dir}/"
 install -m 644 \
   "${work_dir}/controller.pem" \

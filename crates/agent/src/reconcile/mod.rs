@@ -31,7 +31,6 @@ pub use crate::provider::{
     copilot::default_copilot_providers_path,
     grok::default_grok_managed_config_path,
     opencode::{default_open_code_managed_config_path, default_open_code_plugin_path},
-    pi::{default_pi_models_path, default_pi_settings_path},
     vscode::{default_vscode_chat_models_path, default_vscode_settings_path},
 };
 
@@ -61,8 +60,8 @@ impl Reconciler {
         copilot_providers_path: Option<PathBuf>,
         vscode_chat_models_path: Option<PathBuf>,
         vscode_settings_path: Option<PathBuf>,
-        pi_models_path: PathBuf,
-        pi_settings_path: PathBuf,
+        pi_models_path: Option<PathBuf>,
+        pi_settings_path: Option<PathBuf>,
         credential_helper: PathBuf,
         socket: PathBuf,
     ) -> Self {
@@ -785,8 +784,8 @@ programs:
             Some(root.join("copilot/providers.json")),
             None,
             None,
-            root.join("pi/models.json"),
-            root.join("pi/settings.json"),
+            Some(root.join("pi/models.json")),
+            Some(root.join("pi/settings.json")),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
@@ -828,8 +827,8 @@ programs:
             Some(root.join("copilot/providers.json")),
             None,
             None,
-            root.join("pi/models.json"),
-            root.join("pi/settings.json"),
+            Some(root.join("pi/models.json")),
+            Some(root.join("pi/settings.json")),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
@@ -883,8 +882,8 @@ programs:
             Some(root.join("copilot/providers.json")),
             None,
             None,
-            root.join("pi/models.json"),
-            root.join("pi/settings.json"),
+            Some(root.join("pi/models.json")),
+            Some(root.join("pi/settings.json")),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
@@ -957,8 +956,8 @@ programs:
             Some(providers.clone()),
             None,
             None,
-            root.join("pi/models.json"),
-            root.join("pi/settings.json"),
+            Some(root.join("pi/models.json")),
+            Some(root.join("pi/settings.json")),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         )
@@ -1014,8 +1013,8 @@ programs:
             Some(root.join("copilot/providers.json")),
             Some(chat_models.clone()),
             Some(chat_models.with_file_name("settings.json")),
-            root.join("pi/models.json"),
-            root.join("pi/settings.json"),
+            Some(root.join("pi/models.json")),
+            Some(root.join("pi/settings.json")),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         )
@@ -1068,8 +1067,8 @@ programs:
             None,
             None,
             None,
-            root.join("pi/models.json"),
-            root.join("pi/settings.json"),
+            Some(root.join("pi/models.json")),
+            Some(root.join("pi/settings.json")),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
@@ -1131,8 +1130,8 @@ programs:
             Some(root.join("copilot/providers.json")),
             None,
             None,
-            root.join("pi/models.json"),
-            root.join("pi/settings.json"),
+            Some(root.join("pi/models.json")),
+            Some(root.join("pi/settings.json")),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
@@ -1177,8 +1176,8 @@ programs:
                 Some(root.join("copilot/providers.json")),
                 None,
                 None,
-                root.join("pi/models.json"),
-                root.join("pi/settings.json"),
+                Some(root.join("pi/models.json")),
+                Some(root.join("pi/settings.json")),
                 root.join("bin/agentdesktop"),
                 root.join("agentdesktop.sock"),
             );
@@ -1355,8 +1354,8 @@ programs:
             Some(root.join("copilot/providers.json")),
             Some(root.join("vscode/User/chatLanguageModels.json")),
             Some(root.join("vscode/User/settings.json")),
-            root.join("pi/models.json"),
-            root.join("pi/settings.json"),
+            Some(root.join("pi/models.json")),
+            Some(root.join("pi/settings.json")),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         )

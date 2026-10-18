@@ -53,6 +53,17 @@
     "tls": {
       "description": "TLS identities used by the device-facing fleet API.\n\nA string selects a directory containing `controller.pem`,\n`controller-key.pem`, `device-ca.pem`, and `device-ca-key.pem`.",
       "$ref": "#/$defs/ControllerTlsConfig"
+    },
+    "usage": {
+      "description": "Token and cost collection from agentgateway access logs.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ControllerUsageConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "additionalProperties": false,
@@ -175,6 +186,20 @@
         "key",
         "clientCaCertificate",
         "clientCaKey"
+      ]
+    },
+    "ControllerUsageConfig": {
+      "description": "Collection of LLM token and cost records that agentgateway exports to the\nfleet API as OTLP access logs over gRPC.",
+      "type": "object",
+      "properties": {
+        "tokenFile": {
+          "description": "Path to a file containing the bearer token agentgateway sends with each export. The token must be at least 32 characters.\n\nRelative paths are resolved from the controller configuration directory.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "tokenFile"
       ]
     }
   }
