@@ -8,6 +8,7 @@ import type { Settings } from "../types";
 import {
   bootstrap,
   emptyDiscovery,
+  noConfiguredPrograms,
   pendingDevice,
   standaloneConnector,
   unconfiguredDevice,
@@ -67,6 +68,8 @@ const meta = {
             : unconfiguredDevice;
         case "get_discovery":
           return emptyDiscovery;
+        case "get_program_management":
+          return noConfiguredPrograms;
         case "get_remote_config":
           return null;
         default:

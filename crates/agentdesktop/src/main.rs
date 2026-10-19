@@ -21,6 +21,7 @@ use agentdesktop_core::{
     config::DaemonConfig,
     model::{
         ControllerConnectionStatus, DaemonInfo, DeviceUsage, Discovery, EnrollmentStatus, Health,
+        ProgramChoice, ProgramManagement,
     },
 };
 use clap::{Parser, Subcommand};
@@ -613,6 +614,20 @@ async fn logout_managed_device() -> Result<(), String> {
         .map_err(|error| format!("{error:#}"))
 }
 
+#[tauri::command]
+async fn get_program_management() -> Result<ProgramManagement, String> {
+    client::get(&socket_path(), "/v1/programs")
+        .await
+        .map_err(|error| format!("{error:#}"))
+}
+
+#[tauri::command]
+async fn set_program_choice(choice: ProgramChoice) -> Result<ProgramManagement, String> {
+    client::post_json_decode(&socket_path(), "/v1/programs/choice", &choice)
+        .await
+        .map_err(|error| format!("{error:#}"))
+}
+
 async fn open_enrollment_url<GetStatus, StatusFuture, OpenUrl>(
     mut get_status: GetStatus,
     mut open_url: OpenUrl,
@@ -730,6 +745,8 @@ fn run_desktop() -> anyhow::Result<()> {
             get_discovery,
             get_device_usage,
             logout_managed_device,
+            get_program_management,
+            set_program_choice,
             setup_managed_device
         ])
         .run(tauri::generate_context!())?;

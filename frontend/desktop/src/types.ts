@@ -137,3 +137,39 @@ export interface DeviceUsage {
   /** Configured tools whose gateway traffic is not metered. */
   unmeteredTools?: string[];
 }
+
+/**
+ * The configured programs the device user wants Agent Desktop to manage,
+ * honored only while the policy allows a user choice. Program IDs are
+ * provider IDs such as `claude-code`.
+ */
+export type ProgramChoice =
+  | { mode: "all" }
+  | { mode: "none" }
+  | { mode: "selected"; programs: string[] };
+
+/** One configured program and its last reconcile outcome. */
+export interface ManagedProgram {
+  /** Provider ID, for example `claude-code`. */
+  program: string;
+  /** False when the device user opted out of this program. */
+  managed: boolean;
+  /**
+   * Outcome of the last apply (`applied`, `unchanged`, `opted_out`, …);
+   * absent until the program has been applied.
+   */
+  state?: string;
+  detail?: string;
+}
+
+/**
+ * Which configured programs are managed on this device, and whether the
+ * device user may change that.
+ */
+export interface ProgramManagement {
+  userChoiceAllowed: boolean;
+  /** The stored choice; ignored while `userChoiceAllowed` is false. */
+  choice: ProgramChoice;
+  /** Configured programs in reconcile order; empty before a configuration. */
+  programs: ManagedProgram[];
+}

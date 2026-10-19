@@ -44,6 +44,10 @@ export function Desktop() {
               settings={model.settings}
               disabled={!model.bootstrap || model.isSaving}
               onStartupChange={model.setOpenOnStartup}
+              programManagement={model.programManagement}
+              programsLoading={!model.hasLoadedStatus}
+              savingPrograms={model.isChangingPrograms}
+              onProgramChoiceChange={model.setProgramChoice}
             />
           ) : !model.hasLoadedStatus ? (
             <StatusLoading view={model.view} />
