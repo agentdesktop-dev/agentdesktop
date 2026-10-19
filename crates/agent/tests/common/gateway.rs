@@ -74,18 +74,36 @@ async fn handle(
     let api_key = headers.get("x-api-key").and_then(|v| v.to_str().ok());
     let llm_token = headers.get("x-llm-token").and_then(|v| v.to_str().ok());
     tracing::debug!(%method, path, "Gateway fixture request");
-    requests.lock().unwrap().push(json!({"path": path, "method": method.as_str(), "authorization": authorization, "apiKey": api_key, "llmToken": llm_token, "body": body}));
+    let chatgpt_account = headers
+        .get("chatgpt-account-id")
+        .and_then(|value| value.to_str().ok());
+    let pairing = headers
+        .get("x-agentdesktop-pairing")
+        .and_then(|value| value.to_str().ok());
+    requests.lock().unwrap().push(json!({"path": path, "method": method.as_str(), "authorization": authorization, "apiKey": api_key, "llmToken": llm_token, "chatgptAccount": chatgpt_account, "pairing": pairing, "body": body}));
     if path == "/health" {
         return Json(json!({"ready": true})).into_response();
     }
     if !matches!(
         path,
-        "/v1/messages" | "/v1/messages/count_tokens" | "/v1/responses"
+        "/v1/messages"
+            | "/v1/messages/count_tokens"
+            | "/v1/responses"
+            | "/backend-api/codex/responses"
     ) {
         return StatusCode::NOT_FOUND.into_response();
     }
     if authorization != Some(format!("Bearer {TOKEN}").as_str()) && api_key != Some(TOKEN) {
         return (StatusCode::UNAUTHORIZED, Json(json!({"type": "error", "error": {"type": "authentication_error", "message": "Expected the test API key"}}))).into_response();
+    }
+    if path == "/backend-api/codex/responses" {
+        if llm_token != Some("codex-subscription-fixture")
+            || chatgpt_account != Some("fixture-account")
+            || pairing.is_some()
+        {
+            return (StatusCode::UNAUTHORIZED, "invalid subscription passthrough").into_response();
+        }
+        return responses(&body);
     }
     if path == "/v1/responses" {
         return responses(&body);

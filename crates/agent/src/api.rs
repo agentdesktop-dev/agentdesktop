@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use agentdesktop_core::{
     config::{
-        ControllerConnectionConfig, DaemonConfig, LlmGatewayAuthentication, ProgramAuthentication,
+        ControllerConnectionConfig, DaemonConfig, LlmGatewayAuthentication, SubscriptionAuth,
         VsCodeCopilotChat, valid_client_id,
     },
     model::{
@@ -444,6 +444,25 @@ pub(crate) async fn gateway_credential(
     client_id: &str,
     include_subscription: bool,
 ) -> Result<LlmGatewayCredential, (StatusCode, String)> {
+    resolve_gateway_credential(state, effective, client_id, include_subscription, false).await
+}
+
+pub(crate) async fn gateway_proxy_credential(
+    state: &AppState,
+    effective: &DaemonConfig,
+    client_id: &str,
+    subscription: bool,
+) -> Result<LlmGatewayCredential, (StatusCode, String)> {
+    resolve_gateway_credential(state, effective, client_id, false, subscription).await
+}
+
+async fn resolve_gateway_credential(
+    state: &AppState,
+    effective: &DaemonConfig,
+    client_id: &str,
+    include_subscription: bool,
+    passthrough_subscription: bool,
+) -> Result<LlmGatewayCredential, (StatusCode, String)> {
     let gateway = effective.llm_gateway.as_ref().ok_or_else(|| {
         (
             StatusCode::FAILED_DEPENDENCY,
@@ -464,9 +483,14 @@ pub(crate) async fn gateway_credential(
             }
             // Local transport permissions authenticate the user, not the calling
             // process. The client ID selects an allowed policy within that boundary.
-            remote::llm_gateway_credential(controller, &state.state_dir, client_id, false)
-                .await
-                .map(|credential| (credential, false))
+            remote::llm_gateway_credential(
+                controller,
+                &state.state_dir,
+                client_id,
+                passthrough_subscription,
+            )
+            .await
+            .map(|credential| (credential, false))
         }
         Some(LlmGatewayAuthentication::Oidc {
             issuer,
@@ -669,19 +693,7 @@ async fn llm_gateway_login(
 }
 
 fn program_uses_subscription(config: &DaemonConfig, client_id: &str) -> bool {
-    match client_id {
-        "claude-code" => config
-            .programs
-            .claude_code
-            .as_ref()
-            .is_some_and(|program| program.auth == Some(ProgramAuthentication::Subscription)),
-        "claude-desktop" => config
-            .programs
-            .claude_desktop
-            .as_ref()
-            .is_some_and(|program| program.auth == Some(ProgramAuthentication::Subscription)),
-        _ => false,
-    }
+    config.programs.subscription_auth(client_id) == Some(SubscriptionAuth::CredentialHelper)
 }
 
 #[cfg(test)]

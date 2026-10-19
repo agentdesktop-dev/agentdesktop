@@ -1,0 +1,19 @@
+services:
+  dex:
+    image: ghcr.io/dexidp/dex:v2.45.1
+    command: dex serve /etc/dex/config.yaml
+    ports:
+    - 127.0.0.1:5558:5558
+    volumes:
+    - ./dex.yaml:/etc/dex/config.yaml:ro
+
+  agentgateway:
+    image: cr.agentgateway.dev/agentgateway:v1.4.1
+    command: -f /etc/agentgateway/config.yaml
+    depends_on:
+    - dex
+    restart: on-failure
+    ports:
+    - 127.0.0.1:4002:4002
+    volumes:
+    - ./agentgateway.yaml:/etc/agentgateway/config.yaml:ro

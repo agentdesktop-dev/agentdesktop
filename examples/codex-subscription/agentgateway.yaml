@@ -1,0 +1,36 @@
+gateways:
+  gateway:
+    port: 4002
+
+routes:
+- name: codex-subscription
+  gateways: gateway
+  matches:
+  - path:
+      pathPrefix: /codex-subscription
+  policies:
+    jwtAuth:
+      mode: strict
+      issuer: http://127.0.0.1:5558/dex
+      audiences: [agentdesktop-local]
+      jwks:
+        url: http://dex:5558/dex/keys
+    urlRewrite:
+      authority:
+        full: chatgpt.com
+      path:
+        prefix: /backend-api/codex
+    timeout:
+      requestTimeout: 120s
+  backends:
+  - host: chatgpt.com:443
+    policies:
+      backendTLS: {}
+      backendAuth:
+        passthrough: {}
+      transformations:
+        request:
+          set:
+            authorization: '"Bearer " + request.headers["x-llm-token"]'
+          remove:
+          - x-llm-token

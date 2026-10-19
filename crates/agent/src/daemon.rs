@@ -951,14 +951,11 @@ fn start_gateway_authentication(
     };
     let authentication = gateway.authentication.clone();
     let github = gateway.github_oauth.clone().filter(|_| proxy_enabled);
-    let subscription = config.programs.claude_code.as_ref().is_some_and(|program| {
-        program.auth == Some(agentdesktop_core::config::ProgramAuthentication::Subscription)
-    }) || config
-        .programs
-        .claude_desktop
-        .as_ref()
-        .is_some_and(|program| {
-            program.auth == Some(agentdesktop_core::config::ProgramAuthentication::Subscription)
+    let subscription = ["claude-code", "claude-desktop"]
+        .into_iter()
+        .any(|client_id| {
+            config.programs.subscription_auth(client_id)
+                == Some(agentdesktop_core::config::SubscriptionAuth::CredentialHelper)
         });
     if authentication.is_none() && !subscription {
         return;

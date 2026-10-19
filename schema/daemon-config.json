@@ -137,6 +137,17 @@
       "description": "Settings reconciled into Codex's organization-managed configuration.\n\nValues under `managedConfig` are written to Codex's `managed_config.toml`.\nWhen generated LLM-gateway settings overlap with those values,\nAgentdesktop's generated values take precedence.",
       "type": "object",
       "properties": {
+        "auth": {
+          "description": "Keep Codex's ChatGPT subscription login and route it through the local proxy.\nRequires user mode, gateway authentication, and `llmGateway.proxyUrl`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProgramAuthentication"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "managedConfig": {
           "description": "Arbitrary values written to Codex's organization-managed TOML configuration.\n\nUse Codex's native snake_case configuration keys. TOML has no null value,\nso null values cannot be reconciled.",
           "type": "object",
@@ -508,7 +519,7 @@
           "type": "string"
         },
         "whenProxyUnavailable": {
-          "description": "What the programs behind the local LLM proxy (`programs.copilot`,\n`programs.vscode`) do while the daemon runs without that proxy:\n`failClosed` (the default) leaves their managed entries in place, so\nthe tools stay pointed at the loopback port and fail instead\nof falling back to GitHub past the gateway (with no entries in place\nyet, the tools keep their own settings); `failOpen` removes them\nuntil the proxy is back (VS Code on `githubModels` then talks to GitHub\ndirectly, the Copilot CLI and VS Code on `ownModels` lose the gateway's\nmodels).",
+          "description": "What the programs behind the local LLM proxy (`programs.copilot`,\n`programs.vscode`, or Codex with `auth: subscription`) do while the daemon runs without that proxy:\n`failClosed` (the default) leaves their managed entries in place, so\nthe tools stay pointed at the loopback port and fail instead\nof falling back to GitHub past the gateway (with no entries in place\nyet, the tools keep their own settings); `failOpen` removes them\nuntil the proxy is back (VS Code on `githubModels` then talks to GitHub\ndirectly, the Copilot CLI and VS Code on `ownModels` lose the gateway's\nmodels).",
           "$ref": "#/$defs/ProxyUnavailable"
         }
       },
