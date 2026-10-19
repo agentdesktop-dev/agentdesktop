@@ -894,7 +894,7 @@ code {
   margin-top: 16px;
 }
 
-.sandbox-compatibility {
+.config-notice {
   margin: 12px 0 0;
   padding: 9px 10px;
   display: flex;
@@ -908,7 +908,7 @@ code {
   line-height: 1.45;
 }
 
-.sandbox-compatibility svg {
+.config-notice svg {
   flex: 0 0 auto;
   margin-top: 1px;
 }

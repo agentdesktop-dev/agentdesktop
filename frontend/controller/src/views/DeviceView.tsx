@@ -414,8 +414,15 @@ const programStateLabels: Record<ProgramStatus["state"], string> = {
   conflict: "Conflict",
   inactive: "Inactive",
   blocked: "Blocked",
+  opted_out: "Opted out",
   failed: "Failed",
   unspecified: "Unknown",
+};
+
+const programStateDescriptions: Partial<
+  Record<ProgramStatus["state"], string>
+> = {
+  opted_out: "The device user opted out of this program",
 };
 
 function ProgramBadge({ state }: { state: ProgramStatus["state"] }) {
@@ -426,7 +433,7 @@ function ProgramBadge({ state }: { state: ProgramStatus["state"] }) {
         ? "warning"
         : "neutral";
   return (
-    <span className={`badge ${tone}`}>
+    <span className={`badge ${tone}`} title={programStateDescriptions[state]}>
       {programStateLabels[state] ?? state}
     </span>
   );
