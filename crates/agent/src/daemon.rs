@@ -951,12 +951,18 @@ fn start_gateway_authentication(
     };
     let authentication = gateway.authentication.clone();
     let github = gateway.github_oauth.clone().filter(|_| proxy_enabled);
-    let subscription = ["claude-code", "claude-desktop"]
+    let subscription_clients: Vec<_> = ["claude-code", "claude-desktop", "codex"]
         .into_iter()
-        .any(|client_id| {
+        .filter(|client_id| {
             config.programs.subscription_auth(client_id)
                 == Some(agentdesktop_core::config::SubscriptionAuth::CredentialHelper)
-        });
+        })
+        .filter(|client_id| {
+            *client_id != "claude-desktop"
+                || config.programs.subscription_auth("claude-code").is_none()
+        })
+        .collect();
+    let subscription = !subscription_clients.is_empty();
     if authentication.is_none() && !subscription {
         return;
     }
@@ -1013,15 +1019,16 @@ fn start_gateway_authentication(
                 continue_in_browser = acquired.interactive && subscription;
                 tracing::info!(%issuer, "LLM gateway OIDC authentication ready");
             }
-            if subscription {
-                tracing::info!("starting Anthropic subscription authentication");
-                crate::anthropic_oauth::credential(
+            for (index, client_id) in subscription_clients.into_iter().enumerate() {
+                tracing::info!(client_id, "starting provider subscription authentication");
+                crate::subscription::credential(
                     &state_dir,
                     callback_listen,
-                    !continue_in_browser,
+                    continue_in_browser && index == 0,
+                    client_id,
                 )
                 .await?;
-                tracing::info!("Anthropic subscription authentication ready");
+                tracing::info!(client_id, "provider subscription authentication ready");
             }
             if let Some(github) = github {
                 // source: request has no credential of its own to acquire; the

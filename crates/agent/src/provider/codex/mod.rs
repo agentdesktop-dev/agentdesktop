@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use agentdesktop_core::config::{DaemonConfig, ProgramAuthentication};
+use agentdesktop_core::config::DaemonConfig;
 use agentdesktop_core::model::Discovery;
 
 use super::{Provider, ReconcileContext};
@@ -41,17 +41,6 @@ impl Provider for Codex {
     }
 
     fn plan(&self, ctx: &ReconcileContext, config: &DaemonConfig) -> anyhow::Result<ReconcilePlan> {
-        if !ctx.merge_user_settings
-            && config
-                .programs
-                .codex
-                .as_ref()
-                .is_some_and(|program| program.auth == Some(ProgramAuthentication::Subscription))
-        {
-            anyhow::bail!(
-                "programs.codex.auth subscription requires --user (or daemon.user: true)"
-            );
-        }
         let configured = config.programs.codex.as_ref().map(|provider| {
             let gateway = config
                 .llm_gateway
@@ -85,7 +74,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn subscription_requires_a_user_mode_daemon() {
+    fn subscription_can_use_a_system_mode_credential_helper() {
         let config = agentdesktop_core::config::parse_daemon(
             "llmGateway:\n  url: https://gateway.example.com\n  proxyUrl: https://gateway.example.com/codex\n  authentication:\n    type: controllerJwt\n    audience: gateway\n    allowedClientIds: [codex]\nprograms:\n  codex:\n    auth: subscription\n",
         )
@@ -96,7 +85,6 @@ mod tests {
             socket: PathBuf::from("socket"),
             llm_proxy: None,
         };
-        let error = Codex::default().plan(&context, &config).err().unwrap();
-        assert!(error.to_string().contains("requires --user"));
+        assert!(Codex::default().plan(&context, &config).is_ok());
     }
 }

@@ -138,7 +138,7 @@
       "type": "object",
       "properties": {
         "auth": {
-          "description": "Keep Codex's ChatGPT subscription login and route it through the local proxy.\nRequires user mode, gateway authentication, and `llmGateway.proxyUrl`.",
+          "description": "Connect a ChatGPT subscription through agentdesktop's OAuth credential helper.",
           "anyOf": [
             {
               "$ref": "#/$defs/ProgramAuthentication"
@@ -519,7 +519,7 @@
           "type": "string"
         },
         "whenProxyUnavailable": {
-          "description": "What the programs behind the local LLM proxy (`programs.copilot`,\n`programs.vscode`, or Codex with `auth: subscription`) do while the daemon runs without that proxy:\n`failClosed` (the default) leaves their managed entries in place, so\nthe tools stay pointed at the loopback port and fail instead\nof falling back to GitHub past the gateway (with no entries in place\nyet, the tools keep their own settings); `failOpen` removes them\nuntil the proxy is back (VS Code on `githubModels` then talks to GitHub\ndirectly, the Copilot CLI and VS Code on `ownModels` lose the gateway's\nmodels).",
+          "description": "What the programs behind the local LLM proxy (`programs.copilot`,\n`programs.vscode`) do while the daemon runs without that proxy:\n`failClosed` (the default) leaves their managed entries in place, so\nthe tools stay pointed at the loopback port and fail instead\nof falling back to GitHub past the gateway (with no entries in place\nyet, the tools keep their own settings); `failOpen` removes them\nuntil the proxy is back (VS Code on `githubModels` then talks to GitHub\ndirectly, the Copilot CLI and VS Code on `ownModels` lose the gateway's\nmodels).",
           "$ref": "#/$defs/ProxyUnavailable"
         }
       },

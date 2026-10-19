@@ -17,8 +17,7 @@
     "@agentdesktop/ui": "workspace:*",
     "lucide-react": "^1.55.0",
     "react": "^19.3.0",
-    "react-dom": "^19.3.0",
-    "yaml": "^2.9.1"
+    "react-dom": "^19.3.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.15",

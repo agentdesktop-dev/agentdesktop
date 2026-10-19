@@ -1,36 +1,34 @@
-gateways:
-  gateway:
-    port: 4002
+# yaml-language-server: $schema=https://raw.githubusercontent.com/agentgateway/agentgateway/v1.6.0/schema/config.json
 
-routes:
-- name: codex-subscription
-  gateways: gateway
-  matches:
-  - path:
-      pathPrefix: /codex-subscription
+frontendPolicies:
+  accessLog:
+    add:
+      agentdesktop.billing: '"subscription"'
+
+llm:
+  port: 4002
   policies:
     jwtAuth:
       mode: strict
+      location:
+        expression: |
+          request.headers["authorization"].with(credential,
+            credential.matches("^Bearer agentdesktop:[^: ]+:[^: ]+:[^: ]+$")
+              ? credential.split(":")[2] : "")
       issuer: http://127.0.0.1:5558/dex
       audiences: [agentdesktop-local]
       jwks:
         url: http://dex:5558/dex/keys
-    urlRewrite:
-      authority:
-        full: chatgpt.com
-      path:
-        prefix: /backend-api/codex
-    timeout:
-      requestTimeout: 120s
-  backends:
-  - host: chatgpt.com:443
-    policies:
-      backendTLS: {}
-      backendAuth:
-        passthrough: {}
-      transformations:
-        request:
-          set:
-            authorization: '"Bearer " + request.headers["x-llm-token"]'
-          remove:
-          - x-llm-token
+    transformations:
+      request:
+        replace: |
+          request.headers["authorization"].split(" ")[1].split(":").with(parts,
+            request.headers.merge({
+              "authorization": "Bearer " + parts[1],
+              "chatgpt-account-id": parts[3]
+            }))
+  models:
+  - name: "*"
+    provider: openai
+    params:
+      baseUrl: https://chatgpt.com/backend-api/codex

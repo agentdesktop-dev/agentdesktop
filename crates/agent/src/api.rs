@@ -551,6 +551,7 @@ async fn resolve_gateway_credential(
             &state.state_dir,
             state.oidc_callback_listen,
             continue_in_browser,
+            client_id,
         )
         .await
     } else {
@@ -568,10 +569,14 @@ async fn controller_subscription_credential(
     client_id: &str,
 ) -> Result<LlmGatewayCredential, (StatusCode, String)> {
     let bad_gateway = |error: anyhow::Error| (StatusCode::BAD_GATEWAY, format!("{error:#}"));
-    let subscription =
-        subscription::credential(&state.state_dir, state.oidc_callback_listen, false)
-            .await
-            .map_err(bad_gateway)?;
+    let subscription = subscription::credential(
+        &state.state_dir,
+        state.oidc_callback_listen,
+        false,
+        client_id,
+    )
+    .await
+    .map_err(bad_gateway)?;
     let identity = remote::llm_gateway_credential(
         controller,
         &state.state_dir,

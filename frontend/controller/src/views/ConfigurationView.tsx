@@ -8,7 +8,6 @@ import {
   Trash2,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { parse } from "yaml";
 
 import type { AgentDraft, AgentKind, DaemonConfigDocument } from "../types";
 
@@ -49,15 +48,7 @@ export function ConfigurationView({
     return [definition?.label ?? agent.kind];
   });
   const sandboxUnavailable = incompatibleSandboxAgentNames.length > 0;
-  const usesLocalProxy = agents.some((agent) => {
-    if (proxyAgents.has(agent.kind)) return true;
-    if (agent.kind !== "codex" || !agent.useGateway) return false;
-    try {
-      return parse(agent.settings)?.auth === "subscription";
-    } catch {
-      return false;
-    }
-  });
+  const usesLocalProxy = agents.some((agent) => proxyAgents.has(agent.kind));
   const yaml = daemonConfigYaml({
     gateway,
     gatewayUrl,

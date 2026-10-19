@@ -93,17 +93,25 @@ async fn handle(
     ) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    if authorization != Some(format!("Bearer {TOKEN}").as_str()) && api_key != Some(TOKEN) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"type": "error", "error": {"type": "authentication_error", "message": "Expected the test API key"}}))).into_response();
-    }
     if path == "/backend-api/codex/responses" {
-        if llm_token != Some("codex-subscription-fixture")
-            || chatgpt_account != Some("fixture-account")
+        if authorization
+            != Some(
+                format!("Bearer agentdesktop:codex-subscription-fixture:{TOKEN}:fixture-account")
+                    .as_str(),
+            )
+            || llm_token.is_some()
             || pairing.is_some()
         {
-            return (StatusCode::UNAUTHORIZED, "invalid subscription passthrough").into_response();
+            return (
+                StatusCode::UNAUTHORIZED,
+                "invalid composite ChatGPT credential",
+            )
+                .into_response();
         }
         return responses(&body);
+    }
+    if authorization != Some(format!("Bearer {TOKEN}").as_str()) && api_key != Some(TOKEN) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"type": "error", "error": {"type": "authentication_error", "message": "Expected the test API key"}}))).into_response();
     }
     if path == "/v1/responses" {
         return responses(&body);

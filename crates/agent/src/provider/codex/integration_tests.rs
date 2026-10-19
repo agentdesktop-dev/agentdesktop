@@ -22,9 +22,6 @@ async fn managed_chatgpt_subscription_lifecycle() -> anyhow::Result<()> {
         "crates/agent/src/provider/codex/testdata/Dockerfile",
         async |container| {
             let gateway = Gateway::start().await?;
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-            let proxy_address = listener.local_addr()?;
-            drop(listener);
             let state_dir = "/home/tester/.local/state/codex-subscription";
             let socket = format!("{state_dir}/agentdesktop.sock");
             let issuer = "https://codex-fixture.example/";
@@ -41,39 +38,27 @@ async fn managed_chatgpt_subscription_lifecycle() -> anyhow::Result<()> {
                     "tokenEndpoint": "https://codex-fixture.example/token",
                 }).to_string(),
             ).await?;
-            let claims = URL_SAFE_NO_PAD.encode(json!({
-                "email": "fixture@example.com",
-                "exp": 4_000_000_000u64,
-                "https://api.openai.com/auth": {
-                    "chatgpt_account_id": "fixture-account",
-                    "chatgpt_user_id": "fixture-user",
-                    "chatgpt_plan_type": "plus",
-                },
-            }).to_string());
+            let entry = Sha256::digest(b"dev.agentdesktop.openai-subscription\0codex");
+            let entry = entry.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
             container.write(
-                "/home/tester/.codex/auth.json",
+                &format!("{state_dir}/secrets/{entry}"),
                 &json!({
-                    "auth_mode": "chatgpt",
-                    "tokens": {
-                        "id_token": format!("e30.{claims}.fixture"),
-                        "access_token": "codex-subscription-fixture",
-                        "refresh_token": "fixture-refresh-token",
-                        "account_id": "fixture-account",
-                    },
-                    "last_refresh": "2090-01-01T00:00:00Z",
+                    "accessToken": "codex-subscription-fixture",
+                    "refreshToken": "fixture-refresh-token",
+                    "accountId": "fixture-account",
+                    "expiresAtUnixSeconds": 4_000_000_000u64,
                 }).to_string(),
             ).await?;
+            container.exec(&["mkdir", "-p", "/home/tester/.codex"]).await?;
             container.exec(&["chown", "-R", "tester:tester", state_dir, "/home/tester/.codex"]).await?;
             container.exec(&["chmod", "700", state_dir, &format!("{state_dir}/secrets")]).await?;
             container.write(CONFIG, &json!({
                 "daemon": {
                     "user": true,
                     "stateDir": state_dir,
-                    "llmProxy": { "listen": proxy_address.to_string() },
                 },
                 "llmGateway": {
-                    "url": gateway.url,
-                    "proxyUrl": format!("{}backend-api/codex", gateway.url),
+                    "url": format!("{}backend-api/codex", gateway.url),
                     "authentication": { "type": "oidc", "issuer": issuer, "clientId": client_id },
                 },
                 "programs": { "codex": {
@@ -93,8 +78,9 @@ async fn managed_chatgpt_subscription_lifecycle() -> anyhow::Result<()> {
             let managed = container.read(USER_SETTINGS).await?;
             let parsed: toml::Value = toml::from_str(&managed)?;
             let provider = &parsed["model_providers"]["agentdesktop"];
-            ensure!(provider["requires_openai_auth"].as_bool() == Some(true), "ChatGPT authentication missing");
-            ensure!(provider.get("auth").is_none(), "gateway credential command conflicts with ChatGPT auth");
+            ensure!(provider["requires_openai_auth"].as_bool() == Some(false), "Codex must use Agentdesktop OAuth instead of native ChatGPT login");
+            ensure!(provider["auth"]["command"].as_str() == Some("/usr/local/bin/agentdesktop"), "Agentdesktop subscription helper missing");
+            container.exec(&["test", "!", "-e", "/home/tester/.codex/auth.json"]).await?;
             let output = container.exec_as("tester", &[
                 "env", "HTTP_PROXY=http://127.0.0.1:9", "HTTPS_PROXY=http://127.0.0.1:9", "NO_PROXY=127.0.0.1,localhost",
                 "codex", "exec", "--skip-git-repo-check", "--ephemeral", "--json", PROMPT,
@@ -102,9 +88,8 @@ async fn managed_chatgpt_subscription_lifecycle() -> anyhow::Result<()> {
             ensure!(output.contains("provider-integration-ok"), "native Codex subscription request failed: {output}");
             ensure!(gateway.requests().iter().any(|request| {
                 request["path"] == "/backend-api/codex/responses"
-                    && request["authorization"] == format!("Bearer {TOKEN}")
-                    && request["llmToken"] == "codex-subscription-fixture"
-                    && request["chatgptAccount"] == "fixture-account"
+                    && request["authorization"] == format!("Bearer agentdesktop:codex-subscription-fixture:{TOKEN}:fixture-account")
+                    && request["llmToken"].is_null()
                     && request["pairing"].is_null()
                     && request["body"]["input"].to_string().contains(PROMPT)
             }), "Codex subscription headers did not reach the mock gateway correctly");
@@ -112,7 +97,7 @@ async fn managed_chatgpt_subscription_lifecycle() -> anyhow::Result<()> {
             container.write(CONFIG, &json!({"daemon": {"user": true, "stateDir": state_dir}, "programs": {}}).to_string()).await?;
             container.exec_as("tester", &["agentdesktop", "daemon", "--user", "--config", CONFIG, "--once"], Duration::from_secs(15)).await?;
             container.exec(&["test", "!", "-e", USER_SETTINGS]).await?;
-            container.exec(&["test", "-f", "/home/tester/.codex/auth.json"]).await?;
+            container.exec(&["test", "!", "-e", "/home/tester/.codex/auth.json"]).await?;
             Ok(())
         },
     ).await

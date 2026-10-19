@@ -1,11 +1,8 @@
 daemon:
   user: true
-  llmProxy:
-    listen: 127.0.0.1:4012
 
 llmGateway:
-  url: http://127.0.0.1:4002
-  proxyUrl: http://127.0.0.1:4002/codex-subscription
+  url: http://127.0.0.1:4002/v1
   authentication:
     type: oidc
     issuer: http://127.0.0.1:5558/dex

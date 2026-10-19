@@ -75,9 +75,7 @@ export const CodexSubscription: Story = {
   args: {
     initialConfig: {
       llmGateway: {
-        url: "https://gateway.example.com",
-        proxyUrl: "https://gateway.example.com/chatgpt",
-        whenProxyUnavailable: "failOpen",
+        url: "https://gateway.example.com/chatgpt",
         authentication: { type: "controllerJwt", audience: "agentgateway" },
       },
       programs: { codex: { auth: "subscription" } },
@@ -85,13 +83,13 @@ export const CodexSubscription: Story = {
   },
   play: async ({ canvas, canvasElement }) => {
     await expect(
-      canvas.getByRole("checkbox", {
+      canvas.queryByRole("checkbox", {
         name: /Fail open without the local proxy/,
       }),
-    ).toBeChecked();
+    ).toBeNull();
     const output = canvasElement.querySelector(".output-card code");
     await expect(output?.textContent).toContain('auth: "subscription"');
-    await expect(output).toHaveTextContent("whenProxyUnavailable: failOpen");
+    await expect(output).not.toHaveTextContent("whenProxyUnavailable");
     await expect(output).toHaveTextContent(
       "https://gateway.example.com/chatgpt",
     );

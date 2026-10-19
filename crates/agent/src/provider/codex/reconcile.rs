@@ -23,7 +23,7 @@ pub(super) fn plan(
     credential_helper: &Path,
     socket: &Path,
     sandbox: Option<&SandboxConfig>,
-    proxy: Option<(SocketAddr, &str)>,
+    _proxy: Option<(SocketAddr, &str)>,
     config: Option<(&CodexConfig, Option<&LlmGatewayConfig>)>,
     plan: &ReconcilePlan,
 ) -> anyhow::Result<()> {
@@ -32,24 +32,12 @@ pub(super) fn plan(
     };
 
     let subscription = config.auth == Some(ProgramAuthentication::Subscription);
-    if subscription && proxy.is_none() {
-        let gateway = gateway.context("Codex subscription requires an LLM gateway")?;
-        if crate::reconcile::fail_closed_without_proxy(gateway, plan, || {
-            plan.read(path).is_ok_and(|contents| {
-                contents.starts_with(MANAGED_HEADER.as_bytes()) && carries_pairing(&contents)
-            })
-        }) {
-            return Ok(());
-        }
-        plan.inactive(crate::reconcile::FAIL_OPEN_REASON);
-        return remove(path, plan);
-    }
     let mode = if subscription {
         0o600
     } else {
         MANAGED_FILE_MODE
     };
-    let settings = managed_config(config, gateway, credential_helper, socket, sandbox, proxy)?;
+    let settings = managed_config(config, gateway, credential_helper, socket, sandbox, None)?;
     let mut contents = MANAGED_HEADER.as_bytes().to_vec();
     contents.extend_from_slice(
         toml::to_string_pretty(&settings)
@@ -140,7 +128,7 @@ fn managed_config(
     credential_helper: &Path,
     socket: &Path,
     sandbox: Option<&SandboxConfig>,
-    proxy: Option<(SocketAddr, &str)>,
+    _proxy: Option<(SocketAddr, &str)>,
 ) -> anyhow::Result<Value> {
     let mut settings = serde_json::to_value(&config.managed_config)
         .context("serialize Codex pass-through managed configuration")?;
@@ -190,12 +178,13 @@ fn managed_config(
         "wire_api": "responses",
     });
     if config.auth == Some(ProgramAuthentication::Subscription) {
-        let (listen, pairing) = proxy.context("Codex subscription requires the local LLM proxy")?;
-        provider["base_url"] = json!(format!("http://{listen}{}", crate::llm_proxy::CODEX_ROUTE));
-        provider["requires_openai_auth"] = json!(true);
+        provider["base_url"] = json!(gateway.url.as_str().trim_end_matches('/'));
+        provider["requires_openai_auth"] = json!(false);
         provider["supports_websockets"] = json!(false);
-        provider["http_headers"] = json!({ crate::llm_proxy::PAIRING_HEADER: pairing });
-        settings["forced_login_method"] = json!("chatgpt");
+        settings
+            .as_object_mut()
+            .unwrap()
+            .remove("forced_login_method");
         if let Some(existing) = settings
             .get_mut("model_providers")
             .and_then(|providers| providers.get_mut(provider_name))
@@ -213,15 +202,17 @@ fn managed_config(
                 existing.remove(field);
             }
         }
-    } else if gateway
+    }
+    if gateway
         .authentication
         .as_ref()
         .is_some_and(LlmGatewayAuthentication::uses_credential_helper)
     {
-        let timeout_ms = if matches!(
-            gateway.authentication,
-            Some(LlmGatewayAuthentication::Oidc { .. })
-        ) {
+        let timeout_ms = if config.auth == Some(ProgramAuthentication::Subscription)
+            || matches!(
+                gateway.authentication,
+                Some(LlmGatewayAuthentication::Oidc { .. })
+            ) {
             600_000
         } else {
             5_000
@@ -325,7 +316,7 @@ programs:
     }
 
     #[test]
-    fn subscription_provider_keeps_chatgpt_auth_and_pairs_with_the_proxy() {
+    fn subscription_provider_uses_the_agentdesktop_oauth_helper_directly() {
         let config = subscription_config();
         let settings = managed_config(
             config.programs.codex.as_ref().unwrap(),
@@ -337,20 +328,17 @@ programs:
         )
         .unwrap();
         assert_eq!(settings["model"], "gpt-5.4");
-        assert_eq!(settings["forced_login_method"], "chatgpt");
+        assert!(settings.get("forced_login_method").is_none());
         let provider = &settings["model_providers"]["agentdesktop"];
-        assert_eq!(provider["base_url"], "http://127.0.0.1:4010/codex");
-        assert_eq!(provider["requires_openai_auth"], true);
+        assert_eq!(provider["base_url"], "https://gateway.example.com/llm");
+        assert_eq!(provider["requires_openai_auth"], false);
         assert_eq!(provider["supports_websockets"], false);
         assert_eq!(provider["wire_api"], "responses");
-        assert_eq!(
-            provider["http_headers"],
-            serde_json::json!({
-                crate::llm_proxy::PAIRING_HEADER: "pairing-secret"
-            })
-        );
+        assert_eq!(provider["auth"]["command"], "agentdesktop");
+        assert_eq!(provider["auth"]["args"][4], "codex");
+        assert_eq!(provider["auth"]["timeout_ms"], 600_000);
         for field in [
-            "auth",
+            "http_headers",
             "env_key",
             "experimental_bearer_token",
             "env_http_headers",
@@ -364,7 +352,7 @@ programs:
     }
 
     #[test]
-    fn subscription_lifecycle_redacts_pairing_and_obeys_proxy_unavailable_policy() {
+    fn subscription_lifecycle_is_independent_of_proxy_availability() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let mut config = subscription_config();
@@ -386,17 +374,14 @@ programs:
             plan
         };
         let absent = run_plan(&config, None);
-        assert_eq!(
-            absent.inactive_reason().as_deref(),
-            Some(crate::reconcile::FAIL_CLOSED_NOT_IN_PLACE_REASON)
-        );
+        assert!(absent.inactive_reason().is_none());
         absent.apply().unwrap();
-        assert!(!path.exists());
+        assert!(path.exists());
         for pairing in ["first-pairing-secret", "second-pairing-secret"] {
             let plan = run_plan(&config, Some(("127.0.0.1:4010".parse().unwrap(), pairing)));
             assert!(!plan.render().contains("pairing-secret"));
             plan.apply().unwrap();
-            assert!(std::fs::read_to_string(&path).unwrap().contains(pairing));
+            assert!(!std::fs::read_to_string(&path).unwrap().contains(pairing));
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -409,22 +394,16 @@ programs:
         }
         let contents = std::fs::read(&path).unwrap();
         let closed = run_plan(&config, None);
-        assert_eq!(
-            closed.inactive_reason().as_deref(),
-            Some(crate::reconcile::FAIL_CLOSED_REASON)
-        );
+        assert!(closed.inactive_reason().is_none());
         closed.apply().unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), contents);
         config.llm_gateway.as_mut().unwrap().when_proxy_unavailable =
             agentdesktop_core::config::ProxyUnavailable::FailOpen;
         let open = run_plan(&config, None);
-        assert_eq!(
-            open.inactive_reason().as_deref(),
-            Some(crate::reconcile::FAIL_OPEN_REASON)
-        );
+        assert!(open.inactive_reason().is_none());
         assert!(!open.render().contains("pairing-secret"));
         open.apply().unwrap();
-        assert!(!path.exists());
+        assert!(path.exists());
     }
 
     #[test]

@@ -94,12 +94,47 @@ The desktop and fleet interfaces also expose the MCP server and skill
 inventory. See the [standalone quickstart](https://agentdesktop.dev/docs/getting-started/standalone/)
 for prerequisites, test credentials, and a walkthrough of the local services.
 
+## Provider subscriptions
+
+Claude Code, Claude Desktop, and Codex can connect provider subscriptions through
+Agentdesktop's OAuth flow using `auth: subscription`. Agentdesktop owns token
+storage and refresh and supplies a composite credential through each client's
+credential helper. These integrations connect directly to the gateway and do not
+require the local LLM proxy.
+
+For Codex:
+
+```yaml
+llmGateway:
+  url: https://gateway.example.com/v1
+  authentication:
+    type: oidc
+    issuer: https://login.example.com
+    clientId: agentdesktop
+programs:
+  codex:
+    auth: subscription
+```
+
+Complete organization sign-in and the optional ChatGPT step in Agentdesktop's
+browser flow. No separate `codex login` is needed. The helper returns
+`agentdesktop:<provider-token>:<identity-token>:<chatgpt-account-id>`; the gateway
+validates the identity before restoring the ChatGPT bearer and account header.
+Claude retains its existing three-field credential without the account suffix.
+
+Use Agentgateway's `llm` configuration with the OpenAI provider's base URL set to
+`https://chatgpt.com/backend-api/codex`, not `api.openai.com/v1`. This keeps model
+routing, LLM policies, and token-usage processing active. See the
+[Codex subscription example](examples/codex-subscription/README.md)
+for the complete gateway and local sign-in setup. Native Codex 0.153.4 is tested
+with synthetic credentials and a mock gateway, not a paid OpenAI account.
+
 ## Local LLM proxy
 
 Use the daemon's optional loopback proxy for clients without an API-key helper,
 or to preserve a client's provider subscription while authenticating separately
-to the gateway. Codex ChatGPT subscriptions and VS Code Copilot passthrough use
-this same proxy. Enable it in the local configuration file (startup settings are
+to the gateway, such as VS Code Copilot passthrough. Claude and Codex subscription
+helpers use the direct flow above instead. Enable the proxy in the local configuration file (startup settings are
 local only, not delivered by the controller). The proxy is available in `--user`
 mode only: it hands out the
 current user's gateway credential, so a system daemon rejects
@@ -145,14 +180,12 @@ Avoid repeating `/v1` in both URLs.
 **Without the proxy.** When the daemon runs without its loopback proxy
 (`daemon.llmProxy.listen` unset, or the address could not be bound),
 `llmGateway.whenProxyUnavailable` decides what happens to the files of the
-programs that use the proxy (`programs.copilot`, `programs.vscode`, and Codex
-with `auth: subscription`). With `failClosed`, the default, existing managed
+programs that use the proxy (`programs.copilot`, `programs.vscode`). With `failClosed`, the default, existing managed
 entries stay pointed at the loopback proxy and requests fail until it returns.
 Before the first successful apply, or if those entries were removed, there is
 no managed routing to retain: the tools keep their own settings. With `failOpen`,
-the daemon removes its managed entries, including Codex's managed configuration
-file, until the proxy returns. VS Code using GitHub's models and Codex using its
-remaining native configuration may then connect directly to their provider;
+the daemon removes its proxy-managed entries until the proxy returns. VS Code using GitHub's models
+may then connect directly to its provider;
 gateway-only custom models are no longer available. If another process occupies
 the loopback port, it can receive requests containing provider tokens and the
 pairing value; reserve the port and use this setup on single-user devices.
@@ -222,7 +255,7 @@ paths on the prefix-less route:
 | Prefix | Client ID | Sends upstream | Upstream |
 | --- | --- | --- | --- |
 | `/copilot-cli/` | `copilot-cli` | gateway identity only | `llmGateway.url` |
-| `/codex/` | `codex` | gateway identity in `Authorization`, Codex's ChatGPT token in `x-llm-token`; HTTP Responses requests | `llmGateway.proxyUrl` (required) |
+| `/codex/` | `codex` | manual/legacy client-token passthrough; not used by `auth: subscription` | `llmGateway.proxyUrl` (required) |
 | `/vscode-copilot/` | `vscode-copilot` | gateway identity only | `llmGateway.url` |
 | `/vscode-copilot-passthrough/` | `vscode-copilot` | gateway identity in `Authorization`, the client's own bearer token in `x-llm-token` | `llmGateway.proxyUrl` (required) |
 | `/vscode-copilot-capi/<pairing>/` | `vscode-copilot` | as the pass-through route; a credential-less `GET /_ping` is forwarded without `x-llm-token`; the only route that tunnels WebSocket upgrades | `llmGateway.proxyUrl` (required) |
@@ -237,9 +270,7 @@ manual setup copies it from there. The state directory in `--user` mode is
 home directory from `HOME` or `USERPROFILE`, on every platform), unless
 `daemon.stateDir` says otherwise. The Copilot CLI's
 `providers.json` carries it as `"headers": {"x-agentdesktop-pairing": "<value>"}`
-on the provider entry, and Codex's generated provider carries it in `http_headers`.
-The daemon
-writes that Codex file owner-only and redacts its pairing-bearing diffs. Pairing
+on the provider entry. Pairing
 keeps other local users on a shared host
 and browser pages off the proxy, provided the client files that carry it are
 owner-only too. It does not restrict the current user's own processes, which can
@@ -320,61 +351,6 @@ locally and walks through the Copilot CLI, VS Code on the gateway's models and
 VS Code on GitHub's models, with what to check at each step (drift,
 conflicts, removal) and the settings the GitHub organisation owner controls
 ([`examples/copilot/github-side.md`](examples/copilot/github-side.md)).
-
-### Managed program: Codex ChatGPT subscriptions
-
-Set `programs.codex.auth: subscription` to keep Codex's own ChatGPT login while
-the local proxy authenticates separately to the gateway:
-
-```yaml
-daemon:
-  user: true
-  llmProxy:
-    listen: 127.0.0.1:4012
-
-llmGateway:
-  url: https://gateway.example.com
-  proxyUrl: https://gateway.example.com/codex-subscription
-  authentication:
-    type: oidc
-    issuer: https://login.example.com
-    clientId: agentdesktop
-
-programs:
-  codex:
-    auth: subscription
-```
-
-`daemon.llmProxy.listen` enables the shared proxy locally; `proxyUrl` selects the
-gateway's ChatGPT passthrough route. On controller-managed devices, distribute
-`llmGateway` and `programs` through controller policy, but keep `daemon.*` local.
-For controller JWT authentication, authorize client ID `codex` in
-`allowedClientIds`. Upgrade both controller and daemon before using this option.
-
-Agentdesktop generates the Codex provider pointed at `/codex`, inserts the pairing
-header, and enables ChatGPT authentication without a conflicting gateway
-credential command. No manual Codex provider, `daemon.llmProxy.clientId`, or
-`githubOAuth` configuration is needed. WebSockets are disabled for this HTTP-only
-route. Keep Codex signed in with `codex login`; Codex owns the ChatGPT credential
-and its refresh, while Agentdesktop obtains and refreshes gateway identity.
-
-The gateway must validate organization identity from `Authorization`, restore the
-ChatGPT bearer from `x-llm-token`, and remove that transport header before
-forwarding. Preserve Codex's account-identification headers and map
-`/codex-subscription/responses` to
-`https://chatgpt.com/backend-api/codex/responses`, not `api.openai.com/v1`.
-
-This requires a per-user daemon, not the Windows system service. Agentdesktop
-manages `~/.codex/config.toml` in user mode; a pre-existing personal file without
-its ownership header is reported as a conflict rather than overwritten. Migrate
-needed settings into `programs.codex.managedConfig` and resolve that conflict
-without removing Codex's separate login file. A `daemon.codex.config` override
-must name an ordinary configuration layer Codex reads, not `requirements.toml`.
-
-See the [complete Codex subscription example](examples/codex-subscription/README.md)
-for the gateway, sign-in, and production boundaries. The real Codex 0.153.4 CLI is
-tested with synthetic credentials and a mock gateway, not a paid OpenAI account.
-Validate live subscription access, token refresh, and provider terms before rollout.
 
 ### Managed program: GitHub Copilot CLI
 
@@ -833,9 +809,8 @@ usage:
 Then send agentgateway's access log to the fleet API with that token. `root`
 is the CA that signed the controller's TLS certificate. The added fields carry
 the user, device, and tool from the controller JWT. The billing expression below
-recognizes Claude's composite subscription credential with either controller-JWT
-or OIDC gateway authentication. Codex uses separate headers instead: classify its
-dedicated passthrough route as subscription traffic, or use the controller JWT's
+recognizes Claude and Codex composite subscription credentials with either controller-JWT
+or OIDC gateway authentication. You can also use the controller JWT's
 `billing` claim when available. Usage without the added identity fields is shown
 as unknown.
 
@@ -874,10 +849,10 @@ frontendPolicies:
 - **Not metered:** VS Code with `copilotChat: githubModels` reaches GitHub
   through the gateway's pass-through route, which is not an LLM route, so its
   requests leave no usage records. The desktop app says so when the program is
-  configured that way. Codex's subscription example also uses raw HTTP
-  passthrough; forwarding and a subscription-billing claim alone do not extract
-  token counts or prices. The gateway must export those fields for such usage
-  to appear in the totals.
+  configured that way. Codex's subscription example instead uses the LLM
+  pipeline, which extracts token usage; configure the gateway's usage exporter
+  to include it in Agentdesktop totals. The dedicated example listener marks
+  its access logs as subscription-billed rather than organization API-key cost.
 - Hourly totals are kept for 90 days and daily totals for 13 months.
   agentgateway does not retry an export, so requests made while the controller
   is unreachable are not counted. Usage stays after a device is deleted.
