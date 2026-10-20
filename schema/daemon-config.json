@@ -138,7 +138,7 @@
       "type": "object",
       "properties": {
         "auth": {
-          "description": "Connect a ChatGPT subscription through agentdesktop's OAuth credential helper.",
+          "description": "Connect a ChatGPT subscription through Agentdesktop's OAuth credential helper.",
           "anyOf": [
             {
               "$ref": "#/$defs/ProgramAuthentication"
