@@ -33,12 +33,13 @@ A spike on macOS used mitmproxy as the local proxy, a PAC file on loopback, and 
 | Question | Result | Detail |
 |---|---|---|
 | Does Desktop follow the OS proxy and PAC? | Yes | The app, its renderer, the Code tab agent, the helpers and the updater. The Code tab agent gets its proxy from the app when the session starts. |
-| Does it trust the OS trust store? Any pinning? | Yes, no pinning | 0 client TLS failures in about 3,100 requests. `NODE_EXTRA_CA_CERTS` was not necessary. With the CA untrusted, every claude.ai connection fails with `ERR_CERT_AUTHORITY_INVALID`. |
+| Does it trust the OS trust store? Any pinning? | Yes, no pinning | 0 client TLS failures in about 3,100 requests. `NODE_EXTRA_CA_CERTS` was not necessary. With the CA untrusted, every connection from the app to claude.ai fails with `ERR_CERT_AUTHORITY_INVALID`. |
 | Which protocols must the proxy carry? | Known | claude.ai uses HTTP/2 only, with SSE. The Code tab agent uses HTTP/1.1, SSE and a WebSocket. Remote Control uses WebSockets on `bridge.claudeusercontent.com`. |
-| Where does user content travel? | Known | Desktop messages: JSON `events` on `claude.ai/v1/code/sessions/{id}/events`, with replies on an SSE `events/stream`. Connector calls: `{tool_name, arguments}`. Code tab: the Messages API. |
-| Fail open or fail closed? | Closed | With a PAC that has no `DIRECT` fallback, messages fail while the proxy is down. Desktop reconnects about 6 seconds after the proxy returns, without a restart. |
+| Where does user content travel? | Known for Cowork and the Code tab | Desktop messages (Cowork sessions in this test): JSON `events` on `claude.ai/v1/code/sessions/{id}/events`, with replies on an SSE `events/stream`. Connector calls: `{tool_name, arguments}`. Code tab: the Messages API. |
+| Does Chat mode use the same endpoints? | Not tested | Every message in the spike started a Cowork session. |
+| Fail open or fail closed? | Closed, for the local proxy | With a PAC that has no `DIRECT` fallback, messages fail while the local proxy is down. Desktop reconnects about 6 seconds after the proxy returns, without a restart. The test had no gateway, so a gateway outage is not tested. |
 | Sign-in (SSO) and history sync under interception | Not tested | These tests are necessary before the main use case is proven. |
-| Where the model traffic for Cowork sessions goes | Open | The spike did not see it on any host. It possibly runs on the server, or the VM traffic goes around the host proxy. |
+| Where the model traffic for Cowork sessions goes | Open | The spike did not see it on any host. It is possible that the model runs on the server, or that the VM traffic goes around the host proxy. |
 | App-scoped steering (`egressProxyPacUrl`) | Not tested | The result decides how steering works (see 4.2). |
 | Upstream TLS errors after large uploads | Open | Two times, the upstream server sent `bad record mac` immediately after a 1.1 MB upload through mitmproxy. Retest with the TLS stack of the daemon. |
 
@@ -66,7 +67,7 @@ flowchart LR
 
 Steering decides which connections go to the listener. There are two possible mechanisms:
 
-- **System PAC.** The daemon serves a PAC file on loopback. It sets the PAC as the automatic proxy configuration of the active network services. The spike showed that this works for every Claude process. It also steers each browser that uses the system proxy settings, so browser access to claude.ai also goes through the gateway. This can be wanted or not.
+- **System PAC.** The daemon serves a PAC file on loopback. It sets the PAC as the automatic proxy configuration of the active network services. The spike showed that this works for the app, the Code tab agent, the helpers and the updater. The traffic of the Cowork VM is not checked. It also steers each browser that uses the system proxy settings, so browser access to claude.ai also goes through the gateway. This can be wanted or not.
 - **The managed key `egressProxyPacUrl` of Claude.** Claude Desktop reads this key from its managed preferences and uses the PAC only for itself. The daemon already writes the managed preferences of Claude. Anthropic documents that the app connects directly if it cannot download the pinned PAC, which is fail open. This is not tested yet in first-party mode.
 
 Both mechanisms use the same PAC. The PAC sends allowlisted hosts to the listener with no `DIRECT` fallback, and all other hosts `DIRECT`. The listener core serves the PAC. The steering work item picks the mechanism after a test of the managed key (see section 10).
@@ -166,7 +167,7 @@ The agentdesktop repository gets an example under `examples/`, with a matching a
 
 - **Unit tests:** allowlist matching, CA generation with name constraints, the leaf cache, `CONNECT` handling for allowlisted and other hosts, and header handling.
 - **Integration test:** a local TLS origin behind the listener. It covers HTTP/1.1, HTTP/2, SSE, a WebSocket and a multi-MB upload. The upload case retests the upstream TLS error from the spike on the TLS stack of the daemon.
-- **Manual acceptance on macOS:** the checks from the spike again (Desktop through the listener, the untrusted-CA control, and proxy-down behavior). Add sign-in with SSO and history sync, which the spike did not cover.
+- **Manual acceptance on macOS:** the checks from the spike again (Desktop through the listener, the untrusted-CA control, and proxy-down behavior). Add sign-in with SSO, history sync, Chat mode and the traffic of the Cowork VM, which the spike did not cover.
 - **Windows:** the same plan, after the steering and trust parts exist there.
 
 ## 9. Work items
