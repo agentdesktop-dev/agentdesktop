@@ -704,6 +704,19 @@ where
         usage: usage_store,
         programs: Some(program_control),
     };
+    // Sandbox sessions (`/sandbox` route): one registry shared by the proxy,
+    // the local API that mints and revokes sessions, and the sweep.
+    let sessions = llm_proxy::sessions::SessionRegistry::default();
+    let session_api = llm_proxy::sessions::SessionApiState {
+        registry: sessions.clone(),
+        proxy_address: proxy_listener
+            .as_ref()
+            .and_then(|listener| listener.local_addr().ok()),
+        policy: std::sync::Arc::new(llm_proxy::sessions::ConfigPolicy {
+            config: state.config.clone(),
+            state_dir: state.state_dir.clone(),
+        }),
+    };
     let launch_state = launch::LaunchState {
         app: state.clone(),
         executor: Arc::new(launch::host::ProcessExecutor),
@@ -720,7 +733,10 @@ where
         availability: containment,
         daemon_sid: daemon_sid.clone(),
     };
-    let app = api::router(state.clone()).merge(launch::router(launch_state));
+    let app = api::router(state.clone())
+        .merge(llm_proxy::sessions::session_router(session_api))
+        .merge(launch::router(launch_state));
+    let session_sweep = tokio::spawn(llm_proxy::sessions::sweep_forever(sessions.clone()));
     // The proxy is optional at runtime too: if serving fails (for example the
     // TLS root store cannot be built), log it and keep the daemon running
     // without the proxy rather than dropping the device out of the fleet.
@@ -732,6 +748,7 @@ where
                 llm_proxy::ProxyConfig {
                     default_client_id: args.llm_proxy_client_id,
                     pairing: pairing.expect("pairing exists whenever the listener does"),
+                    sessions,
                 },
             )
             .await
@@ -749,10 +766,12 @@ where
     let local_api = serve_unix(&socket, local_api_access()?, app, shutdown);
     #[cfg(windows)]
     let local_api = serve_named_pipe(&socket, app, shutdown, daemon_sid, first_pipe_server);
-    tokio::select! {
-        result = local_api => result?,
-        result = proxy => result?,
-    }
+    let result = tokio::select! {
+        result = local_api => result,
+        result = proxy => result,
+    };
+    session_sweep.abort();
+    result?;
 
     Ok(())
 }
@@ -1249,7 +1268,10 @@ fn validate_one_shot(
     Ok(())
 }
 
-async fn serve_local_connection<I>(stream: I, app: axum::Router) -> Result<(), hyper::Error>
+pub(crate) async fn serve_local_connection<I>(
+    stream: I,
+    app: axum::Router,
+) -> Result<(), hyper::Error>
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {

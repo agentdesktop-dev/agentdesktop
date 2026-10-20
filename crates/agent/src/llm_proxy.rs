@@ -3,8 +3,9 @@ mod routes;
 
 pub(crate) use routes::{CAPI_ROUTE, CODEX_ROUTE, PAIRING_HEADER};
 use routes::{
-    RouteCredential, Upstream, bearer_or_header, constant_time_eq, host_is_loopback, match_route,
-    path_escapes_base, resembles_route, split_path_pairing, upstream_base,
+    RouteCredential, RouteIdentity, SANDBOX_ROUTE, Upstream, bearer_or_header, constant_time_eq,
+    host_is_loopback, match_route, path_escapes_base, resembles_route, split_path_pairing,
+    upstream_base,
 };
 
 pub(crate) use cache::CredentialCache;
@@ -32,6 +33,9 @@ use tokio::{net::TcpListener, task::JoinSet};
 use agentdesktop_core::config::GitHubTokenSource;
 
 use crate::api::{self, AppState};
+
+pub(crate) mod sessions;
+use sessions::SessionRegistry;
 
 type ProxyClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>;
 type ProxyBody = BoxBody<Bytes, hyper::Error>;
@@ -127,8 +131,11 @@ pub(crate) struct ProxyConfig {
     /// Client id for requests that match no prefixed route (the original,
     /// hand-configured shape from the README).
     pub default_client_id: String,
-    /// Pairing value required on every route.
+    /// Device pairing value required on every route except the sandbox
+    /// route, which takes a session pairing from `sessions`.
     pub pairing: Arc<str>,
+    /// Per-session pairings accepted on the `/sandbox` route.
+    pub sessions: SessionRegistry,
 }
 
 impl std::fmt::Debug for ProxyConfig {
@@ -136,6 +143,7 @@ impl std::fmt::Debug for ProxyConfig {
         f.debug_struct("ProxyConfig")
             .field("default_client_id", &self.default_client_id)
             .field("pairing", &"<redacted>")
+            .field("sessions", &self.sessions.len(now_unix()))
             .finish()
     }
 }
@@ -265,10 +273,23 @@ pub(crate) async fn serve_with_cache(
                         let cache = cache.clone();
                         let slot = slot.clone();
                         async move {
-                            let response = match forward(request, &client, &state, &config, &cache, &slot).await {
-                                Ok(response) => response,
+                            let mut log = RequestLog::default();
+                            let response = match forward(request, &client, &state, &config, &cache, &slot, &mut log).await {
+                                Ok(response) => match log.sandbox.take() {
+                                    // A sandbox request: the event is emitted
+                                    // when the response body ends, so it can
+                                    // carry the bytes delivered and the outcome.
+                                    Some(sandbox) => {
+                                        let status = response.status().as_u16();
+                                        response.map(|body| LoggedBody::new(body, sandbox.with_status(status, None)).boxed())
+                                    }
+                                    None => response,
+                                },
                                 Err(error) => {
                                     tracing::warn!(status = %error.status, code = error.code, message = %error.message, "LLM proxy request failed");
+                                    if let Some(sandbox) = log.sandbox.take() {
+                                        sandbox.with_status(error.status.as_u16(), Some(error.code)).emit(0, "complete");
+                                    }
                                     error.into_response()
                                 }
                             };
@@ -302,6 +323,163 @@ pub(crate) async fn serve_with_cache(
     }
 }
 
+/// What `forward` records about a request for the sandbox request log. Only a
+/// request on the sandbox route fills `sandbox`; every other route logs
+/// nothing new. Drop guard: if the handler future is dropped (client
+/// disconnected) before `forward` or `LoggedBody` emitted the log, RequestLog's
+/// Drop emits with outcome=canceled.
+#[derive(Debug, Default)]
+pub(crate) struct RequestLog {
+    pub sandbox: Option<SandboxRequest>,
+}
+
+impl Drop for RequestLog {
+    fn drop(&mut self) {
+        // If sandbox is still present, the request was canceled before the
+        // normal log paths (error arm or LoggedBody) took it and emitted.
+        if let Some(request) = self.sandbox.take() {
+            request.emit(0, "canceled");
+        }
+    }
+}
+
+/// One request on the sandbox route, as its log event reports it: never a
+/// header, a body, a query string or a pairing value.
+#[derive(Debug)]
+pub(crate) struct SandboxRequest {
+    /// Session id once the pairing matched; `-` until then.
+    pub session: Option<String>,
+    pub client_id: Option<String>,
+    pub method: String,
+    /// The path as sent, prefix stripped, query omitted.
+    pub path: String,
+    /// Upstream status, or the proxy's refusal status.
+    pub status: u16,
+    /// The refusal code; `-` for a forwarded request.
+    pub code: Option<&'static str>,
+    /// Buffered request body length; 0 when refused before the body was read.
+    pub bytes_in: usize,
+    started: std::time::Instant,
+}
+
+impl SandboxRequest {
+    fn new(method: &Method, path: &str) -> Self {
+        Self {
+            session: None,
+            client_id: None,
+            method: method.to_string(),
+            path: path.to_owned(),
+            status: 0,
+            code: None,
+            bytes_in: 0,
+            started: std::time::Instant::now(),
+        }
+    }
+
+    fn with_status(mut self, status: u16, code: Option<&'static str>) -> Self {
+        self.status = status;
+        self.code = code;
+        self
+    }
+
+    /// The one `info` event per sandbox request.
+    fn emit(&self, bytes_out: u64, outcome: &'static str) {
+        tracing::info!(
+            session = self.session.as_deref().unwrap_or("-"),
+            client_id = self.client_id.as_deref().unwrap_or("-"),
+            method = %self.method,
+            path = %self.path,
+            status = self.status,
+            code = self.code.unwrap_or("-"),
+            bytes_in = self.bytes_in,
+            bytes_out,
+            duration_ms = self.started.elapsed().as_millis() as u64,
+            outcome,
+            "LLM proxy sandbox request"
+        );
+    }
+}
+
+/// Response body of a sandbox request: counts the data bytes delivered and
+/// emits the request log once, when the upstream body ends (`complete`, also
+/// when hyper drops a body that has reported its end without polling for the
+/// trailing `None`), fails, or is dropped before its end because the client
+/// went away (`aborted`).
+pub(crate) struct LoggedBody {
+    inner: ProxyBody,
+    log: SandboxRequest,
+    bytes_out: u64,
+    emitted: bool,
+}
+
+impl LoggedBody {
+    fn new(inner: ProxyBody, log: SandboxRequest) -> Self {
+        Self {
+            inner,
+            log,
+            bytes_out: 0,
+            emitted: false,
+        }
+    }
+
+    fn finish(&mut self, outcome: &'static str) {
+        if !self.emitted {
+            self.emitted = true;
+            self.log.emit(self.bytes_out, outcome);
+        }
+    }
+}
+
+impl hyper::body::Body for LoggedBody {
+    type Data = Bytes;
+    type Error = hyper::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Bytes>, hyper::Error>>> {
+        let polled = std::pin::Pin::new(&mut self.inner).poll_frame(cx);
+        match &polled {
+            std::task::Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    self.bytes_out += data.len() as u64;
+                }
+                // hyper stops polling once the body reports its end (a
+                // Content-Length body after its last frame) and never asks
+                // for the trailing `None`: that is a completed response too.
+                if hyper::body::Body::is_end_stream(&self.inner) {
+                    self.finish("complete");
+                }
+            }
+            std::task::Poll::Ready(Some(Err(_))) => self.finish("aborted"),
+            std::task::Poll::Ready(None) => self.finish("complete"),
+            std::task::Poll::Pending => {}
+        }
+        polled
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+impl Drop for LoggedBody {
+    fn drop(&mut self) {
+        // An empty body (204, HEAD) is never polled at all; a body dropped
+        // before its end was cut off by the client.
+        let outcome = if hyper::body::Body::is_end_stream(&self.inner) {
+            "complete"
+        } else {
+            "aborted"
+        };
+        self.finish(outcome);
+    }
+}
+
 /// A refused or failed request, rendered as an OpenAI-style JSON error so the
 /// LLM clients display the message instead of dropping the connection.
 #[derive(Debug)]
@@ -317,6 +495,15 @@ impl ProxyError {
             StatusCode::FORBIDDEN,
             "pairing_invalid",
             "agentdesktop proxy: pairing value missing or wrong; re-apply the managed configuration",
+        )
+    }
+
+    /// The sandbox route's refusal: a session pairing that matches nothing.
+    fn session_invalid() -> Self {
+        Self::new(
+            StatusCode::FORBIDDEN,
+            "pairing_invalid",
+            "agentdesktop proxy: session pairing missing, expired or revoked; start a new session",
         )
     }
 
@@ -370,7 +557,29 @@ async fn forward(
     config: &ProxyConfig,
     cache: &Arc<CredentialCache>,
     tunnel_slot: &PendingTunnel,
+    log: &mut RequestLog,
 ) -> Result<Response<ProxyBody>, ProxyError> {
+    // Pure string work on the path first; no configuration is read yet. It
+    // comes before every check so a refused sandbox request is logged with
+    // its route and path.
+    let path_and_query = request
+        .uri()
+        .path_and_query()
+        .map_or("/", |path| path.as_str())
+        .to_owned();
+    let (path, query) = match path_and_query.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (path_and_query.as_str(), None),
+    };
+    // Matched once; the route decides pairing placement, upgrade handling,
+    // the ping exemption, client id, credential mode and upstream.
+    let matched = match_route(path);
+    let matched_route = matched.map(|(route, _)| route);
+    if let Some((route, rest)) = matched
+        && route.identity == RouteIdentity::Session
+    {
+        log.sandbox = Some(SandboxRequest::new(request.method(), rest));
+    }
     if !host_is_loopback(request.headers()) {
         return Err(ProxyError::new(
             StatusCode::FORBIDDEN,
@@ -393,17 +602,8 @@ async fn forward(
             "agentdesktop proxy: OPTIONS is not supported",
         ));
     }
-    // Pure string work on the path first; no configuration is read yet.
-    let path_and_query = request
-        .uri()
-        .path_and_query()
-        .map_or("/", |path| path.as_str())
-        .to_owned();
-    let (path, query) = match path_and_query.split_once('?') {
-        Some((path, query)) => (path, Some(query)),
-        None => (path_and_query.as_str(), None),
-    };
-    // The pairing value is required on every route. It travels in its own
+    // A pairing value is required on every route: the device pairing, or a
+    // session pairing on the sandbox route. It travels in its own
     // header, so Authorization keeps one meaning (the client's own token on the
     // pass-through shapes) and the pairing is never mistaken for a credential.
     // The CAPI route's client (VS Code) cannot add a header, so there the
@@ -412,10 +612,8 @@ async fn forward(
     // nothing about this device and costs it no work.
     let pairing_ok =
         |offered: &str| constant_time_eq(offered.as_bytes(), config.pairing.as_bytes());
-    // Matched once; the route decides pairing placement, upgrade handling,
-    // the ping exemption, client id, credential mode and upstream.
-    let matched = match_route(path);
-    let matched_route = matched.map(|(route, _)| route);
+    // The sandbox route's session, once its pairing matched.
+    let mut session: Option<sessions::SessionRef> = None;
     let capi_rest = match matched {
         Some((route, rest)) if route.pairing_in_path => {
             let Some((segment, remainder)) = split_path_pairing(rest) else {
@@ -425,6 +623,26 @@ async fn forward(
                 return Err(ProxyError::pairing_invalid());
             }
             Some(remainder.to_owned())
+        }
+        // The sandbox route takes a session pairing in the header: looked up
+        // and its idle timeout restarted under one lock. The device pairing
+        // never opens this route (a file that holds it must not become a
+        // session), and a session pairing opens no other route (below, it
+        // never equals the device pairing).
+        Some((route, _)) if route.identity == RouteIdentity::Session => {
+            let offered = request
+                .headers()
+                .get(PAIRING_HEADER)
+                .and_then(|value| value.to_str().ok());
+            let found = offered
+                .and_then(|offered| config.sessions.authorize(offered, now_unix()))
+                .ok_or_else(ProxyError::session_invalid)?;
+            if let Some(sandbox) = log.sandbox.as_mut() {
+                sandbox.session = Some(found.id.clone());
+                sandbox.client_id = Some(found.client_id.clone());
+            }
+            session = Some(found);
+            None
         }
         _ => {
             let offered = request
@@ -459,7 +677,7 @@ async fn forward(
         return Err(ProxyError::new(
             StatusCode::NOT_FOUND,
             "route_unknown",
-            "agentdesktop proxy: unknown route; the managed prefixes are /copilot-cli, /vscode-copilot, /vscode-copilot-passthrough and /vscode-copilot-capi",
+            "agentdesktop proxy: unknown route; the managed prefixes are /copilot-cli, /vscode-copilot, /vscode-copilot-passthrough, /vscode-copilot-capi and /sandbox",
         ));
     }
     let effective =
@@ -496,7 +714,13 @@ async fn forward(
                 ));
             }
             (
-                route.client_id.to_owned(),
+                match route.identity {
+                    RouteIdentity::Fixed(client_id) => client_id.to_owned(),
+                    RouteIdentity::Session => session
+                        .as_ref()
+                        .map(|session| session.client_id.clone())
+                        .ok_or_else(ProxyError::session_invalid)?,
+                },
                 Some(route.credential),
                 upstream_base(gateway, route.upstream),
                 capi_rest.as_deref().unwrap_or(rest),
@@ -573,6 +797,9 @@ async fn forward(
             }
         })?
         .to_bytes();
+    if let Some(sandbox) = log.sandbox.as_mut() {
+        sandbox.bytes_in = body.len();
+    }
     let mut request = Request::from_parts(parts, ());
 
     strip_hop_headers(request.headers_mut());

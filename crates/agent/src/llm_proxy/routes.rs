@@ -26,15 +26,25 @@ pub(crate) enum Upstream {
     ProxyUrl,
 }
 
-/// A fixed path prefix the proxy serves for one managed program.
+/// Where a route takes the client id it presents to the gateway.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RouteIdentity {
+    /// The id is fixed by the route (the file the daemon owns decides it).
+    Fixed(&'static str),
+    /// The id comes from the registered session whose pairing the request carries.
+    Session,
+}
+
+/// A fixed path prefix the proxy serves.
 ///
-/// The prefix is what a reconciler writes into that program's client file, so
-/// the client id is decided by the file the daemon owns, never by request
-/// headers. The prefix is stripped before forwarding.
+/// For a managed program the prefix is what its reconciler writes into the
+/// client file, so the client id is decided by the file the daemon owns, never
+/// by request headers; on the sandbox route the client id is the registered
+/// session's. The prefix is stripped before forwarding.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ProxyRoute {
     pub prefix: &'static str,
-    pub client_id: &'static str,
+    pub identity: RouteIdentity,
     pub credential: RouteCredential,
     pub upstream: Upstream,
     /// The pairing is the first path segment after the prefix (the header is
@@ -55,12 +65,19 @@ pub(crate) struct ProxyRoute {
 pub(crate) const CAPI_ROUTE: &str = "/vscode-copilot-capi";
 pub(crate) const CODEX_ROUTE: &str = "/codex";
 
-/// Routes for the managed programs. A prefix matches only at a `/` boundary, so
+/// The route for a program inside a sandbox: its pairing is a per-session
+/// value minted over the local API (`sessions`), never the device pairing, and
+/// the client id is the session's. The box needs nothing but this route, so
+/// it holds no credential and needs nothing but loopback.
+pub(crate) const SANDBOX_ROUTE: &str = "/sandbox";
+
+/// The prefixed routes: the managed programs and the sandbox route. A prefix
+/// matches only at a `/` boundary, so
 /// `/vscode-copilot-passthrough/...` never matches `/vscode-copilot`.
 pub(crate) const ROUTES: &[ProxyRoute] = &[
     ProxyRoute {
         prefix: CODEX_ROUTE,
-        client_id: "codex",
+        identity: RouteIdentity::Fixed("codex"),
         credential: RouteCredential::Passthrough,
         upstream: Upstream::ProxyUrl,
         pairing_in_path: false,
@@ -69,7 +86,7 @@ pub(crate) const ROUTES: &[ProxyRoute] = &[
     },
     ProxyRoute {
         prefix: "/vscode-copilot-passthrough",
-        client_id: "vscode-copilot",
+        identity: RouteIdentity::Fixed("vscode-copilot"),
         credential: RouteCredential::Passthrough,
         upstream: Upstream::ProxyUrl,
         pairing_in_path: false,
@@ -78,7 +95,7 @@ pub(crate) const ROUTES: &[ProxyRoute] = &[
     },
     ProxyRoute {
         prefix: CAPI_ROUTE,
-        client_id: "vscode-copilot",
+        identity: RouteIdentity::Fixed("vscode-copilot"),
         credential: RouteCredential::Passthrough,
         upstream: Upstream::ProxyUrl,
         pairing_in_path: true,
@@ -87,7 +104,7 @@ pub(crate) const ROUTES: &[ProxyRoute] = &[
     },
     ProxyRoute {
         prefix: "/vscode-copilot",
-        client_id: "vscode-copilot",
+        identity: RouteIdentity::Fixed("vscode-copilot"),
         credential: RouteCredential::Gateway,
         upstream: Upstream::Url,
         pairing_in_path: false,
@@ -96,7 +113,16 @@ pub(crate) const ROUTES: &[ProxyRoute] = &[
     },
     ProxyRoute {
         prefix: "/copilot-cli",
-        client_id: "copilot-cli",
+        identity: RouteIdentity::Fixed("copilot-cli"),
+        credential: RouteCredential::Gateway,
+        upstream: Upstream::Url,
+        pairing_in_path: false,
+        tunnels_upgrades: false,
+        credential_less_ping: false,
+    },
+    ProxyRoute {
+        prefix: SANDBOX_ROUTE,
+        identity: RouteIdentity::Session,
         credential: RouteCredential::Gateway,
         upstream: Upstream::Url,
         pairing_in_path: false,

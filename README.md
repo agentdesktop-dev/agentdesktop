@@ -293,15 +293,17 @@ Controller JWT authentication uses client ID `vscode` by default on the
 prefix-less route; choose another ID with `daemon.llmProxy.clientId`. Every client
 ID the proxy presents (`vscode` or your choice, plus `codex`, `copilot-cli`, and
 `vscode-copilot` for the routes below) must be in the controller's
-`allowedClientIds`. With `authentication.type: oidc` the client ID has no effect: the
+`allowedClientIds`, and so must the client ID of every session registered for
+`/sandbox/`. With `authentication.type: oidc` the client ID has no effect: the
 OIDC token is the same for every route. The listen address must be loopback.
 
 **Routes.** Besides the prefix-less route (the manual shape used above, with the
 credential mode from `llmGateway.githubOAuth` and the upstream from
-`llmGateway.proxyUrl`), the proxy serves fixed path prefixes for the managed
-programs, one per program route, so the client ID is decided by the file
-the daemon writes and never by request headers. The prefix is stripped before
-forwarding. A path whose first segment looks like a route name without matching
+`llmGateway.proxyUrl`), the proxy serves fixed path prefixes: one per managed
+program route, whose client ID is decided by the file the daemon writes and
+never by request headers, and `/sandbox/`, whose client ID comes from the
+registered session (the route name is unrelated to the top-level `sandbox`
+configuration key). The prefix is stripped before forwarding. A path whose first segment looks like a route name without matching
 one exactly is refused with `404 route_unknown` rather than served as the
 prefix-less route; this also applies to a gateway sub-path that happens to start
 with a route name (for example `/vscode-copilot-proxy/...`), so do not use such
@@ -314,11 +316,13 @@ paths on the prefix-less route:
 | `/vscode-copilot/` | `vscode-copilot` | gateway identity only | `llmGateway.url` |
 | `/vscode-copilot-passthrough/` | `vscode-copilot` | gateway identity in `Authorization`, the client's own bearer token in `x-llm-token` | `llmGateway.proxyUrl` (required) |
 | `/vscode-copilot-capi/<pairing>/` | `vscode-copilot` | as the pass-through route; a credential-less `GET /_ping` is forwarded without `x-llm-token`; the only route that tunnels WebSocket upgrades | `llmGateway.proxyUrl` (required) |
+| `/sandbox/` | the registered session's (see **Sandbox route and per-session pairing**) | gateway identity only | `llmGateway.url` |
 
-**Pairing.** Every route requires the per-device pairing value in the
-`x-agentdesktop-pairing` header, except `/vscode-copilot-capi/`, which takes it
+**Pairing.** Every route except `/sandbox/` requires the per-device pairing
+value in the `x-agentdesktop-pairing` header; `/vscode-copilot-capi/` takes it
 as the first path segment after the prefix (VS Code cannot add a header there)
-and ignores the header. The daemon creates it in its state directory
+and ignores the header, and `/sandbox/` takes a per-session pairing in the
+header instead. The daemon creates it in its state directory
 (`llm-proxy-pairing`, owner-only) on first use and keeps it across restarts; a
 manual setup copies it from there. The state directory in `--user` mode is
 `$XDG_STATE_HOME/agentdesktop`, by default `~/.local/state/agentdesktop` (the
@@ -851,6 +855,100 @@ On a device that also runs the system service, set `daemon.socket` to a per-user
 pipe (for example `\\.\pipe\agentdesktop-<username>`) and pass it to `run` with
 `--socket` (or `AGENTDESKTOP_SOCKET` in the unified binary); this preview adds no
 pipe discovery or Windows logon autostart.
+
+### Sandbox route and per-session pairing
+
+A program that runs inside a sandbox (for example a Windows AppContainer) must
+not hold the device pairing or any gateway credential, and needs no network
+beyond loopback. For that the proxy has a further route, `/sandbox`, whose
+pairing is a **per-session** value: whoever starts the sandboxed program (a
+launcher in the user's session) registers a session over the local API, puts
+the session's pairing into the program's environment, and revokes the session
+when the program exits.
+
+```sh
+agentdesktop llm-proxy session create --client-id claude-code --label "project x"
+# {
+#   "id": "0123456789abcdef",
+#   "pairing": "<43 characters, shown here and nowhere else>",
+#   "clientId": "claude-code",
+#   "label": "project x",
+#   "createdAtUnixSeconds": 1760600000,
+#   "expiresAtUnixSeconds": 1760628800,
+#   "baseUrl": "http://127.0.0.1:4000/sandbox"
+# }
+agentdesktop llm-proxy session list      # id, client id, label, expiry per line
+agentdesktop llm-proxy session revoke 0123456789abcdef
+```
+
+The same operations are `POST`/`GET /v1/llm-proxy/sessions` and
+`DELETE /v1/llm-proxy/sessions/{id}` on the local API; `POST` takes
+`{"clientId": "...", "label": "...", "ttlSeconds": 28800}` and answers `409`
+when the proxy could not be bound at startup (`llmProxy.bound: false`). A
+proxy that stopped later still has its address, so a session created then
+gets a `baseUrl` nothing serves until the daemon restarts. For Claude Code the
+sandboxed program's environment is:
+
+```
+ANTHROPIC_BASE_URL=http://127.0.0.1:4000/sandbox
+ANTHROPIC_API_KEY=placeholder
+ANTHROPIC_CUSTOM_HEADERS=x-agentdesktop-pairing: <pairing from session create>
+```
+
+On `/sandbox` the proxy looks the header up among the registered sessions,
+drops every client credential (`Authorization`, `x-api-key`, `api-key`,
+`x-llm-token`) and sends the gateway identity for the session's client id, the
+same way the `/copilot-cli` route does for its fixed id. There is no
+pass-through on this route, and the gateway identity is sent without a
+subscription token: with `programs.claudeCode.auth: subscription` (or the
+same for `claudeDesktop`) a session for that program is refused with `409`.
+With `authentication.type: controllerJwt` the session's client id must be in
+`allowedClientIds`; that is checked when the session is created (so a refused
+id fails at `session create` rather than at the first prompt) and independently
+by the controller on every credential it issues; a session that already exists
+keeps its gateway identity when the configuration later switches that program
+to subscription mode, until it is revoked or idles out. Narrowing
+`allowedClientIds` makes its requests fail within about a minute, because the
+proxy reuses a credential for at most 60 seconds and the controller then denies
+the next fetch. With `oidc` the client id only labels the log.
+
+Sessions live in memory and expire `ttlSeconds` after their last request
+(default 28800, at most 86400 and at least 60; the timeout restarts on every
+request that presents the session's pairing, whether the proxy then forwards
+or refuses it, so a session in use never expires on its own). Revoking a
+session refuses its next request; a response already streaming completes. A daemon
+holds at most 64 unexpired sessions (`429`); expired ones are dropped every
+60 seconds. A daemon restart drops all sessions: the sandboxed program then
+gets `403 pairing_invalid` on its next request and has to be started again
+with a new session. Each request on `/sandbox` leaves one line in the daemon
+log, `LLM proxy sandbox request`, with the session id, client id, method, path
+(prefix stripped, no query), status, refusal code, request and response bytes,
+duration and outcome. A completed or refused request has `outcome=complete`;
+one whose client disconnected before the upstream responded has `outcome=canceled`
+(status 0, response bytes 0); and one cut off during the response has
+`outcome=aborted`. For a request the proxy refused, the response bytes are 0:
+the error body is not counted. The log never carries a header, a body or a
+pairing value.
+
+What a session pairing is worth: it is a bearer secret for `/sandbox` on this
+machine. Any local process that holds it gets the user's gateway identity for
+the session's client id, on any method and path under `llmGateway.url`, until
+the session is revoked, idles out or the daemon restarts. It is not bound to
+the sandbox (loopback is reachable by every process on the machine), it is
+refused on every other route, and it is never forwarded upstream. The device
+pairing in turn never opens `/sandbox`, so the files that carry it (the
+`llm-proxy-pairing` file in the state directory, VS Code's
+`chatLanguageModels.json` and `settings.json`, Copilot CLI's
+`providers.json`) must stay unreadable from inside the sandbox; otherwise the
+program could use the device-wide routes instead. Sessions are minted on the
+local API only, never on the proxy's TCP listener. On Windows the local API's
+named pipe admits every interactive user of the machine, so another
+interactive user could create or revoke sessions on this daemon, the same
+exposure `/v1/llm-gateway/credential` has today.
+
+Note for hand-configured clients on the prefix-less route: a first path
+segment that starts with `sandbox` is now refused as an unknown route, like
+the other managed prefixes.
 
 ## Periodic re-apply (opt-in)
 

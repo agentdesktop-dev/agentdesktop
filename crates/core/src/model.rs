@@ -430,11 +430,67 @@ pub enum TelemetryEventKind {
     },
 }
 
+/// Request to register a sandbox session.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRequest {
+    /// Credential policy client ID the session's requests present to the gateway.
+    pub client_id: String,
+    /// Human-readable name for the session, shown in listings.
+    pub label: String,
+    /// Seconds without a request after which the session expires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<u64>,
+}
+
+/// A newly registered sandbox session. The pairing is shown here and nowhere else.
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionCreated {
+    /// Identifier used to list and revoke the session.
+    pub id: String,
+    /// Secret the session's client presents; never shown again.
+    pub pairing: String,
+    pub client_id: String,
+    pub label: String,
+    pub created_at_unix_seconds: u64,
+    /// When the session expires if it receives no further request.
+    pub expires_at_unix_seconds: u64,
+    /// Base URL the session's client sends its requests to.
+    pub base_url: String,
+}
+
+impl std::fmt::Debug for SessionCreated {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionCreated")
+            .field("id", &self.id)
+            .field("pairing", &"<redacted>")
+            .field("client_id", &self.client_id)
+            .field("label", &self.label)
+            .field("created_at_unix_seconds", &self.created_at_unix_seconds)
+            .field("expires_at_unix_seconds", &self.expires_at_unix_seconds)
+            .field("base_url", &self.base_url)
+            .finish()
+    }
+}
+
+/// A registered sandbox session, without its pairing.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInfo {
+    pub id: String,
+    pub client_id: String,
+    pub label: String,
+    pub created_at_unix_seconds: u64,
+    /// When the session expires if it receives no further request.
+    pub expires_at_unix_seconds: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ContainmentInfo, ControllerConnectionError, ControllerConnectionStatus, Launch,
-        LaunchRequest, LaunchStatus, ProgramChoice,
+        LaunchRequest, LaunchStatus, ProgramChoice, SessionCreated, SessionInfo, SessionRequest,
     };
 
     #[test]
@@ -555,5 +611,115 @@ mod tests {
         assert_eq!(json["exitCode"], 3);
         assert_eq!(json["endedAtUnixSeconds"], 1_700_000_100u64);
         assert_eq!(serde_json::from_value::<Launch>(json).unwrap(), exited);
+    }
+
+    #[test]
+    fn session_request_uses_camel_case_and_ttl_seconds_is_optional() {
+        let request = SessionRequest {
+            client_id: "claude-code".into(),
+            label: "lab".into(),
+            ttl_seconds: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            serde_json::json!({"clientId": "claude-code", "label": "lab"})
+        );
+        let with_ttl = SessionRequest {
+            ttl_seconds: Some(120),
+            ..request.clone()
+        };
+        assert_eq!(
+            serde_json::to_value(&with_ttl).unwrap(),
+            serde_json::json!({"clientId": "claude-code", "label": "lab", "ttlSeconds": 120})
+        );
+
+        let parsed: SessionRequest =
+            serde_json::from_str(r#"{"clientId":"claude-code","label":"lab"}"#).unwrap();
+        assert_eq!(parsed, request);
+        let parsed: SessionRequest =
+            serde_json::from_str(r#"{"clientId":"claude-code","label":"lab","ttlSeconds":120}"#)
+                .unwrap();
+        assert_eq!(parsed, with_ttl);
+        // A newer client may send fields this build does not know.
+        let parsed: SessionRequest = serde_json::from_str(
+            r#"{"clientId":"claude-code","label":"lab","somethingNew":{"a":1}}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed, request);
+        // The wire names are camelCase only.
+        assert!(
+            serde_json::from_str::<SessionRequest>(r#"{"client_id":"claude-code","label":"lab"}"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn session_created_round_trips_with_camel_case_field_names() {
+        let created = SessionCreated {
+            id: "0123456789abcdef".into(),
+            pairing: "p".repeat(43),
+            client_id: "claude-code".into(),
+            label: "lab".into(),
+            created_at_unix_seconds: 1_000,
+            expires_at_unix_seconds: 29_800,
+            base_url: "http://127.0.0.1:4000/sandbox".into(),
+        };
+        let json = serde_json::to_value(&created).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "id": "0123456789abcdef",
+                "pairing": "p".repeat(43),
+                "clientId": "claude-code",
+                "label": "lab",
+                "createdAtUnixSeconds": 1_000,
+                "expiresAtUnixSeconds": 29_800,
+                "baseUrl": "http://127.0.0.1:4000/sandbox",
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<SessionCreated>(json).unwrap(),
+            created
+        );
+    }
+
+    #[test]
+    fn session_created_debug_redacts_the_pairing() {
+        let created = SessionCreated {
+            id: "0123456789abcdef".into(),
+            pairing: "secret-pairing-value".into(),
+            client_id: "claude-code".into(),
+            label: "lab".into(),
+            created_at_unix_seconds: 1_000,
+            expires_at_unix_seconds: 29_800,
+            base_url: "http://127.0.0.1:4000/sandbox".into(),
+        };
+        let debug = format!("{created:?}");
+        assert!(debug.contains("<redacted>"), "{debug}");
+        assert!(!debug.contains("secret-pairing-value"), "{debug}");
+    }
+
+    #[test]
+    fn session_info_has_no_pairing_and_uses_camel_case() {
+        let info = SessionInfo {
+            id: "0123456789abcdef".into(),
+            client_id: "claude-code".into(),
+            label: "lab".into(),
+            created_at_unix_seconds: 1_000,
+            expires_at_unix_seconds: 29_800,
+        };
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "id": "0123456789abcdef",
+                "clientId": "claude-code",
+                "label": "lab",
+                "createdAtUnixSeconds": 1_000,
+                "expiresAtUnixSeconds": 29_800,
+            })
+        );
+        assert_eq!(serde_json::from_value::<SessionInfo>(json).unwrap(), info);
+        assert_eq!(info.clone(), info);
     }
 }
