@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::engine::mxc::build_request;
 use super::*;
 
 #[test]
@@ -145,6 +146,7 @@ mod handler {
     use async_trait::async_trait;
     use axum::{Json, extract::State, http::StatusCode};
 
+    use super::super::engine::mxc::build_request;
     use super::super::*;
 
     /// Maps a request path (`\`-joined, possibly mixed) back to the real
@@ -325,6 +327,7 @@ mod handler {
             registry: LaunchRegistry::new(),
             availability: Some(ContainmentInfo {
                 executor: "wxc-exec.exe".into(),
+                engine: "mxc".to_owned(),
                 available: true,
                 error: None,
                 managed_settings_source: None,
@@ -343,6 +346,7 @@ mod handler {
                 state_dir: std::env::temp_dir(),
             }),
             egress: agentdesktop_core::config::ContainmentEgress::default(),
+            engine: Arc::new(engine::mxc::MxcEngine),
         }
     }
 

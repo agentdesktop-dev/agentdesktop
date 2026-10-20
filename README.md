@@ -742,10 +742,15 @@ daemon:
   containment:
     executor: C:\Program Files\mxc\x64\wxc-exec.exe
     # egress: deny   # opt-in: the box loses direct outbound network
+    # engine: mxc    # the sandbox engine; `mxc` is the only value
 ```
 
 `run` needs the local LLM proxy: without `daemon.llmProxy.listen` it answers
 `409`.
+
+`daemon.containment.engine` selects the sandbox engine; `mxc` is its only
+value and the default, so the key can stay unset. An older daemon refuses a
+config that sets it.
 
 The daemon reports the setting as `containment` in daemon-info (`available`
 with the reason when not). Then, from the workspace directory:

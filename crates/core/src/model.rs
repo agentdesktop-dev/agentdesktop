@@ -163,6 +163,8 @@ pub enum ManagedSettingsSource {
 pub struct ContainmentInfo {
     /// Configured `daemon.containment.executor` (lossy display string).
     pub executor: String,
+    /// The sandbox engine name.
+    pub engine: String,
     /// Whether launches are possible. `false` carries the reason in `error`.
     pub available: bool,
     /// Why launches are impossible, when `available` is `false`.
@@ -556,6 +558,7 @@ mod tests {
     fn containment_info_is_camel_case_and_omits_an_absent_error() {
         let available = ContainmentInfo {
             executor: r"C:\mxc\x64\wxc-exec.exe".into(),
+            engine: "mxc".to_owned(),
             available: true,
             error: None,
             managed_settings_source: None,
@@ -567,6 +570,7 @@ mod tests {
             serde_json::to_value(&available).unwrap(),
             serde_json::json!({
                 "executor": r"C:\mxc\x64\wxc-exec.exe",
+                "engine": "mxc",
                 "available": true,
                 "managedSettingsSource": null,
                 "managedHooksLocked": false,
@@ -575,7 +579,7 @@ mod tests {
         );
 
         let unavailable: ContainmentInfo = serde_json::from_str(
-            r#"{"executor":"x","available":false,"error":"requires user mode"}"#,
+            r#"{"executor":"x","engine":"mxc","available":false,"error":"requires user mode"}"#,
         )
         .unwrap();
         assert_eq!(unavailable.error.as_deref(), Some("requires user mode"));
@@ -741,6 +745,7 @@ mod tests {
         // ContainmentInfo with managed-settings fields
         let info_with_fields = ContainmentInfo {
             executor: r"C:\mxc\x64\wxc-exec.exe".into(),
+            engine: "mxc".to_owned(),
             available: true,
             error: None,
             managed_settings_source: Some(ManagedSettingsSource::Hklm),
@@ -759,6 +764,7 @@ mod tests {
         // ContainmentInfo without managed-settings fields
         let info_without_fields = ContainmentInfo {
             executor: "x".into(),
+            engine: "mxc".to_owned(),
             available: false,
             error: Some("requires user mode".into()),
             managed_settings_source: None,

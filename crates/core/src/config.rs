@@ -145,6 +145,10 @@ pub struct ContainmentStartupConfig {
     /// Outbound network for the sandboxed program: `allow` (default) or `deny`. With `deny` the box reaches only loopback: model requests go through the local LLM proxy, and git over HTTPS and package downloads fail. Read at startup only (restart the daemon after changing it); ignored with `--once` and `--dry-run`.
     #[serde(default, skip_serializing_if = "ContainmentEgress::is_default")]
     pub egress: ContainmentEgress,
+    /// Sandbox engine: `mxc` (default, the only engine). Read at startup only
+    /// (restart the daemon after changing it); ignored with `--once` and `--dry-run`.
+    #[serde(default, skip_serializing_if = "ContainmentEngine::is_default")]
+    pub engine: ContainmentEngine,
 }
 
 /// Checks `daemon.containment`. With `windows == true` the executor must be an
@@ -387,6 +391,23 @@ pub enum ContainmentEgress {
 }
 
 impl ContainmentEgress {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Sandbox engine: `mxc` (default, the only engine). Read at startup only
+/// (restart the daemon after changing it); ignored with `--once` and `--dry-run`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum ContainmentEngine {
+    /// MXC (Windows AppContainer).
+    #[default]
+    Mxc,
+}
+
+impl ContainmentEngine {
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
@@ -2619,6 +2640,7 @@ programs:
         super::ContainmentStartupConfig {
             executor: executor.into(),
             egress: super::ContainmentEgress::default(),
+            engine: super::ContainmentEngine::default(),
         }
     }
 
@@ -3018,6 +3040,7 @@ programs:
         let cfg = super::ContainmentStartupConfig {
             executor: std::path::PathBuf::from("/x/wxc-exec"),
             egress: super::ContainmentEgress::Allow,
+            engine: super::ContainmentEngine::default(),
         };
         let json = serde_json::to_value(&cfg).unwrap();
         assert!(
@@ -3028,12 +3051,48 @@ programs:
         let cfg_deny = super::ContainmentStartupConfig {
             executor: std::path::PathBuf::from("/x/wxc-exec"),
             egress: super::ContainmentEgress::Deny,
+            engine: super::ContainmentEngine::default(),
         };
         let json_deny = serde_json::to_value(&cfg_deny).unwrap();
         assert_eq!(
             json_deny.get("egress").and_then(|v| v.as_str()),
             Some("deny"),
             "deny egress is serialized"
+        );
+    }
+
+    #[test]
+    fn containment_engine_explicit_mxc_parses() {
+        let config = super::parse_local_daemon(
+            "daemon:\n  containment:\n    executor: 'C:\\mxc\\wxc-exec.exe'\n    engine: mxc\n",
+        )
+        .expect("explicit mxc engine parses");
+        let engine = config.daemon.unwrap().containment.unwrap().engine;
+        assert_eq!(engine, super::ContainmentEngine::Mxc);
+    }
+
+    #[test]
+    fn containment_engine_rejects_mxc_capitalized() {
+        assert!(
+            super::parse_local_daemon(
+                "daemon:\n  containment:\n    executor: 'C:\\mxc\\wxc-exec.exe'\n    engine: MXC\n"
+            )
+            .is_err(),
+            "MXC capitalized is rejected"
+        );
+    }
+
+    #[test]
+    fn containment_engine_unset_not_serialized() {
+        let cfg = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("/x/wxc-exec"),
+            egress: super::ContainmentEgress::Allow,
+            engine: super::ContainmentEngine::default(),
+        };
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert!(
+            json.get("engine").is_none(),
+            "default engine is not serialized"
         );
     }
 }

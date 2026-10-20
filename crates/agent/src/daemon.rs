@@ -103,6 +103,8 @@ struct ResolvedDaemonArgs {
     claude_settings_overridden: bool,
     /// Resolved copy of `daemon.containment.egress` for the launch routes.
     containment_egress: config::ContainmentEgress,
+    /// Resolved copy of `daemon.containment.engine`; selects the sandbox engine.
+    containment_engine: config::ContainmentEngine,
 }
 
 struct ResolvedToolConfigPath {
@@ -257,6 +259,7 @@ impl DaemonArgs {
                 containment,
                 claude_settings_overridden,
                 containment_egress: config::ContainmentEgress::default(),
+                containment_engine: config::ContainmentEngine::default(),
             });
         }
 
@@ -359,6 +362,11 @@ impl DaemonArgs {
                 .containment
                 .as_ref()
                 .map(|c| c.egress)
+                .unwrap_or_default(),
+            containment_engine: startup
+                .containment
+                .as_ref()
+                .map(|c| c.engine)
                 .unwrap_or_default(),
         })
     }
@@ -556,12 +564,17 @@ where
     } else {
         None
     };
+    // The sandbox engine is read at startup only; `mxc` is the only engine.
+    let engine: Arc<dyn launch::engine::Engine> = match args.containment_engine {
+        config::ContainmentEngine::Mxc => Arc::new(launch::engine::mxc::MxcEngine),
+    };
     let containment = launch::containment_info(
         args.containment.as_ref(),
         args.user,
         cfg!(windows),
         args.claude_settings_overridden,
         &|path| path.exists(),
+        engine.name(),
     );
     let (usage_store, usage_receiver) = match &args.usage {
         Some(usage) => {
@@ -747,6 +760,7 @@ where
             .and_then(|listener| listener.local_addr().ok()),
         session_policy,
         egress: args.containment_egress,
+        engine,
     };
     let app = api::router(state.clone())
         .merge(llm_proxy::sessions::session_router(session_api))
@@ -2482,6 +2496,7 @@ programs:
             containment: Some(config::ContainmentStartupConfig {
                 executor: PathBuf::from(r"C:\mxc\x64\wxc-exec.exe"),
                 egress: config::ContainmentEgress::default(),
+                engine: config::ContainmentEngine::default(),
             }),
             ..Default::default()
         }

@@ -701,62 +701,58 @@ pub fn verify(
 }
 
 /// Return the list of executable-config paths to check.
-/// Every executable-config entry of `build_request`, plus workspace `.claude` and `.git` (identity only).
+/// Every executable-config entry of the launch profile, plus workspace
+/// `.claude` and `.git` (identity only).
 pub fn integrity_paths(home: &Path, cwd: &Path) -> Vec<IntegrityRoot> {
-    vec![
-        IntegrityRoot {
-            path: home.join(".claude").join("settings.json"),
+    let profile = &super::profile::CLAUDE_CODE;
+    let claude_dir = home.join(".claude");
+    let workspace_claude = cwd.join(".claude");
+    let git = cwd.join(".git");
+    // The workspace entries interleave with the two identity-only folders in
+    // the order the watcher has always reported them.
+    let mut roots: Vec<IntegrityRoot> = profile
+        .home_executable_config
+        .iter()
+        .map(|entry| IntegrityRoot {
+            path: claude_dir.join(entry),
             mode: RootMode::Recursive,
-        },
-        IntegrityRoot {
-            path: home.join(".claude").join("hooks"),
-            mode: RootMode::Recursive,
-        },
-        IntegrityRoot {
-            path: home.join(".claude").join("plugins"),
-            mode: RootMode::Recursive,
-        },
-        IntegrityRoot {
-            path: cwd.join(".claude"),
-            mode: RootMode::IdentityOnly,
-        },
-        IntegrityRoot {
-            path: cwd.join(".claude").join("settings.json"),
-            mode: RootMode::Recursive,
-        },
-        IntegrityRoot {
-            path: cwd.join(".claude").join("settings.local.json"),
-            mode: RootMode::Recursive,
-        },
-        IntegrityRoot {
-            path: cwd.join(".claude").join("hooks"),
-            mode: RootMode::Recursive,
-        },
-        IntegrityRoot {
-            path: cwd.join(".mcp.json"),
-            mode: RootMode::Recursive,
-        },
-        IntegrityRoot {
-            path: cwd.join(".git"),
-            mode: RootMode::IdentityOnly,
-        },
-        IntegrityRoot {
-            path: cwd.join("HEAD"),
-            mode: RootMode::Recursive,
-        },
-        IntegrityRoot {
-            path: cwd.join(".git").join("config"),
-            mode: RootMode::Recursive,
-        },
-        IntegrityRoot {
-            path: cwd.join(".git").join("hooks"),
-            mode: RootMode::Recursive,
-        },
-        IntegrityRoot {
-            path: cwd.join(".git").join("commondir"),
-            mode: RootMode::Recursive,
-        },
-    ]
+        })
+        .collect();
+    roots.push(IntegrityRoot {
+        path: workspace_claude.clone(),
+        mode: RootMode::IdentityOnly,
+    });
+    roots.extend(
+        profile
+            .workspace_claude_entries
+            .iter()
+            .map(|entry| IntegrityRoot {
+                path: workspace_claude.join(entry),
+                mode: RootMode::Recursive,
+            }),
+    );
+    roots.push(IntegrityRoot {
+        path: cwd.join(profile.mcp_json),
+        mode: RootMode::Recursive,
+    });
+    roots.push(IntegrityRoot {
+        path: git.clone(),
+        mode: RootMode::IdentityOnly,
+    });
+    roots.push(IntegrityRoot {
+        path: cwd.join(profile.workspace_head),
+        mode: RootMode::Recursive,
+    });
+    roots.extend(
+        profile
+            .git_executable_config
+            .iter()
+            .map(|entry| IntegrityRoot {
+                path: git.join(entry),
+                mode: RootMode::Recursive,
+            }),
+    );
+    roots
 }
 
 /// Verifies the roots every `period` while the launch runs. Each pass is

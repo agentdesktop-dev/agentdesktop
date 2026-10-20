@@ -15,6 +15,7 @@ use std::{
     time::Duration,
 };
 
+use crate::{api, secure_fs};
 use agentdesktop_core::{
     config::{ContainmentStartupConfig, DaemonConfig},
     model::{
@@ -31,12 +32,12 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use serde::Serialize;
 
-use crate::{api, secure_fs};
-
+pub(crate) mod engine;
 pub mod host;
 pub mod integrity;
+pub(crate) mod plan;
+pub(crate) mod profile;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -63,6 +64,7 @@ pub fn containment_info(
     windows: bool,
     claude_settings_overridden: bool,
     exists: &dyn Fn(&Path) -> bool,
+    engine_name: &'static str,
 ) -> Option<ContainmentInfo> {
     let cfg = cfg?;
     let executor = cfg.executor.display().to_string();
@@ -82,6 +84,7 @@ pub fn containment_info(
     };
     Some(ContainmentInfo {
         executor,
+        engine: engine_name.to_owned(),
         available: error.is_none(),
         error,
         managed_settings_source: None,
@@ -333,67 +336,7 @@ pub fn check_args(args: &[String]) -> Result<Vec<String>, String> {
         .collect()
 }
 
-// No Debug: the request's environment carries the session pairing.
-#[derive(Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MxcRequest {
-    pub version: String,
-    pub containment: String,
-    pub container_id: String,
-    pub ui: MxcUi,
-    pub process: MxcProcess,
-    pub filesystem: MxcFilesystem,
-    pub network: MxcNetwork,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MxcUi {
-    pub disable: bool,
-    pub clipboard: String,
-    pub injection: bool,
-}
-
-// No Debug: the env list carries the session pairing.
-#[derive(Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MxcProcess {
-    pub command_line: String,
-    pub cwd: String,
-    pub inherit_default_env: bool,
-    /// `KEY=VALUE` entries: MXC 1.0.0 rejects an object here (lab-verified).
-    pub env: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct MxcFilesystem {
-    #[serde(rename = "readwritePaths")]
-    pub readwrite_paths: Vec<String>,
-    #[serde(rename = "readonlyPaths")]
-    pub readonly_paths: Vec<String>,
-    #[serde(rename = "deniedPaths")]
-    pub denied_paths: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct MxcNetwork {
-    pub egress: MxcEgress,
-    pub ingress: MxcIngress,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct MxcEgress {
-    pub default: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MxcIngress {
-    pub default: String,
-    pub host_loopback: String,
-}
-
-/// Everything `build_request` may use. Paths are Windows-style strings in a
+/// Everything `plan` may use. Paths are Windows-style strings in a
 /// `PathBuf`; `exists` is called with `\`-joined paths.
 pub struct LaunchInput<'a> {
     pub launch_id: String,
@@ -416,7 +359,7 @@ pub struct LaunchInput<'a> {
 }
 
 /// A path as the request carries it: `\` separators only.
-fn win(path: &Path) -> String {
+pub(crate) fn win(path: &Path) -> String {
     path.to_string_lossy().replace('/', "\\")
 }
 
@@ -424,9 +367,11 @@ fn join(base: &str, rest: &str) -> String {
     format!("{}\\{rest}", base.trim_end_matches('\\'))
 }
 
-/// Builds the MXC request. Pure: no host environment or filesystem reads
-/// beyond `input.exists` and `input.is_dir`.
-pub fn build_request(input: &LaunchInput) -> MxcRequest {
+/// Resolves a launch input into a plan: the canonical executable, validated args,
+/// final environment, and existence-filtered paths. Existence filtering reflects
+/// MXC's grant rules. Pure: no host environment or filesystem reads beyond
+/// `input.exists` and `input.is_dir`.
+pub(crate) fn plan(input: &LaunchInput, profile: &profile::ClaudeCodeProfile) -> plan::LaunchPlan {
     let exists = |path: &str| (input.exists)(Path::new(path));
     let is_dir = |path: &str| (input.is_dir)(Path::new(path));
     let cwd = win(&input.cwd);
@@ -460,48 +405,34 @@ pub fn build_request(input: &LaunchInput) -> MxcRequest {
     path.push(client_exe_dir.clone());
 
     let mut env = input.base_env.clone();
-    env.insert("TERM".into(), "xterm-256color".into());
     env.insert("PATH".into(), path.join(";"));
     env.insert("TEMP".into(), tmp.clone());
     env.insert("TMP".into(), tmp.clone());
     env.insert("CLAUDE_CONFIG_DIR".into(), claude_dir.clone());
-    env.insert("CLAUDE_CODE_USE_POWERSHELL_TOOL".into(), "1".into());
-    env.insert("DISABLE_AUTOUPDATER".into(), "1".into());
-    env.insert(
-        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),
-        "1".into(),
-    );
+    for (key, value) in profile.fixed_env {
+        env.insert((*key).to_owned(), (*value).to_owned());
+    }
     env.insert("ANTHROPIC_BASE_URL".into(), input.relay_base_url.clone());
-    env.insert("ANTHROPIC_AUTH_TOKEN".into(), "placeholder".into());
     env.insert(
         "ANTHROPIC_CUSTOM_HEADERS".into(),
         format!("{}: {}", crate::llm_proxy::PAIRING_HEADER, input.pairing),
     );
-    env.insert("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST".into(), "1".into());
     env.insert("HOME".into(), home.clone());
-
-    let mut command_line = format!(
-        "cmd.exe /d /v:off /c start \"agentdesktop: claude\" /WAIT /D \"{cwd}\" \"{executable}\""
-    );
-    for arg in &input.args {
-        command_line.push(' ');
-        command_line.push_str(arg);
-    }
 
     let mut readonly: Vec<String> = Vec::new();
     let mut denied: Vec<String> = Vec::new();
     // Runtime directories: granted read-only when they exist, simply absent
-    // otherwise (nothing the box could create there matters).
+    // otherwise (nothing the box could create there matters). The profile's
+    // home-relative entries keep their positions among the discovered
+    // directories; the request bytes pin the order.
     let runtime = [
         Some(exe_dir),
-        Some(join(&home, r".local\share\claude")),
+        Some(join(&home, profile.runtime_share)),
         git_dir,
         Some(client_exe_dir),
         program_files_claude,
-        // git reads the user's configuration before anything else; unreadable
-        // means every git command fails in the box (lab L4e).
-        Some(join(&home, ".gitconfig")),
-        Some(join(&home, r".config\git\config")),
+        Some(join(&home, profile.git_user_config)),
+        Some(join(&home, profile.git_xdg_config)),
     ];
     for candidate in runtime.into_iter().flatten() {
         if exists(&candidate) && !readonly.contains(&candidate) {
@@ -510,24 +441,22 @@ pub fn build_request(input: &LaunchInput) -> MxcRequest {
     }
     // Executable configuration: read-only when present, denied when absent, so
     // the box can neither change nor create it.
-    let mut executable_config = vec![
-        join(&claude_dir, "settings.json"),
-        join(&claude_dir, "hooks"),
-        join(&claude_dir, "plugins"),
-        join(&cwd, ".mcp.json"),
-        // A `HEAD` file at the workspace root would let git treat the
-        // workspace itself as a bare repository with box-written config.
-        join(&cwd, "HEAD"),
-    ];
+    let mut executable_config: Vec<String> = profile
+        .home_executable_config
+        .iter()
+        .map(|entry| join(&claude_dir, entry))
+        .collect();
+    executable_config.push(join(&cwd, profile.mcp_json));
+    executable_config.push(join(&cwd, profile.workspace_head));
     // MXC refuses a denied path whose parent folder does not exist
     // (lab-verified, 0x80070003), so a workspace without `.claude` gets the
-    // folder itself denied instead of its three executable-config entries.
+    // folder itself denied instead of its executable-config entries.
     let workspace_claude = join(&cwd, ".claude");
-    let workspace_claude_entries = [
-        join(&workspace_claude, "settings.json"),
-        join(&workspace_claude, "settings.local.json"),
-        join(&workspace_claude, "hooks"),
-    ];
+    let workspace_claude_entries: Vec<String> = profile
+        .workspace_claude_entries
+        .iter()
+        .map(|entry| join(&workspace_claude, entry))
+        .collect();
     if exists(&workspace_claude) || workspace_claude_entries.iter().any(|path| exists(path)) {
         executable_config.extend(workspace_claude_entries);
     } else {
@@ -545,9 +474,12 @@ pub fn build_request(input: &LaunchInput) -> MxcRequest {
         // folder). `.git\HEAD` stays writable: git replaces it by rename on
         // every branch switch, and the root `HEAD` rule already blocks a
         // bare-repo fall-through.
-        executable_config.push(join(&git, "config"));
-        executable_config.push(join(&git, "hooks"));
-        executable_config.push(join(&git, "commondir"));
+        executable_config.extend(
+            profile
+                .git_executable_config
+                .iter()
+                .map(|entry| join(&git, entry)),
+        );
     }
     // A `.git` file (worktree, submodule) is left as it is.
     for path in executable_config {
@@ -557,64 +489,33 @@ pub fn build_request(input: &LaunchInput) -> MxcRequest {
             denied.push(path);
         }
     }
-    for secret in [
-        join(&claude_dir, ".credentials.json"),
-        join(&claude_dir, "history.jsonl"),
-        // IDE lock files carry auth tokens for the editor bridge.
-        join(&claude_dir, "ide"),
-        join(&home, ".ssh"),
-        join(&home, ".aws"),
-        join(&home, ".azure"),
-        join(&home, ".kube"),
-    ] {
-        denied.push(secret);
+    for secret in profile.denied_secrets {
+        denied.push(join(&home, secret));
     }
 
-    MxcRequest {
-        version: "1.0.0".into(),
-        containment: "processcontainer".into(),
-        container_id: format!("agentdesktop-{}", input.launch_id),
-        ui: MxcUi {
-            disable: false,
-            clipboard: "none".into(),
-            injection: false,
-        },
-        process: MxcProcess {
-            command_line,
-            cwd: cwd.clone(),
-            inherit_default_env: false,
-            env: env
-                .into_iter()
-                .map(|(key, value)| format!("{key}={value}"))
-                .collect(),
-        },
-        filesystem: MxcFilesystem {
-            readwrite_paths: vec![cwd, claude_dir, tmp],
-            readonly_paths: readonly,
-            denied_paths: denied,
-        },
-        network: MxcNetwork {
-            egress: MxcEgress {
-                default: match input.egress {
-                    agentdesktop_core::config::ContainmentEgress::Allow => "allow".into(),
-                    agentdesktop_core::config::ContainmentEgress::Deny => "deny".into(),
-                },
-            },
-            ingress: MxcIngress {
-                default: "allow".into(),
-                host_loopback: "allow".into(),
-            },
-        },
+    plan::LaunchPlan {
+        program: input.executable.clone(),
+        args: input.args.clone(),
+        window_title: profile.window_title,
+        cwd: input.cwd.clone(),
+        env,
+        readwrite: vec![
+            PathBuf::from(cwd),
+            PathBuf::from(claude_dir),
+            PathBuf::from(tmp),
+        ],
+        readonly: readonly.into_iter().map(PathBuf::from).collect(),
+        denied: denied.into_iter().map(PathBuf::from).collect(),
+        egress: input.egress,
     }
 }
 
 /// Creates `launch_dir` (private) and writes `request.json` (UTF-8, no BOM,
 /// mode 0600) into it; returns the file's path.
-pub fn write_request(launch_dir: &Path, request: &MxcRequest) -> anyhow::Result<PathBuf> {
+pub fn write_request(launch_dir: &Path, contents: &[u8]) -> anyhow::Result<PathBuf> {
     secure_fs::ensure_private_dir(launch_dir)?;
     let path = launch_dir.join("request.json");
-    let contents = serde_json::to_vec_pretty(request).context("encode MXC request")?;
-    secure_fs::atomic_write(&path, &contents, 0o600)?;
+    secure_fs::atomic_write(&path, contents, 0o600)?;
     Ok(path)
 }
 
@@ -854,6 +755,7 @@ pub struct LaunchState {
     pub(crate) proxy_address: Option<std::net::SocketAddr>,
     pub(crate) session_policy: Arc<dyn crate::llm_proxy::sessions::SessionPolicy>,
     pub(crate) egress: agentdesktop_core::config::ContainmentEgress,
+    pub(crate) engine: Arc<dyn engine::Engine>,
 }
 
 /// `POST /v1/launch` and `GET /v1/launches`, behind the peer check.
@@ -1058,25 +960,32 @@ async fn start_launch(
     }
     let exists = |path: &Path| host.exists(path);
     let is_dir = |path: &Path| host.is_dir(path);
-    let mxc = build_request(&LaunchInput {
-        launch_id: launch_id.clone(),
-        executable: input.executable,
-        client_exe_dir: host.client_exe_dir(),
-        cwd: input.cwd.clone(),
-        args: input.args,
-        home: host.home(),
-        state_dir,
-        launch_dir: launch_dir.clone(),
-        git_dir: host.git_dir(),
-        program_files_claude: host.program_files_claude(),
-        egress: state.egress,
-        relay_base_url: crate::llm_proxy::sessions::sandbox_base_url(input.proxy_address),
-        pairing: session.pairing.to_string(),
-        base_env: host.base_env(),
-        exists: &exists,
-        is_dir: &is_dir,
-    });
-    let request_path = match write_request(&launch_dir, &mxc) {
+    let launch_plan = plan(
+        &LaunchInput {
+            launch_id: launch_id.clone(),
+            executable: input.executable,
+            client_exe_dir: host.client_exe_dir(),
+            cwd: input.cwd.clone(),
+            args: input.args,
+            home: host.home(),
+            state_dir,
+            launch_dir: launch_dir.clone(),
+            git_dir: host.git_dir(),
+            program_files_claude: host.program_files_claude(),
+            egress: state.egress,
+            relay_base_url: crate::llm_proxy::sessions::sandbox_base_url(input.proxy_address),
+            pairing: session.pairing.to_string(),
+            base_env: host.base_env(),
+            exists: &exists,
+            is_dir: &is_dir,
+        },
+        &profile::CLAUDE_CODE,
+    );
+    let request_bytes = match state.engine.request(&launch_plan, &launch_id) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(&launch_dir, format!("encode launch request: {error:#}")),
+    };
+    let request_path = match write_request(&launch_dir, &request_bytes) {
         Ok(path) => path,
         Err(error) => return fail(&launch_dir, format!("prepare launch: {error:#}")),
     };
@@ -1193,7 +1102,7 @@ async fn start_launch(
         launch_id: launch_id.clone(),
         program: PROGRAM.to_owned(),
         cwd: input.cwd,
-        container_id: format!("agentdesktop-{launch_id}"),
+        container_id: state.engine.container_id(&launch_id),
         status: LaunchStatus::Running,
         exit_code: None,
         started_at_unix_seconds: started_at,

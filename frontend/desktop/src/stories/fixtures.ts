@@ -45,6 +45,7 @@ export const containmentDaemonInfo: DaemonInfo = {
   ...standaloneDaemonInfo,
   containment: {
     executor: "C:\\Program Files\\mxc\\wxc-exec.exe",
+    engine: "mxc",
     available: false,
     error: "executor not found: C:\\Program Files\\mxc\\wxc-exec.exe",
     managedSettingsSource: null,

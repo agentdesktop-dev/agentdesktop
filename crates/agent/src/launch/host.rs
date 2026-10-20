@@ -20,23 +20,6 @@ use super::{
 };
 use crate::api;
 
-/// Environment variables copied from the daemon into the box.
-const BASE_ENV: [&str; 13] = [
-    "SystemRoot",
-    "windir",
-    "SystemDrive",
-    "ComSpec",
-    "PATHEXT",
-    "USERPROFILE",
-    "HOMEDRIVE",
-    "HOMEPATH",
-    "APPDATA",
-    "LOCALAPPDATA",
-    "ProgramFiles",
-    "ProgramData",
-    "USERNAME",
-];
-
 /// Directories a workspace may never be under, by environment variable.
 const SYSTEM_DIRS: [&str; 4] = [
     "SystemRoot",
@@ -44,10 +27,6 @@ const SYSTEM_DIRS: [&str; 4] = [
     "ProgramFiles(x86)",
     "ProgramData",
 ];
-
-/// Directories under the home the box must never see; the workspace may not
-/// be under them either.
-const DENIED_HOME_DIRS: [&str; 4] = [".ssh", ".aws", ".azure", ".kube"];
 
 /// The daemon's user, as the process environment describes it.
 pub struct HostEnvironment {
@@ -104,7 +83,8 @@ impl LaunchHost for HostEnvironment {
     }
 
     fn base_env(&self) -> BTreeMap<String, String> {
-        BASE_ENV
+        super::profile::CLAUDE_CODE
+            .base_env_keys
             .iter()
             .filter_map(|name| {
                 std::env::var(name)
@@ -122,8 +102,14 @@ impl LaunchHost for HostEnvironment {
                 .iter()
                 .filter_map(|name| std::env::var_os(name).map(PathBuf::from))
                 .collect(),
-            denied: DENIED_HOME_DIRS
+            // Directories under the home the box must never see; the
+            // workspace may not be under them either. These are the profile's
+            // top-level denied secrets (the `.claude` entries are guarded by
+            // the workspace rules separately).
+            denied: super::profile::CLAUDE_CODE
+                .denied_secrets
                 .iter()
+                .filter(|entry| !entry.contains('\\'))
                 .map(|name| self.home.join(name))
                 .collect(),
             app_data: ["APPDATA", "LOCALAPPDATA"]

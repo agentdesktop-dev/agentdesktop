@@ -71,6 +71,8 @@ export interface DaemonInfo {
   /** Sandboxed launch (`agentdesktop run`), when `daemon.containment` is configured. */
   containment?: {
     executor: string;
+    /** The sandbox engine name (`mxc`). */
+    engine: string;
     available: boolean;
     error?: string;
     managedSettingsSource?: "hklm" | "file" | "unknown" | null;

@@ -17,6 +17,7 @@
 |`daemon.codex.config`|string|Configuration file.|
 |`daemon.containment`|object|Sandboxed launch (`agentdesktop run`).|
 |`daemon.containment.egress`|enum|Outbound network for the sandboxed program: `allow` (default) or `deny`. With `deny` the box reaches only loopback: model requests go through the local LLM proxy, and git over HTTPS and package downloads fail. Read at startup only (restart the daemon after changing it); ignored with `--once` and `--dry-run`.<br>Possible values: `allow`, `deny`.|
+|`daemon.containment.engine`|enum|Sandbox engine: `mxc` (default, the only engine). Read at startup only<br>(restart the daemon after changing it); ignored with `--once` and `--dry-run`.<br>Possible values: `mxc`.|
 |`daemon.containment.executor`|string|Windows only. Absolute path to MXC `wxc-exec.exe`; no default. Read at<br>startup only (restart the daemon after changing it). Requires user<br>mode; ignored with `--once` and `--dry-run`.|
 |`daemon.copilot`|object|GitHub Copilot CLI paths (`config` = the `providers.json` to manage;<br>defaults to `COPILOT_PROVIDERS_CONFIG`, `$COPILOT_HOME/providers.json`,<br>then `~/.copilot/providers.json`).|
 |`daemon.copilot.config`|string|Configuration file.|
