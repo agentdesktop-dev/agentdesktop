@@ -194,6 +194,10 @@ pub struct Launch {
     pub started_at_unix_seconds: u64,
     pub ended_at_unix_seconds: Option<u64>,
     pub credential_expires_at_unix_seconds: Option<u64>,
+    /// True once the executable configuration changed while this launch ran
+    /// (set by the periodic check or the exit check; never cleared).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub integrity_drift: bool,
 }
 
 /// State of the daemon's receiver for gateway usage.
@@ -590,6 +594,7 @@ mod tests {
             started_at_unix_seconds: 1_700_000_000,
             ended_at_unix_seconds: None,
             credential_expires_at_unix_seconds: Some(1_700_003_600),
+            integrity_drift: false,
         };
         let json = serde_json::to_value(&running).unwrap();
         assert_eq!(json["launchId"], "0123456789abcdef");
@@ -597,6 +602,7 @@ mod tests {
         assert_eq!(json["status"], "running");
         assert_eq!(json["startedAtUnixSeconds"], 1_700_000_000u64);
         assert_eq!(json["credentialExpiresAtUnixSeconds"], 1_700_003_600u64);
+        assert!(json.get("integrityDrift").is_none());
         let again: Launch = serde_json::from_value(json).unwrap();
         assert_eq!(again, running);
 
@@ -721,5 +727,36 @@ mod tests {
         );
         assert_eq!(serde_json::from_value::<SessionInfo>(json).unwrap(), info);
         assert_eq!(info.clone(), info);
+    }
+
+    #[test]
+    fn launch_integrity_drift_round_trip() {
+        let without_drift = Launch {
+            launch_id: "0123456789abcdef".into(),
+            program: "claude-code".into(),
+            cwd: "/work/app".into(),
+            container_id: "agentdesktop-0123456789abcdef".into(),
+            status: LaunchStatus::Running,
+            exit_code: None,
+            started_at_unix_seconds: 1_700_000_000,
+            ended_at_unix_seconds: None,
+            credential_expires_at_unix_seconds: None,
+            integrity_drift: false,
+        };
+        let json = serde_json::to_value(&without_drift).unwrap();
+        assert!(json.get("integrityDrift").is_none());
+        let parsed: Launch = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, without_drift);
+        assert!(!parsed.integrity_drift);
+
+        let with_drift = Launch {
+            integrity_drift: true,
+            ..without_drift
+        };
+        let json = serde_json::to_value(&with_drift).unwrap();
+        assert_eq!(json["integrityDrift"], true);
+        let parsed: Launch = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, with_drift);
+        assert!(parsed.integrity_drift);
     }
 }

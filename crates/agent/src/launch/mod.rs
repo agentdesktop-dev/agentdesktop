@@ -36,6 +36,7 @@ use serde::Serialize;
 use crate::{api, secure_fs};
 
 pub mod host;
+pub mod integrity;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -694,6 +695,64 @@ pub trait LaunchChild: Send {
     fn kill(&mut self) -> io::Result<()>;
 }
 
+/// Hex of a file's content hash; "N/A" for everything that is not a file.
+fn format_sha256(snapshot: &integrity::FileSnapshot) -> String {
+    match snapshot {
+        integrity::FileSnapshot::File { sha256, .. } => {
+            let mut hex = String::with_capacity(64);
+            for byte in sha256 {
+                hex.push_str(&format!("{:02x}", byte));
+            }
+            hex
+        }
+        _ => "N/A".to_string(),
+    }
+}
+
+/// The launch-time integrity state: the checked roots, their snapshot taken
+/// before spawn, and the filesystem the checks read.
+struct IntegrityCheck {
+    roots: Vec<integrity::IntegrityRoot>,
+    baseline: BTreeMap<PathBuf, integrity::FileSnapshot>,
+    fs: Arc<dyn integrity::IntegrityFs>,
+}
+
+impl IntegrityCheck {
+    /// Verifies against the launch-time snapshot off the async runtime, logs
+    /// each change, and returns whether anything changed.
+    async fn verify_and_log(&self, launch_id: &str) -> bool {
+        let roots = self.roots.clone();
+        let baseline = self.baseline.clone();
+        let fs = self.fs.clone();
+        let result = match tokio::task::spawn_blocking(move || {
+            integrity::verify(&roots, &baseline, fs.as_ref())
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::warn!(launch_id, %error, "integrity check failed");
+                return false;
+            }
+        };
+        let mut any = false;
+        for (path, change) in result.changed {
+            any = true;
+            let before_sha256 = format_sha256(&change.before);
+            let after_sha256 = format_sha256(&change.after);
+            tracing::warn!(
+                launch_id,
+                path = %path.display(),
+                change = %change.kind,
+                before_sha256,
+                after_sha256,
+                "executable config changed while launch ran"
+            );
+        }
+        any
+    }
+}
+
 fn stop_executor(child: &mut dyn LaunchChild, launch_id: &str) {
     if let Err(error) = child.kill() {
         tracing::warn!(launch_id, %error, "failed to stop the executor process");
@@ -723,6 +782,10 @@ pub trait LaunchHost: Send + Sync {
     fn program_files_claude(&self) -> Option<PathBuf>;
     fn client_exe_dir(&self) -> PathBuf;
     fn now(&self) -> u64;
+
+    fn integrity_fs(&self) -> Arc<dyn integrity::IntegrityFs> {
+        Arc::new(integrity::REAL_FS)
+    }
 }
 
 /// Running launches plus the last 32 exited ones. Clones share state.
@@ -788,6 +851,16 @@ impl LaunchRegistry {
             .find(|launch| launch.launch_id == launch_id)
         {
             launch.credential_expires_at_unix_seconds = Some(expires_at);
+        }
+    }
+
+    pub fn set_integrity_drift(&self, launch_id: &str) {
+        if let Some(launch) = self
+            .lock()
+            .iter_mut()
+            .find(|launch| launch.launch_id == launch_id)
+        {
+            launch.integrity_drift = true;
         }
     }
 
@@ -997,6 +1070,40 @@ async fn start_launch(
         Ok(path) => path,
         Err(error) => return fail(&launch_dir, format!("prepare launch: {error:#}")),
     };
+
+    // Take the integrity snapshot before spawn
+    let integrity_roots = integrity::integrity_paths(&host.home(), &input.cwd);
+    let integrity_fs = host.integrity_fs();
+    let baseline = tokio::task::spawn_blocking({
+        let roots = integrity_roots.clone();
+        let fs = integrity_fs.clone();
+        move || integrity::snapshot(&roots, fs.as_ref())
+    })
+    .await
+    .unwrap_or_else(|error| {
+        tracing::warn!(launch_id, %error, "integrity snapshot failed; every root will be reported as appeared");
+        BTreeMap::new()
+    });
+
+    // Over-budget roots are watched by structure (names, sizes, identities),
+    // not content; that is expected on real machines (plugins), so debug.
+    for (path, snap) in &baseline {
+        match snap {
+            integrity::FileSnapshot::TooLarge { .. } => {
+                tracing::debug!(launch_id, path = %path.display(), "integrity check: over the content budget, structure only");
+            }
+            integrity::FileSnapshot::Unreadable { kind } => {
+                tracing::warn!(launch_id, path = %path.display(), ?kind, "integrity check: root unreadable at launch; content unwatched while it stays so");
+            }
+            _ => {}
+        }
+    }
+    let integrity_check = IntegrityCheck {
+        roots: integrity_roots,
+        baseline,
+        fs: integrity_fs,
+    };
+
     let mut child =
         match state
             .executor
@@ -1013,6 +1120,7 @@ async fn start_launch(
         format!("{} {}", child.pid(), child.start_time()),
     ) {
         stop_executor(child.as_mut(), &launch_id);
+        integrity_check.verify_and_log(&launch_id).await;
         return fail(&launch_dir, format!("record the launch pid: {error}"));
     }
 
@@ -1023,6 +1131,7 @@ async fn start_launch(
         match child.try_wait() {
             Ok(None) => {}
             Ok(Some(code)) => {
+                integrity_check.verify_and_log(&launch_id).await;
                 let tail = log_tail(&log_path);
                 return fail(
                     &launch_dir,
@@ -1034,6 +1143,7 @@ async fn start_launch(
             }
             Err(error) => {
                 stop_executor(child.as_mut(), &launch_id);
+                integrity_check.verify_and_log(&launch_id).await;
                 return fail(&launch_dir, format!("watch wxc-exec: {error}"));
             }
         }
@@ -1053,9 +1163,37 @@ async fn start_launch(
         started_at_unix_seconds: started_at,
         ended_at_unix_seconds: None,
         credential_expires_at_unix_seconds: Some(input.credential.expires_at_unix_seconds),
+        integrity_drift: false,
     };
     state.registry.insert(launch.clone());
     tracing::info!(launch_id, cwd = %launch.cwd.display(), "sandboxed launch started");
+
+    // Start periodic integrity check
+    let periodic = {
+        let registry = state.registry.clone();
+        let launch_id_clone = launch_id.clone();
+        let on_drift = Arc::new(move |path: PathBuf, change: integrity::Change| {
+            let before_sha256 = format_sha256(&change.before);
+            let after_sha256 = format_sha256(&change.after);
+            tracing::warn!(
+                launch_id = launch_id_clone,
+                path = %path.display(),
+                change = %change.kind,
+                before_sha256,
+                after_sha256,
+                "executable config changed during launch"
+            );
+            registry.set_integrity_drift(&launch_id_clone);
+        });
+        tokio::spawn(integrity::run_periodic(
+            integrity_check.roots.clone(),
+            integrity_check.baseline.clone(),
+            integrity_check.fs.clone(),
+            Duration::from_secs(60),
+            on_drift,
+        ))
+    };
+
     let refresh = tokio::spawn(refresh_task(
         state.credentials.clone(),
         host.clone(),
@@ -1067,11 +1205,13 @@ async fn start_launch(
     tokio::spawn(poll_task(
         child,
         refresh.abort_handle(),
+        periodic.abort_handle(),
         state.registry.clone(),
-        host,
+        host.clone(),
         launch_id,
         launch_dir,
         log_path,
+        integrity_check,
     ));
     Ok((StatusCode::CREATED, Json(launch)))
 }
@@ -1097,14 +1237,17 @@ fn log_tail(log: &Path) -> String {
 /// Watches the executor: copies new log lines to the daemon log. When it exits,
 /// or when it can no longer be watched (then it is stopped first), records the
 /// exit, stops the refresh and removes the launch directory.
+#[allow(clippy::too_many_arguments)]
 async fn poll_task(
     mut child: Box<dyn LaunchChild>,
     refresh: tokio::task::AbortHandle,
+    periodic: tokio::task::AbortHandle,
     registry: LaunchRegistry,
     host: Arc<dyn LaunchHost>,
     launch_id: String,
     launch_dir: PathBuf,
     log_path: PathBuf,
+    integrity_check: IntegrityCheck,
 ) {
     let mut log_offset = 0u64;
     loop {
@@ -1119,7 +1262,16 @@ async fn poll_task(
                 None
             }
         };
+
+        // Stop the background tasks, then verify once against the launch
+        // snapshot before the launch is recorded as exited.
+        periodic.abort();
         refresh.abort();
+
+        if integrity_check.verify_and_log(&launch_id).await {
+            registry.set_integrity_drift(&launch_id);
+        }
+
         registry.mark_exited(&launch_id, exit, host.now());
         if let Err(error) = std::fs::remove_dir_all(&launch_dir) {
             tracing::warn!(launch_id, %error, "failed to remove the launch directory");

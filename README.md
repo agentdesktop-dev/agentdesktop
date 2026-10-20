@@ -824,7 +824,8 @@ the executor first), or when the executor exits within three seconds (its last
 log lines are in the message). If the daemon can no longer watch a running
 sandboxed session, it stops it. Launches are
 listed by `GET /v1/launches`
-(running ones plus the last 32 that exited). A daemon restart keeps running
+(running ones plus the last 32 that exited); each
+entry carries `integrityDrift: true` once a change was detected. A daemon restart keeps running
 boxes alive but stops refreshing their credential: at startup the daemon removes
 the credential and request files of every earlier launch, and the directory of
 a launch whose box has exited. Residual risk: on Windows a read-only file inside
@@ -838,13 +839,32 @@ and `.git\commondir`. A `.git` file (worktree or submodule) is box-writable (a r
 is not prevented). The boxed agent can
 change these, and the next unboxed session reads them (Claude Code outside the box;
 git outside the box, where `core.fsmonitor` and `core.hooksPath` run code). The
-read-only grant stops in-place writes but not replacement. The daemon's own
+read-only grant stops in-place writes but not replacement. The daemon detects such
+changes but does not prevent them. At launch it records the content hash and file
+identity of each root file and of every child in a recursively hashed folder (up to
+1000 entries and 10 MiB per folder; a larger or deeper folder, such as a
+well-filled `~\.claude\plugins`, is recorded by its structure instead: names, kinds,
+sizes and identities for files, folders and links, recursively, without file contents,
+so a changed manifest or an atomically saved file still registers, while an in-place
+edit that keeps a file's size does not; past 10,000 entries, or past 64 levels of
+nesting anywhere in the tree, only the top-level names are recorded), and the identity of the workspace `.claude` and `.git`, so a
+replacement with identical bytes is detected (except past 10,000 entries): lab-proven
+end to end for root files, unit-tested for folder children. It compares them every 60 seconds while the box runs and at box
+exit; a transition back to the original state and a repeated change each count again.
+Each change is logged once as a warning (`executable config changed while launch
+ran`, with path, change type and both content hashes, `N/A` where the entry is not a
+file), and the launch shows `integrityDrift: true` in
+`GET /v1/launches`. Changes are not undone. A change is not proof that the box made it:
+the daemon's own reconcile when its configuration changes, Claude Code saving settings
+(inside or outside the box), git writing `.git\config`, and other boxes in the same
+workspace all register. A daemon restart drops the recorded state of running boxes
+without a check. The daemon's own
 directory (and the launched program's directory) is granted read-only recursively,
 so running a portable `agentdesktop.exe` or `claude.exe` from inside the profile
 widens that grant to everything under it except the denied entries (install under
-Program Files, the MSI default, to keep the grant narrow). Files the agent creates
-in the workspace are not gated yet; nested repositories under the workspace, a
-renamed or recreated `.git` or `.claude` directory, and editor task files such as
+Program Files, the MSI default, to keep the grant narrow). Files the agent creates in the workspace are not gated yet; nested
+repositories under the workspace, a renamed or recreated `.git` or `.claude` directory
+(detected, not prevented), and editor task files such as
 `.vscode\tasks.json` are not protected; `~\.claude\.claude.json` (user-scope
 MCP servers) and skills under `~\.claude` stay writable so the agent keeps its
 context; managed `allowManaged*Only` settings arrive with the policy profile.

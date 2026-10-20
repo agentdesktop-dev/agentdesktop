@@ -895,6 +895,61 @@ fn readwrite(value: &serde_json::Value) -> Vec<String> {
     list(value, "/filesystem/readwritePaths")
 }
 
+/// The integrity roots and the request's protections must not drift apart:
+/// every recursively checked root is read-only or denied in the real request.
+#[test]
+fn the_integrity_roots_are_protected_in_the_request() {
+    let value = request_json(&snapshot_existing(), &snapshot_directories(), |_| {});
+    let mut protected: std::collections::BTreeSet<String> = readonly(&value).into_iter().collect();
+    protected.extend(denied(&value));
+    let roots = super::integrity::integrity_paths(&PathBuf::from(HOME), &PathBuf::from(CWD));
+    let root_paths: std::collections::BTreeSet<String> = roots
+        .iter()
+        .map(|root| root.path.to_str().unwrap().replace('/', "\\"))
+        .collect();
+    for root in &roots {
+        if root.mode != super::integrity::RootMode::Recursive {
+            continue; // the identity-only folders are writable by design
+        }
+        let path = root.path.to_str().unwrap().replace('/', "\\");
+        assert!(
+            protected.contains(&path),
+            "integrity root {path} is neither read-only nor denied in the request: {protected:?}"
+        );
+    }
+
+    // The reverse direction: every protected entry is either an integrity
+    // root or on this named list of protected entries outside the roots
+    // (installations, secret denials, and the git configuration files, which
+    // have their own grant). A new grant or denial must be classified here or
+    // in integrity_paths, never silently.
+    let outside_the_roots: Vec<String> = [
+        r"C:\Users\dev\.local\bin".into(),
+        r"C:\Users\dev\.local\share\claude".into(),
+        r"C:\Program Files\Git".into(),
+        r"C:\lab\agentdesktop".into(),
+        r"C:\Program Files\ClaudeCode".into(),
+        r"C:\Users\dev\.gitconfig".into(),
+        r"C:\Users\dev\.config\git\config".into(),
+        format!(r"{LAUNCH_DIR}\credential"),
+        r"C:\Users\dev\.claude\.credentials.json".into(),
+        r"C:\Users\dev\.claude\history.jsonl".into(),
+        r"C:\Users\dev\.claude\ide".into(),
+        r"C:\Users\dev\.ssh".into(),
+        r"C:\Users\dev\.aws".into(),
+        r"C:\Users\dev\.azure".into(),
+        r"C:\Users\dev\.kube".into(),
+    ]
+    .into_iter()
+    .collect();
+    for entry in &protected {
+        assert!(
+            root_paths.contains(entry) || outside_the_roots.contains(entry),
+            "unclassified protected entry {entry}: add it to integrity_paths or name it here"
+        );
+    }
+}
+
 /// Path lists are sets to the sandbox; the snapshot compares them sorted.
 fn sorted_paths(mut value: serde_json::Value) -> serde_json::Value {
     for key in ["readwritePaths", "readonlyPaths", "deniedPaths"] {
@@ -1343,6 +1398,7 @@ fn launch(id: &str, started_at: u64) -> Launch {
         started_at_unix_seconds: started_at,
         ended_at_unix_seconds: None,
         credential_expires_at_unix_seconds: None,
+        integrity_drift: false,
     }
 }
 
@@ -1464,6 +1520,34 @@ fn many_running_launches_are_never_dropped() {
     assert_eq!(registry.list().len(), 50);
 }
 
+// AC 3: integrity_drift registry tests
+
+#[test]
+fn integrity_drift_can_be_set_on_a_running_launch() {
+    let registry = LaunchRegistry::new();
+    registry.insert(launch("a", 10));
+    registry.set_integrity_drift("a");
+    assert!(registry.list()[0].integrity_drift);
+}
+
+#[test]
+fn integrity_drift_stays_true_on_second_set() {
+    let registry = LaunchRegistry::new();
+    registry.insert(launch("a", 10));
+    registry.set_integrity_drift("a");
+    assert!(registry.list()[0].integrity_drift);
+    registry.set_integrity_drift("a");
+    assert!(registry.list()[0].integrity_drift);
+}
+
+#[test]
+fn setting_integrity_drift_on_unknown_id_is_a_noop() {
+    let registry = LaunchRegistry::new();
+    registry.insert(launch("a", 10));
+    registry.set_integrity_drift("nope");
+    assert!(!registry.list()[0].integrity_drift);
+}
+
 // ================================================================== sweep (AC 9)
 
 fn make_launch_dir(state: &Path, id: &str, pid_file: Option<&str>) -> PathBuf {
@@ -1583,11 +1667,48 @@ impl Clock {
     }
 }
 
+/// Successful `read_bytes` calls recorded by `RecordingIntegrityFs`.
+type IntegrityReads = Arc<Mutex<Vec<(PathBuf, Vec<u8>)>>>;
+
+/// Delegates to the real integrity filesystem and records every successful
+/// `read_bytes`, so a test can see which bytes a verify pass read.
+struct RecordingIntegrityFs {
+    reads: IntegrityReads,
+}
+
+impl integrity::IntegrityFs for RecordingIntegrityFs {
+    fn metadata(&self, p: &Path) -> io::Result<integrity::EntryKind> {
+        integrity::REAL_FS.metadata(p)
+    }
+
+    fn read_bytes(&self, p: &Path) -> io::Result<Vec<u8>> {
+        let bytes = integrity::REAL_FS.read_bytes(p)?;
+        self.reads
+            .lock()
+            .unwrap()
+            .push((p.to_path_buf(), bytes.clone()));
+        Ok(bytes)
+    }
+
+    fn read_dir_names(&self, p: &Path) -> io::Result<Vec<std::ffi::OsString>> {
+        integrity::REAL_FS.read_dir_names(p)
+    }
+
+    fn file_identity(&self, p: &Path) -> io::Result<integrity::FileIdentity> {
+        integrity::REAL_FS.file_identity(p)
+    }
+
+    fn read_link(&self, p: &Path) -> io::Result<std::ffi::OsString> {
+        integrity::REAL_FS.read_link(p)
+    }
+}
+
 struct FakeHost {
     home: PathBuf,
     state_dir: PathBuf,
     client_exe_dir: PathBuf,
     clock: Clock,
+    integrity_reads: IntegrityReads,
 }
 
 impl LaunchHost for FakeHost {
@@ -1643,6 +1764,12 @@ impl LaunchHost for FakeHost {
 
     fn now(&self) -> u64 {
         self.clock.now()
+    }
+
+    fn integrity_fs(&self) -> Arc<dyn integrity::IntegrityFs> {
+        Arc::new(RecordingIntegrityFs {
+            reads: self.integrity_reads.clone(),
+        })
     }
 }
 
@@ -1719,6 +1846,8 @@ struct StubExecutor {
     pid_as_dir: AtomicBool,
     /// Records whether the launch directory existed when `kill` was called.
     dir_existed_at_kill: Arc<Mutex<Option<bool>>>,
+    /// Called at the start of `spawn` if set.
+    on_spawn: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl StubExecutor {
@@ -1778,6 +1907,9 @@ impl Executor for StubExecutor {
         request: &Path,
         log: &Path,
     ) -> io::Result<Box<dyn LaunchChild>> {
+        if let Some(callback) = self.on_spawn.lock().unwrap().take() {
+            callback();
+        }
         if let Some(error) = self.error.lock().unwrap().take() {
             return Err(error);
         }
@@ -1851,6 +1983,7 @@ struct Harness {
     client: reqwest::Client,
     executor: Arc<StubExecutor>,
     credentials: Arc<StubCredentials>,
+    integrity_reads: IntegrityReads,
 }
 
 fn strip_verbatim(path: PathBuf) -> PathBuf {
@@ -1898,6 +2031,7 @@ impl Harness {
             kills: Arc::new(AtomicU32::new(0)),
             pid_as_dir: AtomicBool::new(false),
             dir_existed_at_kill: Arc::new(Mutex::new(None)),
+            on_spawn: Mutex::new(None),
         });
         let executor_path = client_exe_dir.join("wxc-exec.exe");
         let availability = match setup.availability {
@@ -1944,6 +2078,7 @@ impl Harness {
             programs: None,
             intercept: None,
         };
+        let integrity_reads: IntegrityReads = Arc::new(Mutex::new(Vec::new()));
         let state = LaunchState {
             app,
             executor: executor.clone(),
@@ -1953,6 +2088,7 @@ impl Harness {
                 state_dir: state_dir.clone(),
                 client_exe_dir,
                 clock: clock.clone(),
+                integrity_reads: integrity_reads.clone(),
             }),
             registry: LaunchRegistry::new(),
             availability,
@@ -1976,6 +2112,7 @@ impl Harness {
             client: reqwest::Client::new(),
             executor,
             credentials,
+            integrity_reads,
         }
     }
 
@@ -2838,6 +2975,162 @@ async fn the_executor_is_not_stopped_after_spawn_failure_early_exit_or_normal_ex
     assert_eq!(listed[0].exit_code, Some(7));
     assert!(!h.launch_dir(&launched.launch_id).exists());
     assert_eq!(h.executor.kills(), 0, "no kill after normal exit");
+}
+
+// AC 1: integrity check integration tests
+
+#[tokio::test(start_paused = true)]
+async fn the_periodic_check_sets_the_drift_flag_while_the_box_runs() {
+    let h = Harness::start(Setup::default()).await;
+    std::fs::write(h.cwd.join(".mcp.json"), b"{}").unwrap();
+    let launched = h.launch_ok().await;
+
+    // No drift at launch.
+    assert!(!h.listed().await[0].integrity_drift);
+
+    std::fs::write(h.cwd.join(".mcp.json"), b"{\"changed\":true}").unwrap();
+
+    // Past the first 60 s tick; the periodic check must flag the running launch.
+    tokio::time::sleep(Duration::from_secs(70)).await;
+    let mut flagged = false;
+    for _ in 0..1000 {
+        let listed = h.listed().await;
+        if listed[0].integrity_drift {
+            flagged = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(flagged, "the periodic check flags a running launch");
+    assert_eq!(h.listed().await[0].status, LaunchStatus::Running);
+
+    h.executor.exit_with(0);
+    let _ = launched;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_periodic_check_stops_when_the_box_exits() {
+    let h = Harness::start(Setup::default()).await;
+    std::fs::write(h.cwd.join(".mcp.json"), b"{}").unwrap();
+    let _launched = h.launch_ok().await;
+    h.executor.exit_with(0);
+
+    for _ in 0..1000 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        if h.listed().await[0].status == LaunchStatus::Exited {
+            break;
+        }
+    }
+    assert_eq!(h.listed().await[0].status, LaunchStatus::Exited);
+    assert!(!h.listed().await[0].integrity_drift, "clean exit, no drift");
+
+    // A change after the exit must not be flagged: the periodic task is gone.
+    std::fs::write(h.cwd.join(".mcp.json"), b"{\"changed\":true}").unwrap();
+    tokio::time::sleep(Duration::from_secs(130)).await;
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !h.listed().await[0].integrity_drift,
+        "no drift after the launch exited"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn integrity_drift_detected_when_file_modified_during_launch() {
+    let h = Harness::start(Setup::default()).await;
+    let launched = h.launch_ok().await;
+
+    // Modify a protected file
+    let mcp_path = launched.cwd.join(".mcp.json");
+    std::fs::write(&mcp_path, b"{\"modified\":true}").unwrap();
+
+    // Wait for periodic check (60s + margin)
+    tokio::time::sleep(Duration::from_secs(80)).await;
+
+    // Exit the launch
+    h.executor.exit_with(0);
+
+    // Wait for launch to be marked exited
+    for _ in 0..1000 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let listed = h.listed().await;
+        if listed[0].status == LaunchStatus::Exited {
+            break;
+        }
+    }
+
+    let listed = h.listed().await;
+    assert_eq!(listed[0].status, LaunchStatus::Exited);
+    assert!(
+        listed[0].integrity_drift,
+        "integrity drift should be detected"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn integrity_drift_detected_when_file_replaced_before_spawn() {
+    let h = Harness::start(Setup::default()).await;
+    std::fs::write(h.cwd.join(".mcp.json"), b"{}").unwrap();
+
+    // The snapshot is taken before `spawn`; replacing the file inside `spawn`
+    // must therefore show up as drift (this fails if the snapshot moved after).
+    let mcp = h.cwd.join(".mcp.json");
+    *h.executor.on_spawn.lock().unwrap() = Some(Box::new(move || {
+        std::fs::write(&mcp, b"{\"replaced\":true}").unwrap();
+    }));
+
+    let _launched = h.launch_ok().await;
+    h.executor.exit_with(0);
+
+    // Wait for launch to be marked exited
+    for _ in 0..1000 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let listed = h.listed().await;
+        if listed[0].status == LaunchStatus::Exited {
+            break;
+        }
+    }
+
+    let listed = h.listed().await;
+    assert_eq!(listed[0].status, LaunchStatus::Exited);
+    assert!(
+        listed[0].integrity_drift,
+        "drift should be detected even if changed during spawn"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn integrity_drift_on_early_exit_verify() {
+    let h = Harness::start(Setup::default()).await;
+    std::fs::write(h.cwd.join(".mcp.json"), b"{}").unwrap();
+
+    let mcp = h.cwd.join(".mcp.json");
+    *h.executor.on_spawn.lock().unwrap() = Some(Box::new(move || {
+        std::fs::write(&mcp, b"{\"replaced\":true}").unwrap();
+    }));
+    h.executor.exit_with(1);
+
+    let (status, _) = h.launch(&h.body()).await;
+    assert_eq!(status, 500, "early exit returns 500");
+
+    // An early exit leaves no launch record, so the verify pass is observed
+    // through the recording integrity filesystem: the pre-spawn snapshot read
+    // the original bytes, and the early-exit verify re-read the replaced ones.
+    let reads = h.integrity_reads.lock().unwrap();
+    let mcp_reads: Vec<&[u8]> = reads
+        .iter()
+        .filter(|(path, _)| path.ends_with(".mcp.json"))
+        .map(|(_, bytes)| bytes.as_slice())
+        .collect();
+    assert!(
+        mcp_reads.contains(&b"{}".as_slice()),
+        "the snapshot before spawn read the original file: {mcp_reads:?}"
+    );
+    assert!(
+        mcp_reads.contains(&b"{\"replaced\":true}".as_slice()),
+        "the early-exit verify re-read the replaced file: {mcp_reads:?}"
+    );
 }
 
 // ----------------------------------------------------------------- Windows only
