@@ -658,6 +658,7 @@ fn system_mode_rejects_a_configured_program_before_writing_anything() {
     .unwrap();
     let context = |merge_user_settings: bool| ReconcileContext {
         merge_user_settings,
+        user_mode: merge_user_settings,
         credential_helper: dir.path().join("agentdesktop"),
         socket: dir.path().join("agentdesktop.sock"),
         llm_proxy: None,
@@ -709,6 +710,7 @@ fn github_models_through_the_provider_removes_the_chat_models_entry_and_writes_s
     let pairing: std::sync::Arc<str> = "PAIRING-FIXTURE".into();
     let context = ReconcileContext {
         merge_user_settings: true,
+        user_mode: true,
         credential_helper: dir.path().join("agentdesktop"),
         socket: dir.path().join("agentdesktop.sock"),
         llm_proxy: Some(crate::llm_proxy::LlmProxyContext {

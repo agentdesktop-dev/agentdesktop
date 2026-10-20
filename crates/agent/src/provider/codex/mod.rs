@@ -54,6 +54,7 @@ impl Provider for Codex {
             &ctx.credential_helper,
             &ctx.socket,
             config.sandbox.as_ref(),
+            ctx.user_mode,
             ctx.llm_proxy
                 .as_ref()
                 .map(|proxy| (proxy.address, &*proxy.pairing)),
@@ -81,6 +82,7 @@ mod tests {
         .unwrap();
         let context = ReconcileContext {
             merge_user_settings: false,
+            user_mode: false,
             credential_helper: PathBuf::from("agentdesktop"),
             socket: PathBuf::from("socket"),
             llm_proxy: None,

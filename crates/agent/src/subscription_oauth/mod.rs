@@ -17,6 +17,8 @@ pub(crate) mod openai;
 const PROMPT_URI: &str = "http://localhost:51327/callback";
 const EXPIRY_SKEW_SECONDS: u64 = 60;
 
+static LISTENER_LOCK: Mutex<()> = Mutex::const_new(());
+
 struct LoginState {
     lock: Mutex<()>,
     declined: AtomicBool,
@@ -90,6 +92,7 @@ async fn credential_inner<P: OAuthProvider>(
         };
         if let Some(token) = ready {
             if !open_browser {
+                let _listener = LISTENER_LOCK.lock().await;
                 oidc::continue_subscription_page(&prompt, callback_listen, true).await?;
             }
             return Ok(Some(provider.credential_from_token(token)));
@@ -97,6 +100,7 @@ async fn credential_inner<P: OAuthProvider>(
     }
     if login.declined.load(Ordering::Relaxed) {
         if !open_browser {
+            let _listener = LISTENER_LOCK.lock().await;
             oidc::continue_subscription_page(&prompt, callback_listen, false).await?;
         }
         return Ok(None);
@@ -106,25 +110,28 @@ async fn credential_inner<P: OAuthProvider>(
     let state = oidc::random_secret();
     let (verifier, challenge) = oidc::pkce();
     let authorization_url = provider.authorization_url(&redirect, &state, &challenge);
-    let code = if redirect == prompt {
-        oidc::wait_for_authorization_code_with_page(
-            authorization_url.as_str(),
-            &redirect,
-            state.clone(),
-            callback_listen,
-            oidc::AuthorizationPage::Subscription,
-            open_browser,
-        )
-        .await?
-    } else {
-        oidc::wait_for_subscription_authorization_code(
-            authorization_url.as_str(),
-            &redirect,
-            state.clone(),
-            callback_listen,
-            open_browser,
-        )
-        .await?
+    let code = {
+        let _listener = LISTENER_LOCK.lock().await;
+        if redirect == prompt {
+            oidc::wait_for_authorization_code_with_page(
+                authorization_url.as_str(),
+                &redirect,
+                state.clone(),
+                callback_listen,
+                oidc::AuthorizationPage::Subscription,
+                open_browser,
+            )
+            .await?
+        } else {
+            oidc::wait_for_subscription_authorization_code(
+                authorization_url.as_str(),
+                &redirect,
+                state.clone(),
+                callback_listen,
+                open_browser,
+            )
+            .await?
+        }
     };
     let Some(code) = code else {
         login.declined.store(true, Ordering::Relaxed);

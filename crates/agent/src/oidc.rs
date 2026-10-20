@@ -828,15 +828,15 @@ pub(crate) async fn continue_subscription_page(
         .route("/flow-ready", get(continued_flow_ready))
         .with_state(state);
     tokio::spawn(async move {
-        let result = axum::serve(listener, app)
+        axum::serve(listener, app)
             .with_graceful_shutdown(async move {
                 let _ = tokio::time::timeout(CALLBACK_TIMEOUT, viewed_receiver).await;
             })
-            .await;
-        if let Err(error) = result {
-            tracing::warn!(%error, "serve continued Agentdesktop authorization page");
-        }
-    });
+            .await
+    })
+    .await
+    .context("join continued Agentdesktop authorization page")?
+    .context("serve continued Agentdesktop authorization page")?;
     Ok(())
 }
 
@@ -950,7 +950,7 @@ mod tests {
 
     use super::{
         AuthorizationPage, DevicePoll, TokenResponse, apply_refreshed_tokens,
-        classify_device_token_error, poll_device_token,
+        classify_device_token_error, continue_subscription_page, poll_device_token,
     };
     use crate::identity::{Identity, OAuthCredentials};
 
@@ -1128,6 +1128,57 @@ mod tests {
             assert_eq!(
                 task.await.unwrap().unwrap().as_deref(),
                 Some("provider-code")
+            );
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn continued_subscription_page_waits_for_view_and_then_stops() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            drop(listener);
+            let redirect = url::Url::parse("http://localhost:51327/callback").unwrap();
+            let server = tokio::spawn(async move {
+                continue_subscription_page(&redirect, Some(address), true).await
+            });
+            let client = reqwest::Client::new();
+            loop {
+                if let Ok(response) = client
+                    .get(format!("http://{address}/flow-ready"))
+                    .send()
+                    .await
+                    && response.status().is_success()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(
+                !server.is_finished(),
+                "listener must remain owned until page visit"
+            );
+            let response = client
+                .get(format!("http://{address}/"))
+                .send()
+                .await
+                .unwrap();
+            assert!(
+                response
+                    .text()
+                    .await
+                    .unwrap()
+                    .contains("Agentdesktop connected")
+            );
+            server.await.unwrap().unwrap();
+            assert!(
+                client
+                    .get(format!("http://{address}/"))
+                    .send()
+                    .await
+                    .is_err()
             );
         })
         .await

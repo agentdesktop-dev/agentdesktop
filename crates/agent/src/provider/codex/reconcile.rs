@@ -23,6 +23,7 @@ pub(super) fn plan(
     credential_helper: &Path,
     socket: &Path,
     sandbox: Option<&SandboxConfig>,
+    user_mode: bool,
     _proxy: Option<(SocketAddr, &str)>,
     config: Option<(&CodexConfig, Option<&LlmGatewayConfig>)>,
     plan: &ReconcilePlan,
@@ -32,7 +33,7 @@ pub(super) fn plan(
     };
 
     let subscription = config.auth == Some(ProgramAuthentication::Subscription);
-    let mode = if subscription {
+    let mode = if subscription && user_mode {
         0o600
     } else {
         MANAGED_FILE_MODE
@@ -178,7 +179,6 @@ fn managed_config(
         "wire_api": "responses",
     });
     if config.auth == Some(ProgramAuthentication::Subscription) {
-        provider["base_url"] = json!(gateway.url.as_str().trim_end_matches('/'));
         provider["requires_openai_auth"] = json!(false);
         provider["supports_websockets"] = json!(false);
         settings
@@ -330,7 +330,7 @@ programs:
         assert_eq!(settings["model"], "gpt-5.4");
         assert!(settings.get("forced_login_method").is_none());
         let provider = &settings["model_providers"]["agentdesktop"];
-        assert_eq!(provider["base_url"], "https://gateway.example.com/llm");
+        assert_eq!(provider["base_url"], "https://gateway.example.com/llm/v1");
         assert_eq!(provider["requires_openai_auth"], false);
         assert_eq!(provider["supports_websockets"], false);
         assert_eq!(provider["wire_api"], "responses");
@@ -356,13 +356,14 @@ programs:
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let mut config = subscription_config();
-        let run_plan = |config: &agentdesktop_core::config::DaemonConfig, proxy| {
+        let run_plan = |config: &agentdesktop_core::config::DaemonConfig, proxy, user_mode| {
             let plan = crate::reconcile::ReconcilePlan::default();
             super::plan(
                 &path,
                 Path::new("agentdesktop"),
                 Path::new("agentdesktop.sock"),
                 None,
+                user_mode,
                 proxy,
                 Some((
                     config.programs.codex.as_ref().unwrap(),
@@ -373,12 +374,16 @@ programs:
             .unwrap();
             plan
         };
-        let absent = run_plan(&config, None);
+        let absent = run_plan(&config, None, true);
         assert!(absent.inactive_reason().is_none());
         absent.apply().unwrap();
         assert!(path.exists());
         for pairing in ["first-pairing-secret", "second-pairing-secret"] {
-            let plan = run_plan(&config, Some(("127.0.0.1:4010".parse().unwrap(), pairing)));
+            let plan = run_plan(
+                &config,
+                Some(("127.0.0.1:4010".parse().unwrap(), pairing)),
+                true,
+            );
             assert!(!plan.render().contains("pairing-secret"));
             plan.apply().unwrap();
             assert!(!std::fs::read_to_string(&path).unwrap().contains(pairing));
@@ -393,17 +398,48 @@ programs:
             }
         }
         let contents = std::fs::read(&path).unwrap();
-        let closed = run_plan(&config, None);
+        let closed = run_plan(&config, None, true);
         assert!(closed.inactive_reason().is_none());
         closed.apply().unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), contents);
         config.llm_gateway.as_mut().unwrap().when_proxy_unavailable =
             agentdesktop_core::config::ProxyUnavailable::FailOpen;
-        let open = run_plan(&config, None);
+        let open = run_plan(&config, None, true);
         assert!(open.inactive_reason().is_none());
         assert!(!open.render().contains("pairing-secret"));
         open.apply().unwrap();
         assert!(path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_mode_subscription_configuration_remains_readable_by_client_users() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("managed_config.toml");
+        let config = subscription_config();
+        let plan = crate::reconcile::ReconcilePlan::default();
+        super::plan(
+            &path,
+            Path::new("agentdesktop"),
+            Path::new("agentdesktop.sock"),
+            None,
+            false,
+            None,
+            Some((
+                config.programs.codex.as_ref().unwrap(),
+                config.llm_gateway.as_ref(),
+            )),
+            &plan,
+        )
+        .unwrap();
+        plan.apply().unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
     }
 
     #[test]
@@ -418,6 +454,7 @@ programs:
             Path::new("agentdesktop"),
             Path::new("agentdesktop.sock"),
             None,
+            false,
             Some(("127.0.0.1:4010".parse().unwrap(), "pairing-secret")),
             Some((
                 config.programs.codex.as_ref().unwrap(),
@@ -446,6 +483,7 @@ programs:
             Path::new("agentdesktop"),
             Path::new("socket"),
             None,
+            false,
             None,
             None,
             &plan,
@@ -587,6 +625,7 @@ programs:
                 Path::new("agentdesktop"),
                 Path::new("agentdesktop.sock"),
                 None,
+                false,
                 None,
                 Some((config.programs.codex.as_ref().unwrap(), None)),
                 plan,
@@ -610,6 +649,7 @@ programs:
                 Path::new("agentdesktop"),
                 Path::new("agentdesktop.sock"),
                 None,
+                false,
                 None,
                 Some((config.programs.codex.as_ref().unwrap(), None)),
                 plan,
