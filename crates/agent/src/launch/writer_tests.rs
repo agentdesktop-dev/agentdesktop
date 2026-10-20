@@ -226,6 +226,9 @@ mod handler {
         fn now(&self) -> u64 {
             1_700_000_000
         }
+        fn managed_sources(&self) -> crate::provider::claude_code::managed::ManagedSources {
+            crate::provider::claude_code::managed::ManagedSources::default()
+        }
     }
 
     struct Credentials;
@@ -322,6 +325,10 @@ mod handler {
                 executor: "wxc-exec.exe".into(),
                 available: true,
                 error: None,
+                managed_settings_source: None,
+                managed_hooks_locked: false,
+                managed_mcp_locked: false,
+                managed_settings_error: None,
             }),
             daemon_sid: None,
         }

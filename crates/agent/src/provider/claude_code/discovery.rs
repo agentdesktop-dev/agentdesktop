@@ -76,7 +76,7 @@ fn skill_roots() -> Vec<PathBuf> {
     roots.into_iter().collect()
 }
 
-fn managed_root() -> Option<PathBuf> {
+pub(super) fn managed_root() -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     return Some(PathBuf::from("/etc/claude-code"));
     #[cfg(target_os = "macos")]
@@ -87,7 +87,7 @@ fn managed_root() -> Option<PathBuf> {
 
 /// `managed-settings.json` followed by the `managed-settings.d/*.json` drop-ins in the
 /// lexical order Claude Code merges them.
-fn managed_settings_files(root: &Path) -> Vec<PathBuf> {
+pub(super) fn managed_settings_files(root: &Path) -> Vec<PathBuf> {
     let mut files = vec![root.join("managed-settings.json")];
     if let Ok(entries) = fs::read_dir(root.join("managed-settings.d")) {
         let mut drop_ins: Vec<PathBuf> = entries
@@ -96,6 +96,10 @@ fn managed_settings_files(root: &Path) -> Vec<PathBuf> {
             .filter(|path| {
                 path.extension()
                     .is_some_and(|extension| extension == "json")
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| !name.starts_with('.'))
             })
             .collect();
         drop_ins.sort();
@@ -418,5 +422,26 @@ mod tests {
         assert!(managed_mcp_servers_from_value(&json!("not json"), source).is_empty());
         assert!(managed_mcp_servers_from_value(&json!("\"nested\""), source).is_empty());
         assert!(managed_mcp_servers_from_value(&json!(42), source).is_empty());
+    }
+
+    #[test]
+    fn hidden_dropin_managed_mcp_servers_are_not_inventoried() {
+        let root = tempfile::tempdir().unwrap();
+        let drop_in = root.path().join("managed-settings.d/50-agentdesktop.json");
+        let hidden_drop_in = root.path().join("managed-settings.d/.50-agentdesktop.json");
+
+        write_managed_servers(&drop_in, json!({ "visible": { "command": "npx" } }));
+        write_managed_servers(
+            &hidden_drop_in,
+            json!({ "hidden": { "command": "secret" } }),
+        );
+
+        let servers =
+            merged_managed_mcp_servers(&managed_settings_sources(Some(root.path()), &drop_in));
+
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "visible");
+        // Hidden drop-in servers should not be in the inventory
+        assert!(!servers.iter().any(|s| s.name == "hidden"));
     }
 }

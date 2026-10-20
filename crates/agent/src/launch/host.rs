@@ -190,6 +190,10 @@ impl LaunchHost for HostEnvironment {
             .map(|elapsed| elapsed.as_secs())
             .unwrap_or_default()
     }
+
+    fn managed_sources(&self) -> crate::provider::claude_code::managed::ManagedSources {
+        crate::provider::claude_code::managed::managed_sources_now()
+    }
 }
 
 /// Runs `wxc-exec.exe <request.json>` with its output appended to the launch's

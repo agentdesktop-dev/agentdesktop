@@ -817,6 +817,19 @@ pub enum SubscriptionAuth {
     ClientPassthrough,
 }
 
+/// MCP server allowlist entry for `allowedMcpServers`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum McpServerRule {
+    /// User-assigned label; not a security control.
+    ServerName(String),
+    /// Command array, must be non-empty.
+    ServerCommand(Vec<String>),
+    /// Server URL, must be non-empty.
+    ServerUrl(String),
+}
+
 /// Settings reconciled into Claude Code's managed configuration.
 ///
 /// Arbitrary keys are written directly to Agentdesktop's managed-settings
@@ -831,9 +844,58 @@ pub struct ClaudeCodeConfig {
     /// Upstream authentication used by this agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<ProgramAuthentication>,
+    /// Allow only managed hooks. Claude Code reads this only from managed sources.
+    /// Unset: not written to Claude Code's settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_managed_hooks_only: Option<bool>,
+    /// Allow only managed MCP servers. Claude Code reads this only from managed sources.
+    /// Unset: not written to Claude Code's settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_managed_mcp_servers_only: Option<bool>,
+    /// Allowed MCP servers list. Unset: not written to Claude Code's settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_mcp_servers: Option<Vec<McpServerRule>>,
     /// Arbitrary Claude Code managed-settings values, flattened into this object.
     #[serde(default, flatten)]
     pub settings: BTreeMap<String, serde_json::Value>,
+}
+
+impl ClaudeCodeConfig {
+    /// Called from daemon config validation, so the controller refuses the config before any device sees it.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(servers) = &self.allowed_mcp_servers {
+            for (i, rule) in servers.iter().enumerate() {
+                match rule {
+                    McpServerRule::ServerName(name) => {
+                        if name.is_empty()
+                            || !name
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                        {
+                            anyhow::bail!(
+                                "programs.claudeCode.allowedMcpServers[{i}]: serverName must match [A-Za-z0-9_-]+"
+                            );
+                        }
+                    }
+                    McpServerRule::ServerCommand(cmd) => {
+                        if cmd.is_empty() {
+                            anyhow::bail!(
+                                "programs.claudeCode.allowedMcpServers[{i}]: serverCommand must be a non-empty array"
+                            );
+                        }
+                    }
+                    McpServerRule::ServerUrl(url) => {
+                        if url.trim().is_empty() {
+                            anyhow::bail!(
+                                "programs.claudeCode.allowedMcpServers[{i}]: serverUrl must be non-empty"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Settings reconciled into Claude Desktop's managed configuration.
@@ -1749,6 +1811,9 @@ fn validate_daemon(
             anyhow::bail!("Pi model {model} is not declared in models");
         }
     }
+    if let Some(claude_code) = &programs.claude_code {
+        claude_code.validate()?;
+    }
     Ok(())
 }
 
@@ -2655,5 +2720,220 @@ programs:
             "daemon:\n  containment:\n    executor: 'C:\\mxc\\wxc-exec.exe'\n",
         )
         .expect("absolute executor");
+    }
+
+    // Managed-settings lock validation tests
+
+    #[test]
+    fn claudecode_config_accepts_both_boolean_locks() {
+        let yaml = r#"
+programs:
+  claudeCode:
+    allowManagedHooksOnly: true
+    allowManagedMcpServersOnly: false
+"#;
+        let config = parse_daemon(yaml).expect("valid config");
+        let claude = config.programs.claude_code.as_ref().unwrap();
+        assert_eq!(claude.allow_managed_hooks_only, Some(true));
+        assert_eq!(claude.allow_managed_mcp_servers_only, Some(false));
+    }
+
+    #[test]
+    fn claudecode_config_rejects_string_for_boolean_keys() {
+        let yaml_hooks = r#"
+programs:
+  claudeCode:
+    allowManagedHooksOnly: "yes"
+"#;
+        let error = parse_daemon(yaml_hooks).expect_err("string for boolean");
+        let msg = format!("{error:#}");
+        assert!(
+            msg.contains("programs.claudeCode.allowManagedHooksOnly"),
+            "error should name the key path: {msg}"
+        );
+
+        let yaml_mcp = r#"
+programs:
+  claudeCode:
+    allowManagedMcpServersOnly: "true"
+"#;
+        let error = parse_daemon(yaml_mcp).expect_err("string for boolean");
+        let msg = format!("{error:#}");
+        assert!(
+            msg.contains("programs.claudeCode.allowManagedMcpServersOnly"),
+            "error should name the key path: {msg}"
+        );
+    }
+
+    #[test]
+    fn claudecode_config_accepts_empty_allowed_mcp_servers() {
+        let yaml = r#"
+programs:
+  claudeCode:
+    allowedMcpServers: []
+"#;
+        let config = parse_daemon(yaml).expect("valid config");
+        let claude = config.programs.claude_code.as_ref().unwrap();
+        assert_eq!(
+            claude.allowed_mcp_servers.as_ref().map(|v| v.len()),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn claudecode_config_accepts_one_entry_of_each_kind() {
+        let yaml = r#"
+programs:
+  claudeCode:
+    allowedMcpServers:
+      - serverName: "my-server"
+      - serverCommand: ["npx", "-y", "server"]
+      - serverUrl: "https://mcp.example.com/*"
+"#;
+        let config = parse_daemon(yaml).expect("valid config");
+        let claude = config.programs.claude_code.as_ref().unwrap();
+        let servers = claude.allowed_mcp_servers.as_ref().unwrap();
+        assert_eq!(servers.len(), 3);
+    }
+
+    #[test]
+    fn claudecode_config_rejects_invalid_allowed_mcp_servers() {
+        // serverCommand as string not array
+        let yaml_cmd_string = r#"
+programs:
+  claudeCode:
+    allowedMcpServers:
+      - serverCommand: "npx"
+"#;
+        let error = parse_daemon(yaml_cmd_string).expect_err("string command");
+        let msg = format!("{error:#}");
+        assert!(
+            msg.contains("programs.claudeCode.allowedMcpServers[0]"),
+            "error should name the path: {msg}"
+        );
+
+        // Two keys in one entry
+        let yaml_two_keys = r#"
+programs:
+  claudeCode:
+    allowedMcpServers:
+      - serverName: "test"
+        serverUrl: "https://example.com"
+"#;
+        let error = parse_daemon(yaml_two_keys).expect_err("two keys");
+        let msg = format!("{error:#}");
+        assert!(
+            msg.contains("programs.claudeCode.allowedMcpServers"),
+            "error should name the path: {msg}"
+        );
+
+        // serverName with invalid characters
+        let yaml_invalid_name = r#"
+programs:
+  claudeCode:
+    allowedMcpServers:
+      - serverName: "a b"
+"#;
+        let error = parse_daemon(yaml_invalid_name).expect_err("invalid server name");
+        let msg = format!("{error:#}");
+        assert!(
+            msg.contains("programs.claudeCode.allowedMcpServers[0]"),
+            "error should name the path: {msg}"
+        );
+
+        // serverName empty
+        let yaml_empty_name = r#"
+programs:
+  claudeCode:
+    allowedMcpServers:
+      - serverName: ""
+"#;
+        let error = parse_daemon(yaml_empty_name).expect_err("empty server name");
+        let msg = format!("{error:#}");
+        assert!(
+            msg.contains("programs.claudeCode.allowedMcpServers[0]"),
+            "error should name the path: {msg}"
+        );
+        assert!(
+            msg.contains("serverName must match"),
+            "error should explain the rule: {msg}"
+        );
+
+        // serverUrl empty
+        let yaml_empty_url = r#"
+programs:
+  claudeCode:
+    allowedMcpServers:
+      - serverUrl: ""
+"#;
+        let error = parse_daemon(yaml_empty_url).expect_err("empty url");
+        let msg = format!("{error:#}");
+        assert!(
+            msg.contains("programs.claudeCode.allowedMcpServers[0]"),
+            "error should name the path: {msg}"
+        );
+        assert!(
+            msg.contains("serverUrl must be non-empty"),
+            "error should explain the rule: {msg}"
+        );
+
+        // serverCommand empty array
+        let yaml_empty_cmd = r#"
+programs:
+  claudeCode:
+    allowedMcpServers:
+      - serverCommand: []
+"#;
+        let error = parse_daemon(yaml_empty_cmd).expect_err("empty command");
+        let msg = format!("{error:#}");
+        assert!(
+            msg.contains("programs.claudeCode.allowedMcpServers[0]"),
+            "error should name the path: {msg}"
+        );
+        assert!(
+            msg.contains("serverCommand must be a non-empty array"),
+            "error should explain the rule: {msg}"
+        );
+
+        // Non-object entry
+        let yaml_non_object = r#"
+programs:
+  claudeCode:
+    allowedMcpServers:
+      - "just a string"
+"#;
+        let error = parse_daemon(yaml_non_object).expect_err("non-object entry");
+        let msg = format!("{error:#}");
+        assert!(
+            msg.contains("programs.claudeCode.allowedMcpServers"),
+            "error should name the path: {msg}"
+        );
+
+        // allowedMcpServers as object not array
+        let yaml_not_array = r#"
+programs:
+  claudeCode:
+    allowedMcpServers: {}
+"#;
+        let error = parse_daemon(yaml_not_array).expect_err("object not array");
+        let msg = format!("{error:#}");
+        assert!(
+            msg.contains("programs.claudeCode.allowedMcpServers"),
+            "error should name the path: {msg}"
+        );
+    }
+
+    #[test]
+    fn claudecode_config_passes_through_other_keys() {
+        let yaml = r#"
+programs:
+  claudeCode:
+    companyAnnouncements: "hello"
+    allowManagedHooksOnly: true
+"#;
+        let config = parse_daemon(yaml).expect("valid config");
+        let claude = config.programs.claude_code.as_ref().unwrap();
+        assert_eq!(claude.allow_managed_hooks_only, Some(true));
+        assert!(claude.settings.contains_key("companyAnnouncements"));
     }
 }

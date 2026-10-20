@@ -64,6 +64,12 @@
 |`programSelection.allowUserChoice`|boolean|Let the device user opt out of all configured programs, or choose the<br>ones to manage, with `agentdesktop programs set`.<br>Agentdesktop removes the settings it wrote for a program the user opts<br>out of, and reports the program as opted out.<br><br>Defaults to `false`: every configured program is managed and a choice<br>stored on the device is ignored until this is enabled again.|
 |`programs`|object|Per-program settings reconciled on this device.|
 |`programs.claudeCode`|object|Claude Code managed-settings configuration. Arbitrary keys are passed through directly.|
+|`programs.claudeCode.allowManagedHooksOnly`|boolean|Allow only managed hooks. Claude Code reads this only from managed sources.<br>Unset: not written to Claude Code's settings.|
+|`programs.claudeCode.allowManagedMcpServersOnly`|boolean|Allow only managed MCP servers. Claude Code reads this only from managed sources.<br>Unset: not written to Claude Code's settings.|
+|`programs.claudeCode.allowedMcpServers`|[]object|Allowed MCP servers list. Unset: not written to Claude Code's settings.|
+|`programs.claudeCode.allowedMcpServers[].serverName`|string|User-assigned label; not a security control.|
+|`programs.claudeCode.allowedMcpServers[].serverCommand`|[]string|Command array, must be non-empty.|
+|`programs.claudeCode.allowedMcpServers[].serverUrl`|string|Server URL, must be non-empty.|
 |`programs.claudeCode.auth`|enum|Upstream authentication used by this agent.<br>Possible values: `subscription`.|
 |`programs.claudeCode.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
 |`programs.claudeDesktop`|object|Claude Desktop system-managed configuration. User daemons skip it.<br>Arbitrary keys are passed through directly.|

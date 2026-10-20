@@ -73,6 +73,10 @@ export interface DaemonInfo {
     executor: string;
     available: boolean;
     error?: string;
+    managedSettingsSource?: "hklm" | "file" | "unknown" | null;
+    managedHooksLocked?: boolean;
+    managedMcpLocked?: boolean;
+    managedSettingsError?: string;
   };
 }
 

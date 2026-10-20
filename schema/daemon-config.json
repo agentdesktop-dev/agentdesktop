@@ -72,6 +72,30 @@
       "description": "Settings reconciled into Claude Code's managed configuration.\n\nArbitrary keys are written directly to Agentdesktop's managed-settings\ndrop-in. Generated gateway settings take precedence when values overlap.",
       "type": "object",
       "properties": {
+        "allowManagedHooksOnly": {
+          "description": "Allow only managed hooks. Claude Code reads this only from managed sources.\nUnset: not written to Claude Code's settings.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "allowManagedMcpServersOnly": {
+          "description": "Allow only managed MCP servers. Claude Code reads this only from managed sources.\nUnset: not written to Claude Code's settings.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "allowedMcpServers": {
+          "description": "Allowed MCP servers list. Unset: not written to Claude Code's settings.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/McpServerRule"
+          }
+        },
         "auth": {
           "description": "Upstream authentication used by this agent.",
           "anyOf": [
@@ -578,6 +602,53 @@
         }
       },
       "additionalProperties": false
+    },
+    "McpServerRule": {
+      "description": "MCP server allowlist entry for `allowedMcpServers`.",
+      "oneOf": [
+        {
+          "description": "User-assigned label; not a security control.",
+          "type": "object",
+          "properties": {
+            "serverName": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "serverName"
+          ]
+        },
+        {
+          "description": "Command array, must be non-empty.",
+          "type": "object",
+          "properties": {
+            "serverCommand": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "serverCommand"
+          ]
+        },
+        {
+          "description": "Server URL, must be non-empty.",
+          "type": "object",
+          "properties": {
+            "serverUrl": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "serverUrl"
+          ]
+        }
+      ]
     },
     "OpenCodeApi": {
       "description": "OpenAI API dialect OpenCode uses for the managed LLM gateway provider.",

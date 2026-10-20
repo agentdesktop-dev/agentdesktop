@@ -336,7 +336,27 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
 }
 
 async fn daemon_info(State(state): State<AppState>) -> Json<DaemonInfo> {
-    Json(state.daemon_info)
+    let mut info = state.daemon_info;
+    if cfg!(windows)
+        && let Some(containment) = info.containment.as_mut()
+    {
+        match tokio::task::spawn_blocking(
+            crate::provider::claude_code::managed::managed_posture_now,
+        )
+        .await
+        {
+            Ok(posture) => {
+                containment.managed_settings_source = posture.source;
+                containment.managed_hooks_locked = posture.hooks_locked;
+                containment.managed_mcp_locked = posture.mcp_locked;
+                containment.managed_settings_error = posture.error;
+            }
+            Err(error) => {
+                tracing::debug!("failed to join managed-settings posture task: {error:#}");
+            }
+        }
+    }
+    Json(info)
 }
 
 async fn config(State(state): State<AppState>) -> Json<DaemonConfig> {

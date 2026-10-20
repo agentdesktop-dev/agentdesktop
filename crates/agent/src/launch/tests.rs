@@ -68,6 +68,10 @@ fn containment_info_is_available_for_a_user_mode_windows_daemon_with_the_executo
             executor: r"C:\mxc\x64\wxc-exec.exe".into(),
             available: true,
             error: None,
+            managed_settings_source: None,
+            managed_hooks_locked: false,
+            managed_mcp_locked: false,
+            managed_settings_error: None,
         }
     );
 }
@@ -1399,6 +1403,9 @@ fn launch(id: &str, started_at: u64) -> Launch {
         ended_at_unix_seconds: None,
         credential_expires_at_unix_seconds: None,
         integrity_drift: false,
+        managed_settings_source: None,
+        managed_hooks_locked: false,
+        managed_mcp_locked: false,
     }
 }
 
@@ -1709,6 +1716,8 @@ struct FakeHost {
     client_exe_dir: PathBuf,
     clock: Clock,
     integrity_reads: IntegrityReads,
+    managed_file: Option<&'static str>,
+    managed_file_error: Option<&'static str>,
 }
 
 impl LaunchHost for FakeHost {
@@ -1770,6 +1779,18 @@ impl LaunchHost for FakeHost {
         Arc::new(RecordingIntegrityFs {
             reads: self.integrity_reads.clone(),
         })
+    }
+
+    fn managed_sources(&self) -> crate::provider::claude_code::managed::ManagedSources {
+        use crate::provider::claude_code::managed::ManagedSources;
+        ManagedSources {
+            hklm: None,
+            file: self
+                .managed_file_error
+                .map(|msg| Err(io::Error::other(msg)))
+                .or_else(|| self.managed_file.map(|s| Ok(s.to_owned()))),
+            drop_ins: Vec::new(),
+        }
     }
 }
 
@@ -1957,6 +1978,8 @@ struct Setup {
     peer: Option<PipePeer>,
     claude_installed: bool,
     credentials_must_not_be_reached: bool,
+    managed_file: Option<&'static str>,
+    managed_file_error: Option<&'static str>,
 }
 
 impl Default for Setup {
@@ -1970,6 +1993,8 @@ impl Default for Setup {
             peer: None,
             claude_installed: true,
             credentials_must_not_be_reached: false,
+            managed_file: None,
+            managed_file_error: None,
         }
     }
 }
@@ -2039,11 +2064,19 @@ impl Harness {
                 executor: executor_path.display().to_string(),
                 available: true,
                 error: None,
+                managed_settings_source: None,
+                managed_hooks_locked: false,
+                managed_mcp_locked: false,
+                managed_settings_error: None,
             }),
             Availability::Unavailable(error) => Some(ContainmentInfo {
                 executor: executor_path.display().to_string(),
                 available: false,
                 error: Some(error.to_owned()),
+                managed_settings_source: None,
+                managed_hooks_locked: false,
+                managed_mcp_locked: false,
+                managed_settings_error: None,
             }),
             Availability::Missing => None,
         };
@@ -2089,6 +2122,8 @@ impl Harness {
                 client_exe_dir,
                 clock: clock.clone(),
                 integrity_reads: integrity_reads.clone(),
+                managed_file: setup.managed_file,
+                managed_file_error: setup.managed_file_error,
             }),
             registry: LaunchRegistry::new(),
             availability,
@@ -3131,6 +3166,133 @@ async fn integrity_drift_on_early_exit_verify() {
         mcp_reads.contains(&b"{\"replaced\":true}".as_slice()),
         "the early-exit verify re-read the replaced file: {mcp_reads:?}"
     );
+}
+
+// Per-launch managed-settings snapshot tests
+
+#[tokio::test(start_paused = true)]
+async fn launch_records_managed_settings_source_and_locks_when_present() {
+    let h = Harness::start(Setup {
+        managed_file: Some(r#"{"allowManagedHooksOnly":true}"#),
+        ..Setup::default()
+    })
+    .await;
+
+    let launched = h.launch_ok().await;
+    assert_eq!(
+        launched.managed_settings_source,
+        Some(agentdesktop_core::model::ManagedSettingsSource::File)
+    );
+    assert!(launched.managed_hooks_locked);
+    assert!(!launched.managed_mcp_locked);
+
+    let listed = h.listed().await;
+    assert_eq!(
+        listed[0].managed_settings_source,
+        Some(agentdesktop_core::model::ManagedSettingsSource::File)
+    );
+    assert!(listed[0].managed_hooks_locked);
+    assert!(!listed[0].managed_mcp_locked);
+}
+
+#[tokio::test(start_paused = true)]
+async fn launch_records_null_source_and_false_locks_when_managed_file_absent() {
+    let h = Harness::start(Setup {
+        managed_file: None,
+        ..Setup::default()
+    })
+    .await;
+
+    let launched = h.launch_ok().await;
+    assert_eq!(launched.managed_settings_source, None);
+    assert!(!launched.managed_hooks_locked);
+    assert!(!launched.managed_mcp_locked);
+
+    let listed = h.listed().await;
+    assert_eq!(listed[0].managed_settings_source, None);
+    assert!(!listed[0].managed_hooks_locked);
+    assert!(!listed[0].managed_mcp_locked);
+}
+
+#[tokio::test(start_paused = true)]
+async fn launch_records_null_source_and_false_locks_when_posture_has_error() {
+    let h = Harness::start(Setup {
+        managed_file_error: Some("access denied"),
+        ..Setup::default()
+    })
+    .await;
+
+    let launched = h.launch_ok().await;
+    assert_eq!(launched.managed_settings_source, None);
+    assert!(!launched.managed_hooks_locked);
+    assert!(!launched.managed_mcp_locked);
+
+    let listed = h.listed().await;
+    assert_eq!(listed[0].managed_settings_source, None);
+    assert!(!listed[0].managed_hooks_locked);
+    assert!(!listed[0].managed_mcp_locked);
+}
+
+#[tokio::test(start_paused = true)]
+async fn launch_logs_posture_error_as_warning() {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use tracing_subscriber::fmt;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    // Capture logs in a shared buffer
+    let logs = Arc::new(Mutex::new(Vec::new()));
+    let logs_writer = logs.clone();
+
+    let subscriber = tracing_subscriber::registry().with(
+        fmt::layer()
+            .with_writer(move || LogWriter(logs_writer.clone()))
+            .with_ansi(false),
+    );
+
+    // Set as global default for this test's duration
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let h = Harness::start(Setup {
+        managed_file_error: Some("access denied"),
+        ..Setup::default()
+    })
+    .await;
+
+    let _launched = h.launch_ok().await;
+
+    // Verify the posture-error warn was emitted
+    let log_bytes = logs.lock().unwrap();
+    let log_output = String::from_utf8_lossy(&log_bytes);
+    assert!(
+        log_output.contains("WARN"),
+        "Expected WARN level in logs, got:\n{}",
+        log_output
+    );
+    assert!(
+        log_output.contains("managed-settings posture could not be determined at launch"),
+        "Expected posture error message in logs"
+    );
+    assert!(
+        log_output.contains("error=file:"),
+        "Expected error field to name the failing source"
+    );
+    // The error message itself (like "cannot read: access denied") is fine;
+    // we're protecting against document-content leakage (e.g., raw JSON).
+    // This test uses a read-error scenario, so no document exists to leak.
+}
+
+/// Writer adapter for capturing tracing output
+struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.lock().unwrap().flush()
+    }
 }
 
 // ----------------------------------------------------------------- Windows only

@@ -867,7 +867,96 @@ repositories under the workspace, a renamed or recreated `.git` or `.claude` dir
 (detected, not prevented), and editor task files such as
 `.vscode\tasks.json` are not protected; `~\.claude\.claude.json` (user-scope
 MCP servers) and skills under `~\.claude` stay writable so the agent keeps its
-context; managed `allowManaged*Only` settings arrive with the policy profile.
+context; see "Managed settings for containment" below for delivery of managed `allowManaged*Only` locks.
+
+### Managed settings for containment
+
+Claude Code reads `allowManagedHooksOnly` and `allowManagedMcpServersOnly` only from
+managed sources (placing them in user or project settings has no effect; see
+https://code.claude.com/docs/en/managed-settings). With the system-mode daemon
+(`agentdesktop daemon`), the locks are delivered in controller config as
+
+```yaml
+programs:
+  claudeCode:
+    useLlmGateway: false
+    allowManagedHooksOnly: true
+    allowManagedMcpServersOnly: true
+    allowedMcpServers: [...]
+```
+
+The keys sit directly under `claudeCode`, not nested under `settings`. The system
+daemon writes them to `%ProgramFiles%\ClaudeCode\managed-settings.d\50-agentdesktop.json`.
+With the user-mode daemon (`agentdesktop daemon --user`), the same keys land in
+`~\.claude\settings.json` where the two `allowManaged*Only` keys have no effect
+(managed-only keys); `allowedMcpServers` is a user allowlist. The locks reach the file
+tier only through the system daemon; `run` needs the user-mode daemon. On a device that
+runs both daemons, the two need different `programs.claudeCode` values: the system
+service carries the locks with `useLlmGateway: false` (so the drop-in holds only the
+locks and the user daemon's gateway settings stay in force), the user daemon carries
+`useLlmGateway: true` for `run`. One controller serves one configuration to every
+daemon, so give the system service a local configuration file (no `controller:`), or
+deliver the locks through MDM/HKLM instead. Run the user daemon on a per-user pipe. The
+locks reach Claude Code only while the system service's `daemon.claudeCode.config` is
+unset (an override writes them where Claude Code does not read managed settings).
+
+Upgrade note: `allowManagedHooksOnly`, `allowManagedMcpServersOnly` and
+`allowedMcpServers` under `programs.claudeCode` are now validated (until now they passed
+through unchecked). Before upgrading the controller, run the new binary's `agentdesktop
+daemon --dry-run --config <daemonConfig.path file>` (add `--user` if the file configures
+a user-mode-only program such as `programs.copilot`); an error that names
+`programs.claudeCode.allowManagedHooksOnly`, `allowManagedMcpServersOnly` or
+`allowedMcpServers` must be fixed first. The controller checks the file when it starts
+and refuses one that fails; a file changed while it runs is refused and the last good
+one kept. A device whose cached configuration fails the rule does not start: delete
+`remote-config.yaml` in its state directory (by default `C:\ProgramData\AgentDesktop\state`
+for the system daemon on Windows, `/var/lib/agentdesktop` on Linux/macOS,
+`~/.local/state/agentdesktop` for `--user`; the startup error names the file) and start it
+again; it starts from its local configuration and receives the current one from the
+controller. Claude Code drops an invalid entry and enforces the rest; agentdesktop refuses
+the whole configuration instead, so the problem shows at the controller.
+
+Under `allowManagedHooksOnly: true`, hooks the user-mode daemon writes into
+`~\.claude\settings.json` stop running; the system daemon's hooks in the drop-in keep
+running while the file tier is selected (Claude Code selects the file tier only when
+HKLM/Intune is absent or sets `managedSourcesBehavior: "merge"`). `allowManagedMcpServersOnly:
+true` restricts servers only together with a managed `allowedMcpServers` list; without a
+managed list every server that passes the denylist loads. With the lock off, a user-level
+`allowedMcpServers` is a soft allowlist the user and the box can change. Use `serverUrl`
+or `serverCommand` entries (a `serverName` entry is a user-chosen label, not a security
+control). Example managed JSON snippet:
+
+```json
+{"allowManagedHooksOnly": true, "allowManagedMcpServersOnly": true, "allowedMcpServers": [{"serverUrl": "https://mcp.example.com/*"}]}
+```
+
+Delivery options on Windows: the system daemon (above), or customer MDM/HKLM registry
+value `HKLM\SOFTWARE\Policies\ClaudeCode` name `Settings` (REG_SZ or REG_EXPAND_SZ, JSON
+string), or GPO/Intune. When HKLM (Intune/GPO) delivers any policy key, Claude Code
+selects HKLM under the default `first-wins`. From the drop-in it then still reads `env`
+(per variable, Claude Code 2.1.223+), `allowManagedMcpServersOnly` (2.1.273+), and the
+`allowedMcpServers` list while the MCP lock is on. It ignores the drop-in's hooks,
+`apiKeyHelper`, `allowManagedHooksOnly` and every other key. `managedSourcesBehavior:
+"merge"` in the HKLM policy (2.1.242+) adds the drop-in's hooks and makes
+`allowManagedHooksOnly` take the strictest value. `apiKeyHelper` is still read from HKLM
+only, so a fleet that pushes HKLM policy and uses the system daemon's gateway helper
+must put `apiKeyHelper` into the HKLM policy as well, or put the locks into HKLM and
+leave the drop-in to `env` and hooks. HKCU is user-writable and is not an admin source;
+`null` means no admin source delivers a policy and Claude Code may then apply the
+user-writable HKCU value, which the daemon does not report. Daemon-info shows the policy
+as of the last GET request (the daemon reads the managed files and HKLM on every
+daemon-info request, so a system-daemon push shows up on the next GET) via
+`managedSettingsSource` (`"hklm"`, `"file"`, or `null`), `managedHooksLocked` and
+`managedMcpLocked` (both boolean), and `managedSettingsError` (present when the posture
+cannot be determined); each launch records the same three fields reflecting the policy
+in force when it started, or source `null` and both lock fields `false` when the posture
+could not be determined at launch time (a read error, invalid JSON, or an empty HKLM value
+in an admin source); daemon-info is the surface that reports the error, and the daemon logs
+a warning when a posture error occurs during launch. Server-managed settings (from claude.ai
+or a Claude apps
+gateway) rank above HKLM and the file tier when a session authenticates to Anthropic's
+API directly or signs in to a gateway; outside the box they apply to unboxed sessions,
+not to launches inside the box. The posture model assumes Claude Code 2.1.273 or later.
 
 Behaviour change for the user-mode daemon on Windows: its pipe now admits the
 owning user only (SYSTEM and that user's SID), no longer every interactive user.
