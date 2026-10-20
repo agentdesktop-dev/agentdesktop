@@ -68,6 +68,12 @@ export interface DaemonInfo {
     bound: boolean;
     error?: string;
   };
+  /** Sandboxed launch (`agentdesktop run`), when `daemon.containment` is configured. */
+  containment?: {
+    executor: string;
+    available: boolean;
+    error?: string;
+  };
 }
 
 export interface ConnectorRuntime {

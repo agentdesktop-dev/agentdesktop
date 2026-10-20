@@ -723,6 +723,133 @@ routes:
 This route is a pass-through, not an LLM route, so requests on it have no
 token or cost records; see [Token and cost usage](#token-and-cost-usage).
 
+## Sandboxed launch (Windows, preview)
+
+`agentdesktop run claude` starts Claude Code inside a Windows AppContainer so the
+agent sees the workspace, its own state and little else. The daemon drives
+Microsoft's MXC executor; nothing is installed on the device by Agentdesktop
+itself. Startup setting (local only, user mode):
+
+```yaml
+daemon:
+  user: true
+  containment:
+    executor: C:\Program Files\mxc\x64\wxc-exec.exe
+```
+
+The daemon reports the setting as `containment` in daemon-info (`available`
+with the reason when not). Then, from the workspace directory:
+
+```powershell
+agentdesktop run claude -- --model opus
+```
+
+Everything after `--` goes to Claude Code. The daemon answers `409` when the
+effective configuration has no `llmGateway` with `authentication`, no
+`programs.claudeCode` with `useLlmGateway: true`, uses subscription sign-in
+(not available inside the box yet), or sets a top-level `sandbox` (Claude
+Code's own sandbox does not run inside the box; remove it or launch without
+`run`). `daemon.claudeCode.config` must stay unset: the box reads
+`~\.claude\settings.json`. With controller JWT authentication, `claude-code`
+must be in the controller's `allowedClientIds`; with `authentication.type: oidc`
+the client ID has no effect.
+
+What the box can see: the workspace, `~\.claude` (skills, agents, commands,
+`CLAUDE.md` and `.claude.json` stay writable; `CLAUDE_CONFIG_DIR` points there),
+a private `tmp`. Read-only: the Claude Code and Git installations, the
+Agentdesktop client, `~\.gitconfig` and `~\.config\git\config` when they exist (git reads them
+before anything else; open egress means a git config can carry secrets, for
+example `http.<url>.extraHeader` with a bearer PAT, or credentials in
+`url.*.insteadOf` URLs; `[include]` and `[includeIf]` targets of the git configuration
+are not granted, so git fails closed in the box when a config uses them), `~\.claude\settings.json`, `~\.claude\hooks`,
+`~\.claude\plugins`, the workspace's `.claude\settings*.json`, `.claude\hooks`,
+`.mcp.json`, a `HEAD` file at the workspace root, and `.git\config`,
+`.git\hooks` and `.git\commondir` of the workspace repository (`.git\HEAD`
+stays writable so branch switches work).
+Each file or folder in that list is denied when it does not exist, so the box
+cannot create it in place, except for the git configuration files (granted when
+present, not emitted otherwise); a workspace without a `.claude` folder gets
+the folder denied as a whole; a workspace without `.git` cannot `git init` one.
+When the `.git` entry is an empty directory (exists but has no children), the config,
+hooks and commondir guards are emitted, so the box cannot `git init` into the existing
+empty folder. A `.git` file (worktree or submodule) remains box-writable: a `gitdir:`
+rewrite is not prevented.
+Residual risk: direct creation of those denied paths is blocked, but renaming a file
+into such a path succeeds, and the file then exists on disk. For example, an agent
+could rename a file into `<cwd>\.git\commondir` to point git at a writable directory
+with its own config and hooks, or into `<cwd>\HEAD` so that git treats the workspace
+as a bare repository. Renaming a folder into these names has not been tested.
+The daemon creates `~\.claude` if it is missing. Always denied:
+`~\.claude\.credentials.json`, `~\.claude\history.jsonl`, `~\.claude\ide`,
+`~\.ssh`, `~\.aws`, `~\.azure`, `~\.kube`. The workspace may not be a drive or share root, the home
+directory or one of its ancestors, or anything under `%SystemRoot%`,
+`%ProgramFiles%`, `%ProgramData%`, `AppData`, and the actual `%APPDATA%` and
+`%LOCALAPPDATA%` paths (Folder Redirection can place these outside `<home>\AppData`),
+`~\.claude`, the daemon's state directory or a denied path (`%ProgramFiles(x86)%`
+counts as a system directory). Outbound network is open in this preview; whether the box can reach
+loopback services on the host, and whether it accepts inbound loopback
+connections, follows the request's network block (`egress` open, host loopback
+ingress denied) and is not yet verified in the lab; the clipboard is off in the
+box; a gateway behind a private CA is not supported yet.
+
+The box gets no pipe to the daemon and no sign-in: the daemon writes the
+gateway credential to a private file named by `AGENTDESKTOP_CREDENTIAL_FILE`,
+which `agentdesktop credential --client-id claude-code` reads inside the box.
+That token is the box's single secret. Inside the box the agent can read a
+valid gateway token and send it anywhere, because outbound traffic is open in
+this preview; the local relay route removes the token from the box. The daemon
+rewrites the file shortly before the credential expires (about 50 s before),
+without ever opening a browser; if the gateway refuses the refresh the file
+stays until the credential expires, and if the configuration no longer allows
+the launch the file is removed at that next refresh. After logout or a policy
+change a running box therefore keeps model access for at most the remaining
+credential lifetime. Restarting the daemon ends model access for running
+sandboxed sessions within the credential lifetime; start a new `run` with
+`--resume`. The box's own `TEMP` lives under the launch directory. Telemetry
+hooks do not reach the daemon from inside the box in this preview. Arguments
+containing `" % ^ & | < > !` or control characters are rejected, because
+`cmd.exe` starts the box's console window.
+
+`run` answers `400` for a rejected program, workspace or argument, `403` when
+another user calls a user-mode daemon on Windows, `409` for the configuration
+rules above, `401`/`424`/`502` straight from the credential request, and `500`
+when preparing the launch fails (creating `~\.claude`, the credential directory,
+or writing the request), when the executor cannot be started, when recording the
+launch pid fails, or when it exits within three seconds (its last log lines are
+in the message). Launches are
+listed by `GET /v1/launches`
+(running ones plus the last 32 that exited). A daemon restart keeps running
+boxes alive but stops refreshing their credential: at startup the daemon removes
+the credential and request files of every earlier launch, and the directory of
+a launch whose box has exited. Residual risk: on Windows a read-only file inside
+a read-write folder can be replaced from the box (write a temp file, rename over
+it; Claude Code's own atomic save does this). That covers every read-only entry
+above that sits inside a writable folder: `~\.claude\settings.json` (hooks,
+`apiKeyHelper`), `~\.claude\hooks`, `~\.claude\plugins`, the workspace's
+`.claude\settings*.json` and `.claude\hooks` (which can also be committed to the
+repository), `.mcp.json`, the workspace-root `HEAD`, and `.git\config`, `.git\hooks`
+and `.git\commondir`. A `.git` file (worktree or submodule) is box-writable (a rewrite
+is not prevented). The boxed agent can
+change these, and the next unboxed session reads them (Claude Code outside the box;
+git outside the box, where `core.fsmonitor` and `core.hooksPath` run code). The
+read-only grant stops in-place writes but not replacement. The daemon's own
+directory (and the launched program's directory) is granted read-only recursively,
+so running a portable `agentdesktop.exe` or `claude.exe` from inside the profile
+widens that grant to everything under it except the denied entries (install under
+Program Files, the MSI default, to keep the grant narrow). Files the agent creates
+in the workspace are not gated yet; nested repositories under the workspace, a
+renamed or recreated `.git` or `.claude` directory, and editor task files such as
+`.vscode\tasks.json` are not protected; `~\.claude\.claude.json` (user-scope
+MCP servers) and skills under `~\.claude` stay writable so the agent keeps its
+context; managed `allowManaged*Only` settings arrive with the policy profile.
+
+Behaviour change for the user-mode daemon on Windows: its pipe now admits the
+owning user only (SYSTEM and that user's SID), no longer every interactive user.
+On a device that also runs the system service, set `daemon.socket` to a per-user
+pipe (for example `\\.\pipe\agentdesktop-<username>`) and pass it to `run` with
+`--socket` (or `AGENTDESKTOP_SOCKET` in the unified binary); this preview adds no
+pipe discovery or Windows logon autostart.
+
 ## Periodic re-apply (opt-in)
 
 The daemon applies its configuration at startup and whenever the controller

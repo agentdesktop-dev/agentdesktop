@@ -160,6 +160,20 @@
       },
       "additionalProperties": false
     },
+    "ContainmentStartupConfig": {
+      "description": "Sandboxed launch settings.",
+      "type": "object",
+      "properties": {
+        "executor": {
+          "description": "Windows only. Absolute path to MXC `wxc-exec.exe`; no default. Read at\nstartup only (restart the daemon after changing it). Requires user\nmode; ignored with `--once` and `--dry-run`.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "executor"
+      ]
+    },
     "ControllerConnectionConfig": {
       "description": "Connection settings used by a daemon to reach the fleet controller.",
       "type": "object",
@@ -260,6 +274,17 @@
           "description": "Codex paths.",
           "$ref": "#/$defs/ToolConfigPath",
           "default": {}
+        },
+        "containment": {
+          "description": "Sandboxed launch (`agentdesktop run`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContainmentStartupConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "copilot": {
           "description": "GitHub Copilot CLI paths (`config` = the `providers.json` to manage;\ndefaults to `COPILOT_PROVIDERS_CONFIG`, `$COPILOT_HOME/providers.json`,\nthen `~/.copilot/providers.json`).",

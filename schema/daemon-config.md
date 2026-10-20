@@ -15,6 +15,8 @@
 |`daemon.claudeDesktop.credentialHelper`|string|Credential helper path.|
 |`daemon.codex`|object|Codex paths.|
 |`daemon.codex.config`|string|Configuration file.|
+|`daemon.containment`|object|Sandboxed launch (`agentdesktop run`).|
+|`daemon.containment.executor`|string|Windows only. Absolute path to MXC `wxc-exec.exe`; no default. Read at<br>startup only (restart the daemon after changing it). Requires user<br>mode; ignored with `--once` and `--dry-run`.|
 |`daemon.copilot`|object|GitHub Copilot CLI paths (`config` = the `providers.json` to manage;<br>defaults to `COPILOT_PROVIDERS_CONFIG`, `$COPILOT_HOME/providers.json`,<br>then `~/.copilot/providers.json`).|
 |`daemon.copilot.config`|string|Configuration file.|
 |`daemon.grok`|object|Grok Build paths.|

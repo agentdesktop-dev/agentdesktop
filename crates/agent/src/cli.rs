@@ -1,13 +1,14 @@
-use std::{io::Read, path::PathBuf};
+use std::{ffi::OsStr, io::Read, path::PathBuf};
 
 use agentdesktop_client as client;
 use agentdesktop_core::{
     config::DaemonConfig,
     model::{
-        Discovery, EnrollmentStatus, Health, LlmGatewayCredential, LlmGatewayLoginStatus,
-        ProgramChoice, ProgramManagement, TelemetryEventKind,
+        Discovery, EnrollmentStatus, Health, Launch, LaunchRequest, LlmGatewayCredential,
+        LlmGatewayLoginStatus, ProgramChoice, ProgramManagement, TelemetryEventKind,
     },
 };
+use anyhow::Context;
 use clap::Subcommand;
 use serde::Deserialize;
 
@@ -37,6 +38,15 @@ pub enum ClientCommand {
     Programs {
         #[command(subcommand)]
         command: Option<ProgramsCommand>,
+    },
+    /// Run a program in a sandbox (Windows AppContainer) with the current
+    /// directory as its workspace. Arguments after `--` go to the program.
+    Run {
+        /// Program to run: `claude-code` (alias `claude`).
+        program: String,
+        /// Arguments passed to the program.
+        #[arg(last = true)]
+        args: Vec<String>,
     },
     /// Handle an event emitted by a managed developer-tool hook.
     Hook {
@@ -150,6 +160,15 @@ pub async fn run(command: ClientCommand, socket: PathBuf) -> anyhow::Result<()> 
             );
         }
         ClientCommand::Credential { client_id } => {
+            // Inside a sandboxed launch the daemon's pipe is out of reach; the
+            // launch directory carries the credential instead.
+            if let Some(credential) = file_credential(
+                &client_id,
+                std::env::var_os("AGENTDESKTOP_CREDENTIAL_FILE").as_deref(),
+            ) {
+                println!("{credential}");
+                return Ok(());
+            }
             let client_id: String =
                 url::form_urlencoded::byte_serialize(client_id.as_bytes()).collect();
             let response: LlmGatewayCredential = client::get(
@@ -158,6 +177,31 @@ pub async fn run(command: ClientCommand, socket: PathBuf) -> anyhow::Result<()> 
             )
             .await?;
             println!("{}", response.credential);
+        }
+        ClientCommand::Run { program, args } => {
+            let cwd = std::env::current_dir().context("read the current directory")?;
+            let request = run_request(&program, cwd, args);
+            match client::post_json_response::<_, Launch>(&socket, "/v1/launch", &request).await {
+                Ok(launch) => {
+                    let valid_until = launch
+                        .credential_expires_at_unix_seconds
+                        .map(|seconds| {
+                            humantime::format_rfc3339_seconds(
+                                std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
+                            )
+                            .to_string()
+                        })
+                        .unwrap_or_else(|| "unknown".to_owned());
+                    println!(
+                        "launched {} (container {}, credential valid until {valid_until})",
+                        launch.launch_id, launch.container_id
+                    );
+                }
+                Err(error) => {
+                    eprintln!("{}", run_error_message(&error));
+                    std::process::exit(1);
+                }
+            }
         }
         ClientCommand::Hook {
             hook: HookCommand::ClaudePreToolUse { include_input },
@@ -226,6 +270,46 @@ fn print_programs(management: &ProgramManagement) {
                 program.program, program.detail
             );
         }
+    }
+}
+
+/// The credential a sandboxed launch reads from `AGENTDESKTOP_CREDENTIAL_FILE`
+/// (the value of that variable is `var`). `None` unless `client_id` is
+/// `claude-code`, and `None` when the variable is unset or the file is
+/// unreadable or empty after trimming.
+pub fn file_credential(client_id: &str, var: Option<&OsStr>) -> Option<String> {
+    if client_id != crate::provider::claude_code::ClaudeCode::ID {
+        return None;
+    }
+    let path = var.filter(|value| !value.is_empty())?;
+    let contents = std::fs::read_to_string(path).ok()?;
+    let credential = contents.trim();
+    (!credential.is_empty()).then(|| credential.to_owned())
+}
+
+/// The launch request for `agentdesktop run <program>`; the alias `claude`
+/// maps to the provider id `claude-code`.
+pub fn run_request(program: &str, cwd: PathBuf, args: Vec<String>) -> LaunchRequest {
+    let program = if program == "claude" {
+        "claude-code"
+    } else {
+        program
+    };
+    LaunchRequest {
+        program: program.to_owned(),
+        cwd,
+        args,
+    }
+}
+
+/// The line `agentdesktop run` prints on stderr for a failed launch request.
+pub fn run_error_message(error: &anyhow::Error) -> String {
+    match error.downcast_ref::<agentdesktop_client::StatusError>() {
+        Some(status) if status.status == 404 => {
+            "this daemon does not support `run` (upgrade agentdesktop)".to_owned()
+        }
+        Some(status) => status.to_string(),
+        None => format!("{error:#}"),
     }
 }
 
@@ -311,9 +395,16 @@ fn claude_client_id_for_entrypoint(entrypoint: Option<&str>) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use agentdesktop_core::model::{ProgramChoice, TelemetryEventKind};
+    use std::{ffi::OsStr, path::PathBuf};
 
-    use super::{parse_claude_pre_tool_use, parse_program_choice};
+    use agentdesktop_client::StatusError;
+    use agentdesktop_core::model::{LaunchRequest, ProgramChoice, TelemetryEventKind};
+    use clap::Parser;
+
+    use super::{
+        ClientCommand, file_credential, parse_claude_pre_tool_use, parse_program_choice,
+        run_error_message, run_request,
+    };
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
@@ -336,6 +427,149 @@ mod tests {
             }
         );
         assert!(parse_program_choice(&args(&["none", "codex"])).is_err());
+    }
+
+    /// Mirrors the binaries: a global `--socket` plus the flattened client commands.
+    #[derive(Parser)]
+    struct TestCli {
+        #[arg(long, global = true, default_value = "default.sock")]
+        socket: PathBuf,
+        #[command(subcommand)]
+        command: ClientCommand,
+    }
+
+    fn parse(args: &[&str]) -> TestCli {
+        TestCli::try_parse_from(std::iter::once("agentdesktop").chain(args.iter().copied()))
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    #[test]
+    fn run_maps_the_claude_alias_to_the_provider_id() {
+        let cwd = PathBuf::from("/work/app");
+        assert_eq!(
+            run_request("claude", cwd.clone(), vec!["--model".into(), "x".into()]),
+            LaunchRequest {
+                program: "claude-code".into(),
+                cwd: cwd.clone(),
+                args: vec!["--model".into(), "x".into()],
+            }
+        );
+        assert_eq!(
+            run_request("claude-code", cwd.clone(), vec![]),
+            LaunchRequest {
+                program: "claude-code".into(),
+                cwd,
+                args: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn run_passes_everything_after_the_separator_to_the_program() {
+        let cli = parse(&["run", "claude", "--", "--socket", "x.sock", "--model", "x"]);
+        let ClientCommand::Run { program, args } = cli.command else {
+            panic!("expected the run command");
+        };
+        assert_eq!(program, "claude");
+        assert_eq!(args, ["--socket", "x.sock", "--model", "x"]);
+        assert_eq!(
+            cli.socket,
+            PathBuf::from("default.sock"),
+            "--socket after -- belongs to the program"
+        );
+    }
+
+    #[test]
+    fn run_honours_the_socket_flag_before_the_separator_and_allows_no_arguments() {
+        let cli = parse(&["--socket", "mine.sock", "run", "claude", "--", "--debug"]);
+        assert_eq!(cli.socket, PathBuf::from("mine.sock"));
+        let ClientCommand::Run { args, .. } = cli.command else {
+            panic!("expected the run command");
+        };
+        assert_eq!(args, ["--debug"]);
+
+        let cli = parse(&["run", "claude", "--socket", "late.sock"]);
+        assert_eq!(cli.socket, PathBuf::from("late.sock"));
+        let ClientCommand::Run { args, .. } = cli.command else {
+            panic!("expected the run command");
+        };
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn run_error_message_maps_404_to_an_upgrade_hint() {
+        let error = anyhow::Error::new(StatusError {
+            status: 404,
+            body: String::new(),
+        });
+        assert_eq!(
+            run_error_message(&error),
+            "this daemon does not support `run` (upgrade agentdesktop)"
+        );
+    }
+
+    #[test]
+    fn run_error_message_prints_the_body_after_the_status() {
+        let error = anyhow::Error::new(StatusError {
+            status: 409,
+            body: "executor not found: C:\\missing\\wxc-exec.exe".into(),
+        });
+        assert_eq!(
+            run_error_message(&error),
+            "daemon returned 409 Conflict: executor not found: C:\\missing\\wxc-exec.exe"
+        );
+    }
+
+    #[test]
+    fn run_error_message_keeps_the_text_of_a_transport_error() {
+        let error = anyhow::anyhow!("connect to /tmp/x.sock\nCheck that the daemon is running.");
+        assert!(run_error_message(&error).contains("connect to /tmp/x.sock"));
+    }
+
+    fn credential_file(contents: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token");
+        std::fs::write(&path, contents).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn file_credential_reads_and_trims_the_file_named_by_the_variable() {
+        let (_dir, path) = credential_file("gateway-token\r\n");
+        assert_eq!(
+            file_credential("claude-code", Some(path.as_os_str())),
+            Some("gateway-token".to_owned())
+        );
+    }
+
+    #[test]
+    fn file_credential_is_none_for_an_empty_file() {
+        let (_dir, path) = credential_file("  \n");
+        assert_eq!(file_credential("claude-code", Some(path.as_os_str())), None);
+    }
+
+    #[test]
+    fn file_credential_is_none_when_the_variable_is_unset_or_the_file_is_unreadable() {
+        assert_eq!(file_credential("claude-code", None), None);
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        assert_eq!(
+            file_credential("claude-code", Some(missing.as_os_str())),
+            None
+        );
+        assert_eq!(file_credential("claude-code", Some(OsStr::new(""))), None);
+    }
+
+    #[test]
+    fn file_credential_is_only_for_claude_code() {
+        let (_dir, path) = credential_file("gateway-token");
+        for client_id in ["codex", "vscode", "claude-desktop", "agentdesktop", ""] {
+            assert_eq!(
+                file_credential(client_id, Some(path.as_os_str())),
+                None,
+                "{client_id}"
+            );
+        }
     }
 
     #[test]

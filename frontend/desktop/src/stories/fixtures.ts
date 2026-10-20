@@ -41,6 +41,15 @@ export const usageReceiverDaemonInfo: DaemonInfo = {
   usageReceiver: { listen: "127.0.0.1:4319", bound: true },
 };
 
+export const containmentDaemonInfo: DaemonInfo = {
+  ...standaloneDaemonInfo,
+  containment: {
+    executor: "C:\\Program Files\\mxc\\wxc-exec.exe",
+    available: false,
+    error: "executor not found: C:\\Program Files\\mxc\\wxc-exec.exe",
+  },
+};
+
 export const usageReceiverOffDaemonInfo: DaemonInfo = {
   ...standaloneDaemonInfo,
   usageReceiver: {

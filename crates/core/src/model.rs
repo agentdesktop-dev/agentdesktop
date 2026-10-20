@@ -141,6 +141,59 @@ pub struct DaemonInfo {
     /// `daemon.usage` is configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_receiver: Option<UsageReceiverInfo>,
+    /// Sandboxed launch (`agentdesktop run`), when `daemon.containment` is
+    /// configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub containment: Option<ContainmentInfo>,
+}
+
+/// Whether `agentdesktop run` can launch a sandboxed program on this daemon.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContainmentInfo {
+    /// Configured `daemon.containment.executor` (lossy display string).
+    pub executor: String,
+    /// Whether launches are possible. `false` carries the reason in `error`.
+    pub available: bool,
+    /// Why launches are impossible, when `available` is `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Body of `POST /v1/launch`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchRequest {
+    /// Provider id of the program to launch (`claude-code`).
+    pub program: String,
+    /// Workspace directory of the launch.
+    pub cwd: PathBuf,
+    /// Arguments passed to the program.
+    pub args: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LaunchStatus {
+    Running,
+    Exited,
+}
+
+/// A sandboxed launch started by this daemon.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Launch {
+    /// 16 lowercase hexadecimal characters.
+    pub launch_id: String,
+    pub program: String,
+    pub cwd: PathBuf,
+    /// `agentdesktop-<launch_id>`.
+    pub container_id: String,
+    pub status: LaunchStatus,
+    pub exit_code: Option<i32>,
+    pub started_at_unix_seconds: u64,
+    pub ended_at_unix_seconds: Option<u64>,
+    pub credential_expires_at_unix_seconds: Option<u64>,
 }
 
 /// State of the daemon's receiver for gateway usage.
@@ -379,7 +432,10 @@ pub enum TelemetryEventKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{ControllerConnectionError, ControllerConnectionStatus, ProgramChoice};
+    use super::{
+        ContainmentInfo, ControllerConnectionError, ControllerConnectionStatus, Launch,
+        LaunchRequest, LaunchStatus, ProgramChoice,
+    };
 
     #[test]
     fn controller_connection_error_is_a_closed_camel_case_set() {
@@ -419,5 +475,85 @@ mod tests {
         assert!(!ProgramChoice::None.includes("claude-code"));
         assert!(selected.includes("codex"));
         assert!(!selected.includes("claude-code"));
+    }
+
+    #[test]
+    fn containment_info_is_camel_case_and_omits_an_absent_error() {
+        let available = ContainmentInfo {
+            executor: r"C:\mxc\x64\wxc-exec.exe".into(),
+            available: true,
+            error: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&available).unwrap(),
+            serde_json::json!({"executor": r"C:\mxc\x64\wxc-exec.exe", "available": true})
+        );
+
+        let unavailable: ContainmentInfo = serde_json::from_str(
+            r#"{"executor":"x","available":false,"error":"requires user mode"}"#,
+        )
+        .unwrap();
+        assert_eq!(unavailable.error.as_deref(), Some("requires user mode"));
+        assert!(!unavailable.available);
+        let again: ContainmentInfo =
+            serde_json::from_str(&serde_json::to_string(&unavailable).unwrap()).unwrap();
+        assert_eq!(again, unavailable);
+    }
+
+    #[test]
+    fn launch_request_is_camel_case_json() {
+        let request = LaunchRequest {
+            program: "claude-code".into(),
+            cwd: "/work/app".into(),
+            args: vec!["--model".into(), "x".into()],
+        };
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            serde_json::json!({
+                "program": "claude-code",
+                "cwd": "/work/app",
+                "args": ["--model", "x"],
+            })
+        );
+        let parsed: LaunchRequest = serde_json::from_value(serde_json::json!({
+            "program": "claude-code", "cwd": "/work/app", "args": []
+        }))
+        .unwrap();
+        assert!(parsed.args.is_empty());
+    }
+
+    #[test]
+    fn launch_serializes_with_camel_case_keys_and_lowercase_status() {
+        let running = Launch {
+            launch_id: "0123456789abcdef".into(),
+            program: "claude-code".into(),
+            cwd: "/work/app".into(),
+            container_id: "agentdesktop-0123456789abcdef".into(),
+            status: LaunchStatus::Running,
+            exit_code: None,
+            started_at_unix_seconds: 1_700_000_000,
+            ended_at_unix_seconds: None,
+            credential_expires_at_unix_seconds: Some(1_700_003_600),
+        };
+        let json = serde_json::to_value(&running).unwrap();
+        assert_eq!(json["launchId"], "0123456789abcdef");
+        assert_eq!(json["containerId"], "agentdesktop-0123456789abcdef");
+        assert_eq!(json["status"], "running");
+        assert_eq!(json["startedAtUnixSeconds"], 1_700_000_000u64);
+        assert_eq!(json["credentialExpiresAtUnixSeconds"], 1_700_003_600u64);
+        let again: Launch = serde_json::from_value(json).unwrap();
+        assert_eq!(again, running);
+
+        let exited = Launch {
+            status: LaunchStatus::Exited,
+            exit_code: Some(3),
+            ended_at_unix_seconds: Some(1_700_000_100),
+            ..running
+        };
+        let json = serde_json::to_value(&exited).unwrap();
+        assert_eq!(json["status"], "exited");
+        assert_eq!(json["exitCode"], 3);
+        assert_eq!(json["endedAtUnixSeconds"], 1_700_000_100u64);
+        assert_eq!(serde_json::from_value::<Launch>(json).unwrap(), exited);
     }
 }

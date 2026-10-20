@@ -7,6 +7,7 @@ pub mod gateway_oidc;
 mod github_oauth;
 pub mod identity;
 mod inventory_watch;
+pub mod launch;
 mod llm_proxy;
 pub mod oidc;
 use subscription_oauth::openai as openai_oauth;

@@ -1,0 +1,85 @@
+{
+  "version": "1.0.0",
+  "containment": "processcontainer",
+  "containerId": "agentdesktop-0123456789abcdef",
+  "ui": {
+    "disable": false,
+    "clipboard": "none",
+    "injection": false
+  },
+  "process": {
+    "commandLine": "cmd.exe /d /v:off /c start \"agentdesktop: claude\" /WAIT /D \"C:\\lab\\ws pr1\" \"C:\\Users\\dev\\.local\\bin\\claude.exe\" --debug-file \"C:\\lab\\ws pr1\\pr1-l2.log\" --allowedTools PowerShell",
+    "cwd": "C:\\lab\\ws pr1",
+    "inheritDefaultEnv": false,
+    "env": [
+      "AGENTDESKTOP_CREDENTIAL_FILE=C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\credential\\token",
+      "ANTHROPIC_BASE_URL=https://alpha-dev.aks.solo.sademo.de",
+      "APPDATA=C:\\Users\\dev\\AppData\\Roaming",
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+      "CLAUDE_CODE_USE_POWERSHELL_TOOL=1",
+      "CLAUDE_CONFIG_DIR=C:\\Users\\dev\\.claude",
+      "ComSpec=C:\\Windows\\system32\\cmd.exe",
+      "DISABLE_AUTOUPDATER=1",
+      "HOME=C:\\Users\\dev",
+      "HOMEDRIVE=C:",
+      "HOMEPATH=\\Users\\dev",
+      "LOCALAPPDATA=C:\\Users\\dev\\AppData\\Local",
+      "PATH=C:\\Windows\\System32;C:\\Windows;C:\\Windows\\System32\\WindowsPowerShell\\v1.0;C:\\Program Files\\Git\\cmd;C:\\Users\\dev\\.local\\bin;C:\\lab\\agentdesktop",
+      "PATHEXT=.COM;.EXE;.BAT;.CMD",
+      "ProgramData=C:\\ProgramData",
+      "ProgramFiles=C:\\Program Files",
+      "SystemDrive=C:",
+      "SystemRoot=C:\\Windows",
+      "TEMP=C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\tmp",
+      "TERM=xterm-256color",
+      "TMP=C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\tmp",
+      "USERNAME=dev",
+      "USERPROFILE=C:\\Users\\dev",
+      "windir=C:\\Windows"
+    ]
+  },
+  "filesystem": {
+    "readwritePaths": [
+      "C:\\lab\\ws pr1",
+      "C:\\Users\\dev\\.claude",
+      "C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\tmp"
+    ],
+    "readonlyPaths": [
+      "C:\\Users\\dev\\.local\\bin",
+      "C:\\Users\\dev\\.local\\share\\claude",
+      "C:\\Program Files\\Git",
+      "C:\\lab\\agentdesktop",
+      "C:\\Program Files\\ClaudeCode",
+      "C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\credential",
+      "C:\\Users\\dev\\.claude\\settings.json",
+      "C:\\Users\\dev\\.claude\\plugins",
+      "C:\\lab\\ws pr1\\.claude\\settings.local.json",
+      "C:\\lab\\ws pr1\\.mcp.json",
+      "C:\\lab\\ws pr1\\.git\\config",
+      "C:\\lab\\ws pr1\\.git\\hooks"
+    ],
+    "deniedPaths": [
+      "C:\\Users\\dev\\.claude\\hooks",
+      "C:\\lab\\ws pr1\\.claude\\settings.json",
+      "C:\\lab\\ws pr1\\.claude\\hooks",
+      "C:\\Users\\dev\\.claude\\.credentials.json",
+      "C:\\Users\\dev\\.claude\\history.jsonl",
+      "C:\\Users\\dev\\.ssh",
+      "C:\\Users\\dev\\.aws",
+      "C:\\Users\\dev\\.azure",
+      "C:\\Users\\dev\\.kube",
+      "C:\\lab\\ws pr1\\.git\\commondir",
+      "C:\\Users\\dev\\.claude\\ide",
+      "C:\\lab\\ws pr1\\HEAD"
+    ]
+  },
+  "network": {
+    "egress": {
+      "default": "allow"
+    },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "deny"
+    }
+  }
+}

@@ -104,6 +104,9 @@ pub struct DaemonStartupConfig {
     /// Usage collection without a controller, from a gateway on this machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<UsageStartupConfig>,
+    /// Sandboxed launch (`agentdesktop run`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub containment: Option<ContainmentStartupConfig>,
     /// Opt-in interval between periodic re-applies of the current
     /// configuration, which repair drift (a managed file deleted or edited by
     /// hand, a fixed conflict, a loosened mode) without rewriting anything
@@ -128,6 +131,48 @@ pub struct LlmProxyStartupConfig {
     /// Credential policy client ID used by the proxy. Defaults to `vscode`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+}
+
+/// Sandboxed launch settings.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContainmentStartupConfig {
+    /// Windows only. Absolute path to MXC `wxc-exec.exe`; no default. Read at
+    /// startup only (restart the daemon after changing it). Requires user
+    /// mode; ignored with `--once` and `--dry-run`.
+    pub executor: PathBuf,
+}
+
+/// Checks `daemon.containment`. With `windows == true` the executor must be an
+/// absolute Windows path (`X:\...` or `\\server\share\...`, judged on the
+/// string) to a file whose name ends in `.exe`, case-insensitively.
+pub fn validate_containment_startup(
+    cfg: &ContainmentStartupConfig,
+    windows: bool,
+) -> Result<(), String> {
+    if !windows {
+        return Ok(());
+    }
+    let text = cfg.executor.to_string_lossy();
+    let bytes = text.as_bytes();
+    let drive_absolute =
+        bytes.len() > 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\';
+    let unc_absolute = text.starts_with("\\\\")
+        && text[2..]
+            .split('\\')
+            .filter(|part| !part.is_empty())
+            .count()
+            >= 3;
+    let exe = text
+        .rsplit('\\')
+        .next()
+        .is_some_and(|name| name.to_ascii_lowercase().ends_with(".exe"));
+    if (drive_absolute || unc_absolute) && exe {
+        Ok(())
+    } else {
+        Err("daemon.containment.executor must be an absolute path to wxc-exec.exe".to_owned())
+    }
 }
 
 /// Token and cost collection for a daemon without a controller. agentgateway
@@ -1405,6 +1450,13 @@ fn parse_local_daemon(contents: &str) -> anyhow::Result<DaemonConfig> {
             anyhow::bail!("daemon.usage.listen must be a loopback address");
         }
     }
+    if let Some(containment) = config
+        .daemon
+        .as_ref()
+        .and_then(|daemon| daemon.containment.as_ref())
+    {
+        validate_containment_startup(containment, cfg!(windows)).map_err(anyhow::Error::msg)?;
+    }
     validate_daemon(
         config.llm_gateway.as_ref(),
         config.sandbox.as_ref(),
@@ -2475,5 +2527,133 @@ programs:
             "programs:\n  pi: {}\n  claudeDesktop: {}\n  grok: {}\n  copilot: {}\n  vscode: {}",
         )
         .expect("each daemon manages the programs supported in its mode");
+    }
+
+    fn containment(executor: &str) -> super::ContainmentStartupConfig {
+        super::ContainmentStartupConfig {
+            executor: executor.into(),
+        }
+    }
+
+    const CONTAINMENT_EXECUTOR_ERROR: &str =
+        "daemon.containment.executor must be an absolute path to wxc-exec.exe";
+
+    #[test]
+    fn containment_executor_on_windows_must_be_an_absolute_path_to_an_exe() {
+        for executor in [
+            r"wxc-exec.exe",
+            r"mxc\wxc-exec.exe",
+            r"\mxc\wxc-exec.exe",
+            r"C:wxc-exec.exe",
+        ] {
+            assert_eq!(
+                super::validate_containment_startup(&containment(executor), true),
+                Err(CONTAINMENT_EXECUTOR_ERROR.to_owned()),
+                "{executor} is not absolute"
+            );
+        }
+    }
+
+    #[test]
+    fn containment_executor_on_windows_accepts_drive_and_unc_paths_and_any_exe_case() {
+        for executor in [
+            r"C:\mxc\x64\wxc-exec.exe",
+            r"C:\mxc\x64\WXC-EXEC.EXE",
+            r"C:\mxc\x64\wxc-exec.Exe",
+            r"\\server\share\mxc\wxc-exec.exe",
+        ] {
+            assert_eq!(
+                super::validate_containment_startup(&containment(executor), true),
+                Ok(()),
+                "{executor}"
+            );
+        }
+    }
+
+    #[test]
+    fn containment_executor_on_windows_rejects_a_cmd_file() {
+        assert_eq!(
+            super::validate_containment_startup(&containment(r"C:\mxc\wxc-exec.cmd"), true),
+            Err(CONTAINMENT_EXECUTOR_ERROR.to_owned())
+        );
+        assert_eq!(
+            super::validate_containment_startup(&containment(r"C:\mxc\wxc-exec"), true),
+            Err(CONTAINMENT_EXECUTOR_ERROR.to_owned())
+        );
+    }
+
+    #[test]
+    fn containment_executor_is_not_checked_off_windows() {
+        for executor in ["wxc-exec.exe", "relative/wxc-exec.cmd", "/opt/mxc/wxc-exec"] {
+            assert_eq!(
+                super::validate_containment_startup(&containment(executor), false),
+                Ok(()),
+                "{executor}"
+            );
+        }
+    }
+
+    #[test]
+    fn daemon_containment_is_a_startup_setting_with_an_executor_path() {
+        let config = super::parse_local_daemon(
+            "daemon:\n  user: true\n  containment:\n    executor: 'C:\\mxc\\wxc-exec.exe'\n",
+        )
+        .expect("a containment block parses off Windows");
+        let containment = config
+            .daemon
+            .unwrap()
+            .containment
+            .expect("containment block");
+        assert_eq!(
+            containment.executor,
+            std::path::Path::new(r"C:\mxc\wxc-exec.exe")
+        );
+    }
+
+    #[test]
+    fn daemon_containment_rejects_unknown_fields_and_a_missing_executor() {
+        assert!(
+            super::parse_local_daemon(
+                "daemon:\n  containment:\n    executor: /x/wxc-exec\n    timeout: 5s\n"
+            )
+            .is_err()
+        );
+        assert!(super::parse_local_daemon("daemon:\n  containment: {}\n").is_err());
+    }
+
+    #[test]
+    fn daemon_containment_is_local_only_and_absent_by_default() {
+        let yaml = "daemon:\n  containment:\n    executor: 'C:\\mxc\\wxc-exec.exe'\n";
+        assert!(
+            parse_daemon(yaml)
+                .unwrap_err()
+                .to_string()
+                .contains("only allowed in the local")
+        );
+        let startup = super::DaemonStartupConfig::default();
+        assert!(startup.containment.is_none());
+        assert!(
+            serde_json::to_value(&startup)
+                .unwrap()
+                .get("containment")
+                .is_none(),
+            "an unset containment block is not serialized"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parse_rejects_a_relative_containment_executor_on_windows() {
+        let error =
+            super::parse_local_daemon("daemon:\n  containment:\n    executor: wxc-exec.exe\n")
+                .expect_err("relative executor");
+        assert!(
+            error.to_string().contains(CONTAINMENT_EXECUTOR_ERROR),
+            "{error:#}"
+        );
+        super::parse_local_daemon(
+            "daemon:\n  containment:\n    executor: 'C:\\mxc\\wxc-exec.exe'\n",
+        )
+        .expect("absolute executor");
     }
 }
