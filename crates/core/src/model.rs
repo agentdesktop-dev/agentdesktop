@@ -215,7 +215,6 @@ pub struct Launch {
     pub exit_code: Option<i32>,
     pub started_at_unix_seconds: u64,
     pub ended_at_unix_seconds: Option<u64>,
-    pub credential_expires_at_unix_seconds: Option<u64>,
     /// True once the executable configuration changed while this launch ran
     /// (set by the periodic check or the exit check; never cleared).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -229,6 +228,10 @@ pub struct Launch {
     /// Whether `allowManagedMcpServersOnly` was enforced when this launch started.
     #[serde(default)]
     pub managed_mcp_locked: bool,
+    /// The relay session this launch runs on; revoked when the box exits.
+    /// Empty when an older daemon answers without the field.
+    #[serde(default)]
+    pub session_id: String,
 }
 
 /// State of the daemon's receiver for gateway usage.
@@ -550,25 +553,6 @@ mod tests {
     }
 
     #[test]
-    fn program_choice_is_tagged_by_mode() {
-        let selected = ProgramChoice::Selected {
-            programs: ["codex".to_owned()].into(),
-        };
-        assert_eq!(
-            serde_json::to_value(&selected).unwrap(),
-            serde_json::json!({ "mode": "selected", "programs": ["codex"] })
-        );
-        assert_eq!(
-            serde_json::from_str::<ProgramChoice>(r#"{"mode":"none"}"#).unwrap(),
-            ProgramChoice::None
-        );
-        assert!(ProgramChoice::default().includes("claude-code"));
-        assert!(!ProgramChoice::None.includes("claude-code"));
-        assert!(selected.includes("codex"));
-        assert!(!selected.includes("claude-code"));
-    }
-
-    #[test]
     fn containment_info_is_camel_case_and_omits_an_absent_error() {
         let available = ContainmentInfo {
             executor: r"C:\mxc\x64\wxc-exec.exe".into(),
@@ -634,7 +618,7 @@ mod tests {
             exit_code: None,
             started_at_unix_seconds: 1_700_000_000,
             ended_at_unix_seconds: None,
-            credential_expires_at_unix_seconds: Some(1_700_003_600),
+            session_id: "test-session-id".into(),
             integrity_drift: false,
             managed_settings_source: None,
             managed_hooks_locked: false,
@@ -645,7 +629,11 @@ mod tests {
         assert_eq!(json["containerId"], "agentdesktop-0123456789abcdef");
         assert_eq!(json["status"], "running");
         assert_eq!(json["startedAtUnixSeconds"], 1_700_000_000u64);
-        assert_eq!(json["credentialExpiresAtUnixSeconds"], 1_700_003_600u64);
+        assert_eq!(json["sessionId"], "test-session-id");
+        assert!(
+            json.get("credentialExpiresAtUnixSeconds").is_none(),
+            "credentialExpiresAtUnixSeconds is removed"
+        );
         assert!(json.get("integrityDrift").is_none());
         assert_eq!(json["managedSettingsSource"], serde_json::Value::Null);
         assert_eq!(json["managedHooksLocked"], false);
@@ -664,6 +652,132 @@ mod tests {
         assert_eq!(json["exitCode"], 3);
         assert_eq!(json["endedAtUnixSeconds"], 1_700_000_100u64);
         assert_eq!(serde_json::from_value::<Launch>(json).unwrap(), exited);
+    }
+
+    #[test]
+    fn launch_integrity_drift_round_trip() {
+        let without_drift = Launch {
+            launch_id: "0123456789abcdef".into(),
+            program: "claude-code".into(),
+            cwd: "/work/app".into(),
+            container_id: "agentdesktop-0123456789abcdef".into(),
+            status: LaunchStatus::Running,
+            exit_code: None,
+            started_at_unix_seconds: 1_700_000_000,
+            ended_at_unix_seconds: None,
+            session_id: "test-session-id".into(),
+            integrity_drift: false,
+            managed_settings_source: None,
+            managed_hooks_locked: false,
+            managed_mcp_locked: false,
+        };
+        let json = serde_json::to_value(&without_drift).unwrap();
+        assert!(json.get("integrityDrift").is_none());
+        let parsed: Launch = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, without_drift);
+        assert!(!parsed.integrity_drift);
+
+        let with_drift = Launch {
+            integrity_drift: true,
+            ..without_drift
+        };
+        let json = serde_json::to_value(&with_drift).unwrap();
+        assert_eq!(json["integrityDrift"], true);
+        let parsed: Launch = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, with_drift);
+        assert!(parsed.integrity_drift);
+    }
+
+    #[test]
+    fn launch_and_containment_info_round_trip_with_managed_settings_fields() {
+        use super::ManagedSettingsSource;
+
+        // Launch with managed-settings fields
+        let launch_with_fields = Launch {
+            launch_id: "0123456789abcdef".into(),
+            program: "claude-code".into(),
+            cwd: "/work/app".into(),
+            container_id: "agentdesktop-0123456789abcdef".into(),
+            status: LaunchStatus::Running,
+            exit_code: None,
+            started_at_unix_seconds: 1_700_000_000,
+            ended_at_unix_seconds: None,
+            session_id: "test-session-id".into(),
+            managed_settings_source: Some(ManagedSettingsSource::File),
+            managed_hooks_locked: true,
+            managed_mcp_locked: false,
+            integrity_drift: false,
+        };
+        let json = serde_json::to_value(&launch_with_fields).unwrap();
+        assert_eq!(json["managedSettingsSource"], "file");
+        assert_eq!(json["managedHooksLocked"], true);
+        assert_eq!(json["managedMcpLocked"], false);
+        let again: Launch = serde_json::from_value(json).unwrap();
+        assert_eq!(again, launch_with_fields);
+
+        // Launch without managed-settings fields (defaults)
+        let launch_without_fields = Launch {
+            launch_id: "fedcba9876543210".into(),
+            program: "claude-code".into(),
+            cwd: "/work/app".into(),
+            container_id: "agentdesktop-fedcba9876543210".into(),
+            status: LaunchStatus::Running,
+            exit_code: None,
+            started_at_unix_seconds: 1_700_000_000,
+            ended_at_unix_seconds: None,
+            session_id: "test-session-id".into(),
+            managed_settings_source: None,
+            managed_hooks_locked: false,
+            managed_mcp_locked: false,
+            integrity_drift: false,
+        };
+        let json = serde_json::to_value(&launch_without_fields).unwrap();
+        assert_eq!(json["managedSettingsSource"], serde_json::Value::Null);
+        assert_eq!(json["managedHooksLocked"], false);
+        assert_eq!(json["managedMcpLocked"], false);
+        let again: Launch = serde_json::from_value(json).unwrap();
+        assert_eq!(again, launch_without_fields);
+
+        // ContainmentInfo with managed-settings fields
+        let info_with_fields = ContainmentInfo {
+            executor: r"C:\mxc\x64\wxc-exec.exe".into(),
+            available: true,
+            error: None,
+            managed_settings_source: Some(ManagedSettingsSource::Hklm),
+            managed_hooks_locked: false,
+            managed_mcp_locked: true,
+            managed_settings_error: Some("cannot read file".into()),
+        };
+        let json = serde_json::to_value(&info_with_fields).unwrap();
+        assert_eq!(json["managedSettingsSource"], "hklm");
+        assert_eq!(json["managedHooksLocked"], false);
+        assert_eq!(json["managedMcpLocked"], true);
+        assert_eq!(json["managedSettingsError"], "cannot read file");
+        let again: ContainmentInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(again, info_with_fields);
+
+        // ContainmentInfo without managed-settings fields
+        let info_without_fields = ContainmentInfo {
+            executor: "x".into(),
+            available: false,
+            error: Some("requires user mode".into()),
+            managed_settings_source: None,
+            managed_hooks_locked: false,
+            managed_mcp_locked: false,
+            managed_settings_error: None,
+        };
+        let json = serde_json::to_value(&info_without_fields).unwrap();
+        assert_eq!(json["managedSettingsSource"], serde_json::Value::Null);
+        assert_eq!(json["managedHooksLocked"], false);
+        assert_eq!(json["managedMcpLocked"], false);
+        assert!(
+            !json
+                .as_object()
+                .unwrap()
+                .contains_key("managedSettingsError")
+        );
+        let again: ContainmentInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(again, info_without_fields);
     }
 
     #[test]
@@ -777,128 +891,21 @@ mod tests {
     }
 
     #[test]
-    fn launch_integrity_drift_round_trip() {
-        let without_drift = Launch {
-            launch_id: "0123456789abcdef".into(),
-            program: "claude-code".into(),
-            cwd: "/work/app".into(),
-            container_id: "agentdesktop-0123456789abcdef".into(),
-            status: LaunchStatus::Running,
-            exit_code: None,
-            started_at_unix_seconds: 1_700_000_000,
-            ended_at_unix_seconds: None,
-            credential_expires_at_unix_seconds: None,
-            integrity_drift: false,
-            managed_settings_source: None,
-            managed_hooks_locked: false,
-            managed_mcp_locked: false,
+    fn program_choice_is_tagged_by_mode() {
+        let selected = ProgramChoice::Selected {
+            programs: ["codex".to_owned()].into(),
         };
-        let json = serde_json::to_value(&without_drift).unwrap();
-        assert!(json.get("integrityDrift").is_none());
-        let parsed: Launch = serde_json::from_value(json).unwrap();
-        assert_eq!(parsed, without_drift);
-        assert!(!parsed.integrity_drift);
-
-        let with_drift = Launch {
-            integrity_drift: true,
-            ..without_drift
-        };
-        let json = serde_json::to_value(&with_drift).unwrap();
-        assert_eq!(json["integrityDrift"], true);
-        let parsed: Launch = serde_json::from_value(json).unwrap();
-        assert_eq!(parsed, with_drift);
-        assert!(parsed.integrity_drift);
-    }
-
-    #[test]
-    fn launch_and_containment_info_round_trip_with_managed_settings_fields() {
-        use super::ManagedSettingsSource;
-
-        // Launch with managed-settings fields
-        let launch_with_fields = Launch {
-            launch_id: "0123456789abcdef".into(),
-            program: "claude-code".into(),
-            cwd: "/work/app".into(),
-            container_id: "agentdesktop-0123456789abcdef".into(),
-            status: LaunchStatus::Running,
-            exit_code: None,
-            started_at_unix_seconds: 1_700_000_000,
-            ended_at_unix_seconds: None,
-            credential_expires_at_unix_seconds: Some(1_700_003_600),
-            managed_settings_source: Some(ManagedSettingsSource::File),
-            managed_hooks_locked: true,
-            managed_mcp_locked: false,
-            integrity_drift: false,
-        };
-        let json = serde_json::to_value(&launch_with_fields).unwrap();
-        assert_eq!(json["managedSettingsSource"], "file");
-        assert_eq!(json["managedHooksLocked"], true);
-        assert_eq!(json["managedMcpLocked"], false);
-        let again: Launch = serde_json::from_value(json).unwrap();
-        assert_eq!(again, launch_with_fields);
-
-        // Launch without managed-settings fields (defaults)
-        let launch_without_fields = Launch {
-            launch_id: "fedcba9876543210".into(),
-            program: "claude-code".into(),
-            cwd: "/work/app".into(),
-            container_id: "agentdesktop-fedcba9876543210".into(),
-            status: LaunchStatus::Running,
-            exit_code: None,
-            started_at_unix_seconds: 1_700_000_000,
-            ended_at_unix_seconds: None,
-            credential_expires_at_unix_seconds: None,
-            managed_settings_source: None,
-            managed_hooks_locked: false,
-            managed_mcp_locked: false,
-            integrity_drift: false,
-        };
-        let json = serde_json::to_value(&launch_without_fields).unwrap();
-        assert_eq!(json["managedSettingsSource"], serde_json::Value::Null);
-        assert_eq!(json["managedHooksLocked"], false);
-        assert_eq!(json["managedMcpLocked"], false);
-        let again: Launch = serde_json::from_value(json).unwrap();
-        assert_eq!(again, launch_without_fields);
-
-        // ContainmentInfo with managed-settings fields
-        let info_with_fields = ContainmentInfo {
-            executor: r"C:\mxc\x64\wxc-exec.exe".into(),
-            available: true,
-            error: None,
-            managed_settings_source: Some(ManagedSettingsSource::Hklm),
-            managed_hooks_locked: false,
-            managed_mcp_locked: true,
-            managed_settings_error: Some("cannot read file".into()),
-        };
-        let json = serde_json::to_value(&info_with_fields).unwrap();
-        assert_eq!(json["managedSettingsSource"], "hklm");
-        assert_eq!(json["managedHooksLocked"], false);
-        assert_eq!(json["managedMcpLocked"], true);
-        assert_eq!(json["managedSettingsError"], "cannot read file");
-        let again: ContainmentInfo = serde_json::from_value(json).unwrap();
-        assert_eq!(again, info_with_fields);
-
-        // ContainmentInfo without managed-settings fields
-        let info_without_fields = ContainmentInfo {
-            executor: "x".into(),
-            available: false,
-            error: Some("requires user mode".into()),
-            managed_settings_source: None,
-            managed_hooks_locked: false,
-            managed_mcp_locked: false,
-            managed_settings_error: None,
-        };
-        let json = serde_json::to_value(&info_without_fields).unwrap();
-        assert_eq!(json["managedSettingsSource"], serde_json::Value::Null);
-        assert_eq!(json["managedHooksLocked"], false);
-        assert_eq!(json["managedMcpLocked"], false);
-        assert!(
-            !json
-                .as_object()
-                .unwrap()
-                .contains_key("managedSettingsError")
+        assert_eq!(
+            serde_json::to_value(&selected).unwrap(),
+            serde_json::json!({ "mode": "selected", "programs": ["codex"] })
         );
-        let again: ContainmentInfo = serde_json::from_value(json).unwrap();
-        assert_eq!(again, info_without_fields);
+        assert_eq!(
+            serde_json::from_str::<ProgramChoice>(r#"{"mode":"none"}"#).unwrap(),
+            ProgramChoice::None
+        );
+        assert!(ProgramChoice::default().includes("claude-code"));
+        assert!(!ProgramChoice::None.includes("claude-code"));
+        assert!(selected.includes("codex"));
+        assert!(!selected.includes("claude-code"));
     }
 }

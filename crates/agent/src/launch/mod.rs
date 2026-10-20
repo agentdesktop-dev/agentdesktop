@@ -1,11 +1,11 @@
 //! Sandboxed launch of a managed program in a Windows AppContainer (MXC).
 //!
-//! `POST /v1/launch` writes an MXC request and a short-lived gateway credential
-//! into a private launch directory, starts `wxc-exec.exe` on it and keeps the
-//! credential fresh while the box runs. Everything that touches the host
-//! (environment, filesystem, process creation, credentials) goes through the
-//! traits below, so the behaviour is testable on every platform; the
-//! production implementations live in [`host`].
+//! `POST /v1/launch` writes an MXC request into a private launch directory,
+//! registers a relay session and starts `wxc-exec.exe` on it. The box reaches
+//! the gateway only through the local LLM proxy's relay. Everything that
+//! touches the host (environment, filesystem, process creation, credentials)
+//! goes through the traits below, so the behaviour is testable on every
+//! platform; the production implementations live in [`host`].
 
 use std::{
     collections::BTreeMap,
@@ -50,8 +50,6 @@ const KEPT_EXITED: usize = 32;
 const EARLY_EXIT_WATCH: Duration = Duration::from_secs(3);
 /// Poll cadence for the exit of a running launch.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
-/// How long one credential refresh may take.
-const REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bytes of `wxc-exec.log` returned with an early-exit error.
 const LOG_TAIL: usize = 4096;
 
@@ -335,7 +333,8 @@ pub fn check_args(args: &[String]) -> Result<Vec<String>, String> {
         .collect()
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+// No Debug: the request's environment carries the session pairing.
+#[derive(Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MxcRequest {
     pub version: String,
@@ -355,7 +354,8 @@ pub struct MxcUi {
     pub injection: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+// No Debug: the env list carries the session pairing.
+#[derive(Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MxcProcess {
     pub command_line: String,
@@ -407,7 +407,9 @@ pub struct LaunchInput<'a> {
     pub launch_dir: PathBuf,
     pub git_dir: Option<PathBuf>,
     pub program_files_claude: Option<PathBuf>,
-    pub gateway_url: String,
+    pub egress: agentdesktop_core::config::ContainmentEgress,
+    pub relay_base_url: String,
+    pub pairing: String,
     pub base_env: BTreeMap<String, String>,
     pub exists: &'a dyn Fn(&Path) -> bool,
     pub is_dir: &'a dyn Fn(&Path) -> bool,
@@ -440,7 +442,6 @@ pub fn build_request(input: &LaunchInput) -> MxcRequest {
     let program_files_claude = input.program_files_claude.as_deref().map(win);
     let claude_dir = join(&home, ".claude");
     let tmp = join(&launch_dir, "tmp");
-    let credential_dir = join(&launch_dir, "credential");
 
     let system_root = input
         .base_env
@@ -470,11 +471,13 @@ pub fn build_request(input: &LaunchInput) -> MxcRequest {
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),
         "1".into(),
     );
-    env.insert("ANTHROPIC_BASE_URL".into(), input.gateway_url.clone());
+    env.insert("ANTHROPIC_BASE_URL".into(), input.relay_base_url.clone());
+    env.insert("ANTHROPIC_AUTH_TOKEN".into(), "placeholder".into());
     env.insert(
-        "AGENTDESKTOP_CREDENTIAL_FILE".into(),
-        join(&credential_dir, "token"),
+        "ANTHROPIC_CUSTOM_HEADERS".into(),
+        format!("{}: {}", crate::llm_proxy::PAIRING_HEADER, input.pairing),
     );
+    env.insert("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST".into(), "1".into());
     env.insert("HOME".into(), home.clone());
 
     let mut command_line = format!(
@@ -495,7 +498,6 @@ pub fn build_request(input: &LaunchInput) -> MxcRequest {
         git_dir,
         Some(client_exe_dir),
         program_files_claude,
-        Some(credential_dir),
         // git reads the user's configuration before anything else; unreadable
         // means every git command fails in the box (lab L4e).
         Some(join(&home, ".gitconfig")),
@@ -593,11 +595,14 @@ pub fn build_request(input: &LaunchInput) -> MxcRequest {
         },
         network: MxcNetwork {
             egress: MxcEgress {
-                default: "allow".into(),
+                default: match input.egress {
+                    agentdesktop_core::config::ContainmentEgress::Allow => "allow".into(),
+                    agentdesktop_core::config::ContainmentEgress::Deny => "deny".into(),
+                },
             },
             ingress: MxcIngress {
                 default: "allow".into(),
-                host_loopback: "deny".into(),
+                host_loopback: "allow".into(),
             },
         },
     }
@@ -611,45 +616,6 @@ pub fn write_request(launch_dir: &Path, request: &MxcRequest) -> anyhow::Result<
     let contents = serde_json::to_vec_pretty(request).context("encode MXC request")?;
     secure_fs::atomic_write(&path, &contents, 0o600)?;
     Ok(path)
-}
-
-/// When the credential refresh next runs: `max(expires_at - 50, now + 10)`.
-pub fn refresh_at(expires_at: u64, now: u64) -> u64 {
-    expires_at.saturating_sub(50).max(now + 10)
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RefreshInput {
-    /// A credential with this (new) `expires_at`.
-    Ok(u64),
-    Status(StatusCode),
-    Timeout,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RefreshAction {
-    Keep,
-    Rewrite,
-    Delete,
-}
-
-pub fn next_action(input: &RefreshInput, expires_at: u64, now: u64) -> RefreshAction {
-    match input {
-        RefreshInput::Ok(new_expiry) if *new_expiry > expires_at => RefreshAction::Rewrite,
-        RefreshInput::Ok(_) => RefreshAction::Keep,
-        // A policy or precondition failure: the box must lose the token now.
-        RefreshInput::Status(StatusCode::CONFLICT | StatusCode::FAILED_DEPENDENCY) => {
-            RefreshAction::Delete
-        }
-        // A transient failure: the still-valid token stays until it expires.
-        RefreshInput::Status(_) | RefreshInput::Timeout => {
-            if now > expires_at {
-                RefreshAction::Delete
-            } else {
-                RefreshAction::Keep
-            }
-        }
-    }
 }
 
 #[async_trait]
@@ -850,16 +816,6 @@ impl LaunchRegistry {
         }
     }
 
-    pub fn set_credential_expiry(&self, launch_id: &str, expires_at: u64) {
-        if let Some(launch) = self
-            .lock()
-            .iter_mut()
-            .find(|launch| launch.launch_id == launch_id)
-        {
-            launch.credential_expires_at_unix_seconds = Some(expires_at);
-        }
-    }
-
     pub fn set_integrity_drift(&self, launch_id: &str) {
         if let Some(launch) = self
             .lock()
@@ -894,6 +850,10 @@ pub struct LaunchState {
     pub availability: Option<ContainmentInfo>,
     /// The daemon's own SID; `Some` only for a Windows user-mode daemon.
     pub daemon_sid: Option<String>,
+    pub(crate) sessions: crate::llm_proxy::sessions::SessionRegistry,
+    pub(crate) proxy_address: Option<std::net::SocketAddr>,
+    pub(crate) session_policy: Arc<dyn crate::llm_proxy::sessions::SessionPolicy>,
+    pub(crate) egress: agentdesktop_core::config::ContainmentEgress,
 }
 
 /// `POST /v1/launch` and `GET /v1/launches`, behind the peer check.
@@ -980,16 +940,23 @@ async fn launch(
             )
         })?;
     preconditions(&effective).map_err(|message| (StatusCode::CONFLICT, message))?;
-    let gateway_url = effective
-        .llm_gateway
-        .as_ref()
-        .map(|gateway| gateway.url.as_str().to_owned())
-        .unwrap_or_default();
-    let credential = state.credentials.credential(PROGRAM, true).await?;
+    let Some(proxy_address) = state.proxy_address else {
+        return Err((
+            StatusCode::CONFLICT,
+            "the local LLM proxy is not running (daemon.llmProxy.listen)".to_owned(),
+        ));
+    };
+    // Refuse a full registry before any interactive sign-in starts; the
+    // register call below stays the authoritative check.
+    if state.sessions.len(state.host.now()) >= crate::llm_proxy::sessions::MAX_SESSIONS {
+        return Err(too_many_sessions());
+    }
+    state.session_policy.check(PROGRAM).await?;
+    let _credential = state.credentials.credential(PROGRAM, true).await?;
 
     // From here on the work runs in its own task: a client that disconnects
     // during the early-exit watch must not leave a running box unregistered,
-    // unpolled and with a token nobody refreshes or removes.
+    // unpolled and without its session revoked.
     let started = tokio::spawn(start_launch(
         state,
         StartInput {
@@ -997,8 +964,7 @@ async fn launch(
             executable,
             cwd,
             args,
-            gateway_url,
-            credential,
+            proxy_address,
         },
     ));
     match started.await {
@@ -1010,18 +976,24 @@ async fn launch(
     }
 }
 
+fn too_many_sessions() -> LaunchError {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        crate::llm_proxy::sessions::too_many_sessions_message(),
+    )
+}
+
 /// What `start_launch` needs beyond the state: the checked request.
 struct StartInput {
     executor: PathBuf,
     executable: PathBuf,
     cwd: PathBuf,
     args: Vec<String>,
-    gateway_url: String,
-    credential: LlmGatewayCredential,
+    proxy_address: std::net::SocketAddr,
 }
 
 /// Creates the launch directory, starts the executor, watches it for an early
-/// exit and registers the launch with its poller and refresh task.
+/// exit and registers the launch with its poller.
 async fn start_launch(
     state: LaunchState,
     input: StartInput,
@@ -1034,10 +1006,42 @@ async fn start_launch(
             format!("resolve the daemon state directory: {error}"),
         )
     })?;
+
+    let session = match state.sessions.register(
+        PROGRAM,
+        &format!("run {}", launch_id),
+        crate::llm_proxy::sessions::DEFAULT_IDLE_TTL,
+        host.now(),
+    ) {
+        Ok(session) => session,
+        Err(crate::llm_proxy::sessions::SessionError::Full) => {
+            return Err(too_many_sessions());
+        }
+        Err(crate::llm_proxy::sessions::SessionError::InvalidClientId) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid session request".to_owned(),
+            ));
+        }
+        Err(crate::llm_proxy::sessions::SessionError::InvalidLabel) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid session request".to_owned(),
+            ));
+        }
+    };
+    let session_id = session.id.clone();
+
     let launch_dir = state_dir.join("launches").join(&launch_id);
     let log_path = launch_dir.join("wxc-exec.log");
     let fail = |launch_dir: &Path, message: String| {
-        tracing::warn!(launch_id = %launch_id, %message, "sandboxed launch failed");
+        state.sessions.revoke(&session_id);
+        tracing::warn!(
+            launch_id = %launch_id,
+            session_id = %session_id,
+            %message,
+            "sandboxed launch failed; its session is revoked"
+        );
         let _ = std::fs::remove_dir_all(launch_dir);
         Err((StatusCode::INTERNAL_SERVER_ERROR, message))
     };
@@ -1049,9 +1053,7 @@ async fn start_launch(
             format!("prepare launch: create ~\\.claude: {error}"),
         );
     }
-    // The credential directory exists before the request is built: a
-    // read-only grant is only honoured for a path that exists.
-    if let Err(error) = create_launch_dir(&launch_dir, &input.credential.credential) {
+    if let Err(error) = create_launch_dir(&launch_dir) {
         return fail(&launch_dir, format!("prepare launch: {error:#}"));
     }
     let exists = |path: &Path| host.exists(path);
@@ -1067,7 +1069,9 @@ async fn start_launch(
         launch_dir: launch_dir.clone(),
         git_dir: host.git_dir(),
         program_files_claude: host.program_files_claude(),
-        gateway_url: input.gateway_url,
+        egress: state.egress,
+        relay_base_url: crate::llm_proxy::sessions::sandbox_base_url(input.proxy_address),
+        pairing: session.pairing.to_string(),
         base_env: host.base_env(),
         exists: &exists,
         is_dir: &is_dir,
@@ -1194,14 +1198,15 @@ async fn start_launch(
         exit_code: None,
         started_at_unix_seconds: started_at,
         ended_at_unix_seconds: None,
-        credential_expires_at_unix_seconds: Some(input.credential.expires_at_unix_seconds),
         integrity_drift: false,
         managed_settings_source: managed_posture.source,
         managed_hooks_locked: managed_posture.hooks_locked,
         managed_mcp_locked: managed_posture.mcp_locked,
+        session_id: session_id.clone(),
     };
     state.registry.insert(launch.clone());
     tracing::info!(launch_id, cwd = %launch.cwd.display(), "sandboxed launch started");
+    tracing::info!(launch_id, session_id, "sandboxed launch session created");
 
     // Start periodic integrity check
     let periodic = {
@@ -1229,35 +1234,23 @@ async fn start_launch(
         ))
     };
 
-    let refresh = tokio::spawn(refresh_task(
-        state.credentials.clone(),
-        host.clone(),
-        state.registry.clone(),
-        launch_id.clone(),
-        launch_dir.join("credential").join("token"),
-        input.credential.expires_at_unix_seconds,
-    ));
     tokio::spawn(poll_task(
         child,
-        refresh.abort_handle(),
+        state.sessions.clone(),
+        session_id,
         periodic.abort_handle(),
         state.registry.clone(),
         host.clone(),
         launch_id,
         launch_dir,
-        log_path,
         integrity_check,
     ));
     Ok((StatusCode::CREATED, Json(launch)))
 }
 
-/// Creates the private launch directory with `credential\token` and the box's
-/// `tmp`, before the request that grants them is built.
-pub(crate) fn create_launch_dir(launch_dir: &Path, credential: &str) -> anyhow::Result<()> {
+/// Creates the private launch directory with the box's `tmp`.
+pub(crate) fn create_launch_dir(launch_dir: &Path) -> anyhow::Result<()> {
     secure_fs::ensure_private_dir(launch_dir)?;
-    let credential_dir = launch_dir.join("credential");
-    secure_fs::ensure_private_dir(&credential_dir)?;
-    secure_fs::atomic_write(&credential_dir.join("token"), credential.as_bytes(), 0o600)?;
     std::fs::create_dir_all(launch_dir.join("tmp")).context("create launch tmp")?;
     Ok(())
 }
@@ -1270,20 +1263,21 @@ fn log_tail(log: &Path) -> String {
 }
 
 /// Watches the executor: copies new log lines to the daemon log. When it exits,
-/// or when it can no longer be watched (then it is stopped first), records the
-/// exit, stops the refresh and removes the launch directory.
+/// or when it can no longer be watched (then it is stopped first), revokes the
+/// session, records the exit and removes the launch directory.
 #[allow(clippy::too_many_arguments)]
 async fn poll_task(
     mut child: Box<dyn LaunchChild>,
-    refresh: tokio::task::AbortHandle,
+    sessions: crate::llm_proxy::sessions::SessionRegistry,
+    session_id: String,
     periodic: tokio::task::AbortHandle,
     registry: LaunchRegistry,
     host: Arc<dyn LaunchHost>,
     launch_id: String,
     launch_dir: PathBuf,
-    log_path: PathBuf,
     integrity_check: IntegrityCheck,
 ) {
+    let log_path = launch_dir.join("wxc-exec.log");
     let mut log_offset = 0u64;
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -1301,11 +1295,11 @@ async fn poll_task(
         // Stop the background tasks, then verify once against the launch
         // snapshot before the launch is recorded as exited.
         periodic.abort();
-        refresh.abort();
 
         if integrity_check.verify_and_log(&launch_id).await {
             registry.set_integrity_drift(&launch_id);
         }
+        sessions.revoke(&session_id);
 
         registry.mark_exited(&launch_id, exit, host.now());
         if let Err(error) = std::fs::remove_dir_all(&launch_dir) {
@@ -1341,77 +1335,6 @@ fn copy_log_lines(launch_id: &str, log_path: &Path, offset: u64) -> u64 {
         tracing::info!(launch_id, "wxc-exec: {line}");
     }
     offset + complete as u64 + 1
-}
-
-/// Re-fetches the credential shortly before it expires and rewrites the token
-/// file; a policy refusal removes the token, a transient failure keeps it
-/// until it expires.
-async fn refresh_task(
-    credentials: Arc<dyn CredentialSource>,
-    host: Arc<dyn LaunchHost>,
-    registry: LaunchRegistry,
-    launch_id: String,
-    token_path: PathBuf,
-    mut expires_at: u64,
-) {
-    let mut next_at = refresh_at(expires_at, host.now());
-    loop {
-        let now = host.now();
-        if next_at > now {
-            tokio::time::sleep(Duration::from_secs(next_at - now)).await;
-        }
-        let now = host.now();
-        let (input, fresh) =
-            match tokio::time::timeout(REFRESH_TIMEOUT, credentials.credential(PROGRAM, false))
-                .await
-            {
-                Ok(Ok(credential)) => (
-                    RefreshInput::Ok(credential.expires_at_unix_seconds),
-                    Some(credential),
-                ),
-                Ok(Err((status, body))) => {
-                    tracing::warn!(launch_id, %status, body, "credential refresh refused");
-                    (RefreshInput::Status(status), None)
-                }
-                Err(_) => {
-                    tracing::warn!(launch_id, "credential refresh timed out");
-                    (RefreshInput::Timeout, None)
-                }
-            };
-        match next_action(&input, expires_at, now) {
-            RefreshAction::Rewrite => {
-                let credential = fresh.expect("a rewrite follows a fetched credential");
-                match secure_fs::atomic_write(&token_path, credential.credential.as_bytes(), 0o600)
-                {
-                    Ok(()) => {
-                        expires_at = credential.expires_at_unix_seconds;
-                        registry.set_credential_expiry(&launch_id, expires_at);
-                        next_at = refresh_at(expires_at, host.now());
-                    }
-                    Err(error) => {
-                        tracing::warn!(launch_id, error = %format!("{error:#}"), "failed to rewrite the credential");
-                        next_at = host.now() + 30;
-                    }
-                }
-            }
-            RefreshAction::Keep => {
-                next_at = host.now()
-                    + if matches!(input, RefreshInput::Ok(_)) {
-                        10
-                    } else {
-                        30
-                    };
-            }
-            RefreshAction::Delete => {
-                let _ = std::fs::remove_file(&token_path);
-                tracing::warn!(
-                    launch_id,
-                    "credential removed; the box can no longer reach the gateway"
-                );
-                return;
-            }
-        }
-    }
 }
 
 /// Removes what a previous daemon left behind in `<state_dir>\launches`:
@@ -1461,7 +1384,7 @@ pub fn sweep(state_dir: &Path, alive: &dyn Fn(u32, u64) -> bool) -> anyhow::Resu
         if live {
             tracing::info!(
                 launch_id,
-                "launch {launch_id} still running; its credential is no longer refreshed"
+                "launch {launch_id} still running; the restart revoked its relay session"
             );
         } else if let Err(error) = std::fs::remove_dir_all(&dir) {
             tracing::warn!(launch_id, %error, "failed to remove a stale launch directory");

@@ -1,5 +1,4 @@
 use std::{
-    ffi::OsStr,
     io::Read,
     path::{Path, PathBuf},
 };
@@ -106,10 +105,9 @@ fn session_error_message(error: &anyhow::Error) -> String {
         Some(status) if status.status == 404 => {
             "this daemon has no session API (upgrade agentdesktop)".to_owned()
         }
-        Some(status) if status.status == 429 => format!(
-            "too many sessions ({}); revoke unused ones",
-            crate::llm_proxy::sessions::MAX_SESSIONS
-        ),
+        Some(status) if status.status == 429 => {
+            crate::llm_proxy::sessions::too_many_sessions_message()
+        }
         Some(status) => status.to_string(),
         None => format!("{error:#}"),
     }
@@ -270,15 +268,6 @@ pub async fn run(command: ClientCommand, socket: PathBuf) -> anyhow::Result<()> 
             );
         }
         ClientCommand::Credential { client_id } => {
-            // Inside a sandboxed launch the daemon's pipe is out of reach; the
-            // launch directory carries the credential instead.
-            if let Some(credential) = file_credential(
-                &client_id,
-                std::env::var_os("AGENTDESKTOP_CREDENTIAL_FILE").as_deref(),
-            ) {
-                println!("{credential}");
-                return Ok(());
-            }
             let client_id: String =
                 url::form_urlencoded::byte_serialize(client_id.as_bytes()).collect();
             let response: LlmGatewayCredential = client::get(
@@ -293,19 +282,7 @@ pub async fn run(command: ClientCommand, socket: PathBuf) -> anyhow::Result<()> 
             let request = run_request(&program, cwd, args);
             match client::post_json_response::<_, Launch>(&socket, "/v1/launch", &request).await {
                 Ok(launch) => {
-                    let valid_until = launch
-                        .credential_expires_at_unix_seconds
-                        .map(|seconds| {
-                            humantime::format_rfc3339_seconds(
-                                std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
-                            )
-                            .to_string()
-                        })
-                        .unwrap_or_else(|| "unknown".to_owned());
-                    println!(
-                        "launched {} (container {}, credential valid until {valid_until})",
-                        launch.launch_id, launch.container_id
-                    );
+                    println!("{}", run_success_line(&launch));
                 }
                 Err(error) => {
                     eprintln!("{}", run_error_message(&error));
@@ -388,20 +365,6 @@ fn print_programs(management: &ProgramManagement) {
     }
 }
 
-/// The credential a sandboxed launch reads from `AGENTDESKTOP_CREDENTIAL_FILE`
-/// (the value of that variable is `var`). `None` unless `client_id` is
-/// `claude-code`, and `None` when the variable is unset or the file is
-/// unreadable or empty after trimming.
-pub fn file_credential(client_id: &str, var: Option<&OsStr>) -> Option<String> {
-    if client_id != crate::provider::claude_code::ClaudeCode::ID {
-        return None;
-    }
-    let path = var.filter(|value| !value.is_empty())?;
-    let contents = std::fs::read_to_string(path).ok()?;
-    let credential = contents.trim();
-    (!credential.is_empty()).then(|| credential.to_owned())
-}
-
 /// The launch request for `agentdesktop run <program>`; the alias `claude`
 /// maps to the provider id `claude-code`.
 pub fn run_request(program: &str, cwd: PathBuf, args: Vec<String>) -> LaunchRequest {
@@ -415,6 +378,14 @@ pub fn run_request(program: &str, cwd: PathBuf, args: Vec<String>) -> LaunchRequ
         cwd,
         args,
     }
+}
+
+/// The line `agentdesktop run` prints on stdout for a successful launch.
+pub fn run_success_line(launch: &Launch) -> String {
+    format!(
+        "launched {} (container {})",
+        launch.launch_id, launch.container_id
+    )
 }
 
 /// The line `agentdesktop run` prints on stderr for a failed launch request.
@@ -510,14 +481,14 @@ fn claude_client_id_for_entrypoint(entrypoint: Option<&str>) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsStr, path::PathBuf};
+    use std::path::PathBuf;
 
     use agentdesktop_client::StatusError;
     use agentdesktop_core::model::{LaunchRequest, ProgramChoice, TelemetryEventKind};
     use clap::Parser;
 
     use super::{
-        ClientCommand, LlmProxyCommand, SessionCommand, file_credential, parse_claude_pre_tool_use,
+        ClientCommand, LlmProxyCommand, SessionCommand, parse_claude_pre_tool_use,
         parse_program_choice, run_error_message, run_request, session_error_message,
     };
 
@@ -641,50 +612,30 @@ mod tests {
         assert!(run_error_message(&error).contains("connect to /tmp/x.sock"));
     }
 
-    fn credential_file(contents: &str) -> (tempfile::TempDir, PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("token");
-        std::fs::write(&path, contents).unwrap();
-        (dir, path)
-    }
-
+    // AC 4: run_success_line test
     #[test]
-    fn file_credential_reads_and_trims_the_file_named_by_the_variable() {
-        let (_dir, path) = credential_file("gateway-token\r\n");
+    fn run_success_line_formats_launch_and_container_id() {
+        use agentdesktop_core::model::{Launch, LaunchStatus};
+        let launch = Launch {
+            launch_id: "0123456789abcdef".into(),
+            program: "claude-code".into(),
+            cwd: "/work/app".into(),
+            container_id: "agentdesktop-0123456789abcdef".into(),
+            status: LaunchStatus::Running,
+            exit_code: None,
+            started_at_unix_seconds: 1_700_000_000,
+            ended_at_unix_seconds: None,
+            integrity_drift: false,
+            managed_settings_source: None,
+            managed_hooks_locked: false,
+            managed_mcp_locked: false,
+            session_id: "test-session-id".into(),
+        };
+        let line = super::run_success_line(&launch);
         assert_eq!(
-            file_credential("claude-code", Some(path.as_os_str())),
-            Some("gateway-token".to_owned())
+            line,
+            "launched 0123456789abcdef (container agentdesktop-0123456789abcdef)"
         );
-    }
-
-    #[test]
-    fn file_credential_is_none_for_an_empty_file() {
-        let (_dir, path) = credential_file("  \n");
-        assert_eq!(file_credential("claude-code", Some(path.as_os_str())), None);
-    }
-
-    #[test]
-    fn file_credential_is_none_when_the_variable_is_unset_or_the_file_is_unreadable() {
-        assert_eq!(file_credential("claude-code", None), None);
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("missing");
-        assert_eq!(
-            file_credential("claude-code", Some(missing.as_os_str())),
-            None
-        );
-        assert_eq!(file_credential("claude-code", Some(OsStr::new(""))), None);
-    }
-
-    #[test]
-    fn file_credential_is_only_for_claude_code() {
-        let (_dir, path) = credential_file("gateway-token");
-        for client_id in ["codex", "vscode", "claude-desktop", "agentdesktop", ""] {
-            assert_eq!(
-                file_credential(client_id, Some(path.as_os_str())),
-                None,
-                "{client_id}"
-            );
-        }
     }
 
     fn session_command(args: &[&str]) -> Result<SessionCommand, clap::Error> {

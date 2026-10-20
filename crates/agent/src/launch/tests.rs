@@ -28,6 +28,60 @@ use axum::http::StatusCode;
 
 use super::*;
 
+// --- Log capture helper for session logging test (AC 2)
+
+#[derive(Clone, Default)]
+struct LogCapture(Arc<std::sync::Mutex<Vec<u8>>>);
+
+struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+    type Writer = LogWriter;
+
+    fn make_writer(&'a self) -> LogWriter {
+        LogWriter(self.0.clone())
+    }
+}
+
+impl LogCapture {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+
+    async fn wait_for_text(&self, needle: &str) -> String {
+        for _ in 0..100 {
+            let text = self.text();
+            if text.contains(needle) {
+                return text;
+            }
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        self.text()
+    }
+}
+
+fn capture_logs() -> (LogCapture, tracing::subscriber::DefaultGuard) {
+    let capture = LogCapture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(capture.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+    (capture, tracing::subscriber::set_default(subscriber))
+}
+
 /// A platform-appropriate absolute root: `/` or `C:\`.
 fn root() -> PathBuf {
     if cfg!(windows) {
@@ -50,6 +104,7 @@ fn p(relative: &str) -> PathBuf {
 fn executor_cfg(path: &str) -> ContainmentStartupConfig {
     ContainmentStartupConfig {
         executor: PathBuf::from(path),
+        egress: agentdesktop_core::config::ContainmentEgress::default(),
     }
 }
 
@@ -857,7 +912,9 @@ fn launch_input<'a>(
         ),
         git_dir: Some(PathBuf::from(r"C:\Program Files\Git")),
         program_files_claude: Some(PathBuf::from(r"C:\Program Files\ClaudeCode")),
-        gateway_url: "https://alpha-dev.aks.solo.sademo.de".into(),
+        egress: agentdesktop_core::config::ContainmentEgress::Allow,
+        relay_base_url: "http://127.0.0.1:4000/sandbox".into(),
+        pairing: "test-pairing-value".into(),
         base_env: base_env(),
         exists,
         is_dir,
@@ -986,11 +1043,28 @@ fn the_request_has_the_fixed_shape_and_no_process_timeout() {
         request["network"],
         serde_json::json!({
             "egress": {"default": "allow"},
-            "ingress": {"default": "allow", "hostLoopback": "deny"},
+            "ingress": {"default": "allow", "hostLoopback": "allow"},
         })
     );
     assert_eq!(request["process"]["inheritDefaultEnv"], false);
     assert!(request["process"].get("timeout").is_none());
+}
+
+// AC 1: egress deny test
+#[test]
+fn egress_deny_sets_the_network_default_to_deny() {
+    use agentdesktop_core::config::ContainmentEgress;
+    let request = request_json(&snapshot_existing(), &snapshot_directories(), |input| {
+        input.egress = ContainmentEgress::Deny;
+    });
+    assert_eq!(
+        request["network"],
+        serde_json::json!({
+            "egress": {"default": "deny"},
+            "ingress": {"default": "allow", "hostLoopback": "allow"},
+        }),
+        "egress deny sets network.egress.default to deny and hostLoopback to allow"
+    );
 }
 
 #[test]
@@ -1031,14 +1105,13 @@ fn the_environment_is_closed_and_expands_the_path_from_system_root() {
     assert_eq!(env["CLAUDE_CODE_USE_POWERSHELL_TOOL"], "1");
     assert_eq!(env["DISABLE_AUTOUPDATER"], "1");
     assert_eq!(env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1");
+    assert_eq!(env["ANTHROPIC_BASE_URL"], "http://127.0.0.1:4000/sandbox");
+    assert_eq!(env["ANTHROPIC_AUTH_TOKEN"], "placeholder");
     assert_eq!(
-        env["ANTHROPIC_BASE_URL"],
-        "https://alpha-dev.aks.solo.sademo.de"
+        env["ANTHROPIC_CUSTOM_HEADERS"],
+        "x-agentdesktop-pairing: test-pairing-value"
     );
-    assert_eq!(
-        env["AGENTDESKTOP_CREDENTIAL_FILE"],
-        format!(r"{LAUNCH_DIR}\credential\token")
-    );
+    assert_eq!(env["CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST"], "1");
     for (key, value) in base_env() {
         assert_eq!(
             env[&key], value,
@@ -1074,13 +1147,7 @@ fn the_request_contains_no_percent_sign_and_no_forward_slash_in_any_path() {
     paths.extend(readonly(&request));
     paths.extend(denied(&request));
     paths.push(request["process"]["cwd"].as_str().unwrap().to_owned());
-    for key in [
-        "PATH",
-        "TEMP",
-        "TMP",
-        "CLAUDE_CONFIG_DIR",
-        "AGENTDESKTOP_CREDENTIAL_FILE",
-    ] {
+    for key in ["PATH", "TEMP", "TMP", "CLAUDE_CONFIG_DIR"] {
         paths.push(env_map(&request)[key].clone());
     }
     for path in paths {
@@ -1092,11 +1159,11 @@ fn the_request_contains_no_percent_sign_and_no_forward_slash_in_any_path() {
 #[test]
 fn a_url_in_the_request_keeps_its_slashes() {
     let request = request_json(&snapshot_existing(), &snapshot_directories(), |input| {
-        input.gateway_url = "https://gateway.example.com/anthropic".into();
+        input.relay_base_url = "http://127.0.0.1:4000/sandbox".into();
     });
     assert_eq!(
         env_map(&request)["ANTHROPIC_BASE_URL"],
-        "https://gateway.example.com/anthropic"
+        "http://127.0.0.1:4000/sandbox"
     );
 }
 
@@ -1123,7 +1190,6 @@ fn read_only_runtime_directories_are_listed_only_when_they_exist() {
         r"C:\Program Files\Git",
         r"C:\lab\agentdesktop",
         r"C:\Program Files\ClaudeCode",
-        &format!(r"{LAUNCH_DIR}\credential"),
     ];
     for candidate in candidates {
         assert!(
@@ -1323,72 +1389,6 @@ fn write_request_uses_a_private_directory_and_a_0600_file() {
     assert_eq!(mode(&path), 0o600);
 }
 
-// ============================================================ refresh (AC 8)
-
-#[test]
-fn refresh_runs_fifty_seconds_before_expiry() {
-    assert_eq!(refresh_at(1_000, 100), 950);
-}
-
-#[test]
-fn refresh_never_runs_sooner_than_ten_seconds_from_now() {
-    assert_eq!(refresh_at(1_000, 990), 1_000);
-    assert_eq!(refresh_at(1_000, 995), 1_005);
-    assert_eq!(refresh_at(1_000, 2_000), 2_010);
-}
-
-#[test]
-fn refresh_does_not_underflow_for_an_early_expiry() {
-    assert_eq!(refresh_at(30, 0), 10);
-}
-
-#[test]
-fn a_later_expiry_is_rewritten() {
-    assert_eq!(
-        next_action(&RefreshInput::Ok(5_000), 1_000, 950),
-        RefreshAction::Rewrite
-    );
-}
-
-#[test]
-fn the_same_expiry_keeps_the_file_and_retries() {
-    assert_eq!(
-        next_action(&RefreshInput::Ok(1_000), 1_000, 950),
-        RefreshAction::Keep
-    );
-}
-
-#[test]
-fn a_gateway_error_or_timeout_keeps_the_file_until_it_expires() {
-    for input in [
-        RefreshInput::Status(StatusCode::UNAUTHORIZED),
-        RefreshInput::Status(StatusCode::BAD_GATEWAY),
-        RefreshInput::Timeout,
-    ] {
-        assert_eq!(
-            next_action(&input, 1_000, 950),
-            RefreshAction::Keep,
-            "{input:?} before expiry"
-        );
-        assert_eq!(
-            next_action(&input, 1_000, 1_001),
-            RefreshAction::Delete,
-            "{input:?} after expiry"
-        );
-    }
-}
-
-#[test]
-fn a_policy_or_precondition_failure_deletes_the_file_at_once() {
-    for status in [StatusCode::CONFLICT, StatusCode::FAILED_DEPENDENCY] {
-        assert_eq!(
-            next_action(&RefreshInput::Status(status), 1_000, 100),
-            RefreshAction::Delete,
-            "{status}"
-        );
-    }
-}
-
 // =========================================================== LaunchRegistry (AC 9)
 
 fn launch(id: &str, started_at: u64) -> Launch {
@@ -1401,7 +1401,7 @@ fn launch(id: &str, started_at: u64) -> Launch {
         exit_code: None,
         started_at_unix_seconds: started_at,
         ended_at_unix_seconds: None,
-        credential_expires_at_unix_seconds: None,
+        session_id: format!("session-{id}"),
         integrity_drift: false,
         managed_settings_source: None,
         managed_hooks_locked: false,
@@ -1468,31 +1468,6 @@ fn an_exit_without_a_code_is_recorded_as_exited() {
     let listed = registry.list();
     assert_eq!(listed[0].status, LaunchStatus::Exited);
     assert_eq!(listed[0].exit_code, None);
-}
-
-#[test]
-fn the_credential_expiry_of_a_running_launch_can_be_updated() {
-    let registry = LaunchRegistry::new();
-    registry.insert(launch("a", 10));
-    registry.set_credential_expiry("a", 3_600);
-    assert_eq!(
-        registry.list()[0].credential_expires_at_unix_seconds,
-        Some(3_600)
-    );
-    registry.set_credential_expiry("a", 7_200);
-    assert_eq!(
-        registry.list()[0].credential_expires_at_unix_seconds,
-        Some(7_200)
-    );
-}
-
-#[test]
-fn updating_an_unknown_launch_changes_nothing() {
-    let registry = LaunchRegistry::new();
-    registry.insert(launch("a", 10));
-    registry.mark_exited("nope", Some(1), 5);
-    registry.set_credential_expiry("nope", 5);
-    assert_eq!(registry.list(), vec![launch("a", 10)]);
 }
 
 #[test]
@@ -1979,6 +1954,10 @@ struct Setup {
     claude_installed: bool,
     credentials_must_not_be_reached: bool,
     managed_file: Option<&'static str>,
+    proxy_address: Option<std::net::SocketAddr>,
+    session_policy: Arc<dyn crate::llm_proxy::sessions::SessionPolicy>,
+    sessions: crate::llm_proxy::sessions::SessionRegistry,
+    egress: agentdesktop_core::config::ContainmentEgress,
     managed_file_error: Option<&'static str>,
 }
 
@@ -1994,6 +1973,13 @@ impl Default for Setup {
             claude_installed: true,
             credentials_must_not_be_reached: false,
             managed_file: None,
+            proxy_address: Some(std::net::SocketAddr::from(([127, 0, 0, 1], 4000))),
+            session_policy: Arc::new(crate::llm_proxy::sessions::ConfigPolicy {
+                config: serde_yaml::from_str(GOOD_CONFIG).unwrap(),
+                state_dir: std::env::temp_dir(),
+            }),
+            sessions: crate::llm_proxy::sessions::SessionRegistry::default(),
+            egress: agentdesktop_core::config::ContainmentEgress::default(),
             managed_file_error: None,
         }
     }
@@ -2009,6 +1995,8 @@ struct Harness {
     executor: Arc<StubExecutor>,
     credentials: Arc<StubCredentials>,
     integrity_reads: IntegrityReads,
+    #[allow(dead_code)]
+    sessions: crate::llm_proxy::sessions::SessionRegistry,
 }
 
 fn strip_verbatim(path: PathBuf) -> PathBuf {
@@ -2128,6 +2116,10 @@ impl Harness {
             registry: LaunchRegistry::new(),
             availability,
             daemon_sid: setup.daemon_sid.map(str::to_owned),
+            sessions: setup.sessions.clone(),
+            proxy_address: setup.proxy_address,
+            session_policy: setup.session_policy.clone(),
+            egress: setup.egress,
         };
 
         let mut router = router(state);
@@ -2148,6 +2140,7 @@ impl Harness {
             executor,
             credentials,
             integrity_reads,
+            sessions: setup.sessions,
         }
     }
 
@@ -2619,12 +2612,7 @@ async fn a_launch_answers_201_with_the_launch_and_lists_it() {
     assert_eq!(launched.exit_code, None);
     assert_eq!(launched.ended_at_unix_seconds, None);
     assert!((BASE_TIME..BASE_TIME + 10).contains(&launched.started_at_unix_seconds));
-    let expires = launched
-        .credential_expires_at_unix_seconds
-        .expect("credential expiry");
-    assert!(
-        (BASE_TIME + CREDENTIAL_LIFETIME..BASE_TIME + CREDENTIAL_LIFETIME + 10).contains(&expires)
-    );
+    assert!(!launched.session_id.is_empty(), "session_id present");
     assert_eq!(h.listed().await, vec![launched]);
 }
 
@@ -2651,7 +2639,7 @@ async fn the_credential_and_request_files_exist_before_the_executor_starts() {
     assert_eq!(spawn.launch_id, launched.launch_id);
     assert_eq!(spawn.request, dir.join("request.json"));
     assert_eq!(spawn.log, dir.join("wxc-exec.log"));
-    assert_eq!(spawn.token.as_deref(), Some("gateway-token-0"));
+    assert_eq!(spawn.token, None, "nothing is stored for the box");
     let request: serde_json::Value =
         serde_json::from_str(spawn.request_json.as_deref().unwrap()).unwrap();
     assert_eq!(
@@ -2660,13 +2648,14 @@ async fn the_credential_and_request_files_exist_before_the_executor_starts() {
     );
     let env = env_map(&request);
     assert!(
-        env["ANTHROPIC_BASE_URL"].starts_with("https://gateway.example.com"),
-        "{env:?}"
+        env["ANTHROPIC_BASE_URL"].ends_with("/sandbox"),
+        "the box talks to the relay: {env:?}"
     );
     assert!(
-        env["AGENTDESKTOP_CREDENTIAL_FILE"].ends_with(r"credential\token"),
+        env["ANTHROPIC_CUSTOM_HEADERS"].starts_with("x-agentdesktop-pairing: "),
         "{env:?}"
     );
+    assert!(!env.contains_key("AGENTDESKTOP_CREDENTIAL_FILE"), "{env:?}");
     assert!(
         !request.to_string().contains("gateway-token"),
         "the request holds no secret"
@@ -2698,9 +2687,11 @@ async fn the_pid_file_names_the_process_and_its_start_time() {
         std::fs::read_to_string(h.launch_dir(&launched.launch_id).join("pid")).unwrap(),
         "4242 987654321"
     );
+    assert_eq!(h.token(&launched.launch_id), None, "nothing is stored");
     assert_eq!(
-        h.token(&launched.launch_id).as_deref(),
-        Some("gateway-token-0")
+        h.credentials.calls(),
+        vec![("claude-code".to_owned(), true)],
+        "the sign-in pre-flight ran"
     );
 }
 
@@ -2775,75 +2766,14 @@ async fn the_poller_marks_an_exit_stops_the_refresh_and_removes_the_launch_direc
     let ended = listed[0].ended_at_unix_seconds.expect("an end time");
     assert!(ended >= listed[0].started_at_unix_seconds);
     assert!(!h.launch_dir(&launched.launch_id).exists());
+    let now = h.credentials.clock.now();
+    assert_eq!(h.sessions.len(now), 0, "session revoked on exit");
 
     tokio::time::sleep(Duration::from_secs(2 * CREDENTIAL_LIFETIME)).await;
-    assert_eq!(h.credentials.calls().len(), 1, "no refresh after the exit");
-}
-
-#[tokio::test(start_paused = true)]
-async fn the_refresh_task_rewrites_the_token_before_it_expires_without_prompting() {
-    let h = Harness::start(Setup::default()).await;
-    let launched = h.launch_ok().await;
-    let first_expiry = launched.credential_expires_at_unix_seconds.unwrap();
     assert_eq!(
-        h.token(&launched.launch_id).as_deref(),
-        Some("gateway-token-0")
-    );
-
-    tokio::time::sleep(Duration::from_secs(CREDENTIAL_LIFETIME - 40)).await;
-
-    assert_eq!(
-        h.token(&launched.launch_id).as_deref(),
-        Some("gateway-token-1")
-    );
-    let calls = h.credentials.calls();
-    assert_eq!(calls[0], ("claude-code".to_owned(), true));
-    assert_eq!(
-        calls[1],
-        ("claude-code".to_owned(), false),
-        "the refresh never prompts"
-    );
-    let listed = h.listed().await;
-    assert!(
-        listed[0].credential_expires_at_unix_seconds.unwrap() > first_expiry,
-        "the launch reports the new expiry"
-    );
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_refresh_refused_by_policy_deletes_the_token_but_not_the_launch() {
-    let h = Harness::start(Setup::default()).await;
-    let launched = h.launch_ok().await;
-    h.credentials.fail_with(Some((
-        StatusCode::CONFLICT,
-        "programs.claudeCode must use the gateway",
-    )));
-
-    tokio::time::sleep(Duration::from_secs(CREDENTIAL_LIFETIME - 40)).await;
-
-    assert_eq!(h.token(&launched.launch_id), None);
-    assert_eq!(h.listed().await[0].status, LaunchStatus::Running);
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_gateway_error_keeps_the_token_until_it_expires_then_deletes_it() {
-    let h = Harness::start(Setup::default()).await;
-    let launched = h.launch_ok().await;
-    h.credentials
-        .fail_with(Some((StatusCode::BAD_GATEWAY, "upstream down")));
-
-    tokio::time::sleep(Duration::from_secs(CREDENTIAL_LIFETIME - 40)).await;
-    assert_eq!(
-        h.token(&launched.launch_id).as_deref(),
-        Some("gateway-token-0"),
-        "a transient error keeps the still-valid token"
-    );
-
-    tokio::time::sleep(Duration::from_secs(120)).await;
-    assert_eq!(
-        h.token(&launched.launch_id),
-        None,
-        "an expired token is removed"
+        h.credentials.calls().len(),
+        1,
+        "only the sign-in pre-flight reached the credentials"
     );
 }
 
@@ -3246,7 +3176,7 @@ async fn launch_logs_posture_error_as_warning() {
 
     let subscriber = tracing_subscriber::registry().with(
         fmt::layer()
-            .with_writer(move || LogWriter(logs_writer.clone()))
+            .with_writer(move || PostureLogWriter(logs_writer.clone()))
             .with_ansi(false),
     );
 
@@ -3283,9 +3213,9 @@ async fn launch_logs_posture_error_as_warning() {
 }
 
 /// Writer adapter for capturing tracing output
-struct LogWriter(Arc<Mutex<Vec<u8>>>);
+struct PostureLogWriter(Arc<Mutex<Vec<u8>>>);
 
-impl std::io::Write for LogWriter {
+impl std::io::Write for PostureLogWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.0.lock().unwrap().write(buf)
     }
@@ -3293,6 +3223,241 @@ impl std::io::Write for LogWriter {
     fn flush(&mut self) -> std::io::Result<()> {
         self.0.lock().unwrap().flush()
     }
+}
+
+// ----------------------------------------------------------------- relay sessions
+
+/// Stub policy for testing: returns a fixed result.
+struct RefusingPolicy {
+    status: StatusCode,
+    message: String,
+}
+
+#[async_trait::async_trait]
+impl crate::llm_proxy::sessions::SessionPolicy for RefusingPolicy {
+    async fn check(&self, _client_id: &str) -> Result<(), (StatusCode, String)> {
+        Err((self.status, self.message.clone()))
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_launch_without_a_proxy_address_answers_409() {
+    let h = Harness::start(Setup {
+        proxy_address: None,
+        credentials_must_not_be_reached: true,
+        ..Setup::default()
+    })
+    .await;
+
+    let (status, body) = h.launch(&h.body()).await;
+
+    assert_eq!(status, 409, "{body}");
+    assert!(
+        body.contains("the local LLM proxy is not running (daemon.llmProxy.listen)"),
+        "{body}"
+    );
+    h.assert_untouched();
+    assert!(h.credentials.calls().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_proxy_check_comes_after_an_invalid_cwd() {
+    let h = Harness::start(Setup {
+        proxy_address: None,
+        ..Setup::default()
+    })
+    .await;
+
+    let (status, body) = h
+        .launch(&h.body_with(|body| {
+            body["cwd"] = h.home.display().to_string().into();
+        }))
+        .await;
+
+    assert_eq!(status, 400, "{body}");
+    assert_ne!(
+        body, "the local LLM proxy is not running (daemon.llmProxy.listen)",
+        "cwd check runs before proxy check"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refusing_session_policy_passes_its_status_and_text_through() {
+    let h = Harness::start(Setup {
+        session_policy: Arc::new(RefusingPolicy {
+            status: StatusCode::CONFLICT,
+            message: "policy says no".to_owned(),
+        }),
+        credentials_must_not_be_reached: true,
+        ..Setup::default()
+    })
+    .await;
+
+    let (status, body) = h.launch(&h.body()).await;
+
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body, "policy says no");
+    h.assert_untouched();
+    assert!(h.executor.spawns().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn controller_jwt_without_claude_code_in_allowed_client_ids_is_refused() {
+    let config: agentdesktop_core::config::DaemonConfig =
+        serde_yaml::from_str(
+            "llmGateway:\n  url: https://gateway.example.com\n  authentication:\n    type: controllerJwt\n    audience: agentgateway\n    allowedClientIds: [copilot-cli]\nprograms:\n  claudeCode: {}\n"
+        )
+        .unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let h = Harness::start(Setup {
+        session_policy: Arc::new(crate::llm_proxy::sessions::ConfigPolicy {
+            config,
+            state_dir: temp.path().to_owned(),
+        }),
+        credentials_must_not_be_reached: true,
+        ..Setup::default()
+    })
+    .await;
+
+    let (status, body) = h.launch(&h.body()).await;
+
+    assert_eq!(status, 409, "{body}");
+    assert!(
+        body.contains("claude-code") && body.contains("allowedClientIds"),
+        "{body}"
+    );
+    h.assert_untouched();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_successful_launch_registers_a_session_with_the_pairing_in_env() {
+    let h = Harness::start(Setup::default()).await;
+
+    let launched = h.launch_ok().await;
+
+    let now = h.credentials.clock.now();
+    let sessions = h.sessions.list(now);
+    assert_eq!(sessions.len(), 1, "exactly one session registered");
+    let session = &sessions[0];
+    assert_eq!(session.id, launched.session_id);
+    assert_eq!(session.client_id, "claude-code");
+    assert!(
+        session.label.starts_with("run "),
+        "label is 'run <launch_id>': {}",
+        session.label
+    );
+
+    let spawn = &h.executor.spawns()[0];
+    let request: serde_json::Value =
+        serde_json::from_str(spawn.request_json.as_deref().unwrap()).unwrap();
+    let env = env_map(&request);
+    let pairing_header = env
+        .get("ANTHROPIC_CUSTOM_HEADERS")
+        .expect("ANTHROPIC_CUSTOM_HEADERS in env");
+    assert!(
+        pairing_header.starts_with("x-agentdesktop-pairing: "),
+        "{pairing_header}"
+    );
+    let pairing = pairing_header
+        .strip_prefix("x-agentdesktop-pairing: ")
+        .unwrap();
+
+    let body = serde_json::to_string(&launched).unwrap();
+    assert!(
+        !body.contains(pairing),
+        "pairing is not in the 201 body: {body}"
+    );
+    assert!(
+        !body.contains("credentialExpiresAtUnixSeconds"),
+        "no credential expiry in body: {body}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_early_exit_revokes_the_session_before_answering() {
+    let h = Harness::start(Setup::default()).await;
+    h.executor.exit_with(1);
+
+    let (status, _) = h.launch(&h.body()).await;
+
+    assert_eq!(status, 500);
+    let now = h.credentials.clock.now();
+    assert_eq!(h.sessions.len(now), 0, "session revoked on early exit");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_spawn_error_revokes_the_session() {
+    let h = Harness::start(Setup::default()).await;
+    *h.executor.error.lock().unwrap() =
+        Some(io::Error::new(io::ErrorKind::NotFound, "no such file"));
+
+    let (status, _) = h.launch(&h.body()).await;
+
+    assert_eq!(status, 500);
+    let now = h.credentials.clock.now();
+    assert_eq!(h.sessions.len(now), 0, "session revoked on spawn error");
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_capacity_exhaustion_answers_429_before_the_credential_check() {
+    let h = Harness::start(Setup {
+        credentials_must_not_be_reached: true,
+        ..Setup::default()
+    })
+    .await;
+    let now = h.credentials.clock.now();
+    for n in 0..64 {
+        h.sessions
+            .register(
+                "claude-code",
+                &format!("s{n}"),
+                Duration::from_secs(3600),
+                now,
+            )
+            .unwrap();
+    }
+
+    let (status, body) = h.launch(&h.body()).await;
+
+    assert_eq!(status, 429, "{body}");
+    assert!(
+        body.contains("too many sessions (64)") && body.contains("revoke unused ones"),
+        "{body}"
+    );
+    h.assert_untouched();
+    assert_eq!(h.sessions.len(now), 64, "registry count unchanged");
+    assert!(h.credentials.calls().is_empty());
+}
+
+#[tokio::test]
+async fn the_launch_log_names_the_session_once_and_never_its_pairing() {
+    let (logs, _guard) = capture_logs();
+    let h = Harness::start(Setup::default()).await;
+
+    let launched = h.launch_ok().await;
+
+    let spawn = &h.executor.spawns()[0];
+    let request: serde_json::Value =
+        serde_json::from_str(spawn.request_json.as_deref().unwrap()).unwrap();
+    let env = env_map(&request);
+    let pairing_header = env
+        .get("ANTHROPIC_CUSTOM_HEADERS")
+        .expect("ANTHROPIC_CUSTOM_HEADERS in env");
+    let pairing = pairing_header
+        .strip_prefix("x-agentdesktop-pairing: ")
+        .expect("header starts with x-agentdesktop-pairing: ");
+
+    let log_text = logs.wait_for_text(&launched.session_id).await;
+    let session_count = log_text.matches(&launched.session_id).count();
+    assert_eq!(
+        session_count, 1,
+        "session_id appears exactly once in the log: {}",
+        launched.session_id
+    );
+    assert!(
+        !log_text.contains(pairing),
+        "pairing value never appears in the log"
+    );
 }
 
 // ----------------------------------------------------------------- Windows only

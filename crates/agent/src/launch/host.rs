@@ -10,10 +10,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use agentdesktop_core::{
-    config::{DaemonConfig, LlmGatewayAuthentication},
-    model::LlmGatewayCredential,
-};
+use agentdesktop_core::model::LlmGatewayCredential;
 use async_trait::async_trait;
 use axum::http::StatusCode;
 
@@ -292,7 +289,7 @@ fn process_start_time(_child: &Child) -> anyhow::Result<u64> {
 }
 
 /// The gateway credential for a launch: the local API's own path, with the
-/// subscription never included and no browser sign-in for a refresh.
+/// subscription never included. The pre-flight is interactive by design.
 pub struct GatewayCredentialSource {
     pub app: api::AppState,
 }
@@ -315,7 +312,7 @@ impl CredentialSource for GatewayCredentialSource {
         let effective = if interactive {
             effective
         } else {
-            non_interactive(effective)
+            api::non_interactive(effective)
         };
         // `include_subscription` stays false whatever the configuration says:
         // no subscription token enters the box.
@@ -332,20 +329,6 @@ impl CredentialSource for GatewayCredentialSource {
             )
         })?
     }
-}
-
-/// With the device grant selected, a missing or unrefreshable OIDC token is a
-/// `401` instead of a browser sign-in: a background refresh never prompts.
-fn non_interactive(mut effective: DaemonConfig) -> DaemonConfig {
-    if let Some(gateway) = effective.llm_gateway.as_mut()
-        && let Some(LlmGatewayAuthentication::Oidc {
-            device_authorization,
-            ..
-        }) = gateway.authentication.as_mut()
-    {
-        *device_authorization = true;
-    }
-    effective
 }
 
 /// Whether the process `pid` with creation time `start_time` is still alive:

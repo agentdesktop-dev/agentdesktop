@@ -101,6 +101,8 @@ struct ResolvedDaemonArgs {
     containment: Option<config::ContainmentStartupConfig>,
     /// Whether `daemon.claudeCode.config` was set: a box reads the default path.
     claude_settings_overridden: bool,
+    /// Resolved copy of `daemon.containment.egress` for the launch routes.
+    containment_egress: config::ContainmentEgress,
 }
 
 struct ResolvedToolConfigPath {
@@ -254,6 +256,7 @@ impl DaemonArgs {
                 dry_run: self.dry_run,
                 containment,
                 claude_settings_overridden,
+                containment_egress: config::ContainmentEgress::default(),
             });
         }
 
@@ -352,6 +355,11 @@ impl DaemonArgs {
             dry_run: self.dry_run,
             containment,
             claude_settings_overridden,
+            containment_egress: startup
+                .containment
+                .as_ref()
+                .map(|c| c.egress)
+                .unwrap_or_default(),
         })
     }
 }
@@ -707,15 +715,16 @@ where
     // Sandbox sessions (`/sandbox` route): one registry shared by the proxy,
     // the local API that mints and revokes sessions, and the sweep.
     let sessions = llm_proxy::sessions::SessionRegistry::default();
+    let session_policy = std::sync::Arc::new(llm_proxy::sessions::ConfigPolicy {
+        config: state.config.clone(),
+        state_dir: state.state_dir.clone(),
+    });
     let session_api = llm_proxy::sessions::SessionApiState {
         registry: sessions.clone(),
         proxy_address: proxy_listener
             .as_ref()
             .and_then(|listener| listener.local_addr().ok()),
-        policy: std::sync::Arc::new(llm_proxy::sessions::ConfigPolicy {
-            config: state.config.clone(),
-            state_dir: state.state_dir.clone(),
-        }),
+        policy: session_policy.clone(),
     };
     let launch_state = launch::LaunchState {
         app: state.clone(),
@@ -732,6 +741,12 @@ where
         registry: launch::LaunchRegistry::new(),
         availability: containment,
         daemon_sid: daemon_sid.clone(),
+        sessions: sessions.clone(),
+        proxy_address: proxy_listener
+            .as_ref()
+            .and_then(|listener| listener.local_addr().ok()),
+        session_policy,
+        egress: args.containment_egress,
     };
     let app = api::router(state.clone())
         .merge(llm_proxy::sessions::session_router(session_api))
@@ -2466,6 +2481,7 @@ programs:
         config::DaemonStartupConfig {
             containment: Some(config::ContainmentStartupConfig {
                 executor: PathBuf::from(r"C:\mxc\x64\wxc-exec.exe"),
+                egress: config::ContainmentEgress::default(),
             }),
             ..Default::default()
         }
@@ -2533,6 +2549,35 @@ programs:
                 "once={once} dry_run={dry_run}"
             );
         }
+    }
+
+    #[test]
+    fn containment_egress_deny_is_resolved_from_config() {
+        let mut startup = startup_with_containment();
+        startup.containment.as_mut().unwrap().egress = config::ContainmentEgress::Deny;
+        let resolved = daemon_args(true)
+            .resolve(
+                startup,
+                PathBuf::from("config.yaml"),
+                PathBuf::from(DEFAULT_SOCKET_PATH),
+            )
+            .unwrap();
+        assert_eq!(resolved.containment_egress, config::ContainmentEgress::Deny);
+    }
+
+    #[test]
+    fn containment_egress_defaults_to_allow_when_absent() {
+        let resolved = daemon_args(true)
+            .resolve(
+                config::DaemonStartupConfig::default(),
+                PathBuf::from("config.yaml"),
+                PathBuf::from(DEFAULT_SOCKET_PATH),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved.containment_egress,
+            config::ContainmentEgress::Allow
+        );
     }
 
     fn startup_with_llm_proxy(listen: &str) -> config::DaemonStartupConfig {

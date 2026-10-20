@@ -484,6 +484,20 @@ async fn llm_gateway_credential(
         .map(Json)
 }
 
+/// With the device grant selected, a missing or unrefreshable OIDC token is a
+/// `401` instead of a browser sign-in: a background refresh never prompts.
+pub(crate) fn non_interactive(mut effective: DaemonConfig) -> DaemonConfig {
+    if let Some(gateway) = effective.llm_gateway.as_mut()
+        && let Some(LlmGatewayAuthentication::Oidc {
+            device_authorization,
+            ..
+        }) = gateway.authentication.as_mut()
+    {
+        *device_authorization = true;
+    }
+    effective
+}
+
 pub(crate) async fn gateway_credential(
     state: &AppState,
     effective: &DaemonConfig,
@@ -1193,5 +1207,77 @@ programs:
             assert_eq!(status, StatusCode::BAD_REQUEST);
             assert!(message.contains("cursor"), "{message}");
         }
+    }
+
+    #[test]
+    fn non_interactive_forces_device_authorization_for_oidc() {
+        use agentdesktop_core::config::LlmGatewayAuthentication;
+
+        let original = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: oidc
+    issuer: https://login.example.com
+    clientId: agentdesktop
+    deviceAuthorization: false
+"#,
+        )
+        .unwrap();
+
+        let transformed = super::non_interactive(original.clone());
+
+        // Original has deviceAuthorization: false
+        if let Some(LlmGatewayAuthentication::Oidc {
+            device_authorization,
+            ..
+        }) = &original.llm_gateway.as_ref().unwrap().authentication
+        {
+            assert!(!device_authorization);
+        } else {
+            panic!("expected OIDC authentication");
+        }
+
+        // Transformed has deviceAuthorization: true
+        if let Some(LlmGatewayAuthentication::Oidc {
+            device_authorization,
+            ..
+        }) = &transformed.llm_gateway.as_ref().unwrap().authentication
+        {
+            assert!(device_authorization);
+        } else {
+            panic!("expected OIDC authentication");
+        }
+    }
+
+    #[test]
+    fn non_interactive_leaves_controller_jwt_unchanged() {
+        let original = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
+    allowedClientIds: [claude-code]
+"#,
+        )
+        .unwrap();
+
+        let transformed = super::non_interactive(original.clone());
+
+        // ControllerJwt should be unchanged
+        assert!(matches!(
+            transformed.llm_gateway.as_ref().unwrap().authentication,
+            Some(agentdesktop_core::config::LlmGatewayAuthentication::ControllerJwt { .. })
+        ));
+    }
+
+    #[test]
+    fn non_interactive_leaves_no_gateway_unchanged() {
+        let original = parse_daemon("{}").unwrap();
+        let transformed = super::non_interactive(original.clone());
+        assert!(transformed.llm_gateway.is_none());
     }
 }

@@ -184,10 +184,29 @@
       },
       "additionalProperties": false
     },
+    "ContainmentEgress": {
+      "description": "Outbound network posture for sandboxed programs.",
+      "oneOf": [
+        {
+          "description": "Plain outbound access; model requests still go through the local LLM proxy.",
+          "type": "string",
+          "const": "allow"
+        },
+        {
+          "description": "Loopback only.",
+          "type": "string",
+          "const": "deny"
+        }
+      ]
+    },
     "ContainmentStartupConfig": {
       "description": "Sandboxed launch settings.",
       "type": "object",
       "properties": {
+        "egress": {
+          "description": "Outbound network for the sandboxed program: `allow` (default) or `deny`. With `deny` the box reaches only loopback: model requests go through the local LLM proxy, and git over HTTPS and package downloads fail. Read at startup only (restart the daemon after changing it); ignored with `--once` and `--dry-run`.",
+          "$ref": "#/$defs/ContainmentEgress"
+        },
         "executor": {
           "description": "Windows only. Absolute path to MXC `wxc-exec.exe`; no default. Read at\nstartup only (restart the daemon after changing it). Requires user\nmode; ignored with `--once` and `--dry-run`.",
           "type": "string"

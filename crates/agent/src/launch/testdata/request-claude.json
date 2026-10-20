@@ -12,10 +12,12 @@
     "cwd": "C:\\lab\\ws pr1",
     "inheritDefaultEnv": false,
     "env": [
-      "AGENTDESKTOP_CREDENTIAL_FILE=C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\credential\\token",
-      "ANTHROPIC_BASE_URL=https://alpha-dev.aks.solo.sademo.de",
+      "ANTHROPIC_AUTH_TOKEN=placeholder",
+      "ANTHROPIC_BASE_URL=http://127.0.0.1:4000/sandbox",
+      "ANTHROPIC_CUSTOM_HEADERS=x-agentdesktop-pairing: test-pairing-value",
       "APPDATA=C:\\Users\\dev\\AppData\\Roaming",
       "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+      "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST=1",
       "CLAUDE_CODE_USE_POWERSHELL_TOOL=1",
       "CLAUDE_CONFIG_DIR=C:\\Users\\dev\\.claude",
       "ComSpec=C:\\Windows\\system32\\cmd.exe",
@@ -50,7 +52,6 @@
       "C:\\Program Files\\Git",
       "C:\\lab\\agentdesktop",
       "C:\\Program Files\\ClaudeCode",
-      "C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\credential",
       "C:\\Users\\dev\\.claude\\settings.json",
       "C:\\Users\\dev\\.claude\\plugins",
       "C:\\lab\\ws pr1\\.claude\\settings.local.json",
@@ -79,7 +80,7 @@
     },
     "ingress": {
       "default": "allow",
-      "hostLoopback": "deny"
+      "hostLoopback": "allow"
     }
   }
 }

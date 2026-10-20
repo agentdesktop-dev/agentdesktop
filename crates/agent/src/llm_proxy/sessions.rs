@@ -33,6 +33,11 @@ const MAX_TTL_SECONDS: u64 = 86_400;
 /// Unexpired sessions a daemon holds at most: a launcher that leaks sessions
 /// fails loudly instead of growing the registry.
 pub(crate) const MAX_SESSIONS: usize = 64;
+
+/// The one message for a full registry, shared with the launch routes.
+pub(crate) fn too_many_sessions_message() -> String {
+    format!("too many sessions ({MAX_SESSIONS}); revoke unused ones")
+}
 /// Longest a label may be, in Unicode scalar values.
 const MAX_LABEL_CHARS: usize = 128;
 
@@ -386,10 +391,7 @@ async fn create_session(
             super::now_unix(),
         )
         .map_err(|error| match error {
-            SessionError::Full => (
-                StatusCode::TOO_MANY_REQUESTS,
-                format!("too many sessions ({MAX_SESSIONS}); revoke unused ones"),
-            ),
+            SessionError::Full => (StatusCode::TOO_MANY_REQUESTS, too_many_sessions_message()),
             // Both were checked above; a race with the registry's own
             // validation would be a bug, reported as such.
             SessionError::InvalidClientId | SessionError::InvalidLabel => (

@@ -959,7 +959,15 @@ async fn forward(
                     // fetches and the others find its credential in the cache.
                     let fetch = {
                         let state = state.clone();
-                        let effective = effective.clone();
+                        // On the sandbox route, the daemon never starts an interactive
+                        // sign-in on behalf of a box: if the stored session is
+                        // unusable, the box's request fails and the user signs in on
+                        // the host.
+                        let effective = if session.is_some() {
+                            api::non_interactive(effective.clone())
+                        } else {
+                            effective.clone()
+                        };
                         let client_id = client_id.clone();
                         let cache = cache.clone();
                         let cache_key = cache_key.clone();
@@ -1003,7 +1011,19 @@ async fn forward(
                                 format!("credential fetch failed: {error}"),
                             ))
                         })?
-                        .map_err(ProxyError::credential)?;
+                        .map_err(|(status, message)| {
+                            // On the sandbox route, a 401 means deviceAuthorization is
+                            // false or the token is missing/expired. The endpoint for
+                            // device flow (agentdesktop-headless login) refuses with 424
+                            // in that configuration, so the honest guidance is to sign in
+                            // on the host session (the daemon's own environment).
+                            let message = if session.is_some() && status == StatusCode::UNAUTHORIZED {
+                                "LLM gateway sign-in required. Sign in on the host (the machine running the daemon), not inside the sandbox.".to_owned()
+                            } else {
+                                message
+                            };
+                            ProxyError::credential((status, message))
+                        })?;
                     let (credential, deadline, cached) = fetched;
                     from_cache = cached;
                     fetched_now = !cached;

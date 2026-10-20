@@ -142,6 +142,9 @@ pub struct ContainmentStartupConfig {
     /// startup only (restart the daemon after changing it). Requires user
     /// mode; ignored with `--once` and `--dry-run`.
     pub executor: PathBuf,
+    /// Outbound network for the sandboxed program: `allow` (default) or `deny`. With `deny` the box reaches only loopback: model requests go through the local LLM proxy, and git over HTTPS and package downloads fail. Read at startup only (restart the daemon after changing it); ignored with `--once` and `--dry-run`.
+    #[serde(default, skip_serializing_if = "ContainmentEgress::is_default")]
+    pub egress: ContainmentEgress,
 }
 
 /// Checks `daemon.containment`. With `windows == true` the executor must be an
@@ -366,6 +369,24 @@ pub enum ProxyUnavailable {
 }
 
 impl ProxyUnavailable {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Outbound network posture for sandboxed programs.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum ContainmentEgress {
+    /// Plain outbound access; model requests still go through the local LLM proxy.
+    #[default]
+    Allow,
+    /// Loopback only.
+    Deny,
+}
+
+impl ContainmentEgress {
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
@@ -2597,6 +2618,7 @@ programs:
     fn containment(executor: &str) -> super::ContainmentStartupConfig {
         super::ContainmentStartupConfig {
             executor: executor.into(),
+            egress: super::ContainmentEgress::default(),
         }
     }
 
@@ -2935,5 +2957,83 @@ programs:
         let claude = config.programs.claude_code.as_ref().unwrap();
         assert_eq!(claude.allow_managed_hooks_only, Some(true));
         assert!(claude.settings.contains_key("companyAnnouncements"));
+    }
+
+    // AC 1: ContainmentEgress tests
+
+    #[test]
+    fn containment_egress_allow_parses() {
+        let config = super::parse_local_daemon(
+            "daemon:\n  containment:\n    executor: 'C:\\mxc\\wxc-exec.exe'\n    egress: allow\n",
+        )
+        .expect("allow parses");
+        let egress = config.daemon.unwrap().containment.unwrap().egress;
+        assert_eq!(egress, super::ContainmentEgress::Allow);
+    }
+
+    #[test]
+    fn containment_egress_deny_parses() {
+        let config = super::parse_local_daemon(
+            "daemon:\n  containment:\n    executor: 'C:\\mxc\\wxc-exec.exe'\n    egress: deny\n",
+        )
+        .expect("deny parses");
+        let egress = config.daemon.unwrap().containment.unwrap().egress;
+        assert_eq!(egress, super::ContainmentEgress::Deny);
+    }
+
+    #[test]
+    fn containment_egress_absent_defaults_to_allow() {
+        let config = super::parse_local_daemon(
+            "daemon:\n  containment:\n    executor: 'C:\\mxc\\wxc-exec.exe'\n",
+        )
+        .expect("absent defaults");
+        let egress = config.daemon.unwrap().containment.unwrap().egress;
+        assert_eq!(egress, super::ContainmentEgress::Allow);
+    }
+
+    #[test]
+    fn containment_egress_rejects_deny_capitalized() {
+        assert!(
+            super::parse_local_daemon(
+                "daemon:\n  containment:\n    executor: /x/wxc-exec\n    egress: Deny\n"
+            )
+            .is_err(),
+            "Deny capitalized is rejected"
+        );
+    }
+
+    #[test]
+    fn containment_egress_rejects_block() {
+        assert!(
+            super::parse_local_daemon(
+                "daemon:\n  containment:\n    executor: /x/wxc-exec\n    egress: block\n"
+            )
+            .is_err(),
+            "block is rejected"
+        );
+    }
+
+    #[test]
+    fn containment_egress_unset_not_serialized() {
+        let cfg = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("/x/wxc-exec"),
+            egress: super::ContainmentEgress::Allow,
+        };
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert!(
+            json.get("egress").is_none(),
+            "default egress is not serialized"
+        );
+
+        let cfg_deny = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("/x/wxc-exec"),
+            egress: super::ContainmentEgress::Deny,
+        };
+        let json_deny = serde_json::to_value(&cfg_deny).unwrap();
+        assert_eq!(
+            json_deny.get("egress").and_then(|v| v.as_str()),
+            Some("deny"),
+            "deny egress is serialized"
+        );
     }
 }

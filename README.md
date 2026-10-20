@@ -737,9 +737,15 @@ itself. Startup setting (local only, user mode):
 ```yaml
 daemon:
   user: true
+  llmProxy:
+    listen: 127.0.0.1:4000
   containment:
     executor: C:\Program Files\mxc\x64\wxc-exec.exe
+    # egress: deny   # opt-in: the box loses direct outbound network
 ```
+
+`run` needs the local LLM proxy: without `daemon.llmProxy.listen` it answers
+`409`.
 
 The daemon reports the setting as `containment` in daemon-info (`available`
 with the reason when not). Then, from the workspace directory:
@@ -790,45 +796,48 @@ directory or one of its ancestors, or anything under `%SystemRoot%`,
 `%ProgramFiles%`, `%ProgramData%`, `AppData`, and the actual `%APPDATA%` and
 `%LOCALAPPDATA%` paths (Folder Redirection can place these outside `<home>\AppData`),
 `~\.claude`, the daemon's state directory or a denied path (`%ProgramFiles(x86)%`
-counts as a system directory). Outbound network is open in this preview; whether the box can reach
-loopback services on the host, and whether it accepts inbound loopback
-connections, follows the request's network block (`egress` open, host loopback
-ingress denied) and is not yet verified in the lab; the clipboard is off in the
-box; a gateway behind a private CA is not supported yet.
+counts as a system directory). Outbound network is open by default (`daemon.containment.egress:
+deny` opts out); the box can reach every loopback listener on this machine
+(host loopback is allowed so it can reach the local LLM proxy), and the
+clipboard is off in the box; a gateway behind a private CA is not supported
+yet.
 
-The box gets no pipe to the daemon and no sign-in: the daemon writes the
-gateway credential to a private file named by `AGENTDESKTOP_CREDENTIAL_FILE`,
-which `agentdesktop credential --client-id claude-code` reads inside the box.
-That token is the box's single secret. Inside the box the agent can read a
-valid gateway token and send it anywhere, because outbound traffic is open in
-this preview; the local relay route removes the token from the box. The daemon
-rewrites the file shortly before the credential expires (about 50 s before),
-without ever opening a browser; if the gateway refuses the refresh the file
-stays until the credential expires, and if the configuration no longer allows
-the launch the file is removed at that next refresh. After logout or a policy
-change a running box therefore keeps model access for at most the remaining
-credential lifetime. Restarting the daemon ends model access for running
-sandboxed sessions within the credential lifetime; start a new `run` with
-`--resume`. The box's own `TEMP` lives under the launch directory. Telemetry
+The box gets no pipe to the daemon, no sign-in and no gateway credential.
+Each `run` registers a session with the local LLM proxy and gives the box only
+that session's pairing (`/sandbox` route); the proxy adds the user's gateway
+identity to each request. Loopback is machine-wide, so the pairing is a bearer
+secret on this machine. Sign-in still happens once, at `run` time. The session
+is revoked when the box exits; restarting the daemon revokes all sessions, and
+a running box gets `403 pairing_invalid` until it is relaunched (use
+`--resume`); a box idle for 8 hours loses its session the same way. The box
+environment sets `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST=1`
+(https://code.claude.com/docs/en/env-vars), so the gateway URL in
+`~\.claude\settings.json` does not apply inside the box; the `apiKeyHelper`
+there is not run (observed, Claude Code 2.1.300). The box's own `TEMP` lives
+under the launch directory. Residual limits: the executor's log lines are
+copied into the daemon log and an early exit quotes the log tail, so anything
+the executor echoes travels there; after a sign-out and new sign-in, a running
+box uses the newly signed-in identity within about a minute; and a box could
+occupy the sign-in's loopback redirect port, failing a concurrent sign-in
+(the token itself stays protected). Telemetry
 hooks do not reach the daemon from inside the box in this preview. Arguments
 containing `" % ^ & | < > !` or control characters are rejected, because
 `cmd.exe` starts the box's console window.
 
 `run` answers `400` for a rejected program, workspace or argument, `403` when
 another user calls a user-mode daemon on Windows, `409` for the configuration
-rules above, `401`/`424`/`502` straight from the credential request, and `500`
-when preparing the launch fails (creating `~\.claude`, the credential directory,
-or writing the request), when the executor cannot be started, when recording the
-launch pid fails or the daemon cannot watch the executor (in both cases it stops
-the executor first), or when the executor exits within three seconds (its last
-log lines are in the message). If the daemon can no longer watch a running
-sandboxed session, it stops it. Launches are
-listed by `GET /v1/launches`
-(running ones plus the last 32 that exited); each
-entry carries `integrityDrift: true` once a change was detected. A daemon restart keeps running
-boxes alive but stops refreshing their credential: at startup the daemon removes
-the credential and request files of every earlier launch, and the directory of
-a launch whose box has exited. Residual risk: on Windows a read-only file inside
+rules above and when the local LLM proxy is not running, `429` when too many
+relay sessions exist (revoke unused ones), `401`/`424`/`502` straight from the
+sign-in, and `500` when preparing the launch fails (creating `~\.claude` or
+writing the request), when the executor cannot be started, when recording the
+launch pid fails or the daemon cannot watch the executor (in both cases it
+stops the executor first), or when the executor exits within three seconds
+(its last log lines are in the message). If the daemon can no longer watch a
+running sandboxed session, it stops it. Launches are listed by
+`GET /v1/launches` (running ones plus the last 32 that exited; each carries
+its `sessionId`, and `integrityDrift: true` once a change was detected). A daemon restart keeps running boxes alive but revokes
+their relay sessions: at startup the daemon removes the request files of
+every earlier launch, and the directory of a launch whose box has exited. Residual risk: on Windows a read-only file inside
 a read-write folder can be replaced from the box (write a temp file, rename over
 it; Claude Code's own atomic save does this). That covers every read-only entry
 above that sits inside a writable folder: `~\.claude\settings.json` (hooks,
@@ -1019,7 +1028,10 @@ keeps its gateway identity when the configuration later switches that program
 to subscription mode, until it is revoked or idles out. Narrowing
 `allowedClientIds` makes its requests fail within about a minute, because the
 proxy reuses a credential for at most 60 seconds and the controller then denies
-the next fetch. With `oidc` the client id only labels the log.
+the next fetch. With `oidc` the client id only labels the log. The daemon
+never starts an interactive sign-in on behalf of a sandbox: if a stored OIDC
+session is missing or unusable, the box's request fails and the user must sign
+in on the host.
 
 Sessions live in memory and expire `ttlSeconds` after their last request
 (default 28800, at most 86400 and at least 60; the timeout restarts on every
