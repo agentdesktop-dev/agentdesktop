@@ -217,6 +217,10 @@ impl LaunchChild for ProcessChild {
     fn start_time(&self) -> u64 {
         self.start_time
     }
+
+    fn kill(&mut self) -> io::Result<()> {
+        self.child.kill()
+    }
 }
 
 impl Executor for ProcessExecutor {
@@ -514,5 +518,41 @@ pub(crate) mod windows {
             user_sid: Some(user_sid),
             app_container: app_container != 0,
         })
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kill_stops_the_process_and_returns_ok_when_already_exited() {
+        let child = Command::new("ping")
+            .args(["-n", "300", "127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("spawn ping");
+        let pid = child.id();
+        let mut process_child = ProcessChild {
+            child,
+            pid,
+            start_time: 0,
+        };
+
+        process_child.kill().expect("kill the process");
+
+        let mut exit_code = None;
+        for _ in 0..100 {
+            if let Ok(Some(code)) = process_child.try_wait() {
+                exit_code = Some(code);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(exit_code, Some(1), "process exited with code 1");
+
+        let result = process_child.kill();
+        assert!(result.is_ok(), "second kill returns Ok");
     }
 }

@@ -815,8 +815,10 @@ another user calls a user-mode daemon on Windows, `409` for the configuration
 rules above, `401`/`424`/`502` straight from the credential request, and `500`
 when preparing the launch fails (creating `~\.claude`, the credential directory,
 or writing the request), when the executor cannot be started, when recording the
-launch pid fails, or when it exits within three seconds (its last log lines are
-in the message). Launches are
+launch pid fails or the daemon cannot watch the executor (in both cases it stops
+the executor first), or when the executor exits within three seconds (its last
+log lines are in the message). If the daemon can no longer watch a running
+sandboxed session, it stops it. Launches are
 listed by `GET /v1/launches`
 (running ones plus the last 32 that exited). A daemon restart keeps running
 boxes alive but stops refreshing their credential: at startup the daemon removes
