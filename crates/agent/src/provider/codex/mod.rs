@@ -55,9 +55,6 @@ impl Provider for Codex {
             &ctx.socket,
             config.sandbox.as_ref(),
             ctx.user_mode,
-            ctx.llm_proxy
-                .as_ref()
-                .map(|proxy| (proxy.address, &*proxy.pairing)),
             configured,
             &plan,
         )?;

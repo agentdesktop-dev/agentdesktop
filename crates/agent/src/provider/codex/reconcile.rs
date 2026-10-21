@@ -33,7 +33,6 @@ pub(super) fn plan(
     socket: &Path,
     sandbox: Option<&SandboxConfig>,
     user_mode: bool,
-    _proxy: Option<(SocketAddr, &str)>,
     config: Option<(&CodexConfig, Option<&LlmGatewayConfig>)>,
     plan: &ReconcilePlan,
 ) -> anyhow::Result<()> {
@@ -389,22 +388,20 @@ programs:
         let path = dir.path().join("config.toml");
         let mut config = subscription_config();
         let run_plan = |config: &agentdesktop_core::config::DaemonConfig, proxy, user_mode| {
-            let plan = crate::reconcile::ReconcilePlan::default();
-            super::plan(
-                &path,
-                Path::new("agentdesktop"),
-                Path::new("agentdesktop.sock"),
-                None,
+            use crate::provider::{Provider, ReconcileContext};
+
+            let context = ReconcileContext {
+                merge_user_settings: false,
                 user_mode,
-                proxy,
-                Some((
-                    config.programs.codex.as_ref().unwrap(),
-                    config.llm_gateway.as_ref(),
-                )),
-                &plan,
-            )
-            .unwrap();
-            plan
+                credential_helper: Path::new("agentdesktop").to_path_buf(),
+                socket: Path::new("agentdesktop.sock").to_path_buf(),
+                llm_proxy: proxy,
+            };
+            super::Codex {
+                managed_config_path: path.clone(),
+            }
+            .plan(&context, config)
+            .unwrap()
         };
         let absent = run_plan(&config, None, true);
         assert!(absent.inactive_reason().is_none());
@@ -413,7 +410,10 @@ programs:
         for pairing in ["first-pairing-secret", "second-pairing-secret"] {
             let plan = run_plan(
                 &config,
-                Some(("127.0.0.1:4010".parse().unwrap(), pairing)),
+                Some(crate::llm_proxy::LlmProxyContext {
+                    address: "127.0.0.1:4010".parse().unwrap(),
+                    pairing: pairing.into(),
+                }),
                 true,
             );
             assert!(!plan.render().contains("pairing-secret"));
@@ -458,7 +458,6 @@ programs:
             Path::new("agentdesktop.sock"),
             None,
             false,
-            None,
             Some((
                 config.programs.codex.as_ref().unwrap(),
                 config.llm_gateway.as_ref(),
@@ -487,7 +486,6 @@ programs:
             Path::new("agentdesktop.sock"),
             None,
             false,
-            Some(("127.0.0.1:4010".parse().unwrap(), "pairing-secret")),
             Some((
                 config.programs.codex.as_ref().unwrap(),
                 config.llm_gateway.as_ref(),
@@ -516,7 +514,6 @@ programs:
             Path::new("socket"),
             None,
             false,
-            None,
             None,
             &plan,
         )
@@ -658,7 +655,6 @@ programs:
                 Path::new("agentdesktop.sock"),
                 None,
                 false,
-                None,
                 Some((config.programs.codex.as_ref().unwrap(), None)),
                 plan,
             )
@@ -682,7 +678,6 @@ programs:
                 Path::new("agentdesktop.sock"),
                 None,
                 false,
-                None,
                 Some((config.programs.codex.as_ref().unwrap(), None)),
                 plan,
             )
