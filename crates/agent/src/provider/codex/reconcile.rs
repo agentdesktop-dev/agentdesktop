@@ -18,6 +18,15 @@ const MANAGED_FILE_MODE: u32 = 0o644;
 
 const MANAGED_HEADER: &str = "# Managed by Agentdesktop. Manual changes will be replaced.\n";
 
+fn codex_responses_base_url(gateway: &LlmGatewayConfig, subscription: bool) -> String {
+    let path = gateway.url.path().trim_end_matches('/');
+    if subscription && path.ends_with("/backend-api/codex") {
+        gateway.url.to_string().trim_end_matches('/').to_owned()
+    } else {
+        responses_base_url(gateway)
+    }
+}
+
 pub(super) fn plan(
     path: &Path,
     credential_helper: &Path,
@@ -172,13 +181,14 @@ fn managed_config(
         return Ok(settings);
     };
 
+    let subscription = config.auth == Some(ProgramAuthentication::Subscription);
     let provider_name = "agentdesktop";
     let mut provider = json!({
         "name": "Agentdesktop",
-        "base_url": responses_base_url(gateway),
+        "base_url": codex_responses_base_url(gateway, subscription),
         "wire_api": "responses",
     });
-    if config.auth == Some(ProgramAuthentication::Subscription) {
+    if subscription {
         provider["requires_openai_auth"] = json!(false);
         provider["supports_websockets"] = json!(false);
         settings
@@ -349,6 +359,28 @@ programs:
         assert!(!contents.contains("conflicting"));
         let parsed: toml::Value = toml::from_str(&contents).unwrap();
         assert_eq!(parsed["model_provider"].as_str(), Some("agentdesktop"));
+    }
+
+    #[test]
+    fn subscription_provider_preserves_the_chatgpt_codex_endpoint() {
+        let mut config = subscription_config();
+        config.llm_gateway.as_mut().unwrap().url = "https://gateway.example.com/backend-api/codex"
+            .parse()
+            .unwrap();
+        let settings = managed_config(
+            config.programs.codex.as_ref().unwrap(),
+            config.llm_gateway.as_ref(),
+            Path::new("agentdesktop"),
+            Path::new("agentdesktop.sock"),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            settings["model_providers"]["agentdesktop"]["base_url"],
+            "https://gateway.example.com/backend-api/codex"
+        );
     }
 
     #[test]
