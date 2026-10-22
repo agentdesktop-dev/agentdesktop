@@ -39,8 +39,6 @@ mod forward;
 mod listener;
 mod run;
 mod store;
-#[cfg(test)]
-mod walkthrough;
 
 pub use ca::InterceptCa;
 pub use forward::{CredentialSource, GatewayTarget, IDENTITY_HEADER};

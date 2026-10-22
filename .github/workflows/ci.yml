@@ -114,7 +114,7 @@ jobs:
           tool: nextest
 
       - name: Test agent
-        run: cargo nextest run --locked --package agentdesktop-agent --lib
+        run: cargo nextest run --locked --package agentdesktop-agent --lib --test intercept
 
   container:
     name: Container

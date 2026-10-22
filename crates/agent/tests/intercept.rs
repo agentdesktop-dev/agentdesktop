@@ -1,8 +1,9 @@
-//! A walkthrough of the intercept listener, end to end on loopback. It needs
-//! no admin rights, no keychain and no Docker. Read it as the demo:
+//! A walkthrough of the intercept listener, end to end on loopback, through
+//! its public API. It needs no admin rights, no keychain and no Docker, and
+//! runs on every platform. Read it as the demo:
 //!
 //! ```text
-//! cargo test -p agentdesktop-agent intercept::walkthrough -- --nocapture
+//! cargo test -p agentdesktop-agent --test intercept -- --nocapture
 //! ```
 //!
 //! The parts:
@@ -15,9 +16,11 @@
 //! - clients that trust only the CA they are given, the way Claude Desktop
 //!   trusts the intercept CA once it is in the System keychain.
 //!
-//! What it does not show: Claude Desktop itself, the macOS trust store, the
-//! `egressProxyUrl` pin, or a real agentgateway. Those were covered by the
-//! manual acceptance run.
+//! The intercept CA's Name Constraints are checked against a verifier in the
+//! unit tests of `intercept/ca.rs`, which can mint leaves the listener never
+//! would. The daemon wiring, the `egressProxyUrl` pin and a real agentgateway
+//! are covered by the Docker tests in `integration.rs`. Claude Desktop itself
+//! and the macOS trust store are not covered here.
 
 use std::{
     convert::Infallible,
@@ -41,15 +44,13 @@ use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair, KeyUsage
 use rustls::{
     ClientConfig, RootCertStore, ServerConfig,
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName},
-    server::{ClientHello, ResolvesServerCert},
-    sign::CertifiedKey,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
 
-use super::{
+use agentdesktop_agent::intercept::{
     CredentialSource, GatewayTarget, IDENTITY_HEADER, InterceptCa, InterceptConfig, Interceptor,
     serve,
 };
@@ -313,37 +314,6 @@ async fn start_other_origin() -> (SocketAddr, CertificateDer<'static>) {
         }
     });
     (address, ca_der)
-}
-
-/// A TLS server that presents one fixed certificate: used to show what a
-/// verifier does with leaves signed by the intercept CA.
-async fn serve_fixed_certificate(key: Arc<CertifiedKey>) -> SocketAddr {
-    #[derive(Debug)]
-    struct Fixed(Arc<CertifiedKey>);
-    impl ResolvesServerCert for Fixed {
-        fn resolve(&self, _hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-            Some(self.0.clone())
-        }
-    }
-    let config = ServerConfig::builder_with_provider(provider())
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_cert_resolver(Arc::new(Fixed(key)));
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let acceptor = acceptor.clone();
-            tokio::spawn(async move {
-                if let Ok(mut tls) = acceptor.accept(stream).await {
-                    let _ = tls.shutdown().await;
-                }
-            });
-        }
-    });
-    address
 }
 
 fn plain_gateway(address: SocketAddr) -> GatewayTarget {
@@ -677,27 +647,7 @@ async fn walkthrough() {
     note(format!("plain-HTTP proxy request -> {not_connect}"));
     assert_eq!(not_connect, 405);
 
-    step("9. A verifier rejects names outside the intercept CA's Name Constraints");
-    let verifier = tls_connector(&intercept_root, &[]);
-    for (name, key) in [
-        ("claude.ai", ca.leaf("claude.ai").unwrap()),
-        ("example.com", ca.leaf_unchecked("example.com").unwrap()),
-        ("127.0.0.1", ca.leaf_unchecked("127.0.0.1").unwrap()),
-    ] {
-        let server = serve_fixed_certificate(key).await;
-        let outcome = tls_over(&verifier, name, TcpStream::connect(server).await.unwrap()).await;
-        note(format!(
-            "leaf for {name:<12} -> {}",
-            match &outcome {
-                Ok(_) => "accepted".to_owned(),
-                Err(error) => format!("rejected ({error})"),
-            }
-        ));
-        assert_eq!(outcome.is_ok(), name == "claude.ai");
-    }
-    note("this is rustls-webpki; Electron's verifier and Apple's SecTrust are not tested here");
-
-    step("10. With the gateway down, requests fail (fail closed) and the health shows why");
+    step("9. With the gateway down, requests fail (fail closed) and the health shows why");
     let closed = TcpListener::bind("127.0.0.1:0")
         .await
         .unwrap()
@@ -728,7 +678,7 @@ async fn walkthrough() {
         "nothing else answered in the gateway's place"
     );
 
-    step("11. Pooled gateway connections are dropped after an idle gap (or a sleep)");
+    step("10. Pooled gateway connections are dropped after an idle gap (or a sleep)");
     let (idle_proxy, _) = start_listener(
         &ca,
         plain_gateway(gateway.address),
@@ -773,7 +723,7 @@ async fn walkthrough() {
         "a gap longer than the idle reset starts a new connection"
     );
 
-    step("12. Over TLS, the gateway connection uses HTTP/2 and keeps the original host");
+    step("11. Over TLS, the gateway connection uses HTTP/2 and keeps the original host");
     let (gateway_tls, gateway_root) = localhost_tls(&[b"h2", b"http/1.1"]);
     let tls_gateway = FakeGateway::start(Some(gateway_tls)).await;
     let mut roots = RootCertStore::empty();
@@ -830,7 +780,7 @@ async fn walkthrough() {
         "upgrades use HTTP/1.1"
     );
 
-    step("13. The main listener's health");
+    step("12. The main listener's health");
     let health = interceptor.health().snapshot();
     note(format!(
         "forwarded {}, gateway failures {}, tunnels {}, tunnel failures {}",

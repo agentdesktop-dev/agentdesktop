@@ -166,8 +166,8 @@ impl InterceptCa {
         Ok(key)
     }
 
-    /// A leaf for any name, without the host check: the walkthrough test uses
-    /// it to show that a verifier rejects names outside the constraints.
+    /// A leaf for any name, without the host check: a test uses it to show
+    /// that a verifier rejects names outside the constraints.
     #[cfg(test)]
     pub(super) fn leaf_unchecked(&self, host: &str) -> anyhow::Result<Arc<CertifiedKey>> {
         Ok(self.mint(host, SystemTime::now())?.key)
@@ -236,5 +236,47 @@ mod tests {
     #[test]
     fn an_empty_host_list_is_refused() {
         assert!(InterceptCa::generate("test intercept CA", &[]).is_err());
+    }
+
+    /// Even a leaf the listener would never mint is rejected by a verifier
+    /// that enforces Name Constraints on the trust anchor. This is
+    /// rustls-webpki; Electron's verifier and Apple's SecTrust are not tested.
+    #[test]
+    fn a_verifier_rejects_names_outside_the_name_constraints() {
+        use rustls::{
+            RootCertStore,
+            client::{WebPkiServerVerifier, danger::ServerCertVerifier},
+            pki_types::{ServerName, UnixTime},
+        };
+
+        let ca = InterceptCa::generate("test intercept CA", &hosts()).unwrap();
+        let mut roots = RootCertStore::empty();
+        roots.add(ca.certificate_der().clone()).unwrap();
+        let verifier = WebPkiServerVerifier::builder_with_provider(
+            Arc::new(roots),
+            Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
+        )
+        .build()
+        .unwrap();
+        for (name, leaf, accepted) in [
+            ("claude.ai", ca.leaf("claude.ai"), true),
+            ("example.com", ca.leaf_unchecked("example.com"), false),
+            ("127.0.0.1", ca.leaf_unchecked("127.0.0.1"), false),
+        ] {
+            let leaf = leaf.unwrap();
+            let outcome = verifier.verify_server_cert(
+                &leaf.cert[0],
+                &[],
+                &ServerName::try_from(name).unwrap(),
+                &[],
+                UnixTime::now(),
+            );
+            if accepted {
+                assert!(outcome.is_ok(), "{name}: {outcome:?}");
+            } else {
+                let error = format!("{:?}", outcome.unwrap_err());
+                assert!(error.contains("NameConstraint"), "{name}: {error}");
+            }
+        }
     }
 }
