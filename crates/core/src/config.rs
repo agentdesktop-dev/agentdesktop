@@ -1364,13 +1364,20 @@ fn parse_local_daemon(contents: &str) -> anyhow::Result<DaemonConfig> {
             anyhow::bail!("daemon.usage.listen must be a loopback address");
         }
     }
-    if config
+    if let Some(listen) = config
         .daemon
         .as_ref()
         .and_then(|daemon| daemon.intercept.listen)
-        .is_some_and(|listen| !listen.ip().is_loopback())
     {
-        anyhow::bail!("daemon.intercept.listen must be a loopback address");
+        if !listen.ip().is_loopback() {
+            anyhow::bail!("daemon.intercept.listen must be a loopback address");
+        }
+        // Claude Desktop is pinned to this exact address.
+        if listen.port() == 0 {
+            anyhow::bail!(
+                "daemon.intercept.listen needs a fixed port: Claude Desktop is pinned to this address"
+            );
+        }
     }
     validate_daemon(
         config.llm_gateway.as_ref(),
@@ -1553,9 +1560,17 @@ fn validate_daemon(
     if let Some(desktop) = &programs.claude_desktop
         && desktop.gateway_mode == ClaudeDesktopGatewayMode::Intercept
     {
-        if !desktop.use_llm_gateway || llm_gateway.is_none() {
+        let Some(gateway) = llm_gateway.filter(|_| desktop.use_llm_gateway) else {
             anyhow::bail!(
                 "programs.claudeDesktop.gatewayMode intercept requires an llmGateway and useLlmGateway"
+            );
+        };
+        // The listener sends decrypted claude.ai cookies and tokens to the
+        // gateway, so only a gateway on this device may use plain HTTP.
+        let target = gateway.intercept_url.as_ref().unwrap_or(&gateway.url);
+        if target.scheme() != "https" && !is_loopback_url(target) {
+            anyhow::bail!(
+                "programs.claudeDesktop.gatewayMode intercept requires an HTTPS gateway: llmGateway.interceptUrl, or url when it is unset, may use HTTP only on a loopback address"
             );
         }
         if desktop.auth.is_some() {
@@ -1687,6 +1702,16 @@ fn validate_daemon(
 
 fn is_loopback(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+}
+
+/// Returns whether `url` names this device: `localhost` or a loopback address.
+pub fn is_loopback_url(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }
 }
 
 /// Returns whether a caller-provided LLM gateway client identifier is valid.
@@ -2215,6 +2240,17 @@ llmGateway:
             default_intercept_listen(),
             "127.0.0.1:18471".parse::<SocketAddr>().unwrap()
         );
+        // A gateway on this device may use plain HTTP.
+        for gateway in [
+            "url: http://127.0.0.1:4011",
+            "url: https://gateway.example.com\n  interceptUrl: http://localhost:4011",
+            "url: https://gateway.example.com\n  interceptUrl: http://[::1]:4011",
+        ] {
+            let yaml = format!(
+                "llmGateway:\n  {gateway}\nprograms:\n  claudeDesktop:\n    gatewayMode: intercept\n"
+            );
+            parse_local_daemon(&yaml).expect(&yaml);
+        }
     }
 
     #[test]
@@ -2252,6 +2288,18 @@ llmGateway:
             (
                 "daemon:\n  intercept:\n    listen: 0.0.0.0:18471\n".to_owned(),
                 "daemon.intercept.listen must be a loopback address",
+            ),
+            (
+                "daemon:\n  intercept:\n    listen: 127.0.0.1:0\n".to_owned(),
+                "daemon.intercept.listen needs a fixed port",
+            ),
+            (
+                "llmGateway:\n  url: http://gateway.example.com\nprograms:\n  claudeDesktop:\n    gatewayMode: intercept\n".to_owned(),
+                "requires an HTTPS gateway",
+            ),
+            (
+                "llmGateway:\n  url: https://gateway.example.com\n  interceptUrl: http://10.0.0.5:4001\nprograms:\n  claudeDesktop:\n    gatewayMode: intercept\n".to_owned(),
+                "requires an HTTPS gateway",
             ),
         ] {
             let error = parse_local_daemon(&yaml).expect_err(&yaml);

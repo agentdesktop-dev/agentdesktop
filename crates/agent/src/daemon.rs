@@ -1110,6 +1110,19 @@ fn validate_one_shot(config: &agentdesktop_core::config::DaemonConfig) -> anyhow
             "--once cannot manage the VS Code chatLanguageModels.json and settings.json files because their local proxy requires the daemon to remain running"
         );
     }
+    if config
+        .programs
+        .claude_desktop
+        .as_ref()
+        .is_some_and(|desktop| {
+            desktop.gateway_mode == agentdesktop_core::config::ClaudeDesktopGatewayMode::Intercept
+                && desktop.use_llm_gateway
+        })
+    {
+        bail!(
+            "--once cannot pin Claude Desktop to the intercept listener because the listener requires the daemon to remain running"
+        );
+    }
     let authenticated_gateway_is_used = config
         .llm_gateway
         .as_ref()
@@ -2065,6 +2078,33 @@ programs:
         let chosen = crate::reconcile::apply_program_choice(&config, &only_claude).0;
         validate_one_shot(&chosen).expect("an opted-out Copilot CLI is only cleaned up");
         assert!(validate_one_shot(&config).is_err());
+    }
+
+    #[test]
+    fn one_shot_rejects_claude_desktop_intercept_mode_unless_opted_out() {
+        let config = parse_daemon(
+            r#"
+programSelection: { allowUserChoice: true }
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  claudeCode: {}
+  claudeDesktop:
+    gatewayMode: intercept
+"#,
+        )
+        .unwrap();
+        assert!(
+            validate_one_shot(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("intercept listener")
+        );
+        let only_claude_code = agentdesktop_core::model::ProgramChoice::Selected {
+            programs: ["claude-code".to_owned()].into(),
+        };
+        let chosen = crate::reconcile::apply_program_choice(&config, &only_claude_code).0;
+        validate_one_shot(&chosen).expect("an opted-out Claude Desktop is only cleaned up");
     }
 
     #[test]

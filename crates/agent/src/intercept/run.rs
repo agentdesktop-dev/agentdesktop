@@ -6,7 +6,7 @@ use std::{
 };
 
 use agentdesktop_core::{
-    config::{ClaudeDesktopGatewayMode, DaemonConfig},
+    config::{ClaudeDesktopGatewayMode, DaemonConfig, is_loopback_url},
     model::InterceptInfo,
 };
 use anyhow::Context;
@@ -22,7 +22,8 @@ use crate::{api, tick::CurrentConfig};
 /// The credential policy client id the identity header is issued for: the same
 /// one Claude Desktop's credential helper uses in inference mode.
 const CLIENT_ID: &str = "claude-desktop";
-/// How long a request waits for a credential fetch before it fails.
+/// How long a request waits for a credential fetch before it fails. The fetch
+/// itself goes on, so a token refresh it started is still stored.
 const CREDENTIAL_FETCH_TIMEOUT: Duration = Duration::from_secs(20);
 /// A cached credential is not used within this margin of its expiry.
 const CREDENTIAL_EXPIRY_MARGIN: Duration = Duration::from_secs(30);
@@ -32,16 +33,32 @@ const CREDENTIAL_REUSE: Duration = Duration::from_secs(60);
 /// Wait before trying again when the listener could not start.
 const RETRY_AFTER: Duration = Duration::from_secs(10);
 
-/// What the listener needs from the applied configuration. A change restarts it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// What the listener needs from the applied configuration. A change to the
+/// gateway or to any `llmGateway` setting, such as its authentication,
+/// restarts it, which also drops its cached credential.
+#[derive(Clone, Debug)]
 pub(crate) struct Wanted {
     /// The gateway's scheme, host and port.
     gateway: Url,
+    /// The `llmGateway` settings, compared to detect a change.
+    settings: serde_json::Value,
+    /// The configuration the listener started with. Credentials are fetched
+    /// for it, so the identity always belongs to the gateway that requests go
+    /// to, even before the configuration is applied and saved.
+    config: Arc<DaemonConfig>,
 }
+
+impl PartialEq for Wanted {
+    fn eq(&self, other: &Self) -> bool {
+        self.gateway == other.gateway && self.settings == other.settings
+    }
+}
+
+impl Eq for Wanted {}
 
 /// The listener settings `config` asks for, or `None` when Claude Desktop is not
 /// in intercept mode.
-pub(crate) fn wanted(config: &DaemonConfig) -> Option<Wanted> {
+pub(crate) fn wanted(config: &Arc<DaemonConfig>) -> Option<Wanted> {
     let desktop = config.programs.claude_desktop.as_ref()?;
     if desktop.gateway_mode != ClaudeDesktopGatewayMode::Intercept || !desktop.use_llm_gateway {
         return None;
@@ -54,7 +71,11 @@ pub(crate) fn wanted(config: &DaemonConfig) -> Option<Wanted> {
     url.set_path("/");
     url.set_query(None);
     url.set_fragment(None);
-    Some(Wanted { gateway: url })
+    Some(Wanted {
+        gateway: url,
+        settings: serde_json::to_value(gateway).unwrap_or_default(),
+        config: config.clone(),
+    })
 }
 
 /// The intercept listener's state, for daemon-info.
@@ -229,7 +250,8 @@ async fn start(
         ca,
         Arc::new(DaemonCredentials {
             state: state.clone(),
-            cached: tokio::sync::Mutex::default(),
+            config: wanted.config.clone(),
+            cached: Arc::default(),
         }),
     )?;
     let listener = TcpListener::bind(listen)
@@ -239,7 +261,9 @@ async fn start(
 }
 
 /// The gateway connection for `url` (scheme, host and port only). HTTPS
-/// gateways are verified against the system's trusted roots.
+/// gateways are verified against the system's trusted roots. Plain HTTP is
+/// for a gateway on this device only: requests carry claude.ai cookies and
+/// tokens. Configuration validation refuses it too.
 fn gateway_target(url: &Url) -> anyhow::Result<GatewayTarget> {
     let host = url
         .host_str()
@@ -251,7 +275,8 @@ fn gateway_target(url: &Url) -> anyhow::Result<GatewayTarget> {
         .port_or_known_default()
         .context("the gateway URL has no port")?;
     match url.scheme() {
-        "http" => Ok(GatewayTarget::http(host, port)),
+        "http" if is_loopback_url(url) => Ok(GatewayTarget::http(host, port)),
+        "http" => anyhow::bail!("a gateway that is not on this device must use HTTPS"),
         "https" => {
             let mut roots = RootCertStore::empty();
             let native = rustls_native_certs::load_native_certs();
@@ -272,8 +297,10 @@ fn gateway_target(url: &Url) -> anyhow::Result<GatewayTarget> {
 /// authentication: the controller-issued JWT, or the OIDC access token.
 struct DaemonCredentials {
     state: api::AppState,
+    /// The configuration the listener started with.
+    config: Arc<DaemonConfig>,
     /// The last credential; the lock also makes concurrent misses share one fetch.
-    cached: tokio::sync::Mutex<Option<Cached>>,
+    cached: Arc<tokio::sync::Mutex<Option<Cached>>>,
 }
 
 struct Cached {
@@ -295,34 +322,45 @@ impl Cached {
 #[async_trait::async_trait]
 impl CredentialSource for DaemonCredentials {
     async fn credential(&self) -> Result<Option<String>, String> {
-        let mut cached = self.cached.lock().await;
-        if let Some(cached) = cached.as_ref()
-            && cached.usable()
-        {
-            return Ok(Some(cached.credential.clone()));
-        }
-        let effective = api::load_effective_config(&self.state.config, &self.state.state_dir)
-            .map_err(|error| format!("read the applied configuration: {error:#}"))?;
-        let gateway = effective
+        let gateway = self
+            .config
             .llm_gateway
             .as_ref()
             .ok_or_else(|| "no LLM gateway is configured".to_owned())?;
         if gateway.authentication.is_none() {
             return Ok(None);
         }
-        let fetched = tokio::time::timeout(
-            CREDENTIAL_FETCH_TIMEOUT,
-            api::gateway_credential(&self.state, &effective, CLIENT_ID, false),
-        )
-        .await
-        .map_err(|_| "the gateway credential fetch did not finish in time".to_owned())?
-        .map_err(|(status, message)| format!("{message} ({status})"))?;
-        *cached = Some(Cached {
-            credential: fetched.credential.clone(),
-            expires_at_unix_seconds: fetched.expires_at_unix_seconds,
-            fetched: Instant::now(),
-        });
-        Ok(Some(fetched.credential))
+        // The fetch runs on its own task so the wait below does not cancel it
+        // half-way: a token refresh must finish and be stored. The task holds
+        // the cache lock, so of concurrent misses one fetches and the others
+        // find its credential.
+        let fetch = {
+            let state = self.state.clone();
+            let config = self.config.clone();
+            let cached = self.cached.clone();
+            tokio::spawn(async move {
+                let mut cached = cached.lock().await;
+                if let Some(cached) = cached.as_ref()
+                    && cached.usable()
+                {
+                    return Ok(cached.credential.clone());
+                }
+                let fetched = api::gateway_credential(&state, &config, CLIENT_ID, false)
+                    .await
+                    .map_err(|(status, message)| format!("{message} ({status})"))?;
+                *cached = Some(Cached {
+                    credential: fetched.credential.clone(),
+                    expires_at_unix_seconds: fetched.expires_at_unix_seconds,
+                    fetched: Instant::now(),
+                });
+                Ok(fetched.credential)
+            })
+        };
+        tokio::time::timeout(CREDENTIAL_FETCH_TIMEOUT, fetch)
+            .await
+            .map_err(|_| "the gateway credential fetch did not finish in time".to_owned())?
+            .map_err(|error| format!("the gateway credential fetch failed: {error}"))?
+            .map(Some)
     }
 }
 
@@ -330,8 +368,8 @@ impl CredentialSource for DaemonCredentials {
 mod tests {
     use super::*;
 
-    fn config(yaml: &str) -> DaemonConfig {
-        agentdesktop_core::config::parse_daemon(yaml).unwrap()
+    fn config(yaml: &str) -> Arc<DaemonConfig> {
+        Arc::new(agentdesktop_core::config::parse_daemon(yaml).unwrap())
     }
 
     #[test]
@@ -360,6 +398,30 @@ mod tests {
     }
 
     #[test]
+    fn any_gateway_setting_change_restarts_the_listener() {
+        let base = "llmGateway:\n  url: https://gateway.example.com\n";
+        let mode = "programs:\n  claudeDesktop:\n    gatewayMode: intercept\n";
+        let oidc = |issuer: &str| {
+            format!(
+                "{base}  authentication:\n    type: oidc\n    issuer: {issuer}\n    clientId: agentdesktop\n{mode}"
+            )
+        };
+        let first = wanted(&config(&oidc("https://idp.example.com"))).unwrap();
+        let same = wanted(&config(&format!(
+            "{}  claudeCode: {{}}\n",
+            oidc("https://idp.example.com")
+        )))
+        .unwrap();
+        let other_issuer = wanted(&config(&oidc("https://other-idp.example.com"))).unwrap();
+        assert_eq!(
+            first, same,
+            "a change outside llmGateway keeps the listener"
+        );
+        assert_ne!(first, other_issuer);
+        assert_eq!(first.gateway, other_issuer.gateway);
+    }
+
+    #[test]
     fn gateway_targets_follow_the_url_scheme() {
         let plain = gateway_target(&"http://127.0.0.1:4001/".parse().unwrap()).unwrap();
         assert_eq!(
@@ -367,6 +429,8 @@ mod tests {
             "GatewayTarget { host: \"127.0.0.1\", port: 4001, tls: false }"
         );
         assert!(gateway_target(&"ftp://gateway.example.com/".parse().unwrap()).is_err());
+        assert!(gateway_target(&"http://localhost:4001/".parse().unwrap()).is_ok());
+        assert!(gateway_target(&"http://gateway.example.com/".parse().unwrap()).is_err());
     }
 
     #[test]
