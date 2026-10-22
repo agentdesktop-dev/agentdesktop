@@ -62,6 +62,8 @@ toml.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+# Signs the fake identity provider's tokens in the integration tests.
+aws-lc-rs.workspace = true
 futures-util = "0.3"
 # Hand-rolled RFC 6455 handshake for the vscode-copilot-capi WebSocket
 # tunnel tests (llm_proxy.rs): Sec-WebSocket-Accept is

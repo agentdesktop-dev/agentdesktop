@@ -5,23 +5,24 @@ use serde_json::{Value, json};
 use tokio::time::{sleep, timeout};
 use tracing::info;
 
-use crate::common::{Container, Gateway};
+use crate::common::{
+    Agentgateway, Container, Gateway, Issuer,
+    issuer::{AUDIENCE, CLIENT_ID},
+};
 
 const CONFIG: &str = "/tmp/agentdesktop.yaml";
 const SETTINGS: &str = "/etc/claude-desktop/managed-settings.json";
 const OWNER: &str = "/etc/claude-desktop/.managed-settings.json.owner";
 const SOCKET: &str = "/run/agentdesktop/agentdesktop.sock";
 const CA: &str = "/var/lib/agentdesktop/intercept-ca.pem";
+const DOCKERFILE: &str = "crates/agent/src/provider/claude_desktop/testdata/Dockerfile";
 
 /// Claude Desktop has no Linux release, so curl stands in for it: it uses the
 /// proxy that the daemon pins in the managed settings and trusts only the
 /// daemon's intercept CA.
 #[tokio::test]
 async fn intercept_lifecycle() -> anyhow::Result<()> {
-    Container::run(
-        "claude-desktop",
-        "crates/agent/src/provider/claude_desktop/testdata/Dockerfile",
-        async |container| {
+    Container::run("claude-desktop", DOCKERFILE, async |container| {
             let gateway = Gateway::start().await?;
             let gateway_address = gateway
                 .url
@@ -236,6 +237,214 @@ async fn intercept_lifecycle() -> anyhow::Result<()> {
         },
     )
     .await
+}
+
+/// The listener in front of a real agentgateway that requires the identity
+/// header. A fake OIDC provider signs the daemon in with device
+/// authorization, and the test origin stands in for Anthropic.
+#[tokio::test]
+async fn identity_through_agentgateway() -> anyhow::Result<()> {
+    Container::run("claude-desktop", DOCKERFILE, async |container| {
+        let origin = Gateway::start().await?;
+        let origin_address = origin
+            .url
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .to_owned();
+        let issuer = Issuer::start().await?;
+        let gateway_port = free_port()?;
+        let agentgateway = Agentgateway::start(
+            &agentgateway_config(gateway_port, free_port()?, &origin_address, &issuer.url)?,
+            gateway_port,
+        )
+        .await?;
+        let listen = format!("127.0.0.1:{}", free_port()?);
+        let proxy = format!("http://{listen}");
+        container
+            .write(
+                CONFIG,
+                &config(
+                    &listen,
+                    json!({
+                        "url": format!("http://127.0.0.1:{gateway_port}/"),
+                        "authentication": {
+                            "type": "oidc",
+                            "issuer": issuer.url,
+                            "clientId": CLIENT_ID,
+                            "allowInsecure": true,
+                            "deviceAuthorization": true,
+                        },
+                    }),
+                    true,
+                )?,
+            )
+            .await?;
+        container
+            .start_process("daemon", &["agentdesktop", "daemon", "--config", CONFIG])
+            .await?;
+        container.wait_ready(&["agentdesktop", "status"]).await?;
+        wait_bound(container).await?;
+
+        info!("Checking that requests fail until the user signs in");
+        let login = container.exec(&["agentdesktop", "login"]).await?;
+        ensure!(
+            login.starts_with("awaitingAuthentication"),
+            "unexpected login status: {login}"
+        );
+        let code = through_listener(
+            container,
+            &proxy,
+            &["-o", "/dev/null", "-w", "%{http_code}", "https://claude.ai/health"],
+        )
+        .await?;
+        ensure!(code == "502", "expected 502 before sign-in, got {code}");
+        let status = intercept_status(container).await?;
+        ensure!(
+            status["lastFailure"]
+                .as_str()
+                .is_some_and(|failure| failure.contains("sign-in required")),
+            "daemon-info does not show that sign-in is required: {status}"
+        );
+        ensure!(
+            origin.requests().is_empty(),
+            "a request reached the origin before sign-in"
+        );
+
+        info!("Approving the sign-in");
+        issuer.approve();
+        container
+            .wait_ready(&["sh", "-c", "agentdesktop login | grep -qx signedIn"])
+            .await?;
+
+        info!("Sending requests through the listener and agentgateway");
+        let body = through_listener(
+            container,
+            &proxy,
+            &[
+                "--fail",
+                "-H",
+                "Cookie: sessionKey=integration",
+                "-H",
+                "x-agentdesktop-identity: Bearer spoofed",
+                "https://claude.ai/health",
+            ],
+        )
+        .await?;
+        ensure!(
+            serde_json::from_str::<Value>(&body)?["ready"] == true,
+            "unexpected claude.ai response: {body}"
+        );
+        through_listener(
+            container,
+            &proxy,
+            &[
+                "--fail",
+                "--http1.1",
+                "-H",
+                "Authorization: Bearer client-token",
+                "https://api.anthropic.com/health",
+            ],
+        )
+        .await?;
+        ensure!(issuer.issued() >= 1, "the daemon never got a token");
+        let requests = origin.requests();
+        ensure!(
+            requests.iter().any(|r| {
+                r["path"] == "/health"
+                    && r["host"] == "claude.ai"
+                    && r["cookie"] == "sessionKey=integration"
+                    && r["identity"].is_null()
+            }),
+            "the origin did not get the claude.ai request with its cookie and without the identity header: {requests:?}"
+        );
+        ensure!(
+            requests.iter().any(|r| {
+                r["host"] == "api.anthropic.com"
+                    && r["authorization"] == "Bearer client-token"
+                    && r["identity"].is_null()
+            }),
+            "the origin did not get the api.anthropic.com request with its own Authorization: {requests:?}"
+        );
+
+        info!("Checking that agentgateway refuses requests without a valid identity");
+        let token = format!("Bearer {}", issuer.token());
+        for (identity, expected) in [(None, "401"), (Some("Bearer spoofed"), "401"), (Some(token.as_str()), "200")] {
+            let code = direct(container, gateway_port, identity).await?;
+            ensure!(
+                code == expected,
+                "agentgateway answered {code} instead of {expected} for identity {identity:?}\n{}",
+                agentgateway.logs().await
+            );
+        }
+
+        container.stop_process("daemon").await?;
+        agentgateway.stop().await
+    })
+    .await
+}
+
+fn agentgateway_config(
+    port: u16,
+    admin_port: u16,
+    origin: &str,
+    issuer: &str,
+) -> anyhow::Result<String> {
+    // The daemon sends `x-agentdesktop-identity: Bearer <token>`. jwtAuth
+    // removes the header after it validates the token.
+    let identity = json!({
+        "mode": "strict",
+        "location": { "header": { "name": "x-agentdesktop-identity", "prefix": "Bearer " } },
+        "issuer": issuer,
+        "audiences": [AUDIENCE],
+        "jwks": { "url": format!("{issuer}/keys") },
+    });
+    let route = |name: &str, host: &str| {
+        json!({
+            "name": name,
+            "gateways": "intercept",
+            "hostnames": [host],
+            "policies": { "jwtAuth": identity },
+            "backends": [{ "host": origin }],
+        })
+    };
+    Ok(serde_json::to_string_pretty(&json!({
+        "config": {
+            "adminAddr": format!("127.0.0.1:{admin_port}"),
+            "statsAddr": "off",
+            "readinessAddr": "off",
+        },
+        "gateways": {
+            "intercept": { "port": port, "bindAddress": "127.0.0.1", "protocol": "HTTP" },
+        },
+        "routes": [route("claude-ai", "claude.ai"), route("anthropic-api", "api.anthropic.com")],
+    }))?)
+}
+
+/// A request for claude.ai straight to agentgateway, bypassing the listener.
+async fn direct(
+    container: &Container,
+    gateway_port: u16,
+    identity: Option<&str>,
+) -> anyhow::Result<String> {
+    let url = format!("http://127.0.0.1:{gateway_port}/health");
+    let header = identity.map(|identity| format!("x-agentdesktop-identity: {identity}"));
+    let mut command = vec![
+        "curl",
+        "-sS",
+        "--max-time",
+        "10",
+        "-o",
+        "/dev/null",
+        "-w",
+        "%{http_code}",
+        "-H",
+        "Host: claude.ai",
+    ];
+    if let Some(header) = &header {
+        command.extend(["-H", header.as_str()]);
+    }
+    command.push(&url);
+    container.exec(&command).await
 }
 
 fn config(listen: &str, gateway: Value, intercept: bool) -> anyhow::Result<String> {
