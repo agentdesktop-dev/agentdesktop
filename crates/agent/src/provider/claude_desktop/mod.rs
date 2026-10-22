@@ -64,6 +64,7 @@ impl Provider for ClaudeDesktop {
             &self.credential_helper_path,
             &ctx.credential_helper,
             &ctx.socket,
+            ctx.intercept_proxy,
             configured,
             &plan,
         )?;

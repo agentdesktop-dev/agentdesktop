@@ -98,6 +98,10 @@ pub struct DaemonStartupConfig {
     /// Local loopback LLM proxy.
     #[serde(default)]
     pub llm_proxy: LlmProxyStartupConfig,
+    /// Local intercept listener for Claude Desktop in first-party mode
+    /// (`programs.claudeDesktop.gatewayMode: intercept`). System mode only.
+    #[serde(default)]
+    pub intercept: InterceptStartupConfig,
     /// Usage collection without a controller, from a gateway on this machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<UsageStartupConfig>,
@@ -125,6 +129,24 @@ pub struct LlmProxyStartupConfig {
     /// Credential policy client ID used by the proxy. Defaults to `vscode`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+}
+
+/// Intercept listener settings. The listener runs in the system daemon while the
+/// applied configuration sets `programs.claudeDesktop.gatewayMode: intercept`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InterceptStartupConfig {
+    /// Loopback address of the listener, which is also the proxy written into
+    /// Claude Desktop's `egressProxyUrl`. Defaults to `127.0.0.1:18471`.
+    /// Rejected in user mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen: Option<SocketAddr>,
+}
+
+/// The intercept listener address when `daemon.intercept.listen` is unset.
+pub fn default_intercept_listen() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], 18471))
 }
 
 /// Token and cost collection for a daemon without a controller. agentgateway
@@ -269,6 +291,22 @@ pub struct LlmGatewayConfig {
     #[serde(rename = "proxyUrl", default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
     pub proxy_url: Option<Url>,
+    /// Where the intercept listener sends Claude Desktop's first-party traffic
+    /// (`programs.claudeDesktop.gatewayMode: intercept`), when it differs from
+    /// `url`.
+    ///
+    /// Only the scheme, host and port are used: each request keeps its own
+    /// path and its original host (`claude.ai`, `api.anthropic.com`), and the
+    /// gateway routes it by host. Without this setting the listener uses the
+    /// scheme, host and port of `url`. The URL cannot include a path,
+    /// credentials, a query, or a fragment.
+    #[serde(
+        rename = "interceptUrl",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
+    pub intercept_url: Option<Url>,
     /// GitHub App OAuth used by the local proxy for the x-llm-token header.
     #[serde(
         rename = "githubOAuth",
@@ -748,12 +786,43 @@ pub struct ClaudeDesktopConfig {
     /// Whether this program uses the top-level LLM gateway.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub use_llm_gateway: bool,
+    /// How Claude Desktop uses the gateway. `inference` (the default) switches
+    /// it to third-party inference through the gateway. `intercept` keeps it
+    /// signed in to claude.ai and sends its Anthropic traffic through the
+    /// daemon's intercept listener, which forwards it to the gateway.
+    #[serde(default, skip_serializing_if = "ClaudeDesktopGatewayMode::is_default")]
+    pub gateway_mode: ClaudeDesktopGatewayMode,
     /// Upstream authentication used by this agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<ProgramAuthentication>,
     /// Arbitrary Claude Desktop managed-settings values, flattened into this object.
     #[serde(default, flatten)]
     pub settings: BTreeMap<String, serde_json::Value>,
+}
+
+/// How Claude Desktop uses the LLM gateway.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum ClaudeDesktopGatewayMode {
+    /// Third-party inference: Claude Desktop sends model requests to the
+    /// gateway with `inferenceProvider: gateway`. It does not sign in to
+    /// claude.ai, so claude.ai history, connectors and organization settings do
+    /// not apply.
+    #[default]
+    Inference,
+    /// First party: Claude Desktop stays signed in to claude.ai. The daemon
+    /// pins it to the local intercept listener with `egressProxyUrl`; the
+    /// listener decrypts claude.ai and api.anthropic.com with a local CA,
+    /// which must be trusted on the device, and forwards them to the gateway
+    /// with an `x-agentdesktop-identity` header. Every other host is tunnelled.
+    Intercept,
+}
+
+impl ClaudeDesktopGatewayMode {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// Settings reconciled into Codex's organization-managed configuration.
@@ -1295,6 +1364,14 @@ fn parse_local_daemon(contents: &str) -> anyhow::Result<DaemonConfig> {
             anyhow::bail!("daemon.usage.listen must be a loopback address");
         }
     }
+    if config
+        .daemon
+        .as_ref()
+        .and_then(|daemon| daemon.intercept.listen)
+        .is_some_and(|listen| !listen.ip().is_loopback())
+    {
+        anyhow::bail!("daemon.intercept.listen must be a loopback address");
+    }
     validate_daemon(
         config.llm_gateway.as_ref(),
         config.sandbox.as_ref(),
@@ -1366,6 +1443,28 @@ fn validate_daemon(
             }
             if proxy_url.query().is_some() || proxy_url.fragment().is_some() {
                 anyhow::bail!("LLM gateway proxyUrl cannot include a query or fragment");
+            }
+        }
+        if let Some(intercept_url) = &gateway.intercept_url {
+            if !matches!(intercept_url.scheme(), "http" | "https") {
+                anyhow::bail!(
+                    "LLM gateway interceptUrl must use HTTP or HTTPS, got {}",
+                    intercept_url.scheme()
+                );
+            }
+            if intercept_url.host().is_none() {
+                anyhow::bail!("LLM gateway interceptUrl must include a host");
+            }
+            if !intercept_url.username().is_empty() || intercept_url.password().is_some() {
+                anyhow::bail!("LLM gateway interceptUrl cannot include credentials");
+            }
+            if intercept_url.query().is_some() || intercept_url.fragment().is_some() {
+                anyhow::bail!("LLM gateway interceptUrl cannot include a query or fragment");
+            }
+            if intercept_url.path() != "/" {
+                anyhow::bail!(
+                    "LLM gateway interceptUrl cannot include a path: requests keep their own path"
+                );
             }
         }
         if let Some(github) = &gateway.github_oauth {
@@ -1451,6 +1550,31 @@ fn validate_daemon(
         }
     }
 
+    if let Some(desktop) = &programs.claude_desktop
+        && desktop.gateway_mode == ClaudeDesktopGatewayMode::Intercept
+    {
+        if !desktop.use_llm_gateway || llm_gateway.is_none() {
+            anyhow::bail!(
+                "programs.claudeDesktop.gatewayMode intercept requires an llmGateway and useLlmGateway"
+            );
+        }
+        if desktop.auth.is_some() {
+            anyhow::bail!(
+                "programs.claudeDesktop.auth cannot be combined with gatewayMode intercept: Claude Desktop keeps its own claude.ai sign-in"
+            );
+        }
+        // A pass-through inference or proxy key would switch Claude Desktop
+        // back to third-party mode, or steer it past the listener.
+        if let Some(key) = desktop
+            .settings
+            .keys()
+            .find(|key| key.starts_with("inference") || key.starts_with("egressProxy"))
+        {
+            anyhow::bail!(
+                "programs.claudeDesktop.{key} cannot be set with gatewayMode intercept: the daemon manages Claude Desktop's gateway and proxy settings"
+            );
+        }
+    }
     for (name, subscription, uses_gateway) in
         [
             (
@@ -1584,8 +1708,11 @@ fn is_true(value: &bool) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
+
     use super::{
-        DaemonConfig, LlmGatewayAuthentication, load_controller, parse_controller, parse_daemon,
+        ClaudeDesktopGatewayMode, DaemonConfig, LlmGatewayAuthentication, default_intercept_listen,
+        load_controller, parse_controller, parse_daemon, parse_local_daemon,
     };
 
     #[test]
@@ -2069,6 +2196,67 @@ llmGateway:
         .expect_err("invalid gateway should fail");
 
         assert!(error.to_string().contains("must use HTTP or HTTPS"));
+    }
+
+    #[test]
+    fn accepts_claude_desktop_intercept_mode() {
+        let config = parse_local_daemon(
+            "daemon:\n  intercept:\n    listen: 127.0.0.1:18500\nllmGateway:\n  url: https://gateway.example.com/anthropic\n  interceptUrl: https://gateway.example.com:8443\nprograms:\n  claudeDesktop:\n    gatewayMode: intercept\n    isLocalDevMcpEnabled: true\n",
+        )
+        .unwrap();
+        let desktop = config.programs.claude_desktop.as_ref().unwrap();
+        assert_eq!(desktop.gateway_mode, ClaudeDesktopGatewayMode::Intercept);
+        assert!(!desktop.settings.contains_key("gatewayMode"));
+        assert_eq!(
+            config.daemon.unwrap().intercept.listen,
+            Some("127.0.0.1:18500".parse().unwrap())
+        );
+        assert_eq!(
+            default_intercept_listen(),
+            "127.0.0.1:18471".parse::<SocketAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn rejects_claude_desktop_intercept_mode_that_would_be_undone_or_cannot_work() {
+        let gateway = "llmGateway:\n  url: https://gateway.example.com\n";
+        for (yaml, message) in [
+            (
+                "programs:\n  claudeDesktop:\n    gatewayMode: intercept\n".to_owned(),
+                "requires an llmGateway",
+            ),
+            (
+                format!("{gateway}programs:\n  claudeDesktop:\n    gatewayMode: intercept\n    useLlmGateway: false\n"),
+                "requires an llmGateway",
+            ),
+            (
+                format!("{gateway}programs:\n  claudeDesktop:\n    gatewayMode: intercept\n    inferenceProvider: gateway\n"),
+                "programs.claudeDesktop.inferenceProvider cannot be set with gatewayMode intercept",
+            ),
+            (
+                format!("{gateway}programs:\n  claudeDesktop:\n    gatewayMode: intercept\n    egressProxyPacUrl: http://pac.example.com/p.pac\n"),
+                "programs.claudeDesktop.egressProxyPacUrl cannot be set",
+            ),
+            (
+                format!("{gateway}programs:\n  claudeDesktop:\n    gatewayMode: intercept\n    auth: subscription\n"),
+                "auth cannot be combined with gatewayMode intercept",
+            ),
+            (
+                "llmGateway:\n  url: https://gateway.example.com\n  interceptUrl: https://gateway.example.com/anthropic\n".to_owned(),
+                "interceptUrl cannot include a path",
+            ),
+            (
+                "llmGateway:\n  url: https://gateway.example.com\n  interceptUrl: ftp://gateway.example.com\n".to_owned(),
+                "interceptUrl must use HTTP or HTTPS",
+            ),
+            (
+                "daemon:\n  intercept:\n    listen: 0.0.0.0:18471\n".to_owned(),
+                "daemon.intercept.listen must be a loopback address",
+            ),
+        ] {
+            let error = parse_local_daemon(&yaml).expect_err(&yaml);
+            assert!(error.to_string().contains(message), "{yaml}: {error}");
+        }
     }
 
     #[test]

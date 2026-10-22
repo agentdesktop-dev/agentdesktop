@@ -37,12 +37,21 @@ use tokio::net::TcpStream;
 mod ca;
 mod forward;
 mod listener;
+mod run;
+mod store;
 #[cfg(test)]
 mod walkthrough;
 
 pub use ca::InterceptCa;
 pub use forward::{CredentialSource, GatewayTarget, IDENTITY_HEADER};
 pub use listener::{InterceptConfig, Interceptor, serve};
+pub use run::Status;
+pub(crate) use run::supervise;
+pub use store::{certificate_path, fingerprint};
+
+/// The hosts the daemon decrypts and forwards to the gateway. Every other host
+/// is tunnelled.
+pub const INTERCEPTED_HOSTS: [&str; 2] = ["claude.ai", "api.anthropic.com"];
 
 /// How long one connection attempt to a resolved address may take.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);

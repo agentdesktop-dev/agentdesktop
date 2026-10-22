@@ -11,7 +11,7 @@ use rcgen::{
     NameConstraints,
 };
 use rustls::{
-    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, pem::PemObject},
     sign::CertifiedKey,
 };
 use time::OffsetDateTime;
@@ -40,6 +40,8 @@ pub struct InterceptCa {
     issuer: Issuer<'static, KeyPair>,
     certificate_der: CertificateDer<'static>,
     certificate_pem: String,
+    /// The CA private key, for the daemon's secret store. Never logged.
+    key_pem: String,
     hosts: Vec<String>,
     leaves: Mutex<HashMap<String, Leaf>>,
 }
@@ -92,10 +94,43 @@ impl InterceptCa {
         Ok(Self {
             certificate_der: certificate.der().clone(),
             certificate_pem: certificate.pem(),
+            key_pem: key.serialize_pem(),
             issuer: Issuer::new(params, key),
             hosts: hosts.to_vec(),
             leaves: Mutex::default(),
         })
+    }
+
+    /// Load a CA that [`InterceptCa::generate`] made for `hosts` earlier. The
+    /// caller keeps the host list with the certificate: a CA is only reused
+    /// for the hosts its constraints were written for.
+    pub fn from_pem(
+        certificate_pem: &str,
+        key_pem: &str,
+        hosts: &[String],
+    ) -> anyhow::Result<Self> {
+        let key = KeyPair::from_pem(key_pem).context("parse the intercept CA key")?;
+        let certificate_der = CertificateDer::from_pem_slice(certificate_pem.as_bytes())
+            .context("parse the intercept CA certificate")?;
+        let issuer = Issuer::from_ca_cert_der(&certificate_der, key)
+            .context("load the intercept CA certificate")?;
+        Ok(Self {
+            issuer,
+            certificate_der,
+            certificate_pem: certificate_pem.to_owned(),
+            key_pem: key_pem.to_owned(),
+            hosts: hosts.to_vec(),
+            leaves: Mutex::default(),
+        })
+    }
+
+    pub(super) fn key_pem(&self) -> &str {
+        &self.key_pem
+    }
+
+    /// The hosts this CA may issue for.
+    pub fn hosts(&self) -> &[String] {
+        &self.hosts
     }
 
     /// The CA certificate, for a trust store or an MDM profile.
@@ -185,6 +220,17 @@ mod tests {
         assert_eq!(&first.cert[1], ca.certificate_der());
         assert!(ca.leaf("example.com").is_err());
         assert!(ca.leaf("claude.ai.example.com").is_err());
+    }
+
+    #[test]
+    fn a_stored_ca_loads_and_still_mints() {
+        let generated = InterceptCa::generate("test intercept CA", &hosts()).unwrap();
+        let loaded =
+            InterceptCa::from_pem(generated.certificate_pem(), generated.key_pem(), &hosts())
+                .unwrap();
+        assert_eq!(loaded.certificate_der(), generated.certificate_der());
+        let leaf = loaded.leaf("api.anthropic.com").unwrap();
+        assert_eq!(&leaf.cert[1], generated.certificate_der());
     }
 
     #[test]

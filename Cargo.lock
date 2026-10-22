@@ -75,6 +75,7 @@ dependencies = [
  "rcgen",
  "reqwest",
  "rustls",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "serde_yaml",

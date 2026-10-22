@@ -33,6 +33,7 @@ clap.workspace = true
 hostname.workspace = true
 hyper = { workspace = true, features = ["http2"] }
 hyper-rustls.workspace = true
+rustls-native-certs.workspace = true
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "server-auto"] }
 http-body-util.workspace = true
 json5.workspace = true

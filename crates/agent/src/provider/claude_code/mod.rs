@@ -139,6 +139,7 @@ mod tests {
         let provider = ClaudeCode::default();
         let context = ReconcileContext {
             llm_proxy: None,
+            intercept_proxy: None,
             merge_user_settings: false,
             credential_helper: PathBuf::from(r"C:\Program Files\Agent Desktop\agentdesktop.exe"),
             socket: PathBuf::from(r"\\.\pipe\agentdesktop"),
