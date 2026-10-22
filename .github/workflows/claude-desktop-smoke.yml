@@ -258,6 +258,9 @@ jobs:
           cp -R "$HOME/Library/Logs/Claude" "$OUT/claude-logs" 2>/dev/null || true
           sudo pkill -f agentdesktop-headless || true
           pkill -f "$SMOKE/agentgateway" || true
+          # The system daemon logs to its state directory, not to stdout.
+          sudo cp -R "$STATE_DIR/logs" "$OUT/daemon-logs" || true
+          sudo chown -R "$(id -u)" "$OUT/daemon-logs" || true
 
       - name: Upload logs
         if: always()
