@@ -31,9 +31,9 @@ base64.workspace = true
 bytes.workspace = true
 clap.workspace = true
 hostname.workspace = true
-hyper.workspace = true
+hyper = { workspace = true, features = ["http2"] }
 hyper-rustls.workspace = true
-hyper-util = { workspace = true, features = ["client-legacy", "http1"] }
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "server-auto"] }
 http-body-util.workspace = true
 json5.workspace = true
 jsonc-parser.workspace = true
@@ -50,9 +50,12 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 sha2.workspace = true
 similar.workspace = true
+time.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true
+tower-service.workspace = true
 tracing.workspace = true
 toml.workspace = true
 url.workspace = true
