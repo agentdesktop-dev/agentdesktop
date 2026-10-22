@@ -11,6 +11,8 @@
 name: Claude Desktop smoke
 
 on:
+  push:
+    branches: [ci/claude-desktop-smoke]
   workflow_dispatch:
   schedule:
     - cron: "23 7 * * 1"
