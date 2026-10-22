@@ -42,6 +42,10 @@
         }
       ]
     },
+    "programSelection": {
+      "description": "Whether the device user may choose which configured programs are managed.\n\nA daemon that predates this setting rejects a configuration that\ncontains it, so upgrade devices before setting it in\ncontroller-delivered policy.",
+      "$ref": "#/$defs/ProgramSelectionConfig"
+    },
     "programs": {
       "description": "Per-program settings reconciled on this device.",
       "$ref": "#/$defs/ProgramsConfig"
@@ -653,6 +657,17 @@
           "const": "subscription"
         }
       ]
+    },
+    "ProgramSelectionConfig": {
+      "description": "Whether the device user may choose which configured programs are managed.",
+      "type": "object",
+      "properties": {
+        "allowUserChoice": {
+          "description": "Let the device user opt out of all configured programs, or choose the\nones to manage, with `agentdesktop programs set`.\nAgentdesktop removes the settings it wrote for a program the user opts\nout of, and reports the program as opted out.\n\nDefaults to `false`: every configured program is managed and a choice\nstored on the device is ignored until this is enabled again.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
     },
     "ProgramsConfig": {
       "description": "Settings for developer tools managed by Agentdesktop.\n\nA policy can mix user-only and system-only programs. Each daemon skips\nprograms its mode cannot manage, reporting them as inactive with a reason.\nSkipped programs' files are left untouched, including during cleanup.",

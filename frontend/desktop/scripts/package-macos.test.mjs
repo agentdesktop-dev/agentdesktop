@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  cpSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -62,6 +64,123 @@ test("package installs the app at a fixed location", () => {
   assert.ok(
     component.includes("<string>Applications/agentdesktop.app</string>"),
   );
+});
+
+test("signs the branded product installer rather than the intermediate component", () => {
+  const script = readFileSync(
+    path.join(import.meta.dirname, "package-macos.mjs"),
+    "utf8",
+  );
+
+  assert.match(script, /run\("\/usr\/bin\/pkgbuild", packageArguments\)/);
+  assert.match(script, /productArguments\.push\(\s*"--sign",/);
+  assert.match(script, /productArguments\.push\("--keychain",/);
+  assert.match(script, /productArguments\.push\(packagePath\)/);
+  assert.match(script, /run\("\/usr\/bin\/productbuild", productArguments\)/);
+  assert.doesNotMatch(script, /packageArguments\.push\(\s*"--sign"/);
+});
+
+test("builds a branded installer with the original component identity and scripts", {
+  skip: process.platform !== "darwin",
+}, (t) => {
+  const directory = mkdtempSync(path.join(tmpdir(), "agentdesktop product-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const payload = path.join(directory, "payload");
+  mkdirSync(payload);
+  writeFileSync(path.join(payload, "fixture.txt"), "installer fixture\n");
+
+  function run(command, arguments_) {
+    const result = spawnSync(command, arguments_, { encoding: "utf8" });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+  }
+
+  run("/usr/bin/pkgbuild", [
+    "--root",
+    payload,
+    "--scripts",
+    path.join(macosDirectory, "scripts"),
+    "--identifier",
+    "dev.agentdesktop.installer",
+    "--version",
+    "9.8.7",
+    "--install-location",
+    "/",
+    path.join(directory, "agentdesktop-component.pkg"),
+  ]);
+  const product = path.join(directory, "agentdesktop.pkg");
+  const resources = path.join(directory, "resources");
+  cpSync(path.join(macosDirectory, "resources"), resources, {
+    recursive: true,
+  });
+  const logo = path.join(nativeDirectory, "icons", "128x128.png");
+  const welcomePath = path.join(resources, "welcome.html");
+  writeFileSync(
+    welcomePath,
+    readFileSync(welcomePath, "utf8").replace(
+      "{{AGENTDESKTOP_LOGO}}",
+      readFileSync(logo).toString("base64"),
+    ),
+  );
+  run("/usr/bin/productbuild", [
+    "--distribution",
+    path.join(macosDirectory, "distribution.xml"),
+    "--resources",
+    resources,
+    "--package-path",
+    directory,
+    product,
+  ]);
+  const expanded = path.join(directory, "expanded");
+  run("/usr/sbin/pkgutil", ["--expand-full", product, expanded]);
+
+  const distribution = readFileSync(
+    path.join(expanded, "Distribution"),
+    "utf8",
+  );
+  assert.match(distribution, /<title>agentdesktop<\/title>/);
+  assert.match(distribution, /<welcome file="welcome.html"\s*\/>/);
+  const welcome = readFileSync(
+    path.join(expanded, "Resources", "welcome.html"),
+    "utf8",
+  );
+  const embeddedLogo = welcome.match(/src="data:image\/png;base64,([^"]+)"/);
+  assert.ok(embeddedLogo);
+  assert.doesNotMatch(welcome, /\{\{AGENTDESKTOP_LOGO\}\}/);
+  assert.match(welcome, /agentdesktop by Solo\.io/);
+  assert.deepEqual(Buffer.from(embeddedLogo[1], "base64"), readFileSync(logo));
+  assert.match(welcome, /Administrator permission is required/);
+  assert.match(welcome, /not added to your shell's PATH/);
+  assert.match(welcome, /starts automatically at boot/);
+  assert.doesNotMatch(distribution, /<readme\b/i);
+  assert.equal(
+    existsSync(path.join(expanded, "Resources", "readme.html")),
+    false,
+  );
+  assert.doesNotMatch(distribution, /<conclusion\b/i);
+  assert.equal(
+    existsSync(path.join(expanded, "Resources", "conclusion.html")),
+    false,
+  );
+  assert.ok(welcome.includes('href="https://agentdesktop.dev"'));
+  assert.doesNotMatch(welcome, /Agentdesktop/);
+  assert.doesNotMatch(welcome, /read\s*me|next steps/i);
+
+  const component = path.join(expanded, "agentdesktop-component.pkg");
+  const info = readFileSync(path.join(component, "PackageInfo"), "utf8");
+  assert.match(info, /identifier="dev.agentdesktop.installer"/);
+  assert.match(info, /version="9.8.7"/);
+  assert.match(info, /install-location="\/"/);
+  assert.equal(
+    readFileSync(path.join(component, "Payload", "fixture.txt"), "utf8"),
+    "installer fixture\n",
+  );
+  for (const script of ["preinstall", "postinstall"]) {
+    assert.equal(
+      readFileSync(path.join(component, "Scripts", script), "utf8"),
+      readFileSync(path.join(macosDirectory, "scripts", script), "utf8"),
+    );
+  }
 });
 
 test("LaunchDaemon runs the bundled binary with system paths", () => {

@@ -24,8 +24,9 @@ pub(crate) struct CurrentConfig {
     pub(crate) config: Arc<DaemonConfig>,
 }
 
-/// One tick's outcome, forwarded to the connection loop for reporting. A
-/// tick never persists anything or changes the current configuration.
+/// One tick's outcome, or the outcome of a re-apply after the device user
+/// changed their program choice, forwarded to the connection loop for
+/// reporting. Neither persists anything or changes the current configuration.
 #[derive(Clone)]
 pub(crate) struct TickStatus {
     /// The revision of the configuration this tick applied, read with it
@@ -77,13 +78,33 @@ pub(crate) async fn run_tick_with<F>(
             continue;
         };
         if let Some(statuses) = &statuses {
-            statuses.send_replace(Some(TickStatus {
-                revision,
-                report,
-                error: result.err().map(|error| format!("{error:#}")),
-            }));
+            publish(
+                statuses,
+                TickStatus {
+                    revision,
+                    report,
+                    error: result.err().map(|error| format!("{error:#}")),
+                },
+            );
         }
     }
+}
+
+/// Publishes `status` to the connection loop unless the channel already holds
+/// the outcome of a later apply. A tick and a program choice change publish
+/// after releasing the apply lock, so they can publish out of apply order;
+/// both carry the same revision, which cannot tell them apart.
+pub(crate) fn publish(statuses: &watch::Sender<Option<TickStatus>>, status: TickStatus) {
+    statuses.send_if_modified(|current| {
+        if current
+            .as_ref()
+            .is_some_and(|current| current.report.sequence > status.report.sequence)
+        {
+            return false;
+        }
+        *current = Some(status);
+        true
+    });
 }
 
 /// [`run_tick_with`] applying through a real [`Reconciler`].
@@ -97,12 +118,7 @@ pub(crate) async fn run_tick(
     run_tick_with(current, interval, statuses, move |_| {
         // Read again under the apply lock: a push that took the lock first
         // may have replaced the configuration this tick woke up with.
-        let (revision, previous, report, result) = reconciler.apply_read_under_lock(|| {
-            latest
-                .borrow()
-                .as_ref()
-                .map(|current| (current.revision, Arc::clone(&current.config)))
-        })?;
+        let (revision, previous, report, result) = apply_current(&reconciler, &latest)?;
         // Outcome lines and the failure warning only when something changed,
         // so a conflict that persists does not repeat every interval.
         if crate::reconcile::should_log(previous.as_ref(), &report) {
@@ -116,8 +132,63 @@ pub(crate) async fn run_tick(
     .await
 }
 
+/// Applies the current configuration, read under the apply lock, and returns
+/// its revision, the report of the apply before it (from any source), and
+/// this apply's outcome. `None` when there is no current configuration.
+#[allow(clippy::type_complexity)]
+pub(crate) fn apply_current(
+    reconciler: &Reconciler,
+    current: &watch::Receiver<Option<CurrentConfig>>,
+) -> Option<(
+    Option<u64>,
+    Option<ApplyReport>,
+    ApplyReport,
+    anyhow::Result<()>,
+)> {
+    reconciler.apply_read_under_lock(|| {
+        current
+            .borrow()
+            .as_ref()
+            .map(|current| (current.revision, Arc::clone(&current.config)))
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_earlier_apply_never_replaces_a_later_one() {
+        use super::{TickStatus, publish};
+        use crate::reconcile::ApplyReport;
+        let status = |sequence| TickStatus {
+            revision: Some(1),
+            report: ApplyReport {
+                programs: Vec::new(),
+                sequence,
+            },
+            error: None,
+        };
+        let (statuses, mut published) = tokio::sync::watch::channel(None);
+        publish(&statuses, status(2));
+        assert!(published.has_changed().unwrap());
+        published.borrow_and_update();
+
+        publish(&statuses, status(1));
+        assert!(
+            !published.has_changed().unwrap(),
+            "the stale outcome is dropped"
+        );
+        publish(&statuses, status(3));
+        assert_eq!(
+            published
+                .borrow_and_update()
+                .as_ref()
+                .unwrap()
+                .report
+                .sequence,
+            3
+        );
+    }
+
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},

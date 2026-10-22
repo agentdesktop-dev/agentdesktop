@@ -9,6 +9,7 @@ import {
   emptyUsageReport,
   failedDeviceDetail,
   oldAgentDeviceDetail,
+  optedOutDeviceDetail,
 } from "../stories/fixtures";
 import { DeviceView } from "./DeviceView";
 
@@ -74,6 +75,17 @@ export const ConfigurationFailed: Story = {
     await expect(
       canvas.getByText("not applied: vscode conflicted"),
     ).toBeVisible();
+  },
+};
+
+export const ProgramOptedOut: Story = {
+  args: { device: optedOutDeviceDetail },
+  play: async ({ canvas }) => {
+    await expect(canvas.getByText("Opted out")).toHaveAttribute(
+      "title",
+      "The device user opted out of this program",
+    );
+    await expect(canvas.getByText("Applied")).not.toHaveAttribute("title");
   },
 };
 

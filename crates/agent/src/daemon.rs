@@ -462,6 +462,14 @@ where
         socket.clone(),
     )
     .with_llm_proxy(proxy_context);
+    let choice = crate::program_choice::load(&args.state_dir);
+    if choice != agentdesktop_core::model::ProgramChoice::All {
+        tracing::info!(
+            ?choice,
+            "the device user chose the programs to manage; honored while the configuration sets programSelection.allowUserChoice"
+        );
+    }
+    reconciler.set_program_choice(choice);
     if args.once {
         if args.dry_run {
             validate_dry_run(&config)?;
@@ -469,7 +477,12 @@ where
                 .dry_run(&config)
                 .context("preview daemon configuration")?;
         } else {
-            validate_one_shot(&config, args.user)?;
+            // Programs the device user opted out of are only cleaned up, so
+            // they need nothing that `--once` cannot provide.
+            validate_one_shot(
+                &reconcile::apply_program_choice(&config, &reconciler.program_choice()).0,
+                args.user,
+            )?;
             let (report, applied) = reconciler.apply_with_report(&config);
             report.log();
             applied.context("apply daemon configuration")?;
@@ -490,13 +503,17 @@ where
         usage_receiver,
         ..describe_daemon(&config, &args.config, &args.state_dir, args.user, llm_proxy)
     };
-    start_gateway_authentication(
-        &config,
-        args.user,
-        args.state_dir.clone(),
-        args.oidc_callback_listen,
-        proxy_listener.is_some(),
-    );
+    // A program the device user opted out of does not ask for a sign-in, and
+    // with every gateway program opted out nothing does.
+    if reconciler.gateway_sign_in_wanted(&config) {
+        start_gateway_authentication(
+            &reconcile::apply_program_choice(&config, &reconciler.program_choice()).0,
+            args.user,
+            args.state_dir.clone(),
+            args.oidc_callback_listen,
+            proxy_listener.is_some(),
+        );
+    }
     let enrollment = EnrollmentState::new(config.controller.is_some());
     let controller_status = remote::ControllerConnectionState::new();
     let local_config = config.clone();
@@ -538,7 +555,7 @@ where
         // With a controller, the cached controller configuration is what is in effect
         // from here, and start_gateway_authentication above only saw the local file.
         // Without one the two are the same configuration and it already ran.
-        if config.controller.is_some() {
+        if config.controller.is_some() && reconciler.gateway_sign_in_wanted(initial_config) {
             gateway_oidc::start_device_login_if_configured(initial_config, &args.state_dir);
         }
     } else {
@@ -553,8 +570,16 @@ where
             revision: None,
             config: Arc::new(config),
         }));
+    // Re-apply outcomes, from the tick and from program choice changes, go to
+    // the controller.
     let (tick_status_sender, tick_status_receiver) = watch::channel(None);
-    let tick_enabled = args.reconcile_interval.is_some();
+    let reapply_statuses = config.controller.is_some().then_some(tick_status_sender);
+    let program_control = api::ProgramControl::new(
+        reconciler.clone(),
+        current_config.subscribe(),
+        reapply_statuses.clone(),
+        args.state_dir.clone(),
+    );
     if let Some(interval) = args.reconcile_interval {
         tracing::info!(
             interval_seconds = interval.as_secs_f64(),
@@ -564,7 +589,7 @@ where
             reconciler.clone(),
             current_config_receiver,
             interval,
-            config.controller.is_some().then_some(tick_status_sender),
+            reapply_statuses,
         ));
     }
     let discovery = reconciler.discover().await;
@@ -597,7 +622,7 @@ where
                 telemetry: telemetry_receiver,
                 logout: logout_receiver,
                 current: remote_current_config,
-                tick_statuses: tick_enabled.then_some(tick_status_receiver),
+                tick_statuses: Some(tick_status_receiver),
             },
         ));
     }
@@ -613,6 +638,7 @@ where
         telemetry,
         logout,
         usage: usage_store,
+        programs: Some(program_control),
     };
     let app = api::router(state.clone());
     // The proxy is optional at runtime too: if serving fails (for example the
@@ -1685,6 +1711,7 @@ programs:
             telemetry: None,
             logout: None,
             usage: None,
+            programs: None,
         });
 
         for (method, expected_status) in [("GET", "200 OK"), ("POST", "405 Method Not Allowed")] {
@@ -1823,6 +1850,7 @@ programs:
             telemetry: None,
             logout: None,
             usage: store,
+            programs: None,
         });
         let (mut client, server) = tokio::io::duplex(64 * 1024);
         let connection = tokio::spawn(serve_local_connection(server, app));
@@ -1908,6 +1936,7 @@ programs:
             telemetry: None,
             logout: None,
             usage: None,
+            programs: None,
         });
 
         for endpoint in ["/v1/health", "/v1/config", "/v1/daemon-info"] {
@@ -2158,6 +2187,29 @@ programs:
                 .to_string()
                 .contains("Copilot")
         );
+    }
+
+    #[test]
+    fn one_shot_accepts_a_copilot_program_the_user_opted_out_of() {
+        let config = parse_daemon(
+            r#"
+programSelection: { allowUserChoice: true }
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  claudeCode: {}
+  copilot:
+    models:
+      gpt-4.1: {}
+"#,
+        )
+        .unwrap();
+        let only_claude = agentdesktop_core::model::ProgramChoice::Selected {
+            programs: ["claude-code".to_owned()].into(),
+        };
+        let chosen = crate::reconcile::apply_program_choice(&config, &only_claude).0;
+        validate_one_shot(&chosen, true).expect("an opted-out Copilot CLI is only cleaned up");
+        assert!(validate_one_shot(&config, true).is_err());
     }
 
     #[test]

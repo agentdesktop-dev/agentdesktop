@@ -108,6 +108,23 @@ pub async fn post_json<T>(endpoint: &Path, path: &str, value: &T) -> anyhow::Res
 where
     T: Serialize,
 {
+    send_json(endpoint, path, value).await.map(drop)
+}
+
+/// Sends a POST with a JSON request body and decodes the JSON response.
+pub async fn post_json_decode<T, R>(endpoint: &Path, path: &str, value: &T) -> anyhow::Result<R>
+where
+    T: Serialize,
+    R: DeserializeOwned,
+{
+    let body = send_json(endpoint, path, value).await?;
+    serde_json::from_slice(&body).context("decode daemon response")
+}
+
+async fn send_json<T>(endpoint: &Path, path: &str, value: &T) -> anyhow::Result<Bytes>
+where
+    T: Serialize,
+{
     let stream = connect(endpoint).await?;
     let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
         .await
@@ -140,7 +157,7 @@ where
             String::from_utf8_lossy(&body)
         );
     }
-    Ok(())
+    Ok(body)
 }
 
 #[cfg(test)]

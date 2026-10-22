@@ -2,6 +2,7 @@ import type { ColorMode } from "@agentdesktop/ui";
 import {
   startTransition,
   useEffect,
+  useOptimistic,
   useRef,
   useState,
   useTransition,
@@ -13,8 +14,10 @@ import {
   getConnectorStatus,
   getDiscovery,
   getManagedDeviceStatus,
+  getProgramManagement,
   logoutManagedDevice,
   saveSettings,
+  setProgramChoice as sendProgramChoice,
   setupManagedDevice,
 } from "./backend";
 import type {
@@ -22,18 +25,21 @@ import type {
   ConnectorSnapshot,
   Discovery,
   ManagedDeviceSnapshot,
+  ProgramChoice,
+  ProgramManagement,
   Settings,
 } from "./types";
 
 export type View = "home" | "tools" | "usage" | "settings";
 export type Notice = { tone: "success" | "error"; message: string } | null;
 
-type StatusSource = "connector" | "managedDevice" | "discovery";
+type StatusSource = "connector" | "managedDevice" | "discovery" | "programs";
 type StatusErrors = Partial<Record<StatusSource, string>>;
 type StatusUpdate = {
   connector: PromiseSettledResult<ConnectorSnapshot>;
   managedDevice: PromiseSettledResult<ManagedDeviceSnapshot>;
   discovery: PromiseSettledResult<Discovery>;
+  programs: PromiseSettledResult<ProgramManagement>;
 };
 
 const loadingSettings: Settings = { openOnStartup: true, colorMode: "system" };
@@ -42,6 +48,7 @@ const statusSourceLabels: Record<StatusSource, string> = {
   connector: "local daemon status",
   managedDevice: "organization status",
   discovery: "tool inventory",
+  programs: "managed tools",
 };
 
 function errorMessage(error: unknown): string {
@@ -49,12 +56,14 @@ function errorMessage(error: unknown): string {
 }
 
 async function getStatusUpdate(): Promise<StatusUpdate> {
-  const [connector, managedDevice, discovery] = await Promise.allSettled([
-    getConnectorStatus(),
-    getManagedDeviceStatus(),
-    getDiscovery(),
-  ]);
-  return { connector, managedDevice, discovery };
+  const [connector, managedDevice, discovery, programs] =
+    await Promise.allSettled([
+      getConnectorStatus(),
+      getManagedDeviceStatus(),
+      getDiscovery(),
+      getProgramManagement(),
+    ]);
+  return { connector, managedDevice, discovery, programs };
 }
 
 function statusErrorMessage(errors: StatusErrors): string | null {
@@ -75,6 +84,16 @@ export function useDesktopModel() {
   const [managedDevice, setManagedDevice] =
     useState<ManagedDeviceSnapshot | null>(null);
   const [discovery, setDiscovery] = useState<Discovery | null>(null);
+  const [programManagement, setProgramManagement] =
+    useState<ProgramManagement | null>(null);
+  // Shows a choice being saved until the daemon answers.
+  const [shownProgramManagement, showProgramChoice] = useOptimistic(
+    programManagement,
+    (current, choice: ProgramChoice) => current && { ...current, choice },
+  );
+  // Advanced when a program choice change starts and when it is saved, so a
+  // status update read before or during the change cannot replace its result.
+  const programChanges = useRef(0);
   const [notice, setNotice] = useState<Notice>(null);
   const [statusErrors, setStatusErrors] = useState<StatusErrors>({});
   const [hasLoadedStatus, setHasLoadedStatus] = useState(false);
@@ -83,6 +102,7 @@ export function useDesktopModel() {
   const [isSaving, startSaving] = useTransition();
   const savingSettings = useRef(false);
   const [isLoggingOut, startLoggingOut] = useTransition();
+  const [isChangingPrograms, startChangingPrograms] = useTransition();
   const needsEnrollment = Boolean(
     managedDevice?.configured && managedDevice.enrollment !== "approved",
   );
@@ -97,7 +117,8 @@ export function useDesktopModel() {
     if (view === "usage" && hasLoadedStatus && !showUsage) setView("home");
   }, [view, hasLoadedStatus, showUsage]);
 
-  function applyStatusUpdate(update: StatusUpdate) {
+  /** `programChange` is `programChanges` from before `update` was read. */
+  function applyStatusUpdate(update: StatusUpdate, programChange: number) {
     const nextErrors: StatusErrors = {};
     startTransition(() => {
       if (update.connector.status === "fulfilled") {
@@ -114,6 +135,13 @@ export function useDesktopModel() {
         setDiscovery(update.discovery.value);
       } else {
         nextErrors.discovery = errorMessage(update.discovery.reason);
+      }
+      if (programChange === programChanges.current) {
+        if (update.programs.status === "fulfilled") {
+          setProgramManagement(update.programs.value);
+        } else {
+          nextErrors.programs = errorMessage(update.programs.reason);
+        }
       }
       setStatusErrors(nextErrors);
       setHasLoadedStatus(true);
@@ -221,8 +249,9 @@ export function useDesktopModel() {
     let active = true;
     let interval: number | undefined;
     const refreshStatus = async () => {
+      const programChange = programChanges.current;
       const update = await getStatusUpdate();
-      if (active) applyStatusUpdate(update);
+      if (active) applyStatusUpdate(update, programChange);
     };
     const stopPolling = () => {
       if (interval === undefined) return;
@@ -255,7 +284,8 @@ export function useDesktopModel() {
   function refresh() {
     setNotice(null);
     startRefreshing(async () => {
-      applyStatusUpdate(await getStatusUpdate());
+      const programChange = programChanges.current;
+      applyStatusUpdate(await getStatusUpdate(), programChange);
     });
   }
 
@@ -295,6 +325,24 @@ export function useDesktopModel() {
           tone: "success",
           message: "Signed out of the organization on this device",
         });
+      } catch (error: unknown) {
+        setNotice({ tone: "error", message: errorMessage(error) });
+      }
+    });
+  }
+
+  function setProgramChoice(choice: ProgramChoice) {
+    setNotice(null);
+    programChanges.current += 1;
+    startChangingPrograms(async () => {
+      showProgramChoice(choice);
+      try {
+        const nextProgramManagement = await sendProgramChoice(choice);
+        programChanges.current += 1;
+        startTransition(() => {
+          setProgramManagement(nextProgramManagement);
+        });
+        setNotice({ tone: "success", message: "Managed tools updated" });
       } catch (error: unknown) {
         setNotice({ tone: "error", message: errorMessage(error) });
       }
@@ -369,6 +417,7 @@ export function useDesktopModel() {
     discovery,
     enroll,
     hasLoadedStatus,
+    isChangingPrograms,
     isLoggingOut,
     isManaging,
     isRefreshing,
@@ -379,10 +428,12 @@ export function useDesktopModel() {
     needsEnrollment,
     notice,
     pageTitle,
+    programManagement: shownProgramManagement,
     refresh,
     refreshError: statusErrorMessage(statusErrors),
     setColorMode,
     setOpenOnStartup,
+    setProgramChoice,
     settings,
     showUsage,
     view,

@@ -169,6 +169,7 @@ fn program_state_name(state: i64) -> &'static str {
         Some(ProgramState::Conflict) => "conflict",
         Some(ProgramState::Inactive) => "inactive",
         Some(ProgramState::Blocked) => "blocked",
+        Some(ProgramState::OptedOut) => "opted_out",
         Some(ProgramState::Failed) => "failed",
         Some(ProgramState::Unspecified) | None => "unspecified",
     }
@@ -944,6 +945,31 @@ mod tests {
             vec!["claude-code"],
             "vscode was replaced away, not appended to"
         );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn an_opted_out_program_reads_back_by_name() {
+        let (database, path) = test_database("opted-out").await;
+
+        database
+            .update_config_status(
+                "device",
+                &config_status(
+                    vec![program_status("codex", ProgramState::OptedOut, "")],
+                    true,
+                ),
+            )
+            .await
+            .expect("store the report");
+        let device = database
+            .get_device("device")
+            .await
+            .expect("load device")
+            .expect("device exists");
+        assert_eq!(device.programs[0].state, "opted_out");
 
         drop(database);
         let _ = std::fs::remove_file(path);
