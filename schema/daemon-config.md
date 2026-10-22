@@ -65,6 +65,7 @@
 |`programs.claudeDesktop.auth`|enum|Upstream authentication used by this agent.<br>Possible values: `subscription`.|
 |`programs.claudeDesktop.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
 |`programs.codex`|object|Codex managed configuration.|
+|`programs.codex.auth`|enum|Connect a ChatGPT subscription through Agentdesktop's OAuth credential helper.<br>Possible values: `subscription`.|
 |`programs.codex.managedConfig`|object|Arbitrary values written to Codex's organization-managed TOML configuration.<br><br>Use Codex's native snake_case configuration keys. TOML has no null value,<br>so null values cannot be reconciled.|
 |`programs.codex.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
 |`programs.copilot`|object|GitHub Copilot CLI managed configuration.|

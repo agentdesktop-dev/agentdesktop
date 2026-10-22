@@ -54,6 +54,7 @@ impl Provider for Codex {
             &ctx.credential_helper,
             &ctx.socket,
             config.sandbox.as_ref(),
+            ctx.user_mode,
             configured,
             &plan,
         )?;
@@ -64,4 +65,25 @@ impl Provider for Codex {
 /// Returns the system-wide Codex managed configuration path.
 pub fn default_codex_managed_config_path() -> PathBuf {
     PathBuf::from("/etc/codex/managed_config.toml")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subscription_can_use_a_system_mode_credential_helper() {
+        let config = agentdesktop_core::config::parse_daemon(
+            "llmGateway:\n  url: https://gateway.example.com\n  proxyUrl: https://gateway.example.com/codex\n  authentication:\n    type: controllerJwt\n    audience: gateway\n    allowedClientIds: [codex]\nprograms:\n  codex:\n    auth: subscription\n",
+        )
+        .unwrap();
+        let context = ReconcileContext {
+            merge_user_settings: false,
+            user_mode: false,
+            credential_helper: PathBuf::from("agentdesktop"),
+            socket: PathBuf::from("socket"),
+            llm_proxy: None,
+        };
+        assert!(Codex::default().plan(&context, &config).is_ok());
+    }
 }
