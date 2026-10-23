@@ -207,7 +207,18 @@ jobs:
           APPLE_API_ISSUER: ${{ vars.APPLE_API_ISSUER }}
         run: |
           bash .github/scripts/notarize-macos.sh "release/${OUTPUT_NAME}"
-          xcrun stapler staple "release/${OUTPUT_NAME}"
+          # Ticket lookup via CloudKit fails transiently; retry stapling without resubmitting.
+          for attempt in 1 2 3 4 5; do
+            if xcrun stapler staple "release/${OUTPUT_NAME}"; then
+              break
+            fi
+            if (( attempt == 5 )); then
+              echo "Stapling failed after ${attempt} attempts" >&2
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
+          xcrun stapler validate "release/${OUTPUT_NAME}"
 
       - name: Checksum PKG
         shell: bash
