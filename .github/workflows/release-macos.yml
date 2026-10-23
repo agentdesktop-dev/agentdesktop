@@ -13,113 +13,7 @@ env:
   CI: true
 
 jobs:
-  build-macos-binaries:
-    runs-on: ${{ matrix.runner }}
-    environment: production-signing
-    permissions:
-      contents: read
-    env:
-      AGENTDESKTOP_VERSION: ${{ inputs.version }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            target: x86_64-apple-darwin
-            runner: macos-15-intel
-          - arch: arm64
-            target: aarch64-apple-darwin
-            runner: macos-26
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install Node
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version-file: frontend/.nvmrc
-
-      - name: Install Rust target
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
-        with:
-          toolchain: "1.98"
-          targets: ${{ matrix.target }}
-
-      - name: Build frontend
-        shell: bash
-        working-directory: frontend
-        run: |
-          npm install --global pnpm@11.25.0
-          pnpm install --frozen-lockfile
-          pnpm --filter @agentdesktop/desktop-web build
-
-      - name: Build binary
-        shell: bash
-        run: cargo build --locked --release --package agentdesktop --target "${{ matrix.target }}"
-
-      - name: Import macOS signing identity
-        shell: bash
-        env:
-          APPLE_APPLICATION_CERTIFICATE: ${{ secrets.APPLE_APPLICATION_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_INSTALLER_CERTIFICATE: ${{ secrets.APPLE_INSTALLER_CERTIFICATE }}
-          APPLE_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_PASSWORD }}
-        run: bash .github/scripts/import-macos-signing.sh
-
-      - name: Sign macOS binary
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-        run: |
-          binary="target/${TARGET}/release/agentdesktop"
-          codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
-            --identifier dev.agentdesktop.tray --options runtime --timestamp "$binary"
-          codesign --verify --strict --verbose=2 \
-            -R="anchor apple generic and identifier \"dev.agentdesktop.tray\" and certificate leaf = H\"${APPLE_SIGNING_IDENTITY}\"" "$binary"
-
-      - name: Notarize macOS binary
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_KEY_ID: ${{ vars.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER: ${{ vars.APPLE_API_ISSUER }}
-        run: |
-          # Bare binaries cannot be stapled; Gatekeeper looks up their ticket online.
-          archive="${RUNNER_TEMP}/agentdesktop-notarize.zip"
-          ditto -c -k "target/${TARGET}/release/agentdesktop" "$archive"
-          bash .github/scripts/notarize-macos.sh "$archive"
-
-      - name: Stage binary and checksum
-        shell: bash
-        env:
-          OUTPUT_NAME: agentdesktop-darwin-${{ matrix.arch }}
-        run: |
-          mkdir -p release
-          cp "target/${{ matrix.target }}/release/agentdesktop" "release/${OUTPUT_NAME}"
-          (cd release && shasum -a 256 "${OUTPUT_NAME}" > "${OUTPUT_NAME}.sha256")
-
-      - name: Remove macOS signing identity
-        if: always()
-        timeout-minutes: 2
-        shell: bash
-        run: |
-          # Delete exported files first, even if keychain deletion later fails.
-          rm -f "${RUNNER_TEMP}/agentdesktop-signing.p12" "${RUNNER_TEMP}/agentdesktop-notary.p8"
-          if [ -f "${RUNNER_TEMP}/agentdesktop-signing.keychain-db" ]; then
-            security delete-keychain "${RUNNER_TEMP}/agentdesktop-signing.keychain-db"
-          fi
-
-      - name: Upload binary
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: release-binary-darwin-${{ matrix.arch }}
-          path: release/agentdesktop-*
-          if-no-files-found: error
-
-  build-macos-installers:
+  build-macos:
     runs-on: ${{ matrix.runner }}
     environment: production-signing
     permissions:
@@ -185,6 +79,29 @@ jobs:
           codesign --verify --strict \
             -R="anchor apple generic and identifier \"dev.agentdesktop.tray\" and certificate leaf = H\"${APPLE_SIGNING_IDENTITY}\"" \
             "$app/Contents/MacOS/agentdesktop"
+
+      - name: Sign and notarize standalone binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          OUTPUT_NAME: agentdesktop-darwin-${{ matrix.arch }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ vars.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ vars.APPLE_API_ISSUER }}
+        run: |
+          mkdir -p release/binary
+          binary="release/binary/${OUTPUT_NAME}"
+          cp "target/${TARGET}/release/bundle/macos/agentdesktop.app/Contents/MacOS/agentdesktop" "$binary"
+          # The bundle signature seals Info.plist and resources, so the extracted copy needs its own.
+          codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
+            --identifier dev.agentdesktop.tray --options runtime --timestamp "$binary"
+          codesign --verify --strict --verbose=2 \
+            -R="anchor apple generic and identifier \"dev.agentdesktop.tray\" and certificate leaf = H\"${APPLE_SIGNING_IDENTITY}\"" "$binary"
+          # Bare binaries cannot be stapled; Gatekeeper looks up their ticket online.
+          archive="${RUNNER_TEMP}/agentdesktop-notarize.zip"
+          ditto -c -k "$binary" "$archive"
+          bash .github/scripts/notarize-macos.sh "$archive"
+          (cd release/binary && shasum -a 256 "${OUTPUT_NAME}" > "${OUTPUT_NAME}.sha256")
 
       - name: Stage PKG
         shell: bash
@@ -291,6 +208,13 @@ jobs:
           if [ -f "${RUNNER_TEMP}/agentdesktop-signing.keychain-db" ]; then
             security delete-keychain "${RUNNER_TEMP}/agentdesktop-signing.keychain-db"
           fi
+
+      - name: Upload binary
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-binary-darwin-${{ matrix.arch }}
+          path: release/binary/agentdesktop-darwin-*
+          if-no-files-found: error
 
       - name: Upload PKG
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
