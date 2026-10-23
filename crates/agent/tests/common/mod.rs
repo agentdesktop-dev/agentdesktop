@@ -2,11 +2,15 @@ use std::{io::IsTerminal, sync::Once};
 
 use tracing_subscriber::EnvFilter;
 
+pub use agentgateway::Agentgateway;
 pub use container::Container;
 pub use gateway::{Gateway, TOKEN};
+pub use issuer::Issuer;
 
+mod agentgateway;
 mod container;
 mod gateway;
+pub mod issuer;
 
 fn setup_logging() {
     static INIT: Once = Once::new();

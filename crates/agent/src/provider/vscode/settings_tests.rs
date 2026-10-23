@@ -59,6 +59,7 @@ fn gateway_with_proxy() -> LlmGatewayConfig {
         url: "https://gateway.example.com".parse().unwrap(),
         authentication: None,
         proxy_url: Some("https://gateway.example.com/copilot-proxy".parse().unwrap()),
+        intercept_url: None,
         github_oauth: None,
         when_proxy_unavailable: Default::default(),
     }
@@ -67,6 +68,7 @@ fn gateway_with_proxy() -> LlmGatewayConfig {
 fn gateway_without_proxy_url() -> LlmGatewayConfig {
     LlmGatewayConfig {
         proxy_url: None,
+        intercept_url: None,
         ..gateway_with_proxy()
     }
 }

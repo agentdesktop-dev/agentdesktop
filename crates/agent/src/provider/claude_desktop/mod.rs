@@ -79,6 +79,7 @@ impl Provider for ClaudeDesktop {
             ctx.merge_user_settings,
             &ctx.credential_helper,
             &ctx.socket,
+            ctx.intercept_proxy,
             configured,
             &plan,
         )?;

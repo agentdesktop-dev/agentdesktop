@@ -15,6 +15,10 @@ path = "src/bin/agentdesktop-headless.rs"
 name = "integration"
 path = "tests/integration.rs"
 
+[[test]]
+name = "intercept"
+path = "tests/intercept.rs"
+
 [[bin]]
 name = "agentdesktop-service"
 path = "src/bin/agentdesktop-service.rs"
@@ -31,9 +35,10 @@ base64.workspace = true
 bytes.workspace = true
 clap.workspace = true
 hostname.workspace = true
-hyper.workspace = true
+hyper = { workspace = true, features = ["http2"] }
 hyper-rustls.workspace = true
-hyper-util = { workspace = true, features = ["client-legacy", "http1"] }
+rustls-native-certs.workspace = true
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "server-auto"] }
 http-body-util.workspace = true
 json5.workspace = true
 jsonc-parser.workspace = true
@@ -50,15 +55,19 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 sha2.workspace = true
 similar.workspace = true
+time.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true
+tower-service.workspace = true
 tracing.workspace = true
 toml.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-# The Windows secret envelope (secret_store.rs) is tested on every platform.
+# The Windows secret envelope (secret_store.rs) is tested on every platform,
+# and the fake identity provider in the integration tests signs its tokens.
 aws-lc-rs.workspace = true
 futures-util = "0.3"
 # Hand-rolled RFC 6455 handshake for the vscode-copilot-capi WebSocket

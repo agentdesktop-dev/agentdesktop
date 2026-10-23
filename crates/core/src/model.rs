@@ -141,6 +141,10 @@ pub struct DaemonInfo {
     /// `daemon.usage` is configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_receiver: Option<UsageReceiverInfo>,
+    /// Intercept listener for Claude Desktop in first-party mode. Present on a
+    /// system daemon; absent in user mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intercept: Option<InterceptInfo>,
 }
 
 /// State of the daemon's receiver for gateway usage.
@@ -156,6 +160,43 @@ pub struct UsageReceiverInfo {
     /// Why the receiver is off, when `bound` is `false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// State of the daemon's intercept listener for Claude Desktop in first-party
+/// mode (`programs.claudeDesktop.gatewayMode: intercept`).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InterceptInfo {
+    /// The listener address, which Claude Desktop's `egressProxyUrl` names.
+    pub listen: String,
+    /// Whether the applied configuration asks for the listener.
+    pub enabled: bool,
+    /// Whether the listener is serving. While it is enabled and not bound,
+    /// Claude Desktop cannot connect; the daemon retries on its own.
+    pub bound: bool,
+    /// Why the listener is not serving, when it is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The intercept CA certificate, which must be a trusted root on the device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_certificate: Option<String>,
+    /// SHA-256 fingerprint of the intercept CA certificate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_sha256: Option<String>,
+    /// Requests the gateway answered since the listener started.
+    pub forwarded: u64,
+    /// Requests that failed because the gateway or its credential was not available.
+    pub gateway_failures: u64,
+    /// Connections to other hosts, tunnelled without decryption.
+    pub tunnels: u64,
+    /// Tunnels that could not reach their destination.
+    pub tunnel_failures: u64,
+    /// The last failure, with its cause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure: Option<String>,
+    /// When the last failure happened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure_unix_seconds: Option<u64>,
 }
 
 /// State of the daemon's loopback LLM proxy listener.

@@ -2,7 +2,9 @@ use super::ClaudeDesktop;
 
 use std::path::Path;
 
-use agentdesktop_core::config::{ClaudeDesktopConfig, LlmGatewayAuthentication, LlmGatewayConfig};
+use agentdesktop_core::config::{
+    ClaudeDesktopConfig, ClaudeDesktopGatewayMode, LlmGatewayAuthentication, LlmGatewayConfig,
+};
 use anyhow::Context;
 use serde_json::{Value, json};
 use tracing::debug;
@@ -41,6 +43,7 @@ pub(super) fn plan(
     merge_existing: bool,
     credential_binary: &Path,
     socket: &Path,
+    intercept_proxy: Option<std::net::SocketAddr>,
     config: Option<(&ClaudeDesktopConfig, Option<&LlmGatewayConfig>)>,
     plan: &ReconcilePlan,
 ) -> anyhow::Result<()> {
@@ -78,12 +81,16 @@ pub(super) fn plan(
         return remove_owned(helper_path, &helper_owner, "credential helper", plan);
     };
 
-    let uses_credential_helper = gateway.is_some_and(|gateway| {
-        gateway
-            .authentication
-            .as_ref()
-            .is_some_and(LlmGatewayAuthentication::uses_credential_helper)
-    });
+    // In intercept mode Claude Desktop keeps its own claude.ai sign-in, so it
+    // gets no gateway credential: the listener adds the identity instead.
+    let intercept = config.gateway_mode == ClaudeDesktopGatewayMode::Intercept;
+    let uses_credential_helper = !intercept
+        && gateway.is_some_and(|gateway| {
+            gateway
+                .authentication
+                .as_ref()
+                .is_some_and(LlmGatewayAuthentication::uses_credential_helper)
+        });
     if uses_credential_helper {
         let script = credential_helper_contents(credential_binary, socket)?;
         write_owned(
@@ -98,7 +105,7 @@ pub(super) fn plan(
         remove_owned(helper_path, &helper_owner, "credential helper", plan)?;
     }
 
-    let settings = managed_settings(config, gateway, helper_path)?;
+    let settings = managed_settings(config, gateway, helper_path, intercept_proxy)?;
     if merge_existing {
         anyhow::bail!(
             "Claude Desktop settings cannot be applied to its user preferences; use system-managed settings"
@@ -499,9 +506,23 @@ fn managed_settings(
     config: &ClaudeDesktopConfig,
     gateway: Option<&LlmGatewayConfig>,
     helper_path: &Path,
+    intercept_proxy: Option<std::net::SocketAddr>,
 ) -> anyhow::Result<Value> {
     let mut settings = serde_json::to_value(&config.settings)
         .context("serialize Claude Desktop pass-through settings")?;
+    if config.gateway_mode == ClaudeDesktopGatewayMode::Intercept {
+        // First party: no inference keys, so Claude Desktop stays signed in to
+        // claude.ai. The pinned proxy is the intercept listener; when it is not
+        // reachable, Claude Desktop fails instead of connecting directly.
+        let proxy = intercept_proxy.context(
+            "Claude Desktop gatewayMode intercept needs the system daemon's intercept listener",
+        )?;
+        deep_merge(
+            &mut settings,
+            json!({ "egressProxyUrl": format!("http://{proxy}") }),
+        );
+        return Ok(settings);
+    }
     let Some(gateway) = gateway else {
         return Ok(settings);
     };
@@ -695,11 +716,104 @@ programs:
         )
         .unwrap();
         let desktop = config.programs.claude_desktop.as_ref().unwrap();
-        let settings =
-            managed_settings(desktop, config.llm_gateway.as_ref(), Path::new("/helper")).unwrap();
+        let settings = managed_settings(
+            desktop,
+            config.llm_gateway.as_ref(),
+            Path::new("/helper"),
+            None,
+        )
+        .unwrap();
         assert_eq!(settings["isLocalDevMcpEnabled"], true);
         assert_eq!(settings["inferenceProvider"], "gateway");
         assert_eq!(settings["inferenceCredentialHelper"], "/helper");
+    }
+
+    const INTERCEPT_CONFIG: &str = r#"
+llmGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
+    allowedClientIds: [claude-desktop]
+programs:
+  claudeDesktop:
+    gatewayMode: intercept
+    isLocalDevMcpEnabled: true
+"#;
+
+    #[test]
+    fn intercept_mode_pins_the_listener_and_writes_no_inference_keys() {
+        let config = parse_daemon(INTERCEPT_CONFIG).unwrap();
+        let desktop = config.programs.claude_desktop.as_ref().unwrap();
+        let settings = managed_settings(
+            desktop,
+            config.llm_gateway.as_ref(),
+            Path::new("/helper"),
+            Some("127.0.0.1:18471".parse().unwrap()),
+        )
+        .unwrap();
+        assert_eq!(settings["egressProxyUrl"], "http://127.0.0.1:18471");
+        assert_eq!(settings["isLocalDevMcpEnabled"], true);
+        assert!(
+            settings
+                .as_object()
+                .unwrap()
+                .keys()
+                .all(|key| !key.starts_with("inference")),
+            "{settings}"
+        );
+        assert!(
+            managed_settings(
+                desktop,
+                config.llm_gateway.as_ref(),
+                Path::new("/helper"),
+                None
+            )
+            .is_err(),
+            "no listener address, no pin"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn switching_to_intercept_mode_removes_the_credential_helper() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("managed-settings.json");
+        let helper = dir.path().join("helper.sh");
+        let desktop = super::ClaudeDesktop {
+            managed_settings_path: settings_path.clone(),
+            credential_helper_path: helper.clone(),
+        };
+        let apply = |yaml: &str| {
+            let config = parse_daemon(yaml).unwrap();
+            let plan = crate::reconcile::ReconcilePlan::default();
+            super::plan(
+                &desktop,
+                false,
+                Path::new("agentdesktop"),
+                Path::new("agentdesktop.sock"),
+                Some("127.0.0.1:18471".parse().unwrap()),
+                Some((
+                    config.programs.claude_desktop.as_ref().unwrap(),
+                    config.llm_gateway.as_ref(),
+                )),
+                &plan,
+            )
+            .unwrap();
+            plan.apply().unwrap();
+        };
+        apply(&INTERCEPT_CONFIG.replace("    gatewayMode: intercept\n", ""));
+        assert!(helper.exists(), "inference mode writes the helper");
+        apply(INTERCEPT_CONFIG);
+        assert!(!helper.exists(), "intercept mode removes it");
+        let bytes = std::fs::read(&settings_path).unwrap();
+        // A property list on macOS, JSON elsewhere.
+        #[cfg(target_os = "macos")]
+        let written: serde_json::Value = plist::from_bytes(&bytes).unwrap();
+        #[cfg(not(target_os = "macos"))]
+        let written: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(written["egressProxyUrl"], "http://127.0.0.1:18471");
+        assert!(written.get("inferenceProvider").is_none());
     }
 
     #[cfg(target_os = "macos")]
@@ -719,8 +833,13 @@ programs:
         )
         .unwrap();
         let desktop = config.programs.claude_desktop.as_ref().unwrap();
-        let settings =
-            managed_settings(desktop, config.llm_gateway.as_ref(), Path::new("/helper")).unwrap();
+        let settings = managed_settings(
+            desktop,
+            config.llm_gateway.as_ref(),
+            Path::new("/helper"),
+            None,
+        )
+        .unwrap();
 
         let contents = serialize_managed_settings(&settings).expect("plist serializes");
         assert!(
@@ -772,6 +891,7 @@ programs:
                 false,
                 Path::new("agentdesktop"),
                 Path::new("agentdesktop.sock"),
+                None,
                 Some((config.programs.claude_desktop.as_ref().unwrap(), None)),
                 plan,
             )
@@ -800,6 +920,7 @@ programs:
                 false,
                 Path::new("agentdesktop"),
                 Path::new("agentdesktop.sock"),
+                None,
                 Some((config.programs.claude_desktop.as_ref().unwrap(), None)),
                 plan,
             )
@@ -830,8 +951,13 @@ programs:
         )
         .unwrap();
         let desktop = config.programs.claude_desktop.as_ref().unwrap();
-        let settings =
-            managed_settings(desktop, config.llm_gateway.as_ref(), Path::new("/helper")).unwrap();
+        let settings = managed_settings(
+            desktop,
+            config.llm_gateway.as_ref(),
+            Path::new("/helper"),
+            None,
+        )
+        .unwrap();
 
         let values = super::registry_values(&settings).unwrap();
         assert_eq!(values["inferenceProvider"], "gateway");
@@ -909,8 +1035,13 @@ programs:
         )
         .unwrap();
         let desktop = config.programs.claude_desktop.as_ref().unwrap();
-        let settings =
-            managed_settings(desktop, config.llm_gateway.as_ref(), Path::new("/helper")).unwrap();
+        let settings = managed_settings(
+            desktop,
+            config.llm_gateway.as_ref(),
+            Path::new("/helper"),
+            None,
+        )
+        .unwrap();
         let error = super::registry_values(&settings).unwrap_err().to_string();
         assert!(error.contains("differ only in case"), "{error}");
         assert!(error.contains("inferenceprovider"), "{error}");
