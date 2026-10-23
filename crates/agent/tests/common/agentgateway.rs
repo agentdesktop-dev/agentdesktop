@@ -3,12 +3,17 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt, runners::AsyncRunner};
 use tokio::time::timeout;
-use tracing::info;
+use tracing::{info, warn};
 
-const IMAGE: &str = "cr.agentgateway.dev/agentgateway";
-const TAG: &str = "v1.6.0";
+// The image that `examples/` pulls as cr.agentgateway.dev/agentgateway:v1.6.0,
+// from GitHub's registry and by digest: a CI pull through cr.agentgateway.dev
+// failed with HTTP 525.
+const IMAGE: &str = "ghcr.io/agentgateway/agentgateway";
+const TAG: &str = "v1.6.0@sha256:9d3e6044ddcdc0878b1787f77bd401252b95e22684203fb5e874c4c42d2ed90c";
 const CONFIG_PATH: &str = "/etc/agentgateway/config.yaml";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+/// A registry error fails one attempt, not the test.
+const START_ATTEMPTS: u64 = 3;
 
 /// A real agentgateway on the host network, listening on `127.0.0.1:port`.
 pub struct Agentgateway {
@@ -20,14 +25,27 @@ impl Agentgateway {
     /// connections.
     pub async fn start(config: &str, port: u16) -> anyhow::Result<Self> {
         let started = Instant::now();
-        let inner = GenericImage::new(IMAGE, TAG)
-            .with_cmd(["-f", CONFIG_PATH])
-            .with_network("host")
-            .with_copy_to(CONFIG_PATH, config.as_bytes().to_vec())
-            .with_startup_timeout(STARTUP_TIMEOUT)
-            .start()
-            .await
-            .context("start agentgateway (Docker is required)")?;
+        let mut attempt = 1;
+        let inner = loop {
+            let outcome = GenericImage::new(IMAGE, TAG)
+                .with_cmd(["-f", CONFIG_PATH])
+                .with_network("host")
+                .with_copy_to(CONFIG_PATH, config.as_bytes().to_vec())
+                .with_startup_timeout(STARTUP_TIMEOUT)
+                .start()
+                .await;
+            match outcome {
+                Ok(inner) => break inner,
+                Err(error) if attempt < START_ATTEMPTS => {
+                    warn!(%error, attempt, "agentgateway did not start; trying again");
+                    tokio::time::sleep(Duration::from_secs(2 * attempt)).await;
+                    attempt += 1;
+                }
+                Err(error) => {
+                    return Err(error).context("start agentgateway (Docker is required)");
+                }
+            }
+        };
         let gateway = Self { inner };
         let ready = timeout(STARTUP_TIMEOUT, async {
             while tokio::net::TcpStream::connect(("127.0.0.1", port))
