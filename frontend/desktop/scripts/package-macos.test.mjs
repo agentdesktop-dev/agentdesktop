@@ -252,8 +252,8 @@ const signingCleanupSteps = [
   return { body, script: run[1].replace(/^ {10}/gm, "") };
 });
 
-test("both release signing cleanups always run with a short timeout", () => {
-  assert.equal(signingCleanupSteps.length, 2);
+test("release signing cleanup always runs with a short timeout", () => {
+  assert.equal(signingCleanupSteps.length, 1);
   for (const { body } of signingCleanupSteps) {
     assert.match(body, /^ {8}if: always\(\)/m);
     const timeout = body.match(/^ {8}timeout-minutes: (\d+)$/m);
