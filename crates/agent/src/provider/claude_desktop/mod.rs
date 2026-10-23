@@ -5,6 +5,8 @@ use agentdesktop_core::model::Discovery;
 
 use super::{Provider, ReconcileContext};
 use crate::reconcile::ReconcilePlan;
+#[cfg(windows)]
+use crate::reconcile::registry::RegistryKey;
 
 pub(super) mod discovery;
 mod reconcile;
@@ -13,6 +15,11 @@ mod reconcile;
 pub struct ClaudeDesktop {
     pub managed_settings_path: PathBuf,
     pub credential_helper_path: PathBuf,
+    /// The policy registry key the managed settings are reconciled into.
+    /// Production uses [`claude_desktop_policy_key`]; tests inject a
+    /// disposable `HKCU` key so they never touch live machine policy.
+    #[cfg(windows)]
+    pub(crate) policy_key: RegistryKey,
 }
 
 impl Default for ClaudeDesktop {
@@ -20,8 +27,17 @@ impl Default for ClaudeDesktop {
         Self {
             managed_settings_path: default_claude_desktop_managed_settings_path(),
             credential_helper_path: default_claude_desktop_credential_helper_path(),
+            #[cfg(windows)]
+            policy_key: claude_desktop_policy_key(),
         }
     }
+}
+
+/// The live machine policy key Claude Desktop reads its managed settings
+/// from on Windows.
+#[cfg(windows)]
+pub(crate) fn claude_desktop_policy_key() -> RegistryKey {
+    RegistryKey::local_machine(reconcile::POLICY_KEY)
 }
 
 impl ClaudeDesktop {
@@ -59,9 +75,8 @@ impl Provider for ClaudeDesktop {
         });
         let plan = ReconcilePlan::default();
         reconcile::plan(
-            &self.managed_settings_path,
+            self,
             ctx.merge_user_settings,
-            &self.credential_helper_path,
             &ctx.credential_helper,
             &ctx.socket,
             ctx.intercept_proxy,
@@ -73,6 +88,11 @@ impl Provider for ClaudeDesktop {
 }
 
 /// Returns Claude Desktop's system-managed settings path.
+///
+/// On Windows Claude Desktop reads its managed configuration from the
+/// `HKLM\SOFTWARE\Policies\Claude` registry key, never from a file, so the
+/// reconciler targets that key and only removes what an earlier agentdesktop
+/// wrote at this path.
 #[cfg(not(target_os = "macos"))]
 pub fn default_claude_desktop_managed_settings_path() -> PathBuf {
     PathBuf::from("/etc/claude-desktop/managed-settings.json")

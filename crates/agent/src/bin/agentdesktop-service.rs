@@ -80,7 +80,7 @@ mod windows {
             ))
             .context("report Windows service running")?;
 
-        let stopping_status = status_handle.clone();
+        let stopping_status = status_handle;
         let shutdown = async move {
             if !*shutdown_receiver.borrow() {
                 shutdown_receiver

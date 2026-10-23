@@ -170,6 +170,7 @@ jobs:
         run: bash .github/scripts/import-macos-signing.sh
 
       - name: Build PKG
+        timeout-minutes: 60
         working-directory: frontend
         shell: bash
         run: pnpm --filter @agentdesktop/desktop-web dist:mac -- --target "${{ matrix.target }}"

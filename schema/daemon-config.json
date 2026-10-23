@@ -136,7 +136,7 @@
       "type": "object",
       "properties": {
         "config": {
-          "description": "Configuration file.",
+          "description": "Configuration file. On Windows the managed settings live in the\npolicy registry key instead, and this file is only removed when an\nearlier agentdesktop wrote it.",
           "type": [
             "string",
             "null"

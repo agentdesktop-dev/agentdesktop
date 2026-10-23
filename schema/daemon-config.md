@@ -11,7 +11,7 @@
 |`daemon.claudeCode`|object|Claude Code paths.|
 |`daemon.claudeCode.config`|string|Configuration file.|
 |`daemon.claudeDesktop`|object|Claude Desktop paths.|
-|`daemon.claudeDesktop.config`|string|Configuration file.|
+|`daemon.claudeDesktop.config`|string|Configuration file. On Windows the managed settings live in the<br>policy registry key instead, and this file is only removed when an<br>earlier agentdesktop wrote it.|
 |`daemon.claudeDesktop.credentialHelper`|string|Credential helper path.|
 |`daemon.codex`|object|Codex paths.|
 |`daemon.codex.config`|string|Configuration file.|

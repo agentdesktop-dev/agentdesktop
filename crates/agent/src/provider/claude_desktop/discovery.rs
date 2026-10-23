@@ -101,6 +101,12 @@ fn discover_mcp_servers(managed: &Path) -> Vec<McpServer> {
         })
         .unwrap_or_default();
 
+    // On Windows the reconciler manages settings as machine policy registry
+    // values — the only place Claude Desktop reads them — so the managed
+    // servers are inventoried from there too.
+    #[cfg(windows)]
+    servers.extend(registry_managed_mcp_servers());
+
     let mut paths = BTreeSet::new();
     for home in metadata::user_home_dirs() {
         paths.insert(home.join(".config/Claude/claude_desktop_config.json"));
@@ -116,6 +122,23 @@ fn discover_mcp_servers(managed: &Path) -> Vec<McpServer> {
             .flat_map(|path| claude_code::mcp_servers_from_json(&path)),
     );
     servers
+}
+
+/// The managed MCP servers under Claude Desktop's Windows policy key, where
+/// the reconciler writes `managedMcpServers` as a `REG_SZ` JSON string.
+#[cfg(windows)]
+fn registry_managed_mcp_servers() -> Vec<McpServer> {
+    let key = super::claude_desktop_policy_key();
+    crate::reconcile::registry::read_values(&key)
+        .ok()
+        .and_then(|values| values.get("managedMcpServers").cloned().flatten())
+        .map(|encoded| {
+            claude_code::managed_mcp_servers_from_value(
+                &Value::String(encoded),
+                &key.display_path(),
+            )
+        })
+        .unwrap_or_default()
 }
 
 /// Reads Claude Desktop's system-managed settings in the platform's native format — see

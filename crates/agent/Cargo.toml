@@ -66,7 +66,8 @@ toml.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-# Signs the fake identity provider's tokens in the integration tests.
+# The Windows secret envelope (secret_store.rs) is tested on every platform,
+# and the fake identity provider in the integration tests signs its tokens.
 aws-lc-rs.workspace = true
 futures-util = "0.3"
 # Hand-rolled RFC 6455 handshake for the vscode-copilot-capi WebSocket
@@ -88,10 +89,12 @@ keyring-core.workspace = true
 plist = "1.10"
 
 [target.'cfg(windows)'.dependencies]
+aws-lc-rs.workspace = true
 keyring.workspace = true
 windows-service = "0.8.1"
 windows-sys = { version = "0.61", features = [
 	"Win32_Foundation",
 	"Win32_Security",
 	"Win32_Security_Authorization",
+	"Win32_System_Registry",
 ] }
