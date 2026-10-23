@@ -376,3 +376,13 @@ export function ToolInventory({ discovery }: { discovery: ToolDiscovery }) {
     </details>
   );
 }
+
+export function friendlyBrowser(browser: string) {
+  const names: Record<string, string> = {
+    chrome: "Google Chrome",
+    edge: "Microsoft Edge",
+    chromium: "Chromium",
+    firefox: "Firefox",
+  };
+  return names[browser] ?? browser;
+}

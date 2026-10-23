@@ -497,6 +497,33 @@ pub struct ControllerConfig {
     /// This escape hatch is only appropriate for isolated local development.
     #[serde(default)]
     pub allow_insecure_dev: bool,
+    /// Browser proxy (PAC) reporting. Devices always report the PAC their
+    /// browser policy sets; these settings add a compliance check shown in
+    /// the management UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_egress: Option<ControllerBrowserEgressConfig>,
+}
+
+/// Browser proxy (PAC) settings of the controller.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerBrowserEgressConfig {
+    /// Compliance check: the controller compares the PAC each device's
+    /// browser policy sets with these values and shows the result in the
+    /// management UI. Agentdesktop does not configure browsers from them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compliance: Option<BrowserEgressCompliance>,
+}
+
+/// Expected browser proxy settings for the compliance check.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserEgressCompliance {
+    /// The PAC URL browser policy is expected to set (exact match).
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub pac_url: Url,
 }
 
 /// OpenID Connect settings used for interactive device enrollment.
@@ -1228,6 +1255,14 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
     {
         anyhow::bail!("daemonConfig.revision must be greater than zero");
     }
+    if let Some(compliance) = config
+        .browser_egress
+        .as_ref()
+        .and_then(|browser_egress| browser_egress.compliance.as_ref())
+        && !matches!(compliance.pac_url.scheme(), "http" | "https")
+    {
+        anyhow::bail!("browserEgress.compliance.pacUrl must be an http or https URL");
+    }
     if let Some(gateway) = &config.gateway_jwt {
         if gateway.issuer.trim().is_empty() {
             anyhow::bail!("gatewayJwt.issuer cannot be empty");
@@ -1759,6 +1794,41 @@ controller:
   address: https://controller.example.com
 "#;
         assert!(parse_daemon(valid).is_ok());
+    }
+
+    #[test]
+    fn controller_browser_egress_compliance_takes_an_http_pac_url() {
+        let base = "tls: /etc/agentdesktop/tls\noidc:\n  issuer: https://idp.example.com\n  clientId: agentdesktop\n";
+        let controller = parse_controller(&format!(
+            "{base}browserEgress:\n  compliance:\n    pacUrl: https://pac.corp.example/ai.pac\n"
+        ))
+        .expect("compliance profile");
+        assert_eq!(
+            controller
+                .browser_egress
+                .and_then(|browser_egress| browser_egress.compliance)
+                .expect("compliance")
+                .pac_url
+                .as_str(),
+            "https://pac.corp.example/ai.pac"
+        );
+        assert!(parse_controller(base).unwrap().browser_egress.is_none());
+        assert!(
+            parse_controller(&format!(
+                "{base}browserEgress:\n  compliance:\n    pacUrl: file:///etc/ai.pac\n"
+            ))
+            .unwrap_err()
+            .to_string()
+            .contains("http or https")
+        );
+        assert!(
+            parse_controller(&format!(
+                "{base}browserEgress:\n  compliance:\n    pacUrl: https://a.example/\n    extra: 1\n"
+            ))
+            .is_err()
+        );
+        // Daemons never see it: the pushed daemon configuration has no such key.
+        assert!(parse_daemon("browserEgress: {}\n").is_err());
     }
 
     #[test]

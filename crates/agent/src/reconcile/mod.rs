@@ -166,12 +166,16 @@ impl Reconciler {
         let mut discovery = Discovery {
             agents: Vec::new(),
             model_runtimes: Vec::new(),
+            browser_pacs: Vec::new(),
+            pac_fetches: Vec::new(),
         };
         for provider in self.providers.iter() {
             let found = provider.discover().await;
             discovery.agents.extend(found.agents);
             discovery.model_runtimes.extend(found.model_runtimes);
         }
+        discovery.browser_pacs = crate::browser_pac::discover(self.context.merge_user_settings);
+        discovery.pac_fetches = crate::browser_pac::fetch_pacs(&discovery.browser_pacs).await;
         discovery
     }
 
@@ -477,7 +481,7 @@ pub(crate) fn outcomes_differ(
 /// The longest detail an outcome carries, in bytes.
 const DETAIL_LIMIT: usize = 1024;
 
-fn truncate_detail(mut detail: String) -> String {
+pub(crate) fn truncate_detail(mut detail: String) -> String {
     if detail.len() > DETAIL_LIMIT {
         let mut end = DETAIL_LIMIT;
         while !detail.is_char_boundary(end) {
@@ -1436,6 +1440,8 @@ programs:
             agentdesktop_core::model::Discovery {
                 agents: Vec::new(),
                 model_runtimes: Vec::new(),
+                browser_pacs: Vec::new(),
+                pac_fetches: Vec::new(),
             }
         }
 
@@ -2429,6 +2435,8 @@ programs:
             agentdesktop_core::model::Discovery {
                 agents: Vec::new(),
                 model_runtimes: Vec::new(),
+                browser_pacs: Vec::new(),
+                pac_fetches: Vec::new(),
             }
         }
 

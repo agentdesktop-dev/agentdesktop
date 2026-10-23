@@ -14,6 +14,17 @@
       "type": "boolean",
       "default": false
     },
+    "browserEgress": {
+      "description": "Browser proxy (PAC) reporting. Devices always report the PAC their\nbrowser policy sets; these settings add a compliance check shown in\nthe management UI.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ControllerBrowserEgressConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "daemonConfig": {
       "description": "Daemon configuration distributed to enrolled devices.",
       "anyOf": [
@@ -72,6 +83,38 @@
     "tls"
   ],
   "$defs": {
+    "BrowserEgressCompliance": {
+      "description": "Expected browser proxy settings for the compliance check.",
+      "type": "object",
+      "properties": {
+        "pacUrl": {
+          "description": "The PAC URL browser policy is expected to set (exact match).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pacUrl"
+      ]
+    },
+    "ControllerBrowserEgressConfig": {
+      "description": "Browser proxy (PAC) settings of the controller.",
+      "type": "object",
+      "properties": {
+        "compliance": {
+          "description": "Compliance check: the controller compares the PAC each device's\nbrowser policy sets with these values and shows the result in the\nmanagement UI. Agentdesktop does not configure browsers from them.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BrowserEgressCompliance"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "ControllerDaemonConfig": {
       "description": "Controller-owned daemon configuration file and its revision.",
       "type": "object",

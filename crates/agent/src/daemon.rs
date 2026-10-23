@@ -866,6 +866,14 @@ fn log_discovery(discovery: &agentdesktop_core::model::Discovery) {
             "discovered model runtime"
         );
     }
+    for browser in &discovery.browser_pacs {
+        tracing::info!(
+            browser = %browser.browser,
+            pac_url = browser.pac_url.as_deref().unwrap_or("none"),
+            recommended = browser.recommended,
+            "discovered browser PAC policy"
+        );
+    }
 }
 
 /// Re-runs discovery on an interval so the inventory reflects tools installed,
@@ -926,14 +934,17 @@ async fn refresh_inventory_with<F, Fut>(
             return;
         }
         let discovery = discover().await;
+        // Every scan, not only changed ones: a scan can leave the inventory
+        // unchanged and still make new directories worth watching, such as
+        // an empty browser policy directory an MDM push just created.
+        if let Some(watch) = watch.as_mut() {
+            watch.sync(&discovery);
+        }
         if **sender.borrow() == discovery {
             continue;
         }
         tracing::info!(trigger, "inventory changed");
         log_discovery(&discovery);
-        if let Some(watch) = watch.as_mut() {
-            watch.sync(&discovery);
-        }
         if sender.send(Arc::new(discovery)).is_err() {
             return;
         }
@@ -1345,6 +1356,8 @@ mod tests {
                 })
                 .collect(),
             model_runtimes: Vec::new(),
+            browser_pacs: Vec::new(),
+            pac_fetches: Vec::new(),
         }
     }
 
@@ -1426,6 +1439,73 @@ mod tests {
         assert_eq!(receiver.borrow_and_update().agents.len(), 2);
 
         refresher.abort();
+    }
+
+    /// A policy directory created empty first and filled later: the scan
+    /// after the creation leaves the inventory unchanged, but must still
+    /// start watching the new directory so the later file is seen.
+    #[tokio::test]
+    async fn watches_a_new_directory_even_when_the_inventory_is_unchanged() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        fn policy_directories() -> Vec<std::path::PathBuf> {
+            let root = ROOT.get().expect("root set");
+            let managed = root.join("managed");
+            vec![if managed.is_dir() {
+                managed
+            } else {
+                root.clone()
+            }]
+        }
+        let root = std::env::temp_dir().join(format!(
+            "agentdesktop-staged-policy-{}-{}",
+            std::process::id(),
+            rand::random::<u32>()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        ROOT.set(root.clone()).unwrap();
+
+        let (watch, changes) = crate::inventory_watch::InventoryWatch::new().unwrap();
+        let watch = watch.with_policy_directories(policy_directories);
+        let scans = Arc::new(AtomicUsize::new(0));
+        let counter = scans.clone();
+        let (sender, _receiver) = watch::channel(Arc::new(discovery(&["codex"])));
+        let refresher = tokio::spawn(super::refresh_inventory_with(
+            sender,
+            Duration::from_secs(3600),
+            changes,
+            Some(watch),
+            move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { discovery(&["codex"]) }
+            },
+        ));
+        let wait_for = |target: usize| {
+            let scans = scans.clone();
+            async move {
+                for _ in 0..100 {
+                    if scans.load(Ordering::SeqCst) >= target {
+                        return true;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                false
+            }
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        std::fs::create_dir(root.join("managed")).unwrap();
+        assert!(wait_for(1).await, "creating the directory triggers a scan");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        std::fs::write(root.join("managed/egress.json"), "{}").unwrap();
+        assert!(
+            wait_for(2).await,
+            "a file in the new directory triggers a scan"
+        );
+
+        refresher.abort();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test(start_paused = true)]

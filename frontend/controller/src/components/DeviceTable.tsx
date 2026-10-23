@@ -4,6 +4,7 @@ import { Check, ChevronRight, CircleAlert } from "lucide-react";
 import { friendlyOs } from "../format";
 import { navigate } from "../router";
 import type { Device } from "../types";
+import { PacCell } from "./BrowserPac";
 import { EmptyDevices } from "./ViewStates";
 
 export function DeviceTable({
@@ -28,6 +29,7 @@ export function DeviceTable({
             <th>Platform</th>
             {!compact && <th>Agent</th>}
             <th>Tools</th>
+            <th>Browser PAC</th>
             <th>Configuration</th>
             <th>
               <span className="sr-only">Open</span>
@@ -68,6 +70,9 @@ export function DeviceTable({
               )}
               <td>
                 <ToolAvatarGroup kinds={device.installed_tools} />
+              </td>
+              <td>
+                <PacCell pac={device.browser_pac} />
               </td>
               <td>
                 <ConfigBadge

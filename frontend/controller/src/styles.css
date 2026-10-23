@@ -1559,3 +1559,27 @@ code {
     scroll-behavior: auto;
   }
 }
+
+.pac-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  font-weight: 600;
+}
+
+.pac-status.success {
+  color: var(--green);
+}
+
+.pac-status.muted {
+  color: var(--icon-muted);
+}
+
+.pac-status.danger {
+  color: var(--red);
+}
+
+.pac-status.warning {
+  color: var(--warning-strong);
+}
