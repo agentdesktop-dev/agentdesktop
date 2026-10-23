@@ -997,6 +997,35 @@ programs:
             let root = tempfile::tempdir().unwrap();
             let mut reconciler =
                 full_reconciler(root.path()).with_llm_proxy(Some(proxy_context("PAIRING")));
+            // On Windows Claude Desktop's system settings land in the policy
+            // registry, so point it at a disposable key and snapshot that too.
+            #[cfg(windows)]
+            let policy_key = super::registry::TestPolicyKey::new();
+            #[cfg(windows)]
+            use_test_policy_key(
+                &mut reconciler,
+                root.path().join("claude-desktop/settings.json"),
+                root.path().join("claude-desktop/helper"),
+                policy_key.0.clone(),
+            );
+            let state = |id: &str| {
+                let dir = root.path().join(id);
+                #[allow(unused_mut)]
+                let mut files = if dir.exists() {
+                    snapshot(&dir)
+                } else {
+                    Default::default()
+                };
+                #[cfg(windows)]
+                if id == "claude-desktop" {
+                    let values = super::registry::read_values(&policy_key.0).unwrap();
+                    files.insert(
+                        PathBuf::from("registry"),
+                        format!("{values:?}").into_bytes(),
+                    );
+                }
+                files
+            };
             // Seed owned files in the opposite mode, including ownership sidecars.
             reconciler.context.merge_user_settings = !user;
             let mut seed = config.clone();
@@ -1007,7 +1036,7 @@ programs:
             let skipped: Vec<_> = programs
                 .iter()
                 .filter(|(_, _, required_user)| *required_user != user)
-                .map(|(id, dir, _)| (*id, snapshot(&root.path().join(dir))))
+                .map(|(id, dir, _)| (*id, state(dir)))
                 .collect();
             assert!(skipped.iter().all(|(_, files)| !files.is_empty()));
 
@@ -1041,7 +1070,7 @@ programs:
                 }
             }
             for (id, files) in &skipped {
-                assert_eq!(&snapshot(&root.path().join(id)), files, "{id}");
+                assert_eq!(&state(id), files, "{id}");
             }
 
             let (report, result) = reconciler.apply_with_report(&parse_daemon("{}").unwrap());
@@ -1051,7 +1080,7 @@ programs:
                     program_outcome(&report, id).is_none(),
                     "disabled {id} has no status"
                 );
-                assert_eq!(&snapshot(&root.path().join(id)), files, "{id}");
+                assert_eq!(&state(id), files, "{id}");
             }
         }
     }
