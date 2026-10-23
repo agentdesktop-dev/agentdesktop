@@ -148,7 +148,9 @@ pub struct UsageStartupConfig {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ClaudeDesktopStartupConfig {
-    /// Configuration file.
+    /// Configuration file. On Windows the managed settings live in the
+    /// policy registry key instead, and this file is only removed when an
+    /// earlier agentdesktop wrote it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<PathBuf>,
     /// Credential helper path.
