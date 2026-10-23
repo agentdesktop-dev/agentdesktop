@@ -440,6 +440,26 @@ impl Database {
         }))
     }
 
+    /// Counts the MCP servers and skills reported across all devices.
+    pub async fn inventory_totals(&self) -> anyhow::Result<(usize, usize)> {
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT mcp_servers_json, skills_json FROM discoveries")
+                .fetch_all(&self.pool)
+                .await
+                .context("load inventory for metrics")?;
+        let count = |json: &str| {
+            serde_json::from_str::<Vec<serde::de::IgnoredAny>>(json)
+                .map(|items| items.len())
+                .context("count reported inventory")
+        };
+        let (mut mcp_servers, mut skills) = (0, 0);
+        for (mcp_servers_json, skills_json) in &rows {
+            mcp_servers += count(mcp_servers_json)?;
+            skills += count(skills_json)?;
+        }
+        Ok((mcp_servers, skills))
+    }
+
     pub async fn delete_device(&self, device_id: &str) -> anyhow::Result<bool> {
         let result = sqlx::query("DELETE FROM devices WHERE id = $1")
             .bind(device_id)
@@ -641,7 +661,7 @@ impl Database {
         &self,
         device_id: &str,
         telemetry: &TelemetryEvent,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<&'static str> {
         let (event_type, payload) =
             match telemetry.event.as_ref().context("telemetry has no event")? {
                 telemetry_event::Event::SessionNew(event) => {
@@ -702,7 +722,7 @@ impl Database {
         .execute(&self.pool)
         .await
         .context("store telemetry event")?;
-        Ok(())
+        Ok(event_type)
     }
 
     async fn recent_telemetry(

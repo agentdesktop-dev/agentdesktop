@@ -23,6 +23,7 @@ use crate::{
     database::{Database, DevicePrincipal},
     device_ca::DeviceCertificateIssuer,
     gateway_jwt::GatewayJwtIssuer,
+    metrics::Metrics,
     oidc::{OidcPrincipal, OidcProvider},
 };
 
@@ -34,6 +35,7 @@ pub struct FleetAgentService {
     gateway_jwt_issuer: Option<GatewayJwtIssuer>,
     device_certificate_issuer: Option<DeviceCertificateIssuer>,
     usage_enabled: bool,
+    metrics: Metrics,
 }
 
 impl FleetAgentService {
@@ -51,7 +53,14 @@ impl FleetAgentService {
             gateway_jwt_issuer,
             device_certificate_issuer,
             usage_enabled: false,
+            metrics: Metrics::default(),
         }
+    }
+
+    /// Reports stream and telemetry activity to `metrics`.
+    pub fn with_metrics(mut self, metrics: Metrics) -> Self {
+        self.metrics = metrics;
+        self
     }
 
     /// Tells devices that the controller collects gateway usage.
@@ -295,8 +304,11 @@ impl FleetAgent for FleetAgentService {
         });
 
         let database = self.database.clone();
+        let metrics = self.metrics.clone();
+        let stream_guard = metrics.stream_connected();
         let auth_sender = sender.clone();
         tokio::spawn(async move {
+            let _stream_guard = stream_guard;
             let enrolled_principal = match database.device_principal(&authenticated_device_id).await
             {
                 Ok(principal) => principal,
@@ -344,9 +356,15 @@ impl FleetAgent for FleetAgentService {
                             );
                             break;
                         }
-                        if let Err(err) =
-                            handle_agent_message(&database, &authenticated_device_id, message).await
+                        if let Err(err) = handle_agent_message(
+                            &database,
+                            &metrics,
+                            &authenticated_device_id,
+                            message,
+                        )
+                        .await
                         {
+                            metrics.message_error();
                             error!(
                                 error = %err,
                                 device_id = %authenticated_device_id,
@@ -504,6 +522,7 @@ fn device_id_from_certificate(certificate_der: &[u8]) -> Result<String, Status> 
 
 async fn handle_agent_message(
     database: &Database,
+    metrics: &Metrics,
     device_id: &str,
     message: AgentMessage,
 ) -> anyhow::Result<()> {
@@ -559,7 +578,8 @@ async fn handle_agent_message(
             }
         }
         Some(agent_message::Message::Telemetry(event)) => {
-            database.insert_telemetry(device_id, &event).await?;
+            let event_type = database.insert_telemetry(device_id, &event).await?;
+            metrics.telemetry_event(event_type);
             debug!(device_id, "stored telemetry event");
         }
         None => {}
