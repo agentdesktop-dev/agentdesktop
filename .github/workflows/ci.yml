@@ -116,6 +116,33 @@ jobs:
       - name: Test agent
         run: cargo nextest run --locked --package agentdesktop-agent --lib
 
+  headless-linux:
+    name: Headless Linux portability
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    container: quay.io/pypa/manylinux_2_28_x86_64@sha256:a57da7c5fcbdc2df58c0f95f10a6fd676e5ea98097d93e70d20db52c926db2b0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.98"
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ci-headless-linux
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build headless binary
+        run: cargo build --locked --package agentdesktop-agent --bin agentdesktop-headless
+
+      - name: Verify glibc and library requirements
+        run: .github/scripts/verify-linux-portability.sh target/debug/agentdesktop-headless 2.28
+
   container:
     name: Container
     runs-on: blacksmith-4vcpu-ubuntu-2404
