@@ -61,8 +61,8 @@ make install
 The `agentdesktop-linux-*` binaries include the desktop UI and need GTK,
 WebKitGTK 4.1, and glibc 2.34 or later. On hosts without them, such as RHEL 8,
 WSL, and virtual desktops, use `agentdesktop-headless-linux-*` instead. It runs
-the same daemon and command-line tools without the UI, and needs only glibc 2.28
-or later:
+the same daemon and command-line tools without the UI. It is statically linked,
+so it does not depend on the host's glibc or other system libraries:
 
 ```sh
 curl -fLO https://github.com/agentdesktop-dev/agentdesktop/releases/latest/download/agentdesktop-headless-linux-amd64

@@ -231,11 +231,11 @@ jobs:
           path: release/agentdesktop-*
           if-no-files-found: error
 
-  # The daemon and CLI without the Tauri UI, built against glibc 2.28 so it runs
-  # on RHEL 8 and similar hosts that lack GTK/WebKit 4.1 and a newer glibc.
+  # The daemon and CLI without the Tauri UI, statically linked against musl so
+  # it runs on any Linux, including RHEL 8 and other hosts without GTK/WebKit
+  # 4.1 or a recent glibc.
   build-linux-headless-binaries:
     runs-on: ${{ matrix.runner }}
-    container: ${{ matrix.image }}
     permissions:
       contents: read
     env:
@@ -245,10 +245,10 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            image: quay.io/pypa/manylinux_2_28_x86_64@sha256:a57da7c5fcbdc2df58c0f95f10a6fd676e5ea98097d93e70d20db52c926db2b0
+            target: x86_64-unknown-linux-musl
             runner: ubuntu-24.04
           - arch: arm64
-            image: quay.io/pypa/manylinux_2_28_aarch64@sha256:98f9eacf40f95fa2f890c646147c413c3dc93c130611bb18f9ee9e7c4be802a5
+            target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
@@ -256,18 +256,25 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust
+      - name: Install musl toolchain
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+
+      - name: Install Rust target
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.98"
+          targets: ${{ matrix.target }}
 
       - name: Build binary
         shell: bash
-        run: cargo build --locked --release --package agentdesktop-agent --bin agentdesktop-headless
+        run: cargo build --locked --release --package agentdesktop-agent --bin agentdesktop-headless --target "${{ matrix.target }}"
 
-      - name: Verify glibc and library requirements
+      - name: Verify static linking
         shell: bash
-        run: .github/scripts/verify-linux-portability.sh target/release/agentdesktop-headless 2.28
+        run: .github/scripts/verify-static-binary.sh "target/${{ matrix.target }}/release/agentdesktop-headless"
 
       - name: Stage binary and checksum
         shell: bash
@@ -275,7 +282,7 @@ jobs:
           OUTPUT_NAME: agentdesktop-headless-linux-${{ matrix.arch }}
         run: |
           mkdir -p release
-          cp target/release/agentdesktop-headless "release/${OUTPUT_NAME}"
+          cp "target/${{ matrix.target }}/release/agentdesktop-headless" "release/${OUTPUT_NAME}"
           (cd release && sha256sum "${OUTPUT_NAME}" > "${OUTPUT_NAME}.sha256")
 
       - name: Upload binary
