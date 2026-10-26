@@ -66,12 +66,24 @@ or later:
 
 ```sh
 curl -fLO https://github.com/agentdesktop-dev/agentdesktop/releases/latest/download/agentdesktop-headless-linux-amd64
-install -m 0755 agentdesktop-headless-linux-amd64 ~/.local/bin/agentdesktop
+install -D -m 0755 agentdesktop-headless-linux-amd64 ~/.local/bin/agentdesktop
 agentdesktop --version
 ```
 
-Every `agentdesktop` command in this guide works with the headless binary. To
-keep a user-mode daemon running, create a systemd user unit at
+Every `agentdesktop` command in this guide works with the headless binary.
+`agentdesktop daemon --user` reads `~/.config/agentdesktop/config.yaml` (or
+`$XDG_CONFIG_HOME/agentdesktop/config.yaml`) and does not start without it.
+Create that file first, for example from
+[`examples/standalone/config.yaml`](examples/standalone/config.yaml):
+
+```sh
+mkdir -p ~/.config/agentdesktop
+curl -fL -o ~/.config/agentdesktop/config.yaml \
+  https://raw.githubusercontent.com/agentdesktop-dev/agentdesktop/main/examples/standalone/config.yaml
+```
+
+Edit it for your identity provider and gateway. To keep a user-mode daemon
+running, create a systemd user unit at
 `~/.config/systemd/user/agentdesktop.service` (on WSL, first set
 `systemd=true` under `[boot]` in `/etc/wsl.conf`):
 
