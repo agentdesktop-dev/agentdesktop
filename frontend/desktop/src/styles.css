@@ -655,7 +655,7 @@ p {
   outline-offset: 2px;
 }
 
-.tools-audit-queue button > span {
+.tools-audit-queue :where(button > span) {
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -1106,7 +1106,7 @@ p {
   list-style: none;
 }
 
-.policy-change-bar details > div {
+.policy-change-bar :where(details > div) {
   position: absolute;
   right: 0;
   bottom: calc(100% + 10px);
@@ -1123,7 +1123,7 @@ p {
   font-size: 11px;
 }
 
-.policy-change-bar details code {
+.policy-change-bar :where(details code) {
   color: var(--muted);
   overflow-wrap: anywhere;
 }
@@ -1407,7 +1407,7 @@ p {
   transition: transform 160ms ease;
 }
 
-.access-configurations[open] > summary > svg:last-child {
+.access-configurations:where([open]) > summary > svg:last-child {
   transform: rotate(180deg);
 }
 
@@ -1450,7 +1450,7 @@ p {
   opacity: 0.65;
 }
 
-.access-configurations > div > button > span {
+.access-configurations :where(div > button > span) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1684,7 +1684,7 @@ p {
   gap: 8px;
 }
 
-.access-wildcard-summary .access-resource-main > strong {
+.access-wildcard-summary :where(.access-resource-main > strong) {
   color: var(--ink);
   font-size: 13px;
   font-weight: 650;
@@ -1783,8 +1783,8 @@ p {
   gap: 4px;
 }
 
-.runtime-card > summary strong,
-.advanced-config > summary strong {
+.runtime-card > summary :where(strong),
+.advanced-config > summary :where(strong) {
   color: var(--ink);
   font-size: 12px;
   font-weight: 600;
@@ -1859,7 +1859,7 @@ p {
   font-size: 10px;
 }
 
-.status-row > div span {
+.status-row > div :where(span) {
   color: var(--muted);
   font-size: 11px;
 }

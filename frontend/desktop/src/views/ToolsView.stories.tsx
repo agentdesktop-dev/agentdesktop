@@ -267,7 +267,9 @@ export const ExplainsAllReadOnlyConfiguredDomains: Story = {
     });
     const network = accessCategory(access, "Network");
     await expect(within(network).getByText("0 editable")).toBeVisible();
-    await expect(within(network).getByText("5 advanced destinations")).toBeVisible();
+    await expect(
+      within(network).getByText("5 advanced destinations"),
+    ).toBeVisible();
     await expect(
       within(network).getByText(
         "Custom request/response approvals or URL paths. Edit in configuration.",

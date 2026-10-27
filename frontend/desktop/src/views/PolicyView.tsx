@@ -434,7 +434,9 @@ export function AgentAccessEditor({
             <div className="policy-rule-empty">
               {readOnlyConfiguredCount ? (
                 <>
-                  <strong>{readOnlyConfiguredCount} advanced destinations</strong>
+                  <strong>
+                    {readOnlyConfiguredCount} advanced destinations
+                  </strong>
                   <span>
                     Custom request/response approvals or URL paths. Edit in
                     configuration.

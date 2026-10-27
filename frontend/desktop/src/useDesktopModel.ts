@@ -10,8 +10,8 @@ import {
 
 import {
   applyNetworkRuleChange as applyNetworkRuleChangeRequest,
-  getAccessReport,
   desktopReady,
+  getAccessReport,
   getBootstrap,
   getConnectorStatus,
   getDiscovery,
@@ -364,10 +364,10 @@ export function useDesktopModel() {
   function refresh() {
     setNotice(null);
     startRefreshing(async () => {
-  const access = view === "tools" ? loadAccess() : null;
+      const access = view === "tools" ? loadAccess() : null;
       const programChange = programChanges.current;
       applyStatusUpdate(await getStatusUpdate(), programChange);
-  if (access) await access;
+      if (access) await access;
     });
   }
 

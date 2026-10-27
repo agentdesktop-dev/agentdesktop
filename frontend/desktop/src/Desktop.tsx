@@ -83,7 +83,9 @@ export function Desktop() {
               accessLoading={model.isAssessing}
               accessReport={model.accessReport}
               accessStale={model.accessStale}
-              allowAccessEditing={model.connector?.runtime?.mode === "standalone"}
+              allowAccessEditing={
+                model.connector?.runtime?.mode === "standalone"
+              }
               discovery={model.discovery}
               onApplyNetworkRuleChange={model.applyNetworkRuleChange}
               onOpenAccessSource={model.openAccessSettings}
