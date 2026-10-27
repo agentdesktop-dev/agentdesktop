@@ -694,3 +694,16 @@ export const ReflowAt320: Story = {
     );
   },
 };
+
+export const Dark: Story = {
+  ...Populated,
+  globals: { colorMode: "dark" },
+};
+
+export const DarkReflow: Story = {
+  ...ReflowAt320,
+  globals: {
+    colorMode: "dark",
+    viewport: { value: "reflow", isRotated: false },
+  },
+};

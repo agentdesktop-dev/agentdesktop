@@ -1,0 +1,289 @@
+name: Release macOS
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Canonical release version without a v prefix
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  CI: true
+
+jobs:
+  build-macos-binaries:
+    runs-on: ${{ matrix.runner }}
+    environment: production-signing
+    permissions:
+      contents: read
+    env:
+      AGENTDESKTOP_VERSION: ${{ inputs.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - arch: arm64
+            target: aarch64-apple-darwin
+            runner: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: frontend/.nvmrc
+
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.98"
+          targets: ${{ matrix.target }}
+
+      - name: Build frontend
+        shell: bash
+        working-directory: frontend
+        run: |
+          npm install --global pnpm@11.25.0
+          pnpm install --frozen-lockfile
+          pnpm --filter @agentdesktop/desktop-web build
+
+      - name: Build binary
+        shell: bash
+        run: cargo build --locked --release --package agentdesktop --target "${{ matrix.target }}"
+
+      - name: Import macOS signing identity
+        shell: bash
+        env:
+          APPLE_APPLICATION_CERTIFICATE: ${{ secrets.APPLE_APPLICATION_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_INSTALLER_CERTIFICATE: ${{ secrets.APPLE_INSTALLER_CERTIFICATE }}
+          APPLE_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_PASSWORD }}
+        run: bash .github/scripts/import-macos-signing.sh
+
+      - name: Sign macOS binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          binary="target/${TARGET}/release/agentdesktop"
+          codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
+            --identifier dev.agentdesktop.tray --options runtime --timestamp "$binary"
+          codesign --verify --strict --verbose=2 \
+            -R="anchor apple generic and identifier \"dev.agentdesktop.tray\" and certificate leaf = H\"${APPLE_SIGNING_IDENTITY}\"" "$binary"
+
+      - name: Notarize macOS binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ vars.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ vars.APPLE_API_ISSUER }}
+        run: |
+          # Bare binaries cannot be stapled; Gatekeeper looks up their ticket online.
+          archive="${RUNNER_TEMP}/agentdesktop-notarize.zip"
+          ditto -c -k "target/${TARGET}/release/agentdesktop" "$archive"
+          bash .github/scripts/notarize-macos.sh "$archive"
+
+      - name: Stage binary and checksum
+        shell: bash
+        env:
+          OUTPUT_NAME: agentdesktop-darwin-${{ matrix.arch }}
+        run: |
+          mkdir -p release
+          cp "target/${{ matrix.target }}/release/agentdesktop" "release/${OUTPUT_NAME}"
+          (cd release && shasum -a 256 "${OUTPUT_NAME}" > "${OUTPUT_NAME}.sha256")
+
+      - name: Remove macOS signing identity
+        if: always()
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          # Delete exported files first, even if keychain deletion later fails.
+          rm -f "${RUNNER_TEMP}/agentdesktop-signing.p12" "${RUNNER_TEMP}/agentdesktop-notary.p8"
+          if [ -f "${RUNNER_TEMP}/agentdesktop-signing.keychain-db" ]; then
+            security delete-keychain "${RUNNER_TEMP}/agentdesktop-signing.keychain-db"
+          fi
+
+      - name: Upload binary
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-binary-darwin-${{ matrix.arch }}
+          path: release/agentdesktop-*
+          if-no-files-found: error
+
+  build-macos-installers:
+    runs-on: ${{ matrix.runner }}
+    environment: production-signing
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - arch: arm64
+            target: aarch64-apple-darwin
+            runner: macos-26
+    env:
+      AGENTDESKTOP_VERSION: ${{ inputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: frontend/.nvmrc
+
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.98"
+          targets: ${{ matrix.target }}
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        shell: bash
+        run: |
+          npm install --global pnpm@11.25.0
+          pnpm install --frozen-lockfile
+
+      - name: Import macOS signing identity
+        shell: bash
+        env:
+          APPLE_APPLICATION_CERTIFICATE: ${{ secrets.APPLE_APPLICATION_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_INSTALLER_CERTIFICATE: ${{ secrets.APPLE_INSTALLER_CERTIFICATE }}
+          APPLE_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_PASSWORD }}
+        run: bash .github/scripts/import-macos-signing.sh
+
+      - name: Build PKG
+        timeout-minutes: 60
+        working-directory: frontend
+        shell: bash
+        run: pnpm --filter @agentdesktop/desktop-web dist:mac -- --target "${{ matrix.target }}"
+
+      - name: Verify application signature
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          app="target/${TARGET}/release/bundle/macos/agentdesktop.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign --verify --strict \
+            -R="anchor apple generic and identifier \"dev.agentdesktop.tray\" and certificate leaf = H\"${APPLE_SIGNING_IDENTITY}\"" \
+            "$app/Contents/MacOS/agentdesktop"
+
+      - name: Stage PKG
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
+          OUTPUT_NAME: agentdesktop-macos-${{ matrix.arch }}.pkg
+        run: |
+          source_path="target/${TARGET}/release/bundle/pkg/Agent Desktop_${AGENTDESKTOP_VERSION}_${ARCH}.pkg"
+          test -f "${source_path}"
+          mkdir -p release
+          cp "${source_path}" "release/${OUTPUT_NAME}"
+
+      - name: Notarize and staple PKG
+        shell: bash
+        env:
+          OUTPUT_NAME: agentdesktop-macos-${{ matrix.arch }}.pkg
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ vars.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ vars.APPLE_API_ISSUER }}
+        run: |
+          bash .github/scripts/notarize-macos.sh "release/${OUTPUT_NAME}"
+          xcrun stapler staple "release/${OUTPUT_NAME}"
+
+      - name: Checksum PKG
+        shell: bash
+        env:
+          OUTPUT_NAME: agentdesktop-macos-${{ matrix.arch }}.pkg
+        run: |
+          (cd release && shasum -a 256 "${OUTPUT_NAME}" > "${OUTPUT_NAME}.sha256")
+
+      - name: Smoke test PKG install and replacement
+        shell: bash
+        env:
+          OUTPUT_NAME: agentdesktop-macos-${{ matrix.arch }}.pkg
+        run: |
+          wait_for_daemon() {
+            deadline=$((SECONDS + 30))
+            until sudo "/Applications/agentdesktop.app/Contents/MacOS/agentdesktop" status; do
+              if (( SECONDS >= deadline )); then
+                echo "Installed CLI could not reach the Agent Desktop daemon" >&2
+                return 1
+              fi
+              sleep 1
+            done
+          }
+
+          daemon_pid() {
+            sudo launchctl print system/dev.agentdesktop.daemon |
+              awk '$1 == "pid" && $2 == "=" { print $3; exit }'
+          }
+
+          sudo installer -pkg "release/${OUTPUT_NAME}" -target /
+          sudo launchctl print system/dev.agentdesktop.daemon > /dev/null
+          wait_for_daemon
+
+          first_pid="$(daemon_pid)"
+          test -n "${first_pid}"
+          config_hash="$(sudo shasum -a 256 /etc/agentdesktop/config.yaml | awk '{ print $1 }')"
+          sudo touch /var/lib/agentdesktop/upgrade-smoke-marker
+
+          sudo installer -pkg "release/${OUTPUT_NAME}" -target /
+          sudo launchctl print system/dev.agentdesktop.daemon > /dev/null
+          wait_for_daemon
+
+          second_pid="$(daemon_pid)"
+          test -n "${second_pid}"
+          if [ "${first_pid}" = "${second_pid}" ]; then
+            echo "Agent Desktop daemon was not restarted during package replacement" >&2
+            exit 1
+          fi
+          test "${config_hash}" = "$(sudo shasum -a 256 /etc/agentdesktop/config.yaml | awk '{ print $1 }')"
+          sudo test -f /var/lib/agentdesktop/upgrade-smoke-marker
+
+      - name: Remove smoke-test installation
+        if: always()
+        shell: bash
+        run: |
+          sudo launchctl bootout system/dev.agentdesktop.daemon || true
+          sudo rm -f /Library/LaunchDaemons/dev.agentdesktop.daemon.plist
+          sudo rm -rf "/Applications/agentdesktop.app"
+          sudo rm -rf /etc/agentdesktop /var/lib/agentdesktop /var/run/agentdesktop
+          sudo rm -f /var/run/agentdesktop-relaunch
+          sudo pkgutil --forget dev.agentdesktop.installer || true
+
+      - name: Remove macOS signing identity
+        if: always()
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          # Delete exported files first, even if keychain deletion later fails.
+          rm -f "${RUNNER_TEMP}/agentdesktop-signing.p12" "${RUNNER_TEMP}/agentdesktop-notary.p8"
+          if [ -f "${RUNNER_TEMP}/agentdesktop-signing.keychain-db" ]; then
+            security delete-keychain "${RUNNER_TEMP}/agentdesktop-signing.keychain-db"
+          fi
+
+      - name: Upload PKG
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-installer-${{ matrix.arch }}
+          path: release/agentdesktop-macos-*
+          if-no-files-found: error

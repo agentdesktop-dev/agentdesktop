@@ -3,7 +3,10 @@ use std::{io::Read, path::PathBuf};
 use agentdesktop_client as client;
 use agentdesktop_core::{
     config::DaemonConfig,
-    model::{Discovery, Health, LlmGatewayCredential, TelemetryEventKind},
+    model::{
+        Discovery, EnrollmentStatus, Health, LlmGatewayCredential, LlmGatewayLoginStatus,
+        ProgramChoice, ProgramManagement, TelemetryEventKind,
+    },
 };
 use anyhow::Context;
 use clap::Subcommand;
@@ -15,6 +18,8 @@ const MAX_HOOK_INPUT_BYTES: u64 = 1024 * 1024;
 pub enum ClientCommand {
     /// Check whether the daemon is reachable.
     Status,
+    /// Print the device's enrollment status and any pending sign-in URL.
+    Enrollment,
     /// Discover locally installed agents.
     Discover,
     /// Print a user-scoped local access audit as JSON.
@@ -27,10 +32,31 @@ pub enum ClientCommand {
         #[arg(long, default_value = "agentdesktop")]
         client_id: String,
     },
+    /// Sign in to the LLM gateway with OIDC device authorization and print
+    /// the verification URL and code to approve from any device.
+    Login,
+    /// List the programs this device's configuration manages, or choose which
+    /// of them Agentdesktop manages.
+    Programs {
+        #[command(subcommand)]
+        command: Option<ProgramsCommand>,
+    },
     /// Handle an event emitted by a managed developer-tool hook.
     Hook {
         #[command(subcommand)]
         hook: HookCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ProgramsCommand {
+    /// Choose the programs Agentdesktop manages on this device: `all`, `none`,
+    /// or program IDs such as `claude-code codex`. Allowed only when the
+    /// configuration sets `programSelection.allowUserChoice`; Agentdesktop
+    /// removes the settings it wrote for each program left out.
+    Set {
+        #[arg(required = true, value_name = "all|none|PROGRAM")]
+        programs: Vec<String>,
     },
 }
 
@@ -65,6 +91,39 @@ pub async fn run(command: ClientCommand, socket: PathBuf) -> anyhow::Result<()> 
         ClientCommand::Status => {
             let health: Health = client::get(&socket, "/v1/health").await?;
             println!("{}", health.status);
+        }
+        ClientCommand::Enrollment => {
+            let enrollment: EnrollmentStatus = client::get(&socket, "/v1/enrollment").await?;
+            println!("{}", enrollment.status);
+            if let Some(url) = enrollment.authorization_url {
+                println!("Sign in at: {url}");
+            }
+            if let Some(code) = enrollment.user_code {
+                println!("Code: {code}");
+            }
+        }
+        ClientCommand::Login => {
+            let login: LlmGatewayLoginStatus =
+                client::post(&socket, "/v1/llm-gateway/login").await?;
+            println!("{}", login.status);
+            if let Some(url) = login.verification_url {
+                println!("Sign in at: {url}");
+            }
+            if let Some(code) = login.user_code {
+                println!("Code: {code}");
+            }
+        }
+        ClientCommand::Programs { command: None } => {
+            let management: ProgramManagement = client::get(&socket, "/v1/programs").await?;
+            print_programs(&management);
+        }
+        ClientCommand::Programs {
+            command: Some(ProgramsCommand::Set { programs }),
+        } => {
+            let choice = parse_program_choice(&programs)?;
+            let management: ProgramManagement =
+                client::post_json_decode(&socket, "/v1/programs/choice", &choice).await?;
+            print_programs(&management);
         }
         ClientCommand::Discover => {
             let discovery: Discovery = client::get(&socket, "/v1/discovery").await?;
@@ -130,6 +189,57 @@ pub async fn run(command: ClientCommand, socket: PathBuf) -> anyhow::Result<()> 
     }
 
     Ok(())
+}
+
+/// `all`, `none`, or the program IDs to manage.
+fn parse_program_choice(programs: &[String]) -> anyhow::Result<ProgramChoice> {
+    match programs {
+        [only] if only == "all" => Ok(ProgramChoice::All),
+        [only] if only == "none" => Ok(ProgramChoice::None),
+        _ if programs
+            .iter()
+            .any(|program| program == "all" || program == "none") =>
+        {
+            anyhow::bail!("`all` and `none` cannot be combined with program IDs")
+        }
+        _ => Ok(ProgramChoice::Selected {
+            programs: programs.iter().cloned().collect(),
+        }),
+    }
+}
+
+fn print_programs(management: &ProgramManagement) {
+    if management.user_choice_allowed {
+        let choice = match &management.choice {
+            ProgramChoice::All => "all".to_owned(),
+            ProgramChoice::None => "none".to_owned(),
+            ProgramChoice::Selected { programs } => {
+                programs.iter().cloned().collect::<Vec<_>>().join(" ")
+            }
+        };
+        println!("Your choice: {choice}");
+    } else {
+        println!("Your organization manages every configured program on this device.");
+    }
+    if management.programs.is_empty() {
+        println!("No programs are configured on this device.");
+    }
+    for program in &management.programs {
+        let managed = if program.managed {
+            "managed"
+        } else {
+            "opted out"
+        };
+        let state = program.state.as_deref().unwrap_or("not applied yet");
+        if program.detail.is_empty() {
+            println!("{}\t{managed}\t{state}", program.program);
+        } else {
+            println!(
+                "{}\t{managed}\t{state}\t{}",
+                program.program, program.detail
+            );
+        }
+    }
 }
 
 async fn report_claude_pre_tool_use(
@@ -214,9 +324,32 @@ fn claude_client_id_for_entrypoint(entrypoint: Option<&str>) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use agentdesktop_core::model::TelemetryEventKind;
+    use agentdesktop_core::model::{ProgramChoice, TelemetryEventKind};
 
-    use super::parse_claude_pre_tool_use;
+    use super::{parse_claude_pre_tool_use, parse_program_choice};
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn program_choice_is_all_none_or_program_ids() {
+        assert_eq!(
+            parse_program_choice(&args(&["all"])).unwrap(),
+            ProgramChoice::All
+        );
+        assert_eq!(
+            parse_program_choice(&args(&["none"])).unwrap(),
+            ProgramChoice::None
+        );
+        assert_eq!(
+            parse_program_choice(&args(&["codex", "claude-code"])).unwrap(),
+            ProgramChoice::Selected {
+                programs: ["claude-code".to_owned(), "codex".to_owned()].into(),
+            }
+        );
+        assert!(parse_program_choice(&args(&["none", "codex"])).is_err());
+    }
 
     #[test]
     fn parses_claude_pre_tool_use_input_without_unrelated_fields() {

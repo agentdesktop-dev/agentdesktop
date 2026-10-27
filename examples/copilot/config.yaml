@@ -1,0 +1,39 @@
+# yaml-language-server: $schema=../../schema/daemon-config.json
+# Agentdesktop daemon configuration for the Copilot example (user mode, no controller).
+llmGateway:
+  url: http://127.0.0.1:4001
+  # The pass-through route for GitHub's models (VS Code copilotChat: githubModels).
+  proxyUrl: http://127.0.0.1:4001/copilot-proxy
+  authentication:
+    type: oidc
+    issuer: http://127.0.0.1:5557/dex
+    clientId: agentdesktop-local
+    scopes: [openid, email, offline_access]
+    allowInsecure: true
+
+daemon:
+  user: true
+  llmProxy:
+    # The loopback proxy the managed client files point at.
+    listen: 127.0.0.1:4010
+  # Opt-in: re-apply every minute, so deleted or edited managed files come back and fixed
+  # conflicts apply. Leave it out for no periodic re-apply.
+  reconcileInterval: 1m
+
+programs:
+  # GitHub Copilot CLI: ~/.copilot/providers.json gains the providers "agentdesktop" and
+  # "agentdesktop-anthropic"; run `copilot --model agentdesktop/gpt-4.1`.
+  copilot:
+    models:
+      gpt-4.1: {}
+  # VS Code Copilot Chat on the gateway's models: chatLanguageModels.json gains the vendor
+  # entry "agentdesktop"; the picker shows "gpt-4.1-mini (agentdesktop)".
+  vscode:
+    models:
+      gpt-4.1-mini:
+        maxInputTokens: 128000
+        maxOutputTokens: 16000
+  # VS Code Copilot Chat on GitHub's models through the gateway instead (Copilot Business or
+  # Enterprise seat): replace the vscode block above with
+  # vscode:
+  #   copilotChat: githubModels

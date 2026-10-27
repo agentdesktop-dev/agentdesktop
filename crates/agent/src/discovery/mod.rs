@@ -16,6 +16,12 @@ pub async fn discover() -> Discovery {
         crate::reconcile::default_open_code_managed_config_path(),
         crate::reconcile::default_open_code_plugin_path(),
         PathBuf::new(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        PathBuf::new(),
         PathBuf::new(),
     )
     .discover()

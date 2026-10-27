@@ -4,8 +4,12 @@ import { expect, fn, userEvent, within } from "storybook/test";
 import { ControllerStoryFrame } from "../stories/ControllerStoryFrame";
 import {
   deviceDetail,
+  deviceUsageReport,
   emptyDeviceDetail,
+  emptyUsageReport,
   failedDeviceDetail,
+  oldAgentDeviceDetail,
+  optedOutDeviceDetail,
 } from "../stories/fixtures";
 import { DeviceView } from "./DeviceView";
 
@@ -64,6 +68,36 @@ export const BrowsesDiscoveredCapabilities: Story = {
 
 export const ConfigurationFailed: Story = {
   args: { device: failedDeviceDetail },
+  play: async ({ canvas }) => {
+    await expect(canvas.getByText("Managed programs")).toBeVisible();
+    await expect(canvas.getByText("Conflict")).toBeVisible();
+    await expect(canvas.getByText("Blocked")).toBeVisible();
+    await expect(
+      canvas.getByText("not applied: vscode conflicted"),
+    ).toBeVisible();
+  },
+};
+
+export const ProgramOptedOut: Story = {
+  args: { device: optedOutDeviceDetail },
+  play: async ({ canvas }) => {
+    await expect(canvas.getByText("Opted out")).toHaveAttribute(
+      "title",
+      "The device user opted out of this program",
+    );
+    await expect(canvas.getByText("Applied")).not.toHaveAttribute("title");
+  },
+};
+
+export const OlderAgentWithoutProgramStatus: Story = {
+  args: { device: oldAgentDeviceDetail },
+  play: async ({ canvas }) => {
+    await expect(
+      canvas.getByText(
+        "Per-program status is not reported by this agent version",
+      ),
+    ).toBeVisible();
+  },
 };
 
 export const NoActivityOrTools: Story = {
@@ -102,4 +136,35 @@ export const DeleteFailed: Story = {
 
 export const Deleting: Story = {
   args: { deleteOpen: true, deleting: true },
+};
+
+export const WithUsage: Story = {
+  args: { usage: deviceUsageReport },
+  play: async ({ canvas }) => {
+    await expect(canvas.getByRole("heading", { name: "Usage" })).toBeVisible();
+    const tools = within(canvas.getByRole("table", { name: "Usage by tool" }));
+    await expect(tools.getByText("Claude Code")).toBeVisible();
+    await expect(
+      canvas.getByRole("link", { name: "View in Usage" }),
+    ).toHaveAttribute("href", "/usage?range=30d&device=device-mac-12345678");
+  },
+};
+
+export const WithoutRecentUsage: Story = {
+  args: { usage: emptyUsageReport },
+  play: async ({ canvas }) => {
+    await expect(
+      canvas.getByText("No LLM gateway usage in the last 30 days."),
+    ).toBeVisible();
+  },
+};
+
+export const Dark: Story = {
+  ...BrowsesDiscoveredCapabilities,
+  globals: { colorMode: "dark" },
+};
+
+export const DarkDeleteFailed: Story = {
+  ...DeleteFailed,
+  globals: { colorMode: "dark" },
 };

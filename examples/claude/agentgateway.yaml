@@ -1,9 +1,27 @@
 # yaml-language-server: $schema=https://agentgateway.dev/schema/config
 frontendPolicies:
-  logging:
+  accessLog:
     add:
       llm.client: jwt.client_id
       user: jwt.email
+    # Token and cost usage for the controller (`usage` in controller.yaml).
+    otlp:
+      host: https://127.0.0.1:8443
+      policies:
+        backendTLS:
+          root: /etc/agentgateway/controller-ca.pem
+        backendAuth:
+          key:
+            value: $AGENTDESKTOP_USAGE_TOKEN
+      fields:
+        add:
+          agentdesktop.subject: jwt.sub
+          agentdesktop.device: jwt.act.sub
+          agentdesktop.client: jwt.client_id
+          agentdesktop.billing: >-
+            request.headers["authorization"].startsWith("Bearer agentdesktop:")
+              ? "subscription"
+              : "api"
 gateways:
   gateway:
     port: 4000

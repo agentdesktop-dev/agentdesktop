@@ -242,14 +242,19 @@ fn collect_history_files(
         traversal.unreadable = true;
         return;
     };
-    for entry in entries.flatten() {
+    for entry in entries {
         if *entries_seen >= entry_limit {
             traversal.limited = true;
             return;
         }
         *entries_seen += 1;
+        let Ok(entry) = entry else {
+            traversal.unreadable = true;
+            continue;
+        };
         let path = entry.path();
         let Ok(file_type) = entry.file_type() else {
+            traversal.unreadable = true;
             continue;
         };
         if file_type.is_dir() {
@@ -267,6 +272,7 @@ fn collect_history_files(
                 .is_some_and(|extension| extension == "json" || extension == "jsonl")
         {
             let Ok(metadata) = entry.metadata() else {
+                traversal.unreadable = true;
                 continue;
             };
             files.push(HistoryCandidate {

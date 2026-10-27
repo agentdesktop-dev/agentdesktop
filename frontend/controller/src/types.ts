@@ -1,3 +1,10 @@
+import type {
+  UsageBucket,
+  UsageDimension,
+  UsageGroup,
+  UsageTotals,
+} from "@agentdesktop/ui";
+
 export type Device = {
   id: string;
   hostname: string;
@@ -16,7 +23,26 @@ export type Device = {
   installed_tools: string[];
 };
 
+export type ProgramStatus = {
+  program: string;
+  state:
+    | "applied"
+    | "unchanged"
+    | "removed"
+    | "conflict"
+    | "inactive"
+    | "blocked"
+    | "opted_out"
+    | "failed"
+    | "unspecified";
+  detail: string;
+  revision: number;
+  updated_at: number;
+};
+
 export type DeviceDetail = Device & {
+  programs: ProgramStatus[];
+  programs_reported: boolean | null;
   discoveries: Array<{
     kind: string;
     version: string;
@@ -67,9 +93,39 @@ export type ControllerSettings = {
   oidc_enabled: boolean;
   tls_enabled: boolean;
   gateway_jwt_enabled: boolean;
+  usage_enabled: boolean;
 };
 
-export type AgentKind = "claudeCode" | "claudeDesktop" | "codex" | "openCode";
+export type UsageRange = "24h" | "7d" | "30d" | "90d";
+
+/** `GET /api/v1/usage`. Unlike other admin endpoints, this one is camelCase. */
+export type UsageReport = {
+  enabled: boolean;
+  range: UsageRange;
+  fromUnixSeconds: number;
+  toUnixSeconds: number;
+  bucketSeconds: number;
+  totals: UsageTotals;
+  previousTotals: UsageTotals;
+  activeUsers: number;
+  activeDevices: number;
+  buckets: UsageBucket[];
+  breakdowns: Partial<Record<UsageDimension, UsageGroup[]>>;
+  /** Users whatever the user and device filters; devices of the chosen user. */
+  filterOptions: Record<"user" | "device", UsageFilterOption[]>;
+};
+
+export type UsageFilterOption = Pick<UsageGroup, "key" | "label">;
+
+export type AgentKind =
+  | "claudeCode"
+  | "claudeDesktop"
+  | "codex"
+  | "openCode"
+  | "grok"
+  | "copilot"
+  | "vscode"
+  | "pi";
 
 export type AgentDraft = {
   kind: AgentKind;
@@ -90,6 +146,8 @@ export type SandboxConfigDocument = {
 export type DaemonConfigDocument = {
   llmGateway?: {
     url: string;
+    proxyUrl?: string;
+    whenProxyUnavailable?: "failClosed" | "failOpen";
     authentication?: {
       type: string;
       audience?: string;
@@ -100,6 +158,9 @@ export type DaemonConfigDocument = {
     events?: string[];
   };
   programs?: Partial<Record<AgentKind, Record<string, unknown>>>;
+  programSelection?: {
+    allowUserChoice?: boolean;
+  };
 };
 
 export type ActiveDaemonConfig = {

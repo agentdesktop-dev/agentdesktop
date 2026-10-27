@@ -179,11 +179,15 @@ impl Container {
         result
     }
 
+    /// Writes the file as the container's default user (root). An existing
+    /// file is removed first: with `fs.protected_regular=2` (the default on
+    /// current kernels) root cannot open a file another user owns inside a
+    /// sticky world-writable directory such as `/tmp` for writing.
     pub async fn write(&self, path: &str, contents: &str) -> anyhow::Result<()> {
         self.exec(&[
             "sh",
             "-c",
-            "mkdir -p -- \"$(dirname -- \"$1\")\" && printf '%s' \"$2\" > \"$1\"",
+            "mkdir -p -- \"$(dirname -- \"$1\")\" && rm -f -- \"$1\" && printf '%s' \"$2\" > \"$1\"",
             "write",
             path,
             contents,
@@ -216,8 +220,17 @@ impl Container {
     pub async fn stop_process(&self, name: &str) -> anyhow::Result<()> {
         let started = Instant::now();
         let pid = self.read(&format!("/tmp/{name}.pid")).await?;
-        self.exec(&["sh", "-c", "kill -INT \"$1\"", "stop", pid.trim()])
-            .await?;
+        // The recorded PID is the launcher (`runuser`, which ignores SIGINT
+        // while its child runs, as `su` does), so the signal also goes to its
+        // children, read from /proc since the image has no pgrep.
+        self.exec(&[
+            "sh",
+            "-c",
+            "p=$1; for d in /proc/[0-9]*; do s=$(cat \"$d/stat\" 2>/dev/null) || continue; r=${s##*) }; set -- $r; [ \"$2\" = \"$p\" ] && kill -INT \"${d#/proc/}\" 2>/dev/null; done; kill -INT \"$p\" 2>/dev/null; exit 0",
+            "stop",
+            pid.trim(),
+        ])
+        .await?;
         self.exec(&[
             "timeout",
             "10",

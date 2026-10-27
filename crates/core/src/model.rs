@@ -1,8 +1,12 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Discovery {
     pub agents: Vec<Agent>,
@@ -25,7 +29,7 @@ pub struct LocalModel {
     pub name: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Agent {
     pub kind: String,
@@ -271,8 +275,181 @@ pub struct Skill {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Health {
     pub status: String,
+    /// Present only when the daemon has a controller configured. Reflects
+    /// whether the daemon's own connection to the controller is currently
+    /// live, independent of local process health: a daemon can be fully
+    /// healthy locally while its controller stream is down (auth rejection,
+    /// network partition, stuck retry loop, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller: Option<ControllerConnectionStatus>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ControllerConnectionStatus {
+    pub connected: bool,
+    /// Last time the daemon observed its controller stream alive: when the
+    /// stream opened, a heartbeat was handed to it, or a controller message
+    /// arrived. Retained across disconnects so the UI can say how long the
+    /// device has been out of contact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_unix_seconds: Option<u64>,
+    /// Coarse reason for the most recent failure. Deliberately a closed set:
+    /// the full error chain (addresses, paths, upstream messages) stays in the
+    /// daemon logs and is never returned to the local API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<ControllerConnectionError>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ControllerConnectionError {
+    /// The controller could not be reached or the stream failed; retrying.
+    Unreachable,
+    /// The controller rejected the device identity; the daemon is re-enrolling.
+    IdentityRejected,
+    /// The organization session could not be refreshed; the daemon is re-enrolling.
+    SessionExpired,
+    /// A local error (for example, the identity store) ended the controller
+    /// session; the daemon is restarting it.
+    LocalError,
+    /// A reason reported by a newer daemon that this build does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Read-only startup information reported by the running daemon, not the desktop host.
+/// Deliberately excludes tool configuration, credentials, and certificate contents.
+/// Paths are lossy UTF-8 display strings, not paths for filesystem operations.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DaemonInfo {
+    pub version: String,
+    pub scope: DaemonScope,
+    pub config_path: String,
+    pub state_directory: String,
+    #[serde(with = "humantime_serde")]
+    pub inventory_interval: Duration,
+    pub controller: Option<DaemonControllerInfo>,
+    /// Local loopback LLM proxy, when configured. Absent in system mode and when
+    /// `daemon.llmProxy.listen` is unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_proxy: Option<LlmProxyInfo>,
+    /// Receiver for usage from a gateway on this machine, when
+    /// `daemon.usage` is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_receiver: Option<UsageReceiverInfo>,
+}
+
+/// State of the daemon's receiver for gateway usage.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageReceiverInfo {
+    /// Configured address; the bound address once the listener is up.
+    pub listen: String,
+    /// Whether the receiver accepts exports. `false` means its listener,
+    /// token, or database failed at startup; it stays off until the daemon
+    /// restarts.
+    pub bound: bool,
+    /// Why the receiver is off, when `bound` is `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// State of the daemon's loopback LLM proxy listener.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmProxyInfo {
+    /// Configured address; the bound address once the listener is up.
+    pub listen: String,
+    /// Whether the listener is bound. `false` means the bind failed at startup;
+    /// the daemon keeps running with the proxy off until it is restarted.
+    pub bound: bool,
+    /// Credential policy client ID the proxy presents to the gateway.
+    pub client_id: String,
+    /// Why the bind failed, when `bound` is `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DaemonScope {
+    User,
+    System,
+}
+
+/// Connection metadata only; URL credentials, query, and fragment are omitted.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DaemonControllerInfo {
+    pub address: String,
+    /// Lossy UTF-8 display path; never used to load the certificate.
+    pub ca_certificate_path: Option<String>,
+    #[serde(with = "humantime_serde")]
+    pub heartbeat_interval: Duration,
+}
+
+/// The configured programs the device user wants Agentdesktop to manage.
+/// Honored only while the policy sets `programSelection.allowUserChoice`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", tag = "mode")]
+pub enum ProgramChoice {
+    /// Every configured program, including programs configured later.
+    #[default]
+    All,
+    /// No program: Agentdesktop removes the settings it wrote for each one.
+    None,
+    /// Only these programs, by provider ID (for example `claude-code`).
+    /// Programs configured later stay unmanaged until chosen.
+    Selected { programs: BTreeSet<String> },
+}
+
+impl ProgramChoice {
+    /// Whether this choice keeps `program` (a provider ID) managed.
+    pub fn includes(&self, program: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::None => false,
+            Self::Selected { programs } => programs.contains(program),
+        }
+    }
+}
+
+/// Which configured programs are managed on this device, and whether the
+/// device user may change that.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgramManagement {
+    /// Whether the policy lets the device user choose
+    /// (`programSelection.allowUserChoice`).
+    pub user_choice_allowed: bool,
+    /// The device user's stored choice; ignored while `user_choice_allowed`
+    /// is `false`.
+    pub choice: ProgramChoice,
+    /// The programs the policy configures, in reconcile order. Empty before
+    /// the device has a configuration.
+    pub programs: Vec<ManagedProgram>,
+}
+
+/// One configured program and its last reconcile outcome.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedProgram {
+    /// Provider ID, for example `claude-code`.
+    pub program: String,
+    /// Whether Agentdesktop manages this program: `false` when the device
+    /// user opted out of it.
+    pub managed: bool,
+    /// Outcome of the last apply (`applied`, `unchanged`, `opted_out`, …);
+    /// absent until the program has been applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -281,6 +458,10 @@ pub struct EnrollmentStatus {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization_url: Option<String>,
+    /// Code the user confirms at `authorization_url` during device
+    /// authorization enrollment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_code: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -288,6 +469,76 @@ pub struct EnrollmentStatus {
 pub struct LlmGatewayCredential {
     pub credential: String,
     pub expires_at_unix_seconds: u64,
+}
+
+/// LLM gateway sign-in state for OIDC device authorization.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmGatewayLoginStatus {
+    /// `signedIn` or `awaitingAuthentication`.
+    pub status: String,
+    /// Page where the user approves the sign-in from any device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_url: Option<String>,
+    /// Code the user confirms at `verification_url`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_code: Option<String>,
+}
+
+/// Token and cost totals over a set of LLM gateway requests.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageTotals {
+    pub requests: u64,
+    pub errors: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    /// API-billed cost in US dollars at the gateway's catalog prices.
+    pub cost_usd: f64,
+    /// Subscription-billed requests priced at API rates. A subscription is
+    /// not billed per token, so this is never part of `cost_usd`.
+    pub subscription_cost_usd: f64,
+    pub subscription_requests: u64,
+    /// Requests for models the gateway has no price for.
+    pub unpriced_requests: u64,
+}
+
+/// Usage totals for one value of a breakdown dimension.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageGroup {
+    pub key: String,
+    pub totals: UsageTotals,
+}
+
+/// Usage totals for one time bucket.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageBucket {
+    pub start_unix_seconds: u64,
+    pub totals: UsageTotals,
+}
+
+/// LLM gateway usage recorded for this device by its controller, or by the
+/// daemon itself when it has no controller.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceUsage {
+    /// False when the controller does not collect usage.
+    pub enabled: bool,
+    pub from_unix_seconds: u64,
+    pub to_unix_seconds: u64,
+    pub bucket_seconds: u64,
+    pub totals: UsageTotals,
+    pub buckets: Vec<UsageBucket>,
+    pub by_tool: Vec<UsageGroup>,
+    pub by_model: Vec<UsageGroup>,
+    /// Configured tools whose traffic does not reach the gateway's usage
+    /// records, such as VS Code with `copilotChat: githubModels`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unmetered_tools: Vec<String>,
 }
 
 /// A timestamped telemetry observation emitted by a managed device.
@@ -325,4 +576,49 @@ pub enum TelemetryEventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_input: Option<serde_json::Value>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ControllerConnectionError, ControllerConnectionStatus, ProgramChoice};
+
+    #[test]
+    fn controller_connection_error_is_a_closed_camel_case_set() {
+        let status = ControllerConnectionStatus {
+            connected: false,
+            last_seen_unix_seconds: Some(1),
+            last_error: Some(ControllerConnectionError::IdentityRejected),
+        };
+        assert_eq!(
+            serde_json::to_value(&status).unwrap(),
+            serde_json::json!({
+                "connected": false,
+                "lastSeenUnixSeconds": 1,
+                "lastError": "identityRejected",
+            })
+        );
+
+        let newer: ControllerConnectionStatus =
+            serde_json::from_str(r#"{"connected":false,"lastError":"somethingNew"}"#).unwrap();
+        assert_eq!(newer.last_error, Some(ControllerConnectionError::Unknown));
+    }
+
+    #[test]
+    fn program_choice_is_tagged_by_mode() {
+        let selected = ProgramChoice::Selected {
+            programs: ["codex".to_owned()].into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&selected).unwrap(),
+            serde_json::json!({ "mode": "selected", "programs": ["codex"] })
+        );
+        assert_eq!(
+            serde_json::from_str::<ProgramChoice>(r#"{"mode":"none"}"#).unwrap(),
+            ProgramChoice::None
+        );
+        assert!(ProgramChoice::default().includes("claude-code"));
+        assert!(!ProgramChoice::None.includes("claude-code"));
+        assert!(selected.includes("codex"));
+        assert!(!selected.includes("claude-code"));
+    }
 }

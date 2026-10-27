@@ -54,6 +54,21 @@ pub async fn get<T>(endpoint: &Path, path: &str) -> anyhow::Result<T>
 where
     T: DeserializeOwned,
 {
+    request(endpoint, "GET", path).await
+}
+
+/// Sends a POST without a request body and decodes the JSON response.
+pub async fn post<T>(endpoint: &Path, path: &str) -> anyhow::Result<T>
+where
+    T: DeserializeOwned,
+{
+    request(endpoint, "POST", path).await
+}
+
+async fn request<T>(endpoint: &Path, method: &str, path: &str) -> anyhow::Result<T>
+where
+    T: DeserializeOwned,
+{
     let stream = connect(endpoint).await?;
     let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
         .await
@@ -66,7 +81,7 @@ where
     });
 
     let request = Request::builder()
-        .method("GET")
+        .method(method)
         .uri(path)
         .header("host", "localhost")
         .body(Empty::<Bytes>::new())?;
@@ -90,6 +105,23 @@ where
 }
 
 pub async fn post_json<T>(endpoint: &Path, path: &str, value: &T) -> anyhow::Result<()>
+where
+    T: Serialize,
+{
+    send_json(endpoint, path, value).await.map(drop)
+}
+
+/// Sends a POST with a JSON request body and decodes the JSON response.
+pub async fn post_json_decode<T, R>(endpoint: &Path, path: &str, value: &T) -> anyhow::Result<R>
+where
+    T: Serialize,
+    R: DeserializeOwned,
+{
+    let body = send_json(endpoint, path, value).await?;
+    serde_json::from_slice(&body).context("decode daemon response")
+}
+
+async fn send_json<T>(endpoint: &Path, path: &str, value: &T) -> anyhow::Result<Bytes>
 where
     T: Serialize,
 {
@@ -125,7 +157,7 @@ where
             String::from_utf8_lossy(&body)
         );
     }
-    Ok(())
+    Ok(body)
 }
 
 #[cfg(test)]

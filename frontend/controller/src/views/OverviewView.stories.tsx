@@ -40,3 +40,7 @@ export const EmptyFleet: Story = {
 export const NoActiveConfiguration: Story = {
   args: { data: { ...overview, active_revision: null } },
 };
+
+export const Dark: Story = {
+  globals: { colorMode: "dark" },
+};

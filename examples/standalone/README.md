@@ -15,10 +15,21 @@ This example runs without a controller, and is useful for simple configuration o
 
 ## Run the example
 
-Start Dex and Agentgateway from the repository root:
+Create the token Agentgateway sends with token and cost usage to the daemon:
+
+```sh
+(umask 077 && mkdir -p /tmp/agentdesktop-standalone &&
+  openssl rand -hex 32 > /tmp/agentdesktop-standalone/usage-token)
+```
+
+Start Dex and Agentgateway from the repository root. Agentgateway uses host
+networking to reach the daemon on 127.0.0.1; on Docker Desktop, first enable
+host networking under **Settings > Resources > Network**. Linux supports host
+networking directly.
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
+export AGENTDESKTOP_USAGE_TOKEN="$(cat /tmp/agentdesktop-standalone/usage-token)"
 docker compose -f examples/standalone/compose.yaml up -d
 ```
 
@@ -62,13 +73,29 @@ $ agentdesktop daemon --config examples/standalone/config.yaml --user
 When we run `claude`, we can now see the message we programmed (`Using the local Agentgateway through Agentdesktop`),
 and messages we send will traverse Agentgateway.
 
+### Usage
+
+Agentgateway sends one access-log record per request to the daemon, which
+listens on 127.0.0.1:4319 (`daemon.usage` in `config.yaml`) and keeps this
+machine's usage. Open the desktop app and select **Usage** to see tokens and
+cost by tool and model.
+
+## Pi
+
+Uncomment `programs.pi` in `config.yaml` to enable Pi with `claude-sonnet-4-5`.
+Run `pi` while the daemon is running to use that model through the gateway.
+Pi requires `--user`; authenticated gateway configuration cannot be applied
+with `--once` in user mode. Pi and Claude Desktop can share a policy: user
+daemons skip Claude Desktop, and system daemons skip Pi, with an inactive reason.
+
+
 ## Claude Desktop
 
 In the Claude Code example, we ran with `--user`. This runs the daemon as an unprivileged user.
 
 Claude Desktop, however, requires root configuration.
 
-Uncomment the Claude Desktop configuration in `config.yaml` and save the file.
+Uncomment the Claude Desktop configuration in `config.yaml`, then save the file.
 Then run the daemon as root:
 
 ```sh

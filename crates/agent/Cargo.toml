@@ -24,20 +24,28 @@ async-trait = "0.1"
 agentdesktop-client.workspace = true
 agentdesktop-core.workspace = true
 agentdesktop-proto.workspace = true
+agentdesktop-usage.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 base64.workspace = true
+bytes.workspace = true
 clap.workspace = true
+glob = "0.3"
 hostname.workspace = true
 hyper.workspace = true
-hyper-util.workspace = true
+hyper-rustls.workspace = true
+hyper-util = { workspace = true, features = ["client-legacy", "http1"] }
+http-body-util.workspace = true
 json5.workspace = true
 jsonc-parser.workspace = true
 memchr.workspace = true
+notify.workspace = true
+notify-debouncer-full.workspace = true
 open.workspace = true
 rand.workspace = true
 rcgen.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
@@ -51,10 +59,18 @@ toml.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+# The Windows secret envelope (secret_store.rs) is tested on every platform.
+aws-lc-rs.workspace = true
 futures-util = "0.3"
+# Hand-rolled RFC 6455 handshake for the vscode-copilot-capi WebSocket
+# tunnel tests (llm_proxy.rs): Sec-WebSocket-Accept is
+# base64(sha1(key + the RFC 6455 GUID)).
+sha1 = "0.11"
 tempfile = "3"
 testcontainers = "0.28"
 tracing-subscriber.workspace = true
+# `start_paused` keeps the interval-driven inventory tests deterministic.
+tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -62,12 +78,15 @@ libc.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store.workspace = true
 keyring-core.workspace = true
+plist = "1.10"
 
 [target.'cfg(windows)'.dependencies]
+aws-lc-rs.workspace = true
 keyring.workspace = true
 windows-service = "0.8.1"
 windows-sys = { version = "0.61", features = [
 	"Win32_Foundation",
 	"Win32_Security",
 	"Win32_Security_Authorization",
+	"Win32_System_Registry",
 ] }

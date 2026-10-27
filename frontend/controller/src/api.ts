@@ -1,29 +1,36 @@
 import { useEffect, useState } from "react";
 
 export function useApi<T>(path: string) {
-  const [data, setData] = useState<T | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [query, setQuery] = useState<{
+    path: string;
+    data: T | null;
+    error: string | null;
+    loading: boolean;
+  }>({ path, data: null, error: null, loading: true });
 
   useEffect(() => {
     const controller = new AbortController();
     let active = true;
-    setLoading(true);
+    setQuery({ path, data: null, error: null, loading: true });
     fetch(path, { signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) throw new Error(await response.text());
         return response.json() as Promise<T>;
       })
       .then((response) => {
-        if (active) setData(response);
+        if (active) {
+          setQuery({ path, data: response, error: null, loading: false });
+        }
       })
       .catch((reason: Error) => {
         if (active && reason.name !== "AbortError") {
-          setError(reason.message || "Request failed");
+          setQuery({
+            path,
+            data: null,
+            error: reason.message || "Request failed",
+            loading: false,
+          });
         }
-      })
-      .finally(() => {
-        if (active) setLoading(false);
       });
     return () => {
       active = false;
@@ -31,5 +38,7 @@ export function useApi<T>(path: string) {
     };
   }, [path]);
 
-  return { data, error, loading };
+  return query.path === path
+    ? query
+    : { path, data: null, error: null, loading: true };
 }

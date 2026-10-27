@@ -2,8 +2,9 @@ use std::pin::Pin;
 
 use agentdesktop_proto::fleet::{
     AgentMessage, BeginEnrollmentRequest, BeginEnrollmentResponse, CompleteEnrollmentRequest,
-    ControllerMessage, DeviceCertificateResponse, EnrollResponse, LlmGatewayCredentialRequest,
-    LlmGatewayCredentialResponse, RenewDeviceCertificateRequest, agent_message, controller_message,
+    ConfigStatus, ControllerMessage, DeviceCertificateResponse, DeviceUsageRequest,
+    DeviceUsageResponse, EnrollResponse, LlmGatewayCredentialRequest, LlmGatewayCredentialResponse,
+    RenewDeviceCertificateRequest, agent_message, controller_message,
     fleet_agent_server::FleetAgent,
 };
 use futures_core::Stream;
@@ -14,7 +15,8 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 use x509_parser::{extensions::GeneralName, parse_x509_certificate};
 
-use agentdesktop_core::config::LlmGatewayAuthentication;
+use agentdesktop_core::config::{LlmGatewayAuthentication, ProgramAuthentication, ProgramsConfig};
+use agentdesktop_usage::UsageError;
 
 use crate::{
     daemon_config::DaemonConfigStore,
@@ -31,6 +33,7 @@ pub struct FleetAgentService {
     daemon_config: DaemonConfigStore,
     gateway_jwt_issuer: Option<GatewayJwtIssuer>,
     device_certificate_issuer: Option<DeviceCertificateIssuer>,
+    usage_enabled: bool,
 }
 
 impl FleetAgentService {
@@ -47,7 +50,28 @@ impl FleetAgentService {
             daemon_config,
             gateway_jwt_issuer,
             device_certificate_issuer,
+            usage_enabled: false,
         }
+    }
+
+    /// Tells devices that the controller collects gateway usage.
+    pub fn with_usage_collection(mut self, enabled: bool) -> Self {
+        self.usage_enabled = enabled;
+        self
+    }
+}
+
+fn subscription_is_configured_for_client(programs: &ProgramsConfig, client_id: &str) -> bool {
+    match client_id {
+        "claude-code" => programs
+            .claude_code
+            .as_ref()
+            .is_some_and(|program| program.auth == Some(ProgramAuthentication::Subscription)),
+        "claude-desktop" => programs
+            .claude_desktop
+            .as_ref()
+            .is_some_and(|program| program.auth == Some(ProgramAuthentication::Subscription)),
+        _ => false,
     }
 }
 
@@ -64,10 +88,12 @@ impl FleetAgent for FleetAgentService {
             .as_ref()
             .ok_or_else(|| Status::failed_precondition("OIDC enrollment is disabled"))?;
         let request = request.into_inner();
-        let response = oidc
-            .begin(request.hostname, &request.code_challenge)
-            .await
-            .map_err(invalid_enrollment)?;
+        let response = if request.device_authorization {
+            oidc.begin_device(request.hostname).await
+        } else {
+            oidc.begin(request.hostname, &request.code_challenge).await
+        }
+        .map_err(invalid_enrollment)?;
         Ok(Response::new(response))
     }
 
@@ -122,7 +148,10 @@ impl FleetAgent for FleetAgentService {
         request: Request<LlmGatewayCredentialRequest>,
     ) -> Result<Response<LlmGatewayCredentialResponse>, Status> {
         let device_id = self.authenticate_device(&request).await?;
-        let client_id = request.into_inner().client_id;
+        let LlmGatewayCredentialRequest {
+            client_id,
+            subscription,
+        } = request.into_inner();
         if !agentdesktop_core::config::valid_client_id(&client_id) {
             return Err(Status::invalid_argument("invalid client_id"));
         }
@@ -155,6 +184,16 @@ impl FleetAgent for FleetAgentService {
             );
             return Err(Status::permission_denied("client_id is not allowed"));
         }
+        let subscription_requested = subscription;
+        let subscription = subscription_requested
+            && subscription_is_configured_for_client(&config.programs, &client_id);
+        if subscription_requested && !subscription {
+            warn!(
+                device_id,
+                client_id,
+                "ignored subscription billing claim without subscription auth configuration"
+            );
+        }
         let issuer = self.gateway_jwt_issuer.as_ref().ok_or_else(|| {
             Status::failed_precondition("controller gateway JWT issuer is not configured")
         })?;
@@ -175,6 +214,7 @@ impl FleetAgent for FleetAgentService {
                 &client_id,
                 audience,
                 principal.idp_claims.as_ref(),
+                subscription,
             )
             .map_err(internal)?;
         info!(
@@ -182,12 +222,32 @@ impl FleetAgent for FleetAgentService {
             expires_at_unix_seconds,
             enrolled_by_issuer = principal.issuer,
             client_id,
+            subscription,
             "issued LLM gateway credential"
         );
         Ok(Response::new(LlmGatewayCredentialResponse {
             credential,
             expires_at_unix_seconds,
         }))
+    }
+
+    async fn get_device_usage(
+        &self,
+        request: Request<DeviceUsageRequest>,
+    ) -> Result<Response<DeviceUsageResponse>, Status> {
+        let device_id = self.authenticate_device(&request).await?;
+        agentdesktop_usage::device_usage(
+            &self.database.usage(),
+            Some(&device_id),
+            request.get_ref(),
+            self.usage_enabled,
+        )
+        .await
+        .map(Response::new)
+        .map_err(|error| match error {
+            UsageError::InvalidQuery(message) => Status::invalid_argument(message),
+            UsageError::Storage(error) => internal(error),
+        })
     }
 
     async fn connect(
@@ -482,7 +542,7 @@ async fn handle_agent_message(
             );
         }
         Some(agent_message::Message::ConfigStatus(status)) => {
-            database.update_config_status(device_id, &status).await?;
+            store_config_status(database, device_id, &status).await?;
             if status.error.is_empty() {
                 info!(
                     device_id,
@@ -505,6 +565,27 @@ async fn handle_agent_message(
         None => {}
     }
     Ok(())
+}
+
+/// Stores a device's configuration status. A per-program report the
+/// controller rejects must not break the stream (the agent would reconnect,
+/// receive the configuration again and send the same report), so the
+/// device-wide status is stored and the last accepted program rows stay.
+/// Database errors are returned as they are.
+async fn store_config_status(
+    database: &Database,
+    device_id: &str,
+    status: &ConfigStatus,
+) -> anyhow::Result<()> {
+    if let Err(error) = crate::database::validate_program_status(status) {
+        warn!(
+            device_id,
+            error = %format!("{error:#}"),
+            "rejected per-program configuration status; storing the device status and keeping the last accepted program status"
+        );
+        return database.update_device_config_state(device_id, status).await;
+    }
+    database.update_config_status(device_id, status).await
 }
 
 fn bearer_credential(metadata: &tonic::metadata::MetadataMap) -> Result<&str, Status> {
@@ -554,8 +635,30 @@ mod tests {
     use rcgen::{CertificateParams, KeyPair};
     use tonic::Code;
 
-    use super::{FleetAgentService, device_id_from_certificate};
+    use super::{
+        FleetAgentService, device_id_from_certificate, subscription_is_configured_for_client,
+    };
     use crate::{daemon_config::DaemonConfigStore, database::Database, oidc::OidcPrincipal};
+
+    #[test]
+    fn subscription_billing_requires_server_configured_program_auth() {
+        let config = agentdesktop_core::config::parse_daemon(
+            "llmGateway:\n  url: https://gateway.example.com\n  authentication:\n    type: oidc\n    issuer: https://issuer.example.com\n    clientId: desktop\nprograms:\n  claudeCode:\n    auth: subscription\n",
+        )
+        .unwrap();
+        assert!(subscription_is_configured_for_client(
+            &config.programs,
+            "claude-code"
+        ));
+        assert!(!subscription_is_configured_for_client(
+            &config.programs,
+            "claude-desktop"
+        ));
+        assert!(!subscription_is_configured_for_client(
+            &config.programs,
+            "codex"
+        ));
+    }
 
     #[tokio::test]
     async fn device_authentication_binds_oidc_issuer_and_subject() {
@@ -655,5 +758,65 @@ mod tests {
             device_id_from_certificate(certificate.der().as_ref()).unwrap(),
             device_id
         );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_program_report_keeps_the_device_status() {
+        use agentdesktop_proto::fleet::{ConfigState, ConfigStatus, ProgramState, ProgramStatus};
+        let path = std::env::temp_dir().join(format!(
+            "agentdesktop-rejected-report-{}-{}.db",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let database = Database::connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .await
+            .unwrap();
+        database
+            .enroll_device("device", "host", "issuer", "subject", None)
+            .await
+            .unwrap();
+        let accepted = ConfigStatus {
+            revision: 2,
+            state: ConfigState::Applied.into(),
+            error: String::new(),
+            programs: vec![ProgramStatus {
+                program: "claude-code".to_owned(),
+                state: ProgramState::Applied.into(),
+                detail: String::new(),
+            }],
+            programs_reported: true,
+        };
+        super::store_config_status(&database, "device", &accepted)
+            .await
+            .unwrap();
+        let status = ConfigStatus {
+            revision: 3,
+            state: ConfigState::Failed.into(),
+            error: "refusing to change VS Code settings".to_owned(),
+            programs: vec![ProgramStatus {
+                program: "Not Valid".to_owned(),
+                state: ProgramState::Conflict.into(),
+                detail: String::new(),
+            }],
+            programs_reported: true,
+        };
+        super::store_config_status(&database, "device", &status)
+            .await
+            .expect("a rejected program report does not fail the stream");
+        let device = database.get_device("device").await.unwrap().unwrap();
+        assert_eq!(device.device.config_revision, Some(3));
+        assert_eq!(device.device.config_state, Some(2));
+        assert_eq!(
+            device
+                .programs
+                .iter()
+                .map(|program| program.program.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude-code"],
+            "the last accepted program rows stay"
+        );
+        assert_eq!(device.programs_reported, Some(true));
+        drop(database);
+        let _ = std::fs::remove_file(path);
     }
 }

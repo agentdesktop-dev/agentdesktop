@@ -24,6 +24,8 @@ export function ConfigurationView({
   const initializedFromController = useRef(false);
   const [gateway, setGateway] = useState(true);
   const [gatewayUrl, setGatewayUrl] = useState("https://gateway.example.com");
+  const [gatewayProxyUrl, setGatewayProxyUrl] = useState("");
+  const [proxyFailOpen, setProxyFailOpen] = useState(false);
   const [controllerJwt, setControllerJwt] = useState(true);
   const [audience, setAudience] = useState("agentgateway");
   const [sessionNewTelemetry, setSessionNewTelemetry] = useState(false);
@@ -33,6 +35,7 @@ export function ConfigurationView({
   const [allowedDomains, setAllowedDomains] = useState("");
   const [writablePaths, setWritablePaths] = useState("");
   const [deniedPaths, setDeniedPaths] = useState("");
+  const [allowUserChoice, setAllowUserChoice] = useState(false);
   const [agents, setAgents] = useState<AgentDraft[]>([
     { kind: "claudeCode", useGateway: true, settings: "" },
   ]);
@@ -45,9 +48,12 @@ export function ConfigurationView({
     return [definition?.label ?? agent.kind];
   });
   const sandboxUnavailable = incompatibleSandboxAgentNames.length > 0;
+  const usesLocalProxy = agents.some((agent) => proxyAgents.has(agent.kind));
   const yaml = daemonConfigYaml({
     gateway,
     gatewayUrl,
+    gatewayProxyUrl,
+    proxyFailOpen: proxyFailOpen && usesLocalProxy,
     controllerJwt,
     audience,
     sandboxEnabled,
@@ -57,6 +63,7 @@ export function ConfigurationView({
     sessionNewTelemetry,
     toolUseTelemetry,
     toolInputTelemetry,
+    allowUserChoice,
     agents,
   });
   const availableAgents = configurableAgents.filter(
@@ -75,6 +82,8 @@ export function ConfigurationView({
     setGateway(Boolean(llmGateway));
     if (llmGateway) {
       setGatewayUrl(llmGateway.url);
+      setGatewayProxyUrl(llmGateway.proxyUrl ?? "");
+      setProxyFailOpen(llmGateway.whenProxyUnavailable === "failOpen");
       setControllerJwt(llmGateway.authentication?.type === "controllerJwt");
       setAudience(llmGateway.authentication?.audience ?? "agentgateway");
     }
@@ -90,6 +99,9 @@ export function ConfigurationView({
     );
     setDeniedPaths(
       (initialConfig.sandbox?.filesystem?.denied ?? []).join("\n"),
+    );
+    setAllowUserChoice(
+      initialConfig.programSelection?.allowUserChoice === true,
     );
     setAgents(agentDrafts(initialConfig.programs));
   }, [initialConfig]);
@@ -177,6 +189,41 @@ export function ConfigurationView({
                       onChange={(event) => setGatewayUrl(event.target.value)}
                     />
                   </label>
+                  <label className="field full-width">
+                    <span>Pass-through URL (proxyUrl, optional)</span>
+                    <input
+                      value={gatewayProxyUrl}
+                      placeholder="https://gateway.example.com/copilot-proxy"
+                      onChange={(event) =>
+                        setGatewayProxyUrl(event.target.value)
+                      }
+                    />
+                    <small>
+                      Gateway route that forwards to the provider with the
+                      client's own token. Required for VS Code Copilot Chat on
+                      GitHub's models (copilotChat: githubModels).
+                    </small>
+                  </label>
+                  {usesLocalProxy && (
+                    <label className="toggle-row compact full-width">
+                      <span>
+                        <strong>Fail open without the local proxy</strong>
+                        <small>
+                          Off (default): while the local proxy is down, Copilot
+                          fails instead of reaching GitHub past the gateway,
+                          once the daemon has pointed it at the proxy. On: the
+                          Copilot entries are removed until it is back.
+                        </small>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={proxyFailOpen}
+                        onChange={(event) =>
+                          setProxyFailOpen(event.target.checked)
+                        }
+                      />
+                    </label>
+                  )}
                   <label className="toggle-row compact full-width">
                     <span>
                       <strong>Controller JWT</strong>
@@ -232,7 +279,7 @@ export function ConfigurationView({
                 />
               </label>
               {sandboxUnavailable && (
-                <p className="sandbox-compatibility" id="sandbox-compatibility">
+                <p className="config-notice" id="sandbox-compatibility">
                   <CircleAlert size={14} />
                   Remove {incompatibleSandboxAgentNames.join(" and ")} to enable
                   sandboxing.
@@ -341,6 +388,43 @@ export function ConfigurationView({
                   />
                 </label>
               </div>
+            </div>
+          </details>
+          <details className="wizard-section" open={allowUserChoice}>
+            <summary className="wizard-section-summary">
+              <span className="wizard-section-title">
+                <strong>Program selection</strong>
+                <small>Decide whether device users can opt out.</small>
+              </span>
+              <ChevronRight size={15} />
+            </summary>
+            <div className="wizard-section-content">
+              <label className="toggle-row">
+                <span>
+                  <strong>
+                    Let device users choose which programs are managed
+                  </strong>
+                  <small>
+                    Users can opt out of configured programs on their device.
+                    Agentdesktop then removes the settings it wrote for them.
+                  </small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={allowUserChoice}
+                  aria-describedby={
+                    allowUserChoice ? "program-selection-upgrade" : undefined
+                  }
+                  onChange={(event) => setAllowUserChoice(event.target.checked)}
+                />
+              </label>
+              {allowUserChoice && (
+                <p className="config-notice" id="program-selection-upgrade">
+                  <CircleAlert size={14} />
+                  Daemons that predate this setting reject a configuration that
+                  contains it. Upgrade devices first.
+                </p>
+              )}
             </div>
           </details>
           <details className="wizard-section" open={agents.length > 0}>
@@ -478,7 +562,8 @@ export function ConfigurationView({
               {copied ? "Copied" : "Copy"}
             </button>
           </div>
-          <pre>
+          {/* biome-ignore lint/a11y/noNoninteractiveTabindex: Keyboard users need to focus this scrollable preview. */}
+          <pre tabIndex={0}>
             <code>{yaml}</code>
           </pre>
         </section>
@@ -520,16 +605,51 @@ const configurableAgents: Array<{
     initialSettings:
       "model: gpt-5.6-terra\nmodels:\n  gpt-5.6-terra:\n    name: GPT 5.6 Terra",
   },
+  {
+    kind: "grok",
+    label: "Grok Build",
+    iconKind: "grok",
+    placeholder: "model: grok-4.6",
+    initialSettings: "model: grok-4.6",
+  },
+  {
+    kind: "copilot",
+    label: "GitHub Copilot CLI",
+    iconKind: "copilot",
+    placeholder: "models:\n  gpt-4.1:\n    wireModel: gpt-4.1-mini",
+    initialSettings: "models:\n  gpt-4.1: {}",
+  },
+  {
+    kind: "vscode",
+    label: "VS Code (Copilot Chat)",
+    iconKind: "vscode",
+    placeholder:
+      "copilotChat: githubModels\n# or own models through the gateway:\n# models:\n#   gpt-4.1-mini:\n#     maxInputTokens: 128000",
+    initialSettings: "models:\n  gpt-4.1-mini: {}",
+  },
+  {
+    kind: "pi",
+    label: "Pi",
+    iconKind: "pi",
+    placeholder: "model: claude-sonnet-4-5",
+    initialSettings: "model: claude-sonnet-4-5",
+  },
 ];
 
 const sandboxUnsupportedAgents = new Set<AgentKind>([
   "claudeDesktop",
   "openCode",
+  "grok",
+  "copilot",
+  "vscode",
+  "pi",
 ]);
 
 function daemonConfigYaml(options: {
   gateway: boolean;
   gatewayUrl: string;
+  gatewayProxyUrl: string;
+  proxyFailOpen: boolean;
   controllerJwt: boolean;
   audience: string;
   sandboxEnabled: boolean;
@@ -539,17 +659,24 @@ function daemonConfigYaml(options: {
   sessionNewTelemetry: boolean;
   toolUseTelemetry: boolean;
   toolInputTelemetry: boolean;
+  allowUserChoice: boolean;
   agents: AgentDraft[];
 }) {
   const lines: string[] = [];
   if (options.gateway) {
     lines.push("llmGateway:", `  url: ${yamlString(options.gatewayUrl)}`);
+    if (options.gatewayProxyUrl.trim()) {
+      lines.push(`  proxyUrl: ${yamlString(options.gatewayProxyUrl.trim())}`);
+    }
+    if (options.proxyFailOpen) {
+      lines.push("  whenProxyUnavailable: failOpen");
+    }
     if (options.controllerJwt) {
       lines.push(
         "  authentication:",
         "    type: controllerJwt",
         `    audience: ${yamlString(options.audience)}`,
-        "    allowedClientIds: [claude-code, claude-desktop, codex, opencode]",
+        "    allowedClientIds: [claude-code, claude-desktop, codex, opencode, grok, copilot-cli, vscode-copilot, pi]",
       );
     }
     lines.push("");
@@ -575,6 +702,9 @@ function daemonConfigYaml(options: {
     }
     lines.push("");
   }
+  if (options.allowUserChoice) {
+    lines.push("programSelection:", "  allowUserChoice: true", "");
+  }
   if (options.agents.length === 0) {
     lines.push("programs: {}");
   } else {
@@ -595,6 +725,10 @@ function daemonConfigYaml(options: {
   }
   return `${lines.join("\n")}\n`;
 }
+
+// Programs that reach the gateway through the daemon's local LLM proxy; only
+// they are affected by llmGateway.whenProxyUnavailable.
+const proxyAgents = new Set<string>(["copilot", "vscode"]);
 
 function yamlString(value: string) {
   return JSON.stringify(value);

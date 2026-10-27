@@ -17,3 +17,6 @@ mod cursor;
 
 #[path = "../src/provider/grok/integration_tests.rs"]
 mod grok;
+
+#[path = "../src/provider/copilot/integration_tests.rs"]
+mod copilot;

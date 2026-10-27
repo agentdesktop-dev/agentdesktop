@@ -12,12 +12,13 @@ import {
 import type { ReactNode } from "react";
 import { useState } from "react";
 
+import { DaemonInformation } from "../components/DaemonInformation";
 import type {
   Bootstrap,
   ConnectorSnapshot,
+  ControllerConnectionError,
   Discovery,
   ManagedDeviceSnapshot,
-  Settings,
 } from "../types";
 
 export interface StatusViewProps {
@@ -25,14 +26,9 @@ export interface StatusViewProps {
   connector: ConnectorSnapshot | null;
   discovery: Discovery | null;
   isLoggingOut: boolean;
-  isSaving: boolean;
   managedDevice: ManagedDeviceSnapshot | null;
   onCopy: () => void;
-  onCopyRemoteConfig: () => void;
   onLogout: () => void;
-  onStartupChange: (checked: boolean) => void;
-  remoteConfig: string | null;
-  settings: Settings;
 }
 
 function humanize(value: string | undefined): string {
@@ -46,6 +42,37 @@ function humanize(value: string | undefined): string {
 
 function gatewayIsConfigured(gateway: string | undefined): boolean {
   return gateway === "reachable" || gateway === "configured";
+}
+
+function formatRelativeTime(unixSeconds: number | undefined): string | null {
+  if (!unixSeconds) return null;
+  const elapsedSeconds = Math.max(
+    0,
+    Math.round(Date.now() / 1000 - unixSeconds),
+  );
+  if (elapsedSeconds < 60) return "just now";
+  const minutes = Math.round(elapsedSeconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+function describeControllerError(
+  error: ControllerConnectionError | undefined,
+): string {
+  switch (error) {
+    case "unreachable":
+      return "Controller is unreachable; retrying";
+    case "identityRejected":
+      return "Device identity was rejected; re-enrolling";
+    case "sessionExpired":
+      return "Organization session expired; re-enrolling";
+    case "localError":
+      return "agentdesktop hit a local error; restarting the controller session";
+    default:
+      return "Reconnecting to your organization's controller";
+  }
 }
 
 function Definition({ label, value }: { label: string; value: ReactNode }) {
@@ -62,13 +89,8 @@ export function StatusView({
   connector,
   managedDevice,
   discovery,
-  remoteConfig,
-  settings,
-  isSaving,
   isLoggingOut,
-  onStartupChange,
   onCopy,
-  onCopyRemoteConfig,
   onLogout,
 }: StatusViewProps) {
   const runtime = connector?.runtime;
@@ -80,6 +102,11 @@ export function StatusView({
     !connector || !discovery || (runtime?.mode === "managed" && !managedDevice);
   const ready = !statusUnavailable && daemonReady && enrolled;
   const gatewayConfigured = gatewayIsConfigured(runtime?.gateway);
+  const controllerConnection = managed ? runtime?.controller : undefined;
+  const controllerConnected = controllerConnection?.connected ?? false;
+  const controllerLastSeen = formatRelativeTime(
+    controllerConnection?.lastSeenUnixSeconds,
+  );
   const [confirmingLogout, setConfirmingLogout] = useState(false);
   const agents = discovery?.agents ?? [];
   const capabilityCount = agents.reduce(
@@ -146,7 +173,7 @@ export function StatusView({
           </span>
           <div>
             <strong>Local daemon</strong>
-            <span>Discovery, configuration, and controller connection</span>
+            <span>Discovery and configuration on this device</span>
           </div>
           <span
             className={`badge ${!connector ? "neutral" : daemonReady ? "success" : "danger"}`}
@@ -154,6 +181,36 @@ export function StatusView({
             {!connector ? "Unavailable" : daemonReady ? "Running" : "Offline"}
           </span>
         </div>
+        {managed ? (
+          <div className="status-row">
+            <span
+              className={`status-row-icon ${!controllerConnection ? "neutral" : controllerConnected ? "success" : "warning"}`}
+            >
+              <Waypoints size={17} />
+            </span>
+            <div>
+              <strong>Controller connection</strong>
+              <span>
+                {!controllerConnection
+                  ? "Live status is unavailable"
+                  : controllerConnected
+                    ? "Reporting device status to your organization"
+                    : describeControllerError(controllerConnection.lastError)}
+              </span>
+            </div>
+            <span
+              className={`badge ${!controllerConnection ? "neutral" : controllerConnected ? "success" : "warning"}`}
+            >
+              {!controllerConnection
+                ? "Unavailable"
+                : controllerConnected
+                  ? "Connected"
+                  : controllerLastSeen
+                    ? `Reconnecting (seen ${controllerLastSeen})`
+                    : "Reconnecting"}
+            </span>
+          </div>
+        ) : null}
         <div className="status-row">
           <span
             className={`status-row-icon ${runtime && gatewayConfigured ? "success" : "neutral"}`}
@@ -226,115 +283,77 @@ export function StatusView({
             />
             <Definition
               label="Daemon version"
-              value={runtime?.version ?? "Unavailable"}
+              value={runtime?.daemon.version ?? "Unavailable"}
             />
           </dl>
-          <div className="inline-preference">
-            <div>
-              <strong>Open window at startup</strong>
-              <span>
-                The tray application continues running when this is off.
-              </span>
-            </div>
-            <label className="switch" aria-label="Open window at startup">
-              <input
-                type="checkbox"
-                disabled={!bootstrap || isSaving}
-                checked={settings.openOnStartup}
-                onChange={(event) => onStartupChange(event.target.checked)}
-              />
-              <span className="switch-track" aria-hidden="true" />
-            </label>
-          </div>
         </div>
       </details>
 
-      {remoteConfig || (managed && enrolled) ? (
-        <details className="card advanced-config">
-          <summary>
-            <span>
-              <strong>Advanced</strong>
-              <small>Raw configuration and organization session controls</small>
-            </span>
-            <span>View</span>
-          </summary>
-          <div className="advanced-config-body">
-            {remoteConfig ? (
-              <>
-                <div className="advanced-config-heading">
-                  <p>
-                    This is the exact controller configuration currently
-                    persisted and applied by the daemon.
-                  </p>
-                  <button
-                    className="button button-secondary"
-                    type="button"
-                    onClick={onCopyRemoteConfig}
-                  >
-                    <Copy size={13} /> Copy YAML
-                  </button>
-                </div>
-                <pre>
-                  <code>{remoteConfig}</code>
-                </pre>
-              </>
-            ) : null}
+      <details className="card advanced-config">
+        <summary>
+          <span>
+            <strong>Advanced</strong>
+            <small>Daemon information and session controls</small>
+          </span>
+          <span>View</span>
+        </summary>
+        <div className="advanced-config-body">
+          <DaemonInformation info={runtime?.daemon} />
 
-            {managed && enrolled ? (
-              <section
-                className="advanced-danger-zone"
-                aria-labelledby="logout-heading"
-              >
-                <div>
-                  <p className="eyebrow">Danger zone</p>
-                  <h2 id="logout-heading">Sign out of this organization</h2>
-                  <p>
-                    Removes this device’s local organization credentials and
-                    stops managed access. It does not revoke the device record
-                    in the controller.
-                  </p>
-                </div>
-                {confirmingLogout ? (
-                  <div className="logout-confirmation">
-                    <strong>Are you sure?</strong>
-                    <div>
-                      <button
-                        className="button button-secondary"
-                        type="button"
-                        onClick={() => setConfirmingLogout(false)}
-                        disabled={isLoggingOut}
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        className="button button-danger"
-                        type="button"
-                        onClick={onLogout}
-                        disabled={isLoggingOut}
-                      >
-                        {isLoggingOut ? (
-                          <LoaderCircle className="spin" size={13} />
-                        ) : (
-                          <LogOut size={13} />
-                        )}
-                        {isLoggingOut ? "Signing out…" : "Yes, sign out"}
-                      </button>
-                    </div>
+          {managed && enrolled ? (
+            <section
+              className="advanced-danger-zone"
+              aria-labelledby="logout-heading"
+            >
+              <div>
+                <p className="eyebrow">Danger zone</p>
+                <h3 id="logout-heading">Sign out of this organization</h3>
+                <p>
+                  Removes this device’s local organization credentials and stops
+                  managed access. It does not revoke the device record in the
+                  controller.
+                </p>
+              </div>
+              {confirmingLogout ? (
+                <div className="logout-confirmation">
+                  <strong>Are you sure?</strong>
+                  <div>
+                    <button
+                      className="button button-secondary"
+                      type="button"
+                      onClick={() => setConfirmingLogout(false)}
+                      disabled={isLoggingOut}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className="button button-danger"
+                      type="button"
+                      onClick={onLogout}
+                      disabled={isLoggingOut}
+                    >
+                      {isLoggingOut ? (
+                        <LoaderCircle className="spin" size={13} />
+                      ) : (
+                        <LogOut size={13} />
+                      )}
+                      {isLoggingOut ? "Signing out…" : "Yes, sign out"}
+                    </button>
                   </div>
-                ) : (
-                  <button
-                    className="button button-danger"
-                    type="button"
-                    onClick={() => setConfirmingLogout(true)}
-                  >
-                    <LogOut size={13} /> Sign out
-                  </button>
-                )}
-              </section>
-            ) : null}
-          </div>
-        </details>
-      ) : null}
+                </div>
+              ) : (
+                <button
+                  className="button button-danger"
+                  type="button"
+                  onClick={() => setConfirmingLogout(true)}
+                >
+                  <LogOut size={13} /> Sign out
+                </button>
+              )}
+            </section>
+          ) : null}
+        </div>
+      </details>
     </div>
   );
 }

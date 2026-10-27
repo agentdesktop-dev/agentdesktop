@@ -4,11 +4,19 @@ import type {
   AccessReport,
   Bootstrap,
   ConnectorSnapshot,
+  DeviceUsage,
   Discovery,
   ManagedDeviceSnapshot,
   NetworkRuleChange,
+  ProgramChoice,
+  ProgramManagement,
   Settings,
+  UsageRange,
 } from "./types";
+
+export async function desktopReady(): Promise<void> {
+  return invoke<void>("desktop_ready");
+}
 
 export async function getBootstrap(): Promise<Bootstrap> {
   return invoke<Bootstrap>("get_bootstrap");
@@ -44,12 +52,25 @@ export async function openAccessSource(path: string): Promise<void> {
   return invoke<void>("open_access_source", { path });
 }
 
-export async function getRemoteConfig(): Promise<string | null> {
-  return invoke<string | null>("get_remote_config");
+export async function getDeviceUsage(
+  range: UsageRange,
+  utcOffsetMinutes: number,
+): Promise<DeviceUsage> {
+  return invoke<DeviceUsage>("get_device_usage", { range, utcOffsetMinutes });
 }
 
 export async function logoutManagedDevice(): Promise<void> {
   return invoke<void>("logout_managed_device");
+}
+
+export async function getProgramManagement(): Promise<ProgramManagement> {
+  return invoke<ProgramManagement>("get_program_management");
+}
+
+export async function setProgramChoice(
+  choice: ProgramChoice,
+): Promise<ProgramManagement> {
+  return invoke<ProgramManagement>("set_program_choice", { choice });
 }
 
 export async function setupManagedDevice(): Promise<ManagedDeviceSnapshot> {

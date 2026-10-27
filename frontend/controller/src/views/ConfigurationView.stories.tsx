@@ -2,7 +2,12 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, userEvent } from "storybook/test";
 
 import { ControllerStoryFrame } from "../stories/ControllerStoryFrame";
-import { activeDaemonConfig, sandboxDaemonConfig } from "../stories/fixtures";
+import {
+  activeDaemonConfig,
+  copilotFailOpenDaemonConfig,
+  programSelectionDaemonConfig,
+  sandboxDaemonConfig,
+} from "../stories/fixtures";
 import { ConfigurationView } from "./ConfigurationView";
 
 const meta = {
@@ -49,6 +54,74 @@ export const ActiveSandbox: Story = {
       'allowedDomains:\n      - "api.github.com"',
     );
     await expect(output?.textContent).toContain('denied:\n      - "~/.ssh"');
+  },
+};
+
+export const CopilotFailOpen: Story = {
+  args: { initialConfig: copilotFailOpenDaemonConfig },
+  play: async ({ canvas, canvasElement }) => {
+    const toggle = canvas.getByRole("checkbox", {
+      name: /Fail open without the local proxy/,
+    });
+    await expect(toggle).toBeChecked();
+    const output = canvasElement.querySelector(".output-card code");
+    await expect(output).toHaveTextContent("whenProxyUnavailable: failOpen");
+    await userEvent.click(toggle);
+    await expect(output).not.toHaveTextContent("whenProxyUnavailable");
+  },
+};
+
+export const ActiveProgramSelection: Story = {
+  args: { initialConfig: programSelectionDaemonConfig },
+  play: async ({ canvas, canvasElement }) => {
+    await expect(
+      canvas.getByRole("checkbox", {
+        name: /Let device users choose which programs are managed/,
+      }),
+    ).toBeChecked();
+    await expect(
+      canvasElement.querySelector(".output-card code")?.textContent,
+    ).toContain("programSelection:\n  allowUserChoice: true\n\nprograms:");
+  },
+};
+
+export const BuildsProgramSelectionYaml: Story = {
+  play: async ({ canvas, canvasElement }) => {
+    const output = canvasElement.querySelector(".output-card code");
+    await expect(output).not.toHaveTextContent("programSelection");
+    await userEvent.click(canvas.getByText("Program selection"));
+    const toggle = canvas.getByRole("checkbox", {
+      name: /Let device users choose which programs are managed/,
+    });
+    await userEvent.click(toggle);
+    await expect(output?.textContent).toContain(
+      "programSelection:\n  allowUserChoice: true",
+    );
+    await expect(toggle).toHaveAccessibleDescription(/Upgrade devices first/);
+    await userEvent.click(toggle);
+    await expect(output).not.toHaveTextContent("programSelection");
+    await expect(canvas.queryByText(/Upgrade devices first/)).toBeNull();
+  },
+};
+
+export const NoProxyPolicyWithoutCopilot: Story = {
+  args: { initialConfig: activeDaemonConfig },
+  play: async ({ canvas }) => {
+    await expect(
+      canvas.queryByRole("checkbox", {
+        name: /Fail open without the local proxy/,
+      }),
+    ).toBeNull();
+  },
+};
+
+export const GeneratedYamlScrolls: Story = {
+  args: { initialConfig: activeDaemonConfig },
+  play: async ({ canvasElement }) => {
+    const preview = canvasElement.querySelector(".output-card pre");
+    await expect(preview).toBeTruthy();
+    const overflowY = getComputedStyle(preview as Element).overflowY;
+    await expect(["auto", "scroll"]).toContain(overflowY);
   },
 };
 
@@ -132,5 +205,25 @@ export const AddsAgent: Story = {
     await userEvent.click(canvas.getByText("Add agent"));
     await userEvent.click(canvas.getByRole("button", { name: /OpenCode/ }));
     await expect(canvas.getAllByText("OpenCode")).toHaveLength(1);
+  },
+};
+
+export const Dark: Story = {
+  ...ActiveSandbox,
+  globals: { colorMode: "dark" },
+};
+
+export const DarkProgramSelection: Story = {
+  ...ActiveProgramSelection,
+  globals: { colorMode: "dark" },
+};
+
+export const DarkAgentMenu: Story = {
+  globals: { colorMode: "dark" },
+  play: async ({ canvas }) => {
+    await userEvent.click(canvas.getByText("Add agent"));
+    await expect(
+      canvas.getByRole("button", { name: /OpenCode/ }),
+    ).toBeVisible();
   },
 };

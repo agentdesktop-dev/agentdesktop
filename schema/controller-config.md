@@ -23,3 +23,5 @@
 |`tls.clientCaCertificate`|string|PEM CA roots used to verify issued device client certificates.|
 |`tls.clientCaKey`|string|PEM private key used to issue device certificates from `clientCaCertificate`.<br><br>Enrolled daemons generate their own private key and send a CSR.|
 |`tls.key`|string|Path to the PEM-encoded TLS private key.<br><br>Relative paths are resolved from the controller configuration directory.|
+|`usage`|object|Token and cost collection from agentgateway access logs.|
+|`usage.tokenFile`|string|Path to a file containing the bearer token agentgateway sends with each export. The token must be at least 32 characters.<br><br>Relative paths are resolved from the controller configuration directory.|

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>agentdesktop</title>
+    <style>
+      body {
+        font-family: -apple-system, Helvetica, sans-serif;
+        font-size: 13px;
+        line-height: 1.5;
+      }
+      .logo {
+        width: 48px;
+        height: 48px;
+        vertical-align: middle;
+        margin-right: 12px;
+      }
+      h1 {
+        font-size: 22px;
+        font-weight: 600;
+        margin: 0 0 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1><img class="logo" src="data:image/png;base64,{{AGENTDESKTOP_LOGO}}" width="48" height="48" alt="">agentdesktop by Solo.io</h1>
+    <p>This installer adds:</p>
+    <ul>
+      <li>The agentdesktop application in Applications.</li>
+      <li>A system-wide background service that starts automatically at boot.</li>
+      <li>A command-line interface inside the application bundle.</li>
+    </ul>
+    <p>Administrator permission is required. The command-line tool is not added to your shell's PATH.</p>
+    <p><a href="https://agentdesktop.dev">agentdesktop.dev</a> |
+      <a href="https://agentdesktop.dev/docs/">Documentation</a></p>
+  </body>
+</html>

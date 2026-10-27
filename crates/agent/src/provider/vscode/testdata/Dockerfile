@@ -12,7 +12,9 @@ RUN case "$(uname -m)" in x86_64) arch=x64 ;; aarch64) arch=arm64 ;; *) exit 1 ;
     && mkdir -p /opt/vscode \
     && tar -xzf /tmp/code.tar.gz --strip-components=1 -C /opt/vscode \
     && rm /tmp/code.tar.gz \
-    && ln -s /opt/vscode/bin/code /usr/local/bin/code
-ENV HOME=/home/tester
+    && ln -s /opt/vscode/bin/code /usr/local/bin/code \
+    && mkdir -p /run/user/1000 && chown tester:tester /run/user/1000
+ENV HOME=/home/tester \
+    XDG_RUNTIME_DIR=/run/user/1000
 WORKDIR /home/tester/project
 CMD ["sleep", "infinity"]

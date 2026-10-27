@@ -1,15 +1,23 @@
 //! Shared reconciliation orchestration, plan application, and dry-run reporting.
-mod plan;
+pub(crate) mod plan;
+#[cfg(any(windows, test))]
+pub(crate) mod registry;
 pub use plan::ReconcilePlan;
+pub(crate) use plan::grants_beyond;
 
 use crate::provider::{
     Provider, ReconcileContext, claude_code::ClaudeCode, claude_desktop::ClaudeDesktop,
-    codex::Codex, cursor::Cursor, grok::Grok, ollama::Ollama, opencode::OpenCode, vscode::VsCode,
+    codex::Codex, copilot::Copilot, cursor::Cursor, grok::Grok, ollama::Ollama, opencode::OpenCode,
+    pi::Pi, vscode::VsCode,
 };
-use agentdesktop_core::{config::DaemonConfig, model::Discovery};
+use agentdesktop_core::{
+    config::{DaemonConfig, ProgramsConfig},
+    model::{Discovery, ProgramChoice},
+};
 use serde_json::Value;
 use similar::TextDiff;
 use std::{
+    borrow::Cow,
     cell::RefCell,
     fmt::Write,
     path::{Path, PathBuf},
@@ -23,13 +31,25 @@ pub use crate::provider::{
         default_claude_desktop_credential_helper_path, default_claude_desktop_managed_settings_path,
     },
     codex::default_codex_managed_config_path,
+    copilot::default_copilot_providers_path,
+    grok::default_grok_managed_config_path,
     opencode::{default_open_code_managed_config_path, default_open_code_plugin_path},
+    vscode::{default_vscode_chat_models_path, default_vscode_settings_path},
 };
 
 #[derive(Clone)]
 pub struct Reconciler {
     context: ReconcileContext,
     providers: Arc<Vec<Box<dyn Provider>>>,
+    /// The apply lock and the report of the last apply. Held for planning
+    /// and applying, so a push, the startup apply and a reconcile tick never
+    /// overlap across clones; never held across an `.await`. `plan`,
+    /// `plan_with_report` and `dry_run` take no lock. The report feeds the
+    /// tick's log rule.
+    last_apply: Arc<std::sync::Mutex<Option<ApplyReport>>>,
+    /// The device user's program choice, honored while the configuration
+    /// sets `programSelection.allowUserChoice`.
+    choice: Arc<std::sync::RwLock<ProgramChoice>>,
 }
 
 impl Reconciler {
@@ -42,6 +62,12 @@ impl Reconciler {
         codex_managed_config_path: PathBuf,
         open_code_managed_config_path: PathBuf,
         open_code_plugin_path: PathBuf,
+        grok_managed_config_path: PathBuf,
+        copilot_providers_path: Option<PathBuf>,
+        vscode_chat_models_path: Option<PathBuf>,
+        vscode_settings_path: Option<PathBuf>,
+        pi_models_path: Option<PathBuf>,
+        pi_settings_path: Option<PathBuf>,
         credential_helper: PathBuf,
         socket: PathBuf,
     ) -> Self {
@@ -50,6 +76,7 @@ impl Reconciler {
                 merge_user_settings,
                 credential_helper,
                 socket,
+                llm_proxy: None,
             },
             providers: Arc::new(vec![
                 Box::new(ClaudeCode {
@@ -58,6 +85,8 @@ impl Reconciler {
                 Box::new(ClaudeDesktop {
                     managed_settings_path: claude_desktop_managed_settings_path,
                     credential_helper_path: claude_desktop_credential_helper_path,
+                    #[cfg(windows)]
+                    policy_key: crate::provider::claude_desktop::claude_desktop_policy_key(),
                 }),
                 Box::new(Codex {
                     managed_config_path: codex_managed_config_path,
@@ -66,20 +95,79 @@ impl Reconciler {
                     managed_config_path: open_code_managed_config_path,
                     plugin_path: open_code_plugin_path,
                 }),
-                Box::new(VsCode),
+                Box::new(VsCode {
+                    chat_models_path: vscode_chat_models_path,
+                    settings_path: vscode_settings_path,
+                }),
                 Box::new(Cursor),
-                Box::new(Grok),
+                Box::new(Grok {
+                    managed_config_path: grok_managed_config_path,
+                }),
+                Box::new(Copilot {
+                    providers_path: copilot_providers_path,
+                }),
+                Box::new(Pi {
+                    models_path: pi_models_path,
+                    settings_path: pi_settings_path,
+                }),
                 Box::new(Ollama),
             ]),
+            last_apply: Arc::new(std::sync::Mutex::new(None)),
+            choice: Arc::new(std::sync::RwLock::new(ProgramChoice::All)),
         }
+    }
+
+    /// Attach the bound loopback LLM proxy so reconcilers can point client files at it.
+    pub fn with_llm_proxy(mut self, llm_proxy: Option<crate::llm_proxy::LlmProxyContext>) -> Self {
+        self.context.llm_proxy = llm_proxy;
+        self
+    }
+
+    /// The device user's program choice. Every clone shares it.
+    pub fn program_choice(&self) -> ProgramChoice {
+        self.choice
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Replaces the device user's program choice for every later plan; it
+    /// takes effect at the next apply.
+    pub fn set_program_choice(&self, choice: ProgramChoice) {
+        *self
+            .choice
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = choice;
+    }
+
+    /// The report of the last apply from any source, `None` before the first.
+    /// Waits for an apply in progress.
+    pub fn last_report(&self) -> Option<ApplyReport> {
+        self.last_apply
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Whether to start a gateway sign-in for `config` without a request:
+    /// always, unless the device user's choice leaves out every configured
+    /// program that uses the LLM gateway and no local LLM proxy is running,
+    /// so nothing on this device would use the sign-in.
+    pub fn gateway_sign_in_wanted(&self, config: &DaemonConfig) -> bool {
+        if self.context.llm_proxy.is_some() || !programs_use_llm_gateway(&config.programs) {
+            return true;
+        }
+        let (chosen, _) = apply_program_choice(config, &self.program_choice());
+        programs_use_llm_gateway(&chosen.programs)
     }
 
     /// Plan every provider, including cleanup for disabled providers, before
     /// applying any writes. A later provider's failure leaves all files intact.
     pub fn plan(&self, config: &DaemonConfig) -> anyhow::Result<ReconcilePlan> {
+        let (config, _) = apply_program_choice(config, &self.program_choice());
         let mut plan = ReconcilePlan::default();
         for provider in self.providers.iter() {
-            plan.append(provider.plan(&self.context, config)?)?;
+            plan.append(provider.plan(&self.context, &config)?)?;
         }
         Ok(plan)
     }
@@ -98,18 +186,623 @@ impl Reconciler {
     }
 
     pub fn apply(&self, config: &DaemonConfig) -> anyhow::Result<()> {
-        self.plan(config)?.apply()
+        self.apply_with_report(config).1
     }
 
     pub fn dry_run(&self, config: &DaemonConfig) -> anyhow::Result<()> {
         print!("{}", self.plan(config)?.render());
         Ok(())
     }
+
+    /// Plans every provider like [`Reconciler::plan`], but a provider whose
+    /// `plan` fails is recorded as failed and the others are still planned,
+    /// so each program's outcome is known. Nothing is written here.
+    pub fn plan_with_report(&self, config: &DaemonConfig) -> AttributedPlan {
+        let (config, opted_out) = apply_program_choice(config, &self.program_choice());
+        let configured = configured_programs(&config.programs);
+        let mut plan = ReconcilePlan::default();
+        let mut entries: Vec<ProgramEntry> = Vec::new();
+        let mut first_error = None;
+        for provider in self.providers.iter() {
+            let program = provider.id();
+            let mut entry = ProgramEntry {
+                program,
+                configured: configured.contains(&program),
+                opted_out: opted_out.contains(&program),
+                failed: None,
+                changes: false,
+                conflicts: Vec::new(),
+                inactive: None,
+                paths: Vec::new(),
+                operations: 0..0,
+                registry_operations: 0..0,
+            };
+            match provider.plan(&self.context, &config) {
+                Err(error) => {
+                    entry.failed = Some(format!("{error:#}"));
+                    first_error.get_or_insert(error);
+                }
+                Ok(own) => {
+                    let summary = own.summary();
+                    entry.changes = summary.changes;
+                    entry.conflicts = summary.conflicts;
+                    entry.inactive = summary.inactive;
+                    entry.paths = summary.paths;
+                    let start = plan.operation_count();
+                    let registry_start = plan.registry_operation_count();
+                    if let Err((error, path)) = plan.append_attributed(own) {
+                        // Both programs of the disagreement fail.
+                        for other in entries
+                            .iter_mut()
+                            .filter(|other| other.paths.contains(&path))
+                        {
+                            other.failed.get_or_insert_with(|| format!("{error:#}"));
+                        }
+                        entry.failed = Some(format!("{error:#}"));
+                        first_error.get_or_insert(error);
+                    }
+                    entry.operations = start..plan.operation_count();
+                    entry.registry_operations = registry_start..plan.registry_operation_count();
+                }
+            }
+            entries.push(entry);
+        }
+        AttributedPlan {
+            plan,
+            entries,
+            first_error,
+        }
+    }
+
+    /// [`Reconciler::plan_with_report`] followed by [`AttributedPlan::apply`],
+    /// under the apply lock.
+    pub fn apply_with_report(&self, config: &DaemonConfig) -> (ApplyReport, anyhow::Result<()>) {
+        let (_, report, result) = self.apply_after_previous(config);
+        (report, result)
+    }
+
+    /// Like [`Reconciler::apply_with_report`], also returning the report of
+    /// the apply before this one (from any source), read under the same lock.
+    pub(crate) fn apply_after_previous(
+        &self,
+        config: &DaemonConfig,
+    ) -> (Option<ApplyReport>, ApplyReport, anyhow::Result<()>) {
+        let ((), previous, report, result) = self
+            .apply_read_under_lock(|| Some(((), Arc::new(config.clone()))))
+            .expect("a configuration was given");
+        (previous, report, result)
+    }
+
+    /// Takes the apply lock, then reads the configuration to apply (with
+    /// whatever `read` returns alongside it, such as its revision), so a
+    /// configuration pushed while this call waited for the lock is the one
+    /// applied (a tick never re-applies an older revision after a push).
+    /// `None` from `read` applies nothing.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn apply_read_under_lock<T>(
+        &self,
+        read: impl FnOnce() -> Option<(T, Arc<DaemonConfig>)>,
+    ) -> Option<(T, Option<ApplyReport>, ApplyReport, anyhow::Result<()>)> {
+        let mut last = self
+            .last_apply
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (value, config) = read()?;
+        let (mut report, result) = self.plan_with_report(&config).apply();
+        report.sequence = last.as_ref().map_or(0, |previous| previous.sequence) + 1;
+        let previous = last.replace(report.clone());
+        Some((value, previous, report, result))
+    }
+}
+
+/// The `inactive` detail under `llmGateway.whenProxyUnavailable: failClosed`,
+/// when a program behind the local LLM proxy keeps its managed entries.
+pub(crate) const FAIL_CLOSED_REASON: &str = concat!(
+    "local LLM proxy not available; see llmProxy.error in daemon-info, or set daemon.llmProxy.listen",
+    "; the managed entries stay and the tool fails until the proxy is back (whenProxyUnavailable: failClosed)"
+);
+
+/// The `inactive` detail under `failClosed` when nothing of the daemon's is
+/// in the file, so the tool keeps its own settings.
+pub(crate) const FAIL_CLOSED_NOT_IN_PLACE_REASON: &str = concat!(
+    "local LLM proxy not available; see llmProxy.error in daemon-info, or set daemon.llmProxy.listen",
+    "; no managed entries are in place, so the tool keeps its own settings until the proxy is back (whenProxyUnavailable: failClosed)"
+);
+
+/// The `inactive` detail under `failOpen`: the managed entries are removed.
+pub(crate) const FAIL_OPEN_REASON: &str = concat!(
+    "local LLM proxy not available; see llmProxy.error in daemon-info, or set daemon.llmProxy.listen",
+    "; the managed entries are removed until the proxy is back (whenProxyUnavailable: failOpen)"
+);
+
+/// Under `failClosed`, marks the program `inactive` (with the reason that
+/// matches `in_place`, which reads the file and is called only under
+/// `failClosed`) and returns `true`: the caller leaves its managed files as
+/// they are.
+pub(crate) fn fail_closed_without_proxy(
+    gateway: &agentdesktop_core::config::LlmGatewayConfig,
+    plan: &ReconcilePlan,
+    in_place: impl FnOnce() -> bool,
+) -> bool {
+    if gateway.when_proxy_unavailable != agentdesktop_core::config::ProxyUnavailable::FailClosed {
+        return false;
+    }
+    plan.inactive(if in_place() {
+        FAIL_CLOSED_REASON
+    } else {
+        FAIL_CLOSED_NOT_IN_PLACE_REASON
+    });
+    true
+}
+
+/// A program's outcome, by precedence (highest first): Failed > Conflict >
+/// Blocked > Inactive > OptedOut > Applied/Removed > Unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgramState {
+    /// The program is configured and its files were changed by this apply.
+    Applied,
+    /// The program is configured; nothing needed to change.
+    Unchanged,
+    /// The program is not configured; its managed content was removed by
+    /// this apply.
+    Removed,
+    /// A managed file held conflicting or invalid existing configuration.
+    Conflict,
+    /// The daemon's mode cannot manage this program, or the program uses a
+    /// configured gateway but the loopback proxy is absent. Detail explains why.
+    Inactive,
+    /// The program had changes, but none of them was written because the
+    /// apply was refused or stopped.
+    Blocked,
+    /// The program is configured, but the device user opted out of it (as
+    /// `programSelection.allowUserChoice` permits): its managed content is
+    /// removed, and stays removed.
+    OptedOut,
+    /// The program's plan failed, it disagreed with another program's plan,
+    /// one of its writes failed, or one of its files changed before the
+    /// apply.
+    Failed,
+}
+
+impl ProgramState {
+    /// Lowercase name, as logged and stored.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Unchanged => "unchanged",
+            Self::Removed => "removed",
+            Self::Conflict => "conflict",
+            Self::Inactive => "inactive",
+            Self::Blocked => "blocked",
+            Self::OptedOut => "opted_out",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// One program's outcome from an apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramOutcome {
+    /// The provider ID, for example `"claude-code"` or `"vscode"`.
+    pub program: &'static str,
+    pub state: ProgramState,
+    pub detail: String,
+}
+
+/// Every reported program's outcome from one apply, in provider
+/// registration order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ApplyReport {
+    pub programs: Vec<ProgramOutcome>,
+    /// This apply's place in the order applies take the apply lock, from 1;
+    /// 0 for a report made without it ([`AttributedPlan::apply`] alone).
+    pub sequence: u64,
+}
+
+impl ApplyReport {
+    /// One log line per program whose state is not applied or unchanged; a
+    /// program that failed, conflicted, was blocked or is inactive is a
+    /// warning.
+    pub fn log(&self) {
+        for outcome in &self.programs {
+            // Inactive is a warning too: a configured program cannot be
+            // managed in this mode or cannot use the gateway. Detail explains
+            // the cause, including any effect on its existing files.
+            let warning = matches!(
+                outcome.state,
+                ProgramState::Failed
+                    | ProgramState::Conflict
+                    | ProgramState::Blocked
+                    | ProgramState::Inactive
+            );
+            if matches!(
+                outcome.state,
+                ProgramState::Applied | ProgramState::Unchanged
+            ) {
+                continue;
+            }
+            if warning {
+                tracing::warn!(
+                    program = outcome.program,
+                    state = outcome.state.as_str(),
+                    detail = %outcome.detail,
+                    "program configuration outcome"
+                );
+            } else {
+                tracing::info!(
+                    program = outcome.program,
+                    state = outcome.state.as_str(),
+                    detail = %outcome.detail,
+                    "program configuration outcome"
+                );
+            }
+        }
+    }
+}
+
+/// Whether `current` (a tick's apply outcome) differs enough from
+/// `previous` (the report of the last apply from any source: startup, a
+/// push, or an earlier tick) to log, using the same same-kind-of-difference
+/// rule as `remote::tick_config_status`: a program moving from `Applied` or
+/// `Removed` to `Unchanged` is not itself a difference. `previous: None`
+/// (nothing has been applied yet) always logs.
+pub(crate) fn should_log(previous: Option<&ApplyReport>, current: &ApplyReport) -> bool {
+    let Some(previous) = previous else {
+        return true;
+    };
+    outcomes_differ(
+        &outcome_keys(&previous.programs),
+        &outcome_keys(&current.programs),
+    )
+}
+
+/// `(program, state, detail)` of each outcome, for [`outcomes_differ`].
+pub(crate) fn outcome_keys(programs: &[ProgramOutcome]) -> Vec<(&str, ProgramState, &str)> {
+    programs
+        .iter()
+        .map(|outcome| (outcome.program, outcome.state, outcome.detail.as_str()))
+        .collect()
+}
+
+/// Whether two outcome lists differ by program, state or detail. A program
+/// that settles from applied or removed to unchanged, or a removed program
+/// that is no longer listed, is not a difference: the files are as reported.
+pub(crate) fn outcomes_differ(
+    previous: &[(&str, ProgramState, &str)],
+    current: &[(&str, ProgramState, &str)],
+) -> bool {
+    let changed = current.iter().any(|&(program, state, detail)| {
+        match previous.iter().find(|(before, _, _)| *before == program) {
+            None => true,
+            Some(&(_, before_state, before_detail)) => {
+                let settled = state == ProgramState::Unchanged
+                    && matches!(before_state, ProgramState::Applied | ProgramState::Removed);
+                !settled && (state != before_state || detail != before_detail)
+            }
+        }
+    });
+    let gone = previous.iter().any(|&(program, state, _)| {
+        state != ProgramState::Removed && !current.iter().any(|(now, _, _)| *now == program)
+    });
+    changed || gone
+}
+
+/// The longest detail an outcome carries, in bytes.
+const DETAIL_LIMIT: usize = 1024;
+
+fn truncate_detail(mut detail: String) -> String {
+    if detail.len() > DETAIL_LIMIT {
+        let mut end = DETAIL_LIMIT;
+        while !detail.is_char_boundary(end) {
+            end -= 1;
+        }
+        detail.truncate(end);
+    }
+    detail
+}
+
+struct ProgramEntry {
+    program: &'static str,
+    configured: bool,
+    /// Configured, but left out by the device user's program choice.
+    opted_out: bool,
+    failed: Option<String>,
+    changes: bool,
+    conflicts: Vec<String>,
+    inactive: Option<String>,
+    paths: Vec<PathBuf>,
+    operations: std::ops::Range<usize>,
+    /// This program's registry key plans within the appended plan, applied
+    /// after every program's file operations.
+    registry_operations: std::ops::Range<usize>,
+}
+
+impl ProgramEntry {
+    /// The outcome when this program's own part did not fail or conflict:
+    /// `written` says whether its changes reached the disk.
+    fn settled(&self, written: bool, blocked_by: &str) -> Option<(ProgramState, String)> {
+        if self.changes && !written {
+            return Some((ProgramState::Blocked, format!("not applied: {blocked_by}")));
+        }
+        if let Some(reason) = &self.inactive {
+            return Some((ProgramState::Inactive, reason.clone()));
+        }
+        if self.opted_out {
+            return Some((ProgramState::OptedOut, String::new()));
+        }
+        match (self.changes, self.configured) {
+            (true, true) => Some((ProgramState::Applied, String::new())),
+            (true, false) => Some((ProgramState::Removed, String::new())),
+            (false, true) => Some((ProgramState::Unchanged, String::new())),
+            (false, false) => None,
+        }
+    }
+}
+
+/// A plan with each program's part identified, ready to apply with
+/// per-program reporting.
+pub struct AttributedPlan {
+    plan: ReconcilePlan,
+    entries: Vec<ProgramEntry>,
+    first_error: Option<anyhow::Error>,
+}
+
+impl AttributedPlan {
+    /// Applies with the all-or-nothing rules of [`ReconcilePlan::apply`] (a
+    /// failed plan or any conflict means nothing is written) and returns the
+    /// same first error, alongside each program's outcome.
+    pub fn apply(self) -> (ApplyReport, anyhow::Result<()>) {
+        let Self {
+            plan,
+            entries,
+            first_error,
+        } = self;
+        let (result, stop) = if let Some(error) = first_error {
+            (Err(error), Stop::BeforeWrites)
+        } else if entries.iter().any(|entry| !entry.conflicts.is_empty()) {
+            // The plan refuses without writing and returns the conflict error.
+            (plan.apply(), Stop::BeforeWrites)
+        } else {
+            match plan.apply_tracked() {
+                Ok(()) => (Ok(()), Stop::Completed),
+                Err((error, at)) => {
+                    // Registry changes apply after every file operation.
+                    let (written_files, written_registry) = match &at {
+                        plan::ApplyStop::Operation(index) => (*index, 0),
+                        #[cfg(windows)]
+                        plan::ApplyStop::Registry(index, _) => (usize::MAX, *index),
+                        _ => (0, 0),
+                    };
+                    let stop = Stop::Failed {
+                        owners: owners_of(&entries, &at),
+                        detail: format!("{error:#}"),
+                        written_files,
+                        written_registry,
+                    };
+                    (Err(error), stop)
+                }
+            }
+        };
+        let failed_during = |program: &str| match &stop {
+            Stop::Failed { owners, .. } => owners.contains(&program),
+            _ => false,
+        };
+        // The first program, in registration order, that stopped the apply.
+        let blocked_by = entries
+            .iter()
+            .find_map(|entry| {
+                if entry.failed.is_some() || failed_during(entry.program) {
+                    Some(format!("{} failed", entry.program))
+                } else if !entry.conflicts.is_empty() {
+                    Some(format!("{} conflicted", entry.program))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+        let programs = entries
+            .iter()
+            .filter_map(|entry| {
+                let (state, detail) = if let Some(detail) = &entry.failed {
+                    (ProgramState::Failed, detail.clone())
+                } else if let Stop::Failed { detail, .. } = &stop
+                    && failed_during(entry.program)
+                {
+                    (ProgramState::Failed, detail.clone())
+                } else if !entry.conflicts.is_empty() {
+                    (ProgramState::Conflict, entry.conflicts.join("; "))
+                } else {
+                    let written = match &stop {
+                        Stop::Completed => true,
+                        Stop::BeforeWrites => false,
+                        Stop::Failed {
+                            written_files,
+                            written_registry,
+                            ..
+                        } => {
+                            entry.operations.end <= *written_files
+                                && entry.registry_operations.end <= *written_registry
+                        }
+                    };
+                    entry.settled(written, &blocked_by)?
+                };
+                Some(outcome(entry.program, state, detail))
+            })
+            .collect();
+        (
+            ApplyReport {
+                programs,
+                sequence: 0,
+            },
+            result,
+        )
+    }
+}
+
+/// How an attributed apply ended.
+enum Stop {
+    /// Every operation was written.
+    Completed,
+    /// Refused before any write (a failed plan or a conflict).
+    BeforeWrites,
+    /// Stopped while applying: `owners` failed, the first `written_files`
+    /// file operations and the first `written_registry` registry key plans
+    /// were applied.
+    Failed {
+        owners: Vec<&'static str>,
+        detail: String,
+        written_files: usize,
+        written_registry: usize,
+    },
+}
+
+/// The programs responsible for where an apply stopped.
+fn owners_of(entries: &[ProgramEntry], at: &plan::ApplyStop) -> Vec<&'static str> {
+    entries
+        .iter()
+        .filter(|entry| match at {
+            plan::ApplyStop::Conflict => false,
+            plan::ApplyStop::Observed(path) => entry.paths.contains(path),
+            #[cfg(windows)]
+            plan::ApplyStop::Registry(_, path) => entry.paths.contains(path),
+            plan::ApplyStop::PrivateDir(dir) => {
+                entry.paths.iter().any(|path| path.starts_with(dir))
+            }
+            plan::ApplyStop::Operation(index) => entry.operations.contains(index),
+        })
+        .map(|entry| entry.program)
+        .collect()
+}
+
+fn outcome(program: &'static str, state: ProgramState, detail: String) -> ProgramOutcome {
+    ProgramOutcome {
+        program,
+        state,
+        detail: truncate_detail(detail),
+    }
+}
+
+/// The provider IDs of every program a configuration can manage, in provider
+/// order: the programs a device user can choose.
+pub const MANAGED_PROGRAMS: [&str; 8] = [
+    ClaudeCode::ID,
+    ClaudeDesktop::ID,
+    Codex::ID,
+    OpenCode::ID,
+    Grok::ID,
+    Copilot::ID,
+    VsCode::ID,
+    Pi::ID,
+];
+
+/// `config` without the configured programs `choice` leaves out, and those
+/// programs' provider IDs, when `programSelection.allowUserChoice` is set.
+/// Otherwise `config` as it is: the choice is kept but not honored. The
+/// destructure is exhaustive, like [`configured_programs`].
+pub fn apply_program_choice<'a>(
+    config: &'a DaemonConfig,
+    choice: &ProgramChoice,
+) -> (Cow<'a, DaemonConfig>, Vec<&'static str>) {
+    fn leave_out<T>(
+        program: &mut Option<T>,
+        id: &'static str,
+        choice: &ProgramChoice,
+        opted_out: &mut Vec<&'static str>,
+    ) {
+        if program.is_some() && !choice.includes(id) {
+            *program = None;
+            opted_out.push(id);
+        }
+    }
+
+    if !config.program_selection.allow_user_choice || *choice == ProgramChoice::All {
+        return (Cow::Borrowed(config), Vec::new());
+    }
+    let mut chosen = config.clone();
+    let ProgramsConfig {
+        claude_code,
+        claude_desktop,
+        codex,
+        open_code,
+        grok,
+        copilot,
+        vscode,
+        pi,
+    } = &mut chosen.programs;
+    let mut opted_out = Vec::new();
+    leave_out(claude_code, ClaudeCode::ID, choice, &mut opted_out);
+    leave_out(claude_desktop, ClaudeDesktop::ID, choice, &mut opted_out);
+    leave_out(codex, Codex::ID, choice, &mut opted_out);
+    leave_out(open_code, OpenCode::ID, choice, &mut opted_out);
+    leave_out(grok, Grok::ID, choice, &mut opted_out);
+    leave_out(copilot, Copilot::ID, choice, &mut opted_out);
+    leave_out(vscode, VsCode::ID, choice, &mut opted_out);
+    leave_out(pi, Pi::ID, choice, &mut opted_out);
+    (Cow::Owned(chosen), opted_out)
+}
+
+/// Whether any configured program sends its traffic through the LLM gateway
+/// (`useLlmGateway`). The destructure is exhaustive, like
+/// [`configured_programs`].
+pub fn programs_use_llm_gateway(programs: &ProgramsConfig) -> bool {
+    let ProgramsConfig {
+        claude_code,
+        claude_desktop,
+        codex,
+        open_code,
+        grok,
+        copilot,
+        vscode,
+        pi,
+    } = programs;
+    [
+        claude_code.as_ref().map(|program| program.use_llm_gateway),
+        claude_desktop
+            .as_ref()
+            .map(|program| program.use_llm_gateway),
+        codex.as_ref().map(|program| program.use_llm_gateway),
+        open_code.as_ref().map(|program| program.use_llm_gateway),
+        grok.as_ref().map(|program| program.use_llm_gateway),
+        copilot.as_ref().map(|program| program.use_llm_gateway),
+        vscode.as_ref().map(|program| program.use_llm_gateway),
+        pi.as_ref().map(|program| program.use_llm_gateway),
+    ]
+    .into_iter()
+    .any(|uses| uses == Some(true))
+}
+
+/// The provider IDs of the configured programs. The destructure is
+/// exhaustive, so a new program key does not compile until it is mapped.
+pub fn configured_programs(programs: &ProgramsConfig) -> Vec<&'static str> {
+    let ProgramsConfig {
+        claude_code,
+        claude_desktop,
+        codex,
+        open_code,
+        grok,
+        copilot,
+        vscode,
+        pi,
+    } = programs;
+    [
+        (claude_code.is_some(), ClaudeCode::ID),
+        (claude_desktop.is_some(), ClaudeDesktop::ID),
+        (codex.is_some(), Codex::ID),
+        (open_code.is_some(), OpenCode::ID),
+        (grok.is_some(), Grok::ID),
+        (copilot.is_some(), Copilot::ID),
+        (vscode.is_some(), VsCode::ID),
+        (pi.is_some(), Pi::ID),
+    ]
+    .into_iter()
+    .filter_map(|(configured, id)| configured.then_some(id))
+    .collect()
 }
 
 #[derive(Default)]
 struct DryRunReport {
     changes: RefCell<Vec<DryRunChange>>,
+    inactive: RefCell<Vec<String>>,
 }
 
 struct DryRunChange {
@@ -156,6 +849,10 @@ impl DryRunReport {
             .filter(|change| change.action == "conflict")
             .count();
         let mut output = String::from("Dry run — no files will be changed\n");
+
+        for reason in self.inactive.borrow().iter() {
+            let _ = write!(output, "\nINACTIVE  {reason}\n");
+        }
 
         for change in changes.iter().filter(|change| change.action != "unchanged") {
             let _ = write!(
@@ -215,9 +912,15 @@ fn normalized_diff(before: &str, after: &str) -> (String, String) {
 mod tests {
     use std::{fs, path::Path, path::PathBuf};
 
+    #[cfg(windows)]
+    use agentdesktop_core::config::DaemonConfig;
     use agentdesktop_core::config::parse_daemon;
 
-    use super::{DryRunReport, Reconciler};
+    use agentdesktop_core::model::ProgramChoice;
+
+    use super::{
+        ApplyReport, DryRunReport, ProgramOutcome, ProgramState, Reconciler, apply_program_choice,
+    };
 
     #[test]
     fn dry_run_report_shows_changes_and_hides_unchanged_files() {
@@ -247,20 +950,195 @@ mod tests {
     }
 
     #[test]
-    fn user_mode_rejects_claude_desktop_before_writing_other_settings() {
+    fn mixed_mode_policy_applies_supported_programs_and_preserves_skipped_files() {
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  claudeCode: {}
+  claudeDesktop:
+    model: selected
+  grok:
+    model: selected
+  pi:
+    model: selected
+  copilot:
+    models:
+      selected: {}
+  vscode:
+    models:
+      selected: {}
+"#,
+        )
+        .expect("mixed fleet policy is valid");
+        let programs = [
+            ("claude-desktop", "claude-desktop", false),
+            ("grok", "grok", false),
+            ("pi", "pi", true),
+            ("copilot", "copilot", true),
+            ("vscode", "vscode", true),
+        ];
+
+        fn snapshot(path: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+            let mut files = std::collections::BTreeMap::new();
+            for entry in fs::read_dir(path).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    files.extend(snapshot(&path));
+                } else {
+                    files.insert(path.clone(), fs::read(path).unwrap());
+                }
+            }
+            files
+        }
+
+        for user in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut reconciler =
+                full_reconciler(root.path()).with_llm_proxy(Some(proxy_context("PAIRING")));
+            // On Windows Claude Desktop's system settings land in the policy
+            // registry, so point it at a disposable key and snapshot that too.
+            #[cfg(windows)]
+            let policy_key = super::registry::TestPolicyKey::new();
+            #[cfg(windows)]
+            use_test_policy_key(
+                &mut reconciler,
+                root.path().join("claude-desktop/settings.json"),
+                root.path().join("claude-desktop/helper"),
+                policy_key.0.clone(),
+            );
+            let state = |id: &str| {
+                let dir = root.path().join(id);
+                #[allow(unused_mut)]
+                let mut files = if dir.exists() {
+                    snapshot(&dir)
+                } else {
+                    Default::default()
+                };
+                #[cfg(windows)]
+                if id == "claude-desktop" {
+                    let values = super::registry::read_values(&policy_key.0).unwrap();
+                    files.insert(
+                        PathBuf::from("registry"),
+                        format!("{values:?}").into_bytes(),
+                    );
+                }
+                files
+            };
+            // Seed owned files in the opposite mode, including ownership sidecars.
+            reconciler.context.merge_user_settings = !user;
+            let mut seed = config.clone();
+            seed.programs.claude_code = None;
+            reconciler
+                .apply(&seed)
+                .expect("seed the other mode's files");
+            let skipped: Vec<_> = programs
+                .iter()
+                .filter(|(_, _, required_user)| *required_user != user)
+                .map(|(id, dir, _)| (*id, state(dir)))
+                .collect();
+            assert!(skipped.iter().all(|(_, files)| !files.is_empty()));
+
+            reconciler.context.merge_user_settings = user;
+            let preview = reconciler.plan(&config).unwrap().render();
+            assert!(preview.contains("INACTIVE"), "{preview}");
+            assert!(preview.contains(if user {
+                "requires system mode"
+            } else {
+                "requires user mode"
+            }));
+            let (report, result) = reconciler.apply_with_report(&config);
+            result.expect("unsupported programs must not block supported programs");
+            assert_eq!(
+                program_outcome(&report, "claude-code").unwrap().state,
+                ProgramState::Applied
+            );
+            for (id, _, required_user) in programs {
+                let outcome = program_outcome(&report, id).unwrap();
+                if required_user == user {
+                    assert_eq!(outcome.state, ProgramState::Applied, "{id}");
+                } else {
+                    assert_eq!(outcome.state, ProgramState::Inactive, "{id}");
+                    assert!(
+                        outcome
+                            .detail
+                            .contains(if user { "system mode" } else { "user mode" }),
+                        "{}",
+                        outcome.detail
+                    );
+                }
+            }
+            for (id, files) in &skipped {
+                assert_eq!(&state(id), files, "{id}");
+            }
+
+            let (report, result) = reconciler.apply_with_report(&parse_daemon("{}").unwrap());
+            result.expect("cleanup only affects programs supported in this mode");
+            for (id, files) in &skipped {
+                assert!(
+                    program_outcome(&report, id).is_none(),
+                    "disabled {id} has no status"
+                );
+                assert_eq!(&state(id), files, "{id}");
+            }
+        }
+    }
+
+    #[test]
+    fn skipped_programs_do_not_read_unmanageable_paths() {
+        for (user, yaml, paths) in [
+            (
+                true,
+                "programs:\n  claudeCode: {}\n  claudeDesktop: {}\n  grok: {}",
+                vec!["claude-desktop/settings.json", "grok/managed_config.toml"],
+            ),
+            (
+                false,
+                "programs:\n  claudeCode: {}\n  pi: {}\n  copilot: {}\n  vscode: {}",
+                vec![
+                    "pi/models.json",
+                    "copilot/providers.json",
+                    "vscode/User/settings.json",
+                ],
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            // Directories where files are expected would fail planning if read.
+            for path in &paths {
+                fs::create_dir_all(root.path().join(path)).unwrap();
+            }
+            let mut reconciler = full_reconciler(root.path());
+            reconciler.context.merge_user_settings = user;
+            let (report, result) = reconciler.apply_with_report(&parse_daemon(yaml).unwrap());
+            result.expect("skipped programs do no I/O");
+            assert_eq!(
+                program_outcome(&report, "claude-code").unwrap().state,
+                ProgramState::Applied
+            );
+            for path in paths {
+                assert!(root.path().join(path).is_dir());
+            }
+        }
+    }
+
+    #[test]
+    fn user_mode_reconciles_pi_models_and_settings() {
         let root = std::env::temp_dir().join(format!(
-            "agentdesktop-reconcile-user-desktop-{}-{}",
+            "agentdesktop-reconcile-user-pi-{}-{}",
             std::process::id(),
             rand::random::<u64>()
         ));
         let config = parse_daemon(
             r#"
+llmGateway:
+  url: https://gateway.example.com
 programs:
-  claudeCode: {}
-  claudeDesktop: {}
+  pi:
+    model: claude-sonnet-4-5
 "#,
         )
-        .expect("valid configuration");
+        .unwrap();
         let reconciler = Reconciler::new(
             true,
             root.join("claude/settings.json"),
@@ -269,18 +1147,172 @@ programs:
             root.join("codex/config.toml"),
             root.join("opencode/config.json"),
             root.join("opencode/plugin.js"),
+            root.join("grok/managed_config.toml"),
+            Some(root.join("copilot/providers.json")),
+            None,
+            None,
+            Some(root.join("pi/models.json")),
+            Some(root.join("pi/settings.json")),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
 
-        let error = reconciler.apply(&config).expect_err("user mode must fail");
+        reconciler
+            .apply(&config)
+            .expect("Pi is supported in user mode");
+        let models = String::from_utf8(fs::read(root.join("pi/models.json")).unwrap()).unwrap();
+        assert!(models.contains("agentdesktop"));
+        assert!(models.contains("claude-sonnet-4-5"));
+        let settings = String::from_utf8(fs::read(root.join("pi/settings.json")).unwrap()).unwrap();
+        assert!(settings.contains("defaultProvider"));
 
-        assert!(
-            error
-                .to_string()
-                .contains("/etc/claude-desktop/managed-settings.json")
+        let repeated = reconciler.plan(&config).unwrap();
+        assert!(repeated.render().contains("Summary: 0 changes"));
+        repeated.apply().unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("pi/models.json")).unwrap(),
+            models
         );
-        assert!(!root.exists(), "preflight failure must not write any files");
+        assert_eq!(
+            fs::read_to_string(root.join("pi/settings.json")).unwrap(),
+            settings
+        );
+
+        reconciler
+            .apply(&parse_daemon("programs: {}").unwrap())
+            .unwrap();
+        for path in [
+            "models.json",
+            ".models.json.agentdesktop",
+            "settings.json",
+            ".settings.json.agentdesktop",
+        ] {
+            assert!(!root.join("pi").join(path).exists());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn copilot_directory_is_created_owner_only_through_the_reconciler() {
+        // The private-directory request must survive `ReconcilePlan::append`,
+        // which the daemon always goes through (it was once dropped there).
+        let root = std::env::temp_dir().join(format!(
+            "agentdesktop-reconcile-copilot-dir-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  copilot:
+    models:
+      gpt-4.1: {}
+"#,
+        )
+        .unwrap();
+        let providers = root.join("copilot/.copilot/providers.json");
+        let reconciler = Reconciler::new(
+            true,
+            root.join("claude/settings.json"),
+            root.join("claude-desktop/settings.json"),
+            root.join("claude-desktop/helper"),
+            root.join("codex/config.toml"),
+            root.join("opencode/config.json"),
+            root.join("opencode/plugin.js"),
+            root.join("grok/managed_config.toml"),
+            Some(providers.clone()),
+            None,
+            None,
+            Some(root.join("pi/models.json")),
+            Some(root.join("pi/settings.json")),
+            root.join("bin/agentdesktop"),
+            root.join("agentdesktop.sock"),
+        )
+        .with_llm_proxy(Some(crate::llm_proxy::LlmProxyContext {
+            address: "127.0.0.1:18095".parse().unwrap(),
+            pairing: std::sync::Arc::from("PAIRING-RECONCILER"),
+        }));
+        reconciler.apply(&config).expect("apply");
+        assert!(providers.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(providers.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700, "directory created through the reconciler");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn vscode_directory_is_created_owner_only_through_the_reconciler() {
+        // Same private-directory request as the Copilot CLI test above, for
+        // the VS Code user profile directory.
+        let root = std::env::temp_dir().join(format!(
+            "agentdesktop-reconcile-vscode-dir-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  vscode:
+    models:
+      gpt-4.1-mini: {}
+"#,
+        )
+        .unwrap();
+        let chat_models = root.join("vscode/User/chatLanguageModels.json");
+        let reconciler = Reconciler::new(
+            true,
+            root.join("claude/settings.json"),
+            root.join("claude-desktop/settings.json"),
+            root.join("claude-desktop/helper"),
+            root.join("codex/config.toml"),
+            root.join("opencode/config.json"),
+            root.join("opencode/plugin.js"),
+            root.join("grok/managed_config.toml"),
+            Some(root.join("copilot/providers.json")),
+            Some(chat_models.clone()),
+            Some(chat_models.with_file_name("settings.json")),
+            Some(root.join("pi/models.json")),
+            Some(root.join("pi/settings.json")),
+            root.join("bin/agentdesktop"),
+            root.join("agentdesktop.sock"),
+        )
+        .with_llm_proxy(Some(crate::llm_proxy::LlmProxyContext {
+            address: "127.0.0.1:18095".parse().unwrap(),
+            pairing: std::sync::Arc::from("PAIRING-RECONCILER"),
+        }));
+        reconciler.apply(&config).expect("apply");
+        assert!(chat_models.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(chat_models.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700, "directory created through the reconciler");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_reconciles_system_grok_managed_config() {
+        let fixture = Fixture::new();
+        let config = parse_daemon("programs:\n  claudeCode: {}\n  grok: {}\n").unwrap();
+        fixture.reconciler.apply(&config).unwrap();
+        assert!(fixture.root.join("grok/managed_config.toml").exists());
     }
 
     #[test]
@@ -311,7 +1343,8 @@ programs:
         fs::write(root.join("claude/settings.json"), user_claude).unwrap();
         fs::write(root.join("codex/config.toml"), old_codex).unwrap();
         fs::write(root.join("opencode/plugin.js"), old_plugin).unwrap();
-        let reconciler = Reconciler::new(
+        #[allow(unused_mut)]
+        let mut reconciler = Reconciler::new(
             false,
             root.join("claude/settings.json"),
             root.join("claude-desktop/settings.json"),
@@ -319,8 +1352,23 @@ programs:
             root.join("codex/config.toml"),
             root.join("opencode/config.json"),
             root.join("opencode/plugin.js"),
+            root.join("grok/managed_config.toml"),
+            Some(root.join("copilot/providers.json")),
+            None,
+            None,
+            Some(root.join("pi/models.json")),
+            Some(root.join("pi/settings.json")),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
+        );
+        #[cfg(windows)]
+        let policy_key = super::registry::TestPolicyKey::new();
+        #[cfg(windows)]
+        use_test_policy_key(
+            &mut reconciler,
+            root.join("claude-desktop/settings.json"),
+            root.join("claude-desktop/helper"),
+            policy_key.0.clone(),
         );
 
         reconciler.dry_run(&config).expect("dry run succeeds");
@@ -339,9 +1387,35 @@ programs:
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Repoints the reconciler's Claude Desktop provider at `key`, a
+    /// disposable `HKCU` key, so the test never reads or writes the live
+    /// machine policy key.
+    #[cfg(windows)]
+    fn use_test_policy_key(
+        reconciler: &mut Reconciler,
+        settings: PathBuf,
+        helper: PathBuf,
+        key: super::registry::RegistryKey,
+    ) {
+        let providers = std::sync::Arc::get_mut(&mut reconciler.providers)
+            .expect("the providers are not shared yet");
+        let desktop = providers
+            .iter_mut()
+            .find(|provider| provider.id() == super::ClaudeDesktop::ID)
+            .expect("the Claude Desktop provider is registered");
+        *desktop = Box::new(super::ClaudeDesktop {
+            managed_settings_path: settings,
+            credential_helper_path: helper,
+            policy_key: key,
+        });
+    }
+
     struct Fixture {
         root: PathBuf,
         reconciler: Reconciler,
+        /// Stands in for the live policy key, deleted with the fixture.
+        #[cfg(windows)]
+        policy_key: super::registry::TestPolicyKey,
     }
 
     impl Fixture {
@@ -351,7 +1425,8 @@ programs:
                 std::process::id(),
                 rand::random::<u64>()
             ));
-            let reconciler = Reconciler::new(
+            #[allow(unused_mut)]
+            let mut reconciler = Reconciler::new(
                 false,
                 root.join("claude/settings.json"),
                 root.join("desktop/settings.json"),
@@ -359,10 +1434,30 @@ programs:
                 root.join("codex/config.toml"),
                 root.join("opencode/config.json"),
                 root.join("opencode/plugin.js"),
+                root.join("grok/managed_config.toml"),
+                Some(root.join("copilot/providers.json")),
+                None,
+                None,
+                Some(root.join("pi/models.json")),
+                Some(root.join("pi/settings.json")),
                 root.join("bin/agentdesktop"),
                 root.join("agentdesktop.sock"),
             );
-            Self { root, reconciler }
+            #[cfg(windows)]
+            let policy_key = super::registry::TestPolicyKey::new();
+            #[cfg(windows)]
+            use_test_policy_key(
+                &mut reconciler,
+                root.join("desktop/settings.json"),
+                root.join("desktop/helper"),
+                policy_key.0.clone(),
+            );
+            Self {
+                root,
+                reconciler,
+                #[cfg(windows)]
+                policy_key,
+            }
         }
     }
 
@@ -382,7 +1477,7 @@ llmGateway:
   authentication:
     type: controllerJwt
     audience: agentgateway
-    allowedClientIds: [claude-code, claude-desktop, codex, opencode]
+    allowedClientIds: [claude-code, claude-desktop, codex, opencode, grok, pi]
 programs:
   claudeCode: {}
   claudeDesktop: {}
@@ -391,6 +1486,8 @@ programs:
     model: company-model
     models:
       company-model: {}
+  grok:
+    model: grok-4.6
 "#,
         )
         .unwrap();
@@ -402,7 +1499,10 @@ programs:
         assert!(!plan.has_conflicts());
         plan.apply().unwrap();
 
-        let paths = [
+        // On Windows the Claude Desktop managed settings land under the
+        // (test) policy registry key, asserted below, not in a file; the
+        // credential helper is a file there too.
+        let paths: Vec<&str> = [
             "claude/settings.json",
             "claude/.settings.json.owner",
             "desktop/settings.json",
@@ -412,7 +1512,27 @@ programs:
             "codex/config.toml",
             "opencode/config.json",
             "opencode/plugin.js",
-        ];
+            "grok/managed_config.toml",
+        ]
+        .into_iter()
+        .filter(|path| {
+            !cfg!(windows)
+                || !matches!(
+                    *path,
+                    "desktop/settings.json" | "desktop/.settings.json.owner"
+                )
+        })
+        .collect();
+        #[cfg(windows)]
+        {
+            let values = super::registry::read_values(&fixture.policy_key.0).unwrap();
+            assert_eq!(values["inferenceProvider"].as_deref(), Some("gateway"));
+            assert_eq!(
+                values["inferenceGatewayBaseUrl"].as_deref(),
+                Some("https://gateway.example.com/")
+            );
+            assert!(values.contains_key(".agentdesktop.owner"));
+        }
         let contents: Vec<_> = paths
             .iter()
             .map(|path| fs::read(fixture.root.join(path)).unwrap())
@@ -441,6 +1561,210 @@ programs:
         assert!(paths.iter().all(|path| fixture.root.join(path).exists()));
         cleanup.apply().unwrap();
         assert!(paths.iter().all(|path| !fixture.root.join(path).exists()));
+        #[cfg(windows)]
+        assert!(
+            !super::registry::key_exists(&fixture.policy_key.0).unwrap(),
+            "removal deletes the owned values, the marker and the empty key"
+        );
+    }
+
+    /// A registry value name the registry itself would refuse fails at
+    /// planning (`registry_values` validation), before anything anywhere is
+    /// written: Claude Desktop is Failed and the other programs Blocked.
+    #[cfg(windows)]
+    #[test]
+    fn registry_name_past_the_limit_fails_the_plan_before_any_write() {
+        let fixture = Fixture::new();
+        // One past the registry's 16,383-character value-name limit.
+        let long_name = "a".repeat(16_384);
+        let mut claude_desktop_settings = serde_json::Map::new();
+        claude_desktop_settings.insert(long_name, serde_json::json!("boom"));
+        let config_json = serde_json::json!({
+            "programs": {
+                "claudeCode": {},
+                "claudeDesktop": claude_desktop_settings,
+            }
+        });
+        let config: DaemonConfig = serde_json::from_value(config_json).unwrap();
+
+        let (report, result) = fixture.reconciler.apply_with_report(&config);
+
+        let error = result.expect_err("the plan must fail validation");
+        assert!(
+            error
+                .to_string()
+                .contains("longer than a registry value name"),
+            "{error}"
+        );
+        let outcome = |program: &str| {
+            report
+                .programs
+                .iter()
+                .find(|outcome| outcome.program == program)
+                .expect("program reported")
+        };
+        assert_eq!(outcome("claude-desktop").state, ProgramState::Failed);
+        assert_eq!(outcome("claude-code").state, ProgramState::Blocked);
+        assert!(
+            !fixture.root.join("claude/settings.json").exists(),
+            "a failed plan must write nothing"
+        );
+        assert!(
+            !super::registry::key_exists(&fixture.policy_key.0).unwrap(),
+            "a failed plan must write no registry value"
+        );
+    }
+
+    /// A registry apply failure after the file operations, at the
+    /// `AttributedPlan` accounting layer (the planners can no longer produce
+    /// an invalid name, so the failing key plan is constructed directly):
+    /// the failure is attributed to Claude Desktop through
+    /// `ApplyStop::Registry`, and the file operations — all applied before
+    /// the registry changes — stay and count as written.
+    #[cfg(windows)]
+    #[test]
+    fn registry_apply_failure_is_attributed_and_keeps_earlier_file_writes() {
+        use super::registry::{RegistryKeyPlan, RegistryValues, TestPolicyKey};
+        let key = TestPolicyKey::new();
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+
+        let plan = super::ReconcilePlan::default();
+        plan.write_file(&settings, b"{}", 0o644).unwrap();
+        plan.plan_registry_key(RegistryKeyPlan {
+            key: key.0.clone(),
+            observed: RegistryValues::new(),
+            // Past the registry's value-name limit: rc 87 at write time.
+            changes: vec![("z".repeat(16_384), Some("boom".to_owned()))],
+            delete_key_when_empty: false,
+        });
+        let entries = vec![
+            super::ProgramEntry {
+                program: "claude-code",
+                configured: true,
+                opted_out: false,
+                failed: None,
+                changes: true,
+                conflicts: Vec::new(),
+                inactive: None,
+                paths: vec![settings.clone()],
+                operations: 0..1,
+                registry_operations: 0..0,
+            },
+            super::ProgramEntry {
+                program: "claude-desktop",
+                configured: true,
+                opted_out: false,
+                failed: None,
+                changes: true,
+                conflicts: Vec::new(),
+                inactive: None,
+                paths: vec![key.0.display_path()],
+                operations: 1..1,
+                registry_operations: 0..1,
+            },
+        ];
+        let (report, result) = super::AttributedPlan {
+            plan,
+            entries,
+            first_error: None,
+        }
+        .apply();
+
+        result.expect_err("the registry write must fail");
+        let outcome = |program: &str| {
+            report
+                .programs
+                .iter()
+                .find(|outcome| outcome.program == program)
+                .expect("program reported")
+        };
+        assert_eq!(outcome("claude-desktop").state, ProgramState::Failed);
+        assert_eq!(outcome("claude-code").state, ProgramState::Applied);
+        assert!(settings.is_file(), "earlier file writes stay");
+    }
+
+    /// A later provider's file write fails while Claude Desktop has pending
+    /// registry changes: registry changes run after every file operation, so
+    /// Claude Desktop's part never ran and must report Blocked, not Applied,
+    /// although its (empty) file range completed. The accounting is
+    /// platform-independent; the write failure is provoked through a
+    /// read-only directory, hence Unix.
+    #[cfg(unix)]
+    #[test]
+    fn pending_registry_work_blocks_completion_when_a_later_file_write_fails() {
+        use super::registry::{RegistryKey, RegistryKeyPlan, RegistryValues};
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        fs::create_dir(&locked).unwrap();
+        let target = locked.join("config.toml");
+
+        let plan = super::ReconcilePlan::default();
+        plan.plan_registry_key(RegistryKeyPlan {
+            key: RegistryKey::local_machine(r"SOFTWARE\Policies\Claude"),
+            observed: RegistryValues::new(),
+            changes: vec![("inferenceProvider".to_owned(), Some("gateway".to_owned()))],
+            delete_key_when_empty: false,
+        });
+        plan.write_file(&target, b"managed", 0o644).unwrap();
+        // Planned fine; the write fails at apply time.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let entries = vec![
+            super::ProgramEntry {
+                program: "claude-desktop",
+                configured: true,
+                opted_out: false,
+                failed: None,
+                changes: true,
+                conflicts: Vec::new(),
+                inactive: None,
+                paths: Vec::new(),
+                operations: 0..0,
+                registry_operations: 0..1,
+            },
+            super::ProgramEntry {
+                program: "codex",
+                configured: true,
+                opted_out: false,
+                failed: None,
+                changes: true,
+                conflicts: Vec::new(),
+                inactive: None,
+                paths: vec![target.clone()],
+                operations: 0..1,
+                registry_operations: 1..1,
+            },
+        ];
+        let (report, result) = super::AttributedPlan {
+            plan,
+            entries,
+            first_error: None,
+        }
+        .apply();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+
+        result.expect_err("the file write must fail");
+        let outcome = |program: &str| {
+            report
+                .programs
+                .iter()
+                .find(|outcome| outcome.program == program)
+                .expect("program reported")
+        };
+        assert_eq!(outcome("codex").state, ProgramState::Failed);
+        assert_eq!(
+            outcome("claude-desktop").state,
+            ProgramState::Blocked,
+            "pending registry work must not count as applied: {}",
+            outcome("claude-desktop").detail
+        );
+        assert!(
+            outcome("claude-desktop").detail.contains("codex failed"),
+            "{}",
+            outcome("claude-desktop").detail
+        );
     }
 
     #[test]
@@ -505,5 +1829,1257 @@ programs:
                 .contains("multiple providers plan to modify")
         );
         assert!(!fixture.root.exists());
+    }
+
+    // --- Per-program configuration status -----------------------------------
+
+    fn new_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "agentdesktop-reconcile-status-{name}-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ))
+    }
+
+    /// A user-mode reconciler with every provider's paths set (including
+    /// Copilot CLI and VS Code), rooted at `root`.
+    fn full_reconciler(root: &Path) -> Reconciler {
+        Reconciler::new(
+            true,
+            root.join("claude/settings.json"),
+            root.join("claude-desktop/settings.json"),
+            root.join("claude-desktop/helper"),
+            root.join("codex/config.toml"),
+            root.join("opencode/config.json"),
+            root.join("opencode/plugin.js"),
+            root.join("grok/managed_config.toml"),
+            Some(root.join("copilot/providers.json")),
+            Some(root.join("vscode/User/chatLanguageModels.json")),
+            Some(root.join("vscode/User/settings.json")),
+            Some(root.join("pi/models.json")),
+            Some(root.join("pi/settings.json")),
+            root.join("bin/agentdesktop"),
+            root.join("agentdesktop.sock"),
+        )
+    }
+
+    fn proxy_context(pairing: &str) -> crate::llm_proxy::LlmProxyContext {
+        crate::llm_proxy::LlmProxyContext {
+            address: "127.0.0.1:18095".parse().unwrap(),
+            pairing: std::sync::Arc::from(pairing),
+        }
+    }
+
+    fn program_outcome<'a>(report: &'a ApplyReport, program: &str) -> Option<&'a ProgramOutcome> {
+        report
+            .programs
+            .iter()
+            .find(|outcome| outcome.program == program)
+    }
+
+    /// A provider whose `plan` always fails with a caller-supplied message,
+    /// for scenarios only the message shape matters for (detail truncation).
+    struct FailWithMessage {
+        message: String,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::provider::Provider for FailWithMessage {
+        fn id(&self) -> &'static str {
+            "fail-with-message"
+        }
+
+        async fn discover(&self) -> agentdesktop_core::model::Discovery {
+            agentdesktop_core::model::Discovery {
+                agents: Vec::new(),
+                model_runtimes: Vec::new(),
+            }
+        }
+
+        fn plan(
+            &self,
+            _ctx: &crate::provider::ReconcileContext,
+            _config: &agentdesktop_core::config::DaemonConfig,
+        ) -> anyhow::Result<super::ReconcilePlan> {
+            anyhow::bail!("{}", self.message)
+        }
+    }
+
+    #[test]
+    fn applied_then_unchanged_with_report() {
+        let root = new_root("applied-unchanged");
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  claudeCode: {}
+  copilot:
+    models:
+      gpt-4.1: {}
+"#,
+        )
+        .unwrap();
+        let reconciler = full_reconciler(&root).with_llm_proxy(Some(proxy_context("PAIRING-1")));
+
+        let (report, result) = reconciler.apply_with_report(&config);
+        result.expect("first apply succeeds");
+        assert_eq!(
+            program_outcome(&report, "claude-code").map(|outcome| outcome.state),
+            Some(ProgramState::Applied)
+        );
+        assert_eq!(
+            program_outcome(&report, "copilot").map(|outcome| outcome.state),
+            Some(ProgramState::Applied)
+        );
+
+        let (report, result) = reconciler.apply_with_report(&config);
+        result.expect("second apply succeeds");
+        assert_eq!(
+            program_outcome(&report, "claude-code").map(|outcome| outcome.state),
+            Some(ProgramState::Unchanged)
+        );
+        assert_eq!(
+            program_outcome(&report, "copilot").map(|outcome| outcome.state),
+            Some(ProgramState::Unchanged)
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    const CHOICE_CONFIG: &str = r#"
+programSelection: { allowUserChoice: true }
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  claudeCode: {}
+  codex: {}
+"#;
+
+    fn only(programs: &[&str]) -> ProgramChoice {
+        ProgramChoice::Selected {
+            programs: programs
+                .iter()
+                .map(|program| (*program).to_owned())
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn opting_out_removes_owned_settings_until_opting_back_in() {
+        let root = new_root("opted-out");
+        let config = parse_daemon(CHOICE_CONFIG).unwrap();
+        let codex_config = root.join("codex/config.toml");
+        let reconciler = full_reconciler(&root);
+        reconciler
+            .apply_with_report(&config)
+            .1
+            .expect("apply every program");
+        assert!(codex_config.exists());
+
+        reconciler.set_program_choice(only(&["claude-code"]));
+        let (report, result) = reconciler.apply_with_report(&config);
+        result.expect("apply the choice");
+        assert_eq!(
+            program_outcome(&report, "codex").map(|outcome| outcome.state),
+            Some(ProgramState::OptedOut)
+        );
+        assert_eq!(
+            program_outcome(&report, "claude-code").map(|outcome| outcome.state),
+            Some(ProgramState::Unchanged)
+        );
+        assert!(!codex_config.exists(), "the owned Codex file is removed");
+
+        let (report, result) = reconciler.apply_with_report(&config);
+        result.expect("apply the choice again");
+        assert_eq!(
+            program_outcome(&report, "codex").map(|outcome| outcome.state),
+            Some(ProgramState::OptedOut),
+            "an opted-out program keeps its row, unlike a removed one"
+        );
+        assert_eq!(reconciler.last_report(), Some(report));
+
+        reconciler.set_program_choice(ProgramChoice::All);
+        let (report, result) = reconciler.apply_with_report(&config);
+        result.expect("apply after opting back in");
+        assert_eq!(
+            program_outcome(&report, "codex").map(|outcome| outcome.state),
+            Some(ProgramState::Applied)
+        );
+        assert!(codex_config.exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_choice_is_kept_but_ignored_unless_the_policy_allows_it() {
+        let root = new_root("choice-not-allowed");
+        let config = parse_daemon(&CHOICE_CONFIG.replace("allowUserChoice: true", "")).unwrap();
+        let reconciler = full_reconciler(&root);
+        reconciler.set_program_choice(ProgramChoice::None);
+
+        let (report, result) = reconciler.apply_with_report(&config);
+        result.expect("apply");
+        assert!(
+            report
+                .programs
+                .iter()
+                .all(|outcome| outcome.state == ProgramState::Applied),
+            "every configured program is managed: {report:?}"
+        );
+        assert!(root.join("codex/config.toml").exists());
+        assert_eq!(reconciler.program_choice(), ProgramChoice::None);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_program_configured_after_a_selection_stays_unmanaged() {
+        let root = new_root("selected-later");
+        let reconciler = full_reconciler(&root);
+        reconciler.set_program_choice(only(&["claude-code"]));
+        let claude_only = parse_daemon(&CHOICE_CONFIG.replace("  codex: {}\n", "")).unwrap();
+        assert!(claude_only.programs.codex.is_none());
+        reconciler
+            .apply_with_report(&claude_only)
+            .1
+            .expect("apply Claude Code");
+
+        let with_codex = parse_daemon(CHOICE_CONFIG).unwrap();
+        let rendered = reconciler.plan(&with_codex).unwrap().render();
+        assert!(
+            !rendered.contains("config.toml"),
+            "a dry run honors the choice too: {rendered}"
+        );
+        let (report, result) = reconciler.apply_with_report(&with_codex);
+        result.expect("apply with Codex configured");
+        assert_eq!(
+            program_outcome(&report, "codex").map(|outcome| outcome.state),
+            Some(ProgramState::OptedOut)
+        );
+        assert!(!root.join("codex/config.toml").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn each_apply_has_a_later_sequence_than_the_last() {
+        let root = new_root("sequence");
+        let config = parse_daemon(CHOICE_CONFIG).unwrap();
+        let reconciler = full_reconciler(&root);
+        let (first, _) = reconciler.apply_with_report(&config);
+        let (second, _) = reconciler.clone().apply_with_report(&config);
+        assert_eq!(first.sequence, 1);
+        assert_eq!(second.sequence, 2, "clones share the apply order");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn no_gateway_sign_in_once_every_gateway_program_is_opted_out() {
+        let root = new_root("gateway-sign-in");
+        let config = parse_daemon(CHOICE_CONFIG).unwrap();
+        let reconciler = full_reconciler(&root);
+        assert!(reconciler.gateway_sign_in_wanted(&config));
+
+        reconciler.set_program_choice(only(&["codex"]));
+        assert!(reconciler.gateway_sign_in_wanted(&config));
+
+        reconciler.set_program_choice(ProgramChoice::None);
+        assert!(!reconciler.gateway_sign_in_wanted(&config));
+        let not_allowed =
+            parse_daemon(&CHOICE_CONFIG.replace("allowUserChoice: true", "")).unwrap();
+        assert!(
+            reconciler.gateway_sign_in_wanted(&not_allowed),
+            "an ignored choice changes nothing"
+        );
+        let off_gateway = parse_daemon(
+            &CHOICE_CONFIG
+                .replace("claudeCode: {}", "claudeCode: { useLlmGateway: false }")
+                .replace("codex: {}", "codex: { useLlmGateway: false }"),
+        )
+        .unwrap();
+        assert!(
+            reconciler.gateway_sign_in_wanted(&off_gateway),
+            "nothing was taken off the gateway, so sign-in is as without a choice"
+        );
+        let with_proxy = reconciler.with_llm_proxy(Some(proxy_context("PAIRING-SIGN-IN")));
+        assert!(
+            with_proxy.gateway_sign_in_wanted(&config),
+            "the running proxy still needs the gateway"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn managed_programs_are_every_program_key() {
+        let every = parse_daemon(
+            "programs: { claudeCode: {}, claudeDesktop: {}, codex: {}, openCode: {}, grok: {}, copilot: {}, vscode: {}, pi: {} }",
+        )
+        .unwrap();
+        assert_eq!(
+            super::configured_programs(&every.programs),
+            super::MANAGED_PROGRAMS
+        );
+    }
+
+    #[test]
+    fn apply_program_choice_lists_what_it_leaves_out_in_provider_order() {
+        let config = parse_daemon(CHOICE_CONFIG).unwrap();
+        let (chosen, opted_out) = apply_program_choice(&config, &ProgramChoice::None);
+        assert_eq!(opted_out, vec!["claude-code", "codex"]);
+        assert!(chosen.programs.claude_code.is_none() && chosen.programs.codex.is_none());
+
+        let (chosen, opted_out) = apply_program_choice(&config, &ProgramChoice::All);
+        assert!(opted_out.is_empty());
+        assert!(matches!(chosen, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn removed_then_absent_on_the_next_apply() {
+        let root = new_root("removed-absent");
+        let configured = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  copilot:
+    models:
+      gpt-4.1: {}
+"#,
+        )
+        .unwrap();
+        let reconciler = full_reconciler(&root).with_llm_proxy(Some(proxy_context("PAIRING-2")));
+        reconciler
+            .apply_with_report(&configured)
+            .1
+            .expect("apply configured");
+
+        let disabled = parse_daemon("programs: {}").unwrap();
+        let (report, result) = reconciler.apply_with_report(&disabled);
+        result.expect("apply disabled");
+        assert_eq!(
+            program_outcome(&report, "copilot").map(|outcome| outcome.state),
+            Some(ProgramState::Removed)
+        );
+
+        let (report, result) = reconciler.apply_with_report(&disabled);
+        result.expect("apply disabled again");
+        assert!(
+            program_outcome(&report, "copilot").is_none(),
+            "an unconfigured, idle provider gets no row"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pi_reports_applied_unchanged_removed_then_no_row() {
+        let root = new_root("pi");
+        let configured = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  pi:
+    model: claude-sonnet-4-5
+"#,
+        )
+        .unwrap();
+        let disabled = parse_daemon("programs: {}").unwrap();
+        let reconciler = full_reconciler(&root);
+        let mut states = Vec::new();
+        for config in [&configured, &configured, &disabled, &disabled] {
+            let (report, result) = reconciler.apply_with_report(config);
+            result.expect("apply succeeds");
+            states.push(program_outcome(&report, "pi").map(|outcome| outcome.state));
+        }
+        assert_eq!(
+            states,
+            [
+                Some(ProgramState::Applied),
+                Some(ProgramState::Unchanged),
+                Some(ProgramState::Removed),
+                None,
+            ]
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn use_llm_gateway_false_reports_applied_or_unchanged() {
+        let root = new_root("use-llm-gateway-false");
+        let with_gateway = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  copilot:
+    models:
+      gpt-4.1: {}
+"#,
+        )
+        .unwrap();
+        let reconciler = full_reconciler(&root).with_llm_proxy(Some(proxy_context("PAIRING-3")));
+        reconciler
+            .apply_with_report(&with_gateway)
+            .1
+            .expect("apply with the gateway on");
+
+        let gateway_off = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  copilot:
+    useLlmGateway: false
+"#,
+        )
+        .unwrap();
+        let (report, result) = reconciler.apply_with_report(&gateway_off);
+        result.expect("apply with the gateway off");
+        assert_eq!(
+            program_outcome(&report, "copilot").map(|outcome| outcome.state),
+            Some(ProgramState::Applied),
+            "the managed file is removed, so a configured program is Applied, not Removed"
+        );
+
+        let (report, result) = reconciler.apply_with_report(&gateway_off);
+        result.expect("apply with the gateway off again");
+        assert_eq!(
+            program_outcome(&report, "copilot").map(|outcome| outcome.state),
+            Some(ProgramState::Unchanged)
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn conflict_blocks_other_programs_and_reports_blocked() {
+        let root = new_root("conflict-blocked");
+        fs::create_dir_all(root.join("codex")).unwrap();
+        fs::write(root.join("codex/config.toml"), b"model = \"personal\"\n").unwrap();
+        let config = parse_daemon("programs:\n  claudeCode: {}\n  codex: {}").unwrap();
+        let reconciler = full_reconciler(&root);
+
+        let (report, result) = reconciler.apply_with_report(&config);
+        assert!(result.is_err(), "a conflict means nothing is written");
+        assert_eq!(
+            program_outcome(&report, "codex").map(|outcome| outcome.state),
+            Some(ProgramState::Conflict)
+        );
+        let claude_code = program_outcome(&report, "claude-code").expect("claude-code is reported");
+        assert_eq!(claude_code.state, ProgramState::Blocked);
+        assert!(
+            claude_code.detail.contains("codex"),
+            "a blocked program's detail names the first conflicted program: {}",
+            claude_code.detail
+        );
+        assert!(!root.join("claude").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn failed_provider_plan_does_not_stop_the_others() {
+        let root = new_root("failed-plan-continues");
+        // A directory where Pi expects a file is a real I/O failure. Grok is
+        // skipped in user mode and must remain inactive even when apply fails.
+        fs::create_dir_all(root.join("pi/models.json")).unwrap();
+        let reconciler = full_reconciler(&root);
+        let config = parse_daemon("programs:\n  claudeCode: {}\n  pi: {}\n  grok: {}").unwrap();
+
+        let (report, result) = reconciler.apply_with_report(&config);
+        assert!(result.is_err());
+        assert_eq!(
+            program_outcome(&report, "pi").unwrap().state,
+            ProgramState::Failed
+        );
+        assert_eq!(
+            program_outcome(&report, "grok").unwrap().state,
+            ProgramState::Inactive
+        );
+        assert_eq!(
+            program_outcome(&report, "claude-code").unwrap().state,
+            ProgramState::Blocked,
+            "claude-code was still planned, but nothing is written because the apply fails"
+        );
+        assert!(!root.join("claude/settings.json").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn observed_file_mismatch_fails_its_owners_and_blocks_the_rest() {
+        let root = new_root("observed-mismatch");
+        let reconciler = full_reconciler(&root);
+        let original = parse_daemon("programs:\n  claudeCode: {}\n  codex: {}").unwrap();
+        reconciler
+            .apply_with_report(&original)
+            .1
+            .expect("initial apply");
+
+        let update =
+            parse_daemon("programs:\n  claudeCode:\n    env:\n      COMPANY: updated\n  codex: {}")
+                .unwrap();
+        let attributed = reconciler.plan_with_report(&update);
+        // Codex's file changes after planning but before apply.
+        fs::write(root.join("codex/config.toml"), b"externally changed").unwrap();
+        let (report, result) = attributed.apply();
+        assert!(result.is_err());
+        assert_eq!(
+            program_outcome(&report, "codex").map(|outcome| outcome.state),
+            Some(ProgramState::Failed)
+        );
+        assert_eq!(
+            program_outcome(&report, "claude-code").map(|outcome| outcome.state),
+            Some(ProgramState::Blocked)
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_failure_orders_applied_failed_blocked() {
+        // SAFETY: geteuid has no preconditions and does not dereference pointers.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root ignores directory permissions.
+        }
+        let root = new_root("write-failure-order");
+        fs::create_dir_all(root.join("codex")).unwrap();
+        let mut reconciler = full_reconciler(&root);
+        reconciler.providers = std::sync::Arc::new(vec![
+            Box::new(super::ClaudeCode {
+                settings_path: root.join("claude/settings.json"),
+            }),
+            Box::new(super::Codex {
+                managed_config_path: root.join("codex/config.toml"),
+            }),
+            Box::new(super::OpenCode {
+                managed_config_path: root.join("opencode/config.json"),
+                plugin_path: root.join("opencode/plugin.js"),
+            }),
+        ]);
+        let config = parse_daemon(
+            r#"
+programs:
+  claudeCode: {}
+  codex: {}
+  openCode:
+    model: m
+    models:
+      m: {}
+"#,
+        )
+        .unwrap();
+        let attributed = reconciler.plan_with_report(&config);
+
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(root.join("codex"), fs::Permissions::from_mode(0o500)).unwrap();
+        let (report, result) = attributed.apply();
+        // Restore permissions so the temp directory can be removed.
+        fs::set_permissions(root.join("codex"), fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(result.is_err());
+        assert_eq!(
+            program_outcome(&report, "claude-code").map(|outcome| outcome.state),
+            Some(ProgramState::Applied)
+        );
+        assert_eq!(
+            program_outcome(&report, "codex").map(|outcome| outcome.state),
+            Some(ProgramState::Failed)
+        );
+        assert_eq!(
+            program_outcome(&report, "opencode").map(|outcome| outcome.state),
+            Some(ProgramState::Blocked)
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn copilot_and_vscode_own_models_go_inactive_when_the_proxy_is_absent() {
+        let root = new_root("inactive-own-models");
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  copilot:
+    models:
+      gpt-4.1: {}
+  vscode:
+    models:
+      gpt-4.1-mini: {}
+"#,
+        )
+        .unwrap();
+        let reconciler = full_reconciler(&root).with_llm_proxy(Some(proxy_context("PAIRING-5")));
+        let (applied, result) = reconciler.apply_with_report(&config);
+        result.expect("apply with the proxy available");
+        assert_eq!(
+            program_outcome(&applied, "copilot").map(|outcome| outcome.state),
+            Some(ProgramState::Applied)
+        );
+        assert_eq!(
+            program_outcome(&applied, "vscode").map(|outcome| outcome.state),
+            Some(ProgramState::Applied)
+        );
+
+        // A restart (or a hot reload) without the proxy: from an applied
+        // state, both programs go Inactive rather than being torn down as an
+        // ordinary removal.
+        let reconciler_without_proxy = full_reconciler(&root);
+        let (report, result) = reconciler_without_proxy.apply_with_report(&config);
+        result.expect("apply without the proxy still succeeds: files are removed, not written");
+        for program in ["copilot", "vscode"] {
+            let outcome = program_outcome(&report, program)
+                .unwrap_or_else(|| panic!("{program} is reported"));
+            assert_eq!(outcome.state, ProgramState::Inactive, "{program}");
+            assert!(
+                outcome.detail.contains("local LLM proxy not available"),
+                "{program}: {}",
+                outcome.detail
+            );
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn vscode_github_models_goes_inactive_when_the_proxy_is_absent() {
+        let root = new_root("inactive-github-models");
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+  proxyUrl: https://gateway.example.com/copilot-proxy
+programs:
+  vscode:
+    copilotChat: githubModels
+"#,
+        )
+        .unwrap();
+        let reconciler = full_reconciler(&root);
+        let (report, result) = reconciler.apply_with_report(&config);
+        result.expect("apply without the proxy still succeeds");
+        let outcome = program_outcome(&report, "vscode").expect("vscode is reported");
+        assert_eq!(outcome.state, ProgramState::Inactive);
+        assert!(
+            outcome.detail.contains("local LLM proxy not available"),
+            "{}",
+            outcome.detail
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn vscode_conflict_on_one_file_outranks_inactive_on_the_other() {
+        let root = new_root("vscode-conflict-outranks-inactive");
+        let github_models = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+  proxyUrl: https://gateway.example.com/copilot-proxy
+programs:
+  vscode:
+    copilotChat: githubModels
+"#,
+        )
+        .unwrap();
+        let reconciler = full_reconciler(&root).with_llm_proxy(Some(proxy_context("PAIRING-7")));
+        reconciler
+            .apply_with_report(&github_models)
+            .1
+            .expect("apply githubModels with the proxy available");
+        let settings_path = root.join("vscode/User/settings.json");
+        assert!(settings_path.is_file(), "the override was written");
+
+        // Break the shape the merge left in settings.json (an object) so its
+        // removal below is a conflict, and switch to ownModels with no proxy
+        // so the other managed file (chatLanguageModels.json) is Inactive in
+        // the same apply: Conflict must outrank Inactive for the program.
+        fs::write(&settings_path, b"[]\n").unwrap();
+        let own_models = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  vscode:
+    models:
+      gpt-4.1-mini: {}
+"#,
+        )
+        .unwrap();
+        let reconciler = full_reconciler(&root);
+        let (report, result) = reconciler.apply_with_report(&own_models);
+        assert!(result.is_err(), "the conflict means nothing is written");
+        let vscode = program_outcome(&report, "vscode").expect("vscode is reported");
+        assert_eq!(
+            vscode.state,
+            ProgramState::Conflict,
+            "conflict outranks inactive"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn discovery_only_and_unconfigured_idle_providers_get_no_row() {
+        let root = new_root("no-row-for-idle");
+        let reconciler = full_reconciler(&root);
+        let config = parse_daemon("programs:\n  claudeCode: {}\n").unwrap();
+        let (report, result) = reconciler.apply_with_report(&config);
+        result.expect("apply succeeds");
+        assert_eq!(
+            program_outcome(&report, "claude-code").map(|outcome| outcome.state),
+            Some(ProgramState::Applied)
+        );
+        for absent in [
+            "cursor",
+            "ollama",
+            "codex",
+            "claude-desktop",
+            "grok",
+            "copilot",
+            "vscode",
+            "opencode",
+            "pi",
+        ] {
+            assert!(
+                program_outcome(&report, absent).is_none(),
+                "{absent} must get no row"
+            );
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn program_detail_is_truncated_to_1024_bytes() {
+        let mut fixture = Fixture::new();
+        // A multi-byte character straddles the 1024-byte cutoff so
+        // truncation must land on a char boundary, not merely a byte count.
+        let long_run = "a".repeat(1020);
+        let message = format!("{long_run}\u{1F600}{long_run}");
+        fixture.reconciler.providers = std::sync::Arc::new(vec![Box::new(FailWithMessage {
+            message: message.clone(),
+        })]);
+        let config = parse_daemon("programs:\n  claudeCode: {}\n").unwrap();
+
+        let (report, result) = fixture.reconciler.apply_with_report(&config);
+        assert!(result.is_err());
+        assert_eq!(
+            report.programs.len(),
+            1,
+            "the one failing provider is reported"
+        );
+        let detail = &report.programs[0].detail;
+        assert!(
+            detail.len() <= 1024,
+            "detail must be truncated to 1024 bytes: {} bytes",
+            detail.len()
+        );
+        assert!(
+            message.len() > 1024,
+            "the untruncated message must exceed the limit"
+        );
+    }
+
+    #[test]
+    fn conflict_and_sidecar_failure_details_never_include_the_pairing() {
+        const PAIRING: &str = "PAIRING-SECRET-13";
+
+        // (a) A foreign "agentdesktop" vendor entry is a conflict.
+        {
+            let root = new_root("no-pairing-conflict");
+            let chat_models = root.join("vscode/User/chatLanguageModels.json");
+            fs::create_dir_all(chat_models.parent().unwrap()).unwrap();
+            fs::write(
+                &chat_models,
+                serde_json::to_vec_pretty(&serde_json::json!([{
+                    "name": "agentdesktop",
+                    "vendor": "customendpoint",
+                    "apiKey": "sk-user",
+                    "apiType": "chat-completions",
+                    "models": [{
+                        "id": "not-ours",
+                        "url": "https://not-ours.example.com/v1/chat/completions",
+                    }],
+                }]))
+                .unwrap(),
+            )
+            .unwrap();
+            let reconciler = full_reconciler(&root).with_llm_proxy(Some(proxy_context(PAIRING)));
+            let config = parse_daemon(
+                r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  vscode:
+    models:
+      gpt-4.1-mini: {}
+"#,
+            )
+            .unwrap();
+            let (report, result) = reconciler.apply_with_report(&config);
+            assert!(result.is_err());
+            let vscode = program_outcome(&report, "vscode").expect("vscode is reported");
+            assert_eq!(vscode.state, ProgramState::Conflict);
+            assert!(
+                !vscode.detail.contains(PAIRING),
+                "conflict detail must not leak the pairing: {}",
+                vscode.detail
+            );
+            let _ = fs::remove_dir_all(&root);
+        }
+
+        // (b) A corrupted sidecar file is a plan error (Failed), not a conflict.
+        {
+            let root = new_root("no-pairing-sidecar");
+            let reconciler = full_reconciler(&root).with_llm_proxy(Some(proxy_context(PAIRING)));
+            let config = parse_daemon(
+                r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  vscode:
+    models:
+      gpt-4.1-mini: {}
+"#,
+            )
+            .unwrap();
+            reconciler
+                .apply_with_report(&config)
+                .1
+                .expect("initial apply");
+            let sidecar = root.join("vscode/User/.chatLanguageModels.json.agentdesktop");
+            assert!(sidecar.is_file(), "the sidecar was written");
+            fs::write(&sidecar, b"{ not json").unwrap();
+
+            let (report, result) = reconciler.apply_with_report(&config);
+            assert!(result.is_err());
+            let vscode = program_outcome(&report, "vscode").expect("vscode is reported");
+            assert_eq!(vscode.state, ProgramState::Failed);
+            assert!(
+                !vscode.detail.contains(PAIRING),
+                "sidecar parse failure detail must not leak the pairing: {}",
+                vscode.detail
+            );
+            let _ = fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
+    fn two_programs_planning_the_same_path_both_fail_and_the_rest_is_blocked() {
+        let root = new_root("same-path");
+        let shared = root.join("shared/settings.json");
+        let mut reconciler = full_reconciler(&root);
+        reconciler.providers = std::sync::Arc::new(vec![
+            Box::new(super::ClaudeCode {
+                settings_path: shared.clone(),
+            }),
+            Box::new(super::OpenCode {
+                managed_config_path: root.join("opencode/config.json"),
+                plugin_path: root.join("opencode/plugin.js"),
+            }),
+            Box::new(super::Codex {
+                managed_config_path: shared,
+            }),
+        ]);
+        let config = parse_daemon(
+            "programs:\n  claudeCode: {}\n  codex: {}\n  openCode:\n    model: m\n    models:\n      m: {}\n",
+        )
+        .unwrap();
+        let (report, result) = reconciler.apply_with_report(&config);
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("multiple providers plan to modify")
+        );
+        let state = |program| program_outcome(&report, program).map(|outcome| outcome.state);
+        assert_eq!(state("claude-code"), Some(ProgramState::Failed));
+        assert_eq!(state("codex"), Some(ProgramState::Failed));
+        assert_eq!(state("opencode"), Some(ProgramState::Blocked));
+        assert!(!root.exists(), "nothing is written");
+    }
+
+    #[test]
+    fn a_wrongly_typed_sidecar_field_does_not_put_its_value_in_the_detail() {
+        const PAIRING: &str = "PAIRING-IN-SIDECAR";
+        let root = new_root("typed-sidecar");
+        let providers = root.join("copilot/providers.json");
+        fs::create_dir_all(providers.parent().unwrap()).unwrap();
+        fs::write(&providers, b"{}\n").unwrap();
+        // `created` must be a boolean; serde would quote the string.
+        fs::write(
+            root.join("copilot/.providers.json.agentdesktop"),
+            format!("{{\"created\": \"{PAIRING}\", \"before\": {{}}, \"after\": {{}}}}"),
+        )
+        .unwrap();
+        let reconciler = full_reconciler(&root).with_llm_proxy(Some(proxy_context(PAIRING)));
+        let config = parse_daemon(
+            "llmGateway:\n  url: https://gateway.example.com\nprograms:\n  copilot:\n    models:\n      gpt-4.1: {}\n",
+        )
+        .unwrap();
+        let (report, result) = reconciler.apply_with_report(&config);
+        assert!(result.is_err());
+        let copilot = program_outcome(&report, "copilot").expect("copilot is reported");
+        assert_eq!(copilot.state, ProgramState::Failed);
+        assert!(!copilot.detail.contains(PAIRING), "{}", copilot.detail);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_private_directory_that_cannot_be_created_fails_its_owner_and_blocks_the_rest() {
+        // SAFETY: geteuid has no preconditions and does not dereference pointers.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root ignores directory permissions.
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let root = new_root("private-dir");
+        let config = parse_daemon(
+            "llmGateway:\n  url: https://gateway.example.com\nprograms:\n  claudeCode: {}\n  vscode:\n    models:\n      gpt-4.1-mini: {}\n",
+        )
+        .unwrap();
+        let reconciler = full_reconciler(&root).with_llm_proxy(Some(proxy_context("PAIRING-PD")));
+        let attributed = reconciler.plan_with_report(&config);
+        // The VS Code profile directory the plan wants to create owner-only
+        // cannot be created any more.
+        fs::create_dir_all(root.join("vscode")).unwrap();
+        fs::set_permissions(root.join("vscode"), fs::Permissions::from_mode(0o500)).unwrap();
+        let (report, result) = attributed.apply();
+        fs::set_permissions(root.join("vscode"), fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.is_err());
+        let state = |program| program_outcome(&report, program).map(|outcome| outcome.state);
+        assert_eq!(state("vscode"), Some(ProgramState::Failed));
+        assert_eq!(state("claude-code"), Some(ProgramState::Blocked));
+        assert!(!root.join("claude").exists(), "nothing is written");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // --- No-op writes skipped, full reconciler ---------------------------------
+
+    fn sidecar_path(path: &Path) -> PathBuf {
+        let name = path.file_name().unwrap().to_str().unwrap();
+        path.with_file_name(format!(".{name}.agentdesktop"))
+    }
+
+    #[test]
+    fn second_apply_of_an_unchanged_multi_program_config_writes_nothing() {
+        let root = new_root("second-apply-no-op");
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  claudeCode: {}
+  copilot:
+    models:
+      gpt-4.1: {}
+  vscode:
+    models:
+      gpt-4.1-mini: {}
+"#,
+        )
+        .unwrap();
+        let reconciler =
+            full_reconciler(&root).with_llm_proxy(Some(proxy_context("PAIRING-TICK-1")));
+        reconciler
+            .apply_with_report(&config)
+            .1
+            .expect("first apply succeeds");
+
+        let paths = [
+            root.join("claude/settings.json"),
+            sidecar_path(&root.join("claude/settings.json")),
+            root.join("copilot/providers.json"),
+            sidecar_path(&root.join("copilot/providers.json")),
+            root.join("vscode/User/chatLanguageModels.json"),
+            sidecar_path(&root.join("vscode/User/chatLanguageModels.json")),
+        ];
+        let before: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                fs::metadata(path).unwrap_or_else(|error| {
+                    panic!(
+                        "{} must exist after the first apply: {error}",
+                        path.display()
+                    )
+                })
+            })
+            .collect();
+
+        reconciler
+            .apply_with_report(&config)
+            .1
+            .expect("second apply succeeds");
+
+        for (path, before) in paths.iter().zip(before) {
+            let after = fs::metadata(path).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                assert_eq!(
+                    after.ino(),
+                    before.ino(),
+                    "{} must not be rewritten by an unchanged apply",
+                    path.display()
+                );
+            }
+            assert_eq!(
+                after.modified().unwrap(),
+                before.modified().unwrap(),
+                "{} mtime must not change on an unchanged apply",
+                path.display()
+            );
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn providers_json_at_a_looser_mode_is_tightened_on_the_next_apply() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = new_root("copilot-tighten");
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  copilot:
+    models:
+      gpt-4.1: {}
+"#,
+        )
+        .unwrap();
+        let reconciler =
+            full_reconciler(&root).with_llm_proxy(Some(proxy_context("PAIRING-TICK-2")));
+        reconciler
+            .apply_with_report(&config)
+            .1
+            .expect("first apply succeeds");
+
+        let providers_path = root.join("copilot/providers.json");
+        fs::set_permissions(&providers_path, fs::Permissions::from_mode(0o664)).unwrap();
+        let before_contents = fs::read(&providers_path).unwrap();
+
+        reconciler
+            .apply_with_report(&config)
+            .1
+            .expect("second apply succeeds");
+
+        assert_eq!(
+            fs::read(&providers_path).unwrap(),
+            before_contents,
+            "bytes must not change"
+        );
+        let mode = fs::metadata(&providers_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "a looser providers.json must be tightened");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_deleted_managed_file_is_recreated_on_the_next_apply() {
+        let root = new_root("recreate-deleted");
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  copilot:
+    models:
+      gpt-4.1: {}
+"#,
+        )
+        .unwrap();
+        let reconciler =
+            full_reconciler(&root).with_llm_proxy(Some(proxy_context("PAIRING-TICK-3")));
+        reconciler
+            .apply_with_report(&config)
+            .1
+            .expect("first apply succeeds");
+
+        let providers_path = root.join("copilot/providers.json");
+        let original = fs::read(&providers_path).unwrap();
+        fs::remove_file(&providers_path).unwrap();
+
+        let (report, result) = reconciler.apply_with_report(&config);
+        result.expect("second apply recreates the deleted file");
+        assert_eq!(
+            program_outcome(&report, "copilot").map(|outcome| outcome.state),
+            Some(ProgramState::Applied)
+        );
+        assert_eq!(fs::read(&providers_path).unwrap(), original);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // --- Serialized applies ----------------------------------------------------
+
+    /// A provider whose `plan` records that it was entered (in order) and,
+    /// only the first time, blocks until `release` is signalled. Later calls
+    /// return immediately, so the test can tell whether a second
+    /// `apply_with_report` was let into `plan` before the first released the
+    /// lock.
+    struct BlockingProbe {
+        order: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+        release: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::provider::Provider for BlockingProbe {
+        fn id(&self) -> &'static str {
+            "blocking-probe"
+        }
+
+        async fn discover(&self) -> agentdesktop_core::model::Discovery {
+            agentdesktop_core::model::Discovery {
+                agents: Vec::new(),
+                model_runtimes: Vec::new(),
+            }
+        }
+
+        fn plan(
+            &self,
+            _ctx: &crate::provider::ReconcileContext,
+            _config: &agentdesktop_core::config::DaemonConfig,
+        ) -> anyhow::Result<super::ReconcilePlan> {
+            let is_first = {
+                let mut order = self.order.lock().unwrap();
+                order.push("enter");
+                order.len() == 1
+            };
+            if is_first {
+                let (lock, condvar) = &*self.release;
+                let mut released = lock.lock().unwrap();
+                while !*released {
+                    released = condvar.wait(released).unwrap();
+                }
+            }
+            Ok(super::ReconcilePlan::default())
+        }
+    }
+
+    #[test]
+    fn a_second_apply_on_a_clone_does_not_enter_plan_until_the_first_releases_the_lock() {
+        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let release =
+            std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let mut reconciler = full_reconciler(&new_root("apply-lock"));
+        reconciler.providers = std::sync::Arc::new(vec![Box::new(BlockingProbe {
+            order: order.clone(),
+            release: release.clone(),
+        })]);
+        let config = parse_daemon("programs: {}").unwrap();
+
+        let first = reconciler.clone();
+        let first_config = config.clone();
+        let first_handle = std::thread::spawn(move || first.apply_with_report(&first_config));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while order.lock().unwrap().is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the first apply never entered plan"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        let second = reconciler.clone();
+        let second_config = config.clone();
+        let second_handle = std::thread::spawn(move || second.apply_with_report(&second_config));
+
+        // Give a wrongly-unserialized second call time to enter `plan`.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(
+            order.lock().unwrap().len(),
+            1,
+            "a second apply_with_report on a clone must not enter plan while \
+             the first holds the lock"
+        );
+
+        {
+            let (lock, condvar) = &*release;
+            *lock.lock().unwrap() = true;
+            condvar.notify_all();
+        }
+
+        let (_, first_result) = first_handle.join().unwrap();
+        let (_, second_result) = second_handle.join().unwrap();
+        assert!(first_result.is_ok(), "{first_result:?}");
+        assert!(second_result.is_ok(), "{second_result:?}");
+        assert_eq!(
+            order.lock().unwrap().len(),
+            2,
+            "the second apply must eventually run once the lock is released"
+        );
+    }
+
+    // --- Tick logging dedup ----------------------------------------------------
+
+    fn outcome_report(state: ProgramState, detail: &str) -> ApplyReport {
+        ApplyReport {
+            programs: vec![ProgramOutcome {
+                program: "claude-code",
+                state,
+                detail: detail.to_owned(),
+            }],
+            sequence: 0,
+        }
+    }
+
+    #[test]
+    fn should_log_with_nothing_applied_yet_always_logs() {
+        let current = outcome_report(ProgramState::Applied, "");
+        assert!(super::should_log(None, &current));
+    }
+
+    #[test]
+    fn should_log_is_false_when_the_report_is_unchanged() {
+        let previous = outcome_report(ProgramState::Unchanged, "");
+        let current = outcome_report(ProgramState::Unchanged, "");
+        assert!(!super::should_log(Some(&previous), &current));
+    }
+
+    #[test]
+    fn should_log_is_false_when_applied_or_removed_settles_to_unchanged() {
+        for state in [ProgramState::Applied, ProgramState::Removed] {
+            let previous = outcome_report(state, "");
+            let current = outcome_report(ProgramState::Unchanged, "");
+            assert!(
+                !super::should_log(Some(&previous), &current),
+                "{state:?} -> Unchanged must not be logged"
+            );
+        }
+    }
+
+    #[test]
+    fn should_log_is_true_when_a_programs_detail_changes() {
+        let previous = outcome_report(ProgramState::Conflict, "conflict at a");
+        let current = outcome_report(ProgramState::Conflict, "conflict at b");
+        assert!(super::should_log(Some(&previous), &current));
+    }
+
+    #[test]
+    fn should_log_is_true_when_a_programs_state_changes_to_something_other_than_unchanged() {
+        let previous = outcome_report(ProgramState::Unchanged, "");
+        let current = outcome_report(ProgramState::Failed, "boom");
+        assert!(super::should_log(Some(&previous), &current));
+    }
+
+    #[test]
+    fn a_program_that_disappears_is_a_difference_unless_it_was_removed() {
+        let both = ApplyReport {
+            programs: vec![
+                ProgramOutcome {
+                    program: "claude-code",
+                    state: ProgramState::Unchanged,
+                    detail: String::new(),
+                },
+                ProgramOutcome {
+                    program: "copilot",
+                    state: ProgramState::Unchanged,
+                    detail: String::new(),
+                },
+            ],
+            sequence: 0,
+        };
+        let one = outcome_report(ProgramState::Unchanged, "");
+        assert!(super::should_log(Some(&both), &one), "copilot vanished");
+        let mut removed = both.clone();
+        removed.programs[1].state = ProgramState::Removed;
+        assert!(
+            !super::should_log(Some(&removed), &one),
+            "a removed program that is no longer listed is not news"
+        );
     }
 }

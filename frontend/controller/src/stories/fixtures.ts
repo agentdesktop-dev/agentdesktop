@@ -1,9 +1,17 @@
+import {
+  emptyUsageTotals,
+  type UsageBucket,
+  type UsageGroup,
+  type UsageTotals,
+} from "@agentdesktop/ui";
+
 import type {
   ControllerSettings,
   DaemonConfigDocument,
   Device,
   DeviceDetail,
   Overview,
+  UsageReport,
 } from "../types";
 
 const now = Math.floor(Date.now() / 1000);
@@ -208,6 +216,30 @@ const deviceSkills = [
 
 export const deviceDetail: DeviceDetail = {
   ...macDevice,
+  programs: [
+    {
+      program: "claude-code",
+      state: "applied",
+      detail: "",
+      revision: 12,
+      updated_at: now - 60,
+    },
+    {
+      program: "vscode",
+      state: "unchanged",
+      detail: "",
+      revision: 12,
+      updated_at: now - 60,
+    },
+    {
+      program: "copilot",
+      state: "removed",
+      detail: "",
+      revision: 12,
+      updated_at: now - 60,
+    },
+  ],
+  programs_reported: true,
   discoveries: [
     {
       kind: "vscode",
@@ -254,6 +286,71 @@ export const deviceDetail: DeviceDetail = {
 export const failedDeviceDetail: DeviceDetail = {
   ...deviceDetail,
   ...failedDevice,
+  programs: [
+    {
+      program: "claude-code",
+      state: "blocked",
+      detail: "not applied: vscode conflicted",
+      revision: 12,
+      updated_at: now - 60,
+    },
+    {
+      program: "copilot",
+      state: "inactive",
+      detail:
+        "local LLM proxy not available; see llmProxy.error in daemon-info, or set daemon.llmProxy.listen; the managed entries stay and the tool fails until the proxy is back (whenProxyUnavailable: failClosed)",
+      revision: 12,
+      updated_at: now - 60,
+    },
+    {
+      program: "vscode",
+      state: "conflict",
+      detail:
+        "settings at /Users/developer/Library/Application Support/Code/User/settings.json: conflicting or invalid existing configuration",
+      revision: 12,
+      updated_at: now - 60,
+    },
+    {
+      program: "codex",
+      state: "failed",
+      detail: "multiple providers plan to modify /etc/codex/config.toml",
+      revision: 12,
+      updated_at: now - 60,
+    },
+    {
+      program: "grok",
+      state: "unspecified",
+      detail: "",
+      revision: 12,
+      updated_at: now - 60,
+    },
+  ],
+};
+
+export const optedOutDeviceDetail: DeviceDetail = {
+  ...deviceDetail,
+  programs: [
+    {
+      program: "claude-code",
+      state: "applied",
+      detail: "",
+      revision: 12,
+      updated_at: now - 60,
+    },
+    {
+      program: "codex",
+      state: "opted_out",
+      detail: "",
+      revision: 12,
+      updated_at: now - 60,
+    },
+  ],
+};
+
+export const oldAgentDeviceDetail: DeviceDetail = {
+  ...deviceDetail,
+  programs: [],
+  programs_reported: false,
 };
 
 export const emptyDeviceDetail: DeviceDetail = {
@@ -261,6 +358,8 @@ export const emptyDeviceDetail: DeviceDetail = {
   discoveries: [],
   model_runtimes: [],
   recent_events: [],
+  programs: [],
+  programs_reported: true,
 };
 
 export const controllerSettings: ControllerSettings = {
@@ -269,6 +368,277 @@ export const controllerSettings: ControllerSettings = {
   oidc_enabled: true,
   tls_enabled: true,
   gateway_jwt_enabled: true,
+  usage_enabled: true,
+};
+
+const day = 86400;
+const startOfToday = (() => {
+  const date = new Date();
+  date.setHours(0, 0, 0, 0);
+  return Math.floor(date.getTime() / 1000);
+})();
+
+function usageTotals(totals: Partial<UsageTotals>): UsageTotals {
+  return { ...emptyUsageTotals, ...totals };
+}
+
+function sumUsage(items: Array<{ totals: UsageTotals }>): UsageTotals {
+  const sum = { ...emptyUsageTotals };
+  for (const { totals } of items) {
+    for (const key of Object.keys(sum) as Array<keyof UsageTotals>) {
+      sum[key] += totals[key];
+    }
+  }
+  return sum;
+}
+
+const dailyCost = [4.12, 6.8, 5.35, 9.9, 7.45, 3.2, 8.15];
+
+export const usageBuckets: UsageBucket[] = dailyCost.map((cost, index) => ({
+  startUnixSeconds: startOfToday - (dailyCost.length - 1 - index) * day,
+  totals: usageTotals({
+    requests: Math.round(cost * 41),
+    errors: index === 3 ? 4 : 0,
+    inputTokens: Math.round(cost * 205_000),
+    outputTokens: Math.round(cost * 19_500),
+    cacheReadTokens: Math.round(cost * 140_000),
+    costUsd: cost,
+    subscriptionCostUsd: Math.round(cost * 38) / 100,
+    subscriptionRequests: Math.round(cost * 9),
+    unpricedRequests: index === dailyCost.length - 1 ? 12 : 0,
+  }),
+}));
+
+const usageTools: UsageGroup[] = [
+  {
+    key: "claude-code",
+    totals: usageTotals({
+      requests: 1102,
+      inputTokens: 6_420_000,
+      outputTokens: 512_000,
+      costUsd: 21.84,
+      subscriptionCostUsd: 17.4,
+      subscriptionRequests: 405,
+    }),
+  },
+  {
+    key: "codex",
+    totals: usageTotals({
+      requests: 401,
+      inputTokens: 2_210_000,
+      outputTokens: 240_000,
+      costUsd: 12.1,
+    }),
+  },
+  {
+    key: "vscode-copilot",
+    totals: usageTotals({
+      requests: 260,
+      inputTokens: 1_190_000,
+      outputTokens: 96_000,
+      costUsd: 6.03,
+    }),
+  },
+  {
+    key: "",
+    totals: usageTotals({
+      requests: 12,
+      inputTokens: 61_000,
+      outputTokens: 4_200,
+      unpricedRequests: 12,
+    }),
+  },
+];
+
+export const usageReport: UsageReport = {
+  enabled: true,
+  range: "7d",
+  fromUnixSeconds: usageBuckets[0].startUnixSeconds,
+  toUnixSeconds: startOfToday + day,
+  bucketSeconds: day,
+  totals: sumUsage(usageBuckets),
+  previousTotals: usageTotals({
+    requests: 1630,
+    inputTokens: 8_100_000,
+    outputTokens: 742_000,
+    costUsd: 38.4,
+    subscriptionCostUsd: 14.1,
+    subscriptionRequests: 300,
+  }),
+  activeUsers: 3,
+  activeDevices: 4,
+  buckets: usageBuckets,
+  breakdowns: {
+    user: [
+      {
+        key: "user-maria",
+        label: "maria@example.com",
+        totals: usageTotals({
+          requests: 941,
+          inputTokens: 5_300_000,
+          outputTokens: 420_000,
+          costUsd: 19.6,
+          subscriptionCostUsd: 17.4,
+          subscriptionRequests: 405,
+        }),
+      },
+      {
+        key: "developer@example.com",
+        label: "developer@example.com",
+        totals: usageTotals({
+          requests: 822,
+          inputTokens: 4_520_000,
+          outputTokens: 428_000,
+          costUsd: 20.37,
+        }),
+      },
+      {
+        key: "",
+        totals: usageTotals({
+          requests: 12,
+          inputTokens: 61_000,
+          outputTokens: 4_200,
+          unpricedRequests: 12,
+        }),
+      },
+    ],
+    device: [
+      {
+        key: macDevice.id,
+        label: macDevice.hostname,
+        totals: usageTotals({
+          requests: 1210,
+          inputTokens: 6_900_000,
+          outputTokens: 560_000,
+          costUsd: 26.2,
+          subscriptionCostUsd: 17.4,
+          subscriptionRequests: 405,
+        }),
+      },
+      {
+        key: linuxDevice.id,
+        label: linuxDevice.hostname,
+        totals: usageTotals({
+          requests: 553,
+          inputTokens: 2_920_000,
+          outputTokens: 288_000,
+          costUsd: 13.77,
+        }),
+      },
+      {
+        key: "5f0c2a8e-2d6b-4f43-9a51-3c8e0f7d2b19",
+        totals: usageTotals({
+          requests: 12,
+          inputTokens: 61_000,
+          outputTokens: 4_200,
+          unpricedRequests: 12,
+        }),
+      },
+    ],
+    tool: usageTools,
+    model: [
+      {
+        key: "claude-sonnet-4-5-20250929",
+        totals: usageTotals({
+          requests: 1102,
+          inputTokens: 6_420_000,
+          outputTokens: 512_000,
+          costUsd: 21.84,
+          subscriptionCostUsd: 17.4,
+          subscriptionRequests: 405,
+        }),
+      },
+      {
+        key: "gpt-5-codex",
+        totals: usageTotals({
+          requests: 661,
+          inputTokens: 3_400_000,
+          outputTokens: 336_000,
+          costUsd: 18.13,
+        }),
+      },
+      {
+        key: "llama-3.3-70b",
+        totals: usageTotals({
+          requests: 12,
+          inputTokens: 61_000,
+          outputTokens: 4_200,
+          unpricedRequests: 12,
+        }),
+      },
+    ],
+    provider: [
+      {
+        key: "anthropic",
+        totals: usageTotals({
+          requests: 1102,
+          inputTokens: 6_420_000,
+          outputTokens: 512_000,
+          costUsd: 21.84,
+          subscriptionCostUsd: 17.4,
+          subscriptionRequests: 405,
+        }),
+      },
+      {
+        key: "openai",
+        totals: usageTotals({
+          requests: 673,
+          inputTokens: 3_461_000,
+          outputTokens: 340_200,
+          costUsd: 18.13,
+          unpricedRequests: 12,
+        }),
+      },
+    ],
+  },
+  filterOptions: {
+    user: [
+      { key: "user-maria", label: "maria@example.com" },
+      { key: "developer@example.com", label: "developer@example.com" },
+      { key: "user-sam", label: "sam@example.com" },
+      { key: "" },
+    ],
+    device: [
+      { key: macDevice.id, label: macDevice.hostname },
+      { key: linuxDevice.id, label: linuxDevice.hostname },
+      { key: "5f0c2a8e-2d6b-4f43-9a51-3c8e0f7d2b19" },
+    ],
+  },
+};
+
+export const emptyUsageReport: UsageReport = {
+  ...usageReport,
+  totals: emptyUsageTotals,
+  previousTotals: emptyUsageTotals,
+  activeUsers: 0,
+  activeDevices: 0,
+  buckets: usageBuckets.map((bucket) => ({
+    ...bucket,
+    totals: emptyUsageTotals,
+  })),
+  breakdowns: {
+    user: [],
+    device: [],
+    tool: [],
+    model: [],
+    provider: [],
+  },
+  filterOptions: { user: [], device: [] },
+};
+
+export const disabledUsageReport: UsageReport = {
+  ...emptyUsageReport,
+  enabled: false,
+};
+
+export const deviceUsageReport: UsageReport = {
+  ...usageReport,
+  range: "30d",
+  totals: sumUsage(usageTools),
+  breakdowns: {
+    tool: usageTools,
+    model: usageReport.breakdowns.model,
+  },
 };
 
 export const activeDaemonConfig: DaemonConfigDocument = {
@@ -280,6 +650,27 @@ export const activeDaemonConfig: DaemonConfigDocument = {
   programs: {
     claudeCode: { permissions: { defaultMode: "plan" } },
     openCode: { useLlmGateway: false, autoupdate: false },
+  },
+};
+
+export const copilotFailOpenDaemonConfig: DaemonConfigDocument = {
+  llmGateway: {
+    url: "https://gateway.example.internal",
+    proxyUrl: "https://gateway.example.internal/copilot-proxy",
+    whenProxyUnavailable: "failOpen",
+    authentication: { type: "controllerJwt", audience: "agentgateway" },
+  },
+  programs: {
+    copilot: { models: { "gpt-4.1": {} } },
+    vscode: { copilotChat: "githubModels" },
+  },
+};
+
+export const programSelectionDaemonConfig: DaemonConfigDocument = {
+  programSelection: { allowUserChoice: true },
+  programs: {
+    claudeCode: {},
+    codex: {},
   },
 };
 

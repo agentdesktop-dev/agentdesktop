@@ -4,8 +4,20 @@ import {
   ModelRuntimeInventory,
   ToolIcon,
   ToolInventory,
+  UsageBreakdownTable,
+  UsageMetrics,
+  UsageNotes,
 } from "@agentdesktop/ui";
-import { ArrowLeft, Box, CircleAlert, Code2, Cpu, Trash2 } from "lucide-react";
+import {
+  ArrowLeft,
+  Box,
+  ChartColumn,
+  ChevronRight,
+  CircleAlert,
+  Code2,
+  Cpu,
+  Trash2,
+} from "lucide-react";
 import { useEffect, useRef } from "react";
 
 import {
@@ -20,7 +32,7 @@ import {
   friendlyOs,
 } from "../format";
 import { Link } from "../router";
-import type { DeviceDetail } from "../types";
+import type { DeviceDetail, ProgramStatus, UsageReport } from "../types";
 
 export interface DeviceViewProps {
   deleteError: string | null;
@@ -30,6 +42,8 @@ export interface DeviceViewProps {
   onDeleteCancel: () => void;
   onDeleteConfirm: () => void;
   onDeleteRequest: () => void;
+  /** This device's last 30 days, when the controller has usage. */
+  usage?: UsageReport | null;
 }
 
 export function DeviceView({
@@ -40,6 +54,7 @@ export function DeviceView({
   onDeleteCancel,
   onDeleteConfirm,
   onDeleteRequest,
+  usage,
 }: DeviceViewProps) {
   const modelCount = device.model_runtimes.reduce(
     (total, runtime) => total + runtime.models.length,
@@ -105,6 +120,47 @@ export function DeviceView({
           )}
         </section>
       </div>
+      {device.programs_reported !== null && (
+        <section className="card table-card">
+          <CardHeader
+            title="Managed programs"
+            description="Outcome of the latest apply, per program"
+          />
+          {!device.programs_reported ? (
+            <p className="empty-state compact">
+              Per-program status is not reported by this agent version
+            </p>
+          ) : device.programs.length ? (
+            <div className="event-list">
+              {device.programs.map((program) => (
+                <div className="event-row" key={program.program}>
+                  <span className="event-source">
+                    <ToolIcon kind={program.program} />
+                    <strong>{friendlyTool(program.program)}</strong>
+                  </span>
+                  <span className="program-state">
+                    <ProgramBadge state={program.state} />
+                    {program.detail && (
+                      <code title={program.detail}>{program.detail}</code>
+                    )}
+                  </span>
+                  <time>
+                    {program.revision !== device.config_revision
+                      ? `r${program.revision} · `
+                      : ""}
+                    {formatTime(program.updated_at)}
+                  </time>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="empty-state compact">No managed programs</p>
+          )}
+        </section>
+      )}
+      {usage && (usage.enabled || usage.totals.requests > 0) ? (
+        <DeviceUsage deviceId={device.id} usage={usage} />
+      ) : null}
       <section className="card table-card">
         <CardHeader
           title="Recent activity"
@@ -224,6 +280,54 @@ export function DeviceView({
   );
 }
 
+function DeviceUsage({
+  deviceId,
+  usage,
+}: {
+  deviceId: string;
+  usage: UsageReport;
+}) {
+  const tools = usage.breakdowns.tool ?? [];
+  const models = usage.breakdowns.model ?? [];
+  return (
+    <section className="card table-card device-usage">
+      <CardHeader
+        title="Usage"
+        description="Last 30 days"
+        action={
+          <Link
+            href={`/usage?${new URLSearchParams({ range: "30d", device: deviceId })}`}
+            className="text-link"
+          >
+            View in Usage <ChevronRight size={14} />
+          </Link>
+        }
+      />
+      {usage.totals.requests ? (
+        <>
+          <UsageMetrics totals={usage.totals} />
+          <UsageNotes totals={usage.totals} />
+          <UsageBreakdownTable
+            dimension="tool"
+            label="Usage by tool"
+            rows={tools}
+          />
+          <UsageBreakdownTable
+            dimension="model"
+            label="Usage by model"
+            rows={models}
+          />
+        </>
+      ) : (
+        <div className="empty-inline">
+          <ChartColumn size={20} />
+          <span>No LLM gateway usage in the last 30 days.</span>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function DeleteDeviceDialog({
   hostname,
   deleting,
@@ -301,4 +405,36 @@ function telemetryDetail(
   if (value === undefined) return "No input reported";
   const encoded = JSON.stringify(value);
   return encoded.length > 180 ? `${encoded.slice(0, 177)}…` : encoded;
+}
+
+const programStateLabels: Record<ProgramStatus["state"], string> = {
+  applied: "Applied",
+  unchanged: "Unchanged",
+  removed: "Removed",
+  conflict: "Conflict",
+  inactive: "Inactive",
+  blocked: "Blocked",
+  opted_out: "Opted out",
+  failed: "Failed",
+  unspecified: "Unknown",
+};
+
+const programStateDescriptions: Partial<
+  Record<ProgramStatus["state"], string>
+> = {
+  opted_out: "The device user opted out of this program",
+};
+
+function ProgramBadge({ state }: { state: ProgramStatus["state"] }) {
+  const tone =
+    state === "conflict" || state === "failed" || state === "blocked"
+      ? "danger"
+      : state === "inactive"
+        ? "warning"
+        : "neutral";
+  return (
+    <span className={`badge ${tone}`} title={programStateDescriptions[state]}>
+      {programStateLabels[state] ?? state}
+    </span>
+  );
 }

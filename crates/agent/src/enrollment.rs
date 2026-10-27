@@ -18,6 +18,7 @@ impl EnrollmentState {
                     "notConfigured".to_owned()
                 },
                 authorization_url: None,
+                user_code: None,
             })),
         }
     }
@@ -30,6 +31,7 @@ impl EnrollmentState {
         *self.status.write().await = EnrollmentStatus {
             status: status.to_owned(),
             authorization_url: None,
+            user_code: None,
         };
     }
 
@@ -37,6 +39,15 @@ impl EnrollmentState {
         *self.status.write().await = EnrollmentStatus {
             status: "awaitingAuthentication".to_owned(),
             authorization_url: Some(authorization_url),
+            user_code: None,
+        };
+    }
+
+    pub async fn awaiting_device_authorization(&self, verification_url: String, user_code: String) {
+        *self.status.write().await = EnrollmentStatus {
+            status: "awaitingAuthentication".to_owned(),
+            authorization_url: Some(verification_url),
+            user_code: Some(user_code),
         };
     }
 }

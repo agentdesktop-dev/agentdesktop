@@ -1,10 +1,12 @@
 use std::path::PathBuf;
 
 use agentdesktop_core::config::DaemonConfig;
-use agentdesktop_core::model::Discovery;
+use agentdesktop_core::model::{DaemonScope, Discovery};
 
 use super::{Provider, ReconcileContext};
 use crate::reconcile::ReconcilePlan;
+#[cfg(windows)]
+use crate::reconcile::registry::RegistryKey;
 
 pub(super) mod discovery;
 mod reconcile;
@@ -13,6 +15,11 @@ mod reconcile;
 pub struct ClaudeDesktop {
     pub managed_settings_path: PathBuf,
     pub credential_helper_path: PathBuf,
+    /// The policy registry key the managed settings are reconciled into.
+    /// Production uses [`claude_desktop_policy_key`]; tests inject a
+    /// disposable `HKCU` key so they never touch live machine policy.
+    #[cfg(windows)]
+    pub(crate) policy_key: RegistryKey,
 }
 
 impl Default for ClaudeDesktop {
@@ -20,8 +27,17 @@ impl Default for ClaudeDesktop {
         Self {
             managed_settings_path: default_claude_desktop_managed_settings_path(),
             credential_helper_path: default_claude_desktop_credential_helper_path(),
+            #[cfg(windows)]
+            policy_key: claude_desktop_policy_key(),
         }
     }
+}
+
+/// The live machine policy key Claude Desktop reads its managed settings
+/// from on Windows.
+#[cfg(windows)]
+pub(crate) fn claude_desktop_policy_key() -> RegistryKey {
+    RegistryKey::local_machine(reconcile::POLICY_KEY)
 }
 
 impl ClaudeDesktop {
@@ -31,18 +47,26 @@ impl ClaudeDesktop {
 
 #[async_trait::async_trait]
 impl Provider for ClaudeDesktop {
+    fn id(&self) -> &'static str {
+        Self::ID
+    }
+
     async fn discover(&self) -> Discovery {
         Discovery {
-            agents: discovery::discover().into_iter().collect(),
+            agents: discovery::discover(&self.managed_settings_path)
+                .into_iter()
+                .collect(),
             model_runtimes: Vec::new(),
         }
     }
 
     fn plan(&self, ctx: &ReconcileContext, config: &DaemonConfig) -> anyhow::Result<ReconcilePlan> {
-        if ctx.merge_user_settings && config.programs.claude_desktop.is_some() {
-            anyhow::bail!(
-                "Claude Desktop does not read inference settings from its user preferences; remove programs.claudeDesktop or run Agentdesktop without --user as root so it can manage /etc/claude-desktop/managed-settings.json"
-            );
+        if let Some(plan) = ctx.skip_unless(
+            DaemonScope::System,
+            config.programs.claude_desktop.is_some(),
+            Self::DISPLAY_NAME,
+        ) {
+            return Ok(plan);
         }
         let configured = config.programs.claude_desktop.as_ref().map(|provider| {
             let gateway = config
@@ -53,9 +77,8 @@ impl Provider for ClaudeDesktop {
         });
         let plan = ReconcilePlan::default();
         reconcile::plan(
-            &self.managed_settings_path,
+            self,
             ctx.merge_user_settings,
-            &self.credential_helper_path,
             &ctx.credential_helper,
             &ctx.socket,
             configured,
@@ -66,8 +89,27 @@ impl Provider for ClaudeDesktop {
 }
 
 /// Returns Claude Desktop's system-managed settings path.
+///
+/// On Windows Claude Desktop reads its managed configuration from the
+/// `HKLM\SOFTWARE\Policies\Claude` registry key, never from a file, so the
+/// reconciler targets that key and only removes what an earlier agentdesktop
+/// wrote at this path.
+#[cfg(not(target_os = "macos"))]
 pub fn default_claude_desktop_managed_settings_path() -> PathBuf {
     PathBuf::from("/etc/claude-desktop/managed-settings.json")
+}
+
+/// Returns Claude Desktop's system-managed settings path.
+///
+/// Claude Desktop on macOS reads its managed configuration the same way as any other
+/// managed macOS application: via `CFPreferencesCopyAppValue` against the
+/// `com.anthropic.claudefordesktop` preference domain, backed by a property list under
+/// `/Library/Managed Preferences/`. It never reads a JSON file under `/etc`, so this must
+/// be a `.plist` and the reconciler must write it with `plist::to_writer_xml` — see
+/// `reconcile::serialize_managed_settings`.
+#[cfg(target_os = "macos")]
+pub fn default_claude_desktop_managed_settings_path() -> PathBuf {
+    PathBuf::from("/Library/Managed Preferences/com.anthropic.claudefordesktop.plist")
 }
 
 /// Returns the path of Agentdesktop's Claude Desktop credential helper.

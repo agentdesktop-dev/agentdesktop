@@ -12,26 +12,46 @@ use crate::provider::{metadata, vscode::discovery as vscode};
 const PRODUCT_NAME: &str = "Cursor";
 
 pub(super) fn discover() -> Option<Agent> {
-    let executable = metadata::find_all_in_path("cursor")
-        .into_iter()
-        .chain(
+    let executable = pick_executable(
+        metadata::find_all_in_path("cursor").into_iter().chain(
             executable_candidates()
                 .into_iter()
                 .filter(|candidate| candidate.is_file()),
-        )
-        .find(|candidate| is_cursor(candidate))?;
-    // Only this install's own manifest, so an unrelated `cursor` on PATH cannot
-    // be reported carrying a version read out of a real Cursor elsewhere.
-    let version = metadata::packaged_manifest_candidates(&executable)
-        .into_iter()
-        .find_map(|path| metadata::json_package_version(&path, PRODUCT_NAME));
+        ),
+    )?;
     Some(Agent {
-        version,
+        version: discover_version(&executable),
         executable,
         kind: Cursor::ID.to_owned(),
         mcp_servers: discover_mcp_servers(),
         skills: metadata::discover_skills(skill_roots()),
     })
+}
+
+/// Prefers a Cursor launcher that carries its own packaged version over a PATH
+/// shim with no nearby manifest (`~/.local/bin/cursor` is a common example).
+fn pick_executable(candidates: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    let mut without_version = None;
+    for candidate in candidates {
+        if !is_cursor(&candidate) {
+            continue;
+        }
+        if discover_version(&candidate).is_some() {
+            return Some(candidate);
+        }
+        if without_version.is_none() {
+            without_version = Some(candidate);
+        }
+    }
+    without_version
+}
+
+fn discover_version(executable: &Path) -> Option<String> {
+    // Only this install's own manifest, so an unrelated `cursor` on PATH cannot
+    // be reported carrying a version read out of a real Cursor elsewhere.
+    metadata::packaged_manifest_candidates(executable)
+        .into_iter()
+        .find_map(|path| metadata::json_package_version(&path, PRODUCT_NAME))
 }
 
 /// Rejects a `cursor` launcher whose packaged manifest names a different
@@ -202,6 +222,40 @@ mod tests {
                 "missing skill root {relative}"
             );
         }
+    }
+
+    #[test]
+    fn prefers_a_packaged_install_over_a_versionless_path_shim() {
+        let root = std::env::temp_dir().join(format!(
+            "agentdesktop-cursor-version-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let shim_dir = root.join("shim");
+        let app_bin = root.join("Cursor.app/Contents/Resources/app/bin");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+        std::fs::create_dir_all(&app_bin).unwrap();
+        let shim = shim_dir.join("cursor");
+        let launcher = app_bin.join("cursor");
+        std::fs::write(&shim, "").unwrap();
+        std::fs::write(&launcher, "").unwrap();
+        std::fs::write(
+            root.join("Cursor.app/Contents/Resources/app/package.json"),
+            json!({ "name": "Cursor", "version": "3.21.13" }).to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(super::discover_version(&shim), None);
+        assert_eq!(
+            super::discover_version(&launcher).as_deref(),
+            Some("3.21.13")
+        );
+        assert_eq!(
+            super::pick_executable([shim, launcher.clone()]),
+            Some(launcher)
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

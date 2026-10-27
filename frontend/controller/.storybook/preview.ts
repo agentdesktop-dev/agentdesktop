@@ -1,4 +1,6 @@
+import { parseColorMode, ThemeProvider } from "@agentdesktop/ui";
 import type { Preview } from "@storybook/react-vite";
+import { createElement } from "react";
 
 import "../src/styles.css";
 import "@agentdesktop/ui/styles.css";
@@ -22,12 +24,40 @@ const controllerViewports = {
 };
 
 const preview = {
+  globalTypes: {
+    colorMode: {
+      description: "Interface appearance",
+      toolbar: {
+        icon: "circlehollow",
+        dynamicTitle: true,
+        items: [
+          { value: "system", title: "System" },
+          { value: "light", title: "Light" },
+          { value: "dark", title: "Dark" },
+        ],
+      },
+    },
+  },
+  decorators: [
+    (Story, context) =>
+      context.parameters.themeProvider === false
+        ? createElement(Story)
+        : createElement(
+            ThemeProvider,
+            {
+              key: `${context.id}-${context.globals.colorMode}`,
+              defaultMode: parseColorMode(context.globals.colorMode),
+            },
+            createElement(Story),
+          ),
+  ],
   parameters: {
     layout: "fullscreen",
     a11y: { test: "error" },
     viewport: { options: controllerViewports },
   },
   initialGlobals: {
+    colorMode: "system",
     viewport: { value: "desktop", isRotated: false },
   },
 } satisfies Preview;

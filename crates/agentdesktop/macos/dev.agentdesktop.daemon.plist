@@ -10,8 +10,6 @@
     <string>daemon</string>
     <string>--config</string>
     <string>/etc/agentdesktop/config.yaml</string>
-    <string>--state-dir</string>
-    <string>/var/lib/agentdesktop</string>
   </array>
   <key>RunAtLoad</key>
   <true/>

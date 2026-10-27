@@ -1,4 +1,10 @@
 # yaml-language-server: $schema=../../schema/daemon-config.json
+daemon:
+  # Agentgateway sends token and cost usage here for the desktop app.
+  usage:
+    listen: 127.0.0.1:4319
+    tokenFile: /tmp/agentdesktop-standalone/usage-token
+
 llmGateway:
   url: http://127.0.0.1:4001
   authentication:
@@ -12,6 +18,10 @@ programs:
   claudeCode:
     useLlmGateway: true
     companyAnnouncements: ["Using the local Agentgateway through Agentdesktop"]
-#    Claude desktop cannot run with --user. Uncomment to enable
+#  Pi is optional and requires --user.
+#  pi:
+#    useLlmGateway: true
+#    model: claude-sonnet-4-5
+#  Claude Desktop requires system mode; user daemons skip it.
 #  claudeDesktop:
 #    useLlmGateway: true

@@ -1,6 +1,8 @@
+import type { ColorMode } from "@agentdesktop/ui";
 import {
   startTransition,
   useEffect,
+  useOptimistic,
   useRef,
   useState,
   useTransition,
@@ -9,14 +11,16 @@ import {
 import {
   applyNetworkRuleChange as applyNetworkRuleChangeRequest,
   getAccessReport,
+  desktopReady,
   getBootstrap,
   getConnectorStatus,
   getDiscovery,
   getManagedDeviceStatus,
-  getRemoteConfig,
+  getProgramManagement,
   logoutManagedDevice,
   openAccessSource,
   saveSettings,
+  setProgramChoice as sendProgramChoice,
   setupManagedDevice,
 } from "./backend";
 import type {
@@ -26,10 +30,12 @@ import type {
   Discovery,
   ManagedDeviceSnapshot,
   NetworkRuleChange,
+  ProgramChoice,
+  ProgramManagement,
   Settings,
 } from "./types";
 
-export type View = "home" | "tools";
+export type View = "home" | "tools" | "usage" | "settings";
 export type Notice = { tone: "success" | "error"; message: string } | null;
 
 type StatusSource =
@@ -37,23 +43,23 @@ type StatusSource =
   | "managedDevice"
   | "discovery"
   | "access"
-  | "remoteConfig";
+  | "programs";
 type StatusErrors = Partial<Record<StatusSource, string>>;
 type StatusUpdate = {
   connector: PromiseSettledResult<ConnectorSnapshot>;
   managedDevice: PromiseSettledResult<ManagedDeviceSnapshot>;
   discovery: PromiseSettledResult<Discovery>;
-  remoteConfig: PromiseSettledResult<string | null>;
+  programs: PromiseSettledResult<ProgramManagement>;
 };
 
-const loadingSettings: Settings = { openOnStartup: true };
+const loadingSettings: Settings = { openOnStartup: true, colorMode: "system" };
 
 const statusSourceLabels: Record<StatusSource, string> = {
   connector: "local daemon status",
   managedDevice: "organization status",
   discovery: "tool inventory",
   access: "local access audit",
-  remoteConfig: "advanced configuration",
+  programs: "managed tools",
 };
 
 function errorMessage(error: unknown): string {
@@ -61,14 +67,14 @@ function errorMessage(error: unknown): string {
 }
 
 async function getStatusUpdate(): Promise<StatusUpdate> {
-  const [connector, managedDevice, discovery, remoteConfig] =
+  const [connector, managedDevice, discovery, programs] =
     await Promise.allSettled([
       getConnectorStatus(),
       getManagedDeviceStatus(),
       getDiscovery(),
-      getRemoteConfig(),
+      getProgramManagement(),
     ]);
-  return { connector, managedDevice, discovery, remoteConfig };
+  return { connector, managedDevice, discovery, programs };
 }
 
 function updateStatusError(
@@ -100,6 +106,7 @@ function statusErrorMessage(errors: StatusErrors): string | null {
 export function useDesktopModel() {
   const [view, setView] = useState<View>("home");
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
+  const [hasLoadedBootstrap, setHasLoadedBootstrap] = useState(false);
   const [settings, setSettings] = useState<Settings>(loadingSettings);
   const [connector, setConnector] = useState<ConnectorSnapshot | null>(null);
   const [managedDevice, setManagedDevice] =
@@ -107,7 +114,16 @@ export function useDesktopModel() {
   const [discovery, setDiscovery] = useState<Discovery | null>(null);
   const [accessReport, setAccessReport] = useState<AccessReport | null>(null);
   const [accessStale, setAccessStale] = useState(false);
-  const [remoteConfig, setRemoteConfig] = useState<string | null>(null);
+  const [programManagement, setProgramManagement] =
+    useState<ProgramManagement | null>(null);
+  // Shows a choice being saved until the daemon answers.
+  const [shownProgramManagement, showProgramChoice] = useOptimistic(
+    programManagement,
+    (current, choice: ProgramChoice) => current && { ...current, choice },
+  );
+  // Advanced when a program choice change starts and when it is saved, so a
+  // status update read before or during the change cannot replace its result.
+  const programChanges = useRef(0);
   const [notice, setNotice] = useState<Notice>(null);
   const [statusErrors, setStatusErrors] = useState<StatusErrors>({});
   const [hasLoadedStatus, setHasLoadedStatus] = useState(false);
@@ -116,13 +132,26 @@ export function useDesktopModel() {
   const [isAssessing, startAssessing] = useTransition();
   const [isManaging, startManaging] = useTransition();
   const [isSaving, startSaving] = useTransition();
+  const savingSettings = useRef(false);
   const [isLoggingOut, startLoggingOut] = useTransition();
   const accessRequestId = useRef(0);
+  const [isChangingPrograms, startChangingPrograms] = useTransition();
   const needsEnrollment = Boolean(
     managedDevice?.configured && managedDevice.enrollment !== "approved",
   );
+  // Usage comes from the controller of an enrolled device, or from the
+  // daemon itself when a gateway on this machine reports to it.
+  const showUsage =
+    Boolean(
+      managedDevice?.configured && managedDevice.enrollment === "approved",
+    ) || Boolean(connector?.runtime?.daemon.usageReceiver);
 
-  function applyStatusUpdate(update: StatusUpdate) {
+  useEffect(() => {
+    if (view === "usage" && hasLoadedStatus && !showUsage) setView("home");
+  }, [view, hasLoadedStatus, showUsage]);
+
+  /** `programChange` is `programChanges` from before `update` was read. */
+  function applyStatusUpdate(update: StatusUpdate, programChange: number) {
     startTransition(() => {
       if (update.connector.status === "fulfilled") {
         setConnector(update.connector.value);
@@ -133,15 +162,19 @@ export function useDesktopModel() {
       if (update.discovery.status === "fulfilled") {
         setDiscovery(update.discovery.value);
       }
-      if (update.remoteConfig.status === "fulfilled") {
-        setRemoteConfig(update.remoteConfig.value);
+      if (programChange === programChanges.current) {
+        if (update.programs.status === "fulfilled") {
+          setProgramManagement(update.programs.value);
+        }
       }
       setStatusErrors((current) => {
         const next = { ...current };
         updateStatusError(next, "connector", update.connector);
         updateStatusError(next, "managedDevice", update.managedDevice);
         updateStatusError(next, "discovery", update.discovery);
-        updateStatusError(next, "remoteConfig", update.remoteConfig);
+        if (programChange === programChanges.current) {
+          updateStatusError(next, "programs", update.programs);
+        }
         return next;
       });
       setHasLoadedStatus(true);
@@ -205,11 +238,22 @@ export function useDesktopModel() {
       })
       .catch((error: unknown) => {
         if (active) setNotice({ tone: "error", message: errorMessage(error) });
+      })
+      .finally(() => {
+        if (active) setHasLoadedBootstrap(true);
       });
     return () => {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!hasLoadedBootstrap) return;
+    // ThemeProvider's layout effect has applied the restored mode before showing.
+    desktopReady().catch((error: unknown) => {
+      setNotice({ tone: "error", message: errorMessage(error) });
+    });
+  }, [hasLoadedBootstrap]);
 
   useEffect(() => {
     if (
@@ -285,8 +329,9 @@ export function useDesktopModel() {
     let active = true;
     let interval: number | undefined;
     const refreshStatus = async () => {
+      const programChange = programChanges.current;
       const update = await getStatusUpdate();
-      if (active) applyStatusUpdate(update);
+      if (active) applyStatusUpdate(update, programChange);
     };
     const stopPolling = () => {
       if (interval === undefined) return;
@@ -319,9 +364,10 @@ export function useDesktopModel() {
   function refresh() {
     setNotice(null);
     startRefreshing(async () => {
-      const access = view === "tools" ? loadAccess() : null;
-      applyStatusUpdate(await getStatusUpdate());
-      if (access) await access;
+  const access = view === "tools" ? loadAccess() : null;
+      const programChange = programChanges.current;
+      applyStatusUpdate(await getStatusUpdate(), programChange);
+  if (access) await access;
     });
   }
 
@@ -350,15 +396,12 @@ export function useDesktopModel() {
     startLoggingOut(async () => {
       try {
         await logoutManagedDevice();
-        const [nextConnector, nextManagedDevice, nextRemoteConfig] =
-          await Promise.all([
-            getConnectorStatus(),
-            getManagedDeviceStatus(),
-            getRemoteConfig(),
-          ]);
+        const [nextConnector, nextManagedDevice] = await Promise.all([
+          getConnectorStatus(),
+          getManagedDeviceStatus(),
+        ]);
         setConnector(nextConnector);
         setManagedDevice(nextManagedDevice);
-        setRemoteConfig(nextRemoteConfig);
         setView("home");
         setNotice({
           tone: "success",
@@ -370,18 +413,49 @@ export function useDesktopModel() {
     });
   }
 
-  function setOpenOnStartup(checked: boolean) {
+  function setProgramChoice(choice: ProgramChoice) {
+    setNotice(null);
+    programChanges.current += 1;
+    startChangingPrograms(async () => {
+      showProgramChoice(choice);
+      try {
+        const nextProgramManagement = await sendProgramChoice(choice);
+        programChanges.current += 1;
+        startTransition(() => {
+          setProgramManagement(nextProgramManagement);
+        });
+        setNotice({ tone: "success", message: "Managed tools updated" });
+      } catch (error: unknown) {
+        setNotice({ tone: "error", message: errorMessage(error) });
+      }
+    });
+  }
+
+  function updateSettings(patch: Partial<Settings>) {
+    if (!bootstrap || savingSettings.current) return;
+    savingSettings.current = true;
     const previous = settings;
-    const next = { ...settings, openOnStartup: checked };
+    const next = { ...settings, ...patch };
     setSettings(next);
+    setNotice(null);
     startSaving(async () => {
       try {
         setSettings(await saveSettings(next));
       } catch (error: unknown) {
         setSettings(previous);
         setNotice({ tone: "error", message: errorMessage(error) });
+      } finally {
+        savingSettings.current = false;
       }
     });
+  }
+
+  function setOpenOnStartup(checked: boolean) {
+    updateSettings({ openOnStartup: checked });
+  }
+
+  function setColorMode(colorMode: ColorMode) {
+    updateSettings({ colorMode });
   }
 
   async function copyDiagnostics() {
@@ -397,16 +471,6 @@ export function useDesktopModel() {
         JSON.stringify({ desktop: bootstrap, connector, managed }, null, 2),
       );
       setNotice({ tone: "success", message: "Diagnostics copied" });
-    } catch (error: unknown) {
-      setNotice({ tone: "error", message: errorMessage(error) });
-    }
-  }
-
-  async function copyRemoteConfig() {
-    if (!remoteConfig) return;
-    try {
-      await navigator.clipboard.writeText(remoteConfig);
-      setNotice({ tone: "success", message: "Configuration copied" });
     } catch (error: unknown) {
       setNotice({ tone: "error", message: errorMessage(error) });
     }
@@ -431,12 +495,16 @@ export function useDesktopModel() {
 
   const visibleStatusErrors = { ...statusErrors };
   if (view !== "tools") delete visibleStatusErrors.access;
-
-  const pageTitle = needsEnrollment
-    ? "Enrollment"
-    : view === "home"
-      ? "Status"
-      : "Tools";
+  const pageTitle =
+    view === "settings"
+      ? "Settings"
+      : needsEnrollment
+        ? "Enrollment"
+        : view === "home"
+          ? "Status"
+          : view === "usage"
+            ? "Usage"
+            : "Tools";
 
   return {
     applyNetworkRuleChange,
@@ -445,12 +513,12 @@ export function useDesktopModel() {
     bootstrap,
     connector,
     copyDiagnostics,
-    copyRemoteConfig,
     discovery,
     enroll,
     hasLoadedStatus,
     hasLoadedAccess,
     isAssessing,
+    isChangingPrograms,
     isLoggingOut,
     isManaging,
     isRefreshing,
@@ -462,11 +530,14 @@ export function useDesktopModel() {
     notice,
     openAccessSettings,
     pageTitle,
+    programManagement: shownProgramManagement,
     refresh,
     refreshError: statusErrorMessage(visibleStatusErrors),
-    remoteConfig,
+    setColorMode,
     setOpenOnStartup,
+    setProgramChoice,
     settings,
+    showUsage,
     view,
   };
 }

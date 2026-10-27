@@ -11,9 +11,11 @@ import claudeCodeIcon from "./assets/claude-code.svg";
 import claudeDesktopIcon from "./assets/claude-desktop.svg";
 import codexIcon from "./assets/codex.svg";
 import copilotIcon from "./assets/copilot.svg";
+import cursorIcon from "./assets/cursor.svg";
 import grokIcon from "./assets/grok.svg";
 import ollamaIcon from "./assets/ollama.svg";
 import openCodeIcon from "./assets/opencode.svg";
+import piIcon from "./assets/pi.svg";
 
 export interface ToolMcpServer {
   name: string;
@@ -63,8 +65,13 @@ const toolIcons: Record<string, string> = {
   claude_desktop: claudeDesktopIcon,
   grok: grokIcon,
   "grok-build": grokIcon,
+  cursor: cursorIcon,
   opencode: openCodeIcon,
+  pi: piIcon,
   vscode: copilotIcon,
+  "vscode-copilot": copilotIcon,
+  copilot: copilotIcon,
+  "copilot-cli": copilotIcon,
 };
 
 export function friendlyTool(kind: string) {
@@ -77,8 +84,12 @@ export function friendlyTool(kind: string) {
     grok: "Grok Build",
     "grok-build": "Grok Build",
     opencode: "OpenCode",
+    pi: "Pi",
     vscode: "VS Code",
+    "vscode-copilot": "VS Code",
     cursor: "Cursor",
+    copilot: "GitHub Copilot CLI",
+    "copilot-cli": "GitHub Copilot CLI",
   };
   return names[kind.toLowerCase()] ?? kind;
 }
@@ -93,7 +104,7 @@ export function friendlyModelRuntime(kind: string) {
 function ModelRuntimeIcon({ kind }: { kind: string }) {
   return kind.toLowerCase() === "ollama" ? (
     <img
-      className="model-runtime-icon"
+      className="model-runtime-icon theme-monochrome"
       src={ollamaIcon}
       alt=""
       aria-hidden="true"
@@ -134,8 +145,21 @@ export function ModelRuntimeInventory({
 
 export function ToolIcon({ kind }: { kind: string }) {
   const icon = toolIcons[kind.toLowerCase()];
+  const monochrome = [
+    "opencode",
+    "vscode",
+    "vscode-copilot",
+    "cursor",
+    "copilot",
+    "copilot-cli",
+  ].includes(kind.toLowerCase());
   return icon ? (
-    <img className="tool-icon" src={icon} alt="" aria-hidden="true" />
+    <img
+      className={`tool-icon${monochrome ? " theme-monochrome" : ""}`}
+      src={icon}
+      alt=""
+      aria-hidden="true"
+    />
   ) : (
     <Code2 className="tool-icon-fallback" size={16} aria-hidden="true" />
   );

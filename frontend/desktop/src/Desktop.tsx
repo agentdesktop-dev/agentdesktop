@@ -1,65 +1,97 @@
+import { ThemeProvider } from "@agentdesktop/ui";
+
 import { DesktopShell } from "./components/DesktopShell";
 import { PageBoundary } from "./components/PageBoundary";
 import { StatusLoading } from "./components/StatusLoading";
 import { useDesktopModel } from "./useDesktopModel";
+import { useDeviceUsage } from "./useDeviceUsage";
 import { EnrollmentView } from "./views/EnrollmentView";
+import { SettingsView } from "./views/SettingsView";
 import { StatusView } from "./views/StatusView";
 import { ToolsView } from "./views/ToolsView";
+import { UsageView } from "./views/UsageView";
 
 export function Desktop() {
   const model = useDesktopModel();
+  const showingUsage =
+    model.view === "usage" && model.showUsage && !model.needsEnrollment;
+  const deviceUsage = useDeviceUsage(showingUsage);
 
   return (
-    <DesktopShell
-      fullWidth={model.needsEnrollment}
-      isRefreshing={model.isRefreshing || model.isAssessing}
-      notice={model.notice}
-      onNavigate={model.navigate}
-      onRefresh={model.refresh}
-      pageTitle={model.pageTitle}
-      refreshError={model.refreshError}
-      view={model.view}
+    <ThemeProvider
+      mode={model.settings.colorMode}
+      onModeChange={model.setColorMode}
     >
-      <PageBoundary
-        key={`${model.view}-${model.needsEnrollment}-${model.hasLoadedStatus}`}
+      <DesktopShell
+        fullWidth={model.needsEnrollment && model.view !== "settings"}
+        isRefreshing={model.isRefreshing}
+        notice={model.notice}
+        onNavigate={model.navigate}
+        onRefresh={() => {
+          model.refresh();
+          if (showingUsage) deviceUsage.reload();
+        }}
+        pageTitle={model.pageTitle}
+        refreshError={model.refreshError}
+        showUsage={model.showUsage}
+        view={model.view}
       >
-        {!model.hasLoadedStatus ? (
-          <StatusLoading view={model.view} />
-        ) : model.needsEnrollment && model.managedDevice ? (
-          <EnrollmentView
-            enrollment={model.managedDevice}
-            busy={model.isManaging}
-            onEnroll={model.enroll}
-          />
-        ) : model.view === "home" ? (
-          <StatusView
-            bootstrap={model.bootstrap}
-            connector={model.connector}
-            managedDevice={model.managedDevice}
-            discovery={model.discovery}
-            remoteConfig={model.remoteConfig}
-            settings={model.settings}
-            isSaving={model.isSaving}
-            isLoggingOut={model.isLoggingOut}
-            onStartupChange={model.setOpenOnStartup}
-            onCopy={model.copyDiagnostics}
-            onCopyRemoteConfig={model.copyRemoteConfig}
-            onLogout={model.logout}
-          />
-        ) : (
-          <ToolsView
-            accessLoaded={model.hasLoadedAccess}
-            accessLoading={model.isAssessing}
-            accessReport={model.accessReport}
-            accessStale={model.accessStale}
-            allowAccessEditing={model.connector?.runtime?.mode === "standalone"}
-            discovery={model.discovery}
-            onApplyNetworkRuleChange={model.applyNetworkRuleChange}
-            onOpenAccessSource={model.openAccessSettings}
-            unavailable={!model.discovery}
-          />
-        )}
-      </PageBoundary>
-    </DesktopShell>
+        <PageBoundary
+          key={`${model.view}-${model.needsEnrollment}-${model.hasLoadedStatus}`}
+        >
+          {model.view === "settings" ? (
+            <SettingsView
+              settings={model.settings}
+              disabled={!model.bootstrap || model.isSaving}
+              onStartupChange={model.setOpenOnStartup}
+              programManagement={model.programManagement}
+              programsLoading={!model.hasLoadedStatus}
+              savingPrograms={model.isChangingPrograms}
+              onProgramChoiceChange={model.setProgramChoice}
+            />
+          ) : !model.hasLoadedStatus ? (
+            <StatusLoading view={model.view} />
+          ) : model.needsEnrollment && model.managedDevice ? (
+            <EnrollmentView
+              enrollment={model.managedDevice}
+              busy={model.isManaging}
+              daemon={model.connector?.runtime?.daemon ?? null}
+              onCopy={model.copyDiagnostics}
+              onEnroll={model.enroll}
+            />
+          ) : model.view === "home" ? (
+            <StatusView
+              bootstrap={model.bootstrap}
+              connector={model.connector}
+              managedDevice={model.managedDevice}
+              discovery={model.discovery}
+              isLoggingOut={model.isLoggingOut}
+              onCopy={model.copyDiagnostics}
+              onLogout={model.logout}
+            />
+          ) : showingUsage ? (
+            <UsageView
+              error={deviceUsage.error}
+              loading={deviceUsage.loading}
+              onRangeChange={deviceUsage.setRange}
+              range={deviceUsage.range}
+              usage={deviceUsage.usage}
+            />
+          ) : (
+            <ToolsView
+              accessLoaded={model.hasLoadedAccess}
+              accessLoading={model.isAssessing}
+              accessReport={model.accessReport}
+              accessStale={model.accessStale}
+              allowAccessEditing={model.connector?.runtime?.mode === "standalone"}
+              discovery={model.discovery}
+              onApplyNetworkRuleChange={model.applyNetworkRuleChange}
+              onOpenAccessSource={model.openAccessSettings}
+              unavailable={!model.discovery}
+            />
+          )}
+        </PageBoundary>
+      </DesktopShell>
+    </ThemeProvider>
   );
 }

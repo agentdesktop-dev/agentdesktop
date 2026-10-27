@@ -29,7 +29,7 @@
           Name="AgentDesktop"
           DisplayName="agentdesktop"
           Description="Applies managed AI agent configuration and connects this device to agentdesktop."
-          Arguments="--config &quot;[AgentDesktopDataFolder]config.yaml&quot; --state-dir &quot;[AgentDesktopDataFolder]state&quot;"
+          Arguments="--config &quot;[AgentDesktopDataFolder]config.yaml&quot;"
           Type="ownProcess"
           Start="auto"
           ErrorControl="normal"

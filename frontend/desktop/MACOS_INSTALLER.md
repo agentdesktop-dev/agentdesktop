@@ -35,12 +35,49 @@ Packages are written below `target/<target>/release/bundle/pkg`, or below
 Set `AGENTDESKTOP_VERSION` to override the package and application version.
 Set `APPLE_INSTALLER_SIGNING_IDENTITY` to a Developer ID Installer identity to
 sign the package. `APPLE_INSTALLER_KEYCHAIN` optionally selects its keychain.
-Application signing continues to use Tauri's standard Apple signing variables.
+Set `APPLE_SIGNING_IDENTITY` to the name or SHA-1 fingerprint of a code-signing
+certificate in your macOS keychain to sign the application itself. Reuse the
+same certificate and app identifier across builds so Keychain recognizes
+upgrades as the same application. A persistent self-signed certificate works
+for this; ad-hoc signing (`-`) does not preserve identity across changed builds.
 
-For production distribution, notarize and staple the resulting package after
-signing it:
+## Release signing
+
+The release workflow signs both architectures of the standalone macOS binary
+and the application inside the PKG with a Developer ID Application certificate,
+signs the PKG with a Developer ID Installer certificate, and notarizes both.
+The PKG is stapled; standalone binaries cannot be, so Gatekeeper checks their
+notarization online.
+
+The macOS jobs run in the protected `production-signing` GitHub environment.
+Configure these there:
+
+| Name | Kind | Value |
+| --- | --- | --- |
+| `APPLE_APPLICATION_CERTIFICATE` | Secret | Base64-encoded `.p12` with the Developer ID Application certificate and private key |
+| `APPLE_CERTIFICATE_PASSWORD` | Secret | Password protecting that `.p12` |
+| `APPLE_INSTALLER_CERTIFICATE` | Secret | Base64-encoded `.p12` with the Developer ID Installer certificate and private key |
+| `APPLE_INSTALLER_CERTIFICATE_PASSWORD` | Secret | Password protecting that `.p12` |
+| `APPLE_API_KEY` | Secret | Contents of an App Store Connect team API key (`.p8`) |
+| `APPLE_API_KEY_ID` | Variable | ID of that API key |
+| `APPLE_API_ISSUER` | Variable | Issuer ID of that API key |
+
+Only the Apple Developer Account Holder can create Developer ID certificates.
+`notarytool` needs a team API key; individual keys do not work. Missing values
+fail the macOS release jobs.
+
+Keychain entries survive upgrades and certificate renewals because the
+application identifier remains `dev.agentdesktop.tray`, including for
+standalone binaries, and Developer ID signatures are matched by team. Devices
+installed from earlier self-signed or ad-hoc builds cannot read their stored
+identity after upgrading; the daemon discards it and enrolls again.
+
+To notarize a locally built package, store the API key once, then submit and
+staple the package:
 
 ```sh
+xcrun notarytool store-credentials agentdesktop-notary \
+  --key AuthKey_KEYID.p8 --key-id KEYID --issuer ISSUER_ID
 xcrun notarytool submit "Agent Desktop.pkg" \
   --keychain-profile agentdesktop-notary --wait
 xcrun stapler staple "Agent Desktop.pkg"

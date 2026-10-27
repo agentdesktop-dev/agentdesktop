@@ -12,6 +12,9 @@ use crate::reconcile::ReconcilePlan;
 
 use crate::provider::shared::{deep_merge, responses_base_url};
 
+/// Mode of the managed file; a looser mode is repaired on the next apply.
+const MANAGED_FILE_MODE: u32 = 0o644;
+
 const MANAGED_HEADER: &str = "// Managed by Agentdesktop. Manual changes will be replaced.\n";
 const CONFIG_PROGRAM: &str = OpenCode::ID;
 
@@ -190,7 +193,11 @@ fn reconcile_file(
         }
     };
     let action = match existing.as_deref() {
-        Some(existing) if existing == contents => {
+        // Identical bytes at a mode looser than planned: rewritten (update).
+        Some(existing)
+            if existing == contents
+                && !crate::reconcile::grants_beyond(path, MANAGED_FILE_MODE) =>
+        {
             debug!(
                 program = CONFIG_PROGRAM,
                 kind = description,
@@ -215,7 +222,7 @@ fn reconcile_file(
         }
         None => "create",
     };
-    plan.write_file(path, contents, 0o644)?;
+    plan.write_file(path, contents, MANAGED_FILE_MODE)?;
     debug!(
         program = CONFIG_PROGRAM,
         kind = description,
@@ -351,5 +358,62 @@ programs:
         ));
         assert!(plugin.contains("input.model.providerID !== provider"));
         assert!(plugin.contains("output.headers.Authorization"));
+    }
+
+    #[cfg(unix)]
+    fn mode_repair_fixture() -> (tempfile::TempDir, agentdesktop_core::config::DaemonConfig) {
+        let config = parse_daemon(
+            r#"
+programs:
+  openCode: {}
+"#,
+        )
+        .expect("valid daemon configuration");
+        (tempfile::tempdir().unwrap(), config)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn identical_bytes_with_looser_mode_is_an_update_at_the_planned_mode() {
+        let (dir, config) = mode_repair_fixture();
+        let path = dir.path().join("opencode.jsonc");
+        let plugin = dir.path().join("plugin.js");
+        let plan_fn = |plan: &crate::reconcile::ReconcilePlan| {
+            super::plan(
+                &path,
+                &plugin,
+                Path::new("agentdesktop"),
+                Path::new("agentdesktop.sock"),
+                Some((config.programs.open_code.as_ref().unwrap(), None)),
+                plan,
+            )
+        };
+        crate::reconcile::plan::mode_repair::assert_identical_bytes_with_looser_mode_is_an_update(
+            &[&path],
+            0o644,
+            &plan_fn,
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn identical_bytes_within_mode_is_unchanged() {
+        let (dir, config) = mode_repair_fixture();
+        let path = dir.path().join("opencode.jsonc");
+        let plugin = dir.path().join("plugin.js");
+        let plan_fn = |plan: &crate::reconcile::ReconcilePlan| {
+            super::plan(
+                &path,
+                &plugin,
+                Path::new("agentdesktop"),
+                Path::new("agentdesktop.sock"),
+                Some((config.programs.open_code.as_ref().unwrap(), None)),
+                plan,
+            )
+        };
+        crate::reconcile::plan::mode_repair::assert_identical_bytes_within_mode_is_unchanged(
+            &[&path],
+            &plan_fn,
+        );
     }
 }

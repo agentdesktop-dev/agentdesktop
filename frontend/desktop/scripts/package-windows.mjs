@@ -4,7 +4,7 @@ import path from "node:path";
 
 import {
   createTauriVersionConfig,
-  normalizeTauriArguments,
+  resolveWindowsPackageMode,
 } from "./package-tauri.mjs";
 
 if (process.platform !== "win32") {
@@ -18,43 +18,57 @@ const nativeDirectory = path.join(
   "crates",
   "agentdesktop",
 );
-const forwardedArguments = normalizeTauriArguments(process.argv.slice(2));
+const packageMode = resolveWindowsPackageMode(process.argv.slice(2));
+const forwardedArguments = packageMode.arguments;
 const targetIndex = forwardedArguments.indexOf("--target");
 const target =
   targetIndex === -1 ? undefined : forwardedArguments[targetIndex + 1];
 if (targetIndex !== -1 && !target) {
   throw new Error("--target requires a Rust target triple");
 }
-const cargoArguments = [
-  "build",
-  "--locked",
-  "--release",
-  "--package",
-  "agentdesktop-agent",
-  "--bin",
-  "agentdesktop-service",
-];
-if (target) cargoArguments.push("--target", target);
+if (packageMode.buildService) {
+  const cargoArguments = [
+    "build",
+    "--locked",
+    "--release",
+    "--package",
+    "agentdesktop-agent",
+    "--bin",
+    "agentdesktop-service",
+  ];
+  if (target) cargoArguments.push("--target", target);
 
-const serviceBuild = spawnSync("cargo", cargoArguments, {
-  cwd: repositoryDirectory,
-  stdio: "inherit",
-});
-if (serviceBuild.error) throw serviceBuild.error;
-if (serviceBuild.status !== 0) process.exit(serviceBuild.status ?? 1);
+  const serviceBuild = spawnSync("cargo", cargoArguments, {
+    cwd: repositoryDirectory,
+    stdio: "inherit",
+  });
+  if (serviceBuild.error) throw serviceBuild.error;
+  if (serviceBuild.status !== 0) process.exit(serviceBuild.status ?? 1);
+}
 
 const targetDirectory = path.resolve(
   repositoryDirectory,
   process.env.CARGO_TARGET_DIR ?? "target",
 );
-const serviceExecutable = path.join(
+const releaseDirectory = path.join(
   targetDirectory,
   ...(target ? [target] : []),
   "release",
+);
+const serviceExecutable = path.join(
+  releaseDirectory,
   "agentdesktop-service.exe",
 );
 if (!existsSync(serviceExecutable)) {
   throw new Error(`Windows service executable not found: ${serviceExecutable}`);
+}
+if (packageMode.requireApplication) {
+  const applicationExecutable = path.join(releaseDirectory, "agentdesktop.exe");
+  if (!existsSync(applicationExecutable)) {
+    throw new Error(
+      `Windows application executable not found: ${applicationExecutable}`,
+    );
+  }
 }
 const tauriExecutable = path.join(
   desktopDirectory,
@@ -66,7 +80,7 @@ const versionConfig = createTauriVersionConfig(
   process.env.AGENTDESKTOP_VERSION,
 );
 const tauriArguments = [
-  "build",
+  ...packageMode.command,
   "--bundles",
   "msi",
   ...forwardedArguments,

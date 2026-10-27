@@ -6,38 +6,187 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use serde::Deserialize;
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
 
 use agentdesktop_core::{
-    config::{DaemonConfig, LlmGatewayAuthentication, ProgramAuthentication, valid_client_id},
+    config::{
+        ControllerConnectionConfig, DaemonConfig, LlmGatewayAuthentication, ProgramAuthentication,
+        VsCodeCopilotChat, valid_client_id,
+    },
     model::{
-        AccessReport, Discovery, EnrollmentStatus, LlmGatewayCredential, TelemetryEvent,
-        TelemetryEventKind,
+        AccessReport, DaemonInfo, DeviceUsage, Discovery, EnrollmentStatus, Health,
+        LlmGatewayCredential, LlmGatewayLoginStatus, ManagedProgram, ProgramChoice,
+        ProgramManagement, TelemetryEvent, TelemetryEventKind,
     },
 };
+use agentdesktop_proto::fleet::DeviceUsageRequest;
+use agentdesktop_usage::{UsageError, UsageStore};
 
-use crate::{enrollment::EnrollmentState, gateway_oidc, remote, subscription};
+use crate::{
+    enrollment::EnrollmentState,
+    gateway_oidc, program_choice,
+    reconcile::{Reconciler, apply_program_choice, configured_programs},
+    remote, subscription,
+    tick::{self, CurrentConfig, TickStatus},
+};
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: DaemonConfig,
-    pub discovery: Discovery,
-    pub access_user_home: Option<PathBuf>,
-    pub access_scan: Arc<Mutex<()>>,
+    pub daemon_info: DaemonInfo,
+    pub discovery: watch::Receiver<Arc<Discovery>>,
     pub enrollment: EnrollmentState,
+    pub controller_status: Option<remote::ControllerConnectionState>,
     pub state_dir: PathBuf,
     pub oidc_callback_listen: Option<SocketAddr>,
     pub telemetry: Option<mpsc::Sender<TelemetryEvent>>,
     pub logout: Option<mpsc::Sender<remote::LogoutRequest>>,
+    /// This device's usage, recorded by the daemon itself (`daemon.usage`).
+    pub usage: Option<UsageStore>,
+    /// The device user's program choice; `None` serves no program routes.
+    pub programs: Option<ProgramControl>,
 }
 
 #[derive(Clone)]
 pub(crate) struct AccessUserHome(pub PathBuf);
 
-#[derive(Serialize)]
-struct Health {
-    status: &'static str,
+static ACCESS_SCAN: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+
+/// Reads and changes the device user's program choice, and re-applies the
+/// current configuration when it changes.
+#[derive(Clone)]
+pub struct ProgramControl {
+    reconciler: Reconciler,
+    current: watch::Receiver<Option<CurrentConfig>>,
+    /// Where a re-apply's outcome goes for the controller; `None` without one.
+    statuses: Option<watch::Sender<Option<TickStatus>>>,
+    state_dir: PathBuf,
+    /// Serializes changes, so the stored and the applied choice agree.
+    changing: Arc<std::sync::Mutex<()>>,
+}
+
+impl ProgramControl {
+    pub(crate) fn new(
+        reconciler: Reconciler,
+        current: watch::Receiver<Option<CurrentConfig>>,
+        statuses: Option<watch::Sender<Option<TickStatus>>>,
+        state_dir: PathBuf,
+    ) -> Self {
+        Self {
+            reconciler,
+            current,
+            statuses,
+            state_dir,
+            changing: Arc::default(),
+        }
+    }
+
+    /// The configured programs, whether each is managed under the device
+    /// user's choice, and each one's outcome from the last apply. Waits for
+    /// an apply in progress.
+    fn management(&self) -> ProgramManagement {
+        let choice = self.reconciler.program_choice();
+        let current = self.current.borrow().clone();
+        let Some(current) = current else {
+            return ProgramManagement {
+                user_choice_allowed: false,
+                choice,
+                programs: Vec::new(),
+            };
+        };
+        let report = self.reconciler.last_report();
+        let (_, opted_out) = apply_program_choice(&current.config, &choice);
+        let programs = configured_programs(&current.config.programs)
+            .into_iter()
+            .map(|program| {
+                let outcome = report
+                    .as_ref()
+                    .and_then(|report| report.programs.iter().find(|o| o.program == program));
+                ManagedProgram {
+                    program: program.to_owned(),
+                    managed: !opted_out.contains(&program),
+                    state: outcome.map(|outcome| outcome.state.as_str().to_owned()),
+                    detail: outcome
+                        .map(|outcome| outcome.detail.clone())
+                        .unwrap_or_default(),
+                }
+            })
+            .collect();
+        ProgramManagement {
+            user_choice_allowed: current.config.program_selection.allow_user_choice,
+            choice,
+            programs,
+        }
+    }
+
+    /// Stores `choice`, re-applies the current configuration with it, and
+    /// reports the outcome to the controller. Refused while the current
+    /// configuration does not allow a choice, or before there is one.
+    fn change(&self, choice: ProgramChoice) -> Result<ProgramManagement, (StatusCode, String)> {
+        program_choice::validate(&choice)
+            .map_err(|error| (StatusCode::BAD_REQUEST, format!("{error:#}")))?;
+        let _changing = self
+            .changing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let allowed = self
+            .current
+            .borrow()
+            .as_ref()
+            .map(|current| current.config.program_selection.allow_user_choice);
+        match allowed {
+            None => {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "this device has no configuration yet; choose once it has one".to_owned(),
+                ));
+            }
+            Some(false) => {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    "this device's policy manages every configured program (programSelection.allowUserChoice is off)".to_owned(),
+                ));
+            }
+            Some(true) => {}
+        }
+        program_choice::save(&self.state_dir, &choice).map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("save program choice: {error:#}"),
+            )
+        })?;
+        tracing::info!(?choice, "program choice changed");
+        self.reconciler.set_program_choice(choice);
+        if let Some((revision, _, report, result)) =
+            tick::apply_current(&self.reconciler, &self.current)
+        {
+            report.log();
+            let error = result.err().map(|error| format!("{error:#}"));
+            if let Some(error) = &error {
+                tracing::warn!(%error, "applying the changed program choice failed");
+            }
+            if let Some(statuses) = &self.statuses {
+                tick::publish(
+                    statuses,
+                    TickStatus {
+                        revision,
+                        report,
+                        error,
+                    },
+                );
+            }
+        }
+        // A choice that brings a gateway program back starts the sign-in that
+        // startup or the push skipped while it was left out (idempotent).
+        let current = self.current.borrow().clone();
+        if let Some(current) = current
+            && self.reconciler.gateway_sign_in_wanted(&current.config)
+        {
+            gateway_oidc::start_device_login_if_configured(&current.config, &self.state_dir);
+        }
+        Ok(self.management())
+    }
 }
 
 #[derive(Deserialize)]
@@ -45,9 +194,18 @@ struct CredentialQuery {
     client_id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageQuery {
+    range: String,
+    #[serde(default)]
+    utc_offset_minutes: i32,
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/daemon-info", get(daemon_info))
         .route("/v1/config", get(config))
         .route("/v1/effective-config", get(effective_config))
         .route("/v1/remote-config", get(remote_config))
@@ -57,7 +215,48 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/logout", post(logout))
         .route("/v1/telemetry", post(telemetry))
         .route("/v1/llm-gateway/credential", get(llm_gateway_credential))
+        .route("/v1/llm-gateway/login", post(llm_gateway_login))
+        .route("/v1/usage", get(device_usage))
+        .route("/v1/programs", get(programs))
+        .route("/v1/programs/choice", post(change_program_choice))
+        .layer(Extension(Arc::new(
+            crate::llm_proxy::CredentialCache::default(),
+        )))
         .with_state(state)
+}
+
+fn program_control(state: &AppState) -> Result<ProgramControl, (StatusCode, String)> {
+    state.programs.clone().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "program management is not available".to_owned(),
+        )
+    })
+}
+
+/// Runs a program route's blocking work (it waits for an apply in progress).
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, (StatusCode, String)> + Send + 'static,
+) -> Result<Json<T>, (StatusCode, String)> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+        .map(Json)
+}
+
+async fn programs(
+    State(state): State<AppState>,
+) -> Result<Json<ProgramManagement>, (StatusCode, String)> {
+    let control = program_control(&state)?;
+    blocking(move || Ok(control.management())).await
+}
+
+async fn change_program_choice(
+    State(state): State<AppState>,
+    Json(choice): Json<ProgramChoice>,
+) -> Result<Json<ProgramManagement>, (StatusCode, String)> {
+    let control = program_control(&state)?;
+    blocking(move || control.change(choice)).await
 }
 
 async fn telemetry(
@@ -131,8 +330,19 @@ fn validate_telemetry(event: &TelemetryEventKind) -> Result<(), (StatusCode, Str
     Ok(())
 }
 
-async fn health() -> Json<Health> {
-    Json(Health { status: "ok" })
+async fn health(State(state): State<AppState>) -> Json<Health> {
+    let controller = match &state.controller_status {
+        Some(controller_status) => Some(controller_status.get().await),
+        None => None,
+    };
+    Json(Health {
+        status: "ok".to_owned(),
+        controller,
+    })
+}
+
+async fn daemon_info(State(state): State<AppState>) -> Json<DaemonInfo> {
+    Json(state.daemon_info)
 }
 
 async fn config(State(state): State<AppState>) -> Json<DaemonConfig> {
@@ -152,7 +362,7 @@ async fn effective_config(
         })
 }
 
-fn load_effective_config(
+pub(crate) fn load_effective_config(
     config: &DaemonConfig,
     state_dir: &std::path::Path,
 ) -> anyhow::Result<DaemonConfig> {
@@ -183,22 +393,20 @@ async fn remote_config(
 }
 
 async fn discover(State(state): State<AppState>) -> Json<Discovery> {
-    Json(state.discovery)
+    Json((**state.discovery.borrow()).clone())
 }
 
 async fn access(
     State(state): State<AppState>,
     peer_home: Option<Extension<AccessUserHome>>,
 ) -> Result<Json<AccessReport>, (StatusCode, String)> {
-    let user_home = state
-        .access_user_home
-        .or_else(|| peer_home.map(|Extension(home)| home.0));
+    let user_home = peer_home.map(|Extension(home)| home.0);
     let Some(user_home) = user_home else {
         return Ok(Json(crate::access::unavailable(
             "Local access audit is unavailable because the local API could not identify the calling OS user",
         )));
     };
-    let _scan = state.access_scan.lock().await;
+    let _scan = ACCESS_SCAN.get_or_init(|| Mutex::new(())).lock().await;
     let discovery = crate::discovery::discover().await;
     tokio::task::spawn_blocking(move || crate::access::assess(&discovery, &user_home))
         .await
@@ -246,6 +454,7 @@ async fn logout(State(state): State<AppState>) -> Result<StatusCode, (StatusCode
 
 async fn llm_gateway_credential(
     State(state): State<AppState>,
+    Extension(cache): Extension<Arc<crate::llm_proxy::CredentialCache>>,
     Query(query): Query<CredentialQuery>,
 ) -> Result<Json<LlmGatewayCredential>, (StatusCode, String)> {
     if !valid_client_id(&query.client_id) {
@@ -257,13 +466,46 @@ async fn llm_gateway_credential(
             format!("read applied configuration: {error:#}"),
         )
     })?;
+    // Pi executes its helper on every request. Reuse the proxy's 60 s cache
+    // for controller identities; OIDC and subscription flows keep their own
+    // refresh behavior. Read identity.json on each call so logout/re-enrollment
+    // cannot reuse another device's token.
+    if !program_uses_subscription(&effective, &query.client_id)
+        && let Some(gateway) = effective.llm_gateway.as_ref()
+        && let Some(LlmGatewayAuthentication::ControllerJwt {
+            audience,
+            allowed_client_ids,
+        }) = &gateway.authentication
+        && allowed_client_ids.contains(&query.client_id)
+        && let Ok(Some(device_id)) =
+            crate::identity::load_device_id(&state.state_dir.join("identity.json"))
+    {
+        let key = format!("{}\0{}\0{audience}", query.client_id, gateway.url);
+        return cache
+            .get_credential(&key, &device_id, || {
+                gateway_credential(&state, &effective, &query.client_id, true)
+            })
+            .await
+            .map(Json);
+    }
+    gateway_credential(&state, &effective, &query.client_id, true)
+        .await
+        .map(Json)
+}
+
+pub(crate) async fn gateway_credential(
+    state: &AppState,
+    effective: &DaemonConfig,
+    client_id: &str,
+    include_subscription: bool,
+) -> Result<LlmGatewayCredential, (StatusCode, String)> {
     let gateway = effective.llm_gateway.as_ref().ok_or_else(|| {
         (
             StatusCode::FAILED_DEPENDENCY,
             "daemon has no LLM gateway configured".to_owned(),
         )
     })?;
-    let uses_subscription = program_uses_subscription(&effective, &query.client_id);
+    let uses_subscription = include_subscription && program_uses_subscription(effective, client_id);
     let (identity, continue_in_browser) = match gateway.authentication.as_ref() {
         Some(LlmGatewayAuthentication::ControllerJwt { .. }) => {
             let controller = state.config.controller.as_ref().ok_or_else(|| {
@@ -272,9 +514,12 @@ async fn llm_gateway_credential(
                     "controller JWT authentication requires a controller".to_owned(),
                 )
             })?;
+            if uses_subscription {
+                return controller_subscription_credential(state, controller, client_id).await;
+            }
             // Local transport permissions authenticate the user, not the calling
             // process. The client ID selects an allowed policy within that boundary.
-            remote::llm_gateway_credential(controller, &state.state_dir, &query.client_id)
+            remote::llm_gateway_credential(controller, &state.state_dir, client_id, false)
                 .await
                 .map(|credential| (credential, false))
         }
@@ -284,6 +529,7 @@ async fn llm_gateway_credential(
             redirect_uri,
             scopes,
             allow_insecure,
+            device_authorization,
         }) => gateway_oidc::credential(
             issuer,
             client_id,
@@ -294,6 +540,21 @@ async fn llm_gateway_credential(
             gateway_oidc::LoginOptions {
                 callback_listen: state.oidc_callback_listen,
                 subscription_available: uses_subscription,
+                github_client_id: if include_subscription {
+                    None
+                } else {
+                    // Same reasoning as the daemon login path: a GitHub sign-in
+                    // step only makes sense for the device flow.
+                    gateway.github_oauth.as_ref().and_then(|github| {
+                        matches!(
+                            github.source,
+                            agentdesktop_core::config::GitHubTokenSource::DeviceFlow
+                        )
+                        .then(|| github.client_id.clone())
+                        .flatten()
+                    })
+                },
+                device_authorization: *device_authorization,
             },
         )
         .await
@@ -307,7 +568,14 @@ async fn llm_gateway_credential(
             "LLM gateway has no authentication configured"
         )),
     }
-    .map_err(|error| (StatusCode::BAD_GATEWAY, format!("{error:#}")))?;
+    .map_err(|error| {
+        let status = if error.is::<gateway_oidc::SignInRequired>() {
+            StatusCode::UNAUTHORIZED
+        } else {
+            StatusCode::BAD_GATEWAY
+        };
+        (status, format!("{error:#}"))
+    })?;
     if uses_subscription {
         subscription::compose(
             identity,
@@ -319,8 +587,140 @@ async fn llm_gateway_credential(
     } else {
         Ok(identity)
     }
-    .map(Json)
     .map_err(|error| (StatusCode::BAD_GATEWAY, format!("{error:#}")))
+}
+
+/// A subscription credential composed with a controller identity. The
+/// subscription is resolved first so the controller marks the identity as
+/// subscription-billed only when a subscription token is sent with it.
+async fn controller_subscription_credential(
+    state: &AppState,
+    controller: &ControllerConnectionConfig,
+    client_id: &str,
+) -> Result<LlmGatewayCredential, (StatusCode, String)> {
+    let bad_gateway = |error: anyhow::Error| (StatusCode::BAD_GATEWAY, format!("{error:#}"));
+    let subscription =
+        subscription::credential(&state.state_dir, state.oidc_callback_listen, false)
+            .await
+            .map_err(bad_gateway)?;
+    let identity = remote::llm_gateway_credential(
+        controller,
+        &state.state_dir,
+        client_id,
+        subscription.is_some(),
+    )
+    .await
+    .map_err(bad_gateway)?;
+    Ok(subscription::combine(subscription, identity))
+}
+
+async fn device_usage(
+    State(state): State<AppState>,
+    Query(query): Query<UsageQuery>,
+) -> Result<Json<DeviceUsage>, (StatusCode, String)> {
+    if !matches!(query.range.as_str(), "24h" | "7d" | "30d") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "range must be 24h, 7d, or 30d".to_owned(),
+        ));
+    }
+    let effective = load_effective_config(&state.config, &state.state_dir).map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("read applied configuration: {error:#}"),
+        )
+    })?;
+    let mut usage = match (&state.usage, &state.config.controller) {
+        (Some(store), _) => {
+            let request = DeviceUsageRequest {
+                range: query.range,
+                utc_offset_minutes: query.utc_offset_minutes,
+            };
+            agentdesktop_usage::device_usage(store, None, &request, true)
+                .await
+                .map(remote::device_usage_from_proto)
+                .map_err(|error| match error {
+                    UsageError::InvalidQuery(message) => {
+                        (StatusCode::BAD_REQUEST, message.to_owned())
+                    }
+                    UsageError::Storage(error) => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("read usage: {error:#}"),
+                    ),
+                })?
+        }
+        (None, Some(controller)) => remote::device_usage(
+            controller,
+            &state.state_dir,
+            &query.range,
+            query.utc_offset_minutes,
+        )
+        .await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("{error:#}")))?,
+        (None, None) => {
+            return Err((
+                StatusCode::FAILED_DEPENDENCY,
+                match &state.daemon_info.usage_receiver {
+                    Some(receiver) => format!(
+                        "usage database is unavailable: {}",
+                        receiver.error.as_deref().unwrap_or("unknown error")
+                    ),
+                    None => "daemon has no controller or daemon.usage configured".to_owned(),
+                },
+            ));
+        }
+    };
+    usage.unmetered_tools = unmetered_tools(&effective);
+    Ok(Json(usage))
+}
+
+/// Configured tools whose gateway traffic has no usage records: VS Code on
+/// GitHub's own models reaches GitHub through the gateway's pass-through
+/// route, which is not an LLM route.
+fn unmetered_tools(config: &DaemonConfig) -> Vec<String> {
+    config
+        .programs
+        .vscode
+        .as_ref()
+        .filter(|vscode| {
+            config.llm_gateway.is_some()
+                && vscode.use_llm_gateway
+                && vscode.copilot_chat == VsCodeCopilotChat::GithubModels
+        })
+        .map(|_| vec!["vscode-copilot".to_owned()])
+        .unwrap_or_default()
+}
+
+async fn llm_gateway_login(
+    State(state): State<AppState>,
+) -> Result<Json<LlmGatewayLoginStatus>, (StatusCode, String)> {
+    let effective = load_effective_config(&state.config, &state.state_dir).map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("read applied configuration: {error:#}"),
+        )
+    })?;
+    let Some(LlmGatewayAuthentication::Oidc {
+        issuer,
+        client_id,
+        scopes,
+        allow_insecure,
+        device_authorization: true,
+        ..
+    }) = effective
+        .llm_gateway
+        .as_ref()
+        .and_then(|gateway| gateway.authentication.as_ref())
+    else {
+        return Err((
+            StatusCode::FAILED_DEPENDENCY,
+            "LLM gateway sign-in with device authorization is not configured".to_owned(),
+        ));
+    };
+    gateway_oidc::device_login(issuer, client_id, scopes, *allow_insecure, &state.state_dir)
+        .await
+        .map(Json)
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("{error:#}")))
 }
 
 fn program_uses_subscription(config: &DaemonConfig, client_id: &str) -> bool {
@@ -345,7 +745,209 @@ mod tests {
 
     use agentdesktop_core::config::parse_daemon;
 
-    use super::{load_effective_config, program_uses_subscription};
+    use super::{
+        ProgramControl, load_effective_config, program_uses_subscription, unmetered_tools,
+    };
+
+    #[tokio::test]
+    async fn credential_endpoint_reuses_controller_tokens_only_for_the_same_identity_and_policy() {
+        use agentdesktop_core::model::{DaemonInfo, DaemonScope, Discovery, LlmGatewayCredential};
+        use axum::{
+            Extension,
+            extract::{Query, State},
+        };
+        use std::{
+            sync::Arc,
+            time::{Duration, SystemTime, UNIX_EPOCH},
+        };
+        let root = tempfile::tempdir().unwrap();
+        let config = parse_daemon("llmGateway:\n  url: https://gateway.example.com\n  authentication:\n    type: controllerJwt\n    audience: test\n    allowedClientIds: [pi, codex]\n").unwrap();
+        let identity = |id: &str| {
+            serde_json::json!({
+                "deviceId": id, "clientCertificatePem": "test", "clientCertificateExpiresAtUnixSeconds": 0,
+                "oauthTokenEndpoint": "test", "oauthClientId": "test"
+            })
+        };
+        fs::write(
+            root.path().join("identity.json"),
+            identity("device-1").to_string(),
+        )
+        .unwrap();
+        let (_, discovery) = tokio::sync::watch::channel(Arc::new(Discovery {
+            agents: vec![],
+            model_runtimes: vec![],
+        }));
+        let mut state = super::AppState {
+            config,
+            daemon_info: DaemonInfo {
+                version: "test".into(),
+                scope: DaemonScope::User,
+                config_path: String::new(),
+                state_directory: String::new(),
+                inventory_interval: Duration::from_secs(60),
+                controller: None,
+                llm_proxy: None,
+                usage_receiver: None,
+            },
+            discovery,
+            enrollment: crate::enrollment::EnrollmentState::new(false),
+            controller_status: None,
+            state_dir: root.path().to_owned(),
+            oidc_callback_listen: None,
+            telemetry: None,
+            logout: None,
+            usage: None,
+            programs: None,
+        };
+        let cache = Arc::new(crate::llm_proxy::CredentialCache::default());
+        let expiry = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 600;
+        cache
+            .get_credential(
+                "pi\0https://gateway.example.com/\0test",
+                "device-1",
+                || async {
+                    Ok::<_, ()>(LlmGatewayCredential {
+                        credential: "cached-token".into(),
+                        expires_at_unix_seconds: expiry,
+                    })
+                },
+            )
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            let credential = super::llm_gateway_credential(
+                State(state.clone()),
+                Extension(cache.clone()),
+                Query(super::CredentialQuery {
+                    client_id: "pi".into(),
+                }),
+            )
+            .await
+            .unwrap()
+            .0;
+            assert_eq!(credential.credential, "cached-token");
+            assert_eq!(credential.expires_at_unix_seconds, expiry);
+        }
+        // Policy changes must not reuse a cached token for the old policy.
+        if let Some(agentdesktop_core::config::LlmGatewayAuthentication::ControllerJwt {
+            audience,
+            ..
+        }) = &mut state.config.llm_gateway.as_mut().unwrap().authentication
+        {
+            *audience = "changed".into();
+        }
+        assert!(
+            super::llm_gateway_credential(
+                State(state.clone()),
+                Extension(cache.clone()),
+                Query(super::CredentialQuery {
+                    client_id: "pi".into()
+                })
+            )
+            .await
+            .is_err()
+        );
+        if let Some(agentdesktop_core::config::LlmGatewayAuthentication::ControllerJwt {
+            audience,
+            allowed_client_ids,
+        }) = &mut state.config.llm_gateway.as_mut().unwrap().authentication
+        {
+            *audience = "test".into();
+            allowed_client_ids.remove("pi");
+        }
+        assert!(
+            super::llm_gateway_credential(
+                State(state.clone()),
+                Extension(cache.clone()),
+                Query(super::CredentialQuery {
+                    client_id: "pi".into()
+                })
+            )
+            .await
+            .is_err()
+        );
+        if let Some(agentdesktop_core::config::LlmGatewayAuthentication::ControllerJwt {
+            allowed_client_ids,
+            ..
+        }) = &mut state.config.llm_gateway.as_mut().unwrap().authentication
+        {
+            allowed_client_ids.insert("pi".into());
+        }
+        // No controller is configured, so any miss fails instead of contacting a server.
+        assert!(
+            super::llm_gateway_credential(
+                State(state.clone()),
+                Extension(cache.clone()),
+                Query(super::CredentialQuery {
+                    client_id: "codex".into()
+                })
+            )
+            .await
+            .is_err()
+        );
+        state.config.llm_gateway.as_mut().unwrap().url =
+            "https://other.example.com".parse().unwrap();
+        assert!(
+            super::llm_gateway_credential(
+                State(state.clone()),
+                Extension(cache.clone()),
+                Query(super::CredentialQuery {
+                    client_id: "pi".into()
+                })
+            )
+            .await
+            .is_err()
+        );
+        state.config.llm_gateway.as_mut().unwrap().url =
+            "https://gateway.example.com".parse().unwrap();
+        fs::write(
+            root.path().join("identity.json"),
+            identity("device-2").to_string(),
+        )
+        .unwrap();
+        assert!(
+            super::llm_gateway_credential(
+                State(state.clone()),
+                Extension(cache.clone()),
+                Query(super::CredentialQuery {
+                    client_id: "pi".into()
+                })
+            )
+            .await
+            .is_err()
+        );
+        fs::remove_file(root.path().join("identity.json")).unwrap();
+        assert!(
+            super::llm_gateway_credential(
+                State(state),
+                Extension(cache),
+                Query(super::CredentialQuery {
+                    client_id: "pi".into()
+                })
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn vscode_on_github_models_is_reported_as_unmetered() {
+        let github_models = parse_daemon(
+            "llmGateway:\n  url: https://gateway.example\n  proxyUrl: https://gateway.example/copilot-proxy\nprograms:\n  vscode:\n    copilotChat: githubModels\n",
+        )
+        .unwrap();
+        assert_eq!(unmetered_tools(&github_models), vec!["vscode-copilot"]);
+
+        let own_models = parse_daemon(
+            "llmGateway:\n  url: https://gateway.example\nprograms:\n  vscode:\n    models:\n      gpt-4.1-mini: {}\n",
+        )
+        .unwrap();
+        assert!(unmetered_tools(&own_models).is_empty());
+    }
 
     #[test]
     fn subscription_is_selected_by_requesting_agent() {
@@ -448,5 +1050,139 @@ llmGateway:
             Some(agentdesktop_core::config::LlmGatewayAuthentication::Oidc { .. })
         ));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    mod programs {
+        use std::{path::Path, sync::Arc};
+
+        use agentdesktop_core::{config::parse_daemon, model::ProgramChoice};
+        use axum::http::StatusCode;
+        use tokio::sync::watch;
+
+        use super::ProgramControl;
+        use crate::{
+            reconcile::{ProgramState, Reconciler},
+            tick::{CurrentConfig, TickStatus},
+        };
+
+        const ALLOWED: &str = r#"
+programSelection: { allowUserChoice: true }
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  claudeCode: {}
+  codex: {}
+"#;
+
+        fn reconciler(root: &Path) -> Reconciler {
+            Reconciler::new(
+                true,
+                root.join("claude/settings.json"),
+                root.join("claude-desktop/settings.json"),
+                root.join("claude-desktop/helper"),
+                root.join("codex/config.toml"),
+                root.join("opencode/config.json"),
+                root.join("opencode/plugin.js"),
+                root.join("grok/managed_config.toml"),
+                None,
+                None,
+                None,
+                Some(root.join("pi/models.json")),
+                Some(root.join("pi/settings.json")),
+                root.join("bin/agentdesktop"),
+                root.join("agentdesktop.sock"),
+            )
+        }
+
+        /// A control over `yaml` as the current configuration (none when
+        /// `None`), already applied, and the receiver of its reports.
+        fn control(
+            root: &Path,
+            yaml: Option<&str>,
+        ) -> (ProgramControl, watch::Receiver<Option<TickStatus>>) {
+            let reconciler = reconciler(root);
+            let current = yaml.map(|yaml| CurrentConfig {
+                revision: Some(7),
+                config: Arc::new(parse_daemon(yaml).unwrap()),
+            });
+            if let Some(current) = &current {
+                reconciler.apply(&current.config).unwrap();
+            }
+            let (_current, current) = watch::channel(current);
+            let (statuses, reports) = watch::channel(None);
+            (
+                ProgramControl::new(reconciler, current, Some(statuses), root.join("state")),
+                reports,
+            )
+        }
+
+        fn only(program: &str) -> ProgramChoice {
+            ProgramChoice::Selected {
+                programs: [program.to_owned()].into(),
+            }
+        }
+
+        #[test]
+        fn a_choice_is_stored_applied_and_reported() {
+            let root = tempfile::tempdir().unwrap();
+            let (control, reports) = control(root.path(), Some(ALLOWED));
+
+            let management = control.change(only("claude-code")).unwrap();
+            assert!(management.user_choice_allowed);
+            assert_eq!(management.choice, only("claude-code"));
+            let codex = management
+                .programs
+                .iter()
+                .find(|program| program.program == "codex")
+                .unwrap();
+            assert!(!codex.managed);
+            assert_eq!(codex.state.as_deref(), Some("opted_out"));
+            assert!(!root.path().join("codex/config.toml").exists());
+            assert_eq!(
+                crate::program_choice::load(&root.path().join("state")),
+                only("claude-code")
+            );
+
+            let report = reports.borrow().clone().expect("the re-apply is reported");
+            assert_eq!(report.revision, Some(7));
+            assert!(report.error.is_none());
+            assert!(report.report.programs.iter().any(|outcome| {
+                outcome.program == "codex" && outcome.state == ProgramState::OptedOut
+            }));
+        }
+
+        #[test]
+        fn a_choice_is_refused_unless_the_policy_allows_it() {
+            let root = tempfile::tempdir().unwrap();
+            let (locked, _) = control(
+                root.path(),
+                Some(&ALLOWED.replace("allowUserChoice: true", "")),
+            );
+            let (status, _) = locked.change(ProgramChoice::None).unwrap_err();
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert!(!root.path().join("state/program-choice.json").exists());
+            assert!(root.path().join("codex/config.toml").exists());
+            assert!(
+                locked
+                    .management()
+                    .programs
+                    .iter()
+                    .all(|program| program.managed)
+            );
+
+            let (unconfigured, _) = control(root.path(), None);
+            let (status, _) = unconfigured.change(ProgramChoice::None).unwrap_err();
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert!(unconfigured.management().programs.is_empty());
+        }
+
+        #[test]
+        fn a_choice_naming_an_unmanaged_program_is_a_bad_request() {
+            let root = tempfile::tempdir().unwrap();
+            let (control, _) = control(root.path(), Some(ALLOWED));
+            let (status, message) = control.change(only("cursor")).unwrap_err();
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(message.contains("cursor"), "{message}");
+        }
     }
 }
