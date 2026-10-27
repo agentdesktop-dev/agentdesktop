@@ -139,9 +139,7 @@ pub(super) fn inspect_configuration(home: &Path) -> CollectedAccess {
         (home_dir(home).join("config.toml"), None),
     ]);
     let mut inspected = 0;
-    let mut cursor = 0;
-    while let Some((path, workspace)) = settings.iter().nth(cursor).cloned() {
-        cursor += 1;
+    while let Some((path, workspace)) = settings.pop_first() {
         let Ok(contents) = fs::read_to_string(&path) else {
             continue;
         };
@@ -367,14 +365,14 @@ fn home_dir(home: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{fs, path::Path};
 
     use agentdesktop_core::model::{
         AccessCategory, AccessDecision, AccessEnforcement, AccessSeverity,
     };
     use serde_json::json;
 
-    use super::{inspect_runtime, parse_settings};
+    use super::{inspect_configuration, inspect_runtime, parse_settings};
     use crate::access::{CollectedAccess, history_scan::RuntimeCollector};
 
     #[test]
@@ -416,6 +414,38 @@ mod tests {
         assert!(capabilities.iter().any(|capability| {
             capability.category == AccessCategory::Network
                 && capability.decision == AccessDecision::Deny
+        }));
+    }
+
+    #[test]
+    fn inspects_trusted_project_config_added_before_pending_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "agentdesktop-codex-project-config-{}",
+            std::process::id()
+        ));
+        let home = root.join("z-home");
+        let workspace = root.join("a-project");
+        let user_config = home.join(".codex/config.toml");
+        let project_config = workspace.join(".codex/config.toml");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(user_config.parent().unwrap()).unwrap();
+        fs::create_dir_all(project_config.parent().unwrap()).unwrap();
+        let project_key = serde_json::to_string(&workspace.display().to_string()).unwrap();
+        fs::write(
+            &user_config,
+            format!("[projects.{project_key}]\ntrust_level = \"trusted\"\n"),
+        )
+        .unwrap();
+        fs::write(&project_config, "sandbox_mode = \"danger-full-access\"\n").unwrap();
+
+        let collected = inspect_configuration(&home);
+
+        let _ = fs::remove_dir_all(&root);
+        assert!(collected.capabilities.iter().any(|capability| {
+            capability.source.path.as_deref() == Some(project_config.as_path())
+                && capability.workspace.as_deref() == Some(workspace.as_path())
+                && capability.resource == "*"
+                && capability.decision == AccessDecision::Allow
         }));
     }
 }

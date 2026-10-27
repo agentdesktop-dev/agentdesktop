@@ -304,12 +304,18 @@ fn parse_permissions(
             _ => continue,
         };
         if let Some(decision) = value.as_str().and_then(access_decision) {
+            let enforcement =
+                if category == AccessCategory::Execution && decision == AccessDecision::Allow {
+                    AccessEnforcement::None
+                } else {
+                    AccessEnforcement::Harness
+                };
             collected.capabilities.push(capability(
                 category,
                 "*",
                 operations,
                 decision,
-                AccessEnforcement::Harness,
+                enforcement,
                 path,
                 None,
                 "OpenCode permission",
@@ -326,12 +332,18 @@ fn parse_permissions(
                     }
                     _ => resource.to_owned(),
                 };
+                let enforcement =
+                    if category == AccessCategory::Execution && decision == AccessDecision::Allow {
+                        AccessEnforcement::None
+                    } else {
+                        AccessEnforcement::Harness
+                    };
                 collected.capabilities.push(capability(
                     category.clone(),
                     &resource,
                     operations.clone(),
                     decision,
-                    AccessEnforcement::Harness,
+                    enforcement,
                     path,
                     None,
                     "OpenCode permission rule",
@@ -433,7 +445,8 @@ mod tests {
     use std::path::Path;
 
     use agentdesktop_core::model::{
-        AccessCategory, AccessDecision, AccessOperation, AccessSourceKind,
+        AccessCategory, AccessDecision, AccessEnforcement, AccessOperation, AccessSeverity,
+        AccessSourceKind,
     };
     use serde_json::json;
 
@@ -466,6 +479,31 @@ mod tests {
                 && capability.resource == "docs.example.com"
         }));
         assert!(!format!("{:?}", collected.capabilities).contains("secret"));
+    }
+
+    #[test]
+    fn allowed_catch_all_shell_permissions_are_uncontained() {
+        for permission in [
+            json!({ "bash": "allow" }),
+            json!({ "bash": { "*": "allow" } }),
+        ] {
+            let mut collected = inspect_document(
+                &json!({ "permission": permission }),
+                Path::new("opencode.json"),
+            );
+            crate::access::derive_findings(&mut collected);
+
+            assert!(collected.capabilities.iter().any(|capability| {
+                capability.category == AccessCategory::Execution
+                    && capability.resource == "*"
+                    && capability.decision == AccessDecision::Allow
+                    && capability.enforcement == AccessEnforcement::None
+            }));
+            assert!(collected.findings.iter().any(|finding| {
+                finding.severity == AccessSeverity::Critical
+                    && finding.title == "Uncontained command execution"
+            }));
+        }
     }
 
     #[test]

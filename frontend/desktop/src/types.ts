@@ -143,25 +143,6 @@ export type AccessRuleMechanism =
   | "vscodeUrlAutoApprove"
   | "claudePermission"
   | "claudeSandboxDomain";
-export type NetworkRuleDecision = "allow" | "ask" | "deny";
-export type NetworkRuleChange =
-  | {
-      agentKind: string;
-      operation: "add";
-      resource: string;
-      decision: NetworkRuleDecision;
-    }
-  | {
-      agentKind: string;
-      operation: "setDecision";
-      ruleId: string;
-      decision: NetworkRuleDecision;
-    }
-  | {
-      agentKind: string;
-      operation: "remove";
-      ruleId: string;
-    };
 export type AccessCoverageStatus =
   | "complete"
   | "partial"

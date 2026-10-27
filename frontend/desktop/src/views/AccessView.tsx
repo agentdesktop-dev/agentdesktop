@@ -28,9 +28,7 @@ import type {
   AccessObservation,
   AccessOperation,
   AgentAccessReport,
-  NetworkRuleChange,
 } from "../types";
-import { AgentAccessEditor } from "./PolicyView";
 
 type ReviewFinding = AccessFinding & { severity: "warning" | "critical" };
 
@@ -799,17 +797,13 @@ function ObservationRow({ observation }: { observation: AccessObservation }) {
 }
 
 function UnifiedCategory({
-  alwaysVisibleCount = 0,
   category,
   capabilities,
-  editor,
   observations,
   visibleOrigins,
 }: {
-  alwaysVisibleCount?: number;
   category: UnifiedAccessCategory;
   capabilities: AccessCapability[];
-  editor?: ReactNode;
   observations: AccessObservation[];
   visibleOrigins: Record<EvidenceOrigin, boolean>;
 }) {
@@ -824,18 +818,14 @@ function UnifiedCategory({
       isAdvancedRuleDetail(capability.detail),
     );
   const count =
-    alwaysVisibleCount +
     categoryCapabilityCount(category, visibleCapabilities) +
     visibleObservations.length;
   const totalCount =
-    alwaysVisibleCount +
-    categoryCapabilityCount(category, capabilities) +
-    observations.length;
+    categoryCapabilityCount(category, capabilities) + observations.length;
   const [expanded, setExpanded] = useState(
-    Boolean(editor) ||
-      (category !== "execution" &&
-        count > 0 &&
-        count <= DEFAULT_EXPANDED_RESOURCE_LIMIT),
+    category !== "execution" &&
+      count > 0 &&
+      count <= DEFAULT_EXPANDED_RESOURCE_LIMIT,
   );
   return (
     <details
@@ -859,16 +849,13 @@ function UnifiedCategory({
       </summary>
       {expanded ? (
         <div className="access-category-body">
-          {editor}
           {visibleCapabilities.length || visibleObservations.length ? (
             <>
-              {editor ? (
+              {hasAdvancedRules ? (
                 <div className="access-network-evidence-heading">
-                  <strong>Other network access</strong>
+                  <strong>Advanced network rules</strong>
                   <span>
-                    {hasAdvancedRules
-                      ? "Advanced rules: custom request/response approvals; edit in configuration."
-                      : "Read-only settings and activity"}
+                    Custom request/response approvals; see configuration.
                   </span>
                 </div>
               ) : null}
@@ -877,7 +864,7 @@ function UnifiedCategory({
                 observations={visibleObservations}
               />
             </>
-          ) : editor ? null : (
+          ) : (
             <p className="access-category-empty">No matching access.</p>
           )}
         </div>
@@ -889,7 +876,6 @@ function UnifiedCategory({
 function UnifiedAccess({
   capabilities,
   configurationSources,
-  networkEditor,
   observations,
   openingSource,
   onOpenSource,
@@ -897,7 +883,6 @@ function UnifiedAccess({
 }: {
   capabilities: AccessCapability[];
   configurationSources: string[];
-  networkEditor?: ReactNode;
   observations: AccessObservation[];
   openingSource: string | null;
   onOpenSource?: (path: string) => void | Promise<void>;
@@ -925,19 +910,10 @@ function UnifiedAccess({
           const categoryCapabilities = capabilities.filter(
             (capability) => unifiedCategory(capability.category) === category,
           );
-          const editableCapabilities =
-            category === "network" && networkEditor
-              ? categoryCapabilities.filter((capability) => capability.rule)
-              : [];
-          const evidenceCapabilities = editableCapabilities.length
-            ? categoryCapabilities.filter((capability) => !capability.rule)
-            : categoryCapabilities;
           return (
             <UnifiedCategory
-              alwaysVisibleCount={editableCapabilities.length}
-              capabilities={evidenceCapabilities}
+              capabilities={categoryCapabilities}
               category={category}
-              editor={category === "network" ? networkEditor : undefined}
               key={category}
               observations={observations.filter(
                 (observation) =>
@@ -954,21 +930,17 @@ function UnifiedAccess({
 
 interface AgentAccessPanelProps {
   agent?: AgentAccessReport;
-  allowAccessEditing?: boolean;
   loading?: boolean;
   stale?: boolean;
   unavailableDetail?: string;
-  onApplyNetworkRuleChange?: (change: NetworkRuleChange) => Promise<void>;
   onOpenSource?: (path: string) => void | Promise<void>;
 }
 
 export function AgentAccessPanel({
   agent,
-  allowAccessEditing = false,
   loading = false,
   stale = false,
   unavailableDetail,
-  onApplyNetworkRuleChange,
   onOpenSource,
 }: AgentAccessPanelProps) {
   const [openingSource, setOpeningSource] = useState<string | null>(null);
@@ -1060,14 +1032,6 @@ export function AgentAccessPanel({
         <UnifiedAccess
           capabilities={visibleCapabilities}
           configurationSources={configurationSources}
-          networkEditor={
-            allowAccessEditing ? (
-              <AgentAccessEditor
-                agent={agent}
-                onApplyNetworkRuleChange={onApplyNetworkRuleChange}
-              />
-            ) : undefined
-          }
           observations={observations}
           onOpenSource={onOpenSource ? openSource : undefined}
           openedSource={openedSource}

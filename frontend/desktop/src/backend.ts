@@ -7,7 +7,6 @@ import type {
   DeviceUsage,
   Discovery,
   ManagedDeviceSnapshot,
-  NetworkRuleChange,
   ProgramChoice,
   ProgramManagement,
   Settings,
@@ -40,12 +39,6 @@ export async function getDiscovery(): Promise<Discovery> {
 
 export async function getAccessReport(): Promise<AccessReport> {
   return invoke<AccessReport>("get_access_report");
-}
-
-export async function applyNetworkRuleChange(
-  request: NetworkRuleChange,
-): Promise<AccessReport> {
-  return invoke<AccessReport>("apply_network_rule_change", { request });
 }
 
 export async function openAccessSource(path: string): Promise<void> {

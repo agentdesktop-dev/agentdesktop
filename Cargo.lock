@@ -28,7 +28,6 @@ dependencies = [
  "agentdesktop-core",
  "anyhow",
  "clap",
- "jsonc-parser",
  "libc",
  "open",
  "plist",

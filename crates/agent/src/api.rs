@@ -49,9 +49,18 @@ pub struct AppState {
 }
 
 #[derive(Clone)]
-pub(crate) struct AccessUserHome(pub PathBuf);
+pub(crate) struct AccessUserHome {
+    pub home: PathBuf,
+    pub uid: u32,
+}
 
 static ACCESS_SCAN: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+
+#[cfg(unix)]
+fn peer_uid_matches_process(uid: u32) -> bool {
+    // SAFETY: geteuid has no preconditions and does not dereference pointers.
+    (unsafe { libc::geteuid() }) == uid
+}
 
 /// Reads and changes the device user's program choice, and re-applies the
 /// current configuration when it changes.
@@ -399,12 +408,18 @@ async fn discover(State(state): State<AppState>) -> Json<Discovery> {
 async fn access(
     peer_home: Option<Extension<AccessUserHome>>,
 ) -> Result<Json<AccessReport>, (StatusCode, String)> {
-    let user_home = peer_home.map(|Extension(home)| home.0);
-    let Some(user_home) = user_home else {
+    let Some(Extension(peer_home)) = peer_home else {
         return Ok(Json(crate::access::unavailable(
             "Local access audit is unavailable because the local API could not identify the calling OS user",
         )));
     };
+    #[cfg(unix)]
+    if !peer_uid_matches_process(peer_home.uid) {
+        return Ok(Json(crate::access::unavailable(
+            "Local access audit is unavailable when the daemon and caller use different OS accounts",
+        )));
+    }
+    let user_home = peer_home.home;
     let _scan = ACCESS_SCAN.get_or_init(|| Mutex::new(())).lock().await;
     let discovery = crate::discovery::discover().await;
     tokio::task::spawn_blocking(move || crate::access::assess(&discovery, &user_home))
@@ -747,6 +762,17 @@ mod tests {
     use super::{
         ProgramControl, load_effective_config, program_uses_subscription, unmetered_tools,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn access_audit_requires_the_daemon_and_caller_to_share_a_uid() {
+        let process_uid = unsafe { libc::geteuid() };
+
+        assert!(super::peer_uid_matches_process(process_uid));
+        assert!(!super::peer_uid_matches_process(
+            process_uid.wrapping_add(1)
+        ));
+    }
 
     #[tokio::test]
     async fn credential_endpoint_reuses_controller_tokens_only_for_the_same_identity_and_policy() {

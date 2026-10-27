@@ -366,6 +366,9 @@ pub(super) fn safe_command_identifier(command: &str) -> String {
     if command.is_empty() {
         return "unknown command".to_owned();
     }
+    if command == "*" {
+        return "*".to_owned();
+    }
     if command.starts_with('/') && command.contains('^') {
         return "regular-expression command rule".to_owned();
     }

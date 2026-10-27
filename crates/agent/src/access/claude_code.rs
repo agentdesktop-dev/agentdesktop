@@ -118,6 +118,7 @@ pub(super) fn inspect_configuration(home: &Path) -> CollectedAccess {
     if !collected.capabilities.iter().any(|capability| {
         capability.category == AccessCategory::Execution
             && capability.enforcement == AccessEnforcement::Sandbox
+            && capability.workspace.is_none()
     }) {
         collected.capabilities.push(default_capability(
             AccessCategory::Execution,
@@ -519,14 +520,19 @@ fn string_array(value: Option<&Value>) -> impl Iterator<Item = &str> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
 
     use agentdesktop_core::model::{
         AccessCategory, AccessDecision, AccessEnforcement, AccessRuleMechanism, AccessSourceKind,
     };
     use serde_json::json;
 
-    use super::{config_dir, inspect_runtime, inspect_state, parse_settings};
+    use super::{
+        config_dir, inspect_configuration, inspect_runtime, inspect_state, parse_settings,
+    };
     use crate::access::{CollectedAccess, history_scan::RuntimeCollector};
 
     #[test]
@@ -600,6 +606,52 @@ mod tests {
 
         let _ = std::fs::remove_file(path);
         assert_eq!(roots, [PathBuf::from("/workspace/trusted")]);
+    }
+
+    #[test]
+    fn project_sandbox_does_not_replace_the_global_shell_default() {
+        let root = std::env::temp_dir().join(format!(
+            "agentdesktop-claude-sandbox-scope-{}",
+            std::process::id()
+        ));
+        let home = root.join("z-home");
+        let workspace = root.join("a-project");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::create_dir_all(workspace.join(".claude")).unwrap();
+        let state = json!({
+            "projects": {
+                workspace.display().to_string(): { "hasTrustDialogAccepted": true }
+            }
+        });
+        fs::write(
+            home.join(".claude.json"),
+            serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            workspace.join(".claude/settings.json"),
+            r#"{"sandbox":{"enabled":true}}"#,
+        )
+        .unwrap();
+
+        let collected = inspect_configuration(&home);
+
+        let _ = fs::remove_dir_all(&root);
+        assert!(collected.capabilities.iter().any(|capability| {
+            capability.category == AccessCategory::Execution
+                && capability.enforcement == AccessEnforcement::Sandbox
+                && capability.workspace.as_deref() == Some(workspace.as_path())
+        }));
+        assert!(collected.capabilities.iter().any(|capability| {
+            capability.category == AccessCategory::Execution
+                && capability.resource == "shell subprocesses"
+                && capability.source.kind == AccessSourceKind::Default
+                && capability.workspace.is_none()
+        }));
+        assert!(collected.findings.iter().any(|finding| {
+            finding.title == "Shell sandbox not configured" && finding.workspace.is_none()
+        }));
     }
 
     #[test]

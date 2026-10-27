@@ -128,9 +128,7 @@ const meta = {
     accessLoading: false,
     accessReport: populatedAccessReport,
     accessStale: false,
-    allowAccessEditing: true,
     discovery: populatedDiscovery,
-    onApplyNetworkRuleChange: fn(async () => {}),
     onOpenAccessSource: fn(),
     unavailable: false,
   },
@@ -175,7 +173,6 @@ export const Populated: Story = {};
 export const ManagedAccess: Story = {
   args: {
     accessReport: claudeHardeningReport,
-    allowAccessEditing: false,
   },
   play: async ({ canvas, canvasElement }) => {
     await userEvent.click(
@@ -210,9 +207,7 @@ export const ShowsClaudeHardeningFindingWithoutAction: Story = {
     await expect(
       within(access).queryByRole("button", { name: "Use recommended" }),
     ).not.toBeInTheDocument();
-    await expect(
-      within(access).getByText("Configured destinations"),
-    ).toBeVisible();
+    await expect(accessCategory(access, "Network")).toBeVisible();
   },
 };
 
@@ -227,11 +222,10 @@ export const ShowsReadOnlyConfiguredDomain: Story = {
       name: "Access 1",
     });
     const network = accessCategory(access, "Network");
-    await expect(within(network).getByText("9 rules")).toBeVisible();
-    await expect(within(network).getByText("5 editable")).toBeVisible();
+    if (!network.open) await userEvent.click(inventorySummary(network));
     await expect(
       within(network).getByText(
-        "Advanced rules: custom request/response approvals; edit in configuration.",
+        "Custom request/response approvals; see configuration.",
       ),
     ).toBeVisible();
     const configuredDomain = within(network).getByText("legacy.example.com");
@@ -266,103 +260,19 @@ export const ExplainsAllReadOnlyConfiguredDomains: Story = {
       name: "Access 1",
     });
     const network = accessCategory(access, "Network");
-    await expect(within(network).getByText("0 editable")).toBeVisible();
+    if (!network.open) await userEvent.click(inventorySummary(network));
     await expect(
-      within(network).getByText("5 advanced destinations"),
+      within(network).getByText("Advanced network rules"),
     ).toBeVisible();
     await expect(
       within(network).getByText(
-        "Custom request/response approvals or URL paths. Edit in configuration.",
+        "Custom request/response approvals; see configuration.",
       ),
     ).toBeVisible();
+    await expect(within(network).getAllByText("Configured")).toHaveLength(2);
     await expect(
       within(network).queryByText(/Edit this rule in the configuration file/),
     ).not.toBeInTheDocument();
-    await expect(
-      within(network).queryByText("No editable destinations configured."),
-    ).not.toBeInTheDocument();
-  },
-};
-
-export const EditsVscodeNetworkRules: Story = {
-  play: async ({ args, canvas, canvasElement }) => {
-    await userEvent.click(
-      canvas.getByRole("button", { name: /VS Code.*1 access issue/ }),
-    );
-    const inventory = inventoryFor(canvasElement, "VS Code");
-    const access = within(inventory).getByRole("tabpanel", {
-      name: "Access 1",
-    });
-    const approval = within(access).getByRole("group", {
-      name: "Access for *.githubusercontent.com",
-    });
-    await userEvent.click(
-      within(approval).getByRole("button", { name: "Ask" }),
-    );
-    await userEvent.click(
-      within(access).getByRole("button", { name: "Remove *.amazon.com" }),
-    );
-    await userEvent.type(
-      within(access).getByRole("textbox", { name: "New destination" }),
-      "api.internal.example",
-    );
-    await userEvent.click(
-      within(access).getByRole("button", { name: "Add as Ask first" }),
-    );
-    await expect(args.onApplyNetworkRuleChange).not.toHaveBeenCalled();
-    await expect(within(access).getByText("3 pending")).toBeVisible();
-    await userEvent.click(
-      within(access).getByRole("button", { name: "Apply changes" }),
-    );
-    await expect(args.onApplyNetworkRuleChange).toHaveBeenCalledWith({
-      agentKind: "vscode",
-      operation: "setDecision",
-      ruleId: "vscode-url-githubusercontent",
-      decision: "ask",
-    });
-    await expect(args.onApplyNetworkRuleChange).toHaveBeenCalledWith({
-      agentKind: "vscode",
-      operation: "remove",
-      ruleId: "vscode-url-amazon",
-    });
-    await expect(args.onApplyNetworkRuleChange).toHaveBeenCalledWith({
-      agentKind: "vscode",
-      operation: "add",
-      resource: "api.internal.example",
-      decision: "ask",
-    });
-    await expect(args.onApplyNetworkRuleChange).toHaveBeenCalledTimes(3);
-  },
-};
-
-export const EditsClaudeNetworkRules: Story = {
-  play: async ({ args, canvas, canvasElement }) => {
-    await userEvent.click(
-      canvas.getByRole("button", { name: /Claude Code.*1 access issue/ }),
-    );
-    const inventory = inventoryFor(canvasElement, "Claude Code");
-    const access = within(inventory).getByRole("tabpanel", {
-      name: "Access 1",
-    });
-    const decision = within(access).getByRole("group", {
-      name: "Access for *.github.com",
-    });
-    await expect(
-      within(decision).queryByRole("button", { name: "Ask" }),
-    ).not.toBeInTheDocument();
-    await userEvent.click(
-      within(decision).getByRole("button", { name: "Block" }),
-    );
-    await expect(args.onApplyNetworkRuleChange).not.toHaveBeenCalled();
-    await userEvent.click(
-      within(access).getByRole("button", { name: "Apply changes" }),
-    );
-    await expect(args.onApplyNetworkRuleChange).toHaveBeenCalledWith({
-      agentKind: "claude-code",
-      operation: "setDecision",
-      ruleId: "claude-sandbox-github",
-      decision: "deny",
-    });
   },
 };
 
@@ -417,6 +327,8 @@ export const Interactions: Story = {
     const vscodeAccess = within(vscodeInventory).getByRole("tabpanel", {
       name: "Access 1",
     });
+    const network = accessCategory(vscodeAccess, "Network");
+    if (!network.open) await userEvent.click(inventorySummary(network));
     await expect(
       within(vscodeAccess).queryByText("Recommendations"),
     ).not.toBeInTheDocument();
@@ -426,13 +338,10 @@ export const Interactions: Story = {
     await expect(
       within(vscodeAccess).queryByText("sentry"),
     ).not.toBeInTheDocument();
-    await expect(within(vscodeAccess).getByText("5 editable")).toBeVisible();
     await expect(
-      within(vscodeAccess).getAllByText("All subdomains"),
-    ).toHaveLength(4);
-    const network = accessCategory(vscodeAccess, "Network");
+      within(network).getByText("*.githubusercontent.com"),
+    ).toBeVisible();
     await expect(within(network).getByText("8 rules")).toBeVisible();
-    if (!network.open) await userEvent.click(inventorySummary(network));
     const configurationLink = within(vscodeAccess).getByRole("button", {
       name: "Open configuration",
     });
@@ -446,9 +355,7 @@ export const Interactions: Story = {
     await expect(
       within(network).queryByText("Wildcard rules"),
     ).not.toBeInTheDocument();
-    await expect(
-      within(network).queryByText("Configured"),
-    ).not.toBeInTheDocument();
+    await expect(within(network).getAllByText("Configured")).toHaveLength(2);
     await expect(within(network).getAllByText("Session")[0]).toBeVisible();
     await expect(within(network).getByText("docs.rs")).toBeVisible();
     await expect(within(network).getByText("localhost")).toBeVisible();
@@ -552,7 +459,7 @@ export const FiltersAccessSources: Story = {
       [...network.querySelectorAll(".access-origin-badge")].map((badge) =>
         badge.textContent?.trim(),
       ),
-    ).toEqual(["Default", "Session", "Session"]);
+    ).toEqual(["Default", "Configured", "Configured", "Session", "Session"]);
 
     const filterSummary = vscodeAccess.querySelector(
       ".access-filter > summary",
@@ -677,7 +584,7 @@ export const ReflowAt320: Story = {
   globals: {
     viewport: { value: "reflow", isRotated: false },
   },
-  play: async ({ args, canvas, canvasElement }) => {
+  play: async ({ canvas, canvasElement }) => {
     await userEvent.click(
       canvas.getByRole("button", { name: /VS Code.*1 access issue/ }),
     );
@@ -685,17 +592,11 @@ export const ReflowAt320: Story = {
     const access = await within(vscodeInventory).findByRole("tabpanel", {
       name: "Access 1",
     });
-    const decision = within(access).getByRole("group", {
-      name: "Access for *.githubusercontent.com",
-    });
-    await userEvent.click(
-      within(decision).getByRole("button", { name: "Ask" }),
-    );
-    await expect(within(access).getByText("1 pending")).toBeVisible();
+    const network = accessCategory(access, "Network");
+    if (!network.open) await userEvent.click(inventorySummary(network));
     await expect(
-      within(access).getByRole("button", { name: "Apply changes" }),
+      within(network).getByText("*.githubusercontent.com"),
     ).toBeVisible();
-    await expect(args.onApplyNetworkRuleChange).not.toHaveBeenCalled();
     const documentElement = canvasElement.ownerDocument.documentElement;
     const viewportWidth = canvasElement.ownerDocument.defaultView?.innerWidth;
     await expect(documentElement.scrollWidth).toBeLessThanOrEqual(

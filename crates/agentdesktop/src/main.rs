@@ -34,8 +34,6 @@ use tauri::{
     tray::TrayIconBuilder,
 };
 
-mod network_policy;
-
 const OPEN_MENU_ID: &str = "open";
 const QUIT_MENU_ID: &str = "quit";
 const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -634,26 +632,6 @@ async fn local_access_report() -> anyhow::Result<AccessReport> {
         .map_err(|error| anyhow::anyhow!("local access assessment failed: {error}"))
 }
 
-#[tauri::command]
-async fn apply_network_rule_change(
-    request: network_policy::NetworkRuleChangeRequest,
-) -> Result<AccessReport, String> {
-    let config = daemon_config().await?;
-    let _scan = LOCAL_ACCESS_SCAN.lock().await;
-    let user_home = env::var_os("HOME")
-        .or_else(|| env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .ok_or_else(|| "Cannot change local network rules without a user home".to_owned())?;
-    let report = local_access_report()
-        .await
-        .map_err(|error| format!("Local access assessment failed: {error:#}"))?;
-    network_policy::apply(&config, &report, &user_home, &request)
-        .map_err(|error| format!("{error:#}"))?;
-    local_access_report()
-        .await
-        .map_err(|error| format!("Local access assessment failed: {error:#}"))
-}
-
 fn report_allows_access_source(report: &AccessReport, path: &PathBuf) -> bool {
     let Ok(path) = fs::canonicalize(path) else {
         return false;
@@ -1034,7 +1012,6 @@ fn run_desktop() -> anyhow::Result<()> {
             get_managed_device_status,
             get_discovery,
             get_access_report,
-            apply_network_rule_change,
             open_access_source,
             get_device_usage,
             logout_managed_device,

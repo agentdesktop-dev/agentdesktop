@@ -9,7 +9,6 @@ import {
 } from "react";
 
 import {
-  applyNetworkRuleChange as applyNetworkRuleChangeRequest,
   desktopReady,
   getAccessReport,
   getBootstrap,
@@ -29,7 +28,6 @@ import type {
   ConnectorSnapshot,
   Discovery,
   ManagedDeviceSnapshot,
-  NetworkRuleChange,
   ProgramChoice,
   ProgramManagement,
   Settings,
@@ -208,24 +206,6 @@ export function useDesktopModel() {
 
   function assessAccess() {
     startAssessing(loadAccess);
-  }
-
-  async function applyNetworkRuleChange(change: NetworkRuleChange) {
-    setNotice(null);
-    const requestId = ++accessRequestId.current;
-    try {
-      const report = await applyNetworkRuleChangeRequest(change);
-      if (requestId === accessRequestId.current) {
-        applyAccessUpdate({ status: "fulfilled", value: report });
-      }
-      setNotice({
-        tone: "success",
-        message: "Network rule updated and access rechecked",
-      });
-    } catch (error: unknown) {
-      setNotice({ tone: "error", message: errorMessage(error) });
-      throw error;
-    }
   }
 
   useEffect(() => {
@@ -507,7 +487,6 @@ export function useDesktopModel() {
             : "Tools";
 
   return {
-    applyNetworkRuleChange,
     accessReport,
     accessStale,
     bootstrap,
