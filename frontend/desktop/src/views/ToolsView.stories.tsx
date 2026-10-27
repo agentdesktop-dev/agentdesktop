@@ -460,6 +460,11 @@ export const Interactions: Story = {
     await expect(
       within(commands).getByText("recorded terminal commands"),
     ).toBeVisible();
+    await expect(
+      within(commands).getByText(
+        "Workspace: /Users/developer/projects/agentdesktop",
+      ),
+    ).toBeVisible();
     await expect(within(commands).getAllByText("cd")).toHaveLength(1);
     await expect(
       within(commands).getByText(

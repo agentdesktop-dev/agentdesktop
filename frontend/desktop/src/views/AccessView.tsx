@@ -512,6 +512,11 @@ function CapabilityRow({ capabilities }: { capabilities: AccessCapability[] }) {
           <span>{groupedCapabilityDescription(capabilities)}</span>
         )}
         {enforcement ? <small>{enforcement}</small> : null}
+        {representative.workspace ? (
+          <small title={representative.workspace}>
+            Workspace: {representative.workspace}
+          </small>
+        ) : null}
         {advancedRule ? null : <ReadOnlyDetail detail={readOnlyDetail} />}
       </div>
       <div className="access-row-meta">

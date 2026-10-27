@@ -403,6 +403,7 @@ export const populatedAccessReport: AccessReport = {
           operations: ["execute"],
           decision: "allow",
           enforcement: "sandbox",
+          workspace: "/Users/developer/projects/agentdesktop",
           source: { kind: "history" },
           detail: "VS Code recorded sandbox-wrapped terminal execution",
         },
