@@ -397,7 +397,6 @@ async fn discover(State(state): State<AppState>) -> Json<Discovery> {
 }
 
 async fn access(
-    State(state): State<AppState>,
     peer_home: Option<Extension<AccessUserHome>>,
 ) -> Result<Json<AccessReport>, (StatusCode, String)> {
     let user_home = peer_home.map(|Extension(home)| home.0);
