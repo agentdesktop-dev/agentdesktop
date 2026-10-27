@@ -608,8 +608,7 @@ export const populatedAccessReport: AccessReport = {
         {
           severity: "warning",
           title: "4 wildcard network rules",
-          detail:
-            "4 wildcard domain rules each allow every matching subdomain; review the Network rules",
+          detail: "Each wildcard domain allows every matching subdomain.",
           category: "network",
           source: {
             kind: "configuration",

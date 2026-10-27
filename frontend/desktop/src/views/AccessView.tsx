@@ -871,7 +871,6 @@ function UnifiedCategory({
               {editor ? (
                 <div className="access-network-evidence-heading">
                   <strong>Other network access</strong>
-                  <span>Read-only settings, defaults, and recent activity</span>
                 </div>
               ) : null}
               <CategoryResourceList
@@ -1047,7 +1046,7 @@ export function AgentAccessPanel({
       ) : null}
       {reviewFindings.length ? (
         <section className="access-section access-review">
-          <h3>Review</h3>
+          <h3>Findings</h3>
           <div className="access-findings">
             {reviewFindings.map((finding) => (
               <FindingRow

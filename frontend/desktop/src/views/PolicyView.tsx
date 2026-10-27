@@ -372,10 +372,6 @@ export function AgentAccessEditor({
         <div className="policy-section-heading">
           <div>
             <h3>Configured destinations</h3>
-            <p>
-              Edit supported rules. Other configured and observed access appears
-              below.
-            </p>
           </div>
           <div className="policy-section-meta">
             {pendingCount ? (

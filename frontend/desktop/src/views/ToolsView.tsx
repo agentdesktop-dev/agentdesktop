@@ -217,9 +217,6 @@ export function ToolsView({
       <div className="page-heading">
         <div>
           <h2>Local tools</h2>
-          <p>
-            Review each agent’s access, MCP servers, and skills in one place.
-          </p>
         </div>
       </div>
       {!unavailable && agents.length ? (

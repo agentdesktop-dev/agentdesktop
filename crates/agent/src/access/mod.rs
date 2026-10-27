@@ -276,10 +276,7 @@ fn derive_findings(collected: &mut CollectedAccess) {
         } else {
             (
                 format!("{} wildcard network rules", resources.len()),
-                format!(
-                    "{} wildcard domain rules each allow every matching subdomain; review the Network rules",
-                    resources.len()
-                ),
+                "Each wildcard domain allows every matching subdomain.".to_owned(),
             )
         };
         collected.findings.push(AccessFinding {

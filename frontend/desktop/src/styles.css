@@ -616,12 +616,12 @@ p {
 }
 
 .tools-audit-heading > small {
-  color: var(--muted);
+  color: var(--foreground-secondary);
   white-space: nowrap;
 }
 
 .tools-audit-heading > small.stale {
-  color: var(--warning);
+  color: var(--warning-strong);
 }
 
 .tools-audit-queue {
