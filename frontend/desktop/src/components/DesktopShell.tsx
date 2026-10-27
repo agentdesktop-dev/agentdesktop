@@ -60,6 +60,7 @@ export function DesktopShell({
               type="button"
               className={view === "home" ? "active" : ""}
               aria-current={view === "home" ? "page" : undefined}
+              title="Status"
               onClick={() => onNavigate("home")}
             >
               <Gauge size={18} />
@@ -69,6 +70,7 @@ export function DesktopShell({
               type="button"
               className={view === "tools" ? "active" : ""}
               aria-current={view === "tools" ? "page" : undefined}
+              title="Tools"
               onClick={() => onNavigate("tools")}
             >
               <Laptop size={18} />

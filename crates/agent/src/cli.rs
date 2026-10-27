@@ -8,6 +8,7 @@ use agentdesktop_core::{
         ProgramChoice, ProgramManagement, TelemetryEventKind,
     },
 };
+use anyhow::Context;
 use clap::Subcommand;
 use serde::Deserialize;
 
@@ -21,6 +22,8 @@ pub enum ClientCommand {
     Enrollment,
     /// Discover locally installed agents.
     Discover,
+    /// Print a user-scoped local access audit as JSON.
+    Access,
     /// Print the daemon's local startup configuration.
     Config,
     /// Print a short-lived credential for an LLM gateway.
@@ -141,6 +144,16 @@ pub async fn run(command: ClientCommand, socket: PathBuf) -> anyhow::Result<()> 
                     println!("{}\tmodel\t{}", runtime.kind, model.name);
                 }
             }
+        }
+        ClientCommand::Access => {
+            let user_home = crate::discovery::metadata::home_dir()
+                .context("cannot assess local access without a user home")?;
+            let discovery = crate::discovery::discover().await;
+            let report =
+                tokio::task::spawn_blocking(move || crate::access::assess(&discovery, &user_home))
+                    .await
+                    .context("local access assessment failed")?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         ClientCommand::Config => {
             let config: DaemonConfig = client::get(&socket, "/v1/config").await?;

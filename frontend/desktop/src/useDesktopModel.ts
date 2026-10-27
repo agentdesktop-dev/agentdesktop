@@ -10,17 +10,20 @@ import {
 
 import {
   desktopReady,
+  getAccessReport,
   getBootstrap,
   getConnectorStatus,
   getDiscovery,
   getManagedDeviceStatus,
   getProgramManagement,
   logoutManagedDevice,
+  openAccessSource,
   saveSettings,
   setProgramChoice as sendProgramChoice,
   setupManagedDevice,
 } from "./backend";
 import type {
+  AccessReport,
   Bootstrap,
   ConnectorSnapshot,
   Discovery,
@@ -33,7 +36,12 @@ import type {
 export type View = "home" | "tools" | "usage" | "settings";
 export type Notice = { tone: "success" | "error"; message: string } | null;
 
-type StatusSource = "connector" | "managedDevice" | "discovery" | "programs";
+type StatusSource =
+  | "connector"
+  | "managedDevice"
+  | "discovery"
+  | "access"
+  | "programs";
 type StatusErrors = Partial<Record<StatusSource, string>>;
 type StatusUpdate = {
   connector: PromiseSettledResult<ConnectorSnapshot>;
@@ -48,6 +56,7 @@ const statusSourceLabels: Record<StatusSource, string> = {
   connector: "local daemon status",
   managedDevice: "organization status",
   discovery: "tool inventory",
+  access: "local access audit",
   programs: "managed tools",
 };
 
@@ -64,6 +73,23 @@ async function getStatusUpdate(): Promise<StatusUpdate> {
       getProgramManagement(),
     ]);
   return { connector, managedDevice, discovery, programs };
+}
+
+function updateStatusError(
+  errors: StatusErrors,
+  source: StatusSource,
+  result: PromiseSettledResult<unknown>,
+) {
+  if (result.status === "fulfilled") {
+    delete errors[source];
+  } else {
+    errors[source] = errorMessage(result.reason);
+  }
+}
+
+async function getAccessUpdate(): Promise<PromiseSettledResult<AccessReport>> {
+  const [result] = await Promise.allSettled([getAccessReport()]);
+  return result;
 }
 
 function statusErrorMessage(errors: StatusErrors): string | null {
@@ -84,6 +110,8 @@ export function useDesktopModel() {
   const [managedDevice, setManagedDevice] =
     useState<ManagedDeviceSnapshot | null>(null);
   const [discovery, setDiscovery] = useState<Discovery | null>(null);
+  const [accessReport, setAccessReport] = useState<AccessReport | null>(null);
+  const [accessStale, setAccessStale] = useState(false);
   const [programManagement, setProgramManagement] =
     useState<ProgramManagement | null>(null);
   // Shows a choice being saved until the daemon answers.
@@ -97,11 +125,14 @@ export function useDesktopModel() {
   const [notice, setNotice] = useState<Notice>(null);
   const [statusErrors, setStatusErrors] = useState<StatusErrors>({});
   const [hasLoadedStatus, setHasLoadedStatus] = useState(false);
+  const [hasLoadedAccess, setHasLoadedAccess] = useState(false);
   const [isRefreshing, startRefreshing] = useTransition();
+  const [isAssessing, startAssessing] = useTransition();
   const [isManaging, startManaging] = useTransition();
   const [isSaving, startSaving] = useTransition();
   const savingSettings = useRef(false);
   const [isLoggingOut, startLoggingOut] = useTransition();
+  const accessRequestId = useRef(0);
   const [isChangingPrograms, startChangingPrograms] = useTransition();
   const needsEnrollment = Boolean(
     managedDevice?.configured && managedDevice.enrollment !== "approved",
@@ -119,33 +150,62 @@ export function useDesktopModel() {
 
   /** `programChange` is `programChanges` from before `update` was read. */
   function applyStatusUpdate(update: StatusUpdate, programChange: number) {
-    const nextErrors: StatusErrors = {};
     startTransition(() => {
       if (update.connector.status === "fulfilled") {
         setConnector(update.connector.value);
-      } else {
-        nextErrors.connector = errorMessage(update.connector.reason);
       }
       if (update.managedDevice.status === "fulfilled") {
         setManagedDevice(update.managedDevice.value);
-      } else {
-        nextErrors.managedDevice = errorMessage(update.managedDevice.reason);
       }
       if (update.discovery.status === "fulfilled") {
         setDiscovery(update.discovery.value);
-      } else {
-        nextErrors.discovery = errorMessage(update.discovery.reason);
       }
       if (programChange === programChanges.current) {
         if (update.programs.status === "fulfilled") {
           setProgramManagement(update.programs.value);
-        } else {
-          nextErrors.programs = errorMessage(update.programs.reason);
         }
       }
-      setStatusErrors(nextErrors);
+      setStatusErrors((current) => {
+        const next = { ...current };
+        updateStatusError(next, "connector", update.connector);
+        updateStatusError(next, "managedDevice", update.managedDevice);
+        updateStatusError(next, "discovery", update.discovery);
+        if (programChange === programChanges.current) {
+          updateStatusError(next, "programs", update.programs);
+        }
+        return next;
+      });
       setHasLoadedStatus(true);
     });
+  }
+
+  function applyAccessUpdate(update: PromiseSettledResult<AccessReport>) {
+    startTransition(() => {
+      if (update.status === "fulfilled") {
+        setAccessReport(update.value);
+        setAccessStale(false);
+      } else {
+        setAccessStale(true);
+      }
+      setStatusErrors((current) => {
+        const next = { ...current };
+        updateStatusError(next, "access", update);
+        return next;
+      });
+      setHasLoadedAccess(true);
+    });
+  }
+
+  async function loadAccess() {
+    const requestId = ++accessRequestId.current;
+    const update = await getAccessUpdate();
+    if (requestId === accessRequestId.current) {
+      applyAccessUpdate(update);
+    }
+  }
+
+  function assessAccess() {
+    startAssessing(loadAccess);
   }
 
   useEffect(() => {
@@ -284,8 +344,10 @@ export function useDesktopModel() {
   function refresh() {
     setNotice(null);
     startRefreshing(async () => {
+      const access = view === "tools" ? loadAccess() : null;
       const programChange = programChanges.current;
       applyStatusUpdate(await getStatusUpdate(), programChange);
+      if (access) await access;
     });
   }
 
@@ -394,11 +456,25 @@ export function useDesktopModel() {
     }
   }
 
+  async function openAccessSettings(path: string) {
+    try {
+      await openAccessSource(path);
+    } catch (error: unknown) {
+      setNotice({ tone: "error", message: errorMessage(error) });
+      throw error;
+    }
+  }
+
   function navigate(nextView: View) {
     setView(nextView);
     setNotice(null);
+    if (nextView === "tools" && view !== "tools" && !isAssessing) {
+      assessAccess();
+    }
   }
 
+  const visibleStatusErrors = { ...statusErrors };
+  if (view !== "tools") delete visibleStatusErrors.access;
   const pageTitle =
     view === "settings"
       ? "Settings"
@@ -411,12 +487,16 @@ export function useDesktopModel() {
             : "Tools";
 
   return {
+    accessReport,
+    accessStale,
     bootstrap,
     connector,
     copyDiagnostics,
     discovery,
     enroll,
     hasLoadedStatus,
+    hasLoadedAccess,
+    isAssessing,
     isChangingPrograms,
     isLoggingOut,
     isManaging,
@@ -427,10 +507,11 @@ export function useDesktopModel() {
     navigate,
     needsEnrollment,
     notice,
+    openAccessSettings,
     pageTitle,
     programManagement: shownProgramManagement,
     refresh,
-    refreshError: statusErrorMessage(statusErrors),
+    refreshError: statusErrorMessage(visibleStatusErrors),
     setColorMode,
     setOpenOnStartup,
     setProgramChoice,

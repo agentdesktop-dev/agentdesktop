@@ -1195,7 +1195,14 @@ async fn serve_unix(
                 let (stream, _) = accepted.context("accept connection")?;
                 let peer = stream.peer_cred().context("inspect local API peer credentials")?;
                 tracing::debug!(peer_uid = peer.uid(), peer_pid = peer.pid(), "accepted local API connection");
-                let app = app.clone();
+                let app = crate::discovery::metadata::home_dir_for_uid(peer.uid())
+                    .map(|home| {
+                        app.clone().layer(axum::Extension(api::AccessUserHome {
+                            home,
+                            uid: peer.uid(),
+                        }))
+                    })
+                    .unwrap_or_else(|| app.clone());
                 tokio::spawn(async move {
                     if let Err(error) = serve_local_connection(stream, app).await {
                         tracing::warn!(%error, "failed to serve local API connection");

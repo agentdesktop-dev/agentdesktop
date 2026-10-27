@@ -18,7 +18,7 @@ pub mod copilot;
 pub mod cursor;
 pub mod grok;
 mod json_merge;
-mod metadata;
+pub(crate) mod metadata;
 pub mod ollama;
 pub mod opencode;
 pub mod pi;

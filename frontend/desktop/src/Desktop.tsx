@@ -79,7 +79,12 @@ export function Desktop() {
             />
           ) : (
             <ToolsView
+              accessLoaded={model.hasLoadedAccess}
+              accessLoading={model.isAssessing}
+              accessReport={model.accessReport}
+              accessStale={model.accessStale}
               discovery={model.discovery}
+              onOpenAccessSource={model.openAccessSettings}
               unavailable={!model.discovery}
             />
           )}
