@@ -229,6 +229,11 @@ export const ShowsReadOnlyConfiguredDomain: Story = {
     const network = accessCategory(access, "Network");
     await expect(within(network).getByText("9 rules")).toBeVisible();
     await expect(within(network).getByText("5 editable")).toBeVisible();
+    await expect(
+      within(network).getByText(
+        "Advanced rules: custom request/response approvals; edit in configuration.",
+      ),
+    ).toBeVisible();
     const configuredDomain = within(network).getByText("legacy.example.com");
     await expect(configuredDomain).toBeVisible();
     const row = configuredDomain.closest(".access-setting-row");
@@ -237,15 +242,11 @@ export const ShowsReadOnlyConfiguredDomain: Story = {
     }
     await expect(within(row).getByText("Configured")).toBeVisible();
     await expect(
-      within(row).getByText("Custom request and response approvals"),
-    ).toBeVisible();
-    await expect(
       within(row).queryByText("Can connect without asking"),
     ).not.toBeInTheDocument();
-    await expect(within(row).getByText("Advanced")).toBeVisible();
     await expect(
-      within(row).getByText(/Edit this rule in the configuration file/),
-    ).toBeVisible();
+      within(row).queryByText(/Edit this rule in the configuration file/),
+    ).not.toBeInTheDocument();
     await expect(
       within(network).queryByRole("group", {
         name: "Access for legacy.example.com",
@@ -266,14 +267,15 @@ export const ExplainsAllReadOnlyConfiguredDomains: Story = {
     });
     const network = accessCategory(access, "Network");
     await expect(within(network).getByText("0 editable")).toBeVisible();
+    await expect(within(network).getByText("5 advanced destinations")).toBeVisible();
     await expect(
       within(network).getByText(
-        "5 configured destinations are Advanced and read-only here",
+        "Custom request/response approvals or URL paths. Edit in configuration.",
       ),
     ).toBeVisible();
     await expect(
-      within(network).getAllByText(/Edit this rule in the configuration file/),
-    ).toHaveLength(2);
+      within(network).queryByText(/Edit this rule in the configuration file/),
+    ).not.toBeInTheDocument();
     await expect(
       within(network).queryByText("No editable destinations configured."),
     ).not.toBeInTheDocument();

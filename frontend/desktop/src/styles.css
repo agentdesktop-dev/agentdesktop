@@ -1354,21 +1354,6 @@ p {
   gap: 5px;
 }
 
-.access-advanced-badge {
-  min-height: 20px;
-  padding: 0 6px;
-  display: inline-flex;
-  align-items: center;
-  color: var(--warning-strong);
-  background: var(--warning-soft);
-  border: 1px solid var(--warning-border);
-  border-radius: 3px;
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 1;
-  text-transform: uppercase;
-}
-
 .access-toolbar {
   margin-bottom: 9px;
   display: flex;

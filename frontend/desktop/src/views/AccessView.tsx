@@ -472,29 +472,17 @@ function SourceFilter({
   );
 }
 
-function ReadOnlyDetail({ detail }: { detail?: string | null }) {
-  if (!detail) return null;
-  const advancedPrefix = "Advanced:";
-  const advanced = detail.startsWith(advancedPrefix);
-  return (
-    <small className="access-read-only-detail">
-      {advanced ? (
-        <span className="access-advanced-badge">Advanced</span>
-      ) : null}
-      <span>
-        {advanced ? detail.slice(advancedPrefix.length).trim() : detail}
-      </span>
-    </small>
-  );
+function isAdvancedRuleDetail(detail?: string | null): boolean {
+  return detail?.startsWith("Advanced:") ?? false;
 }
 
-function readOnlyAccessDescription(
-  detail: string | null | undefined,
-  fallback: string,
-): string {
-  return detail?.startsWith("Advanced:")
-    ? "Custom request and response approvals"
-    : fallback;
+function ReadOnlyDetail({ detail }: { detail?: string | null }) {
+  if (!detail || isAdvancedRuleDetail(detail)) return null;
+  return (
+    <small className="access-read-only-detail">
+      <span>{detail}</span>
+    </small>
+  );
 }
 
 function CapabilityRow({ capabilities }: { capabilities: AccessCapability[] }) {
@@ -513,20 +501,18 @@ function CapabilityRow({ capabilities }: { capabilities: AccessCapability[] }) {
     !representative.rule
       ? representative.detail
       : null;
+  const advancedRule = isAdvancedRuleDetail(readOnlyDetail);
   return (
     <div
       className={`access-setting-row${broadGrant ? " access-setting-row-risk" : ""}`}
     >
       <div className="access-resource-main">
         <code title={representative.resource}>{representative.resource}</code>
-        <span>
-          {readOnlyAccessDescription(
-            readOnlyDetail,
-            groupedCapabilityDescription(capabilities),
-          )}
-        </span>
+        {advancedRule ? null : (
+          <span>{groupedCapabilityDescription(capabilities)}</span>
+        )}
         {enforcement ? <small>{enforcement}</small> : null}
-        <ReadOnlyDetail detail={readOnlyDetail} />
+        {advancedRule ? null : <ReadOnlyDetail detail={readOnlyDetail} />}
       </div>
       <div className="access-row-meta">
         {riskLabel ? <span className="access-risk">{riskLabel}</span> : null}
@@ -636,19 +622,17 @@ function WildcardRules({
     capabilities.every((capability) => !capability.rule)
       ? representative.detail
       : null;
+  const advancedRule = isAdvancedRuleDetail(readOnlyDetail);
   return (
     <div className="access-wildcard-group access-setting-row-risk">
       <div className="access-wildcard-summary">
         <div className="access-resource-main">
           <strong>{capabilities.length} wildcard domains</strong>
-          <span>
-            {readOnlyAccessDescription(
-              readOnlyDetail,
-              capabilityDescription(representative),
-            )}
-          </span>
+          {advancedRule ? null : (
+            <span>{capabilityDescription(representative)}</span>
+          )}
           {enforcement ? <small>{enforcement}</small> : null}
-          <ReadOnlyDetail detail={readOnlyDetail} />
+          {advancedRule ? null : <ReadOnlyDetail detail={readOnlyDetail} />}
         </div>
         <div className="access-row-meta">
           <OriginBadge origin={origin} sourcePath={sourcePath} />
@@ -829,6 +813,11 @@ function UnifiedCategory({
     return origin ? visibleOrigins[origin] : false;
   });
   const visibleObservations = visibleOrigins.session ? observations : [];
+  const hasAdvancedRules =
+    category === "network" &&
+    visibleCapabilities.some((capability) =>
+      isAdvancedRuleDetail(capability.detail),
+    );
   const count =
     alwaysVisibleCount +
     categoryCapabilityCount(category, visibleCapabilities) +
@@ -871,6 +860,11 @@ function UnifiedCategory({
               {editor ? (
                 <div className="access-network-evidence-heading">
                   <strong>Other network access</strong>
+                  <span>
+                    {hasAdvancedRules
+                      ? "Advanced rules: custom request/response approvals; edit in configuration."
+                      : "Read-only settings and activity"}
+                  </span>
                 </div>
               ) : null}
               <CategoryResourceList

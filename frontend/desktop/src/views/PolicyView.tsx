@@ -434,16 +434,10 @@ export function AgentAccessEditor({
             <div className="policy-rule-empty">
               {readOnlyConfiguredCount ? (
                 <>
-                  <strong>
-                    {readOnlyConfiguredCount} configured{" "}
-                    {readOnlyConfiguredCount === 1
-                      ? "destination is"
-                      : "destinations are"}{" "}
-                    Advanced and read-only here
-                  </strong>
+                  <strong>{readOnlyConfiguredCount} advanced destinations</strong>
                   <span>
-                    Advanced rules use separate request and response approvals
-                    or URL paths. Use Open configuration to edit them directly.
+                    Custom request/response approvals or URL paths. Edit in
+                    configuration.
                   </span>
                 </>
               ) : (
