@@ -605,13 +605,13 @@ p {
 
 .tools-audit-heading strong {
   color: var(--ink);
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 650;
 }
 
 .tools-audit-heading span,
 .tools-audit-heading > small {
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
 }
 
@@ -665,13 +665,13 @@ p {
 .tools-audit-queue strong {
   overflow: hidden;
   color: var(--ink);
-  font-size: 11px;
+  font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .tools-audit-queue small {
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .agent-access-panel {
@@ -696,11 +696,11 @@ p {
 
 .agent-access-state-panel strong {
   color: var(--ink);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .agent-access-state-panel span {
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .agent-policy-panel {
@@ -726,11 +726,11 @@ p {
 
 .agent-policy-state strong {
   color: var(--ink);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .agent-policy-state span {
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .policy-section-heading {
@@ -743,14 +743,14 @@ p {
 .policy-section-heading h3 {
   margin: 0;
   color: var(--ink);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 650;
 }
 
 .policy-section-heading p {
   margin: 4px 0 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
 }
 
@@ -763,20 +763,20 @@ p {
 
 .policy-section-meta > span:last-child {
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
   white-space: nowrap;
 }
 
 .policy-pending-badge {
-  min-height: 22px;
-  padding: 0 7px;
+  min-height: 24px;
+  padding: 0 8px;
   display: inline-flex;
   align-items: center;
   color: var(--green);
   background: var(--success-soft);
   border: 1px solid var(--success-border);
   border-radius: 3px;
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 700;
   white-space: nowrap;
 }
@@ -792,7 +792,7 @@ p {
   background: var(--success-notice-surface);
   border: 1px solid var(--success-border);
   border-radius: 5px;
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .policy-success > span {
@@ -812,7 +812,7 @@ p {
 }
 
 .policy-change-bar > button {
-  min-height: 30px;
+  min-height: 34px;
   padding: 0 10px;
   display: inline-flex;
   align-items: center;
@@ -821,7 +821,7 @@ p {
   color: #fff;
   background: #356859;
   border-radius: 4px;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
   cursor: pointer;
   white-space: nowrap;
@@ -851,11 +851,11 @@ p {
 }
 
 .policy-rule-header {
-  min-height: 28px;
+  min-height: 32px;
   color: var(--muted);
   background: var(--surface);
   border-bottom: 1px solid var(--border-soft);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 650;
   text-transform: uppercase;
 }
@@ -896,7 +896,7 @@ p {
 
 .policy-rule-row code {
   color: var(--ink);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 650;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -906,7 +906,7 @@ p {
 .policy-rule-row small,
 .policy-rule-row > span:nth-child(2) {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .policy-rule-row > span:nth-child(2).broad {
@@ -921,13 +921,13 @@ p {
   flex-direction: column;
   gap: 4px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.4;
 }
 
 .policy-rule-empty strong {
   color: var(--ink);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .policy-decision-control {
@@ -943,12 +943,12 @@ p {
 }
 
 .policy-decision-control button {
-  min-height: 27px;
-  padding: 0 6px;
+  min-height: 31px;
+  padding: 0 8px;
   color: var(--muted);
   background: transparent;
   border-right: 1px solid var(--border);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 600;
   cursor: pointer;
 }
@@ -988,7 +988,7 @@ p {
   justify-self: start;
   color: var(--accent);
   background: transparent;
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 650;
   cursor: pointer;
 }
@@ -999,7 +999,7 @@ p {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
   gap: 8px;
-  background: #fafbfc;
+  background: var(--surface);
   border-bottom: 1px solid var(--border);
 }
 
@@ -1008,24 +1008,24 @@ p {
   flex-direction: column;
   gap: 4px;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 650;
 }
 
 .policy-add-rule input {
   min-width: 0;
-  height: 30px;
+  height: 34px;
   padding: 0 8px;
   color: var(--ink);
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 4px;
   font: inherit;
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .policy-add-rule button {
-  min-height: 30px;
+  min-height: 34px;
   padding: 0 10px;
   display: inline-flex;
   align-items: center;
@@ -1034,7 +1034,7 @@ p {
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 4px;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
   cursor: pointer;
 }
@@ -1055,7 +1055,7 @@ p {
   background: var(--danger-notice-surface);
   border: 1px solid var(--danger-notice-border);
   border-radius: 4px;
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.4;
 }
 
@@ -1085,12 +1085,12 @@ p {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .policy-change-bar small {
   color: #cbd6d1;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .policy-change-bar details {
@@ -1100,7 +1100,7 @@ p {
 .policy-change-bar summary {
   padding: 7px;
   color: #e1e9e5;
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 650;
   cursor: pointer;
   list-style: none;
@@ -1120,7 +1120,7 @@ p {
   border: 1px solid var(--border);
   border-radius: 5px;
   box-shadow: 0 10px 30px rgb(31 35 40 / 14%);
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .policy-change-bar details code {
@@ -1208,13 +1208,13 @@ p {
   background: var(--warning-notice-surface);
   border: 1px solid var(--warning-border);
   border-radius: 5px;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .access-section h3 {
   margin: 0;
   color: var(--ink);
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 650;
 }
 
@@ -1279,13 +1279,13 @@ p {
 
 .access-finding strong {
   color: var(--ink);
-  font-size: 11px;
+  font-size: 13px;
 }
 
 .access-finding span,
 .access-finding code {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.4;
 }
 
@@ -1301,7 +1301,7 @@ p {
   justify-content: center;
   border: 1px solid var(--border);
   border-radius: 999px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 650;
   text-transform: capitalize;
   white-space: nowrap;
@@ -1340,7 +1340,7 @@ p {
 .access-resource-main small {
   min-width: 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.35;
   overflow-wrap: anywhere;
   white-space: normal;
@@ -1355,15 +1355,15 @@ p {
 }
 
 .access-advanced-badge {
-  min-height: 18px;
-  padding: 0 5px;
+  min-height: 20px;
+  padding: 0 6px;
   display: inline-flex;
   align-items: center;
   color: var(--warning-strong);
   background: var(--warning-soft);
   border: 1px solid var(--warning-border);
   border-radius: 3px;
-  font-size: 8px;
+  font-size: 10px;
   font-weight: 700;
   line-height: 1;
   text-transform: uppercase;
@@ -1387,7 +1387,7 @@ p {
   color: var(--accent);
   background: transparent;
   border: 0;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 650;
   cursor: pointer;
   list-style: none;
@@ -1401,7 +1401,7 @@ p {
 
 .access-configuration-link:focus-visible,
 .access-configurations > summary:focus-visible {
-  outline: 3px solid rgb(95 67 178 / 18%);
+  outline: 3px solid var(--focus-ring);
   outline-offset: 1px;
 }
 
@@ -1451,7 +1451,7 @@ p {
   background: transparent;
   border: 0;
   border-radius: 4px;
-  font-size: 11px;
+  font-size: 12px;
   text-align: left;
   cursor: pointer;
 }
@@ -1485,7 +1485,7 @@ p {
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 5px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   cursor: pointer;
   list-style: none;
@@ -1521,7 +1521,7 @@ p {
   width: 178px;
   margin: 0;
   padding: 8px;
-  background: #fff;
+  background: var(--card);
   border: 1px solid var(--border);
   border-radius: 5px;
   box-shadow: 0 8px 20px rgb(31 35 40 / 12%);
@@ -1530,12 +1530,12 @@ p {
 .access-filter legend {
   padding: 0 3px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
 }
 
 .access-filter label {
-  min-height: 32px;
+  min-height: 34px;
   padding: 4px 5px;
   display: flex;
   align-items: center;
@@ -1565,14 +1565,14 @@ p {
 }
 
 .access-category-heading {
-  min-height: 44px;
+  min-height: 48px;
   margin: 0;
   padding: 8px 2px;
   display: flex;
   align-items: center;
   gap: 6px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 700;
   letter-spacing: 0;
   text-transform: uppercase;
@@ -1600,19 +1600,19 @@ p {
 }
 
 .access-category-disclosure > summary:hover {
-  color: #3f474f;
+  color: var(--ink);
   background: var(--surface);
 }
 
 .access-category-disclosure > summary:focus-visible {
-  outline: 3px solid rgb(95 67 178 / 18%);
+  outline: 3px solid var(--focus-ring);
   outline-offset: 1px;
 }
 
 .access-category-count {
   margin-left: auto;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0;
   white-space: nowrap;
@@ -1633,13 +1633,13 @@ p {
 }
 
 .access-origin-badge {
-  min-height: 20px;
-  padding: 0 7px;
+  min-height: 22px;
+  padding: 0 8px;
   display: inline-flex;
   align-items: center;
   border: 1px solid var(--border);
   border-radius: 999px;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0;
 }
@@ -1666,7 +1666,7 @@ p {
   margin: 0;
   padding: 14px 10px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   text-align: center;
 }
 
@@ -1701,7 +1701,7 @@ p {
 
 .access-wildcard-summary .access-resource-main > strong {
   color: var(--ink);
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 650;
 }
 
@@ -1717,7 +1717,7 @@ p {
 
 .access-domain-list li {
   min-width: 0;
-  min-height: 27px;
+  min-height: 30px;
   display: flex;
   align-items: center;
 }
@@ -1726,7 +1726,7 @@ p {
   min-width: 0;
   overflow: hidden;
   color: var(--warning-strong);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1739,7 +1739,7 @@ p {
 .access-resource-main > code {
   min-width: 0;
   color: var(--ink);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   overflow-wrap: anywhere;
   white-space: normal;
@@ -1747,7 +1747,7 @@ p {
 
 .access-resource-main > span {
   color: var(--foreground-secondary);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.35;
 }
 
@@ -1767,13 +1767,13 @@ p {
 
 .access-network-evidence-heading > strong {
   color: var(--ink);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 650;
 }
 
 .access-network-evidence-heading > span {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 11px;
   line-height: 1.4;
   text-align: right;
 }
