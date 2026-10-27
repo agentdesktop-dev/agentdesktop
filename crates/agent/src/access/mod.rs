@@ -424,7 +424,10 @@ impl CollectedAccess {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path, path::PathBuf};
+    use std::path::{Path, PathBuf};
+
+    #[cfg(unix)]
+    use std::fs;
 
     #[cfg(unix)]
     use std::os::unix::fs::symlink;

@@ -462,9 +462,11 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
+    #[cfg(unix)]
+    use super::history_candidates;
     use super::{
         HistoryAdapter, HistoryCandidate, HistoryTraversal, ObservationCollector, RuntimeCollector,
-        collect_history_files, history_candidates, read_bounded_line, scan_history_file,
+        collect_history_files, read_bounded_line, scan_history_file,
     };
 
     fn ignore_runtime(

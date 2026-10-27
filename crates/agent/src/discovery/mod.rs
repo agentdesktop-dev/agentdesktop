@@ -3,7 +3,10 @@ use std::path::PathBuf;
 use agentdesktop_core::model::Discovery;
 
 pub(crate) mod metadata {
-    pub(crate) use crate::provider::metadata::{home_dir, home_dir_for_uid, user_home_dirs};
+    pub(crate) use crate::provider::metadata::{home_dir, user_home_dirs};
+
+    #[cfg(unix)]
+    pub(crate) use crate::provider::metadata::home_dir_for_uid;
 }
 
 pub async fn discover() -> Discovery {
