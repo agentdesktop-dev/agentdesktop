@@ -105,6 +105,32 @@ export function DaemonInformation({
         : `${info.usageReceiver.listen} (off${info.usageReceiver.error ? `: ${info.usageReceiver.error}` : ""})`,
     ]);
   }
+  if (info?.intercept) {
+    const intercept = info.intercept;
+    fields.push([
+      "Claude Desktop intercept",
+      !intercept.enabled
+        ? `${intercept.listen} (off)`
+        : intercept.bound
+          ? `${intercept.listen} (listening)`
+          : `${intercept.listen} (not bound${intercept.error ? `: ${intercept.error}` : ""})`,
+    ]);
+    if (intercept.enabled && !intercept.caCertificate) {
+      fields.push(["Intercept CA certificate", "Not generated"]);
+    } else if (intercept.caCertificate) {
+      fields.push(["Intercept CA certificate", intercept.caCertificate, true]);
+    }
+    if (intercept.caSha256) {
+      fields.push(["Intercept CA SHA-256", intercept.caSha256, true]);
+    }
+    fields.push([
+      "Intercept traffic",
+      `${intercept.forwarded} forwarded, ${intercept.gatewayFailures} gateway failures, ${intercept.tunnels} tunnels, ${intercept.tunnelFailures} tunnel failures`,
+    ]);
+    if (intercept.lastFailure) {
+      fields.push(["Last intercept failure", intercept.lastFailure]);
+    }
+  }
 
   return (
     <section className="daemon-information" aria-labelledby={headingId}>

@@ -68,6 +68,21 @@ export interface DaemonInfo {
     bound: boolean;
     error?: string;
   };
+  intercept?: {
+    /** Bound address when `bound`, configured address otherwise. */
+    listen: string;
+    enabled: boolean;
+    bound: boolean;
+    error?: string;
+    caCertificate?: string;
+    caSha256?: string;
+    forwarded: number;
+    gatewayFailures: number;
+    tunnels: number;
+    tunnelFailures: number;
+    lastFailure?: string;
+    lastFailureUnixSeconds?: number;
+  };
 }
 
 export interface ConnectorRuntime {

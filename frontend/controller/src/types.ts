@@ -126,10 +126,13 @@ export type AgentKind =
   | "copilot"
   | "vscode";
 
+export type ClaudeDesktopGatewayMode = "inference" | "intercept";
+
 export type AgentDraft = {
   kind: AgentKind;
   useGateway: boolean;
   settings: string;
+  gatewayMode?: ClaudeDesktopGatewayMode;
 };
 
 export type SandboxConfigDocument = {

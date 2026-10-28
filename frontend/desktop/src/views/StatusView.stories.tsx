@@ -6,6 +6,8 @@ import {
   approvedDevice,
   bootstrap,
   emptyDiscovery,
+  interceptDaemonInfo,
+  interceptUnboundDaemonInfo,
   managedConnector,
   managedDaemonInfo,
   offlineConnector,
@@ -172,6 +174,65 @@ export const StandaloneUsageReceiverOff: Story = {
         `127.0.0.1:4319 (off: ${usageReceiverOffDaemonInfo.usageReceiver?.error})`,
       ),
     ).toBeVisible();
+  },
+};
+
+export const StandaloneClaudeDesktopIntercept: Story = {
+  args: {
+    connector: {
+      ...standaloneConnector,
+      runtime: {
+        ...standaloneConnector.runtime,
+        daemon: interceptDaemonInfo,
+      },
+    },
+    discovery: emptyDiscovery,
+    managedDevice: unconfiguredDevice,
+  },
+  play: async ({ canvas }) => {
+    await userEvent.click(canvas.getByText("Advanced"));
+    const local = within(
+      canvas.getByRole("region", { name: "Daemon information" }),
+    );
+    await expect(local.getByText("127.0.0.1:18471 (listening)")).toBeVisible();
+    await expect(
+      local.getByText("/var/lib/agentdesktop/intercept-ca.pem"),
+    ).toBeVisible();
+    await expect(local.getByText("AB:CD:EF:12")).toBeVisible();
+    await expect(
+      local.getByText(
+        "12 forwarded, 0 gateway failures, 3 tunnels, 0 tunnel failures",
+      ),
+    ).toBeVisible();
+    await expect(local.getAllByRole("button", { name: /^Copy / })).toHaveLength(
+      4,
+    );
+  },
+};
+
+export const StandaloneClaudeDesktopInterceptUnbound: Story = {
+  args: {
+    connector: {
+      ...standaloneConnector,
+      runtime: {
+        ...standaloneConnector.runtime,
+        daemon: interceptUnboundDaemonInfo,
+      },
+    },
+    discovery: emptyDiscovery,
+    managedDevice: unconfiguredDevice,
+  },
+  play: async ({ canvas }) => {
+    await userEvent.click(canvas.getByText("Advanced"));
+    const local = within(
+      canvas.getByRole("region", { name: "Daemon information" }),
+    );
+    await expect(
+      local.getByText(
+        "127.0.0.1:18471 (not bound: Address already in use (os error 48))",
+      ),
+    ).toBeVisible();
+    await expect(local.getByText("gateway connection refused")).toBeVisible();
   },
 };
 

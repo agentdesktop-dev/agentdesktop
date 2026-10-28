@@ -9,7 +9,12 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import type { AgentDraft, AgentKind, DaemonConfigDocument } from "../types";
+import type {
+  AgentDraft,
+  AgentKind,
+  ClaudeDesktopGatewayMode,
+  DaemonConfigDocument,
+} from "../types";
 
 export interface ConfigurationViewProps {
   initialConfig?: DaemonConfigDocument | null;
@@ -177,7 +182,19 @@ export function ConfigurationView({
                 <input
                   type="checkbox"
                   checked={gateway}
-                  onChange={(event) => setGateway(event.target.checked)}
+                  onChange={(event) => {
+                    const enabled = event.target.checked;
+                    setGateway(enabled);
+                    if (!enabled) {
+                      setAgents((current) =>
+                        current.map((agent) =>
+                          agent.kind === "claudeDesktop"
+                            ? { ...agent, gatewayMode: "inference" }
+                            : agent,
+                        ),
+                      );
+                    }
+                  }}
                 />
               </label>
               {gateway && (
@@ -516,10 +533,56 @@ export function ConfigurationView({
                           onChange={(event) =>
                             updateAgent(agent.kind, {
                               useGateway: event.target.checked,
+                              ...(agent.kind === "claudeDesktop" &&
+                              !event.target.checked
+                                ? { gatewayMode: "inference" }
+                                : {}),
                             })
                           }
                         />
                       </label>
+                      {agent.kind === "claudeDesktop" && (
+                        <>
+                          <div className="field">
+                            <label htmlFor="claude-desktop-gateway-mode">
+                              Gateway mode
+                            </label>
+                            <select
+                              id="claude-desktop-gateway-mode"
+                              value={agent.gatewayMode ?? "inference"}
+                              disabled={!gateway || !agent.useGateway}
+                              aria-describedby={
+                                agent.gatewayMode === "intercept"
+                                  ? "claude-desktop-intercept-requirements"
+                                  : undefined
+                              }
+                              onChange={(event) =>
+                                updateAgent(agent.kind, {
+                                  gatewayMode: event.target
+                                    .value as ClaudeDesktopGatewayMode,
+                                })
+                              }
+                            >
+                              <option value="inference">
+                                Third-party inference
+                              </option>
+                              <option value="intercept">
+                                Keep Claude sign-in
+                              </option>
+                            </select>
+                          </div>
+                          {agent.gatewayMode === "intercept" && (
+                            <p
+                              className="config-notice"
+                              id="claude-desktop-intercept-requirements"
+                            >
+                              <CircleAlert size={14} />
+                              Requires the system daemon and a trusted intercept
+                              CA on each device.
+                            </p>
+                          )}
+                        </>
+                      )}
                       <label className="field">
                         <span>Additional settings (YAML)</span>
                         <textarea
@@ -704,11 +767,14 @@ function daemonConfigYaml(options: {
     for (const agent of options.agents) {
       const settings = agent.settings.trim();
       const disablesGateway = options.gateway && !agent.useGateway;
-      if (!settings && !disablesGateway) {
+      const interceptsClaudeDesktop =
+        agent.kind === "claudeDesktop" && agent.gatewayMode === "intercept";
+      if (!settings && !disablesGateway && !interceptsClaudeDesktop) {
         lines.push(`  ${agent.kind}: {}`);
         continue;
       }
       lines.push(`  ${agent.kind}:`);
+      if (interceptsClaudeDesktop) lines.push("    gatewayMode: intercept");
       if (disablesGateway) lines.push("    useLlmGateway: false");
       if (settings) {
         lines.push(...settings.split("\n").map((line) => `    ${line}`));
@@ -747,11 +813,17 @@ function agentDrafts(programs: DaemonConfigDocument["programs"]): AgentDraft[] {
     const program = programs[kind];
     if (!program) return [];
     const { useLlmGateway, ...settings } = program;
+    const gatewayMode =
+      kind === "claudeDesktop" ? settings.gatewayMode : undefined;
+    if (kind === "claudeDesktop") delete settings.gatewayMode;
     return [
       {
         kind,
         useGateway: useLlmGateway !== false,
-        settings: objectYaml(settings),
+        settings: Object.keys(settings).length > 0 ? objectYaml(settings) : "",
+        ...(kind === "claudeDesktop" && gatewayMode === "intercept"
+          ? { gatewayMode }
+          : {}),
       },
     ];
   });
