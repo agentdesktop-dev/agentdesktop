@@ -97,6 +97,7 @@ mod tests {
         };
         let ctx = ReconcileContext {
             llm_proxy: None,
+            intercept_proxy: None,
             merge_user_settings: false,
             credential_helper: root.path().join("agentdesktop"),
             socket: root.path().join("agentdesktop.sock"),
@@ -122,6 +123,7 @@ mod tests {
         };
         let mut ctx = ReconcileContext {
             llm_proxy: None,
+            intercept_proxy: None,
             merge_user_settings: true,
             credential_helper: root.path().join("agentdesktop"),
             socket: root.path().join("agentdesktop.sock"),
@@ -143,6 +145,7 @@ mod tests {
     fn system_mode_needs_no_pi_paths() {
         let ctx = ReconcileContext {
             llm_proxy: None,
+            intercept_proxy: None,
             merge_user_settings: false,
             credential_helper: "agentdesktop".into(),
             socket: "agentdesktop.sock".into(),

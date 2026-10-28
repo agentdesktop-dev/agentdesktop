@@ -763,6 +763,7 @@ mod tests {
                 controller: None,
                 llm_proxy: None,
                 usage_receiver: None,
+                intercept: None,
             },
             discovery,
             enrollment: crate::enrollment::EnrollmentState::new(false),
@@ -773,6 +774,7 @@ mod tests {
             logout: None,
             usage: None,
             programs: None,
+            intercept: None,
         };
         let cache = Arc::new(crate::llm_proxy::CredentialCache::default());
         let expiry = SystemTime::now()

@@ -2276,7 +2276,7 @@ programs:
         )
         .unwrap();
         assert!(
-            validate_one_shot(&config)
+            validate_one_shot(&config, false)
                 .unwrap_err()
                 .to_string()
                 .contains("intercept listener")
@@ -2285,7 +2285,7 @@ programs:
             programs: ["claude-code".to_owned()].into(),
         };
         let chosen = crate::reconcile::apply_program_choice(&config, &only_claude_code).0;
-        validate_one_shot(&chosen).expect("an opted-out Claude Desktop is only cleaned up");
+        validate_one_shot(&chosen, false).expect("an opted-out Claude Desktop is only cleaned up");
     }
 
     #[test]
