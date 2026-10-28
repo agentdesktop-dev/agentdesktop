@@ -758,6 +758,7 @@ where
         session_policy,
         egress: args.containment_egress,
         git: args.containment.as_ref().and_then(|c| c.git.clone()),
+        claude_settings_overridden: args.claude_settings_overridden,
         engine,
     };
     let app = api::router(state.clone())

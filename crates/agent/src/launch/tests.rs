@@ -183,16 +183,15 @@ fn containment_info_names_a_missing_executor() {
     );
 }
 
+/// PR 6a, D13 G1: the Claude settings override no longer gates containment
+/// globally; it is a Claude-only launch refusal (see
+/// `a_claude_settings_override_refuses_only_claude_code_launches`).
 #[test]
-fn containment_info_is_unavailable_when_the_claude_settings_path_is_overridden() {
+fn containment_info_stays_available_when_the_claude_settings_path_is_overridden() {
     let cfg = executor_cfg(r"C:\mxc\wxc-exec.exe");
     let info = containment_info(Some(&cfg), true, true, true, &|_| true, "mxc").unwrap();
-    assert!(!info.available);
-    let error = info.error.expect("a reason");
-    assert!(
-        error.starts_with("daemon.claudeCode.config must be unset for run"),
-        "{error}"
-    );
+    assert!(info.available, "{info:?}");
+    assert_eq!(info.error, None);
 }
 
 // ============================================================ peer_allowed (AC 4)
@@ -2047,6 +2046,8 @@ struct Setup {
     git: Option<agentdesktop_core::config::GitConfig>,
     known_hosts: Vec<(&'static str, &'static str)>,
     client_exe_name: Option<&'static str>,
+    /// PR 6a, G1: `daemon.claudeCode.config` set at startup.
+    claude_settings_overridden: bool,
 }
 
 impl Default for Setup {
@@ -2072,6 +2073,7 @@ impl Default for Setup {
             git: None,
             known_hosts: Vec::new(),
             client_exe_name: None,
+            claude_settings_overridden: false,
         }
     }
 }
@@ -2246,6 +2248,7 @@ impl Harness {
             egress: setup.egress,
             git: setup.git,
             engine: Arc::new(engine::mxc::MxcEngine),
+            claude_settings_overridden: setup.claude_settings_overridden,
         };
 
         let mut router = router(state);
@@ -2477,15 +2480,19 @@ async fn an_unconfigured_containment_answers_409() {
     h.assert_untouched();
 }
 
+// PR 6a (G6, contract): the unknown-program text lists the three programs.
 #[tokio::test(start_paused = true)]
-async fn only_claude_code_can_be_launched() {
+async fn only_the_three_profiled_programs_can_be_launched() {
     let h = Harness::start(Setup::default()).await;
     for program in ["codex", "claude", ""] {
         let (status, body) = h
             .launch(&h.body_with(|body| body["program"] = program.into()))
             .await;
         assert_eq!(status, 400, "{program}: {body}");
-        assert_eq!(body, "program must be claude-code", "{program}");
+        assert_eq!(
+            body, "program must be one of claude-code, opencode, copilot",
+            "{program}"
+        );
     }
     h.assert_untouched();
 }
@@ -2499,7 +2506,10 @@ async fn the_program_is_checked_before_the_workspace() {
     });
     assert_eq!(
         h.launch(&body).await,
-        (400, "program must be claude-code".to_owned())
+        (
+            400,
+            "program must be one of claude-code, opencode, copilot".to_owned()
+        )
     );
 }
 
@@ -4694,4 +4704,1924 @@ async fn an_ssh_setup_failure_fails_the_launch_stops_the_box_and_closes_the_legs
         }
         assert!(closed, "leg port {port} is closed after the failed launch");
     }
+}
+
+// =====================================================================
+// PR 6a: OpenCode and Copilot CLI launch profiles
+// (`specs/PR-6a-harness-profiles.md`, frozen v3). Spec-derived, written
+// before the implementation; ledger `specs/PR-6a-test-changes.md`. Every
+// test here runs on Linux: the plan works on `\`-joined strings, the probe
+// on a temp directory.
+
+use super::profile::{InjectionStrategy, ProgramProfile, program_profile};
+
+const SANDBOX_REFUSAL: &str =
+    "argument --sandbox is not available inside the box (the box is the sandbox)";
+const OPENCODE_MODEL_REFUSAL: &str =
+    "programs.openCode.model must be set (and present in programs.openCode.models) for run";
+const COPILOT_MODELS_REFUSAL: &str =
+    "programs.copilot.models needs an entry with provider agentdesktop-anthropic for run";
+const COPILOT_POLICY_REFUSAL: &str = "Copilot's managed settings require its own sandbox (sandbox.enabled), which cannot run inside the box; launch Copilot unboxed (mode A) or lift the requirement for boxed devices";
+const EGRESS_ALLOW_REFUSAL: &str = "egress allow is supported for claude-code only";
+
+/// G9: the listener refusal for `token` (`serve`, `web`, `--port`, ...).
+fn listener_refusal(token: &str) -> String {
+    format!(
+        "argument {token} is not available inside the box (an in-box listener would expose the session pairing)"
+    )
+}
+
+/// D4: the missing/mismatched package-cache refusal.
+fn pkg_cache_refusal(version: &str, cache_home: &Path) -> String {
+    format!(
+        "Copilot package cache not found for {version}: run copilot --version once outside the box with COPILOT_PKG_CACHE_HOME={}",
+        cache_home.display()
+    )
+}
+
+/// `<home>\.agentdesktop\harness` of the build_request fixture.
+const HARNESS: &str = r"C:\Users\dev\.agentdesktop\harness";
+const OPENCODE_MODEL: &str = "claude-sonnet";
+const COPILOT_WIRE_MODEL: &str = "claude-sonnet-4-5";
+
+const PROGRAMS_6A: [&str; 3] = ["claude-code", "opencode", "copilot"];
+
+fn profile_of(program: &str) -> &'static ProgramProfile {
+    program_profile(program).unwrap_or_else(|| panic!("a profile for {program}"))
+}
+
+fn exe_of(program: &str) -> &'static str {
+    match program {
+        "claude-code" => "claude.exe",
+        "opencode" => "opencode.exe",
+        "copilot" => "copilot.exe",
+        other => panic!("no exe for {other}"),
+    }
+}
+
+/// D5 (round-2 B1, test-author source re-check at v1.19.3): OpenCode's
+/// executable configuration under `config\opencode`.
+const OPENCODE_HOME_PINS: [&str; 18] = [
+    "opencode.json",
+    "opencode.jsonc",
+    "config.json",
+    "tui.json",
+    "AGENTS.md",
+    "agents",
+    "agent",
+    "commands",
+    "command",
+    "modes",
+    "mode",
+    "plugins",
+    "plugin",
+    "skills",
+    "skill",
+    "tools",
+    "tool",
+    "themes",
+];
+
+/// D5: Copilot's executable configuration under `COPILOT_HOME` (config-dir
+/// reference); `config.json` is denied separately.
+const COPILOT_HOME_PINS: [&str; 11] = [
+    "settings.json",
+    "mcp-config.json",
+    "lsp-config.json",
+    "providers.json",
+    "copilot-instructions.md",
+    "instructions",
+    "agents",
+    "skills",
+    "hooks",
+    "extensions",
+    "installed-plugins",
+];
+
+/// D5 pins of `program` as full `\`-joined paths of the fixture.
+fn home_pins(program: &str) -> Vec<String> {
+    match program {
+        "claude-code" => ["settings.json", "hooks", "plugins"]
+            .iter()
+            .map(|entry| format!(r"{HOME}\.claude\{entry}"))
+            .collect(),
+        "opencode" => OPENCODE_HOME_PINS
+            .iter()
+            .map(|entry| format!(r"{HARNESS}\opencode\config\opencode\{entry}"))
+            .collect(),
+        "copilot" => COPILOT_HOME_PINS
+            .iter()
+            .map(|entry| format!(r"{HARNESS}\copilot\{entry}"))
+            .collect(),
+        other => panic!("{other}"),
+    }
+}
+
+/// D9: the union workspace pins at the fixture workspace (`.github`
+/// entries included; the plan denies `.github` whole when it is absent).
+fn union_pins() -> Vec<String> {
+    [
+        r".claude\settings.json",
+        r".claude\settings.local.json",
+        r".claude\hooks",
+        ".mcp.json",
+        "HEAD",
+        r".git\config",
+        r".git\hooks",
+        r".git\commondir",
+        "opencode.json",
+        "opencode.jsonc",
+        ".opencode",
+        r".github\copilot",
+        r".github\mcp.json",
+        r".github\hooks",
+        r".github\agents",
+    ]
+    .iter()
+    .map(|entry| format!(r"{CWD}\{entry}"))
+    .collect()
+}
+
+/// The harness directories the 6a scenarios have on disk.
+fn harness_dirs(program: &str) -> Vec<String> {
+    let mut dirs = vec![r"C:\Users\dev\.agentdesktop".to_owned(), HARNESS.to_owned()];
+    match program {
+        "opencode" => {
+            for sub in [
+                "",
+                r"\data",
+                r"\config",
+                r"\state",
+                r"\cache",
+                r"\config\opencode",
+            ] {
+                dirs.push(format!(r"{HARNESS}\opencode{sub}"));
+            }
+        }
+        "copilot" => {
+            dirs.push(format!(r"{HARNESS}\copilot"));
+            dirs.push(format!(r"{HARNESS}\copilot-pkg"));
+        }
+        _ => dirs.push(format!(r"{HOME}\.claude")),
+    }
+    dirs
+}
+
+fn existing_6a(program: &str) -> BTreeSet<String> {
+    let mut existing = snapshot_existing();
+    existing.extend(harness_dirs(program));
+    existing
+}
+
+fn directories_6a(program: &str) -> BTreeSet<String> {
+    let mut directories = snapshot_directories();
+    directories.extend(harness_dirs(program));
+    directories
+}
+
+fn model_6a(program: &str) -> Option<&'static str> {
+    match program {
+        "opencode" => Some(OPENCODE_MODEL),
+        "copilot" => Some(COPILOT_WIRE_MODEL),
+        _ => None,
+    }
+}
+
+/// `plan_program` for `program` on the build_request fixture, with egress
+/// deny (D1b) and the program's exe in `<home>\.local\bin`.
+fn plan_6a(
+    program: &str,
+    existing: &BTreeSet<String>,
+    directories: &BTreeSet<String>,
+    tweak: impl FnOnce(&mut LaunchInput),
+) -> plan::LaunchPlan {
+    let exists = |path: &Path| existing.contains(path.to_str().expect("UTF-8 path"));
+    let is_dir = |path: &Path| directories.contains(path.to_str().expect("UTF-8 path"));
+    let mut input = launch_input(&exists, &is_dir);
+    input.executable = PathBuf::from(format!(r"{HOME}\.local\bin\{}", exe_of(program)));
+    input.egress = agentdesktop_core::config::ContainmentEgress::Deny;
+    tweak(&mut input);
+    plan_program(&input, profile_of(program), model_6a(program))
+}
+
+fn default_plan_6a(program: &str) -> plan::LaunchPlan {
+    plan_6a(
+        program,
+        &existing_6a(program),
+        &directories_6a(program),
+        |_| {},
+    )
+}
+
+fn strings(paths: &[PathBuf]) -> Vec<String> {
+    paths.iter().map(|path| win(path)).collect()
+}
+
+fn is_under_str(path: &str, root: &str) -> bool {
+    path == root || path.starts_with(&format!("{root}\\"))
+}
+
+/// Read-only or denied: the executable-configuration rule.
+fn protected_6a(plan: &plan::LaunchPlan) -> BTreeSet<String> {
+    let mut protected: BTreeSet<String> = strings(&plan.readonly).into_iter().collect();
+    protected.extend(strings(&plan.denied));
+    protected
+}
+
+fn writable_6a(plan: &plan::LaunchPlan, path: &str) -> bool {
+    strings(&plan.readwrite)
+        .iter()
+        .any(|root| is_under_str(path, root))
+}
+
+fn yaml_config(text: &str) -> agentdesktop_core::config::DaemonConfig {
+    serde_yaml::from_str(text).unwrap_or_else(|error| panic!("{error}: {text}"))
+}
+
+const GATEWAY_6A: &str = "llmGateway:\n  url: https://gateway.example.com\n  authentication:\n    type: oidc\n    issuer: https://login.example.com\n    clientId: agentdesktop\n";
+
+fn with_gateway(programs: &str) -> agentdesktop_core::config::DaemonConfig {
+    yaml_config(&format!("{GATEWAY_6A}{programs}"))
+}
+
+const DENY: agentdesktop_core::config::ContainmentEgress =
+    agentdesktop_core::config::ContainmentEgress::Deny;
+const ALLOW: agentdesktop_core::config::ContainmentEgress =
+    agentdesktop_core::config::ContainmentEgress::Allow;
+
+// ------------------------------------------------- ProgramProfile table (D1)
+
+#[test]
+fn the_profile_table_has_exactly_the_three_programs() {
+    for program in PROGRAMS_6A {
+        assert_eq!(profile_of(program).program, program);
+    }
+    for other in ["codex", "claude", "copilot-cli", "OpenCode", ""] {
+        assert!(program_profile(other).is_none(), "{other:?}");
+    }
+}
+
+#[test]
+fn the_claude_code_profile_row_keeps_claude_s_executable_injection_and_title() {
+    let claude = profile_of("claude-code");
+    assert_eq!(claude.exe_name, "claude.exe");
+    assert_eq!(claude.home_candidates, &[r".local\bin"]);
+    assert_eq!(
+        claude.injection,
+        InjectionStrategy::Env {
+            base_url: "ANTHROPIC_BASE_URL",
+            headers: "ANTHROPIC_CUSTOM_HEADERS",
+        }
+    );
+    for pair in super::profile::CLAUDE_CODE.fixed_env {
+        assert!(claude.fixed_env.contains(pair), "{pair:?} moved away");
+    }
+    assert!(claude.harness_home.is_none());
+    assert!(claude.denied_args.is_empty(), "{:?}", claude.denied_args);
+    assert!(
+        claude.denied_tokens.is_empty(),
+        "{:?}",
+        claude.denied_tokens
+    );
+    assert_eq!(claude.window_title, "agentdesktop: claude");
+}
+
+#[test]
+fn the_opencode_profile_row_names_its_exe_inline_config_harness_dirs_and_title() {
+    let opencode = profile_of("opencode");
+    assert_eq!(opencode.exe_name, "opencode.exe");
+    assert_eq!(opencode.home_candidates, &[r".local\bin"]);
+    assert_eq!(opencode.injection, InjectionStrategy::OpenCodeInlineConfig);
+    for pair in [
+        ("OPENCODE_DISABLE_AUTOUPDATE", "1"),
+        ("OPENCODE_DISABLE_MODELS_FETCH", "1"),
+        ("OPENCODE_DISABLE_PROJECT_CONFIG", "1"),
+    ] {
+        assert!(opencode.fixed_env.contains(&pair), "{pair:?} (D8)");
+    }
+    let home = opencode.harness_home.as_ref().expect("a harness home (D5)");
+    assert_eq!(home.dir, "opencode");
+    let env_dirs: BTreeSet<(&str, &str)> = home.env_dirs.iter().copied().collect();
+    assert_eq!(
+        env_dirs,
+        BTreeSet::from([
+            ("XDG_DATA_HOME", r"opencode\data"),
+            ("XDG_CONFIG_HOME", r"opencode\config"),
+            ("XDG_STATE_HOME", r"opencode\state"),
+            ("XDG_CACHE_HOME", r"opencode\cache"),
+        ])
+    );
+    for flag in ["--port", "--hostname", "--mdns"] {
+        assert!(opencode.denied_args.contains(&flag), "{flag} (G9)");
+    }
+    assert_eq!(opencode.denied_tokens, &["serve", "web"]);
+    assert_eq!(opencode.window_title, "agentdesktop: opencode");
+}
+
+#[test]
+fn the_copilot_profile_row_names_its_exe_byok_env_harness_dirs_and_title() {
+    let copilot = profile_of("copilot");
+    assert_eq!(copilot.exe_name, "copilot.exe");
+    assert_eq!(copilot.home_candidates, &[r".local\bin"]);
+    assert_eq!(
+        copilot.injection,
+        InjectionStrategy::Env {
+            base_url: "COPILOT_PROVIDER_BASE_URL",
+            headers: "COPILOT_PROVIDER_HEADERS",
+        }
+    );
+    for pair in [
+        ("COPILOT_PROVIDER_TYPE", "anthropic"),
+        ("COPILOT_PROVIDER_API_KEY", "placeholder"),
+        ("COPILOT_AUTO_UPDATE", "false"),
+    ] {
+        assert!(copilot.fixed_env.contains(&pair), "{pair:?} (D2b, D8)");
+    }
+    assert!(
+        !copilot
+            .fixed_env
+            .iter()
+            .any(|(key, _)| *key == "COPILOT_OFFLINE"),
+        "COPILOT_OFFLINE stays unset (D8)"
+    );
+    let home = copilot.harness_home.as_ref().expect("a harness home (D5)");
+    assert_eq!(home.dir, "copilot");
+    let env_dirs: BTreeSet<(&str, &str)> = home.env_dirs.iter().copied().collect();
+    assert_eq!(
+        env_dirs,
+        BTreeSet::from([
+            ("COPILOT_HOME", "copilot"),
+            ("COPILOT_PKG_CACHE_HOME", "copilot-pkg"),
+        ])
+    );
+    assert_eq!(copilot.denied_args, &["--sandbox"]);
+    assert!(
+        copilot.denied_tokens.is_empty(),
+        "{:?}",
+        copilot.denied_tokens
+    );
+    assert_eq!(copilot.window_title, "agentdesktop: copilot");
+}
+
+#[test]
+fn no_non_claude_profile_carries_claude_or_anthropic_fixed_env() {
+    for program in ["opencode", "copilot"] {
+        for (key, _) in profile_of(program).fixed_env {
+            assert!(
+                !key.starts_with("CLAUDE_") && !key.starts_with("ANTHROPIC_"),
+                "{program}: {key} (AC6)"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_opencode_harness_home_pins_cover_the_global_config_files_and_executable_directories() {
+    let home = profile_of("opencode").harness_home.as_ref().unwrap();
+    for entry in OPENCODE_HOME_PINS {
+        let pin = format!(r"opencode\config\opencode\{entry}");
+        assert!(
+            home.executable_config.contains(&pin.as_str()),
+            "{pin} (D5, B1)"
+        );
+    }
+}
+
+#[test]
+fn the_copilot_harness_home_pins_cover_the_config_dir_reference_entries() {
+    let home = profile_of("copilot").harness_home.as_ref().unwrap();
+    for entry in COPILOT_HOME_PINS {
+        let pin = format!(r"copilot\{entry}");
+        assert!(home.executable_config.contains(&pin.as_str()), "{pin} (D5)");
+    }
+    assert!(
+        !home.executable_config.contains(&r"copilot\config.json"),
+        "config.json is denied, not pinned read-only (D5)"
+    );
+}
+
+// ------------------------------------------------- resolve_program (D3)
+
+#[test]
+fn resolve_program_for_claude_code_matches_resolve_program_on_every_existing_case() {
+    let home = p("home/dev");
+    let npm = p("npm");
+    let own = home.join(".local").join("bin").join("claude.exe");
+    let (first, second, third) = (p("a"), p("b"), p("c"));
+    let mut outside = program_fs(std::slice::from_ref(&own));
+    outside
+        .canonical
+        .insert(own.clone(), p("home/other/claude.exe"));
+    let cases: Vec<(FakeProgramFs, Vec<PathBuf>)> = vec![
+        (
+            program_fs(&[
+                npm.join("claude.cmd"),
+                npm.join("claude"),
+                home.join(".local/bin/claude.cmd"),
+            ]),
+            vec![npm.clone()],
+        ),
+        (
+            program_fs(&[p("home/other/.local/bin/claude.exe")]),
+            vec![p("windows/system32")],
+        ),
+        (outside, vec![]),
+        (
+            program_fs(&[npm.join("claude.cmd"), npm.join("claude"), own.clone()]),
+            vec![npm.clone()],
+        ),
+        (
+            program_fs(&[p("tools").join("claude.exe"), own.clone()]),
+            vec![p("tools")],
+        ),
+        (
+            program_fs(&[second.join("claude.exe"), third.join("claude.exe")]),
+            vec![first, second, third],
+        ),
+        (program_fs(&[]), vec![p("tools")]),
+    ];
+    for (fs, path_dirs) in cases {
+        assert_eq!(
+            resolve_program_for(profile_of("claude-code"), &home, &path_dirs, &fs),
+            resolve_program(&home, &path_dirs, &fs),
+            "{path_dirs:?}"
+        );
+    }
+}
+
+#[test]
+fn each_program_resolves_its_native_exe_from_home_before_path() {
+    let home = p("home/dev");
+    let tools = p("tools");
+    for program in PROGRAMS_6A {
+        let exe = exe_of(program);
+        let own = home.join(".local").join("bin").join(exe);
+        let fs = program_fs(&[tools.join(exe), own.clone()]);
+        assert_eq!(
+            resolve_program_for(
+                profile_of(program),
+                &home,
+                std::slice::from_ref(&tools),
+                &fs
+            ),
+            Ok(own),
+            "{program}"
+        );
+    }
+}
+
+#[test]
+fn each_program_falls_back_to_the_first_path_directory_with_its_exe() {
+    let home = p("home/dev");
+    let (first, second, third) = (p("a"), p("b"), p("c"));
+    for program in PROGRAMS_6A {
+        let exe = exe_of(program);
+        let fs = program_fs(&[second.join(exe), third.join(exe)]);
+        assert_eq!(
+            resolve_program_for(
+                profile_of(program),
+                &home,
+                &[first.clone(), second.clone(), third.clone()],
+                &fs
+            ),
+            Ok(second.join(exe)),
+            "{program}"
+        );
+    }
+}
+
+#[test]
+fn npm_shims_of_opencode_and_copilot_are_not_found_and_the_error_names_the_exe() {
+    let home = p("home/dev");
+    let npm = p("npm");
+    for program in ["opencode", "copilot"] {
+        let stem = exe_of(program).trim_end_matches(".exe");
+        let fs = program_fs(&[
+            npm.join(format!("{stem}.cmd")),
+            npm.join(format!("{stem}.ps1")),
+            npm.join(stem),
+            home.join(".local/bin").join(format!("{stem}.cmd")),
+        ]);
+        let error =
+            resolve_program_for(profile_of(program), &home, std::slice::from_ref(&npm), &fs)
+                .expect_err(program);
+        assert!(error.contains(exe_of(program)), "{program}: {error}");
+    }
+}
+
+#[test]
+fn one_programs_exe_never_resolves_another_program() {
+    let home = p("home/dev");
+    let bin = home.join(".local").join("bin");
+    for program in PROGRAMS_6A {
+        let others: Vec<PathBuf> = PROGRAMS_6A
+            .iter()
+            .filter(|other| **other != program)
+            .map(|other| bin.join(exe_of(other)))
+            .collect();
+        let fs = program_fs(&others);
+        assert!(
+            resolve_program_for(profile_of(program), &home, &[], &fs).is_err(),
+            "{program}"
+        );
+    }
+}
+
+#[test]
+fn a_candidate_that_canonicalises_outside_home_and_path_is_not_used_for_any_program() {
+    let home = p("home/dev");
+    for program in PROGRAMS_6A {
+        let candidate = home.join(".local").join("bin").join(exe_of(program));
+        let mut fs = program_fs(std::slice::from_ref(&candidate));
+        fs.canonical
+            .insert(candidate, p("home/other").join(exe_of(program)));
+        assert!(
+            resolve_program_for(profile_of(program), &home, &[], &fs).is_err(),
+            "{program}"
+        );
+    }
+}
+
+// ------------------------------------------------- denied args (D6, G9)
+
+#[test]
+fn copilot_refuses_any_argument_equal_to_or_prefixed_by_sandbox() {
+    for list in [
+        vec!["--sandbox"],
+        vec!["--sandbox=true"],
+        vec!["--sandbox-mode", "workspace"],
+        vec!["-p", "hello", "--sandbox"],
+    ] {
+        assert_eq!(
+            check_denied_args(profile_of("copilot"), &args(&list)),
+            Err(SANDBOX_REFUSAL.to_owned()),
+            "{list:?}"
+        );
+    }
+}
+
+#[test]
+fn opencode_refuses_serve_and_web_wherever_they_appear_as_bare_tokens() {
+    for (list, token) in [
+        (vec!["serve"], "serve"),
+        (vec!["web"], "web"),
+        (vec!["--print-logs", "serve"], "serve"),
+        (vec!["run", "--continue", "web"], "web"),
+    ] {
+        assert_eq!(
+            check_denied_args(profile_of("opencode"), &args(&list)),
+            Err(listener_refusal(token)),
+            "{list:?}"
+        );
+    }
+}
+
+#[test]
+fn opencode_refuses_port_hostname_and_mdns_by_prefix() {
+    for (list, flag) in [
+        (vec!["--port", "4096"], "--port"),
+        (vec!["--port=4096"], "--port"),
+        (vec!["--hostname", "0.0.0.0"], "--hostname"),
+        (vec!["--hostname=127.0.0.1"], "--hostname"),
+        (vec!["--mdns"], "--mdns"),
+        (vec!["--mdns-domain", "x.local"], "--mdns"),
+    ] {
+        assert_eq!(
+            check_denied_args(profile_of("opencode"), &args(&list)),
+            Err(listener_refusal(flag)),
+            "{list:?}"
+        );
+    }
+}
+
+/// G9 fail-closed rule: no flag-arity parsing, so a space-separated flag
+/// value equal to `serve` is refused; a value glued with `=`, or one that
+/// merely starts with `serve`, is not a bare token.
+#[test]
+fn opencode_refuses_a_space_separated_flag_value_equal_to_serve_but_not_a_glued_one() {
+    assert_eq!(
+        check_denied_args(profile_of("opencode"), &args(&["--model", "serve"])),
+        Err(listener_refusal("serve"))
+    );
+    for list in [
+        vec!["--model=serve"],
+        vec!["--model", "serve/x"],
+        vec!["--model=web"],
+    ] {
+        assert_eq!(
+            check_denied_args(profile_of("opencode"), &args(&list)),
+            Ok(()),
+            "{list:?}"
+        );
+    }
+}
+
+#[test]
+fn the_listener_and_sandbox_denials_are_per_profile() {
+    assert_eq!(
+        check_denied_args(profile_of("opencode"), &args(&["--sandbox"])),
+        Ok(())
+    );
+    for list in [vec!["serve"], vec!["web"], vec!["--port", "1"]] {
+        assert_eq!(
+            check_denied_args(profile_of("copilot"), &args(&list)),
+            Ok(()),
+            "{list:?}"
+        );
+    }
+    for list in [vec!["serve"], vec!["--sandbox"], vec!["--port", "1"]] {
+        assert_eq!(
+            check_denied_args(profile_of("claude-code"), &args(&list)),
+            Ok(()),
+            "Claude has no denied args (D6): {list:?}"
+        );
+    }
+}
+
+#[test]
+fn ordinary_arguments_pass_every_profile() {
+    for program in PROGRAMS_6A {
+        for list in [
+            vec![],
+            vec!["--model", "anthropic/claude-sonnet"],
+            vec!["-p", "fix the tests"],
+            vec!["--print-logs"],
+        ] {
+            assert_eq!(
+                check_denied_args(profile_of(program), &args(&list)),
+                Ok(()),
+                "{program}: {list:?}"
+            );
+        }
+    }
+}
+
+// ------------------------------------------------- preconditions (AC4, D1b, D11)
+
+#[test]
+fn claude_code_preconditions_keep_their_existing_texts() {
+    let cases = [
+        (
+            yaml_config("programs:\n  claudeCode: {}\n"),
+            "llmGateway (with authentication) must be configured for run",
+        ),
+        (
+            yaml_config(
+                "llmGateway:\n  url: https://gateway.example.com\nprograms:\n  claudeCode: {}\n",
+            ),
+            "llmGateway.authentication must be configured for run",
+        ),
+        (
+            with_gateway(""),
+            "programs.claudeCode must be configured for run",
+        ),
+        (
+            with_gateway("programs:\n  claudeCode:\n    useLlmGateway: false\n"),
+            "programs.claudeCode.useLlmGateway must be true for run",
+        ),
+        (
+            with_gateway("programs:\n  claudeCode:\n    auth: subscription\n"),
+            "programs.claudeCode.auth: subscription sign-in is not available inside the box in PR 1",
+        ),
+        (
+            with_gateway("programs:\n  claudeCode: {}\nsandbox: {}\n"),
+            "Claude Code's own sandbox is not available inside the box; remove `sandbox` or launch without `run`",
+        ),
+    ];
+    for (config, text) in cases {
+        assert_eq!(
+            program_preconditions(&config, "claude-code", DENY),
+            Err(text.to_owned())
+        );
+        assert_eq!(
+            preconditions(&config),
+            Err(text.to_owned()),
+            "the old rule agrees"
+        );
+    }
+    assert_eq!(
+        program_preconditions(
+            &with_gateway("programs:\n  claudeCode: {}\n"),
+            "claude-code",
+            DENY
+        ),
+        Ok(())
+    );
+}
+
+const VALID_6A_PROGRAMS: &str = "programs:\n  openCode:\n    model: claude-sonnet\n    models:\n      claude-sonnet: {}\n  copilot:\n    models:\n      sonnet:\n        provider: agentdesktop-anthropic\n";
+
+#[test]
+fn valid_opencode_and_copilot_configurations_pass_under_deny() {
+    let config = with_gateway(VALID_6A_PROGRAMS);
+    for program in ["opencode", "copilot"] {
+        assert_eq!(
+            program_preconditions(&config, program, DENY),
+            Ok(()),
+            "{program}"
+        );
+    }
+}
+
+#[test]
+fn claude_code_is_the_only_program_allowed_under_egress_allow() {
+    let config = with_gateway(&format!("{VALID_6A_PROGRAMS}  claudeCode: {{}}\n"));
+    assert_eq!(program_preconditions(&config, "claude-code", ALLOW), Ok(()));
+    for program in ["opencode", "copilot"] {
+        assert_eq!(
+            program_preconditions(&config, program, ALLOW),
+            Err(EGRESS_ALLOW_REFUSAL.to_owned()),
+            "{program} (D1b)"
+        );
+    }
+}
+
+#[test]
+fn a_missing_program_section_names_it_for_opencode_and_copilot() {
+    let config = with_gateway("programs:\n  claudeCode: {}\n");
+    for (program, field) in [
+        ("opencode", "programs.openCode"),
+        ("copilot", "programs.copilot"),
+    ] {
+        let error = program_preconditions(&config, program, DENY).expect_err(program);
+        assert!(error.contains(field), "{program}: {error}");
+    }
+}
+
+#[test]
+fn use_llm_gateway_false_names_the_field_for_opencode_and_copilot() {
+    let config = with_gateway(
+        "programs:\n  openCode:\n    useLlmGateway: false\n    model: claude-sonnet\n    models:\n      claude-sonnet: {}\n  copilot:\n    useLlmGateway: false\n    models:\n      sonnet:\n        provider: agentdesktop-anthropic\n",
+    );
+    for (program, field) in [
+        ("opencode", "programs.openCode.useLlmGateway"),
+        ("copilot", "programs.copilot.useLlmGateway"),
+    ] {
+        let error = program_preconditions(&config, program, DENY).expect_err(program);
+        assert!(error.contains(field), "{program}: {error}");
+    }
+}
+
+#[test]
+fn opencode_without_a_usable_model_answers_the_model_text() {
+    for programs in [
+        "programs:\n  openCode:\n    models:\n      claude-sonnet: {}\n",
+        "programs:\n  openCode:\n    model: claude-opus\n    models:\n      claude-sonnet: {}\n",
+        "programs:\n  openCode:\n    model: claude-sonnet\n",
+    ] {
+        assert_eq!(
+            program_preconditions(&with_gateway(programs), "opencode", DENY),
+            Err(OPENCODE_MODEL_REFUSAL.to_owned()),
+            "{programs}"
+        );
+    }
+}
+
+#[test]
+fn copilot_without_an_anthropic_model_entry_answers_the_models_text() {
+    for programs in [
+        "programs:\n  copilot: {}\n",
+        "programs:\n  copilot:\n    models:\n      gpt:\n        provider: agentdesktop\n",
+    ] {
+        assert_eq!(
+            program_preconditions(&with_gateway(programs), "copilot", DENY),
+            Err(COPILOT_MODELS_REFUSAL.to_owned()),
+            "{programs}"
+        );
+    }
+}
+
+#[test]
+fn copilot_with_a_non_string_wire_model_answers_the_wire_model_text() {
+    let config = with_gateway(
+        "programs:\n  copilot:\n    models:\n      sonnet:\n        provider: agentdesktop-anthropic\n        wireModel: 5\n",
+    );
+    assert_eq!(
+        program_preconditions(&config, "copilot", DENY),
+        Err("programs.copilot.models entry sonnet: wireModel must be a string".to_owned())
+    );
+}
+
+#[test]
+fn opencode_and_copilot_need_the_gateway_with_authentication() {
+    for config in [
+        yaml_config(VALID_6A_PROGRAMS),
+        yaml_config(&format!(
+            "llmGateway:\n  url: https://gateway.example.com\n{VALID_6A_PROGRAMS}"
+        )),
+    ] {
+        for program in ["opencode", "copilot"] {
+            let error = program_preconditions(&config, program, DENY).expect_err(program);
+            assert!(error.contains("llmGateway"), "{program}: {error}");
+        }
+    }
+}
+
+/// D6, D11: the subscription refusal and the `sandbox` precondition are
+/// Claude's; `SandboxConfig` is not consumed by the other two.
+#[test]
+fn subscription_and_the_top_level_sandbox_refusals_stay_claude_only() {
+    let config = with_gateway(&format!(
+        "{VALID_6A_PROGRAMS}  claudeCode:\n    auth: subscription\nsandbox: {{}}\n"
+    ));
+    for program in ["opencode", "copilot"] {
+        assert_eq!(
+            program_preconditions(&config, program, DENY),
+            Ok(()),
+            "{program}"
+        );
+    }
+}
+
+#[test]
+fn an_unknown_program_has_no_preconditions_path() {
+    let config = with_gateway(VALID_6A_PROGRAMS);
+    assert!(program_preconditions(&config, "codex", DENY).is_err());
+}
+
+// ------------------------------------------------- Copilot model (D2b, R5)
+
+fn copilot_models(models: &str) -> agentdesktop_core::config::DaemonConfig {
+    with_gateway(&format!("programs:\n  copilot:\n    models:\n{models}"))
+}
+
+#[test]
+fn copilot_wire_model_takes_the_first_anthropic_entry_in_key_order() {
+    let config = copilot_models(
+        "      a-gpt:\n        provider: agentdesktop\n        modelId: gpt-5\n      b-sonnet:\n        provider: agentdesktop-anthropic\n        modelId: m-b\n      c-opus:\n        provider: agentdesktop-anthropic\n        modelId: m-c\n",
+    );
+    assert_eq!(copilot_wire_model(&config), Ok("m-b".to_owned()));
+}
+
+#[test]
+fn copilot_wire_model_prefers_a_string_wire_model_then_model_id_then_the_key() {
+    let wire = copilot_models(
+        "      sonnet:\n        provider: agentdesktop-anthropic\n        modelId: m\n        wireModel: w\n",
+    );
+    assert_eq!(copilot_wire_model(&wire), Ok("w".to_owned()));
+    let model_id = copilot_models(
+        "      sonnet:\n        provider: agentdesktop-anthropic\n        modelId: m\n",
+    );
+    assert_eq!(copilot_wire_model(&model_id), Ok("m".to_owned()));
+    let key = copilot_models("      sonnet:\n        provider: agentdesktop-anthropic\n");
+    assert_eq!(copilot_wire_model(&key), Ok("sonnet".to_owned()));
+}
+
+#[test]
+fn copilot_wire_model_refuses_a_non_string_wire_model() {
+    for value in ["5", "true", "[a]", "{x: 1}"] {
+        let config = copilot_models(&format!(
+            "      sonnet:\n        provider: agentdesktop-anthropic\n        wireModel: {value}\n"
+        ));
+        assert_eq!(
+            copilot_wire_model(&config),
+            Err("programs.copilot.models entry sonnet: wireModel must be a string".to_owned()),
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn copilot_wire_model_without_an_anthropic_entry_names_the_models_field() {
+    let config = copilot_models("      gpt:\n        provider: agentdesktop\n");
+    assert_eq!(
+        copilot_wire_model(&config),
+        Err(COPILOT_MODELS_REFUSAL.to_owned())
+    );
+    assert_eq!(
+        copilot_wire_model(&with_gateway("programs:\n  claudeCode: {}\n")),
+        Err(COPILOT_MODELS_REFUSAL.to_owned())
+    );
+}
+
+// ------------------------------------------------- OPENCODE_CONFIG_CONTENT (D2a, N6, AC2)
+
+/// The inline config snapshot, with the build_request fixture's relay URL
+/// and placeholder pairing.
+fn opencode_inline_snapshot() -> serde_json::Value {
+    serde_json::json!({
+        "provider": {
+            "anthropic": {
+                "options": {
+                    "baseURL": "http://127.0.0.1:4000/sandbox/v1",
+                    "apiKey": "placeholder",
+                    "headers": {"x-agentdesktop-pairing": "test-pairing-value"},
+                },
+                "models": {"claude-sonnet": {}},
+            },
+        },
+        "model": "anthropic/claude-sonnet",
+        "enabled_providers": ["anthropic"],
+        "autoupdate": false,
+        "share": "disabled",
+    })
+}
+
+#[test]
+fn the_opencode_inline_config_matches_its_snapshot() {
+    assert_eq!(
+        opencode_config_content(
+            "http://127.0.0.1:4000/sandbox",
+            "test-pairing-value",
+            OPENCODE_MODEL
+        ),
+        opencode_inline_snapshot()
+    );
+}
+
+#[test]
+fn the_opencode_box_carries_the_inline_config_in_opencode_config_content() {
+    let plan = default_plan_6a("opencode");
+    let content = plan
+        .env
+        .get("OPENCODE_CONFIG_CONTENT")
+        .expect("OPENCODE_CONFIG_CONTENT (D2a)");
+    let parsed: serde_json::Value = serde_json::from_str(content).expect("JSON");
+    assert_eq!(parsed, opencode_inline_snapshot());
+    assert!(
+        !plan.env.contains_key("OPENCODE_CONFIG"),
+        "inline is primary; no config file (D2a)"
+    );
+}
+
+// ------------------------------------------------- Copilot pre-flight (D7, AC3)
+
+#[test]
+fn a_local_copilot_policy_requiring_the_sandbox_is_refused_with_the_two_modes() {
+    for policy in [
+        serde_json::json!({"sandbox": {"enabled": true}}),
+        serde_json::json!({"sandbox": {"enabled": true, "failIfUnavailable": true}}),
+        serde_json::json!({"sandbox": {"enabled": true, "allowBypass": false}}),
+    ] {
+        assert_eq!(
+            copilot_sandbox_preflight(&[serde_json::json!({}), policy.clone()]),
+            Err(COPILOT_POLICY_REFUSAL.to_owned()),
+            "{policy}"
+        );
+    }
+}
+
+#[test]
+fn copilot_policies_without_sandbox_enabled_pass() {
+    assert_eq!(copilot_sandbox_preflight(&[]), Ok(()));
+    for policy in [
+        serde_json::json!({}),
+        serde_json::json!({"sandbox": {"enabled": false}}),
+        serde_json::json!({"sandbox": {}}),
+        serde_json::json!({"model": "x"}),
+    ] {
+        assert_eq!(
+            copilot_sandbox_preflight(&[policy.clone()]),
+            Ok(()),
+            "{policy}"
+        );
+    }
+}
+
+// ------------------------------------------------- pkg-cache probe (D4, G8, AC5)
+
+/// Creates `<cache>\pkg\win32-x64\<version>` with one file in it (or empty).
+fn prime_pkg_cache(cache_home: &Path, version: &str, with_file: bool) -> PathBuf {
+    let dir = cache_home.join("pkg").join("win32-x64").join(version);
+    std::fs::create_dir_all(&dir).unwrap();
+    if with_file {
+        std::fs::write(dir.join("index.js"), b"// extracted").unwrap();
+    }
+    dir
+}
+
+#[test]
+fn the_pkg_cache_probe_accepts_the_directory_of_the_exe_version() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = prime_pkg_cache(temp.path(), "1.0.101", true);
+    prime_pkg_cache(temp.path(), "1.0.99", true);
+    assert_eq!(
+        probe_copilot_pkg_cache(temp.path(), Some("1.0.101")),
+        Ok(dir)
+    );
+}
+
+/// G8 (round 3 F5): the first three dot-separated parts of the PE
+/// ProductVersion are compared with the directory name; a fourth is ignored.
+#[test]
+fn the_pkg_cache_probe_compares_the_first_three_version_parts() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = prime_pkg_cache(temp.path(), "1.0.101", true);
+    assert_eq!(
+        probe_copilot_pkg_cache(temp.path(), Some("1.0.101.0")),
+        Ok(dir)
+    );
+}
+
+#[test]
+fn a_missing_pkg_cache_names_the_priming_command() {
+    let temp = tempfile::tempdir().unwrap();
+    let cache_home = temp.path().join("copilot-pkg");
+    assert_eq!(
+        probe_copilot_pkg_cache(&cache_home, Some("1.0.101")),
+        Err(pkg_cache_refusal("1.0.101", &cache_home))
+    );
+}
+
+#[test]
+fn a_mismatched_pkg_cache_names_the_priming_command() {
+    let temp = tempfile::tempdir().unwrap();
+    prime_pkg_cache(temp.path(), "1.0.100", true);
+    assert_eq!(
+        probe_copilot_pkg_cache(temp.path(), Some("1.0.101.0")),
+        Err(pkg_cache_refusal("1.0.101", temp.path()))
+    );
+}
+
+#[test]
+fn an_empty_version_directory_does_not_count_as_a_cache() {
+    let temp = tempfile::tempdir().unwrap();
+    prime_pkg_cache(temp.path(), "1.0.101", false);
+    assert_eq!(
+        probe_copilot_pkg_cache(temp.path(), Some("1.0.101")),
+        Err(pkg_cache_refusal("1.0.101", temp.path()))
+    );
+}
+
+#[test]
+fn without_a_pe_version_exactly_one_cache_directory_is_accepted() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = prime_pkg_cache(temp.path(), "1.0.101", true);
+    assert_eq!(probe_copilot_pkg_cache(temp.path(), None), Ok(dir));
+}
+
+#[test]
+fn without_a_pe_version_two_cache_directories_or_none_are_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    assert!(probe_copilot_pkg_cache(temp.path(), None).is_err(), "none");
+    prime_pkg_cache(temp.path(), "1.0.100", true);
+    prime_pkg_cache(temp.path(), "1.0.101", true);
+    let error = probe_copilot_pkg_cache(temp.path(), None).expect_err("two dirs");
+    assert!(
+        error.contains("run copilot --version once outside the box with COPILOT_PKG_CACHE_HOME="),
+        "{error}"
+    );
+}
+
+// ------------------------------------------------- validate_cwd (AC7)
+
+#[test]
+fn cwd_may_not_be_under_the_agentdesktop_harness_directory() {
+    for cwd in [
+        p("home/dev/.agentdesktop"),
+        p("home/dev/.agentdesktop/harness"),
+        p("home/dev/.agentdesktop/harness/opencode/config"),
+    ] {
+        let error = validate_cwd(&cwd, &cwd_context(), &FakeFs::default())
+            .expect_err(&cwd.display().to_string());
+        assert!(error.contains("agentdesktop harness directory"), "{error}");
+    }
+}
+
+#[test]
+fn cwd_may_not_contain_the_agentdesktop_harness_directory_through_a_junction() {
+    let mut fs = FakeFs::default();
+    fs.mapping.insert(p("home/dev/.agentdesktop"), p("data/ad"));
+    let error = validate_cwd(&p("data"), &cwd_context(), &fs).expect_err("contains it");
+    assert!(error.contains("agentdesktop harness directory"), "{error}");
+    assert!(error.starts_with("workspace may not contain"), "{error}");
+}
+
+#[test]
+fn cwd_may_be_a_sibling_named_like_the_agentdesktop_directory() {
+    accepted(&p("home/dev/.agentdesktop-work/app"));
+    accepted(&p("home/dev/agentdesktop/app"));
+}
+
+// ------------------------------------------------- pre-create list (D5, N2)
+
+#[test]
+fn the_pre_create_list_holds_the_harness_directories_of_each_profile() {
+    let home = PathBuf::from(HOME);
+    let listed = |program: &str| -> BTreeSet<String> {
+        harness_pre_create(profile_of(program), &home)
+            .iter()
+            .map(|path| path.to_str().unwrap().replace('/', "\\"))
+            .collect()
+    };
+    let opencode = listed("opencode");
+    for sub in ["data", "config", "state", "cache", r"config\opencode"] {
+        let dir = format!(r"{HARNESS}\opencode\{sub}");
+        assert!(opencode.contains(&dir), "{dir}: {opencode:?}");
+    }
+    let copilot = listed("copilot");
+    for dir in [
+        format!(r"{HARNESS}\copilot"),
+        format!(r"{HARNESS}\copilot-pkg"),
+    ] {
+        assert!(copilot.contains(&dir), "{dir}: {copilot:?}");
+    }
+    let claude = listed("claude-code");
+    assert!(claude.contains(&format!(r"{HOME}\.claude")), "{claude:?}");
+    assert!(
+        !claude.iter().any(|dir| is_under_str(dir, HARNESS)),
+        "Claude gets no harness home: {claude:?}"
+    );
+}
+
+/// D5 (round-2 N2): MXC refuses a denied path under a missing parent
+/// (0x80070003). On a host with nothing but the fixture's base directories
+/// and the pre-create list, every denied path's parent exists.
+#[test]
+fn the_plan_never_denies_a_path_whose_parent_is_absent() {
+    for program in PROGRAMS_6A {
+        let mut world: BTreeSet<String> = [
+            HOME,
+            CWD,
+            LAUNCH_DIR,
+            r"C:\Users\dev\.local\bin",
+            r"C:\Program Files\Git",
+            r"C:\lab\agentdesktop",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        world.insert(format!(r"{LAUNCH_DIR}\tmp"));
+        world.extend(
+            harness_pre_create(profile_of(program), &PathBuf::from(HOME))
+                .iter()
+                .map(|path| path.to_str().unwrap().replace('/', "\\")),
+        );
+        // create_dir_all: every ancestor exists too.
+        let mut with_ancestors = world.clone();
+        for path in &world {
+            let mut current = path.as_str();
+            while let Some((parent, _)) = current.rsplit_once('\\') {
+                with_ancestors.insert(parent.to_owned());
+                current = parent;
+            }
+        }
+        let plan = plan_6a(program, &with_ancestors, &with_ancestors, |_| {});
+        for denied in strings(&plan.denied) {
+            let (parent, _) = denied.rsplit_once('\\').expect("a parent");
+            assert!(
+                with_ancestors.contains(parent),
+                "{program}: {denied} is denied but its parent {parent} is absent"
+            );
+        }
+    }
+}
+
+// ------------------------------------------------- the plan per profile (AC1, AC6, D9, D10)
+
+#[test]
+fn every_profile_carries_the_union_workspace_pins() {
+    for program in PROGRAMS_6A {
+        let plan = default_plan_6a(program);
+        let protected = protected_6a(&plan);
+        for pin in union_pins() {
+            if is_under_str(&pin, &format!(r"{CWD}\.github")) {
+                continue; // the fixture has no `.github`: see the next test
+            }
+            assert!(protected.contains(&pin), "{program}: {pin} (D9)");
+            assert!(!writable_6a(&plan, &pin) || protected.contains(&pin));
+        }
+        // Present entries are read-only, absent ones denied.
+        let readonly: BTreeSet<String> = strings(&plan.readonly).into_iter().collect();
+        assert!(readonly.contains(&format!(r"{CWD}\.mcp.json")), "{program}");
+        let denied: BTreeSet<String> = strings(&plan.denied).into_iter().collect();
+        for absent in ["opencode.json", "opencode.jsonc", ".opencode", "HEAD"] {
+            assert!(
+                denied.contains(&format!(r"{CWD}\{absent}")),
+                "{program}: {absent}"
+            );
+        }
+    }
+}
+
+#[test]
+fn every_profile_denies_a_missing_github_folder_whole_and_pins_its_entries_when_present() {
+    let github = format!(r"{CWD}\.github");
+    for program in PROGRAMS_6A {
+        let plan = default_plan_6a(program);
+        let denied = strings(&plan.denied);
+        assert!(denied.contains(&github), "{program}: {denied:?}");
+        assert!(
+            !protected_6a(&plan)
+                .iter()
+                .any(|path| path.starts_with(&format!(r"{github}\"))),
+            "{program}: no entry under a missing .github"
+        );
+
+        let mut existing = existing_6a(program);
+        let mut directories = directories_6a(program);
+        existing.insert(github.clone());
+        directories.insert(github.clone());
+        existing.insert(format!(r"{github}\copilot"));
+        directories.insert(format!(r"{github}\copilot"));
+        let plan = plan_6a(program, &existing, &directories, |_| {});
+        let readonly = strings(&plan.readonly);
+        let denied = strings(&plan.denied);
+        assert!(
+            readonly.contains(&format!(r"{github}\copilot")),
+            "{program}"
+        );
+        for absent in ["mcp.json", "hooks", "agents"] {
+            assert!(
+                denied.contains(&format!(r"{github}\{absent}")),
+                "{program}: {absent}"
+            );
+        }
+        assert!(
+            !denied.contains(&github),
+            "{program}: .github itself stays usable"
+        );
+    }
+}
+
+#[test]
+fn non_claude_boxes_carry_no_claude_env_home_grant_or_installation() {
+    for program in ["opencode", "copilot"] {
+        let plan = default_plan_6a(program);
+        for key in plan.env.keys() {
+            assert!(
+                !key.starts_with("CLAUDE_") && !key.starts_with("ANTHROPIC_"),
+                "{program}: {key} (AC6)"
+            );
+        }
+        let claude_dir = format!(r"{HOME}\.claude");
+        for granted in strings(&plan.readwrite)
+            .iter()
+            .chain(&strings(&plan.readonly))
+        {
+            assert!(
+                !is_under_str(granted, &claude_dir),
+                "{program}: {granted} (AC6)"
+            );
+        }
+        for path in strings(&plan.readwrite)
+            .iter()
+            .chain(&strings(&plan.readonly))
+            .chain(&strings(&plan.denied))
+        {
+            assert!(
+                !is_under_str(path, r"C:\Program Files\ClaudeCode")
+                    && !is_under_str(path, r"C:\Users\dev\.local\share\claude"),
+                "{program}: {path} (AC6)"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_claude_box_keeps_its_env_and_claude_directory() {
+    let plan = default_plan_6a("claude-code");
+    assert_eq!(plan.env["CLAUDE_CONFIG_DIR"], format!(r"{HOME}\.claude"));
+    assert_eq!(
+        plan.env["ANTHROPIC_BASE_URL"],
+        "http://127.0.0.1:4000/sandbox"
+    );
+    assert_eq!(
+        plan.env["ANTHROPIC_CUSTOM_HEADERS"],
+        "x-agentdesktop-pairing: test-pairing-value"
+    );
+    assert_eq!(plan.env["ANTHROPIC_AUTH_TOKEN"], "placeholder");
+    assert!(strings(&plan.readwrite).contains(&format!(r"{HOME}\.claude")));
+    let readonly = strings(&plan.readonly);
+    assert!(readonly.contains(&r"C:\Program Files\ClaudeCode".to_owned()));
+    assert!(readonly.contains(&r"C:\Users\dev\.local\share\claude".to_owned()));
+    for key in plan.env.keys() {
+        assert!(
+            !key.starts_with("OPENCODE_")
+                && !key.starts_with("COPILOT_")
+                && !key.starts_with("XDG_"),
+            "{key}: another program's env in the Claude box"
+        );
+    }
+    assert!(
+        !strings(&plan.readwrite)
+            .iter()
+            .any(|path| is_under_str(path, HARNESS)),
+        "no harness home grant in the Claude box"
+    );
+}
+
+#[test]
+fn the_opencode_box_env_points_xdg_into_its_harness_home_and_pins_network_features() {
+    let plan = default_plan_6a("opencode");
+    let home = format!(r"{HARNESS}\opencode");
+    for (key, sub) in [
+        ("XDG_DATA_HOME", "data"),
+        ("XDG_CONFIG_HOME", "config"),
+        ("XDG_STATE_HOME", "state"),
+        ("XDG_CACHE_HOME", "cache"),
+    ] {
+        assert_eq!(plan.env[key], format!(r"{home}\{sub}"), "{key}");
+    }
+    for (key, value) in [
+        ("OPENCODE_DISABLE_AUTOUPDATE", "1"),
+        ("OPENCODE_DISABLE_MODELS_FETCH", "1"),
+        ("OPENCODE_DISABLE_PROJECT_CONFIG", "1"),
+    ] {
+        assert_eq!(
+            plan.env.get(key).map(String::as_str),
+            Some(value),
+            "{key} (D8)"
+        );
+    }
+    for key in plan.env.keys() {
+        assert!(!key.starts_with("COPILOT_"), "{key}");
+    }
+    for sub in ["data", "state", "cache"] {
+        let dir = format!(r"{home}\{sub}");
+        assert!(writable_6a(&plan, &dir), "{dir} is read-write (D5)");
+    }
+    assert_eq!(plan.egress, DENY);
+}
+
+#[test]
+fn the_copilot_box_env_carries_byok_provider_model_and_harness_dirs() {
+    let plan = default_plan_6a("copilot");
+    assert_eq!(plan.env["COPILOT_HOME"], format!(r"{HARNESS}\copilot"));
+    assert_eq!(
+        plan.env["COPILOT_PKG_CACHE_HOME"],
+        format!(r"{HARNESS}\copilot-pkg")
+    );
+    assert_eq!(plan.env["COPILOT_PROVIDER_TYPE"], "anthropic");
+    assert_eq!(
+        plan.env["COPILOT_PROVIDER_BASE_URL"],
+        "http://127.0.0.1:4000/sandbox"
+    );
+    assert_eq!(plan.env["COPILOT_PROVIDER_API_KEY"], "placeholder");
+    let headers = &plan.env["COPILOT_PROVIDER_HEADERS"];
+    assert!(
+        headers.contains("x-agentdesktop-pairing") && headers.contains("test-pairing-value"),
+        "{headers}"
+    );
+    assert_eq!(plan.env["COPILOT_MODEL"], COPILOT_WIRE_MODEL);
+    assert_eq!(plan.env["COPILOT_AUTO_UPDATE"], "false");
+    assert!(!plan.env.contains_key("COPILOT_OFFLINE"), "D8");
+    for key in plan.env.keys() {
+        assert!(
+            !key.starts_with("OPENCODE_") && !key.starts_with("XDG_"),
+            "{key}"
+        );
+    }
+    assert!(writable_6a(&plan, &format!(r"{HARNESS}\copilot")));
+}
+
+#[test]
+fn the_copilot_box_denies_config_json_and_grants_the_pkg_cache_read_only() {
+    let plan = default_plan_6a("copilot");
+    let config_json = format!(r"{HARNESS}\copilot\config.json");
+    assert!(strings(&plan.denied).contains(&config_json), "D5");
+    let cache = format!(r"{HARNESS}\copilot-pkg");
+    assert!(strings(&plan.readonly).contains(&cache), "D4");
+    assert!(
+        !writable_6a(&plan, &cache),
+        "the cache is never writable (D4)"
+    );
+    for path in strings(&plan.readwrite)
+        .iter()
+        .chain(&strings(&plan.readonly))
+    {
+        assert!(
+            !is_under_str(path, r"C:\Users\dev\AppData\Local\copilot"),
+            "{path}: %LOCALAPPDATA%\\copilot stays invisible (D4)"
+        );
+    }
+}
+
+#[test]
+fn harness_home_pins_are_read_only_when_present_and_denied_when_absent() {
+    for program in ["opencode", "copilot"] {
+        let pins = home_pins(program);
+        let present = pins[0].clone();
+        let mut existing = existing_6a(program);
+        existing.insert(present.clone());
+        let plan = plan_6a(program, &existing, &directories_6a(program), |_| {});
+        let readonly = strings(&plan.readonly);
+        let denied = strings(&plan.denied);
+        assert!(readonly.contains(&present), "{program}: {present}");
+        for pin in &pins[1..] {
+            assert!(denied.contains(pin), "{program}: {pin} (D5)");
+        }
+    }
+}
+
+#[test]
+fn no_managed_opencode_config_is_granted_to_the_box() {
+    let plan = default_plan_6a("opencode");
+    for path in strings(&plan.readwrite)
+        .iter()
+        .chain(&strings(&plan.readonly))
+    {
+        assert!(
+            !is_under_str(path, r"C:\ProgramData\opencode"),
+            "{path}: the managed layer must not leak in (D2a)"
+        );
+    }
+}
+
+#[test]
+fn the_shared_git_surface_is_the_same_for_every_profile() {
+    let git_config = format!(r"{LAUNCH_DIR}\git_config");
+    for program in PROGRAMS_6A {
+        let plan = default_plan_6a(program);
+        assert_eq!(plan.env["HOME"], HOME, "{program}");
+        assert_eq!(plan.env["GIT_CONFIG_GLOBAL"], git_config, "{program}");
+        assert_eq!(plan.env["GIT_TERMINAL_PROMPT"], "0", "{program}");
+        assert!(strings(&plan.readonly).contains(&git_config), "{program}");
+        assert!(
+            strings(&plan.denied).contains(&format!(r"{HOME}\.gitconfig")),
+            "{program}"
+        );
+        for secret in [".ssh", ".aws", ".azure", ".kube"] {
+            assert!(
+                strings(&plan.denied).contains(&format!(r"{HOME}\{secret}")),
+                "{program}: {secret}"
+            );
+        }
+    }
+}
+
+/// What turning ssh on adds to a plan: env entries (PATH as entries) and
+/// grants.
+fn ssh_delta(
+    program: &str,
+) -> (
+    BTreeMap<String, String>,
+    BTreeSet<String>,
+    [BTreeSet<String>; 3],
+) {
+    let without = default_plan_6a(program);
+    let with = plan_6a(
+        program,
+        &existing_6a(program),
+        &directories_6a(program),
+        |input| input.ssh_enabled = true,
+    );
+    let env: BTreeMap<String, String> = with
+        .env
+        .iter()
+        .filter(|(key, value)| *key != "PATH" && without.env.get(*key) != Some(*value))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    let path_before: BTreeSet<&str> = without.env["PATH"].split(';').collect();
+    let path_added: BTreeSet<String> = with.env["PATH"]
+        .split(';')
+        .filter(|entry| !path_before.contains(entry))
+        .map(str::to_owned)
+        .collect();
+    let added = |after: &[PathBuf], before: &[PathBuf]| -> BTreeSet<String> {
+        let before: BTreeSet<String> = strings(before).into_iter().collect();
+        strings(after)
+            .into_iter()
+            .filter(|path| !before.contains(path))
+            .collect()
+    };
+    (
+        env,
+        path_added,
+        [
+            added(&with.readwrite, &without.readwrite),
+            added(&with.readonly, &without.readonly),
+            added(&with.denied, &without.denied),
+        ],
+    )
+}
+
+/// Contract (round-2 N3): the ssh surface is shared; its delta does not
+/// depend on the profile.
+#[test]
+fn the_ssh_delta_is_profile_independent() {
+    let claude = ssh_delta("claude-code");
+    assert!(claude.0.contains_key("SSH_AUTH_SOCK"), "{:?}", claude.0);
+    assert!(claude.0.contains_key("GIT_SSH"), "{:?}", claude.0);
+    for program in ["opencode", "copilot"] {
+        assert_eq!(ssh_delta(program), claude, "{program}");
+    }
+}
+
+#[test]
+fn each_profile_names_its_window_title_in_the_plan() {
+    for (program, title) in [
+        ("claude-code", "agentdesktop: claude"),
+        ("opencode", "agentdesktop: opencode"),
+        ("copilot", "agentdesktop: copilot"),
+    ] {
+        assert_eq!(default_plan_6a(program).window_title, title);
+    }
+}
+
+fn request_6a(program: &str) -> serde_json::Value {
+    serde_json::to_value(engine::mxc::MxcEngine.to_request(&default_plan_6a(program), LAUNCH_ID))
+        .expect("the request serializes")
+}
+
+/// AC1: the golden file is a scaffold until the writer generates and
+/// reviews it (`testdata/request-opencode.json` says so).
+#[test]
+fn the_opencode_request_matches_the_checked_in_snapshot() {
+    let expected: serde_json::Value =
+        serde_json::from_str(include_str!("testdata/request-opencode.json")).unwrap();
+    assert_eq!(sorted_paths(request_6a("opencode")), sorted_paths(expected));
+}
+
+/// AC1: as above, for Copilot.
+#[test]
+fn the_copilot_request_matches_the_checked_in_snapshot() {
+    let expected: serde_json::Value =
+        serde_json::from_str(include_str!("testdata/request-copilot.json")).unwrap();
+    assert_eq!(sorted_paths(request_6a("copilot")), sorted_paths(expected));
+}
+
+// ------------------------------------------------- integrity roots (AC9, D12)
+
+fn recursive_roots(program: &str) -> BTreeSet<String> {
+    super::integrity::integrity_paths_for(
+        profile_of(program),
+        &PathBuf::from(HOME),
+        &PathBuf::from(CWD),
+    )
+    .iter()
+    .filter(|root| root.mode == super::integrity::RootMode::Recursive)
+    .map(|root| root.path.to_str().unwrap().replace('/', "\\"))
+    .collect()
+}
+
+#[test]
+fn integrity_roots_per_profile_are_the_union_and_the_harness_home_pins() {
+    for program in PROGRAMS_6A {
+        let roots = recursive_roots(program);
+        for pin in union_pins().into_iter().chain(home_pins(program)) {
+            assert!(
+                roots.contains(&pin),
+                "{program}: {pin} is not an integrity root"
+            );
+        }
+        for other in PROGRAMS_6A.iter().filter(|other| **other != program) {
+            for pin in home_pins(other) {
+                assert!(!roots.contains(&pin), "{program}: {pin} belongs to {other}");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_pkg_cache_and_harness_read_write_roots_are_not_integrity_roots() {
+    for program in ["opencode", "copilot"] {
+        let roots = recursive_roots(program);
+        for not_a_root in [
+            format!(r"{HARNESS}\copilot-pkg"),
+            format!(r"{HARNESS}\copilot"),
+            format!(r"{HARNESS}\opencode"),
+            format!(r"{HARNESS}\opencode\data"),
+            format!(r"{HARNESS}\opencode\state"),
+            format!(r"{HARNESS}\opencode\cache"),
+        ] {
+            assert!(
+                !roots
+                    .iter()
+                    .any(|root| is_under_str(root, &not_a_root)
+                        && !home_pins(program).contains(root)),
+                "{program}: {not_a_root} (D12)"
+            );
+        }
+    }
+}
+
+/// Contract (round-2 N4): the reverse classification, fed per profile.
+/// Every recursive root is protected, and every protected entry is a root
+/// or on the profile's named list.
+#[test]
+fn every_profiles_integrity_roots_are_protected_and_every_protected_entry_is_classified() {
+    let shared: Vec<String> = [
+        r"C:\Users\dev\.local\bin".to_owned(),
+        r"C:\Program Files\Git".into(),
+        r"C:\lab\agentdesktop".into(),
+        r"C:\Users\dev\.gitconfig".into(),
+        format!(r"{LAUNCH_DIR}\credential"),
+        format!(r"{LAUNCH_DIR}\git_config"),
+        r"C:\Users\dev\.claude\.credentials.json".into(),
+        r"C:\Users\dev\.claude\history.jsonl".into(),
+        r"C:\Users\dev\.claude\ide".into(),
+        r"C:\Users\dev\.ssh".into(),
+        r"C:\Users\dev\.aws".into(),
+        r"C:\Users\dev\.azure".into(),
+        r"C:\Users\dev\.kube".into(),
+        // `.github` is denied whole when absent (D9 parent rule).
+        format!(r"{CWD}\.github"),
+        // An absent workspace `.claude` is denied whole (PR 1 rule).
+        format!(r"{CWD}\.claude"),
+    ]
+    .into_iter()
+    .collect();
+    for program in PROGRAMS_6A {
+        let mut named = shared.clone();
+        match program {
+            "claude-code" => named.extend([
+                r"C:\Users\dev\.local\share\claude".to_owned(),
+                r"C:\Program Files\ClaudeCode".to_owned(),
+            ]),
+            "opencode" => {
+                for sub in [
+                    "",
+                    r"\data",
+                    r"\config",
+                    r"\state",
+                    r"\cache",
+                    r"\config\opencode",
+                ] {
+                    named.push(format!(r"{HARNESS}\opencode{sub}"));
+                }
+            }
+            _ => named.extend([
+                format!(r"{HARNESS}\copilot"),
+                format!(r"{HARNESS}\copilot-pkg"),
+                format!(r"{HARNESS}\copilot\config.json"),
+            ]),
+        }
+        let plan = default_plan_6a(program);
+        let protected = protected_6a(&plan);
+        let roots = recursive_roots(program);
+        for root in &roots {
+            if is_under_str(root, &format!(r"{CWD}\.github"))
+                && protected.contains(&format!(r"{CWD}\.github"))
+            {
+                continue; // covered by the whole-folder denial
+            }
+            assert!(
+                protected.contains(root),
+                "{program}: root {root} is not protected"
+            );
+        }
+        for entry in &protected {
+            assert!(
+                roots.contains(entry) || named.contains(entry),
+                "{program}: unclassified protected entry {entry}: add it to integrity_paths_for or name it here"
+            );
+        }
+    }
+}
+
+// ------------------------------------------------- the launch handler (AC3-AC5, AC8, D11, G1, G2)
+
+const SIX_A_CONFIG: &str = r#"
+llmGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: oidc
+    issuer: https://login.example.com
+    clientId: agentdesktop
+programs:
+  claudeCode: {}
+  openCode:
+    model: claude-sonnet
+    models:
+      claude-sonnet: {}
+  copilot:
+    models:
+      sonnet:
+        provider: agentdesktop-anthropic
+"#;
+
+impl Harness {
+    /// Places the program's native exe in `<home>\.local\bin` and, for
+    /// Copilot, a primed package cache (one version directory, D4 fallback:
+    /// the stub exe carries no PE version).
+    fn install(&self, program: &str) {
+        let bin = self.home.join(".local").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join(exe_of(program)), b"MZ").unwrap();
+        if program == "copilot" {
+            prime_pkg_cache(
+                &self
+                    .home
+                    .join(".agentdesktop")
+                    .join("harness")
+                    .join("copilot-pkg"),
+                "1.0.101",
+                true,
+            );
+        }
+    }
+
+    fn body_for(&self, program: &str, args: &[&str]) -> serde_json::Value {
+        self.body_with(|body| {
+            body["program"] = program.into();
+            body["args"] = serde_json::json!(args);
+        })
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn opencode_and_copilot_launch_201_with_the_program_id_and_no_claude_posture() {
+    for program in ["opencode", "copilot"] {
+        let h = Harness::start(Setup {
+            config: SIX_A_CONFIG,
+            managed_file: Some(
+                r#"{"allowManagedHooksOnly":true,"allowManagedMcpServersOnly":true}"#,
+            ),
+            ..Setup::default()
+        })
+        .await;
+        h.install(program);
+        let (status, body) = h.launch(&h.body_for(program, &[])).await;
+        assert_eq!(status, 201, "{program}: {body}");
+        let launched: Launch = serde_json::from_str(&body).unwrap();
+        assert_eq!(launched.program, program, "AC8");
+        assert_eq!(launched.managed_settings_source, None, "{program} (G2)");
+        assert!(!launched.managed_hooks_locked, "{program} (G2)");
+        assert!(!launched.managed_mcp_locked, "{program} (G2)");
+        let listed = h.listed().await;
+        assert_eq!(listed[0].program, program);
+        assert_eq!(listed[0].managed_settings_source, None);
+        assert_eq!(
+            h.credentials.calls(),
+            vec![(program.to_owned(), true)],
+            "client id = program id (D11)"
+        );
+        let spawns = h.executor.spawns();
+        let request: serde_json::Value =
+            serde_json::from_str(spawns[0].request_json.as_deref().unwrap()).unwrap();
+        let env = env_map(&request);
+        assert!(
+            !env.keys().any(|key| key.starts_with("ANTHROPIC_")),
+            "{program}: {env:?}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn opencode_and_copilot_under_egress_allow_answer_409_and_start_nothing() {
+    for program in ["opencode", "copilot"] {
+        let h = Harness::start(Setup {
+            config: SIX_A_CONFIG,
+            egress: ALLOW,
+            ..Setup::default()
+        })
+        .await;
+        h.install(program);
+        assert_eq!(
+            h.launch(&h.body_for(program, &[])).await,
+            (409, EGRESS_ALLOW_REFUSAL.to_owned()),
+            "{program} (D1b)"
+        );
+        assert!(h.executor.spawns().is_empty());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn claude_code_under_egress_allow_still_launches() {
+    let h = Harness::start(Setup {
+        config: SIX_A_CONFIG,
+        egress: ALLOW,
+        ..Setup::default()
+    })
+    .await;
+    assert_eq!(h.launch(&h.body()).await.0, 201);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_sandbox_argument_to_copilot_answers_400() {
+    let h = Harness::start(Setup {
+        config: SIX_A_CONFIG,
+        ..Setup::default()
+    })
+    .await;
+    h.install("copilot");
+    for list in [vec!["--sandbox"], vec!["--sandbox=true"]] {
+        assert_eq!(
+            h.launch(&h.body_for("copilot", &list)).await,
+            (400, SANDBOX_REFUSAL.to_owned()),
+            "{list:?}"
+        );
+    }
+    h.assert_untouched();
+}
+
+#[tokio::test(start_paused = true)]
+async fn serve_and_listener_flags_to_opencode_answer_400() {
+    let h = Harness::start(Setup {
+        config: SIX_A_CONFIG,
+        ..Setup::default()
+    })
+    .await;
+    h.install("opencode");
+    for (list, token) in [
+        (vec!["serve"], "serve"),
+        (vec!["web"], "web"),
+        (vec!["--print-logs", "serve"], "serve"),
+        (vec!["--port", "4096"], "--port"),
+        (vec!["--hostname", "0.0.0.0"], "--hostname"),
+        (vec!["--mdns"], "--mdns"),
+    ] {
+        assert_eq!(
+            h.launch(&h.body_for("opencode", &list)).await,
+            (400, listener_refusal(token)),
+            "{list:?}"
+        );
+    }
+    h.assert_untouched();
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_opencode_client_id_outside_allowed_client_ids_answers_409() {
+    let h = Harness::start(Setup {
+        config: SIX_A_CONFIG,
+        session_policy: Arc::new(crate::llm_proxy::sessions::ConfigPolicy {
+            config: serde_yaml::from_str(
+                "llmGateway:\n  url: https://gateway.example.com\n  authentication:\n    type: controllerJwt\n    audience: agentgateway\n    allowedClientIds: [claude-code, copilot-cli]\n",
+            )
+            .unwrap(),
+            state_dir: std::env::temp_dir(),
+        }),
+        ..Setup::default()
+    })
+    .await;
+    for program in ["opencode", "copilot"] {
+        h.install(program);
+        assert_eq!(
+            h.launch(&h.body_for(program, &[])).await,
+            (
+                409,
+                format!("client id {program} is not in llmGateway.authentication.allowedClientIds")
+            ),
+            "D11: the boxed id is the program id, not copilot-cli"
+        );
+    }
+    h.assert_untouched();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_copilot_launch_without_a_primed_pkg_cache_answers_409_and_spawns_nothing() {
+    let h = Harness::start(Setup {
+        config: SIX_A_CONFIG,
+        ..Setup::default()
+    })
+    .await;
+    let bin = h.home.join(".local").join("bin");
+    std::fs::write(bin.join("copilot.exe"), b"MZ").unwrap();
+    let (status, body) = h.launch(&h.body_for("copilot", &[])).await;
+    assert_eq!(status, 409, "{body}");
+    assert!(
+        body.starts_with("Copilot package cache not found for "),
+        "{body}"
+    );
+    assert!(
+        body.contains("run copilot --version once outside the box with COPILOT_PKG_CACHE_HOME=")
+            && body.contains("copilot-pkg"),
+        "{body}"
+    );
+    assert!(
+        h.executor.spawns().is_empty(),
+        "never spawned unboxed or boxed (AC5)"
+    );
+}
+
+const SIX_A_WIRE_MODEL_CONFIG: &str = r#"
+llmGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: oidc
+    issuer: https://login.example.com
+    clientId: agentdesktop
+programs:
+  copilot:
+    models:
+      sonnet:
+        provider: agentdesktop-anthropic
+        wireModel: 5
+"#;
+
+#[tokio::test(start_paused = true)]
+async fn a_copilot_non_string_wire_model_answers_409() {
+    let h = Harness::start(Setup {
+        config: SIX_A_WIRE_MODEL_CONFIG,
+        credentials_must_not_be_reached: true,
+        ..Setup::default()
+    })
+    .await;
+    h.install("copilot");
+    assert_eq!(
+        h.launch(&h.body_for("copilot", &[])).await,
+        (
+            409,
+            "programs.copilot.models entry sonnet: wireModel must be a string".to_owned()
+        )
+    );
+    h.assert_untouched();
+}
+
+/// D13 G1: `daemon.claudeCode.config` refuses claude-code launches only.
+#[tokio::test(start_paused = true)]
+async fn a_claude_settings_override_refuses_only_claude_code_launches() {
+    let h = Harness::start(Setup {
+        config: SIX_A_CONFIG,
+        claude_settings_overridden: true,
+        ..Setup::default()
+    })
+    .await;
+    let (status, body) = h.launch(&h.body()).await;
+    assert_eq!(status, 409, "{body}");
+    assert!(body.contains("daemon.claudeCode.config"), "{body}");
+    h.assert_untouched();
+    h.install("opencode");
+    assert_eq!(h.launch(&h.body_for("opencode", &[])).await.0, 201);
 }

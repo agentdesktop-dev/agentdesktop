@@ -882,6 +882,11 @@ pub struct LaunchState {
     /// come from its `allow` list.
     pub(crate) git: Option<agentdesktop_core::config::GitConfig>,
     pub(crate) engine: Arc<dyn engine::Engine>,
+    /// `daemon.claudeCode.config` is set (startup). PR 6a, D13 G1: a
+    /// claude-code-only launch refusal instead of a global containment gate.
+    /// Test-first plumbing: carried, not yet consulted (writer).
+    #[allow(dead_code)]
+    pub(crate) claude_settings_overridden: bool,
 }
 
 /// `POST /v1/launch` and `GET /v1/launches`, behind the peer check.
@@ -1821,4 +1826,107 @@ pub(crate) fn warn_on_open_egress(egress: agentdesktop_core::config::Containment
     if egress == agentdesktop_core::config::ContainmentEgress::Allow {
         tracing::warn!("egress allow: the box has unrestricted outbound");
     }
+}
+
+// --- PR 6a: OpenCode and Copilot CLI launch profiles
+// (`specs/PR-6a-harness-profiles.md`). Test-first scaffolding: the seams the
+// spec-derived tests call, bodies `todo!()`. The writer may fold the `_for`
+// variants into the existing names (`resolve_program`, `plan`,
+// `preconditions`); the call-site renames in the tests are compile-only edits
+// with a ledger line.
+
+/// D3: the native executable of `profile` for the daemon's user, from the
+/// profile's home candidates, then each daemon `PATH` directory; same roots
+/// and canonicalization rule as `resolve_program`.
+#[allow(dead_code)] // test-first scaffolding
+pub(crate) fn resolve_program_for(
+    _profile: &profile::ProgramProfile,
+    _home: &Path,
+    _path_dirs: &[PathBuf],
+    _fs: &dyn ProgramFs,
+) -> Result<PathBuf, String> {
+    todo!("PR 6a: per-program executable resolution (D3)")
+}
+
+/// D6, G9: refuses (400 text) an argument equal to or prefixed by one of the
+/// profile's `denied_args`, or equal to one of its `denied_tokens`. Runs on
+/// the raw arguments, before `check_args` quotes them.
+#[allow(dead_code)] // test-first scaffolding
+pub(crate) fn check_denied_args(
+    _profile: &profile::ProgramProfile,
+    _args: &[String],
+) -> Result<(), String> {
+    todo!("PR 6a: per-profile denied arguments (D6, G9)")
+}
+
+/// D11, D1b: the effective-configuration rules of `program` under the
+/// launch's effective egress; `Err` is the 409 text naming the field.
+#[allow(dead_code)] // test-first scaffolding
+pub(crate) fn program_preconditions(
+    _effective: &DaemonConfig,
+    _program: &str,
+    _egress: agentdesktop_core::config::ContainmentEgress,
+) -> Result<(), String> {
+    todo!("PR 6a: per-program preconditions (D11, D1b)")
+}
+
+/// D2b: the model name a boxed Copilot sends (`COPILOT_MODEL`): the first
+/// `programs.copilot.models` entry (BTreeMap order) with provider
+/// `agentdesktop-anthropic`; `wireModel` (must be a string), else `modelId`,
+/// else the entry key. `Err` is the 409 text.
+#[allow(dead_code)] // test-first scaffolding
+pub(crate) fn copilot_wire_model(_effective: &DaemonConfig) -> Result<String, String> {
+    todo!("PR 6a: Copilot model selection (D2b)")
+}
+
+/// D2a: the `OPENCODE_CONFIG_CONTENT` document: the Anthropic provider
+/// pointed at `<relay>/v1` with the placeholder key and the pairing header,
+/// `model`/`enabled_providers` pinned, autoupdate and share off.
+#[allow(dead_code)] // test-first scaffolding
+pub(crate) fn opencode_config_content(
+    _relay_base_url: &str,
+    _pairing: &str,
+    _model: &str,
+) -> serde_json::Value {
+    todo!("PR 6a: OpenCode inline config (D2a)")
+}
+
+/// D7: the Copilot require-sandbox pre-flight over the local managed-policy
+/// documents (registry key and `managed-settings.json`, already parsed);
+/// `Err` is the 409 text.
+#[allow(dead_code)] // test-first scaffolding
+pub(crate) fn copilot_sandbox_preflight(_policies: &[serde_json::Value]) -> Result<(), String> {
+    todo!("PR 6a: Copilot require-sandbox pre-flight (D7)")
+}
+
+/// D4, G8: the Copilot package-cache probe. `product_version` is the
+/// resolved exe's PE ProductVersion (`None` when it has none: fallback to
+/// "exactly one version directory"). Returns the non-empty
+/// `<cache_home>\pkg\win32-x64\<version>` directory, or the 409 text.
+#[allow(dead_code)] // test-first scaffolding
+pub(crate) fn probe_copilot_pkg_cache(
+    _cache_home: &Path,
+    _product_version: Option<&str>,
+) -> Result<PathBuf, String> {
+    todo!("PR 6a: Copilot package-cache probe (D4, G8)")
+}
+
+/// D5: the directories the daemon creates before `plan` runs for `profile`
+/// (the pre-create list), so the plan never denies a path whose parent is
+/// absent.
+#[allow(dead_code)] // test-first scaffolding
+pub(crate) fn harness_pre_create(_profile: &profile::ProgramProfile, _home: &Path) -> Vec<PathBuf> {
+    todo!("PR 6a: per-profile pre-create list (D5)")
+}
+
+/// D1, D9, D10: `plan` for any profile. `model` is the resolved model
+/// (OpenCode: `programs.openCode.model`; Copilot: `copilot_wire_model`;
+/// Claude: `None`).
+#[allow(dead_code)] // test-first scaffolding
+pub(crate) fn plan_program(
+    _input: &LaunchInput,
+    _profile: &profile::ProgramProfile,
+    _model: Option<&str>,
+) -> plan::LaunchPlan {
+    todo!("PR 6a: per-profile launch plan (D1, D9, D10)")
 }

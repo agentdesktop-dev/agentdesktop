@@ -330,6 +330,7 @@ mod handler {
             credentials: Arc::new(Credentials),
             host: Arc::new(Host { home, state_dir }),
             git: None,
+            claude_settings_overridden: false,
             registry: LaunchRegistry::new(),
             availability: Some(ContainmentInfo {
                 executor: "wxc-exec.exe".into(),

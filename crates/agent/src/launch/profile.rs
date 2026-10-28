@@ -98,3 +98,81 @@ pub(crate) const CLAUDE_CODE: ClaudeCodeProfile = ClaudeCodeProfile {
     ],
     window_title: "agentdesktop: claude",
 };
+
+// --- PR 6a: program profiles (`specs/PR-6a-harness-profiles.md`, interface
+// contract). Test-first scaffolding: the types the contract names, with the
+// table itself left to the writer (`program_profile` is `todo!()`). The writer
+// folds `ClaudeCodeProfile` into `ProgramProfile` (D1) and the shared pieces
+// into one shared const (D10, G4); field names here may be renamed with a
+// ledger line (compile-only test edits).
+
+/// How the relay base URL and the session pairing reach the harness (D2).
+#[allow(dead_code)] // test-first scaffolding; the writer wires it
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InjectionStrategy {
+    /// The relay base URL goes into `base_url`, the pairing header into
+    /// `headers` (Claude: `ANTHROPIC_*`; Copilot BYOK: `COPILOT_PROVIDER_*`).
+    Env {
+        base_url: &'static str,
+        headers: &'static str,
+    },
+    /// The provider configuration, pairing included, goes inline into
+    /// `OPENCODE_CONFIG_CONTENT` (D2a).
+    OpenCodeInlineConfig,
+}
+
+/// The per-harness home under `<home>\.agentdesktop\harness` (D5). Every
+/// path below is `\`-joined and relative to `<home>\.agentdesktop\harness`.
+#[allow(dead_code)] // test-first scaffolding; the writer wires it
+pub(crate) struct HarnessHome {
+    /// The program's own directory (`opencode`, `copilot`).
+    pub dir: &'static str,
+    /// Environment variables pointing into the harness tree (the
+    /// "harness-home subdir map"): `XDG_*_HOME` for OpenCode,
+    /// `COPILOT_HOME` and `COPILOT_PKG_CACHE_HOME` for Copilot.
+    pub env_dirs: &'static [(&'static str, &'static str)],
+    /// Executable configuration inside the harness home: read-only when
+    /// present, denied when absent, and integrity roots (D5, D12).
+    pub executable_config: &'static [&'static str],
+}
+
+/// Per-program effective-configuration rules (D11, D1b): `Err` carries the
+/// 409 text.
+pub(crate) type ProgramPreconditions = fn(
+    &agentdesktop_core::config::DaemonConfig,
+    agentdesktop_core::config::ContainmentEgress,
+) -> Result<(), String>;
+
+/// One launchable program (D1): the generalisation of `ClaudeCodeProfile`.
+#[allow(dead_code)] // test-first scaffolding; the writer wires it
+pub(crate) struct ProgramProfile {
+    /// Program ID, also the session client ID (D11).
+    pub program: &'static str,
+    /// Native executable file name (D3).
+    pub exe_name: &'static str,
+    /// Home-relative (`\`-joined) directories searched for `exe_name`
+    /// before the daemon `PATH` (D3).
+    pub home_candidates: &'static [&'static str],
+    /// Relay injection (D2).
+    pub injection: InjectionStrategy,
+    /// Fixed environment key-value pairs of this program (D8, D10).
+    pub fixed_env: &'static [(&'static str, &'static str)],
+    /// The harness home; `None` for Claude (which keeps `~\.claude`).
+    pub harness_home: Option<HarnessHome>,
+    /// Arguments refused when equal to or prefixed by an entry (D6, G9).
+    pub denied_args: &'static [&'static str],
+    /// Bare tokens refused wherever they appear in the args (G9,
+    /// fail-closed: no flag-arity parsing).
+    pub denied_tokens: &'static [&'static str],
+    /// Title of the `cmd.exe start` window (G5).
+    pub window_title: &'static str,
+    /// Per-program precondition rules (D11, D1b).
+    pub preconditions: ProgramPreconditions,
+}
+
+/// The profile of `program` (`claude-code`, `opencode`, `copilot`); `None`
+/// for any other program.
+#[allow(dead_code)] // test-first scaffolding; the writer wires it
+pub(crate) fn program_profile(_program: &str) -> Option<&'static ProgramProfile> {
+    todo!("PR 6a: the program profile table (D1)")
+}

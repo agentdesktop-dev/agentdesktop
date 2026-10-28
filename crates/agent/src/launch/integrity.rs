@@ -799,3 +799,16 @@ pub async fn run_periodic(
         last_observed = current;
     }
 }
+
+/// PR 6a, D12: the integrity roots of a launch of `profile`: the D9 union at
+/// the workspace, the D5 executable-config entries of the harness home, and
+/// Claude's `~\.claude` entries for Claude. Test-first scaffolding; the writer
+/// may fold it into `integrity_paths` (compile-only test edit, ledgered).
+#[allow(dead_code)] // test-first scaffolding
+pub(crate) fn integrity_paths_for(
+    _profile: &super::profile::ProgramProfile,
+    _home: &Path,
+    _cwd: &Path,
+) -> Vec<IntegrityRoot> {
+    todo!("PR 6a: integrity roots per profile (D12)")
+}
