@@ -931,6 +931,9 @@ fn launch_input<'a>(
         relay_base_url: "http://127.0.0.1:4000/sandbox".into(),
         pairing: "test-pairing-value".into(),
         base_env: base_env(),
+        // The snapshot scenario has no ssh hosts (G5: the writer defines the
+        // ssh additions to `plan()`'s input; ledgered).
+        ssh_enabled: false,
         exists,
         is_dir,
     }
@@ -1750,10 +1753,13 @@ struct FakeHost {
     home: PathBuf,
     state_dir: PathBuf,
     client_exe_dir: PathBuf,
+    client_exe_name: String,
     clock: Clock,
     integrity_reads: IntegrityReads,
     managed_file: Option<&'static str>,
     managed_file_error: Option<&'static str>,
+    /// `(host, line)` pairs `known_hosts_seed` answers from.
+    known_hosts: Vec<(&'static str, &'static str)>,
 }
 
 impl LaunchHost for FakeHost {
@@ -1764,6 +1770,15 @@ impl LaunchHost for FakeHost {
     fn git_identity(&self) -> Vec<(String, Vec<String>)> {
         // Deterministic: never read the test machine's git configuration.
         Vec::new()
+    }
+
+    fn known_hosts_seed(&self, hosts: &[String]) -> Vec<String> {
+        // Deterministic: never read the test machine's known_hosts.
+        self.known_hosts
+            .iter()
+            .filter(|(host, _)| hosts.iter().any(|wanted| wanted == host))
+            .map(|(_, line)| (*line).to_owned())
+            .collect()
     }
 
     fn path_dirs(&self) -> Vec<PathBuf> {
@@ -1810,6 +1825,10 @@ impl LaunchHost for FakeHost {
 
     fn client_exe_dir(&self) -> PathBuf {
         self.client_exe_dir.clone()
+    }
+
+    fn client_exe_name(&self) -> String {
+        self.client_exe_name.clone()
     }
 
     fn now(&self) -> u64 {
@@ -2025,6 +2044,9 @@ struct Setup {
     sessions: crate::llm_proxy::sessions::SessionRegistry,
     egress: agentdesktop_core::config::ContainmentEgress,
     managed_file_error: Option<&'static str>,
+    git: Option<agentdesktop_core::config::GitConfig>,
+    known_hosts: Vec<(&'static str, &'static str)>,
+    client_exe_name: Option<&'static str>,
 }
 
 impl Default for Setup {
@@ -2047,6 +2069,9 @@ impl Default for Setup {
             sessions: crate::llm_proxy::sessions::SessionRegistry::default(),
             egress: agentdesktop_core::config::ContainmentEgress::default(),
             managed_file_error: None,
+            git: None,
+            known_hosts: Vec::new(),
+            client_exe_name: None,
         }
     }
 }
@@ -2072,8 +2097,34 @@ fn strip_verbatim(path: PathBuf) -> PathBuf {
     }
 }
 
+/// Keeps two process-lifetime dispatchers registered so tracing-core never
+/// enters its single-dispatcher mode, for log-capture tests that run beside
+/// launches on other threads.
+///
+/// With at most one registered dispatcher, tracing-core 0.1 computes a
+/// callsite's first-hit interest from the CALLING thread's default
+/// subscriber, without the dispatcher lock, and caches it globally. A
+/// concurrent launch test with no subscriber could then cache
+/// `Interest::never` for a callsite another test is capturing (the
+/// `launch_logs_posture_error_as_warning` flake). With two or more
+/// dispatchers always registered, callsite registration takes the read lock
+/// and sees every live dispatcher, and `set_default` (write lock) re-computes
+/// every callsite: the two are serialized, so a capture installed before an
+/// event always sees it. Called from `Harness::start`, so every launch
+/// happens after the pins exist.
+pub(super) fn pin_tracing_dispatchers() {
+    static PINS: std::sync::OnceLock<[tracing::Dispatch; 2]> = std::sync::OnceLock::new();
+    PINS.get_or_init(|| {
+        [
+            tracing::Dispatch::new(tracing_subscriber::registry()),
+            tracing::Dispatch::new(tracing_subscriber::registry()),
+        ]
+    });
+}
+
 impl Harness {
     async fn start(setup: Setup) -> Self {
+        pin_tracing_dispatchers();
         let dir = tempfile::tempdir().unwrap();
         let root = strip_verbatim(std::fs::canonicalize(dir.path()).unwrap());
         let home = root.join("home").join("dev");
@@ -2176,10 +2227,15 @@ impl Harness {
                 home: home.clone(),
                 state_dir: state_dir.clone(),
                 client_exe_dir,
+                client_exe_name: setup
+                    .client_exe_name
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| "agentdesktop".to_owned()),
                 clock: clock.clone(),
                 integrity_reads: integrity_reads.clone(),
                 managed_file: setup.managed_file,
                 managed_file_error: setup.managed_file_error,
+                known_hosts: setup.known_hosts,
             }),
             registry: LaunchRegistry::new(),
             availability,
@@ -2188,7 +2244,7 @@ impl Harness {
             proxy_address: setup.proxy_address,
             session_policy: setup.session_policy.clone(),
             egress: setup.egress,
-            git: None,
+            git: setup.git,
             engine: Arc::new(engine::mxc::MxcEngine),
         };
 
@@ -3240,7 +3296,10 @@ async fn launch_logs_posture_error_as_warning() {
     use tracing_subscriber::fmt;
     use tracing_subscriber::layer::SubscriberExt;
 
-    // Capture logs in a shared buffer
+    // Capture logs in a shared buffer. The dispatcher pins go first, so no
+    // concurrent launch on another thread can cache the posture callsite as
+    // disabled (see `pin_tracing_dispatchers`).
+    pin_tracing_dispatchers();
     let logs = Arc::new(Mutex::new(Vec::new()));
     let logs_writer = logs.clone();
 
@@ -3897,6 +3956,7 @@ fn the_engine_reproduces_the_baseline_request_bytes() {
         relay_base_url: "http://127.0.0.1:4000/sandbox".into(),
         pairing: "test-pairing-value".into(),
         base_env: BTreeMap::new(),
+        ssh_enabled: false,
         exists: &exists_c,
         is_dir: &is_dir_c,
     };
@@ -4122,4 +4182,516 @@ fn the_profile_window_title_equals_the_replaced_command_line_title() {
     // Baseline 8910230 crates/agent/src/launch/mod.rs:483-485 (the `start`
     // window title in the command line).
     assert_eq!(profile::CLAUDE_CODE.window_title, "agentdesktop: claude");
+}
+
+// ------------------------------------- PR 5: ssh generation and wiring
+//
+// Spec-derived tests for PR 5 (`specs/PR-5-ssh-agent.md`, Tests first:
+// Generation, the env guard, and the launch side of Leg pump). The broker
+// suites live in `launch/ssh/mod.rs`. These drive the launch handler with
+// `git.ssh` set and read what the daemon produced at the moment the box
+// starts (the stub executor's `on_spawn`): with ssh hosts configured the
+// post-spawn pipe setup cannot succeed against the stub child (pid 4242 has
+// no AppContainer box behind it; off Windows there is no pipe at all), so the
+// launch fails closed right after (AC 3) and its directory is removed.
+
+const SSH_HOST_A: &str = "git.example.com";
+const SSH_HOST_B: &str = "code.example.org";
+const HTTPS_ONLY_HOST: &str = "other.example.net";
+const SEED_A: &str = "git.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB";
+const SEED_B: &str = "code.example.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIC";
+const SEED_OTHER: &str = "other.example.net ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMD";
+
+fn ssh_git_config(ssh: Option<(&[&str], &[&str])>) -> agentdesktop_core::config::GitConfig {
+    agentdesktop_core::config::GitConfig {
+        allow: vec![
+            format!("https://{SSH_HOST_A}/org/"),
+            format!("https://{HTTPS_ONLY_HOST}/team/"),
+        ],
+        push_allow: vec![],
+        credentials: vec![],
+        ssh: ssh.map(|(hosts, keys)| agentdesktop_core::config::GitSshConfig {
+            hosts: hosts.iter().map(|host| (*host).to_owned()).collect(),
+            keys: keys.iter().map(|key| (*key).to_owned()).collect(),
+        }),
+    }
+}
+
+fn ssh_setup(ssh: Option<(&[&str], &[&str])>) -> Setup {
+    Setup {
+        git: Some(ssh_git_config(ssh)),
+        known_hosts: vec![
+            (SSH_HOST_A, SEED_A),
+            (SSH_HOST_B, SEED_B),
+            (HTTPS_ONLY_HOST, SEED_OTHER),
+        ],
+        client_exe_name: Some("agentdesktop-windows-x64"),
+        ..Setup::default()
+    }
+}
+
+/// What the launch directory held when the box was started.
+#[derive(Clone, Debug, Default)]
+struct SpawnTimeFiles {
+    launch_dir: PathBuf,
+    ssh_config: Option<String>,
+    known_hosts: Option<String>,
+    git_config: Option<String>,
+    git_ssh: Option<String>,
+    /// Unix permission bits of (ssh_config, known_hosts); `None` elsewhere
+    /// or when absent.
+    modes: (Option<u32>, Option<u32>),
+    /// Each `Port` of the ssh_config, and whether 127.0.0.1 had a listener on
+    /// it at spawn.
+    ports_in_use: Vec<(u16, bool)>,
+}
+
+/// Whether something listens on 127.0.0.1:`port` (probed by binding, so no
+/// connection reaches a leg and nothing is dialed).
+fn port_in_use(port: u16) -> bool {
+    matches!(
+        std::net::TcpListener::bind(("127.0.0.1", port)),
+        Err(error) if error.kind() == io::ErrorKind::AddrInUse
+    )
+}
+
+#[cfg(unix)]
+fn file_mode(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.permissions().mode() & 0o777)
+}
+
+#[cfg(not(unix))]
+fn file_mode(_path: &Path) -> Option<u32> {
+    None
+}
+
+fn capture_at_spawn(h: &Harness) -> Arc<Mutex<Option<SpawnTimeFiles>>> {
+    let captured = Arc::new(Mutex::new(None));
+    let slot = captured.clone();
+    let launches = h.state_dir.join("launches");
+    *h.executor.on_spawn.lock().unwrap() = Some(Box::new(move || {
+        let Some(Ok(entry)) = std::fs::read_dir(&launches)
+            .ok()
+            .and_then(|mut dir| dir.next())
+        else {
+            return;
+        };
+        let launch_dir = entry.path();
+        let read = |name: &str| std::fs::read_to_string(launch_dir.join(name)).ok();
+        let ssh_config = read(SSH_CONFIG_FILE);
+        let ports_in_use = ssh_config
+            .as_deref()
+            .map(ssh_config_ports)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|port| (port, port_in_use(port)))
+            .collect();
+        *slot.lock().unwrap() = Some(SpawnTimeFiles {
+            ssh_config,
+            known_hosts: read(KNOWN_HOSTS_FILE),
+            git_config: read(GIT_CONFIG_FILE),
+            git_ssh: read(GIT_SSH_FILE),
+            modes: (
+                file_mode(&launch_dir.join(SSH_CONFIG_FILE)),
+                file_mode(&launch_dir.join(KNOWN_HOSTS_FILE)),
+            ),
+            ports_in_use,
+            launch_dir,
+        });
+    }));
+    captured
+}
+
+fn spawn_time_files(captured: &Arc<Mutex<Option<SpawnTimeFiles>>>) -> SpawnTimeFiles {
+    captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the box was started and the launch directory read")
+}
+
+/// The `Host` blocks of an ssh_config: host to its directives
+/// `(keyword, value)`, surrounding quotes removed. Directives before the first
+/// `Host` land under `""`.
+fn ssh_config_blocks(text: &str) -> BTreeMap<String, Vec<(String, String)>> {
+    let mut blocks: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    let mut current = String::new();
+    for line in text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+    {
+        let (keyword, value) = line
+            .split_once(char::is_whitespace)
+            .map(|(keyword, value)| (keyword, value.trim()))
+            .unwrap_or((line, ""));
+        let value = value.trim_matches('"').to_owned();
+        if keyword == "Host" {
+            current = value.clone();
+            blocks.entry(value).or_default();
+            continue;
+        }
+        blocks
+            .entry(current.clone())
+            .or_default()
+            .push((keyword.to_owned(), value));
+    }
+    blocks
+}
+
+fn ssh_config_ports(text: &str) -> Vec<u16> {
+    ssh_config_blocks(text)
+        .values()
+        .flat_map(|directives| {
+            directives
+                .iter()
+                .filter(|(keyword, _)| keyword == "Port")
+                .map(|(_, value)| value.parse().unwrap_or(0))
+                .collect::<Vec<u16>>()
+        })
+        .collect()
+}
+
+fn spawned_request(h: &Harness) -> (String, serde_json::Value) {
+    let spawn = h.executor.spawns().into_iter().next().expect("one spawn");
+    let request = serde_json::from_str(spawn.request_json.as_deref().unwrap()).unwrap();
+    (spawn.launch_id, request)
+}
+
+#[tokio::test(start_paused = true)]
+async fn ssh_config_and_known_hosts_are_generated_for_a_two_host_fixture() {
+    let h = Harness::start(ssh_setup(Some((&[SSH_HOST_A, SSH_HOST_B], &["*"])))).await;
+    let captured = capture_at_spawn(&h);
+
+    let _ = h.launch(&h.body()).await;
+
+    let files = spawn_time_files(&captured);
+    let ssh_config = files
+        .ssh_config
+        .as_deref()
+        .expect("ssh_config is in the launch directory before the box starts");
+    assert!(
+        !ssh_config.contains("IdentityAgent"),
+        "the pipe travels in SSH_AUTH_SOCK, not IdentityAgent: {ssh_config}"
+    );
+    let blocks = ssh_config_blocks(ssh_config);
+    assert_eq!(
+        blocks.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+        BTreeSet::from([SSH_HOST_A, SSH_HOST_B]),
+        "one Host block per ssh host and nothing else: {ssh_config}"
+    );
+    let known_hosts_path = format!("{}\\{KNOWN_HOSTS_FILE}", win(&files.launch_dir));
+    let mut ports = Vec::new();
+    for host in [SSH_HOST_A, SSH_HOST_B] {
+        let port: u16 = blocks[host]
+            .iter()
+            .find(|(keyword, _)| keyword == "Port")
+            .map(|(_, value)| value.parse().expect("a numeric Port"))
+            .unwrap_or_else(|| panic!("a Port for {host}: {ssh_config}"));
+        assert_ne!(port, 0, "{ssh_config}");
+        let mut actual: Vec<(String, String)> = blocks[host]
+            .iter()
+            .map(|(keyword, value)| {
+                if keyword == "UserKnownHostsFile" {
+                    (keyword.clone(), value.replace('/', "\\"))
+                } else {
+                    (keyword.clone(), value.clone())
+                }
+            })
+            .collect();
+        actual.sort();
+        let mut expected: Vec<(String, String)> = [
+            ("HostName", "127.0.0.1".to_owned()),
+            ("Port", port.to_string()),
+            ("HostKeyAlias", host.to_owned()),
+            ("UserKnownHostsFile", known_hosts_path.clone()),
+            ("StrictHostKeyChecking", "accept-new".to_owned()),
+            ("IdentitiesOnly", "no".to_owned()),
+        ]
+        .into_iter()
+        .map(|(keyword, value)| (keyword.to_owned(), value))
+        .collect();
+        expected.sort();
+        assert_eq!(actual, expected, "the {host} block: {ssh_config}");
+        ports.push(port);
+    }
+    assert_ne!(ports[0], ports[1], "one loopback leg per host");
+    assert_eq!(files.ports_in_use.len(), 2, "{:?}", files.ports_in_use);
+    for (port, in_use) in &files.ports_in_use {
+        assert!(in_use, "leg port {port} is listening before the box starts");
+    }
+
+    let known_hosts = files
+        .known_hosts
+        .as_deref()
+        .expect("known_hosts is in the launch directory before the box starts");
+    let lines: BTreeSet<&str> = known_hosts
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(
+        lines,
+        BTreeSet::from([SEED_A, SEED_B]),
+        "exactly the seeded entries of the ssh hosts: {known_hosts}"
+    );
+    if cfg!(unix) {
+        assert_eq!(
+            files.modes,
+            (Some(0o600), Some(0o600)),
+            "both files are 0600"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_gitconfig_drops_the_ssh_refusal_mapping_only_for_ssh_hosts() {
+    let h = Harness::start(ssh_setup(Some((&[SSH_HOST_A], &["*"])))).await;
+    let captured = capture_at_spawn(&h);
+
+    let _ = h.launch(&h.body()).await;
+
+    let files = spawn_time_files(&captured);
+    let git_config = files.git_config.as_deref().expect("git_config at spawn");
+    // The ssh host: git uses the real remote and GIT_SSH.
+    for absent in [
+        format!("git-ssh/{SSH_HOST_A}/"),
+        format!("insteadOf = ssh://{SSH_HOST_A}/"),
+        format!("insteadOf = git@{SSH_HOST_A}:"),
+    ] {
+        assert!(
+            !git_config.contains(&absent),
+            "{absent} must be gone: {git_config}"
+        );
+    }
+    // Its https mapping is untouched.
+    assert!(
+        git_config.contains(&format!("git/{SSH_HOST_A}/org/")),
+        "{git_config}"
+    );
+    // A git.allow host that is not an ssh host keeps the refusal route.
+    for present in [
+        format!("git-ssh/{HTTPS_ONLY_HOST}/"),
+        format!("insteadOf = ssh://{HTTPS_ONLY_HOST}/"),
+        format!("insteadOf = git@{HTTPS_ONLY_HOST}:"),
+    ] {
+        assert!(
+            git_config.contains(&present),
+            "{present} must stay: {git_config}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn ssh_env_names_the_launch_pipe_and_the_generated_ssh_config() {
+    let h = Harness::start(ssh_setup(Some((&[SSH_HOST_A, SSH_HOST_B], &["*"])))).await;
+
+    let _ = h.launch(&h.body()).await;
+
+    let (launch_id, request) = spawned_request(&h);
+    let env = env_map(&request);
+    let dir = win(&h.launch_dir(&launch_id));
+    assert_eq!(
+        env.get("SSH_AUTH_SOCK"),
+        Some(&format!("{}{launch_id}", ssh::pipe::AGENT_PIPE_PREFIX)),
+        "{env:?}"
+    );
+    // Git reaches ssh through the launcher script beside the ssh_config,
+    // which git runs without a shell (fix round v3, lab F-ssh-1).
+    let launcher = format!("{dir}\\{GIT_SSH_FILE}");
+    assert_eq!(env.get("GIT_SSH"), Some(&launcher), "{env:?}");
+    assert_eq!(
+        env.get("GIT_SSH_VARIANT").map(String::as_str),
+        Some("ssh"),
+        "{env:?}"
+    );
+    assert!(
+        env["PATH"]
+            .split(';')
+            .any(|entry| entry.eq_ignore_ascii_case(r"C:\Windows\System32\OpenSSH")),
+        "Windows OpenSSH is on the box PATH: {}",
+        env["PATH"]
+    );
+    let ssh_config = format!("{dir}\\{SSH_CONFIG_FILE}");
+    let known_hosts = format!("{dir}\\{KNOWN_HOSTS_FILE}");
+    assert!(
+        readonly(&request).contains(&ssh_config),
+        "ssh_config is granted read-only, exactly the file: {:?}",
+        readonly(&request)
+    );
+    assert!(
+        readonly(&request).contains(&launcher) && !readwrite(&request).contains(&launcher),
+        "the launcher script is granted read-only, exactly the file: {:?}",
+        readonly(&request)
+    );
+    assert!(
+        readwrite(&request).contains(&known_hosts),
+        "known_hosts is granted read-write, exactly the file: {:?}",
+        readwrite(&request)
+    );
+    assert!(
+        !readwrite(&request).contains(&ssh_config),
+        "ssh_config is not writable"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn git_over_ssh_sets_no_shell_run_ssh_command_and_the_launcher_names_the_client_executable() {
+    // Git runs GIT_SSH_COMMAND and core.sshCommand through `sh`, which cannot
+    // start in the box (lab F-ssh-1): neither may be set, and GIT_SSH must
+    // name the launcher script, whose interpreter is the agentdesktop
+    // executable, never a shell.
+    let h = Harness::start(ssh_setup(Some((&[SSH_HOST_A], &["*"])))).await;
+    let captured = capture_at_spawn(&h);
+
+    let _ = h.launch(&h.body()).await;
+
+    let (launch_id, request) = spawned_request(&h);
+    let env = env_map(&request);
+    assert!(
+        !env.keys()
+            .any(|key| key.eq_ignore_ascii_case("GIT_SSH_COMMAND")),
+        "{env:?}"
+    );
+    // Nor through the environment-config route (GIT_CONFIG_KEY_<n>).
+    assert!(
+        !env.iter()
+            .any(|(key, value)| key.starts_with("GIT_CONFIG_KEY_")
+                && value.eq_ignore_ascii_case("core.sshCommand")),
+        "{env:?}"
+    );
+    let files = spawn_time_files(&captured);
+    let git_config = files.git_config.as_deref().expect("git_config at spawn");
+    assert!(
+        !git_config.to_ascii_lowercase().contains("sshcommand"),
+        "the generated gitconfig sets no core.sshCommand: {git_config}"
+    );
+    assert_eq!(
+        env["GIT_SSH"],
+        format!("{}\\{GIT_SSH_FILE}", win(&h.launch_dir(&launch_id))),
+        "GIT_SSH is the bare launcher path, no arguments"
+    );
+    assert_eq!(
+        files.git_ssh.as_deref(),
+        Some("#!/agentdesktop-windows-x64\n"),
+        "the launcher is one #! line naming the client executable"
+    );
+}
+
+#[test]
+fn ssh_files_refuse_a_client_executable_name_git_would_cut_and_write_the_launcher_0600() {
+    let temp = tempfile::tempdir().unwrap();
+    let legs = [(SSH_HOST_A.to_owned(), 2222u16)];
+    let long_name = "a".repeat(100);
+    for name in ["agent desktop", "", "agent\tdesktop", &long_name] {
+        let error = generate_ssh_files(temp.path(), &legs, &[], name)
+            .expect_err("a name with whitespace, none, or too long is refused");
+        let msg = format!("{error:#}");
+        assert!(
+            msg.contains("without spaces") || msg.contains("fits the #! line"),
+            "{error:#}"
+        );
+        assert!(
+            std::fs::read_dir(temp.path()).unwrap().next().is_none(),
+            "nothing is written for {name:?}"
+        );
+    }
+
+    generate_ssh_files(temp.path(), &legs, &[], "agentdesktop-windows-x64").unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join(GIT_SSH_FILE)).unwrap(),
+        "#!/agentdesktop-windows-x64\n"
+    );
+    if cfg!(unix) {
+        assert_eq!(file_mode(&temp.path().join(GIT_SSH_FILE)), Some(0o600));
+    }
+}
+
+/// A request with the per-harness parts (temp root, launch id, pairing)
+/// replaced by placeholders, so two launches compare byte for byte.
+fn normalized_request(h: &Harness) -> String {
+    let (launch_id, request) = spawned_request(h);
+    let env = env_map(&request);
+    let pairing = env["ANTHROPIC_CUSTOM_HEADERS"]
+        .strip_prefix("x-agentdesktop-pairing: ")
+        .unwrap()
+        .to_owned();
+    let root = h.state_dir.parent().unwrap().to_path_buf();
+    let text = serde_json::to_string_pretty(&request).unwrap();
+    let windows_root = serde_json::to_string(&win(&root)).unwrap();
+    let native_root = serde_json::to_string(&root.display().to_string()).unwrap();
+    text.replace(windows_root.trim_matches('"'), "<root>")
+        .replace(native_root.trim_matches('"'), "<root>")
+        .replace(&launch_id, "<launch_id>")
+        .replace(&pairing, "<pairing>")
+}
+
+#[tokio::test(start_paused = true)]
+async fn without_ssh_hosts_nothing_changes_no_env_no_files_and_identical_request_bytes() {
+    // The PR 4 shape: no git block at all, and a git block without ssh.
+    let baseline = Harness::start(Setup::default()).await;
+    baseline.launch_ok().await;
+    let baseline_request = normalized_request(&baseline);
+
+    for ssh in [None, Some((&[][..], &["*"][..]))] {
+        let h = Harness::start(ssh_setup(ssh)).await;
+        let captured = capture_at_spawn(&h);
+        // No ssh surface, so nothing post-spawn can fail: the launch starts.
+        h.launch_ok().await;
+        let files = spawn_time_files(&captured);
+        assert!(files.ssh_config.is_none(), "no ssh_config for {ssh:?}");
+        assert!(files.known_hosts.is_none(), "no known_hosts for {ssh:?}");
+        let (_, request) = spawned_request(&h);
+        let env = env_map(&request);
+        assert!(!env.contains_key("SSH_AUTH_SOCK"), "{env:?}");
+        assert!(!env.contains_key("GIT_SSH_COMMAND"), "{env:?}");
+        assert_eq!(
+            normalized_request(&h),
+            baseline_request,
+            "the request bytes are the PR 4 ones for {ssh:?}"
+        );
+    }
+}
+
+#[cfg(not(windows))]
+#[tokio::test(start_paused = true)]
+async fn an_ssh_setup_failure_fails_the_launch_stops_the_box_and_closes_the_legs() {
+    let h = Harness::start(ssh_setup(Some((&[SSH_HOST_A], &["*"])))).await;
+    let captured = capture_at_spawn(&h);
+
+    let (status, body) = h.launch(&h.body()).await;
+
+    // Off Windows there is no pipe transport: the launch must not degrade to
+    // a box without ssh (its env already names the pipe).
+    assert_eq!(status, 500, "{body}");
+    assert_eq!(h.executor.kills(), 1, "the started box is stopped");
+    assert!(h.listed().await.is_empty(), "{body}");
+    let now = h.credentials.clock.now();
+    assert_eq!(h.sessions.len(now), 0, "the session is revoked");
+    let launches = h.state_dir.join("launches");
+    assert!(
+        !launches.exists() || std::fs::read_dir(&launches).unwrap().next().is_none(),
+        "no launch directory remains"
+    );
+    // The legs bound before spawn close with the launch.
+    let files = spawn_time_files(&captured);
+    assert!(
+        !files.ports_in_use.is_empty(),
+        "a leg was bound before spawn"
+    );
+    for (port, _) in &files.ports_in_use {
+        let mut closed = false;
+        for _ in 0..100 {
+            if !port_in_use(*port) {
+                closed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(closed, "leg port {port} is closed after the failed launch");
+    }
 }

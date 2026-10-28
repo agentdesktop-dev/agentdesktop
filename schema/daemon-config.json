@@ -495,6 +495,17 @@
           "items": {
             "type": "string"
           }
+        },
+        "ssh": {
+          "description": "Git over ssh: the box's ssh signs through a filtered agent proxy (the\nkey never enters the box) and reaches each host through a loopback\nleg the daemon originates.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitSshConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -557,6 +568,27 @@
           "const": "request"
         }
       ]
+    },
+    "GitSshConfig": {
+      "description": "Git SSH access configuration.",
+      "type": "object",
+      "properties": {
+        "hosts": {
+          "description": "Bare hostnames (port fixed at 22) the box may fetch from and push to\nover ssh; host-granular. Empty or absent: no ssh at all.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "keys": {
+          "description": "SHA256 fingerprints (`SHA256:...`, as `ssh-add -l` prints them) of the\nagent keys offered to the box. Empty or absent: no key is offered.\nThe literal `\"*\"` offers every key in the agent.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
     },
     "GrokConfig": {
       "description": "Settings reconciled into Grok Build's organization-managed configuration.\n\nValues under `managedConfig` are written to Grok's `managed_config.toml`.\nWhen generated LLM-gateway settings overlap with those values,\nagentdesktop's generated values take precedence.\nOnly system mode is supported. Grok can delete or replace the user-level\nmanaged file during startup, so user daemons skip it with an inactive reason.",

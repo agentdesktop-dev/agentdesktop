@@ -33,14 +33,25 @@ pub struct HostEnvironment {
     home: PathBuf,
     state_dir: PathBuf,
     client_exe_dir: PathBuf,
+    client_exe_name: String,
 }
 
 impl HostEnvironment {
-    pub fn new(home: PathBuf, state_dir: PathBuf, client_exe_dir: PathBuf) -> Self {
+    /// `client_executable` is the agentdesktop executable the box may run:
+    /// its directory goes on the box PATH, its file stem names the
+    /// interpreter of git's ssh launcher script.
+    pub fn new(home: PathBuf, state_dir: PathBuf, client_executable: &Path) -> Self {
         Self {
             home,
             state_dir,
-            client_exe_dir,
+            client_exe_dir: client_executable
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
+            client_exe_name: client_executable
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default(),
         }
     }
 }
@@ -165,6 +176,10 @@ impl LaunchHost for HostEnvironment {
 
     fn client_exe_dir(&self) -> PathBuf {
         self.client_exe_dir.clone()
+    }
+
+    fn client_exe_name(&self) -> String {
+        self.client_exe_name.clone()
     }
 
     fn now(&self) -> u64 {
@@ -338,10 +353,15 @@ pub(crate) mod windows {
             STILL_ACTIVE, SetHandleInformation,
         },
         Security::{
-            Authorization::ConvertSidToStringSidW, GetTokenInformation, TOKEN_QUERY, TOKEN_USER,
+            Authorization::ConvertSidToStringSidW, GetTokenInformation,
+            TOKEN_APPCONTAINER_INFORMATION, TOKEN_QUERY, TOKEN_USER, TokenAppContainerSid,
             TokenIsAppContainer, TokenUser,
         },
         System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE},
+        System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+            TH32CS_SNAPPROCESS,
+        },
         System::Threading::{
             GetExitCodeProcess, GetProcessTimes, OpenProcess, OpenProcessToken,
             PROCESS_QUERY_LIMITED_INFORMATION,
@@ -422,15 +442,62 @@ pub(crate) mod windows {
         ok != 0 && code == STILL_ACTIVE as u32
     }
 
-    /// Reads the identity of process `pid` (`TokenUser`, `TokenIsAppContainer`).
-    pub fn peer_identity(pid: u32) -> anyhow::Result<PipePeer> {
+    /// The string form of a SID pointer (`ConvertSidToStringSidW`).
+    ///
+    /// # Safety
+    /// `sid` must point at a valid SID that outlives the call.
+    unsafe fn sid_string(sid: *mut c_void) -> anyhow::Result<String> {
+        let mut text: *mut u16 = std::ptr::null_mut();
+        // SAFETY: the caller guarantees `sid`; `text` is a valid out-parameter.
+        if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
+            return Err(std::io::Error::last_os_error()).context("convert SID to string");
+        }
+        // SAFETY: a null-terminated UTF-16 string allocated by the system.
+        Ok(unsafe {
+            let mut len = 0usize;
+            while *text.add(len) != 0 {
+                len += 1;
+            }
+            let sid = String::from_utf16_lossy(std::slice::from_raw_parts(text, len));
+            LocalFree(text.cast::<c_void>());
+            sid
+        })
+    }
+
+    /// The process token of `pid`, opened for query.
+    fn open_process_token(pid: u32) -> anyhow::Result<Handle> {
         let process = open_process(pid)?;
         let mut token: HANDLE = std::ptr::null_mut();
         // SAFETY: valid process handle and out-parameter.
         if unsafe { OpenProcessToken(process.0, TOKEN_QUERY, &mut token) } == 0 {
             return Err(std::io::Error::last_os_error()).context("open process token");
         }
-        let token = Handle(token);
+        Ok(Handle(token))
+    }
+
+    /// Whether a token reports `TokenIsAppContainer`.
+    fn token_is_app_container(token: &Handle) -> anyhow::Result<bool> {
+        let mut app_container = 0u32;
+        let mut returned = 0u32;
+        // SAFETY: a u32 out-parameter of the documented size.
+        let ok = unsafe {
+            GetTokenInformation(
+                token.0,
+                TokenIsAppContainer,
+                (&mut app_container as *mut u32).cast::<c_void>(),
+                std::mem::size_of::<u32>() as u32,
+                &mut returned,
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error()).context("read token AppContainer flag");
+        }
+        Ok(app_container != 0)
+    }
+
+    /// Reads the identity of process `pid` (`TokenUser`, `TokenIsAppContainer`).
+    pub fn peer_identity(pid: u32) -> anyhow::Result<PipePeer> {
+        let token = open_process_token(pid)?;
 
         let mut length = 0u32;
         // SAFETY: a size query; the null buffer is allowed with length 0.
@@ -454,48 +521,134 @@ pub(crate) mod windows {
         if ok == 0 {
             return Err(std::io::Error::last_os_error()).context("read token user");
         }
-        // SAFETY: GetTokenInformation(TokenUser) fills a TOKEN_USER at the buffer start.
-        let sid = unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid };
-        let mut text: *mut u16 = std::ptr::null_mut();
-        // SAFETY: `sid` points into `buffer`, which outlives the call.
-        if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
-            return Err(std::io::Error::last_os_error()).context("convert SID to string");
-        }
-        // SAFETY: a null-terminated UTF-16 string allocated by the system.
-        let user_sid = unsafe {
-            let mut len = 0usize;
-            while *text.add(len) != 0 {
-                len += 1;
-            }
-            let sid = String::from_utf16_lossy(std::slice::from_raw_parts(text, len));
-            LocalFree(text.cast::<c_void>());
-            sid
-        };
+        // SAFETY: GetTokenInformation(TokenUser) fills a TOKEN_USER at the buffer
+        // start; the SID it names points into `buffer`, which outlives the call.
+        let user_sid = unsafe { sid_string((*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid)? };
 
-        let mut app_container = 0u32;
-        let mut returned = 0u32;
-        // SAFETY: a u32 out-parameter of the documented size.
+        Ok(PipePeer {
+            user_sid: Some(user_sid),
+            app_container: token_is_app_container(&token)?,
+        })
+    }
+
+    /// The AppContainer SID of process `pid`'s token, `None` for a process
+    /// outside an AppContainer (AC 3: the pipe DACL and the pipe-client
+    /// check are scoped to the box's per-launch SID).
+    pub(crate) fn app_container_sid(pid: u32) -> anyhow::Result<Option<String>> {
+        let token = open_process_token(pid)?;
+        if !token_is_app_container(&token)? {
+            return Ok(None);
+        }
+        let mut length = 0u32;
+        // SAFETY: a size query; the null buffer is allowed with length 0.
+        unsafe {
+            GetTokenInformation(
+                token.0,
+                TokenAppContainerSid,
+                std::ptr::null_mut(),
+                0,
+                &mut length,
+            );
+        }
+        if length == 0 {
+            bail!("TokenAppContainerSid size query failed");
+        }
+        let mut buffer = vec![0u8; length as usize];
+        // SAFETY: the buffer is `length` bytes, as the size query asked for.
         let ok = unsafe {
             GetTokenInformation(
                 token.0,
-                TokenIsAppContainer,
-                (&mut app_container as *mut u32).cast::<c_void>(),
-                std::mem::size_of::<u32>() as u32,
-                &mut returned,
+                TokenAppContainerSid,
+                buffer.as_mut_ptr().cast::<c_void>(),
+                length,
+                &mut length,
             )
         };
         if ok == 0 {
-            return Err(std::io::Error::last_os_error()).context("read token AppContainer flag");
+            return Err(std::io::Error::last_os_error()).context("read token AppContainer SID");
         }
-        Ok(PipePeer {
-            user_sid: Some(user_sid),
-            app_container: app_container != 0,
-        })
+        // SAFETY: GetTokenInformation(TokenAppContainerSid) fills a
+        // TOKEN_APPCONTAINER_INFORMATION at the buffer start; the SID points
+        // into `buffer`, which outlives the call.
+        let sid = unsafe {
+            sid_string(
+                (*buffer.as_ptr().cast::<TOKEN_APPCONTAINER_INFORMATION>()).TokenAppContainer,
+            )?
+        };
+        Ok(Some(sid))
+    }
+
+    /// The AppContainer SID of the first AppContainer descendant of `root`
+    /// (AC 3, needs-lab-check L1): one process snapshot, depth-first
+    /// over the parent-pid tree; descendants whose token cannot be read are
+    /// skipped. `None` when no descendant is in an AppContainer yet.
+    /// A candidate created before `root_start_time` (the executor's creation
+    /// FILETIME) is never a descendant: the snapshot's parent pid is not
+    /// updated when a parent exits, so after pid reuse an older process can
+    /// name the executor's pid.
+    pub(crate) fn app_container_descendant_sid(
+        root: u32,
+        root_start_time: u64,
+    ) -> anyhow::Result<Option<String>> {
+        // SAFETY: plain system call.
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error()).context("snapshot the process list");
+        }
+        let snapshot = Handle(snapshot);
+        // SAFETY: PROCESSENTRY32W is plain data; dwSize is set as documented.
+        let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut processes: Vec<(u32, u32)> = Vec::new();
+        // SAFETY: valid snapshot handle and entry buffer.
+        if unsafe { Process32FirstW(snapshot.0, &mut entry) } != 0 {
+            loop {
+                processes.push((entry.th32ProcessID, entry.th32ParentProcessID));
+                // SAFETY: valid snapshot handle and entry buffer.
+                if unsafe { Process32NextW(snapshot.0, &mut entry) } == 0 {
+                    break;
+                }
+            }
+        }
+        let mut frontier = vec![root];
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(parent) = frontier.pop() {
+            for (pid, parent_pid) in &processes {
+                if *parent_pid != parent || *pid == root || !seen.insert(*pid) {
+                    continue;
+                }
+                let created = open_process(*pid).and_then(|process| creation_time(process.0));
+                if !created.is_ok_and(|created| created >= root_start_time) {
+                    continue;
+                }
+                if let Ok(Some(sid)) = app_container_sid(*pid) {
+                    return Ok(Some(sid));
+                }
+                frontier.push(*pid);
+            }
+        }
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derives_the_executable_name_and_directory_from_the_path() {
+        let env = HostEnvironment::new(
+            PathBuf::from("/home/user"),
+            PathBuf::from("/var/lib/agentdesktop"),
+            Path::new("/opt/x/agentdesktop-windows-x64.exe"),
+        );
+        assert_eq!(env.client_exe_name(), "agentdesktop-windows-x64");
+        assert_eq!(env.client_exe_dir(), PathBuf::from("/opt/x"));
     }
 }
 
 #[cfg(all(test, windows))]
-mod tests {
+mod windows_tests {
     use super::*;
 
     #[test]

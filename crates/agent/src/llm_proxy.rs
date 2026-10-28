@@ -1395,8 +1395,9 @@ fn git_credential_for<'c>(
 }
 
 /// Answer on the `/git-ssh` refusal route: the generated gitconfig maps
-/// ssh-form remotes of allowlisted hosts here so the user sees a pkt-line
-/// `ERR` instead of a deny-mode timeout (ssh itself is PR 5).
+/// ssh-form remotes of allowlisted hosts without a
+/// `daemon.containment.git.ssh.hosts` entry here so the user sees a pkt-line
+/// `ERR` instead of a deny-mode timeout.
 fn ssh_refused_response(
     rest: &str,
     query: Option<&str>,
@@ -1407,8 +1408,7 @@ fn ssh_refused_response(
         sandbox.host = Some(host.to_owned());
         sandbox.decision = Some("refuse");
     }
-    const MESSAGE: &str =
-        "ssh remotes are not available in the box yet (PR 5); use the https remote";
+    const MESSAGE: &str = "ssh remotes are not enabled for this host; use the https remote or add the host to daemon.containment.git.ssh.hosts";
     match classify_git_endpoint(rest, query) {
         Some(endpoint) if endpoint.is_push() => {
             pkt_line_err_response(endpoint.service(), endpoint.is_rpc(), MESSAGE)
@@ -1480,8 +1480,9 @@ fn handle_connect_request(
     ))
 }
 
-/// How often an in-flight git request checks whether its session was revoked.
-const REVOCATION_POLL: Duration = Duration::from_millis(50);
+/// How often an in-flight git request (and the ssh broker and legs) checks
+/// whether its session was revoked.
+pub(crate) const REVOCATION_POLL: Duration = Duration::from_millis(50);
 
 /// A git response body that ends as soon as its session is revoked (AC 1).
 /// The registry is read without restarting the idle timeout; the revocation

@@ -3676,6 +3676,7 @@ async fn git_leg_chains_to_the_egress_upstream() {
                 username: "git-user".to_owned(),
                 secret: "git-pat".to_owned(),
             }],
+            ssh: None,
         });
         config.egress_upstream =
             Some(url::Url::parse(&format!("http://{upstream_address}/")).unwrap());
@@ -3747,6 +3748,7 @@ async fn git_leg_retries_503_exactly_once() {
             allow: vec!["https://github.com/org/".to_owned()],
             push_allow: vec![],
             credentials: vec![],
+            ssh: None,
         });
         config.egress_upstream =
             Some(url::Url::parse(&format!("http://{upstream_address}/")).unwrap());
@@ -3980,6 +3982,7 @@ fn validate_containment_git_urls_must_be_https() {
             allow: vec!["https://github.com/org/".to_string()],
             push_allow: vec!["https://github.com/org/".to_string()],
             credentials: vec![],
+            ssh: None,
         }),
     };
 
@@ -3991,6 +3994,7 @@ fn validate_containment_git_urls_must_be_https() {
         allow: vec!["http://github.com/org/".to_string()],
         push_allow: vec![],
         credentials: vec![],
+        ssh: None,
     });
     assert!(validate_containment_startup(&cfg, true).is_err());
 
@@ -3999,6 +4003,7 @@ fn validate_containment_git_urls_must_be_https() {
         allow: vec!["git@github.com:org/repo.git".to_string()],
         push_allow: vec![],
         credentials: vec![],
+        ssh: None,
     });
     assert!(validate_containment_startup(&cfg, true).is_err());
 
@@ -4007,6 +4012,7 @@ fn validate_containment_git_urls_must_be_https() {
         allow: vec!["https://github.com/org/".to_string()],
         push_allow: vec!["http://github.com/org/".to_string()],
         credentials: vec![],
+        ssh: None,
     });
     assert!(validate_containment_startup(&cfg, true).is_err());
 }
@@ -4039,6 +4045,7 @@ fn pr4_plan(
         relay_base_url: "http://127.0.0.1:4000/sandbox".into(),
         pairing: "test-pairing".into(),
         base_env: std::collections::BTreeMap::new(),
+        ssh_enabled: false,
         exists: &exists,
         is_dir: &is_dir,
     };
@@ -4126,6 +4133,7 @@ async fn git_proxy(
         allow,
         push_allow: vec![],
         credentials: vec![],
+        ssh: None,
     });
     config.egress_upstream = egress_upstream;
     let sessions = config.sessions.clone();
@@ -4269,6 +4277,7 @@ fn credential_injection_only_for_allowed_hosts() {
             username: "user".to_string(),
             secret: "secret".to_string(),
         }],
+        ssh: None,
     };
 
     let url = |text: &str| url::Url::parse(text).unwrap();
@@ -4301,6 +4310,7 @@ fn credential_never_injected_for_non_allowed_host() {
             username: "user".to_string(),
             secret: "secret".to_string(),
         }],
+        ssh: None,
     };
 
     let url = |text: &str| url::Url::parse(text).unwrap();
@@ -4351,7 +4361,7 @@ fn gitconfig_insteadof_rewrites_to_git_route() {
         "https://github.com/org/".to_owned(),
         "https://git.example.com:8443/team".to_owned(),
     ];
-    let contents = crate::launch::gitconfig_contents("pairing-x", 4000, &allow, &[]);
+    let contents = crate::launch::gitconfig_contents("pairing-x", 4000, &allow, &[], &[]);
     // One rewrite per allow entry, onto GIT_ROUTE on the loopback
     // listener; the authority is verbatim (port only when configured),
     // the value in git's quoted form.
@@ -4366,7 +4376,7 @@ fn gitconfig_insteadof_rewrites_to_git_route() {
         "[url \"http://127.0.0.1:4000{GIT_SSH_ROUTE}/github.com/\"]\n\tinsteadOf = ssh://github.com/\n\tinsteadOf = git@github.com:\n"
     )), "{contents}");
     // No allow entries: no rewrites at all.
-    let empty = crate::launch::gitconfig_contents("pairing-x", 4000, &[], &[]);
+    let empty = crate::launch::gitconfig_contents("pairing-x", 4000, &[], &[], &[]);
     assert!(!empty.contains("insteadOf"), "{empty}");
 }
 
@@ -4374,7 +4384,7 @@ fn gitconfig_insteadof_rewrites_to_git_route() {
 fn gitconfig_pairing_scoped_to_loopback() {
     let pairing = "secret-session-pairing-value";
     let allow = vec!["https://github.com/org/".to_owned()];
-    let contents = crate::launch::gitconfig_contents(pairing, 4123, &allow, &[]);
+    let contents = crate::launch::gitconfig_contents(pairing, 4123, &allow, &[], &[]);
     // The pairing appears exactly once, as the extraHeader of the
     // url-matched loopback section; never in a global http section
     // (which git would send to every remote).
@@ -4392,8 +4402,13 @@ fn gitconfig_pairing_scoped_to_loopback() {
 
 #[test]
 fn gitconfig_proxy_bypass() {
-    let contents =
-        crate::launch::gitconfig_contents("p", 4000, &["https://github.com/org/".to_owned()], &[]);
+    let contents = crate::launch::gitconfig_contents(
+        "p",
+        4000,
+        &["https://github.com/org/".to_owned()],
+        &[],
+        &[],
+    );
     let section = "[http \"http://127.0.0.1:4000/\"]\n";
     let start = contents.find(section).expect("loopback http section");
     let body = &contents[start + section.len()..];
@@ -4405,8 +4420,13 @@ fn gitconfig_proxy_bypass() {
 
 #[test]
 fn gitconfig_credential_helper_emptied() {
-    let contents =
-        crate::launch::gitconfig_contents("p", 4000, &["https://github.com/org/".to_owned()], &[]);
+    let contents = crate::launch::gitconfig_contents(
+        "p",
+        4000,
+        &["https://github.com/org/".to_owned()],
+        &[],
+        &[],
+    );
     // The empty helper entry is the first (and only) credential.helper
     // value, resetting Git for Windows' system `helper=manager`.
     let section = contents
@@ -4442,7 +4462,7 @@ fn gitconfig_identity_allowlist() {
             vec!["C:/ws/a".to_owned(), "C:/ws/b".to_owned()],
         ),
     ];
-    let contents = crate::launch::gitconfig_contents("p", 4000, &[], &identity);
+    let contents = crate::launch::gitconfig_contents("p", 4000, &[], &identity, &[]);
     assert!(
         contents.contains("[user]\n\tname = \"Dev User\"\n"),
         "{contents}"
@@ -4465,7 +4485,7 @@ fn gitconfig_identity_allowlist() {
         "user.name".to_owned(),
         vec!["x\n[alias]\n\tco = !evil".to_owned()],
     )];
-    let contents = crate::launch::gitconfig_contents("p", 4000, &[], &hostile);
+    let contents = crate::launch::gitconfig_contents("p", 4000, &[], &hostile, &[]);
     assert!(!contents.contains("[alias]"), "{contents}");
 }
 
@@ -4479,6 +4499,7 @@ fn gitconfig_file_lifecycle() {
         "pairing-x",
         4000,
         &["https://github.com/org/".to_owned()],
+        &[],
         &[],
     )
     .unwrap();
@@ -4893,6 +4914,38 @@ async fn connect_request_log_has_host_and_decision() {
     .unwrap();
 }
 
+/// PR 5 AC 6: the refusal route keeps serving ssh-form remotes of
+/// `git.allow` hosts that are not ssh hosts, with the new message and no
+/// stale PR reference, for fetch and push alike.
+#[tokio::test]
+async fn ssh_refusal_route_names_the_ssh_hosts_setting() {
+    const NEW_MESSAGE: &str = "ERR ssh remotes are not enabled for this host; use the https remote or add the host to daemon.containment.git.ssh.hosts";
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let client = http_client();
+        let (direct, _seen, direct_task) = recording_upstream().await;
+        let (dir, proxy_address, _sessions, session, proxy) =
+            git_proxy(vec![format!("http://{direct}/org/")], None).await;
+        for service in ["git-upload-pack", "git-receive-pack"] {
+            let ssh = Request::builder()
+                .method(Method::GET)
+                .uri(format!("http://{proxy_address}{GIT_SSH_ROUTE}/github.com/org/repo.git/info/refs?service={service}"))
+                .header(PAIRING_HEADER, &*session.pairing)
+                .body(Full::new(Bytes::new()))
+                .unwrap();
+            let response = client.request(ssh).await.unwrap();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let body = String::from_utf8_lossy(&body);
+            assert!(body.contains(NEW_MESSAGE), "{service}: {body}");
+            assert!(!body.contains("PR 5"), "{service}: {body}");
+        }
+        proxy.abort();
+        direct_task.abort();
+        drop(dir);
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn log_outcome_values_unchanged() {
     let (logs, _guard) = capture_logs();
@@ -4920,7 +4973,7 @@ async fn log_outcome_values_unchanged() {
             .unwrap();
         let response = client.request(ssh).await.unwrap();
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert!(String::from_utf8_lossy(&body).contains("ERR ssh remotes are not available in the box yet (PR 5); use the https remote"));
+        assert!(String::from_utf8_lossy(&body).contains("ERR ssh remotes are not enabled for this host; use the https remote or add the host to daemon.containment.git.ssh.hosts"));
         let auth = base64::engine::general_purpose::STANDARD.encode(format!("{}:", session.pairing));
         raw_http(
             proxy_address,
@@ -5206,6 +5259,7 @@ async fn push_allowed_remote_reaches_upstream() {
             allow: vec![format!("http://{up}/org/")],
             push_allow: vec![format!("http://{up}/org/")],
             credentials: vec![],
+            ssh: None,
         });
         let sessions = config.sessions.clone();
         let session = new_session(&sessions, "test-client");
@@ -5251,7 +5305,7 @@ fn gitconfig_values_are_quoted() {
         ("user.name".to_owned(), vec!["Max ; Mustermann".to_owned()]),
         ("user.email".to_owned(), vec![r#"a"b@x"#.to_owned()]),
     ];
-    let contents = crate::launch::gitconfig_contents("p", 4000, &[], &identity);
+    let contents = crate::launch::gitconfig_contents("p", 4000, &[], &identity, &[]);
     assert!(
         contents.contains(r#"signingkey = "C:\\Users\\dev\\.ssh\\id.pub""#),
         "{contents}"
@@ -5267,7 +5321,7 @@ fn gitconfig_values_are_quoted() {
 #[test]
 fn gitconfig_host_only_entry_has_no_double_slash() {
     let allow = vec!["https://github.com".to_owned()];
-    let contents = crate::launch::gitconfig_contents("p", 4000, &allow, &[]);
+    let contents = crate::launch::gitconfig_contents("p", 4000, &allow, &[], &[]);
     assert!(
         contents.contains(&format!(
             "[url \"http://127.0.0.1:4000{GIT_ROUTE}/github.com\"]\n\tinsteadOf = \"https://github.com\"\n"
@@ -5306,6 +5360,7 @@ async fn credential_selected_per_prefix_end_to_end() {
                     secret: "s2".to_owned(),
                 },
             ],
+            ssh: None,
         });
         config.egress_upstream = Some(url::Url::parse(&format!("http://{up}/")).unwrap());
         let sessions = config.sessions.clone();
@@ -5525,6 +5580,7 @@ async fn push_rpc_503_is_not_retried() {
             allow: vec!["https://github.com/org/".to_owned()],
             push_allow: vec!["https://github.com/org/".to_owned()],
             credentials: vec![],
+            ssh: None,
         });
         config.egress_upstream = Some(url::Url::parse(&format!("http://{up}/")).unwrap());
         let sessions = config.sessions.clone();

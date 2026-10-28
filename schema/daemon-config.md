@@ -39,6 +39,9 @@
 |`daemon.containment.git.credentials[].urlPrefix`|string|URL prefix this credential applies to.|
 |`daemon.containment.git.credentials[].username`|string|Username for HTTP basic auth.|
 |`daemon.containment.git.pushAllow`|[]string|List of HTTPS URL prefixes the box may push to (subset of allow).|
+|`daemon.containment.git.ssh`|object|Git over ssh: the box's ssh signs through a filtered agent proxy (the<br>key never enters the box) and reaches each host through a loopback<br>leg the daemon originates.|
+|`daemon.containment.git.ssh.hosts`|[]string|Bare hostnames (port fixed at 22) the box may fetch from and push to<br>over ssh; host-granular. Empty or absent: no ssh at all.|
+|`daemon.containment.git.ssh.keys`|[]string|SHA256 fingerprints (`SHA256:...`, as `ssh-add -l` prints them) of the<br>agent keys offered to the box. Empty or absent: no key is offered.<br>The literal `"*"` offers every key in the agent.|
 |`daemon.copilot`|object|GitHub Copilot CLI paths (`config` = the `providers.json` to manage;<br>defaults to `COPILOT_PROVIDERS_CONFIG`, `$COPILOT_HOME/providers.json`,<br>then `~/.copilot/providers.json`).|
 |`daemon.copilot.config`|string|Configuration file.|
 |`daemon.grok`|object|Grok Build paths.|

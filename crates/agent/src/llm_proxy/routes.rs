@@ -75,8 +75,9 @@ pub(crate) const SANDBOX_ROUTE: &str = "/sandbox";
 pub(crate) const GIT_ROUTE: &str = "/git";
 
 /// Refusal route the generated gitconfig maps ssh-form remotes of allowlisted
-/// hosts to: it answers a pkt-line `ERR` so the user sees a clear message
-/// instead of a deny-mode timeout (ssh itself is PR 5).
+/// hosts WITHOUT a `daemon.containment.git.ssh.hosts` entry to: it answers a
+/// pkt-line `ERR` so the user sees a clear message instead of a deny-mode
+/// timeout (hosts on the ssh allowlist use real ssh via `GIT_SSH_COMMAND`).
 pub(crate) const GIT_SSH_ROUTE: &str = "/git-ssh";
 
 /// The prefixed routes: the managed programs and the sandbox route. A prefix

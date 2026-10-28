@@ -95,6 +95,7 @@ fn the_executable_configuration_rule_covers_git_commondir_and_the_ide_directory_
         relay_base_url: "http://127.0.0.1:4000/sandbox".into(),
         pairing: "test-pairing".into(),
         base_env: BTreeMap::new(),
+        ssh_enabled: false,
         exists: &exists,
         is_dir: &is_dir,
     });
@@ -444,6 +445,7 @@ mod handler {
             relay_base_url: "http://127.0.0.1:4000/sandbox".into(),
             pairing: "test-pairing".into(),
             base_env: BTreeMap::new(),
+            ssh_enabled: false,
             exists: &exists,
             is_dir: &is_dir,
         });
@@ -573,6 +575,7 @@ fn the_environment_is_a_list_of_key_value_entries_and_a_missing_workspace_claude
         relay_base_url: "http://127.0.0.1:4000/sandbox".into(),
         pairing: "test-pairing".into(),
         base_env: BTreeMap::from([("SystemRoot".to_owned(), r"C:\Windows".to_owned())]),
+        ssh_enabled: false,
         exists: &exists,
         is_dir: &is_dir,
     });
@@ -622,6 +625,7 @@ fn the_box_environment_has_home_set_to_the_daemon_home_when_daemon_env_has_no_ho
         relay_base_url: "http://127.0.0.1:4000/sandbox".into(),
         pairing: "test-pairing".into(),
         base_env: BTreeMap::new(),
+        ssh_enabled: false,
         exists: &exists,
         is_dir: &is_dir,
     });

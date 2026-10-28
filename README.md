@@ -744,13 +744,16 @@ daemon:
     executor: C:\Program Files\mxc\x64\wxc-exec.exe
     # egress: allow  # opt-out of the default `deny`: the box gets open outbound
     # engine: mxc    # the sandbox engine; `mxc` is the only value
-    # git:           # git over the relay (https remotes only)
+    # git:           # git over the relay (https remotes)
     #   allow: [https://github.com/your-org/]
     #   pushAllow: [https://github.com/your-org/team-repo.git]
     #   credentials:
     #     - urlPrefix: https://github.com/your-org/
     #       username: x-access-token
     #       secret: <PAT>
+    #   ssh:           # git over ssh, signing through the user's ssh-agent
+    #     hosts: [github.com]
+    #     keys: ["SHA256:..."]   # fingerprints as `ssh-add -l` prints them
     # egressUpstream:  # chain the git leg through a central agentgateway
     #   url: https://egress.example.com
 ```
@@ -775,7 +778,9 @@ path element, so `team-repo` does not cover `team-repo.git`; use the remote
 URL exactly as cloned, or an org prefix. Request bodies on the git route are
 buffered (redirects and the retry resend them) and capped at 32 MiB; a larger
 push fails with `413 body_too_large`. ssh remotes
-of allowed hosts get a clear refusal (ssh is not available in the box yet).
+of allowed hosts that are not in `git.ssh.hosts` get a clear refusal
+(`ssh remotes are not enabled for this host; use the https remote or add the
+host to daemon.containment.git.ssh.hosts`).
 With `egressUpstream` set the relay sends the git requests to that endpoint
 (path case preserved, `Host` = the egress host, a `503` retried once, except
 on a push) instead
@@ -790,6 +795,51 @@ generated gitconfig carries the launch's session pairing and is removed with
 the launch directory. The generated gitconfig applies under `egress: allow`
 too: credentials kept in `~\.gitconfig` or a credential manager are not used
 in the box; configure `git.credentials` for private remotes.
+
+**Git over ssh** (`daemon.containment.git.ssh`, Windows OpenSSH agent
+required): for each host in `git.ssh.hosts` (bare hostnames, port 22) the
+daemon binds a loopback leg and writes a per-launch `ssh_config` and
+`known_hosts` (seeded from your `known_hosts` via `ssh-keygen -F`; unknown
+hosts are accepted on first use, per launch); the box gets `GIT_SSH`, a
+one-line launcher script that Git for Windows runs with the agentdesktop
+executable (no shell, which cannot start in the box) and that runs Windows
+OpenSSH with that `ssh_config`, and `SSH_AUTH_SOCK` naming a per-launch named
+pipe that only that box can use. The daemon brokers the box's agent
+requests to your `\\.\pipe\openssh-ssh-agent`: only identity listing and
+signing are forwarded; adding, removing, locking and extension requests are
+refused. The private key never enters the box or the daemon.
+
+Known limits: the box needs Git for Windows; a `core.sshCommand` in the
+repository's (or system) git configuration takes precedence over `GIT_SSH` and
+git runs it through `sh`, which cannot start in the box (the box cannot edit
+`.git/config` — it is granted read-only — so the user has to unset it on the
+host); git over ssh needs an agentdesktop executable name without spaces.
+
+Posture:
+
+- The daemon signs with your ssh keys on behalf of the box. A signature is
+  not bound to a destination: the box can authenticate as you to any server
+  that accepts an offered key, over any channel it has. The key filter is the
+  blast-radius control: `git.ssh.keys` lists the fingerprints offered to the
+  box; empty or absent offers no key at all, and `["*"]` offers every key in
+  your agent. The filter matches the exact key blob, and the agent signs with
+  the private key behind it: offering only a certificate still gives the box
+  signatures from that private key, usable with any server that trusts the
+  plain key. Treat each offered key's reach as that of its private key.
+- An ssh host grants fetch AND push to that whole host; `git.allow` and
+  `git.pushAllow` prefixes do not apply to ssh. Use https remotes where
+  per-repository push control matters.
+- The loopback legs are machine-wide while the launch runs: any local
+  process can use them (the same caveat as the relay). A leg is a TCP pump to
+  `host:22`, so plain `ssh <host>` sessions through it work too.
+- With `egressUpstream` set the daemon refuses a non-empty `git.ssh.hosts`
+  (the egress endpoint is L7 https only).
+
+If any part of the ssh setup fails (leg bind, reading the box's identity,
+creating the pipe) the launch is stopped and fails; it never runs without
+ssh. The pipe and the legs close when the session ends (box exit, revocation,
+daemon restart). ssh used in the first instant of a launch may report the
+agent as unavailable: the pipe is created right after the box starts.
 
 `run` needs the local LLM proxy: without `daemon.llmProxy.listen` it answers
 `409`.

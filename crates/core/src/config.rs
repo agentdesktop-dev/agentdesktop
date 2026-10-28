@@ -193,6 +193,39 @@ pub struct GitConfig {
     /// Static git credentials for allowed hosts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credentials: Vec<GitCredentialEntry>,
+    /// Git over ssh: the box's ssh signs through a filtered agent proxy (the
+    /// key never enters the box) and reaches each host through a loopback
+    /// leg the daemon originates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<GitSshConfig>,
+}
+
+/// Git SSH access configuration.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitSshConfig {
+    /// Bare hostnames (port fixed at 22) the box may fetch from and push to
+    /// over ssh; host-granular. Empty or absent: no ssh at all.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_lowercase_hosts"
+    )]
+    pub hosts: Vec<String>,
+    /// SHA256 fingerprints (`SHA256:...`, as `ssh-add -l` prints them) of the
+    /// agent keys offered to the box. Empty or absent: no key is offered.
+    /// The literal `"*"` offers every key in the agent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<String>,
+}
+
+fn deserialize_lowercase_hosts<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let hosts: Vec<String> = Vec::deserialize(deserializer)?;
+    Ok(hosts.into_iter().map(|h| h.to_ascii_lowercase()).collect())
 }
 
 /// Git credential entry for a URL prefix.
@@ -329,9 +362,57 @@ pub fn validate_containment_startup(
                 );
             }
         }
+
+        // Validate git.ssh configuration (D5, D6, AC 1).
+        if let Some(ssh_config) = &git.ssh {
+            // D6: refuse both egressUpstream and git.ssh.hosts
+            if cfg.egress_upstream.is_some() && !ssh_config.hosts.is_empty() {
+                return Err(
+                    "daemon.containment.git.ssh: with egressUpstream set, ssh egress is not available (the egress endpoint is L7 https only)"
+                        .to_owned(),
+                );
+            }
+
+            // Validate hosts: bare hostname only (no scheme, path, port)
+            for (idx, host) in ssh_config.hosts.iter().enumerate() {
+                if !is_bare_hostname(host) {
+                    return Err(format!(
+                        "daemon.containment.git.ssh.hosts[{}] must be a bare hostname (no scheme, path, or port)",
+                        idx
+                    ));
+                }
+            }
+
+            // Validate keys: must be "SHA256:..." or "*"
+            for (idx, key) in ssh_config.keys.iter().enumerate() {
+                if key != "*" && !key.starts_with("SHA256:") {
+                    return Err(format!(
+                        "daemon.containment.git.ssh.keys[{}] must be a SHA256:... fingerprint or \"*\"",
+                        idx
+                    ));
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+/// A bare DNS hostname or IPv4 literal: dot-separated non-empty labels of
+/// ASCII letters, digits and `-`, no label starting with `-`. Everything else
+/// (scheme, path, port, whitespace, ssh_config patterns, `%` tokens) is
+/// refused: the value is written verbatim into the generated `ssh_config`
+/// and passed to `ssh-keygen -F`.
+fn is_bare_hostname(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 253
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && !label.starts_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
 }
 
 /// Token and cost collection for a daemon without a controller. agentgateway
@@ -3277,6 +3358,7 @@ programs:
                 allow: allow.iter().map(|s| (*s).to_owned()).collect(),
                 push_allow: push_allow.iter().map(|s| (*s).to_owned()).collect(),
                 credentials: vec![],
+                ssh: None,
             }),
         };
         // Two hosts in allow: refused.
@@ -3369,10 +3451,375 @@ programs:
                 allow: vec!["https://github.com/org/".to_owned()],
                 push_allow: vec![],
                 credentials: vec![entry],
+                ssh: None,
             }),
         };
         let rendered = format!("{containment:?}");
         assert!(!rendered.contains("sup3rs3cret-PAT"), "{rendered}");
         assert!(rendered.contains("<redacted>"), "{rendered}");
+    }
+
+    // PR 5 tests: ssh agent proxy and git over ssh
+
+    #[test]
+    fn git_ssh_config_parses_hosts_and_keys() {
+        let config = super::parse_local_daemon(
+            "daemon:\n  containment:\n    executor: 'C:\\mxc\\wxc-exec.exe'\n    git:\n      ssh:\n        hosts: ['github.com', 'gitlab.com']\n        keys: ['SHA256:abcd1234', '*']\n",
+        )
+        .expect("ssh config parses");
+        let ssh = config
+            .daemon
+            .unwrap()
+            .containment
+            .unwrap()
+            .git
+            .unwrap()
+            .ssh
+            .unwrap();
+        assert_eq!(ssh.hosts, vec!["github.com", "gitlab.com"]);
+        assert_eq!(ssh.keys, vec!["SHA256:abcd1234", "*"]);
+    }
+
+    #[test]
+    fn git_ssh_config_hosts_normalized_to_lowercase() {
+        let config = super::parse_local_daemon(
+            "daemon:\n  containment:\n    executor: 'C:\\mxc\\wxc-exec.exe'\n    git:\n      ssh:\n        hosts: ['GitHub.COM']\n",
+        )
+        .expect("ssh config parses");
+        let ssh = config
+            .daemon
+            .unwrap()
+            .containment
+            .unwrap()
+            .git
+            .unwrap()
+            .ssh
+            .unwrap();
+        assert_eq!(ssh.hosts, vec!["github.com"]);
+    }
+
+    #[test]
+    fn git_ssh_config_absent_round_trips_absent() {
+        let cfg = super::GitConfig {
+            allow: vec![],
+            push_allow: vec![],
+            credentials: vec![],
+            ssh: None,
+        };
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert!(json.get("ssh").is_none(), "absent ssh is not serialized");
+    }
+
+    #[test]
+    fn git_ssh_config_empty_hosts_and_keys_not_serialized() {
+        let cfg = super::GitSshConfig {
+            hosts: vec![],
+            keys: vec![],
+        };
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert!(json.get("hosts").is_none(), "empty hosts not serialized");
+        assert!(json.get("keys").is_none(), "empty keys not serialized");
+    }
+
+    #[test]
+    fn git_ssh_config_deny_unknown_fields() {
+        assert!(
+            super::parse_local_daemon(
+                "daemon:\n  containment:\n    executor: 'C:\\mxc\\wxc-exec.exe'\n    git:\n      ssh:\n        host: ['github.com']\n",
+            )
+            .is_err(),
+            "unknown field 'host' should be rejected"
+        );
+    }
+
+    #[test]
+    fn git_ssh_host_validation_rejects_scheme() {
+        let cfg = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("C:\\mxc\\wxc-exec.exe"),
+            egress: super::ContainmentEgress::default(),
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: None,
+            git: Some(super::GitConfig {
+                allow: vec![],
+                push_allow: vec![],
+                credentials: vec![],
+                ssh: Some(super::GitSshConfig {
+                    hosts: vec!["https://github.com".to_owned()],
+                    keys: vec![],
+                }),
+            }),
+        };
+        let error = super::validate_containment_startup(&cfg, true).expect_err("scheme rejected");
+        assert!(
+            error.contains("daemon.containment.git.ssh.hosts[0]"),
+            "error: {error}"
+        );
+        assert!(
+            error.contains("bare hostname (no scheme, path, or port)"),
+            "error: {error}"
+        );
+    }
+
+    #[test]
+    fn git_ssh_host_validation_charset() {
+        fn validate_host(host: &str) -> Result<(), String> {
+            let cfg = super::ContainmentStartupConfig {
+                executor: std::path::PathBuf::from("C:\\mxc\\wxc-exec.exe"),
+                egress: super::ContainmentEgress::default(),
+                engine: super::ContainmentEngine::default(),
+                egress_upstream: None,
+                git: Some(super::GitConfig {
+                    allow: vec![],
+                    push_allow: vec![],
+                    credentials: vec![],
+                    ssh: Some(super::GitSshConfig {
+                        hosts: vec![host.to_owned()],
+                        keys: vec![],
+                    }),
+                }),
+            };
+            super::validate_containment_startup(&cfg, true)
+        }
+        for host in [
+            "github.com",
+            "httpbin.org",
+            "httpd.corp.example",
+            "git-01.corp.example",
+            "github-demo",
+            "10.0.0.5",
+        ] {
+            assert_eq!(validate_host(host), Ok(()), "accepted: {host}");
+        }
+        for host in [
+            "a.com\n\tProxyCommand x",
+            "a.com ProxyCommand",
+            " github.com",
+            "a\tb",
+            "*",
+            "*.corp.example",
+            "git?.corp",
+            "%h",
+            "-oProxyCommand=x",
+            "a..com",
+            "github.com.",
+            ".github.com",
+        ] {
+            assert_eq!(
+                validate_host(host),
+                Err(
+                    "daemon.containment.git.ssh.hosts[0] must be a bare hostname (no scheme, path, or port)"
+                        .to_owned()
+                ),
+                "refused: {host}"
+            );
+        }
+    }
+
+    #[test]
+    fn git_ssh_host_validation_rejects_path() {
+        let cfg = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("C:\\mxc\\wxc-exec.exe"),
+            egress: super::ContainmentEgress::default(),
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: None,
+            git: Some(super::GitConfig {
+                allow: vec![],
+                push_allow: vec![],
+                credentials: vec![],
+                ssh: Some(super::GitSshConfig {
+                    hosts: vec!["github.com/org/repo".to_owned()],
+                    keys: vec![],
+                }),
+            }),
+        };
+        let error = super::validate_containment_startup(&cfg, true).expect_err("path rejected");
+        assert!(
+            error.contains("daemon.containment.git.ssh.hosts[0]"),
+            "error: {error}"
+        );
+        assert!(
+            error.contains("bare hostname (no scheme, path, or port)"),
+            "error: {error}"
+        );
+    }
+
+    #[test]
+    fn git_ssh_host_validation_rejects_port() {
+        let cfg = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("C:\\mxc\\wxc-exec.exe"),
+            egress: super::ContainmentEgress::default(),
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: None,
+            git: Some(super::GitConfig {
+                allow: vec![],
+                push_allow: vec![],
+                credentials: vec![],
+                ssh: Some(super::GitSshConfig {
+                    hosts: vec!["github.com:2222".to_owned()],
+                    keys: vec![],
+                }),
+            }),
+        };
+        let error = super::validate_containment_startup(&cfg, true).expect_err("port rejected");
+        assert!(
+            error.contains("daemon.containment.git.ssh.hosts[0]"),
+            "error: {error}"
+        );
+        assert!(
+            error.contains("bare hostname (no scheme, path, or port)"),
+            "error: {error}"
+        );
+    }
+
+    #[test]
+    fn git_ssh_host_validation_rejects_empty() {
+        let cfg = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("C:\\mxc\\wxc-exec.exe"),
+            egress: super::ContainmentEgress::default(),
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: None,
+            git: Some(super::GitConfig {
+                allow: vec![],
+                push_allow: vec![],
+                credentials: vec![],
+                ssh: Some(super::GitSshConfig {
+                    hosts: vec!["".to_owned()],
+                    keys: vec![],
+                }),
+            }),
+        };
+        let error = super::validate_containment_startup(&cfg, true).expect_err("empty rejected");
+        assert!(
+            error.contains("daemon.containment.git.ssh.hosts[0]"),
+            "error: {error}"
+        );
+    }
+
+    #[test]
+    fn git_ssh_key_validation_rejects_non_sha256() {
+        let cfg = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("C:\\mxc\\wxc-exec.exe"),
+            egress: super::ContainmentEgress::default(),
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: None,
+            git: Some(super::GitConfig {
+                allow: vec![],
+                push_allow: vec![],
+                credentials: vec![],
+                ssh: Some(super::GitSshConfig {
+                    hosts: vec![],
+                    keys: vec!["MD5:1234abcd".to_owned()],
+                }),
+            }),
+        };
+        let error = super::validate_containment_startup(&cfg, true)
+            .expect_err("non-SHA256 fingerprint rejected");
+        assert!(
+            error.contains("daemon.containment.git.ssh.keys[0]"),
+            "error: {error}"
+        );
+        assert!(
+            error.contains("must be a SHA256:... fingerprint or \"*\""),
+            "error: {error}"
+        );
+    }
+
+    #[test]
+    fn git_ssh_key_validation_accepts_sha256() {
+        let cfg = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("C:\\mxc\\wxc-exec.exe"),
+            egress: super::ContainmentEgress::default(),
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: None,
+            git: Some(super::GitConfig {
+                allow: vec![],
+                push_allow: vec![],
+                credentials: vec![],
+                ssh: Some(super::GitSshConfig {
+                    hosts: vec!["github.com".to_owned()],
+                    keys: vec!["SHA256:abcd1234".to_owned()],
+                }),
+            }),
+        };
+        assert!(super::validate_containment_startup(&cfg, true).is_ok());
+    }
+
+    #[test]
+    fn git_ssh_key_validation_accepts_wildcard() {
+        let cfg = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("C:\\mxc\\wxc-exec.exe"),
+            egress: super::ContainmentEgress::default(),
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: None,
+            git: Some(super::GitConfig {
+                allow: vec![],
+                push_allow: vec![],
+                credentials: vec![],
+                ssh: Some(super::GitSshConfig {
+                    hosts: vec!["github.com".to_owned()],
+                    keys: vec!["*".to_owned()],
+                }),
+            }),
+        };
+        assert!(super::validate_containment_startup(&cfg, true).is_ok());
+    }
+
+    #[test]
+    fn git_ssh_with_egress_upstream_and_hosts_rejected() {
+        let cfg = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("C:\\mxc\\wxc-exec.exe"),
+            egress: super::ContainmentEgress::default(),
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: Some(super::EgressUpstreamConfig {
+                url: url::Url::parse("https://gateway.example.com/forward").unwrap(),
+                authentication: None,
+            }),
+            git: Some(super::GitConfig {
+                allow: vec![],
+                push_allow: vec![],
+                credentials: vec![],
+                ssh: Some(super::GitSshConfig {
+                    hosts: vec!["github.com".to_owned()],
+                    keys: vec![],
+                }),
+            }),
+        };
+        let error = super::validate_containment_startup(&cfg, true)
+            .expect_err("egress_upstream + ssh.hosts rejected");
+        assert!(
+            error.contains("daemon.containment.git.ssh"),
+            "error: {error}"
+        );
+        assert!(
+            error.contains("with egressUpstream set, ssh egress is not available"),
+            "error: {error}"
+        );
+        assert!(error.contains("L7 https only"), "error: {error}");
+    }
+
+    #[test]
+    fn git_ssh_with_egress_upstream_and_empty_hosts_allowed() {
+        let cfg = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("C:\\mxc\\wxc-exec.exe"),
+            egress: super::ContainmentEgress::default(),
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: Some(super::EgressUpstreamConfig {
+                url: url::Url::parse("https://gateway.example.com/forward").unwrap(),
+                authentication: None,
+            }),
+            git: Some(super::GitConfig {
+                allow: vec![],
+                push_allow: vec![],
+                credentials: vec![],
+                ssh: Some(super::GitSshConfig {
+                    hosts: vec![],
+                    keys: vec![],
+                }),
+            }),
+        };
+        assert!(
+            super::validate_containment_startup(&cfg, true).is_ok(),
+            "egress_upstream + empty ssh.hosts allowed"
+        );
     }
 }

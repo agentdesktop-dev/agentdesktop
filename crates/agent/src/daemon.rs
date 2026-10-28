@@ -746,10 +746,7 @@ where
         host: Arc::new(launch::host::HostEnvironment::new(
             home_directory().unwrap_or_default(),
             state.state_dir.clone(),
-            agentdesktop_client_executable()?
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_default(),
+            &agentdesktop_client_executable()?,
         )),
         registry: launch::LaunchRegistry::new(),
         availability: containment,

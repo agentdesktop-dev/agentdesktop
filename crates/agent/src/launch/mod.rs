@@ -34,10 +34,12 @@ use axum::{
 };
 
 pub(crate) mod engine;
+pub mod git_ssh;
 pub mod host;
 pub mod integrity;
 pub(crate) mod plan;
 pub(crate) mod profile;
+pub(crate) mod ssh;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -47,8 +49,9 @@ mod writer_tests;
 const PROGRAM: &str = crate::provider::claude_code::ClaudeCode::ID;
 /// Exited launches kept in the registry after the running ones.
 const KEPT_EXITED: usize = 32;
-/// How long the handler watches a fresh box for an early exit.
-const EARLY_EXIT_WATCH: Duration = Duration::from_secs(3);
+/// How long the handler watches a fresh box for an early exit; the ssh
+/// pipe setup polls for the box process within the same window (AC 3).
+pub(crate) const EARLY_EXIT_WATCH: Duration = Duration::from_secs(3);
 /// Poll cadence for the exit of a running launch.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Bytes of `wxc-exec.log` returned with an early-exit error.
@@ -354,6 +357,10 @@ pub struct LaunchInput<'a> {
     pub relay_base_url: String,
     pub pairing: String,
     pub base_env: BTreeMap<String, String>,
+    /// Whether `daemon.containment.git.ssh.hosts` is non-empty: only then do
+    /// the ssh env vars and file grants enter the request (AC 6; a launch
+    /// without ssh keeps byte-identical request bytes, AC 9).
+    pub ssh_enabled: bool,
     pub exists: &'a dyn Fn(&Path) -> bool,
     pub is_dir: &'a dyn Fn(&Path) -> bool,
 }
@@ -398,6 +405,11 @@ pub(crate) fn plan(input: &LaunchInput, profile: &profile::ClaudeCodeProfile) ->
         system_root.clone(),
         join(&system_root, r"System32\WindowsPowerShell\v1.0"),
     ];
+    // Windows OpenSSH (`ssh`, `ssh-add`) for the box's own ssh use; only with
+    // ssh hosts, so launches without ssh keep byte-identical requests.
+    if input.ssh_enabled {
+        path.push(join(&system_root, r"System32\OpenSSH"));
+    }
     if let Some(git_dir) = &git_dir {
         path.push(join(git_dir, "cmd"));
     }
@@ -427,6 +439,25 @@ pub(crate) fn plan(input: &LaunchInput, profile: &profile::ClaudeCodeProfile) ->
     // A 401 or refusal fails fast instead of git prompting on a console
     // that cannot answer.
     env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
+    // AC 6: with ssh hosts configured, the box's ssh talks to the per-launch
+    // agent pipe (`IdentityAgent` did not work on Windows OpenSSH; the pipe
+    // travels in SSH_AUTH_SOCK) and git runs ssh with the generated
+    // per-launch client configuration. The pipe itself is created after
+    // spawn, once the box's AppContainer SID can be read.
+    if input.ssh_enabled {
+        env.insert(
+            "SSH_AUTH_SOCK".into(),
+            format!("{}{}", ssh::pipe::AGENT_PIPE_PREFIX, input.launch_id),
+        );
+        // No shell between git and ssh: git runs a `GIT_SSH_COMMAND` (or
+        // `core.sshCommand`) through `sh`, and Git for Windows' msys `sh`
+        // cannot start in the AppContainer. `GIT_SSH` is run without a
+        // shell; it names the launcher script, which adds
+        // `-F <launch-dir>\ssh_config` (see `git_ssh`). The variant skips
+        // git's `-G` probe of an unrecognized program name.
+        env.insert("GIT_SSH".into(), join(&launch_dir, GIT_SSH_FILE));
+        env.insert("GIT_SSH_VARIANT".into(), "ssh".into());
+    }
 
     let mut readonly: Vec<String> = Vec::new();
     let mut denied: Vec<String> = Vec::new();
@@ -449,6 +480,13 @@ pub(crate) fn plan(input: &LaunchInput, profile: &profile::ClaudeCodeProfile) ->
     // The generated gitconfig: exactly the file, read-only (it is written
     // before the box starts).
     readonly.push(git_config);
+    // AC 6: the generated ssh client configuration and git's ssh launcher
+    // script, exactly the files, read-only (written before the box starts,
+    // like the gitconfig).
+    if input.ssh_enabled {
+        readonly.push(join(&launch_dir, SSH_CONFIG_FILE));
+        readonly.push(join(&launch_dir, GIT_SSH_FILE));
+    }
     // Executable configuration: read-only when present, denied when absent, so
     // the box can neither change nor create it.
     let mut executable_config: Vec<String> = profile
@@ -526,17 +564,26 @@ pub(crate) fn plan(input: &LaunchInput, profile: &profile::ClaudeCodeProfile) ->
         }
     }
 
+    let mut readwrite = vec![
+        PathBuf::from(cwd),
+        PathBuf::from(claude_dir),
+        PathBuf::from(tmp),
+    ];
+    // AC 6: the per-launch known_hosts is read-write, exactly the file, so
+    // `accept-new` persists across connections within the launch. Worst case
+    // of the grant is the box corrupting its own per-launch file (self-DoS;
+    // it dies with the launch directory; no secret).
+    if input.ssh_enabled {
+        readwrite.push(PathBuf::from(join(&launch_dir, KNOWN_HOSTS_FILE)));
+    }
+
     plan::LaunchPlan {
         program: input.executable.clone(),
         args: input.args.clone(),
         window_title: profile.window_title,
         cwd: input.cwd.clone(),
         env,
-        readwrite: vec![
-            PathBuf::from(cwd),
-            PathBuf::from(claude_dir),
-            PathBuf::from(tmp),
-        ],
+        readwrite,
         readonly: readonly.into_iter().map(PathBuf::from).collect(),
         denied: denied.into_iter().map(PathBuf::from).collect(),
         egress: input.egress,
@@ -688,6 +735,12 @@ pub trait LaunchHost: Send + Sync {
     fn client_exe_dir(&self) -> PathBuf;
     fn now(&self) -> u64;
 
+    /// The file stem of the agentdesktop executable in `client_exe_dir`: the
+    /// interpreter of git's ssh launcher script.
+    fn client_exe_name(&self) -> String {
+        "agentdesktop".to_owned()
+    }
+
     fn integrity_fs(&self) -> Arc<dyn integrity::IntegrityFs> {
         Arc::new(integrity::REAL_FS)
     }
@@ -699,6 +752,35 @@ pub trait LaunchHost: Send + Sync {
     /// includes. Keys with no value are absent.
     fn git_identity(&self) -> Vec<(String, Vec<String>)> {
         read_git_identity()
+    }
+
+    /// The user's `known_hosts` entries for `hosts`, seeding the per-launch
+    /// `known_hosts` file. The default reads them host-side with
+    /// `ssh-keygen -F <host>`, comment lines (`# Host <h> found: ...`)
+    /// stripped. A host without entries, or a missing `ssh-keygen`, is simply
+    /// skipped: `StrictHostKeyChecking accept-new` then records that host's
+    /// key on first use, per launch.
+    fn known_hosts_seed(&self, hosts: &[String]) -> Vec<String> {
+        let mut lines = Vec::new();
+        for host in hosts {
+            let Ok(output) = std::process::Command::new("ssh-keygen")
+                .args(["-F", host])
+                .output()
+            else {
+                continue;
+            };
+            if !output.status.success() {
+                continue;
+            }
+            lines.extend(
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                    .map(str::to_owned),
+            );
+        }
+        lines
     }
 }
 
@@ -1010,6 +1092,18 @@ async fn start_launch(
         .as_ref()
         .map(|git| git.allow.clone())
         .unwrap_or_default();
+    // AC 6: `git.ssh` with a non-empty host list is the whole ssh
+    // surface switch; absent or empty, nothing below changes a launch.
+    let git_ssh = state
+        .git
+        .as_ref()
+        .and_then(|git| git.ssh.as_ref())
+        .filter(|ssh| !ssh.hosts.is_empty())
+        .cloned();
+    let ssh_hosts: Vec<String> = git_ssh
+        .as_ref()
+        .map(|ssh| ssh.hosts.clone())
+        .unwrap_or_default();
     // The identity read spawns up to a handful of `git config` processes:
     // off the async runtime, like the posture snapshot below.
     let identity = {
@@ -1024,8 +1118,67 @@ async fn start_launch(
         input.proxy_address.port(),
         &git_allow,
         &identity,
+        &ssh_hosts,
     ) {
         return fail(&launch_dir, format!("prepare launch: {error:#}"));
+    }
+    if let Some(ssh) = &git_ssh {
+        // The seed read shells `ssh-keygen -F` host-side: off the async
+        // runtime, like the identity read above.
+        let seeds = {
+            let host = host.clone();
+            let hosts = ssh.hosts.clone();
+            tokio::task::spawn_blocking(move || host.known_hosts_seed(&hosts))
+                .await
+                .unwrap_or_default()
+        };
+        // AC 5: one loopback leg per ssh host, bound BEFORE spawn so the
+        // assigned ports go into the generated ssh_config.
+        let mut legs = Vec::new();
+        for ssh_host in &ssh.hosts {
+            let listener = match tokio::net::TcpListener::bind(("127.0.0.1", 0)).await {
+                Ok(listener) => listener,
+                Err(error) => {
+                    return fail(
+                        &launch_dir,
+                        format!("bind an ssh leg for {ssh_host}: {error}"),
+                    );
+                }
+            };
+            let port = match listener.local_addr() {
+                Ok(address) => address.port(),
+                Err(error) => {
+                    return fail(
+                        &launch_dir,
+                        format!("bind an ssh leg for {ssh_host}: {error}"),
+                    );
+                }
+            };
+            legs.push((ssh_host.clone(), listener, port));
+        }
+        let leg_ports: Vec<(String, u16)> = legs
+            .iter()
+            .map(|(ssh_host, _, port)| (ssh_host.clone(), *port))
+            .collect();
+        if let Err(error) =
+            generate_ssh_files(&launch_dir, &leg_ports, &seeds, &host.client_exe_name())
+        {
+            return fail(&launch_dir, format!("prepare launch: {error:#}"));
+        }
+        // The leg tasks hold the session registry and die with the session
+        // (D7): every existing stop path revokes it, including the `fail`
+        // closure above, so a failed launch closes its legs with no new hook.
+        for (ssh_host, listener, port) in legs {
+            tokio::spawn(ssh::serve_leg(
+                listener,
+                ssh_host,
+                port,
+                state.sessions.clone(),
+                session_id.clone(),
+                launch_id.clone(),
+                session_clock(&host),
+            ));
+        }
     }
     // AC 4: deny is the default; an explicit allow is loud.
     warn_on_open_egress(state.egress);
@@ -1047,6 +1200,7 @@ async fn start_launch(
             relay_base_url: crate::llm_proxy::sessions::sandbox_base_url(input.proxy_address),
             pairing: session.pairing.to_string(),
             base_env: host.base_env(),
+            ssh_enabled: git_ssh.is_some(),
             exists: &exists,
             is_dir: &is_dir,
         },
@@ -1140,6 +1294,41 @@ async fn start_launch(
         return fail(&launch_dir, format!("record the launch pid: {error}"));
     }
 
+    // AC 3, fail-closed: with ssh hosts configured, ANY ssh setup
+    // failure (SID read, pipe create) stops and fails the launch — the box
+    // env already names the pipe, so a launch must not run pointed at a name
+    // the daemon does not own. The pipe is created after spawn because the
+    // box's per-launch AppContainer SID can only be read from the running
+    // box. The `fail` closure revokes the session, which also closes the
+    // legs bound above (D7).
+    if let Some(ssh) = &git_ssh
+        && let Err(error) = ssh::pipe::start_agent_pipe_server(
+            &launch_id,
+            child.pid(),
+            child.start_time(),
+            state.daemon_sid.as_deref(),
+            ssh::AgentPolicy::from_config_keys(&ssh.keys),
+            state.sessions.clone(),
+            session_id.clone(),
+            session_clock(&host),
+        )
+        .await
+    {
+        // A box that already died is reported like any early exit, with the
+        // executor's log tail, rather than as a missing box process.
+        let message = match child.try_wait() {
+            Ok(Some(code)) => format!(
+                "wxc-exec exited with code {code} within {}s: {}",
+                EARLY_EXIT_WATCH.as_secs(),
+                log_tail(&log_path)
+            ),
+            _ => format!("ssh agent proxy setup: {error:#}"),
+        };
+        stop_executor(child.as_mut(), &launch_id);
+        integrity_check.verify_and_log(&launch_id).await;
+        return fail(&launch_dir, message);
+    }
+
     // A box that dies within seconds (bad request, missing tier, MXC refusal)
     // is reported to the caller instead of lingering as a running launch.
     let deadline = tokio::time::Instant::now() + EARLY_EXIT_WATCH;
@@ -1226,6 +1415,12 @@ async fn start_launch(
         integrity_check,
     ));
     Ok((StatusCode::CREATED, Json(launch)))
+}
+
+/// The launch host's clock, for the ssh accept loops' session checks.
+fn session_clock(host: &Arc<dyn LaunchHost>) -> ssh::SessionClock {
+    let host = host.clone();
+    Arc::new(move || host.now())
 }
 
 /// Creates the private launch directory with the box's `tmp`.
@@ -1393,6 +1588,17 @@ fn parse_pid_file(text: &str) -> Option<(u32, u64)> {
 /// (it carries the session pairing; never log its content).
 pub(crate) const GIT_CONFIG_FILE: &str = "git_config";
 
+/// File name of the generated per-launch ssh client configuration.
+pub(crate) const SSH_CONFIG_FILE: &str = "ssh_config";
+
+/// File name of the per-launch `known_hosts` the generated `ssh_config`
+/// points at.
+pub(crate) const KNOWN_HOSTS_FILE: &str = "known_hosts";
+
+/// File name of git's per-launch ssh launcher script (`GIT_SSH`), beside the
+/// `ssh_config` it hands to ssh.
+pub(crate) const GIT_SSH_FILE: &str = "git_ssh";
+
 /// The identity allowlist the generated gitconfig copies from the user's
 /// global git configuration, and whether the key is multi-valued (read with
 /// `--get-all`). Intentionally NOT copied: aliases, advanced core settings,
@@ -1460,12 +1666,15 @@ fn git_config_quote(value: &str) -> String {
 /// url-scoped `proxy` (so the loopback requests bypass any ambient proxy the
 /// user's environment carries — the daemon itself sets no proxy variables),
 /// an emptied `credential.helper`, the copied identity values, and ssh-form
-/// insteadOf mappings of allowlisted hosts to the `/git-ssh` refusal route.
+/// insteadOf mappings of allowlisted hosts to the `/git-ssh` refusal route —
+/// except hosts in `daemon.containment.git.ssh.hosts` (`ssh_hosts`), which
+/// use their real remotes over `GIT_SSH` (D5).
 pub(crate) fn gitconfig_contents(
     pairing: &str,
     proxy_port: u16,
     git_allow: &[String],
     identity: &[(String, Vec<String>)],
+    ssh_hosts: &[String],
 ) -> String {
     let loopback = format!("http://127.0.0.1:{proxy_port}/");
     let mut contents = String::new();
@@ -1477,7 +1686,7 @@ pub(crate) fn gitconfig_contents(
         "[http \"{loopback}\"]\n\textraHeader = {}: {pairing}\n\tproxy =\n",
         crate::llm_proxy::PAIRING_HEADER
     ));
-    let mut ssh_hosts: Vec<&str> = Vec::new();
+    let mut refused_hosts: Vec<&str> = Vec::new();
     for entry in git_allow {
         let Some((authority, path)) = split_prefix_authority(entry) else {
             continue;
@@ -1487,11 +1696,18 @@ pub(crate) fn gitconfig_contents(
             git_config_quote(entry),
         ));
         let host = authority.split(':').next().unwrap_or(authority);
-        if !host.is_empty() && !ssh_hosts.contains(&host) {
-            ssh_hosts.push(host);
+        // D5: a host on the ssh allowlist loses its `/git-ssh` refusal
+        // insteadOf; git then uses the real remote and `GIT_SSH`.
+        if !host.is_empty()
+            && !refused_hosts.contains(&host)
+            && !ssh_hosts
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(host))
+        {
+            refused_hosts.push(host);
         }
     }
-    for host in ssh_hosts {
+    for host in refused_hosts {
         contents.push_str(&format!(
             "[url \"{loopback}git-ssh/{host}/\"]\n\tinsteadOf = ssh://{host}/\n\tinsteadOf = git@{host}:\n",
         ));
@@ -1519,12 +1735,84 @@ pub(crate) fn generate_gitconfig(
     proxy_port: u16,
     git_allow: &[String],
     identity: &[(String, Vec<String>)],
+    ssh_hosts: &[String],
 ) -> anyhow::Result<PathBuf> {
     let path = launch_dir.join(GIT_CONFIG_FILE);
-    let contents = gitconfig_contents(pairing, proxy_port, git_allow, identity);
+    let contents = gitconfig_contents(pairing, proxy_port, git_allow, identity, ssh_hosts);
     secure_fs::atomic_write(&path, contents.as_bytes(), 0o600)
         .with_context(|| format!("write {}", path.display()))?;
     Ok(path)
+}
+
+/// Renders the per-launch ssh client configuration (AC 6): one `Host` block
+/// per allowlisted ssh host, pointing ssh at that host's loopback leg with
+/// the host's real name as `HostKeyAlias`, the per-launch `known_hosts`, and
+/// `accept-new` for hosts without a seeded entry. `IdentityAgent` is not
+/// used; the agent pipe travels in `SSH_AUTH_SOCK`.
+pub(crate) fn ssh_config_contents(launch_dir: &Path, legs: &[(String, u16)]) -> String {
+    let known_hosts = format!("\"{}\\{KNOWN_HOSTS_FILE}\"", win(launch_dir));
+    let mut contents =
+        String::from("# Generated by agentdesktop for one sandboxed launch; do not edit.\n");
+    for (host, port) in legs {
+        contents.push_str(&format!(
+            "Host {host}\n\tHostName 127.0.0.1\n\tPort {port}\n\tHostKeyAlias {host}\n\tUserKnownHostsFile {known_hosts}\n\tStrictHostKeyChecking accept-new\n\tIdentitiesOnly no\n"
+        ));
+    }
+    contents
+}
+
+/// Writes the per-launch `ssh_config` (granted read-only, exactly the file),
+/// `known_hosts` (granted read-write so `accept-new` persists within the
+/// launch) and git's ssh launcher script (granted read-only, exactly the
+/// file) into the launch directory, all 0600. None carries a secret; all die
+/// with the launch directory.
+///
+/// The script is one `#!` line naming the agentdesktop executable
+/// (`client_exe_name`, the file stem; it is on the box PATH). Git for Windows
+/// runs a `GIT_SSH` script as `<interpreter>.exe <script> <ssh args>`, the
+/// interpreter found by name on PATH and started without a shell; the
+/// executable then runs ssh with this directory's `ssh_config`
+/// ([`git_ssh::run_if_invoked`]). Git cuts the interpreter name at the first
+/// space, so a name with whitespace is refused.
+pub(crate) fn generate_ssh_files(
+    launch_dir: &Path,
+    legs: &[(String, u16)],
+    seeds: &[String],
+    client_exe_name: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !client_exe_name.is_empty() && !client_exe_name.contains(char::is_whitespace),
+        "git over ssh needs an agentdesktop executable name without spaces (found {client_exe_name:?})"
+    );
+    anyhow::ensure!(
+        client_exe_name.len() <= 90,
+        "git over ssh needs an agentdesktop executable name that fits the #! line (found {client_exe_name:?}, {} bytes)",
+        client_exe_name.len()
+    );
+    let config = launch_dir.join(SSH_CONFIG_FILE);
+    secure_fs::atomic_write(
+        &config,
+        ssh_config_contents(launch_dir, legs).as_bytes(),
+        0o600,
+    )
+    .with_context(|| format!("write {}", config.display()))?;
+    let mut known = seeds.join("\n");
+    if !known.is_empty() {
+        known.push('\n');
+    }
+    let known_hosts = launch_dir.join(KNOWN_HOSTS_FILE);
+    secure_fs::atomic_write(&known_hosts, known.as_bytes(), 0o600)
+        .with_context(|| format!("write {}", known_hosts.display()))?;
+    let script = launch_dir.join(GIT_SSH_FILE);
+    secure_fs::atomic_write(&script, git_ssh_script(client_exe_name).as_bytes(), 0o600)
+        .with_context(|| format!("write {}", script.display()))?;
+    Ok(())
+}
+
+/// The contents of git's ssh launcher script: `#!/<client_exe_name>`. Git for
+/// Windows keeps only the last path component of a `#!` line.
+pub(crate) fn git_ssh_script(client_exe_name: &str) -> String {
+    format!("#!/{client_exe_name}\n")
 }
 
 /// AC 4: the egress default is deny; an explicit `egress: allow` keeps
