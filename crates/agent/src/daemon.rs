@@ -95,6 +95,7 @@ struct ResolvedDaemonArgs {
     vscode_chat_models: Option<PathBuf>,
     /// VS Code's user `settings.json`; `None` in system mode (user-only program).
     vscode_settings: Option<PathBuf>,
+    pi: ResolvedPiStartupConfig,
     /// `daemon.reconcileInterval`; `None` means no periodic re-apply.
     reconcile_interval: Option<Duration>,
     once: bool,
@@ -113,6 +114,11 @@ struct ResolvedClaudeDesktopStartupConfig {
 struct ResolvedOpenCodeStartupConfig {
     config: PathBuf,
     plugin: PathBuf,
+}
+
+struct ResolvedPiStartupConfig {
+    models: Option<PathBuf>,
+    settings: Option<PathBuf>,
 }
 
 impl DaemonArgs {
@@ -236,6 +242,15 @@ impl DaemonArgs {
                 },
                 vscode_chat_models: None,
                 vscode_settings: None,
+                pi: {
+                    if startup.pi.models.is_some() || startup.pi.settings.is_some() {
+                        bail!("daemon.pi paths require --user (or daemon.user: true)");
+                    }
+                    ResolvedPiStartupConfig {
+                        models: None,
+                        settings: None,
+                    }
+                },
                 reconcile_interval: startup.reconcile_interval,
                 once: self.once || self.dry_run,
                 dry_run: self.dry_run,
@@ -325,6 +340,14 @@ impl DaemonArgs {
                     .settings
                     .unwrap_or_else(|| reconcile::default_vscode_settings_path(&home)),
             ),
+            pi: ResolvedPiStartupConfig {
+                models: Some(startup.pi.models.unwrap_or_else(|| {
+                    crate::provider::pi::user_pi_agent_dir(&home).join("models.json")
+                })),
+                settings: Some(startup.pi.settings.unwrap_or_else(|| {
+                    crate::provider::pi::user_pi_agent_dir(&home).join("settings.json")
+                })),
+            },
             reconcile_interval: startup.reconcile_interval,
             once: self.once || self.dry_run,
             dry_run: self.dry_run,
@@ -450,6 +473,8 @@ where
         args.copilot_providers.clone(),
         args.vscode_chat_models.clone(),
         args.vscode_settings.clone(),
+        args.pi.models.clone(),
+        args.pi.settings.clone(),
         agentdesktop_client_executable()?,
         socket.clone(),
     )
@@ -474,6 +499,7 @@ where
             // they need nothing that `--once` cannot provide.
             validate_one_shot(
                 &reconcile::apply_program_choice(&config, &reconciler.program_choice()).0,
+                args.user,
             )?;
             let (report, applied) = reconciler.apply_with_report(&config);
             report.log();
@@ -500,6 +526,7 @@ where
     if reconciler.gateway_sign_in_wanted(&config) {
         start_gateway_authentication(
             &reconcile::apply_program_choice(&config, &reconciler.program_choice()).0,
+            args.user,
             args.state_dir.clone(),
             args.oidc_callback_listen,
             proxy_listener.is_some(),
@@ -973,8 +1000,26 @@ async fn refresh_inventory_with<F, Fut>(
     }
 }
 
+/// Only programs managed in this mode can request subscription sign-in.
+fn uses_subscription(config: &agentdesktop_core::config::DaemonConfig, user: bool) -> bool {
+    use agentdesktop_core::config::ProgramAuthentication;
+
+    config
+        .programs
+        .claude_code
+        .as_ref()
+        .is_some_and(|program| program.auth == Some(ProgramAuthentication::Subscription))
+        || (!user
+            && config
+                .programs
+                .claude_desktop
+                .as_ref()
+                .is_some_and(|program| program.auth == Some(ProgramAuthentication::Subscription)))
+}
+
 fn start_gateway_authentication(
     config: &agentdesktop_core::config::DaemonConfig,
+    user: bool,
     state_dir: PathBuf,
     callback_listen: Option<SocketAddr>,
     proxy_enabled: bool,
@@ -984,15 +1029,7 @@ fn start_gateway_authentication(
     };
     let authentication = gateway.authentication.clone();
     let github = gateway.github_oauth.clone().filter(|_| proxy_enabled);
-    let subscription = config.programs.claude_code.as_ref().is_some_and(|program| {
-        program.auth == Some(agentdesktop_core::config::ProgramAuthentication::Subscription)
-    }) || config
-        .programs
-        .claude_desktop
-        .as_ref()
-        .is_some_and(|program| {
-            program.auth == Some(agentdesktop_core::config::ProgramAuthentication::Subscription)
-        });
+    let subscription = uses_subscription(config, user);
     if authentication.is_none() && !subscription {
         return;
     }
@@ -1091,7 +1128,10 @@ fn validate_dry_run(config: &agentdesktop_core::config::DaemonConfig) -> anyhow:
     Ok(())
 }
 
-fn validate_one_shot(config: &agentdesktop_core::config::DaemonConfig) -> anyhow::Result<()> {
+fn validate_one_shot(
+    config: &agentdesktop_core::config::DaemonConfig,
+    user: bool,
+) -> anyhow::Result<()> {
     if config.controller.is_some() {
         bail!(
             "--once cannot use a controller because controller synchronization requires the daemon to remain running"
@@ -1100,12 +1140,12 @@ fn validate_one_shot(config: &agentdesktop_core::config::DaemonConfig) -> anyhow
     if !config.telemetry.events.is_empty() {
         bail!("--once cannot collect telemetry because hooks require the daemon to remain running");
     }
-    if config.programs.copilot.is_some() {
+    if user && config.programs.copilot.is_some() {
         bail!(
             "--once cannot manage the GitHub Copilot CLI providers file because its local proxy requires the daemon to remain running"
         );
     }
-    if config.programs.vscode.is_some() {
+    if user && config.programs.vscode.is_some() {
         bail!(
             "--once cannot manage the VS Code chatLanguageModels.json and settings.json files because their local proxy requires the daemon to remain running"
         );
@@ -1127,7 +1167,42 @@ fn validate_one_shot(config: &agentdesktop_core::config::DaemonConfig) -> anyhow
         .llm_gateway
         .as_ref()
         .is_some_and(|gateway| gateway.authentication.is_some())
-        && reconcile::programs_use_llm_gateway(&config.programs);
+        && [
+            config
+                .programs
+                .claude_code
+                .as_ref()
+                .is_some_and(|program| program.use_llm_gateway),
+            !user
+                && config
+                    .programs
+                    .claude_desktop
+                    .as_ref()
+                    .is_some_and(|program| program.use_llm_gateway),
+            config
+                .programs
+                .codex
+                .as_ref()
+                .is_some_and(|program| program.use_llm_gateway),
+            config
+                .programs
+                .open_code
+                .as_ref()
+                .is_some_and(|program| program.use_llm_gateway),
+            !user
+                && config
+                    .programs
+                    .grok
+                    .as_ref()
+                    .is_some_and(|program| program.use_llm_gateway),
+            user && config
+                .programs
+                .pi
+                .as_ref()
+                .is_some_and(|program| program.use_llm_gateway),
+        ]
+        .into_iter()
+        .any(|used| used);
     if authenticated_gateway_is_used {
         bail!(
             "--once cannot configure an authenticated LLM gateway because credential helpers require the daemon to remain running"
@@ -1377,6 +1452,51 @@ mod tests {
     use agentdesktop_core::config::{self, parse_daemon};
     use agentdesktop_core::model::{Agent, Discovery, LlmProxyInfo};
     use tokio::sync::{mpsc, watch};
+
+    #[test]
+    fn pi_startup_paths_require_user_mode() {
+        for user in [false, true] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(
+                file.path(),
+                format!(
+                    "daemon:\n  user: {user}\n  pi:\n    models: custom/pi-models.json\n    settings: custom/pi-settings.json\n"
+                ),
+            )
+            .unwrap();
+            let config = agentdesktop_core::config::load_daemon(file.path()).unwrap();
+            let args = super::DaemonArgs {
+                user: false,
+                once: false,
+                dry_run: false,
+                config: None,
+            };
+            let result = args.resolve(
+                config.daemon.unwrap(),
+                file.path().to_path_buf(),
+                agentdesktop_core::DEFAULT_SOCKET_PATH.into(),
+            );
+            if !user {
+                assert!(
+                    result
+                        .err()
+                        .unwrap()
+                        .to_string()
+                        .contains("daemon.pi paths require --user")
+                );
+                continue;
+            }
+            let resolved = result.unwrap();
+            assert_eq!(
+                resolved.pi.models.as_deref(),
+                Some(Path::new("custom/pi-models.json"))
+            );
+            assert_eq!(
+                resolved.pi.settings.as_deref(),
+                Some(Path::new("custom/pi-settings.json"))
+            );
+        }
+    }
 
     fn discovery(kinds: &[&str]) -> Discovery {
         Discovery {
@@ -1989,6 +2109,67 @@ programs:
     }
 
     #[test]
+    fn skipped_desktop_does_not_request_subscription_sign_in() {
+        let mut config = parse_daemon(
+            "llmGateway:\n  url: https://gateway.example.com\n  authentication:\n    type: oidc\n    issuer: https://login.example.com\n    clientId: agentdesktop\nprograms:\n  pi:\n    model: selected\n  claudeDesktop:\n    auth: subscription\n"
+        ).unwrap();
+        assert!(!super::uses_subscription(&config, true));
+        assert!(super::uses_subscription(&config, false));
+
+        config.programs.claude_code =
+            Some(serde_json::from_value(serde_json::json!({ "auth": "subscription" })).unwrap());
+        assert!(super::uses_subscription(&config, true));
+        assert!(super::uses_subscription(&config, false));
+    }
+
+    #[test]
+    fn one_shot_rejects_authenticated_pi_gateway() {
+        for authentication in [
+            "    type: oidc\n    issuer: https://login.example.com\n    clientId: agentdesktop\n",
+            "    type: controllerJwt\n    audience: agentgateway\n    allowedClientIds: [pi]\n",
+        ] {
+            let config = parse_daemon(&format!(
+                "llmGateway:\n  url: https://gateway.example.com\n  authentication:\n{authentication}programs:\n  pi:\n    model: selected\n"
+            )).unwrap();
+            let error = validate_one_shot(&config, true)
+                .expect_err("Pi credentials require a running daemon");
+            assert!(error.to_string().contains("credential helpers"));
+        }
+    }
+
+    #[test]
+    fn one_shot_accepts_pi_without_runtime_credentials() {
+        for yaml in [
+            "programs:\n  pi: {}\n",
+            "llmGateway:\n  url: https://gateway.example.com\nprograms:\n  pi:\n    model: selected\n",
+            "llmGateway:\n  url: https://gateway.example.com\n  authentication:\n    type: oidc\n    issuer: https://login.example.com\n    clientId: agentdesktop\nprograms:\n  pi:\n    useLlmGateway: false\n",
+        ] {
+            validate_one_shot(&parse_daemon(yaml).unwrap(), true).unwrap();
+        }
+    }
+
+    #[test]
+    fn one_shot_ignores_runtime_requirements_of_skipped_programs() {
+        for (user, programs) in [
+            (
+                false,
+                "  pi:\n    model: selected\n  copilot:\n    models:\n      selected: {}\n  vscode:\n    models:\n      selected: {}\n",
+            ),
+            (
+                true,
+                "  claudeDesktop:\n    model: selected\n  grok:\n    model: selected\n",
+            ),
+        ] {
+            let config = parse_daemon(&format!(
+                "llmGateway:\n  url: https://gateway.example.com\n  authentication:\n    type: oidc\n    issuer: https://login.example.com\n    clientId: agentdesktop\nprograms:\n  claudeCode:\n    useLlmGateway: false\n{programs}"
+            )).unwrap();
+            validate_one_shot(&config, user).expect("skipped programs need no runtime services");
+            validate_one_shot(&config, !user)
+                .expect_err("supported programs still require runtime services");
+        }
+    }
+
+    #[test]
     fn one_shot_accepts_static_settings_and_rejects_runtime_services() {
         let static_config = parse_daemon(
             r#"
@@ -1999,7 +2180,7 @@ programs:
 "#,
         )
         .unwrap();
-        validate_one_shot(&static_config).expect("static settings work in one-shot mode");
+        validate_one_shot(&static_config, true).expect("static settings work in one-shot mode");
 
         let oidc = parse_daemon(
             r#"
@@ -2015,7 +2196,7 @@ programs:
         )
         .unwrap();
         assert!(
-            validate_one_shot(&oidc)
+            validate_one_shot(&oidc, true)
                 .unwrap_err()
                 .to_string()
                 .contains("credential helpers")
@@ -2029,7 +2210,7 @@ telemetry:
         )
         .unwrap();
         assert!(
-            validate_one_shot(&telemetry)
+            validate_one_shot(&telemetry, true)
                 .unwrap_err()
                 .to_string()
                 .contains("telemetry")
@@ -2050,7 +2231,7 @@ programs:
         )
         .unwrap();
         assert!(
-            validate_one_shot(&copilot)
+            validate_one_shot(&copilot, true)
                 .unwrap_err()
                 .to_string()
                 .contains("Copilot")
@@ -2076,8 +2257,8 @@ programs:
             programs: ["claude-code".to_owned()].into(),
         };
         let chosen = crate::reconcile::apply_program_choice(&config, &only_claude).0;
-        validate_one_shot(&chosen).expect("an opted-out Copilot CLI is only cleaned up");
-        assert!(validate_one_shot(&config).is_err());
+        validate_one_shot(&chosen, true).expect("an opted-out Copilot CLI is only cleaned up");
+        assert!(validate_one_shot(&config, true).is_err());
     }
 
     #[test]
@@ -2121,7 +2302,7 @@ programs:
         )
         .unwrap();
         assert!(
-            validate_one_shot(&vscode)
+            validate_one_shot(&vscode, true)
                 .unwrap_err()
                 .to_string()
                 .contains("VS Code")

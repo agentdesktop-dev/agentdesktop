@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use agentdesktop_core::config::DaemonConfig;
-use agentdesktop_core::model::Discovery;
+use agentdesktop_core::model::{DaemonScope, Discovery};
 
 use super::{Provider, ReconcileContext};
 use crate::reconcile::ReconcilePlan;
@@ -41,10 +41,12 @@ impl Provider for Grok {
     }
 
     fn plan(&self, ctx: &ReconcileContext, config: &DaemonConfig) -> anyhow::Result<ReconcilePlan> {
-        if ctx.merge_user_settings && config.programs.grok.is_some() {
-            anyhow::bail!(
-                "Grok Build can delete or replace its user-level managed_config.toml during startup; remove programs.grok or run agentdesktop in system mode so it can manage Grok's system managed_config.toml"
-            );
+        if let Some(plan) = ctx.skip_unless(
+            DaemonScope::System,
+            config.programs.grok.is_some(),
+            Self::DISPLAY_NAME,
+        ) {
+            return Ok(plan);
         }
         let configured = config.programs.grok.as_ref().map(|provider| {
             let gateway = config

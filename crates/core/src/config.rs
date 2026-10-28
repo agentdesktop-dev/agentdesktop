@@ -95,6 +95,9 @@ pub struct DaemonStartupConfig {
     /// directory).
     #[serde(default)]
     pub vscode: VsCodeStartupConfig,
+    /// Pi paths.
+    #[serde(default)]
+    pub pi: PiStartupConfig,
     /// Local loopback LLM proxy.
     #[serde(default)]
     pub llm_proxy: LlmProxyStartupConfig,
@@ -217,6 +220,19 @@ pub struct OpenCodeStartupConfig {
     /// Credential plugin path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin: Option<PathBuf>,
+}
+
+/// Local Pi paths.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PiStartupConfig {
+    /// Model catalog file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<PathBuf>,
+    /// Settings file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<PathBuf>,
 }
 
 impl Default for DaemonConfig {
@@ -718,6 +734,10 @@ impl ProgramSelectionConfig {
 }
 
 /// Settings for developer tools managed by Agentdesktop.
+///
+/// A policy can mix user-only and system-only programs. Each daemon skips
+/// programs its mode cannot manage, reporting them as inactive with a reason.
+/// Skipped programs' files are left untouched, including during cleanup.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -725,7 +745,8 @@ pub struct ProgramsConfig {
     /// Claude Code managed-settings configuration. Arbitrary keys are passed through directly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_code: Option<ClaudeCodeConfig>,
-    /// Claude Desktop managed configuration. Arbitrary keys are passed through directly.
+    /// Claude Desktop system-managed configuration. User daemons skip it.
+    /// Arbitrary keys are passed through directly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_desktop: Option<ClaudeDesktopConfig>,
     /// Codex managed configuration.
@@ -744,6 +765,11 @@ pub struct ProgramsConfig {
     /// loopback proxy, or GitHub's models through the gateway).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vscode: Option<VsCodeConfig>,
+    /// Pi coding-agent harness managed configuration.
+    ///
+    /// Managed in user mode (`--user`); system daemons skip it with an inactive reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pi: Option<PiConfig>,
 }
 
 impl ProgramsConfig {
@@ -755,6 +781,7 @@ impl ProgramsConfig {
             && self.grok.is_none()
             && self.copilot.is_none()
             && self.vscode.is_none()
+            && self.pi.is_none()
     }
 }
 
@@ -881,7 +908,7 @@ pub struct OpenCodeConfig {
 /// When generated LLM-gateway settings overlap with those values,
 /// agentdesktop's generated values take precedence.
 /// Only system mode is supported. Grok can delete or replace the user-level
-/// managed file during startup, so `--user` rejects `programs.grok`.
+/// managed file during startup, so user daemons skip it with an inactive reason.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -918,8 +945,8 @@ pub struct GrokConfig {
 /// managed-settings equivalent for providers, and users may have their own
 /// BYOK entries. See `provider::copilot::reconcile` in the agent crate for
 /// how this is turned into the merged document. User mode only: the file
-/// lives in the user's Copilot directory, so a system daemon rejects the
-/// program.
+/// lives in the user's Copilot directory, so system daemons skip it with an
+/// inactive reason.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1060,7 +1087,7 @@ impl CopilotConfig {
 /// the daemon adds the gateway identity. See `provider::vscode::reconcile`
 /// and `provider::vscode::settings` in the agent crate for how each is turned
 /// into its merged document. User mode only: both files live in the user's
-/// VS Code profile directory, so a system daemon rejects the program.
+/// VS Code profile directory, so system daemons skip it with an inactive reason.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1225,6 +1252,41 @@ impl VsCodeConfig {
         }
         Ok(())
     }
+}
+
+/// Settings reconciled into Pi's user `models.json` and `settings.json`.
+///
+/// Generated `providers.agentdesktop` values take precedence over overlapping
+/// `managedConfig` keys. Pi stores configuration under `~/.pi/agent` (or
+/// `PI_CODING_AGENT_DIR`), so management requires `--user`. System daemons skip it.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PiConfig {
+    /// Whether this program uses the top-level LLM gateway.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub use_llm_gateway: bool,
+    /// Model ID selected when pointing Pi at the LLM gateway.
+    ///
+    /// This is required when a top-level `llmGateway` is configured. If `models`
+    /// is empty, agentdesktop creates a catalog entry with this ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Extra Pi model objects, keyed by model ID.
+    ///
+    /// Each value is an arbitrary Pi `models.json` model object. The map key
+    /// sets its `id`. Generated gateway `baseUrl` and `apiKey` values take
+    /// precedence, including per-model URLs. When this map is non-empty,
+    /// `model` must name one of its keys. Every key must contain a
+    /// non-whitespace character.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<String, serde_json::Value>,
+    /// Pi API dialect for the managed provider. Defaults to `anthropic-messages`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<String>,
+    /// Arbitrary values merged into Pi's `models.json`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub managed_config: BTreeMap<String, serde_json::Value>,
 }
 
 /// Upstream authentication selected by a managed agent.
@@ -1419,6 +1481,9 @@ fn validate_daemon(
         }
         if programs.vscode.is_some() {
             anyhow::bail!("sandbox is not supported for VS Code");
+        }
+        if programs.pi.is_some() {
+            anyhow::bail!("sandbox is not supported for Pi");
         }
     }
     if let Some(gateway) = llm_gateway {
@@ -1699,6 +1764,22 @@ fn validate_daemon(
             }
         }
     }
+    if let Some(pi) = &programs.pi
+        && llm_gateway.is_some()
+        && pi.use_llm_gateway
+    {
+        let model = pi
+            .model
+            .as_deref()
+            .filter(|model| !model.trim().is_empty())
+            .context("Pi requires model when llmGateway is configured")?;
+        if pi.models.keys().any(|model| model.trim().is_empty()) {
+            anyhow::bail!("Pi model IDs cannot be empty");
+        }
+        if !pi.models.is_empty() && !pi.models.contains_key(model) {
+            anyhow::bail!("Pi model {model} is not declared in models");
+        }
+    }
     Ok(())
 }
 
@@ -1763,6 +1844,22 @@ mod tests {
                 .contains("only allowed in the local")
         );
         assert!(super::parse_local_daemon("daemon: { stateDr: /tmp/device }").is_err());
+    }
+
+    #[test]
+    fn pi_startup_paths_are_local_only() {
+        let yaml = "daemon:\n  pi:\n    models: custom/pi-models.json\n    settings: custom/pi-settings.json\n";
+        let config = super::parse_local_daemon(yaml).expect("local Pi paths are supported");
+        let value = serde_json::to_value(config).unwrap();
+        assert_eq!(value["daemon"]["pi"]["models"], "custom/pi-models.json");
+        assert_eq!(value["daemon"]["pi"]["settings"], "custom/pi-settings.json");
+        assert!(
+            parse_daemon(yaml)
+                .unwrap_err()
+                .to_string()
+                .contains("only allowed in the local")
+        );
+        assert!(super::parse_local_daemon("daemon: { pi: { model: wrong } }").is_err());
     }
 
     #[test]
@@ -2395,5 +2492,96 @@ programs:
                 .to_string()
                 .contains("Grok Build model missing is not declared in models")
         );
+    }
+
+    #[test]
+    fn pi_parses_gateway_catalog_settings() {
+        let daemon = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  pi:
+    model: claude-sonnet-4-5
+    api: anthropic-messages
+    models:
+      claude-sonnet-4-5:
+        name: Claude Sonnet
+"#,
+        )
+        .expect("valid Pi configuration");
+        let pi = daemon.programs.pi.expect("Pi program");
+        assert!(pi.use_llm_gateway);
+        assert_eq!(pi.model.as_deref(), Some("claude-sonnet-4-5"));
+        assert_eq!(pi.api.as_deref(), Some("anthropic-messages"));
+        assert!(pi.models.contains_key("claude-sonnet-4-5"));
+    }
+
+    #[test]
+    fn pi_requires_a_model_when_using_the_gateway() {
+        let error = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  pi: {}
+"#,
+        )
+        .expect_err("Pi without a model should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Pi requires model when llmGateway is configured")
+        );
+    }
+
+    #[test]
+    fn pi_requires_a_declared_gateway_model_when_models_are_listed() {
+        let error = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  pi:
+    model: missing
+    models:
+      available: {}
+"#,
+        )
+        .expect_err("undeclared Pi model should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Pi model missing is not declared in models")
+        );
+    }
+
+    #[test]
+    fn pi_rejects_empty_model_ids() {
+        let error = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  pi:
+    model: claude-sonnet-4-5
+    models:
+      claude-sonnet-4-5: {}
+      "": {}
+"#,
+        )
+        .expect_err("empty Pi model id should fail");
+
+        assert!(error.to_string().contains("Pi model IDs cannot be empty"));
+    }
+
+    #[test]
+    fn accepts_mixed_user_and_system_programs() {
+        parse_daemon(
+            "programs:\n  pi: {}\n  claudeDesktop: {}\n  grok: {}\n  copilot: {}\n  vscode: {}",
+        )
+        .expect("each daemon manages the programs supported in its mode");
     }
 }

@@ -724,7 +724,7 @@ device-wide state. The device page in the controller lists them under
 | `unchanged` | The program is configured and nothing needed to change. |
 | `removed` | The program is no longer configured and its managed content was removed. |
 | `conflict` | A managed file holds configuration the daemon will not overwrite; the detail names the file. |
-| `inactive` | The program uses the LLM gateway but the local LLM proxy is not running (see `llmProxy.error` in daemon-info): its entries were left pointing at the loopback port (`whenProxyUnavailable: failClosed`, the default; the detail says when no entries were in place, so the tool keeps its own settings) or removed (`failOpen`). |
+| `inactive` | The daemon's mode cannot manage the program, so its files are untouched and the detail names the required mode. Also used when the program uses the LLM gateway but the local LLM proxy is not running (see `llmProxy.error` in daemon-info): its entries were left pointing at the loopback port (`whenProxyUnavailable: failClosed`, the default; the detail says when no entries were in place, so the tool keeps its own settings) or removed (`failOpen`). |
 | `blocked` | The program had changes, but none were written because another program conflicted or failed; the detail names that program. |
 | `opted_out` | The program is configured, but the device user [opted out of it](#user-choice-of-managed-programs-opt-in); its managed content was removed. An older controller shows this as `unspecified`. |
 | `failed` | Planning or writing this program failed; the detail carries the error. |
@@ -872,13 +872,20 @@ runs this setup.
 | Tool | Discovery | Managed configuration | MCP and skills inventory | Sandbox policy |
 | --- | --- | --- | --- | --- |
 | Claude Code | Yes | Yes | MCP and skills | Yes |
-| Claude Desktop | Yes | Yes | MCP | — |
+| Claude Desktop | Yes | System mode | MCP | — |
 | Codex | Yes | Yes | MCP and skills | Yes |
 | Cursor | Yes | — | MCP and skills | — |
 | OpenCode | Yes | Yes | MCP | — |
 | VS Code | Yes | User mode (Copilot Chat) | MCP and skills | — |
 | Grok Build | Yes | System mode | MCP and skills | — |
 | GitHub Copilot CLI | Yes | User mode | — | — |
+| Pi | Yes | User mode | MCP and skills | — |
+
+A fleet policy can include programs for both user and system mode. Each daemon
+skips programs its mode cannot manage and reports them as **inactive** with a
+reason; supported programs continue applying. Skipped programs' files are left
+untouched, including when the program is removed from the policy. Cleanup requires
+a daemon running in the program's supported mode.
 
 > **Don't see your tool?** We're actively expanding this list and would love
 > your help. [Open an integration request](https://github.com/agentdesktop-dev/agentdesktop/issues/new)

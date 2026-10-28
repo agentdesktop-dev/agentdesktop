@@ -645,10 +645,10 @@ fn conflict_on_a_non_array_non_object_file() {
     assert_eq!(fs::read(&path).unwrap(), b"42\n");
 }
 
-// --- Provider::plan: system-mode rejection ----------------------------------
+// --- Provider::plan: system-mode skipping ----------------------------------
 
 #[test]
-fn system_mode_rejects_a_configured_program_before_writing_anything() {
+fn system_mode_skips_a_configured_program_without_writing_anything() {
     use super::VsCode;
     use crate::provider::{Provider, ReconcileContext};
     let dir = tempfile::tempdir().unwrap();
@@ -675,12 +675,15 @@ fn system_mode_rejects_a_configured_program_before_writing_anything() {
             settings_path: Some(path.with_file_name("settings.json")),
         },
     ] {
-        let error = match provider.plan(&context(false), &config) {
-            Ok(_) => panic!("system mode with programs.vscode configured must fail"),
-            Err(error) => error,
-        };
-        assert!(error.to_string().contains("--user"), "{error}");
-        assert!(error.to_string().contains("VS Code"), "{error}");
+        let plan = provider
+            .plan(&context(false), &config)
+            .expect("system mode skips this program");
+        let reason = plan
+            .inactive_reason()
+            .expect("configured program is inactive");
+        assert!(reason.contains("--user"), "{reason}");
+        assert!(reason.contains("VS Code"), "{reason}");
+        plan.apply().unwrap();
     }
     assert!(!path.exists(), "preflight failure must not write any files");
 }

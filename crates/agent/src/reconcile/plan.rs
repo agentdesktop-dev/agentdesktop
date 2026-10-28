@@ -23,8 +23,8 @@ pub struct ReconcilePlan {
     registry: RefCell<Vec<RegistryKeyPlan>>,
     private_dirs: PrivateDirs,
     report: DryRunReport,
-    /// Why the program that owns this plan is configured but not pointed at
-    /// the gateway (the loopback proxy is absent); set by the provider.
+    /// Why the configured program cannot be managed in this daemon's mode or
+    /// cannot use the gateway (the loopback proxy is absent).
     inactive: RefCell<Option<String>>,
 }
 
@@ -87,10 +87,18 @@ impl ReconcilePlan {
         self.apply_tracked().map_err(|(error, _)| error)
     }
 
-    /// Records that the program owning this plan uses the gateway, a gateway
-    /// is configured, and the loopback proxy is absent.
+    /// Records why the configured program is inactive.
     pub fn inactive(&self, reason: &str) {
         *self.inactive.borrow_mut() = Some(reason.to_owned());
+    }
+
+    /// A program outside this daemon's scope has no file operations. Keep its
+    /// reason in both per-program status and the combined dry-run report.
+    pub(crate) fn skipped(reason: &str) -> Self {
+        let plan = Self::default();
+        plan.inactive(reason);
+        plan.report.inactive.borrow_mut().push(reason.to_owned());
+        plan
     }
 
     /// The reason recorded by [`ReconcilePlan::inactive`], for tests.
@@ -315,6 +323,10 @@ impl ReconcilePlan {
             .changes
             .get_mut()
             .extend(other.report.changes.into_inner());
+        self.report
+            .inactive
+            .get_mut()
+            .extend(other.report.inactive.into_inner());
         Ok(())
     }
 

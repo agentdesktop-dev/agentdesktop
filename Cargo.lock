@@ -57,6 +57,7 @@ dependencies = [
  "bytes",
  "clap",
  "futures-util",
+ "glob",
  "hostname",
  "http-body-util",
  "hyper",

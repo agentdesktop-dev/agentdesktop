@@ -690,6 +690,13 @@ const configurableAgents: Array<{
       "copilotChat: githubModels\n# or own models through the gateway:\n# models:\n#   gpt-4.1-mini:\n#     maxInputTokens: 128000",
     initialSettings: "models:\n  gpt-4.1-mini: {}",
   },
+  {
+    kind: "pi",
+    label: "Pi",
+    iconKind: "pi",
+    placeholder: "model: claude-sonnet-4-5",
+    initialSettings: "model: claude-sonnet-4-5",
+  },
 ];
 
 const sandboxUnsupportedAgents = new Set<AgentKind>([
@@ -698,6 +705,7 @@ const sandboxUnsupportedAgents = new Set<AgentKind>([
   "grok",
   "copilot",
   "vscode",
+  "pi",
 ]);
 
 function daemonConfigYaml(options: {
@@ -731,7 +739,7 @@ function daemonConfigYaml(options: {
         "  authentication:",
         "    type: controllerJwt",
         `    audience: ${yamlString(options.audience)}`,
-        "    allowedClientIds: [claude-code, claude-desktop, codex, opencode, grok, copilot-cli, vscode-copilot]",
+        "    allowedClientIds: [claude-code, claude-desktop, codex, opencode, grok, copilot-cli, vscode-copilot, pi]",
       );
     }
     lines.push("");

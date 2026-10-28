@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Query, State},
     http::StatusCode,
     routing::{get, post},
@@ -215,6 +215,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/usage", get(device_usage))
         .route("/v1/programs", get(programs))
         .route("/v1/programs/choice", post(change_program_choice))
+        .layer(Extension(Arc::new(
+            crate::llm_proxy::CredentialCache::default(),
+        )))
         .with_state(state)
 }
 
@@ -426,6 +429,7 @@ async fn logout(State(state): State<AppState>) -> Result<StatusCode, (StatusCode
 
 async fn llm_gateway_credential(
     State(state): State<AppState>,
+    Extension(cache): Extension<Arc<crate::llm_proxy::CredentialCache>>,
     Query(query): Query<CredentialQuery>,
 ) -> Result<Json<LlmGatewayCredential>, (StatusCode, String)> {
     if !valid_client_id(&query.client_id) {
@@ -437,6 +441,28 @@ async fn llm_gateway_credential(
             format!("read applied configuration: {error:#}"),
         )
     })?;
+    // Pi executes its helper on every request. Reuse the proxy's 60 s cache
+    // for controller identities; OIDC and subscription flows keep their own
+    // refresh behavior. Read identity.json on each call so logout/re-enrollment
+    // cannot reuse another device's token.
+    if !program_uses_subscription(&effective, &query.client_id)
+        && let Some(gateway) = effective.llm_gateway.as_ref()
+        && let Some(LlmGatewayAuthentication::ControllerJwt {
+            audience,
+            allowed_client_ids,
+        }) = &gateway.authentication
+        && allowed_client_ids.contains(&query.client_id)
+        && let Ok(Some(device_id)) =
+            crate::identity::load_device_id(&state.state_dir.join("identity.json"))
+    {
+        let key = format!("{}\0{}\0{audience}", query.client_id, gateway.url);
+        return cache
+            .get_credential(&key, &device_id, || {
+                gateway_credential(&state, &effective, &query.client_id, true)
+            })
+            .await
+            .map(Json);
+    }
     gateway_credential(&state, &effective, &query.client_id, true)
         .await
         .map(Json)
@@ -698,6 +724,191 @@ mod tests {
         ProgramControl, load_effective_config, program_uses_subscription, unmetered_tools,
     };
 
+    #[tokio::test]
+    async fn credential_endpoint_reuses_controller_tokens_only_for_the_same_identity_and_policy() {
+        use agentdesktop_core::model::{DaemonInfo, DaemonScope, Discovery, LlmGatewayCredential};
+        use axum::{
+            Extension,
+            extract::{Query, State},
+        };
+        use std::{
+            sync::Arc,
+            time::{Duration, SystemTime, UNIX_EPOCH},
+        };
+        let root = tempfile::tempdir().unwrap();
+        let config = parse_daemon("llmGateway:\n  url: https://gateway.example.com\n  authentication:\n    type: controllerJwt\n    audience: test\n    allowedClientIds: [pi, codex]\n").unwrap();
+        let identity = |id: &str| {
+            serde_json::json!({
+                "deviceId": id, "clientCertificatePem": "test", "clientCertificateExpiresAtUnixSeconds": 0,
+                "oauthTokenEndpoint": "test", "oauthClientId": "test"
+            })
+        };
+        fs::write(
+            root.path().join("identity.json"),
+            identity("device-1").to_string(),
+        )
+        .unwrap();
+        let (_, discovery) = tokio::sync::watch::channel(Arc::new(Discovery {
+            agents: vec![],
+            model_runtimes: vec![],
+        }));
+        let mut state = super::AppState {
+            config,
+            daemon_info: DaemonInfo {
+                version: "test".into(),
+                scope: DaemonScope::User,
+                config_path: String::new(),
+                state_directory: String::new(),
+                inventory_interval: Duration::from_secs(60),
+                controller: None,
+                llm_proxy: None,
+                usage_receiver: None,
+            },
+            discovery,
+            enrollment: crate::enrollment::EnrollmentState::new(false),
+            controller_status: None,
+            state_dir: root.path().to_owned(),
+            oidc_callback_listen: None,
+            telemetry: None,
+            logout: None,
+            usage: None,
+            programs: None,
+        };
+        let cache = Arc::new(crate::llm_proxy::CredentialCache::default());
+        let expiry = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 600;
+        cache
+            .get_credential(
+                "pi\0https://gateway.example.com/\0test",
+                "device-1",
+                || async {
+                    Ok::<_, ()>(LlmGatewayCredential {
+                        credential: "cached-token".into(),
+                        expires_at_unix_seconds: expiry,
+                    })
+                },
+            )
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            let credential = super::llm_gateway_credential(
+                State(state.clone()),
+                Extension(cache.clone()),
+                Query(super::CredentialQuery {
+                    client_id: "pi".into(),
+                }),
+            )
+            .await
+            .unwrap()
+            .0;
+            assert_eq!(credential.credential, "cached-token");
+            assert_eq!(credential.expires_at_unix_seconds, expiry);
+        }
+        // Policy changes must not reuse a cached token for the old policy.
+        if let Some(agentdesktop_core::config::LlmGatewayAuthentication::ControllerJwt {
+            audience,
+            ..
+        }) = &mut state.config.llm_gateway.as_mut().unwrap().authentication
+        {
+            *audience = "changed".into();
+        }
+        assert!(
+            super::llm_gateway_credential(
+                State(state.clone()),
+                Extension(cache.clone()),
+                Query(super::CredentialQuery {
+                    client_id: "pi".into()
+                })
+            )
+            .await
+            .is_err()
+        );
+        if let Some(agentdesktop_core::config::LlmGatewayAuthentication::ControllerJwt {
+            audience,
+            allowed_client_ids,
+        }) = &mut state.config.llm_gateway.as_mut().unwrap().authentication
+        {
+            *audience = "test".into();
+            allowed_client_ids.remove("pi");
+        }
+        assert!(
+            super::llm_gateway_credential(
+                State(state.clone()),
+                Extension(cache.clone()),
+                Query(super::CredentialQuery {
+                    client_id: "pi".into()
+                })
+            )
+            .await
+            .is_err()
+        );
+        if let Some(agentdesktop_core::config::LlmGatewayAuthentication::ControllerJwt {
+            allowed_client_ids,
+            ..
+        }) = &mut state.config.llm_gateway.as_mut().unwrap().authentication
+        {
+            allowed_client_ids.insert("pi".into());
+        }
+        // No controller is configured, so any miss fails instead of contacting a server.
+        assert!(
+            super::llm_gateway_credential(
+                State(state.clone()),
+                Extension(cache.clone()),
+                Query(super::CredentialQuery {
+                    client_id: "codex".into()
+                })
+            )
+            .await
+            .is_err()
+        );
+        state.config.llm_gateway.as_mut().unwrap().url =
+            "https://other.example.com".parse().unwrap();
+        assert!(
+            super::llm_gateway_credential(
+                State(state.clone()),
+                Extension(cache.clone()),
+                Query(super::CredentialQuery {
+                    client_id: "pi".into()
+                })
+            )
+            .await
+            .is_err()
+        );
+        state.config.llm_gateway.as_mut().unwrap().url =
+            "https://gateway.example.com".parse().unwrap();
+        fs::write(
+            root.path().join("identity.json"),
+            identity("device-2").to_string(),
+        )
+        .unwrap();
+        assert!(
+            super::llm_gateway_credential(
+                State(state.clone()),
+                Extension(cache.clone()),
+                Query(super::CredentialQuery {
+                    client_id: "pi".into()
+                })
+            )
+            .await
+            .is_err()
+        );
+        fs::remove_file(root.path().join("identity.json")).unwrap();
+        assert!(
+            super::llm_gateway_credential(
+                State(state),
+                Extension(cache),
+                Query(super::CredentialQuery {
+                    client_id: "pi".into()
+                })
+            )
+            .await
+            .is_err()
+        );
+    }
+
     #[test]
     fn vscode_on_github_models_is_reported_as_unmetered() {
         let github_models = parse_daemon(
@@ -851,6 +1062,8 @@ programs:
                 None,
                 None,
                 None,
+                Some(root.join("pi/models.json")),
+                Some(root.join("pi/settings.json")),
                 root.join("bin/agentdesktop"),
                 root.join("agentdesktop.sock"),
             )
