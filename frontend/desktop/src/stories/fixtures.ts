@@ -51,6 +51,36 @@ export const usageReceiverOffDaemonInfo: DaemonInfo = {
   },
 };
 
+const interceptStatus: NonNullable<DaemonInfo["intercept"]> = {
+  listen: "127.0.0.1:18471",
+  enabled: true,
+  bound: true,
+  caCertificate: "/var/lib/agentdesktop/intercept-ca.pem",
+  caSha256: "AB:CD:EF:12",
+  forwarded: 12,
+  gatewayFailures: 0,
+  tunnels: 3,
+  tunnelFailures: 0,
+};
+
+export const interceptDaemonInfo: DaemonInfo = {
+  ...standaloneDaemonInfo,
+  scope: "system",
+  intercept: interceptStatus,
+};
+
+export const interceptUnboundDaemonInfo: DaemonInfo = {
+  ...interceptDaemonInfo,
+  intercept: {
+    ...interceptStatus,
+    bound: false,
+    error: "Address already in use (os error 48)",
+    forwarded: 4,
+    gatewayFailures: 1,
+    lastFailure: "gateway connection refused",
+  },
+};
+
 export const managedDaemonInfo: DaemonInfo = {
   version: "0.1.1",
   scope: "system",

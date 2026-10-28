@@ -3,6 +3,9 @@ mod common;
 #[path = "../src/provider/claude_code/integration_tests.rs"]
 mod claude_code;
 
+#[path = "../src/provider/claude_desktop/integration_tests.rs"]
+mod claude_desktop;
+
 #[path = "../src/provider/codex/integration_tests.rs"]
 mod codex;
 

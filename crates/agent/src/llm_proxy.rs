@@ -1428,10 +1428,11 @@ mod tests {
                 daemon_info: DaemonInfo { version: "test".into(), scope: DaemonScope::User,
                     config_path: String::new(), state_directory: String::new(),
                     inventory_interval: Duration::from_secs(60), controller: None, llm_proxy: None,
-                    usage_receiver: None },
+                    usage_receiver: None, intercept: None },
                 discovery, enrollment: EnrollmentState::new(false), state_dir: dir.path().to_owned(),
                 oidc_callback_listen: None, telemetry: None, logout: None, usage: None,
                 programs: None,
+                intercept: None,
             };
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let proxy_address = listener.local_addr().unwrap();
@@ -2059,6 +2060,7 @@ mod tests {
                     controller: None,
                     llm_proxy: None,
                     usage_receiver: None,
+                    intercept: None,
                 },
                 discovery,
                 enrollment: EnrollmentState::new(true),
@@ -2068,6 +2070,7 @@ mod tests {
                 logout: None,
                 usage: None,
                 programs: None,
+                intercept: None,
             };
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let proxy_address = listener.local_addr().unwrap();
@@ -2449,6 +2452,7 @@ mod tests {
                 controller: None,
                 llm_proxy: None,
                 usage_receiver: None,
+                intercept: None,
             },
             discovery,
             enrollment: EnrollmentState::new(false),
@@ -2458,6 +2462,7 @@ mod tests {
             logout: None,
             usage: None,
             programs: None,
+            intercept: None,
         };
         (dir, state)
     }
@@ -2628,6 +2633,7 @@ mod tests {
                 controller: None,
                 llm_proxy: None,
                 usage_receiver: None,
+                intercept: None,
             },
             discovery,
             enrollment: EnrollmentState::new(false),
@@ -2637,6 +2643,7 @@ mod tests {
             logout: None,
             usage: None,
             programs: None,
+            intercept: None,
         };
         (dir, state)
     }
@@ -2698,6 +2705,7 @@ mod tests {
                 controller: None,
                 llm_proxy: None,
                 usage_receiver: None,
+                intercept: None,
             },
             discovery,
             enrollment: EnrollmentState::new(false),
@@ -2707,6 +2715,7 @@ mod tests {
             logout: None,
             usage: None,
             programs: None,
+            intercept: None,
         };
         (dir, state)
     }

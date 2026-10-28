@@ -1,0 +1,272 @@
+# Smoke test of Claude Desktop in first-party intercept mode on macOS, with the
+# real Claude Desktop app. The system daemon pins Claude Desktop to its intercept
+# listener (managed `egressProxyUrl`), its CA is trusted in the System keychain,
+# and a local agentgateway passes claude.ai and api.anthropic.com through to
+# Anthropic. Claude Desktop is launched without signing in, so the traffic is
+# the signed-out start: the sign-in page and its API calls.
+#
+# Pass: Claude Desktop logs the pinned proxy and no certificate or TLS errors,
+# agentgateway logs claude.ai answering with 2xx or 3xx, and the daemon counts
+# forwarded requests.
+name: Claude Desktop smoke
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 7 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CI: true
+  AGENTGATEWAY_VERSION: v1.6.0
+  AGENTGATEWAY_SHA256: 6cebe8bd57262edce23a65a376d2f5a27b97cdfef609740642edbe75e1e9c685
+  # Anthropic's Developer ID team for Claude Desktop.
+  CLAUDE_TEAM_ID: Q6L2SF6YDW
+  INTERCEPT_LISTEN: 127.0.0.1:18471
+  GATEWAY_PORT: "4011"
+  DAEMON_ROOT: /var/tmp/agentdesktop-smoke
+  MANAGED_SETTINGS: /Library/Managed Preferences/com.anthropic.claudefordesktop.plist
+
+jobs:
+  smoke:
+    name: Claude Desktop intercept (macOS)
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set paths
+        run: |
+          smoke="$RUNNER_TEMP/claude-desktop-smoke"
+          mkdir -p "$smoke/out"
+          {
+            echo "SMOKE=$smoke"
+            echo "OUT=$smoke/out"
+            echo "AGW_LOG=$smoke/out/agentgateway.log"
+            echo "DAEMON_LOG=$smoke/out/daemon.log"
+            echo "STATE_DIR=$DAEMON_ROOT/state"
+            echo "SOCKET=$DAEMON_ROOT/agentdesktop.sock"
+            echo "MAIN_LOG=$HOME/Library/Logs/Claude/main.log"
+          } >>"$GITHUB_ENV"
+
+      - name: Set up Rust build cache
+        uses: ./.github/actions/rust-build-cache
+        with:
+          cache-key: claude-desktop-smoke
+          save: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build the daemon
+        run: cargo build --locked -p agentdesktop-agent --bin agentdesktop-headless
+
+      - name: Install agentgateway
+        run: |
+          curl -fsSL --retry 3 -o "$SMOKE/agentgateway" \
+            "https://github.com/agentgateway/agentgateway/releases/download/$AGENTGATEWAY_VERSION/agentgateway-darwin-arm64"
+          echo "$AGENTGATEWAY_SHA256  $SMOKE/agentgateway" | shasum -a 256 -c
+          chmod +x "$SMOKE/agentgateway"
+
+      # The latest release from the feed that Claude Desktop's own updater reads.
+      - name: Install Claude Desktop
+        run: |
+          feed=https://downloads.claude.ai/releases/darwin/universal/RELEASES.json
+          url=$(curl -fsSL --retry 3 "$feed" | jq -r '.currentRelease as $v | .releases[] | select(.version == $v) | .updateTo.url')
+          case "$url" in
+            https://downloads.claude.ai/releases/darwin/universal/*.zip) ;;
+            *) echo "::error::unexpected download URL in $feed: $url"; exit 1 ;;
+          esac
+          echo "Claude Desktop: $url"
+          curl -fsSL --retry 3 -o "$SMOKE/Claude.zip" "$url"
+          ditto -x -k "$SMOKE/Claude.zip" "$SMOKE/unpacked"
+          app="$SMOKE/unpacked/Claude.app"
+          codesign --verify --deep --strict "$app"
+          team=$(codesign -dv "$app" 2>&1 | sed -n 's/^TeamIdentifier=//p')
+          if [ "$team" != "$CLAUDE_TEAM_ID" ]; then
+            echo "::error::Claude.app is signed by team '$team', expected $CLAUDE_TEAM_ID"
+            exit 1
+          fi
+          sudo mv "$app" /Applications/Claude.app
+          version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Applications/Claude.app/Contents/Info.plist)
+          echo "CLAUDE_VERSION=$version" >>"$GITHUB_ENV"
+          echo "Installed Claude Desktop $version"
+
+      - name: Start agentgateway
+        run: |
+          cat >"$SMOKE/agentgateway.yaml" <<EOF
+          config:
+            adminAddr: 127.0.0.1:15911
+            statsAddr: "off"
+            readinessAddr: "off"
+            sensitiveHeaders: [cookie, x-agentdesktop-identity]
+          frontendPolicies:
+            accessLog:
+              add:
+                # Present when Cloudflare answers with a bot challenge.
+                cf_mitigated: 'response.headers["cf-mitigated"]'
+          gateways:
+            local:
+              port: $GATEWAY_PORT
+              bindAddress: 127.0.0.1
+              protocol: HTTP
+          routes:
+          - name: claude-ai
+            gateways: local
+            hostnames: [claude.ai]
+            policies:
+              requestHeaderModifier:
+                remove: [x-agentdesktop-identity]
+            backends:
+            - host: claude.ai:443
+              policies:
+                backendTLS:
+                  hostname: claude.ai
+                  alpn: ["http/1.1"]
+          - name: anthropic-api
+            gateways: local
+            hostnames: [api.anthropic.com]
+            policies:
+              requestHeaderModifier:
+                remove: [x-agentdesktop-identity]
+            backends:
+            - host: api.anthropic.com:443
+              policies:
+                backendTLS:
+                  hostname: api.anthropic.com
+                  alpn: ["http/1.1"]
+          EOF
+          nohup "$SMOKE/agentgateway" -f "$SMOKE/agentgateway.yaml" >"$AGW_LOG" 2>&1 &
+          for _ in $(seq 1 30); do nc -z 127.0.0.1 "$GATEWAY_PORT" 2>/dev/null && exit 0; sleep 1; done
+          echo "::error::agentgateway did not listen on port $GATEWAY_PORT"
+          cat "$AGW_LOG"
+          exit 1
+
+      - name: Start the system daemon
+        run: |
+          cat >"$SMOKE/daemon.yaml" <<EOF
+          daemon:
+            stateDir: $STATE_DIR
+            socket: $SOCKET
+            intercept:
+              listen: $INTERCEPT_LISTEN
+          llmGateway:
+            url: http://127.0.0.1:$GATEWAY_PORT
+          programs:
+            claudeDesktop:
+              gatewayMode: intercept
+          EOF
+          sudo mkdir -p "$DAEMON_ROOT"
+          sudo nohup "$PWD/target/debug/agentdesktop-headless" daemon --config "$SMOKE/daemon.yaml" >"$DAEMON_LOG" 2>&1 &
+          for _ in $(seq 1 60); do
+            sudo test -S "$SOCKET" && sudo test -f "$STATE_DIR/intercept-ca.pem" && test -f "$MANAGED_SETTINGS" && break
+            sleep 1
+          done
+          if ! sudo test -f "$STATE_DIR/intercept-ca.pem" || ! test -f "$MANAGED_SETTINGS"; then
+            echo "::error::the daemon did not start its intercept listener or write Claude Desktop's managed settings"
+            cat "$DAEMON_LOG"
+            exit 1
+          fi
+          sudo cat "$STATE_DIR/intercept-ca.pem" >"$OUT/intercept-ca.pem"
+          openssl x509 -in "$OUT/intercept-ca.pem" -noout -subject -fingerprint -sha256 -ext nameConstraints
+          plutil -p "$MANAGED_SETTINGS"
+
+      - name: Trust the intercept CA
+        timeout-minutes: 3
+        run: |
+          sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$OUT/intercept-ca.pem"
+          security verify-cert -c "$OUT/intercept-ca.pem"
+
+      - name: Launch Claude Desktop and check
+        run: |
+          pin="[egress-proxy] pinned to fixed proxy at $INTERCEPT_LISTEN"
+          check() {
+            pinned=no
+            grep -qF "$pin" "$MAIN_LOG" 2>/dev/null && pinned=yes
+            tls_errors=$(grep -cE 'ERR_CERT|ERR_SSL' "$MAIN_LOG" 2>/dev/null || true)
+            tls_errors=${tls_errors:-0}
+            claude_lines=$(grep -E 'route=default/claude-ai ' "$AGW_LOG" || true)
+            # Answers from claude.ai itself, not Cloudflare's challenge pages.
+            claude_ok=$(printf '%s\n' "$claude_lines" | grep -v 'http.path=/cdn-cgi/' | grep -v 'cf_mitigated=' \
+              | grep -cE 'http.status=[23][0-9]{2} ' || true)
+            challenged=$(printf '%s\n' "$claude_lines" | grep -c 'cf_mitigated=' || true)
+            forwarded=$(sudo curl -sS --max-time 5 --unix-socket "$SOCKET" http://localhost/v1/daemon-info \
+              | jq -r '.intercept.forwarded // 0' 2>/dev/null || echo 0)
+            forwarded=${forwarded:-0}
+          }
+
+          open -a /Applications/Claude.app
+          for _ in $(seq 1 36); do
+            sleep 5
+            check
+            [ "$pinned" = yes ] && [ "$claude_ok" -gt 0 ] && [ "$forwarded" -gt 0 ] && break
+          done
+          # Let the sign-in page finish loading, then check again.
+          sleep 20
+          check
+
+          echo "== agentgateway: host, status, Cloudflare mitigation"
+          grep -E 'route=default/(claude-ai|anthropic-api) ' "$AGW_LOG" \
+            | sed -E 's/.*http\.host=([^ ]+).*http\.status=([0-9]+).*/\1 \2/' | sort | uniq -c | sort -rn || true
+          grep 'cf_mitigated=' "$AGW_LOG" \
+            | sed -E 's/.*http\.host=([^ ]+) http\.path=([^ ?]+).*http\.status=([0-9]+).*cf_mitigated="([^"]*)".*/\1 \2 \3 \4/' \
+            | sort | uniq -c | sort -rn || true
+          echo "== Claude Desktop TLS errors"
+          grep -oE 'net::ERR_(CERT|SSL)[A-Z_]*' "$MAIN_LOG" 2>/dev/null | sort | uniq -c || true
+
+          {
+            echo "### Claude Desktop $CLAUDE_VERSION, intercept mode"
+            echo
+            echo "| Check | Result |"
+            echo "| --- | --- |"
+            echo "| \`main.log\` shows the pinned proxy | $pinned |"
+            echo "| \`ERR_CERT\` / \`ERR_SSL\` lines in \`main.log\` | $tls_errors |"
+            echo "| claude.ai 2xx/3xx through agentgateway | $claude_ok |"
+            echo "| claude.ai Cloudflare challenges | $challenged |"
+            echo "| daemon \`intercept.forwarded\` | $forwarded |"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+          failed=0
+          [ "$pinned" = yes ] || { echo "::error::main.log does not show '$pin'"; failed=1; }
+          [ "$tls_errors" -eq 0 ] || { echo "::error::main.log has $tls_errors certificate or TLS errors"; failed=1; }
+          [ "$forwarded" -gt 0 ] || { echo "::error::the daemon forwarded no requests to agentgateway"; failed=1; }
+          if [ "$claude_ok" -eq 0 ]; then
+            if [ "$challenged" -gt 0 ]; then
+              echo "::error::claude.ai answered this runner with $challenged Cloudflare challenges and no regular responses"
+            else
+              echo "::error::agentgateway logged no 2xx or 3xx answers from claude.ai"
+            fi
+            failed=1
+          fi
+          exit "$failed"
+
+      - name: Collect logs
+        if: always()
+        run: |
+          screencapture -x "$OUT/screen.png" || true
+          sudo curl -sS --max-time 5 --unix-socket "$SOCKET" http://localhost/v1/daemon-info >"$OUT/daemon-info.json" || true
+          plutil -p "$MANAGED_SETTINGS" >"$OUT/managed-settings.txt" 2>&1 || true
+          pkill -x Claude || true
+          sleep 3
+          cp -R "$HOME/Library/Logs/Claude" "$OUT/claude-logs" 2>/dev/null || true
+          sudo pkill -f agentdesktop-headless || true
+          pkill -f "$SMOKE/agentgateway" || true
+          # The system daemon logs to its state directory, not to stdout.
+          sudo cp -R "$STATE_DIR/logs" "$OUT/daemon-logs" || true
+          sudo chown -R "$(id -u)" "$OUT/daemon-logs" || true
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: claude-desktop-smoke
+          path: ${{ env.OUT }}
+          retention-days: 14
+          if-no-files-found: warn

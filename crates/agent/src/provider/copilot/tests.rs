@@ -50,6 +50,7 @@ fn sample_gateway() -> LlmGatewayConfig {
         url: "https://gateway.example.com".parse().unwrap(),
         authentication: None,
         proxy_url: None,
+        intercept_url: None,
         github_oauth: None,
         when_proxy_unavailable: Default::default(),
     }
@@ -769,6 +770,7 @@ fn system_mode_skips_a_configured_program_without_writing_anything() {
         credential_helper: dir.path().join("agentdesktop"),
         socket: dir.path().join("agentdesktop.sock"),
         llm_proxy: None,
+        intercept_proxy: None,
     };
     // System mode: no providers path, or a path but no user settings.
     for provider in [

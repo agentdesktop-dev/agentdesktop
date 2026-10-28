@@ -77,6 +77,7 @@ impl Reconciler {
                 credential_helper,
                 socket,
                 llm_proxy: None,
+                intercept_proxy: None,
             },
             providers: Arc::new(vec![
                 Box::new(ClaudeCode {
@@ -120,6 +121,13 @@ impl Reconciler {
     /// Attach the bound loopback LLM proxy so reconcilers can point client files at it.
     pub fn with_llm_proxy(mut self, llm_proxy: Option<crate::llm_proxy::LlmProxyContext>) -> Self {
         self.context.llm_proxy = llm_proxy;
+        self
+    }
+
+    /// The intercept listener address that Claude Desktop's `egressProxyUrl`
+    /// points at in intercept mode.
+    pub fn with_intercept(mut self, intercept_proxy: Option<std::net::SocketAddr>) -> Self {
+        self.context.intercept_proxy = intercept_proxy;
         self
     }
 

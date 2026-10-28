@@ -46,6 +46,8 @@ pub struct AppState {
     pub usage: Option<UsageStore>,
     /// The device user's program choice; `None` serves no program routes.
     pub programs: Option<ProgramControl>,
+    /// The intercept listener's state, for daemon-info; `None` in user mode.
+    pub intercept: Option<Arc<crate::intercept::Status>>,
 }
 
 /// Reads and changes the device user's program choice, and re-applies the
@@ -336,7 +338,9 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
 }
 
 async fn daemon_info(State(state): State<AppState>) -> Json<DaemonInfo> {
-    Json(state.daemon_info)
+    let mut info = state.daemon_info;
+    info.intercept = state.intercept.as_ref().map(|status| status.info());
+    Json(info)
 }
 
 async fn config(State(state): State<AppState>) -> Json<DaemonConfig> {
@@ -759,6 +763,7 @@ mod tests {
                 controller: None,
                 llm_proxy: None,
                 usage_receiver: None,
+                intercept: None,
             },
             discovery,
             enrollment: crate::enrollment::EnrollmentState::new(false),
@@ -769,6 +774,7 @@ mod tests {
             logout: None,
             usage: None,
             programs: None,
+            intercept: None,
         };
         let cache = Arc::new(crate::llm_proxy::CredentialCache::default());
         let expiry = SystemTime::now()

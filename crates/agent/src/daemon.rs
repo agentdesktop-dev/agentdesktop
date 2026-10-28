@@ -37,8 +37,8 @@ use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 #[cfg(windows)]
 use crate::windows_security::SecurityDescriptor;
 use crate::{
-    api, enrollment::EnrollmentState, gateway_oidc, inventory_watch::InventoryWatch, llm_proxy,
-    reconcile, remote, secure_fs,
+    api, enrollment::EnrollmentState, gateway_oidc, intercept, inventory_watch::InventoryWatch,
+    llm_proxy, reconcile, remote, secure_fs,
 };
 
 #[cfg(unix)]
@@ -79,6 +79,9 @@ struct ResolvedDaemonArgs {
     oidc_callback_listen: Option<SocketAddr>,
     llm_proxy_listen: Option<SocketAddr>,
     llm_proxy_client_id: String,
+    /// The intercept listener address (`daemon.intercept.listen` or its
+    /// default); `None` in user mode, where Claude Desktop is not managed.
+    intercept_listen: Option<SocketAddr>,
     /// `daemon.usage`; `None` for `--once` and `--dry-run`, which serve nothing.
     usage: Option<config::UsageStartupConfig>,
     claude_code: ResolvedToolConfigPath,
@@ -154,6 +157,13 @@ impl DaemonArgs {
             .usage
             .clone()
             .filter(|_| !(self.once || self.dry_run));
+        // Claude Desktop's managed settings are system-wide, so only the
+        // system daemon pins it to the intercept listener.
+        if user && startup.intercept.listen.is_some() {
+            bail!(
+                "daemon.intercept.listen is for the system daemon; it cannot be used with --user"
+            );
+        }
         // VS Code's chatLanguageModels.json and settings.json live in the
         // user's own profile, like the Copilot CLI providers file: a system
         // daemon has no user file to manage, so an explicit override is
@@ -179,6 +189,12 @@ impl DaemonArgs {
                 oidc_callback_listen: startup.oidc_callback_listen,
                 llm_proxy_listen: None,
                 llm_proxy_client_id: llm_proxy_client_id.clone(),
+                intercept_listen: Some(
+                    startup
+                        .intercept
+                        .listen
+                        .unwrap_or_else(config::default_intercept_listen),
+                ),
                 usage,
                 claude_code: ResolvedToolConfigPath {
                     config: startup.claude_code.config.unwrap_or_else(|| {
@@ -265,6 +281,7 @@ impl DaemonArgs {
             oidc_callback_listen: startup.oidc_callback_listen,
             llm_proxy_listen,
             llm_proxy_client_id,
+            intercept_listen: None,
             usage,
             claude_code: ResolvedToolConfigPath {
                 config: startup
@@ -461,7 +478,8 @@ where
         agentdesktop_client_executable()?,
         socket.clone(),
     )
-    .with_llm_proxy(proxy_context);
+    .with_llm_proxy(proxy_context)
+    .with_intercept(args.intercept_listen);
     let choice = crate::program_choice::load(&args.state_dir);
     if choice != agentdesktop_core::model::ProgramChoice::All {
         tracing::info!(
@@ -627,6 +645,9 @@ where
         ));
     }
     let has_controller = config.controller.is_some();
+    let intercept_status = args
+        .intercept_listen
+        .map(|listen| intercept::Status::new(listen, args.state_dir.clone()));
     let state = api::AppState {
         config,
         daemon_info,
@@ -639,7 +660,18 @@ where
         logout,
         usage: usage_store,
         programs: Some(program_control),
+        intercept: intercept_status.clone(),
     };
+    // The intercept listener follows the applied configuration: it runs while
+    // programs.claudeDesktop.gatewayMode is intercept.
+    if let (Some(listen), Some(status)) = (args.intercept_listen, intercept_status) {
+        tokio::spawn(intercept::supervise(
+            listen,
+            state.clone(),
+            current_config.subscribe(),
+            status,
+        ));
+    }
     let app = api::router(state.clone());
     // The proxy is optional at runtime too: if serving fails (for example the
     // TLS root store cannot be built), log it and keep the daemon running
@@ -847,6 +879,7 @@ fn describe_daemon(
         controller,
         llm_proxy,
         usage_receiver: None,
+        intercept: None,
     }
 }
 
@@ -1115,6 +1148,19 @@ fn validate_one_shot(
     if user && config.programs.vscode.is_some() {
         bail!(
             "--once cannot manage the VS Code chatLanguageModels.json and settings.json files because their local proxy requires the daemon to remain running"
+        );
+    }
+    if config
+        .programs
+        .claude_desktop
+        .as_ref()
+        .is_some_and(|desktop| {
+            desktop.gateway_mode == agentdesktop_core::config::ClaudeDesktopGatewayMode::Intercept
+                && desktop.use_llm_gateway
+        })
+    {
+        bail!(
+            "--once cannot pin Claude Desktop to the intercept listener because the listener requires the daemon to remain running"
         );
     }
     let authenticated_gateway_is_used = config
@@ -1712,6 +1758,7 @@ programs:
             logout: None,
             usage: None,
             programs: None,
+            intercept: None,
         });
 
         for (method, expected_status) in [("GET", "200 OK"), ("POST", "405 Method Not Allowed")] {
@@ -1851,6 +1898,7 @@ programs:
             logout: None,
             usage: store,
             programs: None,
+            intercept: None,
         });
         let (mut client, server) = tokio::io::duplex(64 * 1024);
         let connection = tokio::spawn(serve_local_connection(server, app));
@@ -1937,6 +1985,7 @@ programs:
             logout: None,
             usage: None,
             programs: None,
+            intercept: None,
         });
 
         for endpoint in ["/v1/health", "/v1/config", "/v1/daemon-info"] {
@@ -2213,6 +2262,33 @@ programs:
     }
 
     #[test]
+    fn one_shot_rejects_claude_desktop_intercept_mode_unless_opted_out() {
+        let config = parse_daemon(
+            r#"
+programSelection: { allowUserChoice: true }
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  claudeCode: {}
+  claudeDesktop:
+    gatewayMode: intercept
+"#,
+        )
+        .unwrap();
+        assert!(
+            validate_one_shot(&config, false)
+                .unwrap_err()
+                .to_string()
+                .contains("intercept listener")
+        );
+        let only_claude_code = agentdesktop_core::model::ProgramChoice::Selected {
+            programs: ["claude-code".to_owned()].into(),
+        };
+        let chosen = crate::reconcile::apply_program_choice(&config, &only_claude_code).0;
+        validate_one_shot(&chosen, false).expect("an opted-out Claude Desktop is only cleaned up");
+    }
+
+    #[test]
     fn one_shot_rejects_the_vscode_program() {
         let vscode = parse_daemon(
             r#"
@@ -2284,6 +2360,38 @@ programs:
         let mut startup = config::DaemonStartupConfig::default();
         startup.llm_proxy.listen = Some(listen.parse().unwrap());
         startup
+    }
+
+    #[test]
+    fn the_intercept_listener_address_is_for_the_system_daemon() {
+        let resolved = daemon_args(false)
+            .resolve(
+                config::DaemonStartupConfig::default(),
+                PathBuf::from("config.yaml"),
+                PathBuf::from(DEFAULT_SOCKET_PATH),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved.intercept_listen,
+            Some(config::default_intercept_listen())
+        );
+        let user = daemon_args(true)
+            .resolve(
+                config::DaemonStartupConfig::default(),
+                PathBuf::from("config.yaml"),
+                PathBuf::from(DEFAULT_SOCKET_PATH),
+            )
+            .unwrap();
+        assert_eq!(user.intercept_listen, None);
+        let mut startup = config::DaemonStartupConfig::default();
+        startup.intercept.listen = Some("127.0.0.1:18500".parse().unwrap());
+        let error = resolve_error(daemon_args(true), startup);
+        assert!(
+            error
+                .to_string()
+                .contains("daemon.intercept.listen is for the system daemon"),
+            "{error:#}"
+        );
     }
 
     #[test]

@@ -105,12 +105,31 @@
             }
           ]
         },
+        "gatewayMode": {
+          "description": "How Claude Desktop uses the gateway. `inference` (the default) switches\nit to third-party inference through the gateway. `intercept` keeps it\nsigned in to claude.ai and sends its Anthropic traffic through the\ndaemon's intercept listener, which forwards it to the gateway.",
+          "$ref": "#/$defs/ClaudeDesktopGatewayMode"
+        },
         "useLlmGateway": {
           "description": "Whether this program uses the top-level LLM gateway.",
           "type": "boolean"
         }
       },
       "additionalProperties": true
+    },
+    "ClaudeDesktopGatewayMode": {
+      "description": "How Claude Desktop uses the LLM gateway.",
+      "oneOf": [
+        {
+          "description": "Third-party inference: Claude Desktop sends model requests to the\ngateway with `inferenceProvider: gateway`. It does not sign in to\nclaude.ai, so claude.ai history, connectors and organization settings do\nnot apply.",
+          "type": "string",
+          "const": "inference"
+        },
+        {
+          "description": "First party: Claude Desktop stays signed in to claude.ai. The daemon\npins it to the local intercept listener with `egressProxyUrl`; the\nlistener decrypts claude.ai and api.anthropic.com with a local CA,\nwhich must be trusted on the device, and forwards them to the gateway\nwith an `x-agentdesktop-identity` header. Every other host is tunnelled.",
+          "type": "string",
+          "const": "intercept"
+        }
+      ]
     },
     "ClaudeDesktopStartupConfig": {
       "description": "Local Claude Desktop paths.",
@@ -260,6 +279,11 @@
           "$ref": "#/$defs/ToolConfigPath",
           "default": {}
         },
+        "intercept": {
+          "description": "Local intercept listener for Claude Desktop in first-party mode\n(`programs.claudeDesktop.gatewayMode: intercept`). System mode only.",
+          "$ref": "#/$defs/InterceptStartupConfig",
+          "default": {}
+        },
         "llmProxy": {
           "description": "Local loopback LLM proxy.",
           "$ref": "#/$defs/LlmProxyStartupConfig",
@@ -393,6 +417,20 @@
       },
       "additionalProperties": false
     },
+    "InterceptStartupConfig": {
+      "description": "Intercept listener settings. The listener runs in the system daemon while the\napplied configuration sets `programs.claudeDesktop.gatewayMode: intercept`.",
+      "type": "object",
+      "properties": {
+        "listen": {
+          "description": "Loopback address of the listener, which is also the proxy written into\nClaude Desktop's `egressProxyUrl`. Defaults to `127.0.0.1:18471`.\nRejected in user mode.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "LlmGatewayAuthentication": {
       "description": "Authentication mechanisms supported by an LLM gateway.",
       "oneOf": [
@@ -499,6 +537,13 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "interceptUrl": {
+          "description": "Where the intercept listener sends Claude Desktop's first-party traffic\n(`programs.claudeDesktop.gatewayMode: intercept`), when it differs from\n`url`.\n\nOnly the scheme, host and port are used: each request keeps its own\npath and its original host (`claude.ai`, `api.anthropic.com`), and the\ngateway routes it by host. Without this setting the listener uses the\nscheme, host and port of `url`. The URL cannot include a path,\ncredentials, a query, or a fragment.",
+          "type": [
+            "string",
+            "null"
           ]
         },
         "proxyUrl": {

@@ -39,6 +39,7 @@ fn sample_gateway() -> LlmGatewayConfig {
         url: "https://gateway.example.com".parse().unwrap(),
         authentication: None,
         proxy_url: None,
+        intercept_url: None,
         github_oauth: None,
         when_proxy_unavailable: Default::default(),
     }
@@ -661,6 +662,7 @@ fn system_mode_skips_a_configured_program_without_writing_anything() {
         credential_helper: dir.path().join("agentdesktop"),
         socket: dir.path().join("agentdesktop.sock"),
         llm_proxy: None,
+        intercept_proxy: None,
     };
     // System mode: no chat models path, or a path but no user settings.
     for provider in [
@@ -718,6 +720,7 @@ fn github_models_through_the_provider_removes_the_chat_models_entry_and_writes_s
             address: "127.0.0.1:4000".parse().unwrap(),
             pairing: pairing.clone(),
         }),
+        intercept_proxy: None,
     };
     let provider = VsCode {
         chat_models_path: Some(chat_models.clone()),

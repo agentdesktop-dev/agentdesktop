@@ -139,6 +139,54 @@ export const BuildsYaml: Story = {
   },
 };
 
+export const BuildsClaudeDesktopInterceptYaml: Story = {
+  play: async ({ canvas, canvasElement }) => {
+    await userEvent.click(canvas.getByText("Add agent"));
+    await userEvent.click(
+      canvas.getByRole("button", { name: /Claude Desktop/ }),
+    );
+    await userEvent.selectOptions(
+      canvas.getByRole("combobox", { name: "Gateway mode" }),
+      "intercept",
+    );
+    const output = canvasElement.querySelector(".output-card code");
+    await expect(output?.textContent).toContain(
+      "claudeDesktop:\n    gatewayMode: intercept",
+    );
+    await expect(
+      canvas.getByText(/Requires the system daemon and a trusted intercept CA/),
+    ).toBeVisible();
+    await userEvent.click(
+      canvas.getByRole("checkbox", { name: /Enable LLM gateway/ }),
+    );
+    await expect(
+      canvas.getByRole("combobox", { name: "Gateway mode" }),
+    ).toHaveValue("inference");
+    await expect(output).not.toHaveTextContent("gatewayMode: intercept");
+  },
+};
+
+export const LoadsClaudeDesktopInterceptYaml: Story = {
+  args: {
+    initialConfig: {
+      llmGateway: { url: "https://gateway.example.com" },
+      programs: { claudeDesktop: { gatewayMode: "intercept" } },
+    },
+  },
+  play: async ({ canvas, canvasElement }) => {
+    const output = canvasElement.querySelector(".output-card code");
+    await expect(
+      canvas.getByRole("combobox", { name: "Gateway mode" }),
+    ).toHaveValue("intercept");
+    await expect(output?.textContent).toContain(
+      "claudeDesktop:\n    gatewayMode: intercept",
+    );
+    await expect(output?.textContent).not.toContain(
+      "gatewayMode: intercept\n    {}",
+    );
+  },
+};
+
 export const BuildsSandboxYaml: Story = {
   play: async ({ canvas, canvasElement }) => {
     await userEvent.click(canvas.getByText("Sandbox"));

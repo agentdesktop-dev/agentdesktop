@@ -57,6 +57,11 @@ pub struct ReconcileContext {
     /// failed, or no pairing could be created: such programs must then remove
     /// or neutralise any pointer they wrote earlier, never leave a stale one.
     pub llm_proxy: Option<crate::llm_proxy::LlmProxyContext>,
+    /// The intercept listener address, which Claude Desktop is pinned to in
+    /// `gatewayMode: intercept`. Set in system mode whether or not the listener
+    /// is serving at the moment: Claude Desktop then fails to connect rather
+    /// than go around the gateway. `None` in user mode.
+    pub intercept_proxy: Option<std::net::SocketAddr>,
 }
 
 impl ReconcileContext {

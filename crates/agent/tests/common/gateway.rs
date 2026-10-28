@@ -73,8 +73,13 @@ async fn handle(
     let authorization = headers.get("authorization").and_then(|v| v.to_str().ok());
     let api_key = headers.get("x-api-key").and_then(|v| v.to_str().ok());
     let llm_token = headers.get("x-llm-token").and_then(|v| v.to_str().ok());
+    let host = headers.get("host").and_then(|v| v.to_str().ok());
+    let cookie = headers.get("cookie").and_then(|v| v.to_str().ok());
+    let identity = headers
+        .get("x-agentdesktop-identity")
+        .and_then(|v| v.to_str().ok());
     tracing::debug!(%method, path, "Gateway fixture request");
-    requests.lock().unwrap().push(json!({"path": path, "method": method.as_str(), "authorization": authorization, "apiKey": api_key, "llmToken": llm_token, "body": body}));
+    requests.lock().unwrap().push(json!({"path": path, "method": method.as_str(), "host": host, "authorization": authorization, "apiKey": api_key, "llmToken": llm_token, "cookie": cookie, "identity": identity, "body": body}));
     if path == "/health" {
         return Json(json!({"ready": true})).into_response();
     }
