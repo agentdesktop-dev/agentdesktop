@@ -107,6 +107,8 @@ fn executor_cfg(path: &str) -> ContainmentStartupConfig {
         executor: PathBuf::from(path),
         egress: agentdesktop_core::config::ContainmentEgress::default(),
         engine: agentdesktop_core::config::ContainmentEngine::default(),
+        egress_upstream: None,
+        git: None,
     }
 }
 
@@ -1004,8 +1006,10 @@ fn the_integrity_roots_are_protected_in_the_request() {
         r"C:\lab\agentdesktop".into(),
         r"C:\Program Files\ClaudeCode".into(),
         r"C:\Users\dev\.gitconfig".into(),
-        r"C:\Users\dev\.config\git\config".into(),
+        // XDG config is conditionally denied (only when parent exists); it's
+        // not in the default snapshot's denied list.
         format!(r"{LAUNCH_DIR}\credential"),
+        format!(r"{LAUNCH_DIR}\git_config"),
         r"C:\Users\dev\.claude\.credentials.json".into(),
         r"C:\Users\dev\.claude\history.jsonl".into(),
         r"C:\Users\dev\.claude\ide".into(),
@@ -1332,12 +1336,15 @@ fn a_git_file_of_a_worktree_or_submodule_is_left_as_it_is() {
         existing.remove(gone);
     }
     let request = request_json(&existing, &directories, |_| {});
+    // PR 4: the home git user-configuration files are always denied and the
+    // generated git_config always granted, so the check is scoped to the
+    // workspace `.git` the test is about.
     for path in readwrite(&request)
         .into_iter()
         .chain(readonly(&request))
         .chain(denied(&request))
     {
-        assert!(!path.contains(r"\.git"), "{path}");
+        assert!(!path.contains(r"C:\lab\ws pr1\.git"), "{path}");
     }
 }
 
@@ -1361,6 +1368,47 @@ fn credential_and_ssh_style_paths_are_denied_whether_or_not_they_exist() {
             assert!(!readonly(&request).contains(&path.to_owned()), "{path}");
         }
     }
+}
+
+#[test]
+fn git_user_config_always_denied_and_xdg_config_denied_only_when_parent_exists() {
+    // PR 4 AC 6: `~/.gitconfig` is always denied (parent `$HOME` always exists).
+    // The XDG path `~/.config/git/config` is denied only when its parent
+    // `~/.config/git` exists, to satisfy MXC's denied-path parent rule.
+    let gitconfig = r"C:\Users\dev\.gitconfig";
+    let xdg_config = r"C:\Users\dev\.config\git\config";
+    let xdg_parent = r"C:\Users\dev\.config\git";
+
+    // Case 1: XDG parent directory exists.
+    let mut existing_with_parent = snapshot_existing();
+    existing_with_parent.insert(xdg_parent.to_owned());
+    let mut dirs_with_parent = snapshot_directories();
+    dirs_with_parent.insert(xdg_parent.to_owned());
+    let request_parent_exists = request_json(&existing_with_parent, &dirs_with_parent, |_| {});
+
+    assert!(
+        denied(&request_parent_exists).contains(&gitconfig.to_owned()),
+        "~/.gitconfig is always denied"
+    );
+    assert!(
+        denied(&request_parent_exists).contains(&xdg_config.to_owned()),
+        "XDG config is denied when parent exists; got {:?}",
+        denied(&request_parent_exists)
+    );
+
+    // Case 2: XDG parent directory does not exist.
+    let existing_no_parent = snapshot_existing();
+    let dirs_no_parent = snapshot_directories();
+    let request_parent_absent = request_json(&existing_no_parent, &dirs_no_parent, |_| {});
+
+    assert!(
+        denied(&request_parent_absent).contains(&gitconfig.to_owned()),
+        "~/.gitconfig is always denied even when XDG parent absent"
+    );
+    assert!(
+        !denied(&request_parent_absent).contains(&xdg_config.to_owned()),
+        "XDG config is not denied when parent does not exist (MXC parent rule)"
+    );
 }
 
 #[test]
@@ -1711,6 +1759,11 @@ struct FakeHost {
 impl LaunchHost for FakeHost {
     fn home(&self) -> PathBuf {
         self.home.clone()
+    }
+
+    fn git_identity(&self) -> Vec<(String, Vec<String>)> {
+        // Deterministic: never read the test machine's git configuration.
+        Vec::new()
     }
 
     fn path_dirs(&self) -> Vec<PathBuf> {
@@ -2135,6 +2188,7 @@ impl Harness {
             proxy_address: setup.proxy_address,
             session_policy: setup.session_policy.clone(),
             egress: setup.egress,
+            git: None,
             engine: Arc::new(engine::mxc::MxcEngine),
         };
 
@@ -3532,9 +3586,11 @@ fn the_engine_reproduces_the_baseline_request_bytes() {
     const LAUNCH_ID: &str = "0123456789abcdef";
 
     // Oracle (a): launch_input + snapshot_existing extended with both git
-    // user-configuration files, egress: Allow. The extension pins the order
-    // of the profile's two git user-configuration entries in `readonlyPaths`;
-    // re-captured at the baseline with the same fixture (ledger ## v2).
+    // user-configuration files, egress: Allow. Re-captured for PR 4 with the
+    // same fixture (ledger ## v5 writer): the git user-configuration files
+    // moved from readonlyPaths to deniedPaths, the generated git_config is
+    // granted read-only, and the box env gains GIT_CONFIG_GLOBAL and
+    // GIT_TERMINAL_PROMPT=0 (AC 6).
     const ORACLE_A: &str = r#"{
   "version": "1.0.0",
   "containment": "processcontainer",
@@ -3559,6 +3615,8 @@ fn the_engine_reproduces_the_baseline_request_bytes() {
       "CLAUDE_CONFIG_DIR=C:\\Users\\dev\\.claude",
       "ComSpec=C:\\Windows\\system32\\cmd.exe",
       "DISABLE_AUTOUPDATER=1",
+      "GIT_CONFIG_GLOBAL=C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\git_config",
+      "GIT_TERMINAL_PROMPT=0",
       "HOME=C:\\Users\\dev",
       "HOMEDRIVE=C:",
       "HOMEPATH=\\Users\\dev",
@@ -3589,8 +3647,7 @@ fn the_engine_reproduces_the_baseline_request_bytes() {
       "C:\\Program Files\\Git",
       "C:\\lab\\agentdesktop",
       "C:\\Program Files\\ClaudeCode",
-      "C:\\Users\\dev\\.gitconfig",
-      "C:\\Users\\dev\\.config\\git\\config",
+      "C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\git_config",
       "C:\\Users\\dev\\.claude\\settings.json",
       "C:\\Users\\dev\\.claude\\plugins",
       "C:\\lab\\ws pr1\\.mcp.json",
@@ -3610,7 +3667,9 @@ fn the_engine_reproduces_the_baseline_request_bytes() {
       "C:\\Users\\dev\\.ssh",
       "C:\\Users\\dev\\.aws",
       "C:\\Users\\dev\\.azure",
-      "C:\\Users\\dev\\.kube"
+      "C:\\Users\\dev\\.kube",
+      "C:\\Users\\dev\\.gitconfig",
+      "C:\\Users\\dev\\.config\\git\\config"
     ]
   },
   "network": {
@@ -3649,6 +3708,8 @@ fn the_engine_reproduces_the_baseline_request_bytes() {
       "CLAUDE_CONFIG_DIR=C:\\Users\\dev\\.claude",
       "ComSpec=C:\\Windows\\system32\\cmd.exe",
       "DISABLE_AUTOUPDATER=1",
+      "GIT_CONFIG_GLOBAL=C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\git_config",
+      "GIT_TERMINAL_PROMPT=0",
       "HOME=C:\\Users\\dev",
       "HOMEDRIVE=C:",
       "HOMEPATH=\\Users\\dev",
@@ -3679,6 +3740,7 @@ fn the_engine_reproduces_the_baseline_request_bytes() {
       "C:\\Program Files\\Git",
       "C:\\lab\\agentdesktop",
       "C:\\Program Files\\ClaudeCode",
+      "C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\git_config",
       "C:\\Users\\dev\\.claude\\settings.json",
       "C:\\Users\\dev\\.claude\\plugins",
       "C:\\lab\\ws pr1\\.mcp.json",
@@ -3698,7 +3760,8 @@ fn the_engine_reproduces_the_baseline_request_bytes() {
       "C:\\Users\\dev\\.ssh",
       "C:\\Users\\dev\\.aws",
       "C:\\Users\\dev\\.azure",
-      "C:\\Users\\dev\\.kube"
+      "C:\\Users\\dev\\.kube",
+      "C:\\Users\\dev\\.gitconfig"
     ]
   },
   "network": {
@@ -3735,6 +3798,8 @@ fn the_engine_reproduces_the_baseline_request_bytes() {
       "CLAUDE_CODE_USE_POWERSHELL_TOOL=1",
       "CLAUDE_CONFIG_DIR=C:\\Users\\dev\\.claude",
       "DISABLE_AUTOUPDATER=1",
+      "GIT_CONFIG_GLOBAL=C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\git_config",
+      "GIT_TERMINAL_PROMPT=0",
       "HOME=C:\\Users\\dev",
       "PATH=C:\\Windows\\System32;C:\\Windows;C:\\Windows\\System32\\WindowsPowerShell\\v1.0;C:\\Users\\dev\\.local\\bin;C:\\lab\\agentdesktop",
       "TEMP=C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\tmp",
@@ -3748,7 +3813,9 @@ fn the_engine_reproduces_the_baseline_request_bytes() {
       "C:\\Users\\dev\\.claude",
       "C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\tmp"
     ],
-    "readonlyPaths": [],
+    "readonlyPaths": [
+      "C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\git_config"
+    ],
     "deniedPaths": [
       "C:\\ws\\.claude",
       "C:\\ws\\.git",
@@ -3763,7 +3830,8 @@ fn the_engine_reproduces_the_baseline_request_bytes() {
       "C:\\Users\\dev\\.ssh",
       "C:\\Users\\dev\\.aws",
       "C:\\Users\\dev\\.azure",
-      "C:\\Users\\dev\\.kube"
+      "C:\\Users\\dev\\.kube",
+      "C:\\Users\\dev\\.gitconfig"
     ]
   },
   "network": {
@@ -3778,16 +3846,22 @@ fn the_engine_reproduces_the_baseline_request_bytes() {
 }"#;
 
     // Fixture (a): both git user-configuration files exist, so the oracle
-    // covers their positions among the read-only grants.
+    // covers their positions among the read-only grants. The XDG config's
+    // parent directory also exists (required for MXC denied-path rule).
     let existing_a = {
         let mut existing = snapshot_existing();
         existing.insert(r"C:\Users\dev\.gitconfig".to_owned());
+        existing.insert(r"C:\Users\dev\.config\git".to_owned());
         existing.insert(r"C:\Users\dev\.config\git\config".to_owned());
         existing
     };
+    let directories_a = {
+        let mut dirs = snapshot_directories();
+        dirs.insert(r"C:\Users\dev\.config\git".to_owned());
+        dirs
+    };
     let exists_a = |path: &Path| existing_a.contains(path.to_str().expect("UTF-8 path"));
-    let is_dir_a =
-        |path: &Path| snapshot_directories().contains(path.to_str().expect("UTF-8 path"));
+    let is_dir_a = |path: &Path| directories_a.contains(path.to_str().expect("UTF-8 path"));
     let input_a = launch_input(&exists_a, &is_dir_a);
     let plan_a = plan(&input_a, &CLAUDE_CODE);
     let bytes_a = MxcEngine.request(&plan_a, LAUNCH_ID).unwrap();
@@ -3864,6 +3938,8 @@ fn posture_carries_engine_name() {
             executor: p("path/to/wxc-exec.exe"),
             egress: agentdesktop_core::config::ContainmentEgress::Allow,
             engine: agentdesktop_core::config::ContainmentEngine::Mxc,
+            egress_upstream: None,
+            git: None,
         }),
         true,
         true,
@@ -3884,6 +3960,8 @@ fn posture_carries_engine_when_containment_unavailable() {
             executor: p("path/to/missing.exe"),
             egress: agentdesktop_core::config::ContainmentEgress::Allow,
             engine: agentdesktop_core::config::ContainmentEngine::Mxc,
+            egress_upstream: None,
+            git: None,
         }),
         true,
         true,

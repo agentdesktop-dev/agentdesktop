@@ -16,9 +16,29 @@
 |`daemon.codex`|object|Codex paths.|
 |`daemon.codex.config`|string|Configuration file.|
 |`daemon.containment`|object|Sandboxed launch (`agentdesktop run`).|
-|`daemon.containment.egress`|enum|Outbound network for the sandboxed program: `allow` (default) or `deny`. With `deny` the box reaches only loopback: model requests go through the local LLM proxy, and git over HTTPS and package downloads fail. Read at startup only (restart the daemon after changing it); ignored with `--once` and `--dry-run`.<br>Possible values: `allow`, `deny`.|
+|`daemon.containment.egress`|enum|Outbound network for the sandboxed program: `deny` (default) or `allow`. With `deny` the box reaches only loopback and configured egress routes. Read at startup only (restart the daemon after changing it); ignored with `--once` and `--dry-run`.<br>Possible values: `allow`, `deny`.|
+|`daemon.containment.egressUpstream`|object|Central L7 egress endpoint (an agentgateway HTTPS listener whose<br>per-prefix routes are the central allowlist). When set, the relay sends<br>the box's git smart-HTTP requests to `https://<egress host>/<path>`<br>instead of directly to the remote. CONNECT is always refused, with or<br>without it. Read at startup only.|
+|`daemon.containment.egressUpstream.authentication`|object|Reserved for gateway-hop authentication, which is not available yet:<br>startup refuses a config that sets it (the relay sends only the git<br>credential in `Authorization`).|
+|`daemon.containment.egressUpstream.authentication.allowedClientIds`|[]string|Client identifiers permitted to request credentials for this gateway.|
+|`daemon.containment.egressUpstream.authentication.audience`|string|Audience placed in the issued JWT. This must match the gateway's expected audience.|
+|`daemon.containment.egressUpstream.authentication.type`|enum|Possible values: `controllerJwt`.|
+|`daemon.containment.egressUpstream.authentication.allowInsecure`|boolean|Permit loopback HTTP endpoints for isolated local development.|
+|`daemon.containment.egressUpstream.authentication.clientId`|string|Public OpenID Connect client identifier.|
+|`daemon.containment.egressUpstream.authentication.deviceAuthorization`|boolean|Sign in with the OAuth 2.0 Device Authorization Grant (RFC 8628)<br>instead of a browser redirect to a local callback.<br><br>Use this on hosts without a local browser, such as servers reached<br>over SSH. Run `agentdesktop-headless login` to get a verification<br>URL and user code to approve from any other device. The identity<br>provider must support device authorization for this client.|
+|`daemon.containment.egressUpstream.authentication.issuer`|string|Exact OpenID Connect issuer URL.|
+|`daemon.containment.egressUpstream.authentication.redirectUri`|string|Loopback redirect URI registered for the native client.|
+|`daemon.containment.egressUpstream.authentication.scopes`|[]string|Scopes requested during sign-in.|
+|`daemon.containment.egressUpstream.authentication.type`|enum|Possible values: `oidc`.|
+|`daemon.containment.egressUpstream.url`|string|HTTPS URL of the egress endpoint; must include a host and no<br>credentials, query or fragment.|
 |`daemon.containment.engine`|enum|Sandbox engine: `mxc` (default, the only engine). Read at startup only<br>(restart the daemon after changing it); ignored with `--once` and `--dry-run`.<br>Possible values: `mxc`.|
 |`daemon.containment.executor`|string|Windows only. Absolute path to MXC `wxc-exec.exe`; no default. Read at<br>startup only (restart the daemon after changing it). Requires user<br>mode; ignored with `--once` and `--dry-run`.|
+|`daemon.containment.git`|object|Git over the relay: the remotes the box may fetch from and push to, and<br>the static credentials the relay attaches host-side. Absent = no git<br>egress. Read at startup only.|
+|`daemon.containment.git.allow`|[]string|List of HTTPS URL prefixes the box may fetch from.|
+|`daemon.containment.git.credentials`|[]object|Static git credentials for allowed hosts.|
+|`daemon.containment.git.credentials[].secret`|string|Secret (password or token) for HTTP basic auth (never serialized).|
+|`daemon.containment.git.credentials[].urlPrefix`|string|URL prefix this credential applies to.|
+|`daemon.containment.git.credentials[].username`|string|Username for HTTP basic auth.|
+|`daemon.containment.git.pushAllow`|[]string|List of HTTPS URL prefixes the box may push to (subset of allow).|
 |`daemon.copilot`|object|GitHub Copilot CLI paths (`config` = the `providers.json` to manage;<br>defaults to `COPILOT_PROVIDERS_CONFIG`, `$COPILOT_HOME/providers.json`,<br>then `~/.copilot/providers.json`).|
 |`daemon.copilot.config`|string|Configuration file.|
 |`daemon.grok`|object|Grok Build paths.|

@@ -142,13 +142,83 @@ pub struct ContainmentStartupConfig {
     /// startup only (restart the daemon after changing it). Requires user
     /// mode; ignored with `--once` and `--dry-run`.
     pub executor: PathBuf,
-    /// Outbound network for the sandboxed program: `allow` (default) or `deny`. With `deny` the box reaches only loopback: model requests go through the local LLM proxy, and git over HTTPS and package downloads fail. Read at startup only (restart the daemon after changing it); ignored with `--once` and `--dry-run`.
+    /// Outbound network for the sandboxed program: `deny` (default) or `allow`. With `deny` the box reaches only loopback and configured egress routes. Read at startup only (restart the daemon after changing it); ignored with `--once` and `--dry-run`.
     #[serde(default, skip_serializing_if = "ContainmentEgress::is_default")]
     pub egress: ContainmentEgress,
     /// Sandbox engine: `mxc` (default, the only engine). Read at startup only
     /// (restart the daemon after changing it); ignored with `--once` and `--dry-run`.
     #[serde(default, skip_serializing_if = "ContainmentEngine::is_default")]
     pub engine: ContainmentEngine,
+    /// Central L7 egress endpoint (an agentgateway HTTPS listener whose
+    /// per-prefix routes are the central allowlist). When set, the relay sends
+    /// the box's git smart-HTTP requests to `https://<egress host>/<path>`
+    /// instead of directly to the remote. CONNECT is always refused, with or
+    /// without it. Read at startup only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_upstream: Option<EgressUpstreamConfig>,
+    /// Git over the relay: the remotes the box may fetch from and push to, and
+    /// the static credentials the relay attaches host-side. Absent = no git
+    /// egress. Read at startup only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<GitConfig>,
+}
+
+/// The central L7 egress endpoint the git leg chains to.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EgressUpstreamConfig {
+    /// HTTPS URL of the egress endpoint; must include a host and no
+    /// credentials, query or fragment.
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub url: Url,
+    /// Reserved for gateway-hop authentication, which is not available yet:
+    /// startup refuses a config that sets it (the relay sends only the git
+    /// credential in `Authorization`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication: Option<LlmGatewayAuthentication>,
+}
+
+/// Git repository access configuration.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitConfig {
+    /// List of HTTPS URL prefixes the box may fetch from.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+    /// List of HTTPS URL prefixes the box may push to (subset of allow).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub push_allow: Vec<String>,
+    /// Static git credentials for allowed hosts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credentials: Vec<GitCredentialEntry>,
+}
+
+/// Git credential entry for a URL prefix.
+#[derive(Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitCredentialEntry {
+    /// URL prefix this credential applies to.
+    pub url_prefix: String,
+    /// Username for HTTP basic auth.
+    pub username: String,
+    /// Secret (password or token) for HTTP basic auth (never serialized).
+    #[serde(skip_serializing)]
+    pub secret: String,
+}
+
+// The secret never reaches a log or error through `{:?}` (the containing
+// configs derive Debug over this).
+impl std::fmt::Debug for GitCredentialEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitCredentialEntry")
+            .field("url_prefix", &self.url_prefix)
+            .field("username", &self.username)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Checks `daemon.containment`. With `windows == true` the executor must be an
@@ -158,28 +228,110 @@ pub fn validate_containment_startup(
     cfg: &ContainmentStartupConfig,
     windows: bool,
 ) -> Result<(), String> {
-    if !windows {
-        return Ok(());
+    if windows {
+        let text = cfg.executor.to_string_lossy();
+        let bytes = text.as_bytes();
+        let drive_absolute = bytes.len() > 2
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && bytes[2] == b'\\';
+        let unc_absolute = text.starts_with("\\\\")
+            && text[2..]
+                .split('\\')
+                .filter(|part| !part.is_empty())
+                .count()
+                >= 3;
+        let exe = text
+            .rsplit('\\')
+            .next()
+            .is_some_and(|name| name.to_ascii_lowercase().ends_with(".exe"));
+        if !(drive_absolute || unc_absolute) || !exe {
+            return Err(
+                "daemon.containment.executor must be an absolute path to wxc-exec.exe".to_owned(),
+            );
+        }
     }
-    let text = cfg.executor.to_string_lossy();
-    let bytes = text.as_bytes();
-    let drive_absolute =
-        bytes.len() > 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\';
-    let unc_absolute = text.starts_with("\\\\")
-        && text[2..]
-            .split('\\')
-            .filter(|part| !part.is_empty())
-            .count()
-            >= 3;
-    let exe = text
-        .rsplit('\\')
-        .next()
-        .is_some_and(|name| name.to_ascii_lowercase().ends_with(".exe"));
-    if (drive_absolute || unc_absolute) && exe {
-        Ok(())
-    } else {
-        Err("daemon.containment.executor must be an absolute path to wxc-exec.exe".to_owned())
+
+    // Validate egress_upstream URL like LlmGatewayConfig.url, HTTPS only
+    // (the leg carries the git credential).
+    if let Some(upstream) = &cfg.egress_upstream {
+        if upstream.url.scheme() != "https" {
+            return Err("daemon.containment.egressUpstream.url must be an https:// URL".to_owned());
+        }
+        // v1 defers gateway-hop authentication (AC 2): a configured block
+        // would otherwise be silently ignored.
+        if upstream.authentication.is_some() {
+            return Err(
+                "daemon.containment.egressUpstream.authentication is not supported yet; remove it"
+                    .to_owned(),
+            );
+        }
+        if upstream.url.host().is_none() {
+            return Err("daemon.containment.egressUpstream.url must include a host".to_owned());
+        }
+        if upstream.url.username() != "" || upstream.url.password().is_some() {
+            return Err(
+                "daemon.containment.egressUpstream.url cannot include credentials".to_owned(),
+            );
+        }
+        if upstream.url.query().is_some() {
+            return Err("daemon.containment.egressUpstream.url cannot include a query".to_owned());
+        }
+        if upstream.url.fragment().is_some() {
+            return Err(
+                "daemon.containment.egressUpstream.url cannot include a fragment".to_owned(),
+            );
+        }
     }
+
+    // Validate git allow/pushAllow URLs must be https:// (and parse, with a
+    // host: the relay reparses them on every request).
+    if let Some(git) = &cfg.git {
+        for (idx, url_str) in git.allow.iter().enumerate() {
+            if !Url::parse(url_str)
+                .is_ok_and(|url| url.scheme() == "https" && url.host_str().is_some())
+            {
+                return Err(format!(
+                    "daemon.containment.git.allow[{}] must be an https:// URL",
+                    idx
+                ));
+            }
+        }
+        for (idx, url_str) in git.push_allow.iter().enumerate() {
+            if !Url::parse(url_str)
+                .is_ok_and(|url| url.scheme() == "https" && url.host_str().is_some())
+            {
+                return Err(format!(
+                    "daemon.containment.git.pushAllow[{}] must be an https:// URL",
+                    idx
+                ));
+            }
+        }
+        // With egressUpstream the relay sends only the path to the egress
+        // endpoint, so a second host could never be told apart there: refuse
+        // more than one distinct (host, port) across both lists (DV-8).
+        if cfg.egress_upstream.is_some() {
+            let mut hosts: Vec<(String, Option<u16>)> = Vec::new();
+            for url_str in git.allow.iter().chain(&git.push_allow) {
+                if let Ok(url) = Url::parse(url_str)
+                    && let Some(host) = url.host_str()
+                {
+                    let key = (host.to_ascii_lowercase(), url.port_or_known_default());
+                    if !hosts.contains(&key) {
+                        hosts.push(key);
+                    }
+                }
+            }
+            if hosts.len() > 1 {
+                return Err(
+                    "daemon.containment.git: with egressUpstream set, git.allow and git.pushAllow must name a single host (the egress endpoint routes by path only)"
+                        .to_owned(),
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Token and cost collection for a daemon without a controller. agentgateway
@@ -384,9 +536,9 @@ impl ProxyUnavailable {
 #[serde(rename_all = "camelCase")]
 pub enum ContainmentEgress {
     /// Plain outbound access; model requests still go through the local LLM proxy.
-    #[default]
     Allow,
     /// Loopback only.
+    #[default]
     Deny,
 }
 
@@ -2641,6 +2793,8 @@ programs:
             executor: executor.into(),
             egress: super::ContainmentEgress::default(),
             engine: super::ContainmentEngine::default(),
+            egress_upstream: None,
+            git: None,
         }
     }
 
@@ -3004,13 +3158,14 @@ programs:
     }
 
     #[test]
-    fn containment_egress_absent_defaults_to_allow() {
+    fn containment_egress_absent_defaults_to_deny() {
+        // PR 4 (AC 4): the default flipped from allow to deny.
         let config = super::parse_local_daemon(
             "daemon:\n  containment:\n    executor: 'C:\\mxc\\wxc-exec.exe'\n",
         )
         .expect("absent defaults");
         let egress = config.daemon.unwrap().containment.unwrap().egress;
-        assert_eq!(egress, super::ContainmentEgress::Allow);
+        assert_eq!(egress, super::ContainmentEgress::Deny);
     }
 
     #[test]
@@ -3037,26 +3192,31 @@ programs:
 
     #[test]
     fn containment_egress_unset_not_serialized() {
+        // PR 4: default flipped to Deny, so Deny is not serialized and Allow is
         let cfg = super::ContainmentStartupConfig {
             executor: std::path::PathBuf::from("/x/wxc-exec"),
-            egress: super::ContainmentEgress::Allow,
+            egress: super::ContainmentEgress::Deny,
             engine: super::ContainmentEngine::default(),
+            egress_upstream: None,
+            git: None,
         };
         let json = serde_json::to_value(&cfg).unwrap();
         assert!(
             json.get("egress").is_none(),
-            "default egress is not serialized"
+            "default egress (Deny) is not serialized"
         );
 
-        let cfg_deny = super::ContainmentStartupConfig {
+        let cfg_allow = super::ContainmentStartupConfig {
             executor: std::path::PathBuf::from("/x/wxc-exec"),
-            egress: super::ContainmentEgress::Deny,
+            egress: super::ContainmentEgress::Allow,
             engine: super::ContainmentEngine::default(),
+            egress_upstream: None,
+            git: None,
         };
-        let json_deny = serde_json::to_value(&cfg_deny).unwrap();
+        let json_allow = serde_json::to_value(&cfg_allow).unwrap();
         assert_eq!(
-            json_deny.get("egress").and_then(|v| v.as_str()),
-            Some("deny"),
+            json_allow.get("egress").and_then(|v| v.as_str()),
+            Some("allow"),
             "deny egress is serialized"
         );
     }
@@ -3088,11 +3248,131 @@ programs:
             executor: std::path::PathBuf::from("/x/wxc-exec"),
             egress: super::ContainmentEgress::Allow,
             engine: super::ContainmentEngine::default(),
+            egress_upstream: None,
+            git: None,
         };
         let json = serde_json::to_value(&cfg).unwrap();
         assert!(
             json.get("engine").is_none(),
             "default engine is not serialized"
         );
+    }
+
+    /// DV-8: with egressUpstream set, git.allow + git.pushAllow must name a
+    /// single (host, port) — the egress endpoint routes by path only.
+    #[test]
+    fn containment_git_single_host_with_egress_upstream() {
+        let upstream = || {
+            Some(super::EgressUpstreamConfig {
+                url: url::Url::parse("https://egress.example.com").unwrap(),
+                authentication: None,
+            })
+        };
+        let cfg = |upstream, allow: &[&str], push_allow: &[&str]| super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("C:\\mxc\\wxc-exec.exe"),
+            egress: super::ContainmentEgress::default(),
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: upstream,
+            git: Some(super::GitConfig {
+                allow: allow.iter().map(|s| (*s).to_owned()).collect(),
+                push_allow: push_allow.iter().map(|s| (*s).to_owned()).collect(),
+                credentials: vec![],
+            }),
+        };
+        // Two hosts in allow: refused.
+        let result = super::validate_containment_startup(
+            &cfg(
+                upstream(),
+                &["https://github.com/org/", "https://gitlab.com/org/"],
+                &[],
+            ),
+            true,
+        );
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.contains("single host")),
+            "{result:?}"
+        );
+        // A second host via pushAllow: refused too.
+        assert!(
+            super::validate_containment_startup(
+                &cfg(
+                    upstream(),
+                    &["https://github.com/org/"],
+                    &["https://gitlab.com/x/"]
+                ),
+                true,
+            )
+            .is_err()
+        );
+        // Case-insensitive host, default port: one key.
+        assert_eq!(
+            super::validate_containment_startup(
+                &cfg(
+                    upstream(),
+                    &["https://github.com/a/", "https://GitHub.com:443/b/"],
+                    &[]
+                ),
+                true,
+            ),
+            Ok(())
+        );
+        // Same host, different ports: two keys, refused.
+        assert!(
+            super::validate_containment_startup(
+                &cfg(
+                    upstream(),
+                    &["https://git.corp/", "https://git.corp:8443/"],
+                    &[]
+                ),
+                true,
+            )
+            .is_err()
+        );
+        // Without egressUpstream, two hosts stay allowed.
+        assert_eq!(
+            super::validate_containment_startup(
+                &cfg(
+                    None,
+                    &["https://github.com/org/", "https://gitlab.com/org/"],
+                    &[]
+                ),
+                true,
+            ),
+            Ok(())
+        );
+        // An entry without a host never passes (with or without upstream).
+        assert!(
+            super::validate_containment_startup(&cfg(upstream(), &["https://"], &[]), true)
+                .is_err()
+        );
+    }
+
+    /// The credential secret never reaches a `{:?}` rendering (manual Debug).
+    #[test]
+    fn git_credential_entry_debug_redacts_secret() {
+        let entry = super::GitCredentialEntry {
+            url_prefix: "https://github.com/org/".to_owned(),
+            username: "x-access-token".to_owned(),
+            secret: "sup3rs3cret-PAT".to_owned(),
+        };
+        let rendered = format!("{entry:?}");
+        assert!(!rendered.contains("sup3rs3cret-PAT"), "{rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        let containment = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("C:\\mxc\\wxc-exec.exe"),
+            egress: super::ContainmentEgress::default(),
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: None,
+            git: Some(super::GitConfig {
+                allow: vec!["https://github.com/org/".to_owned()],
+                push_allow: vec![],
+                credentials: vec![entry],
+            }),
+        };
+        let rendered = format!("{containment:?}");
+        assert!(!rendered.contains("sup3rs3cret-PAT"), "{rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
     }
 }

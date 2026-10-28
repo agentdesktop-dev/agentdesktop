@@ -214,8 +214,19 @@
       "type": "object",
       "properties": {
         "egress": {
-          "description": "Outbound network for the sandboxed program: `allow` (default) or `deny`. With `deny` the box reaches only loopback: model requests go through the local LLM proxy, and git over HTTPS and package downloads fail. Read at startup only (restart the daemon after changing it); ignored with `--once` and `--dry-run`.",
+          "description": "Outbound network for the sandboxed program: `deny` (default) or `allow`. With `deny` the box reaches only loopback and configured egress routes. Read at startup only (restart the daemon after changing it); ignored with `--once` and `--dry-run`.",
           "$ref": "#/$defs/ContainmentEgress"
+        },
+        "egressUpstream": {
+          "description": "Central L7 egress endpoint (an agentgateway HTTPS listener whose\nper-prefix routes are the central allowlist). When set, the relay sends\nthe box's git smart-HTTP requests to `https://<egress host>/<path>`\ninstead of directly to the remote. CONNECT is always refused, with or\nwithout it. Read at startup only.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EgressUpstreamConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "engine": {
           "description": "Sandbox engine: `mxc` (default, the only engine). Read at startup only\n(restart the daemon after changing it); ignored with `--once` and `--dry-run`.",
@@ -224,6 +235,17 @@
         "executor": {
           "description": "Windows only. Absolute path to MXC `wxc-exec.exe`; no default. Read at\nstartup only (restart the daemon after changing it). Requires user\nmode; ignored with `--once` and `--dry-run`.",
           "type": "string"
+        },
+        "git": {
+          "description": "Git over the relay: the remotes the box may fetch from and push to, and\nthe static credentials the relay attaches host-side. Absent = no git\negress. Read at startup only.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -423,6 +445,84 @@
         }
       },
       "additionalProperties": false
+    },
+    "EgressUpstreamConfig": {
+      "description": "The central L7 egress endpoint the git leg chains to.",
+      "type": "object",
+      "properties": {
+        "authentication": {
+          "description": "Reserved for gateway-hop authentication, which is not available yet:\nstartup refuses a config that sets it (the relay sends only the git\ncredential in `Authorization`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LlmGatewayAuthentication"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "url": {
+          "description": "HTTPS URL of the egress endpoint; must include a host and no\ncredentials, query or fragment.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "url"
+      ]
+    },
+    "GitConfig": {
+      "description": "Git repository access configuration.",
+      "type": "object",
+      "properties": {
+        "allow": {
+          "description": "List of HTTPS URL prefixes the box may fetch from.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "credentials": {
+          "description": "Static git credentials for allowed hosts.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GitCredentialEntry"
+          }
+        },
+        "pushAllow": {
+          "description": "List of HTTPS URL prefixes the box may push to (subset of allow).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "GitCredentialEntry": {
+      "description": "Git credential entry for a URL prefix.",
+      "type": "object",
+      "properties": {
+        "secret": {
+          "description": "Secret (password or token) for HTTP basic auth (never serialized).",
+          "type": "string",
+          "writeOnly": true
+        },
+        "urlPrefix": {
+          "description": "URL prefix this credential applies to.",
+          "type": "string"
+        },
+        "username": {
+          "description": "Username for HTTP basic auth.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "urlPrefix",
+        "username",
+        "secret"
+      ]
     },
     "GitHubOAuthConfig": {
       "description": "GitHub App user authorization for Copilot requests through the local proxy.",

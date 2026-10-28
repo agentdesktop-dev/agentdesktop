@@ -221,6 +221,15 @@ impl SessionRegistry {
         entries.len() != before
     }
 
+    /// Whether the session still exists and has not expired. Read-only: unlike
+    /// `authorize`, this does not restart the idle timeout, so an in-flight
+    /// request can poll it without keeping its session alive.
+    pub(crate) fn live(&self, id: &str, now: u64) -> bool {
+        self.lock()
+            .iter()
+            .any(|entry| entry.id == id && !entry.expired(now))
+    }
+
     /// Unexpired sessions, oldest first, without their pairings.
     pub(crate) fn list(&self, now: u64) -> Vec<SessionInfo> {
         let entries = self.lock();

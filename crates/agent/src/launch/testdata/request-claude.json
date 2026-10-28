@@ -22,6 +22,8 @@
       "CLAUDE_CONFIG_DIR=C:\\Users\\dev\\.claude",
       "ComSpec=C:\\Windows\\system32\\cmd.exe",
       "DISABLE_AUTOUPDATER=1",
+      "GIT_CONFIG_GLOBAL=C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\git_config",
+      "GIT_TERMINAL_PROMPT=0",
       "HOME=C:\\Users\\dev",
       "HOMEDRIVE=C:",
       "HOMEPATH=\\Users\\dev",
@@ -52,6 +54,7 @@
       "C:\\Program Files\\Git",
       "C:\\lab\\agentdesktop",
       "C:\\Program Files\\ClaudeCode",
+      "C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\git_config",
       "C:\\Users\\dev\\.claude\\settings.json",
       "C:\\Users\\dev\\.claude\\plugins",
       "C:\\lab\\ws pr1\\.claude\\settings.local.json",
@@ -71,7 +74,8 @@
       "C:\\Users\\dev\\.kube",
       "C:\\lab\\ws pr1\\.git\\commondir",
       "C:\\Users\\dev\\.claude\\ide",
-      "C:\\lab\\ws pr1\\HEAD"
+      "C:\\lab\\ws pr1\\HEAD",
+      "C:\\Users\\dev\\.gitconfig"
     ]
   },
   "network": {

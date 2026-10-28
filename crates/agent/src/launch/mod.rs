@@ -418,6 +418,15 @@ pub(crate) fn plan(input: &LaunchInput, profile: &profile::ClaudeCodeProfile) ->
         format!("{}: {}", crate::llm_proxy::PAIRING_HEADER, input.pairing),
     );
     env.insert("HOME".into(), home.clone());
+    // AC 6: the box's git reads only the generated per-launch gitconfig.
+    // GIT_CONFIG_GLOBAL replaces both global files (XDG and ~/.gitconfig),
+    // which also fixes the documented [include] fail-closed breakage and
+    // stops the box reading PATs out of the user's configuration.
+    let git_config = join(&launch_dir, GIT_CONFIG_FILE);
+    env.insert("GIT_CONFIG_GLOBAL".into(), git_config.clone());
+    // A 401 or refusal fails fast instead of git prompting on a console
+    // that cannot answer.
+    env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
 
     let mut readonly: Vec<String> = Vec::new();
     let mut denied: Vec<String> = Vec::new();
@@ -431,14 +440,15 @@ pub(crate) fn plan(input: &LaunchInput, profile: &profile::ClaudeCodeProfile) ->
         git_dir,
         Some(client_exe_dir),
         program_files_claude,
-        Some(join(&home, profile.git_user_config)),
-        Some(join(&home, profile.git_xdg_config)),
     ];
     for candidate in runtime.into_iter().flatten() {
         if exists(&candidate) && !readonly.contains(&candidate) {
             readonly.push(candidate);
         }
     }
+    // The generated gitconfig: exactly the file, read-only (it is written
+    // before the box starts).
+    readonly.push(git_config);
     // Executable configuration: read-only when present, denied when absent, so
     // the box can neither change nor create it.
     let mut executable_config: Vec<String> = profile
@@ -491,6 +501,29 @@ pub(crate) fn plan(input: &LaunchInput, profile: &profile::ClaudeCodeProfile) ->
     }
     for secret in profile.denied_secrets {
         denied.push(join(&home, secret));
+    }
+    // AC 6: both real git user-configuration paths are denied, not granted
+    // (the box reads the generated file via GIT_CONFIG_GLOBAL). Under MXC an
+    // ungranted home path is unreachable by default, but we deny explicitly,
+    // matching the denied-secrets posture. MXC's denied-path rule requires
+    // the parent directory to exist at launch time (CreateProcessSecurityEnvironment
+    // 0x80070003), else launch fails. `~/.gitconfig`'s parent ($HOME) always
+    // exists; the XDG path's parent (`~/.config/git`) may not, so we only
+    // deny it when the parent is present. Skipping the XDG deny when the
+    // parent is absent is safe: under MXC that home path is unreachable anyway.
+    denied.push(join(&home, profile.git_user_config));
+    let xdg_config_path = join(&home, profile.git_xdg_config);
+    // The XDG config path's parent directory may not exist on Windows hosts
+    // without `~/.config/git`. MXC's denied-path rule requires the parent to
+    // exist (CreateProcessSecurityEnvironment 0x80070003), so we only deny
+    // the XDG config when the parent exists. Extract the parent by finding
+    // the last backslash (these are Windows `\`-joined paths, even when
+    // tested on Linux).
+    if let Some(last_sep) = xdg_config_path.rfind('\\') {
+        let parent = &xdg_config_path[..last_sep];
+        if exists(parent) {
+            denied.push(xdg_config_path);
+        }
     }
 
     plan::LaunchPlan {
@@ -659,6 +692,14 @@ pub trait LaunchHost: Send + Sync {
         Arc::new(integrity::REAL_FS)
     }
     fn managed_sources(&self) -> crate::provider::claude_code::managed::ManagedSources;
+
+    /// The user's global git identity values the generated gitconfig copies
+    /// read-only (AC 6), read host-side via `git config --global --get`
+    /// (`--get-all` for the multi-valued `safe.directory`), which honors
+    /// includes. Keys with no value are absent.
+    fn git_identity(&self) -> Vec<(String, Vec<String>)> {
+        read_git_identity()
+    }
 }
 
 /// Running launches plus the last 32 exited ones. Clones share state.
@@ -755,6 +796,9 @@ pub struct LaunchState {
     pub(crate) proxy_address: Option<std::net::SocketAddr>,
     pub(crate) session_policy: Arc<dyn crate::llm_proxy::sessions::SessionPolicy>,
     pub(crate) egress: agentdesktop_core::config::ContainmentEgress,
+    /// `daemon.containment.git`: the generated gitconfig's insteadOf rewrites
+    /// come from its `allow` list.
+    pub(crate) git: Option<agentdesktop_core::config::GitConfig>,
     pub(crate) engine: Arc<dyn engine::Engine>,
 }
 
@@ -958,6 +1002,33 @@ async fn start_launch(
     if let Err(error) = create_launch_dir(&launch_dir) {
         return fail(&launch_dir, format!("prepare launch: {error:#}"));
     }
+    // AC 6: the per-launch gitconfig is written before the box starts; the
+    // plan grants exactly this file read-only and points GIT_CONFIG_GLOBAL
+    // at it.
+    let git_allow = state
+        .git
+        .as_ref()
+        .map(|git| git.allow.clone())
+        .unwrap_or_default();
+    // The identity read spawns up to a handful of `git config` processes:
+    // off the async runtime, like the posture snapshot below.
+    let identity = {
+        let host = host.clone();
+        tokio::task::spawn_blocking(move || host.git_identity())
+            .await
+            .unwrap_or_default()
+    };
+    if let Err(error) = generate_gitconfig(
+        &launch_dir,
+        &session.pairing,
+        input.proxy_address.port(),
+        &git_allow,
+        &identity,
+    ) {
+        return fail(&launch_dir, format!("prepare launch: {error:#}"));
+    }
+    // AC 4: deny is the default; an explicit allow is loud.
+    warn_on_open_egress(state.egress);
     let exists = |path: &Path| host.exists(path);
     let is_dir = |path: &Path| host.is_dir(path);
     let launch_plan = plan(
@@ -1247,7 +1318,7 @@ fn copy_log_lines(launch_id: &str, log_path: &Path, offset: u64) -> u64 {
 }
 
 /// Removes what a previous daemon left behind in `<state_dir>\launches`:
-/// `credential\` and `request.json` of every launch, and the whole launch
+/// `credential\`, `request.json` and `git_config` of every launch, and the whole launch
 /// directory when `<launch_dir>\pid` (`"<pid> <start_time>"`) no longer names a
 /// live process according to `alive(pid, start_time)`.
 pub fn sweep(state_dir: &Path, alive: &dyn Fn(u32, u64) -> bool) -> anyhow::Result<()> {
@@ -1277,8 +1348,13 @@ pub fn sweep(state_dir: &Path, alive: &dyn Fn(u32, u64) -> bool) -> anyhow::Resu
             .and_then(|text| parse_pid_file(&text))
             .is_some_and(|(pid, start_time)| alive(pid, start_time));
         // Secrets go first either way, so a directory that cannot be removed
-        // as a whole never keeps a token behind.
-        for secret in [dir.join("credential"), dir.join("request.json")] {
+        // as a whole never keeps a token behind. The generated gitconfig is
+        // one of them: it carries the launch's session pairing.
+        for secret in [
+            dir.join("credential"),
+            dir.join("request.json"),
+            dir.join(GIT_CONFIG_FILE),
+        ] {
             let removed = if secret.is_dir() {
                 std::fs::remove_dir_all(&secret)
             } else {
@@ -1307,4 +1383,154 @@ fn parse_pid_file(text: &str) -> Option<(u32, u64)> {
     let pid = parts.next()?.parse().ok()?;
     let start_time = parts.next()?.parse().ok()?;
     Some((pid, start_time))
+}
+
+// --- PR 4: the generated per-launch gitconfig (AC 6).
+
+/// File name of the generated gitconfig in the launch directory. Same
+/// lifecycle as the launch's other secrets: created before the box starts,
+/// removed with the launch directory, and in the secrets-first `sweep` list
+/// (it carries the session pairing; never log its content).
+pub(crate) const GIT_CONFIG_FILE: &str = "git_config";
+
+/// The identity allowlist the generated gitconfig copies from the user's
+/// global git configuration, and whether the key is multi-valued (read with
+/// `--get-all`). Intentionally NOT copied: aliases, advanced core settings,
+/// credential helpers.
+pub(crate) const GIT_IDENTITY_KEYS: &[(&str, bool)] = &[
+    ("user.name", false),
+    ("user.email", false),
+    ("user.signingkey", false),
+    ("commit.gpgsign", false),
+    ("core.longpaths", false),
+    ("safe.directory", true),
+];
+
+/// Reads the identity allowlist host-side via `git config --global --get`
+/// (`--get-all` for `safe.directory`), which honors includes. Absent keys and
+/// a missing git are simply skipped: the box then commits without them.
+fn read_git_identity() -> Vec<(String, Vec<String>)> {
+    let mut identity = Vec::new();
+    for (key, multi) in GIT_IDENTITY_KEYS {
+        let get = if *multi { "--get-all" } else { "--get" };
+        let Ok(output) = std::process::Command::new("git")
+            .args(["config", "--global", get, key])
+            .output()
+        else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let values: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if !values.is_empty() {
+            identity.push(((*key).to_owned(), values));
+        }
+    }
+    identity
+}
+
+/// The authority (verbatim, port only when configured) and path of an allow
+/// entry; the route shape mirrors the entry so the insteadOf rewrite is an
+/// exact string prefix of the configured remote URL.
+fn split_prefix_authority(entry: &str) -> Option<(&str, &str)> {
+    let rest = entry
+        .strip_prefix("https://")
+        .or_else(|| entry.strip_prefix("http://"))?;
+    Some(match rest.find('/') {
+        Some(index) => (&rest[..index], &rest[index..]),
+        None => (rest, ""),
+    })
+}
+
+/// A git config value in git's quoted form: `\` and `"` escaped, so `;`, `#`
+/// and Windows paths survive git's value parser.
+fn git_config_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// Renders the per-launch gitconfig (AC 6): insteadOf rewrites of every
+/// allowed prefix to the loopback `/git/...` route, the session pairing as a
+/// url-scoped `extraHeader` (sent only to the loopback relay), an empty
+/// url-scoped `proxy` (so the loopback requests bypass any ambient proxy the
+/// user's environment carries — the daemon itself sets no proxy variables),
+/// an emptied `credential.helper`, the copied identity values, and ssh-form
+/// insteadOf mappings of allowlisted hosts to the `/git-ssh` refusal route.
+pub(crate) fn gitconfig_contents(
+    pairing: &str,
+    proxy_port: u16,
+    git_allow: &[String],
+    identity: &[(String, Vec<String>)],
+) -> String {
+    let loopback = format!("http://127.0.0.1:{proxy_port}/");
+    let mut contents = String::new();
+    contents.push_str("# Generated by agentdesktop for one sandboxed launch; do not edit.\n");
+    // Git for Windows' SYSTEM config sets credential.helper=manager and the
+    // git install dir is granted, so the empty first entry is necessary.
+    contents.push_str("[credential]\n\thelper =\n");
+    contents.push_str(&format!(
+        "[http \"{loopback}\"]\n\textraHeader = {}: {pairing}\n\tproxy =\n",
+        crate::llm_proxy::PAIRING_HEADER
+    ));
+    let mut ssh_hosts: Vec<&str> = Vec::new();
+    for entry in git_allow {
+        let Some((authority, path)) = split_prefix_authority(entry) else {
+            continue;
+        };
+        contents.push_str(&format!(
+            "[url \"{loopback}git/{authority}{path}\"]\n\tinsteadOf = {}\n",
+            git_config_quote(entry),
+        ));
+        let host = authority.split(':').next().unwrap_or(authority);
+        if !host.is_empty() && !ssh_hosts.contains(&host) {
+            ssh_hosts.push(host);
+        }
+    }
+    for host in ssh_hosts {
+        contents.push_str(&format!(
+            "[url \"{loopback}git-ssh/{host}/\"]\n\tinsteadOf = ssh://{host}/\n\tinsteadOf = git@{host}:\n",
+        ));
+    }
+    for (key, values) in identity {
+        let Some((section, name)) = key.split_once('.') else {
+            continue;
+        };
+        contents.push_str(&format!("[{section}]\n"));
+        for value in values {
+            if value.chars().any(char::is_control) {
+                continue;
+            }
+            contents.push_str(&format!("\t{name} = {}\n", git_config_quote(value)));
+        }
+    }
+    contents
+}
+
+/// Writes the per-launch gitconfig into the launch directory (mode 0600; the
+/// box gets exactly the file granted read-only) and returns its path.
+pub(crate) fn generate_gitconfig(
+    launch_dir: &Path,
+    pairing: &str,
+    proxy_port: u16,
+    git_allow: &[String],
+    identity: &[(String, Vec<String>)],
+) -> anyhow::Result<PathBuf> {
+    let path = launch_dir.join(GIT_CONFIG_FILE);
+    let contents = gitconfig_contents(pairing, proxy_port, git_allow, identity);
+    secure_fs::atomic_write(&path, contents.as_bytes(), 0o600)
+        .with_context(|| format!("write {}", path.display()))?;
+    Ok(path)
+}
+
+/// AC 4: the egress default is deny; an explicit `egress: allow` keeps
+/// today's open outbound and is called out once per launch.
+pub(crate) fn warn_on_open_egress(egress: agentdesktop_core::config::ContainmentEgress) {
+    if egress == agentdesktop_core::config::ContainmentEgress::Allow {
+        tracing::warn!("egress allow: the box has unrestricted outbound");
+    }
 }

@@ -18,13 +18,13 @@ pub(crate) struct ClaudeCodeProfile {
     /// part of the request: this entry sits between the executable's
     /// directory and the git installation.
     pub runtime_share: &'static str,
-    /// The git user configuration (home-relative), granted read-only when it
-    /// exists; comes after the discovered directories (git reads the user's
-    /// configuration before anything else; unreadable means every git
-    /// command fails in the box, lab L4e).
+    /// The git user configuration (home-relative). Since PR 4 this is DENIED
+    /// (not granted): the box reads the generated per-launch gitconfig via
+    /// `GIT_CONFIG_GLOBAL` instead, so the real file (and any PAT in it)
+    /// stays out of reach.
     pub git_user_config: &'static str,
-    /// The XDG fallback of the git user configuration (`\`-joined), granted
-    /// read-only directly after `git_user_config`.
+    /// The XDG fallback of the git user configuration (`\`-joined), denied
+    /// alongside `git_user_config` since PR 4.
     pub git_xdg_config: &'static str,
     /// Executable configuration under `<home>\.claude`: read-only when
     /// present, denied when absent, so the box can neither change nor

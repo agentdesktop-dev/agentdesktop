@@ -71,6 +71,14 @@ pub(crate) const CODEX_ROUTE: &str = "/codex";
 /// it holds no credential and needs nothing but loopback.
 pub(crate) const SANDBOX_ROUTE: &str = "/sandbox";
 
+/// Git relay route for allowed git hosts.
+pub(crate) const GIT_ROUTE: &str = "/git";
+
+/// Refusal route the generated gitconfig maps ssh-form remotes of allowlisted
+/// hosts to: it answers a pkt-line `ERR` so the user sees a clear message
+/// instead of a deny-mode timeout (ssh itself is PR 5).
+pub(crate) const GIT_SSH_ROUTE: &str = "/git-ssh";
+
 /// The prefixed routes: the managed programs and the sandbox route. A prefix
 /// matches only at a `/` boundary, so
 /// `/vscode-copilot-passthrough/...` never matches `/vscode-copilot`.

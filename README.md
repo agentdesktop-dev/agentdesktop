@@ -369,7 +369,8 @@ LLM clients display the message. Codes: `host_not_allowed`, `pairing_invalid`,
 `client_credential_missing`, `upgrade_not_supported`, `body_too_large`,
 `body_invalid`, `agentdesktop_credential` (no gateway credential for this device: not enrolled,
 revoked, controller unreachable or slow), `agentdesktop_unavailable`,
-`gateway_unreachable`, `gateway_timeout`.
+`gateway_unreachable`, `gateway_timeout`, and on the git/egress routes
+`git_host_not_allowed`, `git_upstream_unreachable`, `egress_not_supported`.
 
 To attach the local user's GitHub App OAuth token as well, add the App's client ID
 to the gateway configuration (keep the existing `authentication` block):
@@ -741,9 +742,54 @@ daemon:
     listen: 127.0.0.1:4000
   containment:
     executor: C:\Program Files\mxc\x64\wxc-exec.exe
-    # egress: deny   # opt-in: the box loses direct outbound network
+    # egress: allow  # opt-out of the default `deny`: the box gets open outbound
     # engine: mxc    # the sandbox engine; `mxc` is the only value
+    # git:           # git over the relay (https remotes only)
+    #   allow: [https://github.com/your-org/]
+    #   pushAllow: [https://github.com/your-org/team-repo.git]
+    #   credentials:
+    #     - urlPrefix: https://github.com/your-org/
+    #       username: x-access-token
+    #       secret: <PAT>
+    # egressUpstream:  # chain the git leg through a central agentgateway
+    #   url: https://egress.example.com
 ```
+
+**Egress is denied by default.** A box has no direct outbound network unless
+`daemon.containment.egress: allow` is set; with `allow` the daemon logs
+`egress allow: the box has unrestricted outbound` at every launch. A config
+written without the key means `deny` to this daemon and `allow` to an older
+one; set the key explicitly if a rollback is possible.
+
+Under `deny` the box reaches the model through the local LLM proxy and git
+remotes through the relay's `/git` route: the daemon writes a per-launch
+gitconfig (`GIT_CONFIG_GLOBAL`) that rewrites every `git.allow` prefix to the
+loopback relay, and the relay re-originates TLS to the remote, attaching the
+matching `git.credentials` entry (longest prefix, allowed hosts only) on its own
+leg; the box never sees the credential. Only the smart-HTTP endpoints are
+served; a remote outside `git.allow` gets `403 git_host_not_allowed`, a push to
+a remote outside `git.pushAllow` gets git's `fatal: remote error: ...`, and
+upstream redirects are followed by the daemon (at most 3, only within the same
+allow prefix). Allow entries are matched case-sensitively on the path and per
+path element, so `team-repo` does not cover `team-repo.git`; use the remote
+URL exactly as cloned, or an org prefix. Request bodies on the git route are
+buffered (redirects and the retry resend them) and capped at 32 MiB; a larger
+push fails with `413 body_too_large`. ssh remotes
+of allowed hosts get a clear refusal (ssh is not available in the box yet).
+With `egressUpstream` set the relay sends the git requests to that endpoint
+(path case preserved, `Host` = the egress host, a `503` retried once, except
+on a push) instead
+of to the remote; the central gateway's routes are then the allowlist too.
+With `egressUpstream` set, `git.allow` and `git.pushAllow` must name a single
+host: the relay sends only the path to the egress endpoint, so the gateway's
+routes for those paths must lead to that host. The daemon refuses to start
+otherwise.
+CONNECT and proxy-form requests to the listener are always refused
+(`403 egress_not_supported`); there is no generic outbound egress. The
+generated gitconfig carries the launch's session pairing and is removed with
+the launch directory. The generated gitconfig applies under `egress: allow`
+too: credentials kept in `~\.gitconfig` or a credential manager are not used
+in the box; configure `git.credentials` for private remotes.
 
 `run` needs the local LLM proxy: without `daemon.llmProxy.listen` it answers
 `409`.
@@ -772,18 +818,16 @@ the client ID has no effect.
 What the box can see: the workspace, `~\.claude` (skills, agents, commands,
 `CLAUDE.md` and `.claude.json` stay writable; `CLAUDE_CONFIG_DIR` points there),
 a private `tmp`. Read-only: the Claude Code and Git installations, the
-Agentdesktop client, `~\.gitconfig` and `~\.config\git\config` when they exist (git reads them
-before anything else; open egress means a git config can carry secrets, for
-example `http.<url>.extraHeader` with a bearer PAT, or credentials in
-`url.*.insteadOf` URLs; `[include]` and `[includeIf]` targets of the git configuration
-are not granted, so git fails closed in the box when a config uses them), `~\.claude\settings.json`, `~\.claude\hooks`,
+Agentdesktop client, the launch's generated gitconfig (the box's git reads only
+that file; it carries `user.name`, `user.email`, `user.signingkey`,
+`commit.gpgsign`, `core.longpaths` and `safe.directory` copied from your global
+configuration, nothing else), `~\.claude\settings.json`, `~\.claude\hooks`,
 `~\.claude\plugins`, the workspace's `.claude\settings*.json`, `.claude\hooks`,
 `.mcp.json`, a `HEAD` file at the workspace root, and `.git\config`,
 `.git\hooks` and `.git\commondir` of the workspace repository (`.git\HEAD`
 stays writable so branch switches work).
 Each file or folder in that list is denied when it does not exist, so the box
-cannot create it in place, except for the git configuration files (granted when
-present, not emitted otherwise); a workspace without a `.claude` folder gets
+cannot create it in place; a workspace without a `.claude` folder gets
 the folder denied as a whole; a workspace without `.git` cannot `git init` one.
 When the `.git` entry is an empty directory (exists but has no children), the config,
 hooks and commondir guards are emitted, so the box cannot `git init` into the existing
@@ -796,13 +840,14 @@ with its own config and hooks, or into `<cwd>\HEAD` so that git treats the works
 as a bare repository. Renaming a folder into these names has not been tested.
 The daemon creates `~\.claude` if it is missing. Always denied:
 `~\.claude\.credentials.json`, `~\.claude\history.jsonl`, `~\.claude\ide`,
-`~\.ssh`, `~\.aws`, `~\.azure`, `~\.kube`. The workspace may not be a drive or share root, the home
+`~\.ssh`, `~\.aws`, `~\.azure`, `~\.kube`, `~\.gitconfig` and
+`~\.config\git\config` (the box uses the generated gitconfig instead). The workspace may not be a drive or share root, the home
 directory or one of its ancestors, or anything under `%SystemRoot%`,
 `%ProgramFiles%`, `%ProgramData%`, `AppData`, and the actual `%APPDATA%` and
 `%LOCALAPPDATA%` paths (Folder Redirection can place these outside `<home>\AppData`),
 `~\.claude`, the daemon's state directory or a denied path (`%ProgramFiles(x86)%`
-counts as a system directory). Outbound network is open by default (`daemon.containment.egress:
-deny` opts out); the box can reach every loopback listener on this machine
+counts as a system directory). Outbound network is denied by default (see
+above; `daemon.containment.egress: allow` opts out); the box can reach every loopback listener on this machine
 (host loopback is allowed so it can reach the local LLM proxy), and the
 clipboard is off in the box; a gateway behind a private CA is not supported
 yet.
@@ -811,7 +856,8 @@ The box gets no pipe to the daemon, no sign-in and no gateway credential.
 Each `run` registers a session with the local LLM proxy and gives the box only
 that session's pairing (`/sandbox` route); the proxy adds the user's gateway
 identity to each request. Loopback is machine-wide, so the pairing is a bearer
-secret on this machine. Sign-in still happens once, at `run` time. The session
+secret on this machine; with `git.allow` set it also grants that session's git
+egress scope, not just the model relay. Sign-in still happens once, at `run` time. The session
 is revoked when the box exits; restarting the daemon revokes all sessions, and
 a running box gets `403 pairing_invalid` until it is relaunched (use
 `--resume`); a box idle for 8 hours loses its session the same way. The box

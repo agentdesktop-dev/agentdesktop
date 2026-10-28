@@ -191,6 +191,10 @@ mod handler {
         fn home(&self) -> PathBuf {
             self.home.clone()
         }
+        fn git_identity(&self) -> Vec<(String, Vec<String>)> {
+            // Deterministic: never read the test machine's git configuration.
+            Vec::new()
+        }
         fn path_dirs(&self) -> Vec<PathBuf> {
             vec![]
         }
@@ -324,6 +328,7 @@ mod handler {
             executor,
             credentials: Arc::new(Credentials),
             host: Arc::new(Host { home, state_dir }),
+            git: None,
             registry: LaunchRegistry::new(),
             availability: Some(ContainmentInfo {
                 executor: "wxc-exec.exe".into(),
@@ -409,9 +414,11 @@ mod handler {
         );
     }
 
-    /// The user's git configuration is granted read-only when it exists (m-a).
+    /// PR 4 (AC 6) reverses the m-a grant: the user's real git configuration
+    /// is DENIED whether or not it exists, and the box reads only the
+    /// generated per-launch `git_config`, granted read-only.
     #[tokio::test]
-    async fn the_git_configuration_is_granted_when_it_exists() {
+    async fn the_real_git_configuration_is_denied_and_the_generated_one_granted() {
         use std::collections::{BTreeMap, BTreeSet};
 
         let existing: BTreeSet<String> = [r"C:\Users\dev\.gitconfig"]
@@ -441,20 +448,25 @@ mod handler {
             is_dir: &is_dir,
         });
         let readonly = &request.filesystem.readonly_paths;
+        let denied = &request.filesystem.denied_paths;
         assert!(
-            readonly.contains(&r"C:\Users\dev\.gitconfig".to_owned()),
-            "~\\.gitconfig is granted when it exists; got {readonly:?}"
+            !readonly.contains(&r"C:\Users\dev\.gitconfig".to_owned()),
+            "~\\.gitconfig is never granted, even when it exists; got {readonly:?}"
         );
         assert!(
-            !readonly.contains(&r"C:\Users\dev\.config\git\config".to_owned()),
-            "~\\.config\\git\\config is not in readonlyPaths when it does not exist"
+            denied.contains(&r"C:\Users\dev\.gitconfig".to_owned()),
+            "~\\.gitconfig is denied; got {denied:?}"
         );
         assert!(
-            !request
-                .filesystem
-                .denied_paths
-                .contains(&r"C:\Users\dev\.config\git\config".to_owned()),
-            "~\\.config\\git\\config is not in deniedPaths when it does not exist"
+            !denied.contains(&r"C:\Users\dev\.config\git\config".to_owned()),
+            "~\\.config\\git\\config is not denied when parent does not exist (MXC parent rule); got {denied:?}"
+        );
+        assert!(
+            readonly.contains(
+                &r"C:\Users\dev\.local\state\agentdesktop\launches\0123456789abcdef\git_config"
+                    .to_owned()
+            ),
+            "the generated git_config (exactly the file) is granted read-only; got {readonly:?}"
         );
     }
 }
