@@ -19,10 +19,15 @@ security unlock-keychain -p "$keychain_password" "$keychain"
 
 import_identity() {
   printf '%s' "$1" | base64 --decode > "$archive"
-  security import "$archive" -k "$keychain" -P "$2" -T "$3"
+  local trusted=()
+  for app in "${@:3}"; do
+    trusted+=(-T "$app")
+  done
+  security import "$archive" -k "$keychain" -P "$2" "${trusted[@]}"
 }
 import_identity "$APPLE_APPLICATION_CERTIFICATE" "$APPLE_CERTIFICATE_PASSWORD" /usr/bin/codesign
-import_identity "$APPLE_INSTALLER_CERTIFICATE" "$APPLE_INSTALLER_CERTIFICATE_PASSWORD" /usr/bin/pkgbuild
+# productbuild signs the final PKG; a key it isn't trusted for prompts and hangs headless runners.
+import_identity "$APPLE_INSTALLER_CERTIFICATE" "$APPLE_INSTALLER_CERTIFICATE_PASSWORD" /usr/bin/pkgbuild /usr/bin/productbuild
 security set-key-partition-list -S apple-tool:,apple:,codesign: -s \
   -k "$keychain_password" "$keychain" > /dev/null
 

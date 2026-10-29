@@ -1,4 +1,6 @@
 use super::DryRunReport;
+#[cfg(any(windows, test))]
+use super::registry::RegistryKeyPlan;
 use anyhow::Context;
 use std::{
     cell::RefCell,
@@ -14,10 +16,15 @@ use std::{
 pub struct ReconcilePlan {
     observed: RefCell<BTreeMap<PathBuf, Option<Vec<u8>>>>,
     operations: RefCell<Vec<FileChange>>,
+    /// Planned Windows registry changes, applied after the file operations.
+    /// Only the Windows planners create one; the pure planning tests on
+    /// other platforms inspect them without applying.
+    #[cfg(any(windows, test))]
+    registry: RefCell<Vec<RegistryKeyPlan>>,
     private_dirs: PrivateDirs,
     report: DryRunReport,
-    /// Why the program that owns this plan is configured but not pointed at
-    /// the gateway (the loopback proxy is absent); set by the provider.
+    /// Why the configured program cannot be managed in this daemon's mode or
+    /// cannot use the gateway (the loopback proxy is absent).
     inactive: RefCell<Option<String>>,
 }
 
@@ -44,6 +51,10 @@ pub(super) enum ApplyStop {
     PrivateDir(PathBuf),
     /// The operation at this index failed; the ones before it were written.
     Operation(usize),
+    /// The registry changes for the key at this index failed; every file
+    /// operation and the keys before it were applied.
+    #[cfg(windows)]
+    Registry(usize, PathBuf),
 }
 
 struct FileChange {
@@ -76,10 +87,18 @@ impl ReconcilePlan {
         self.apply_tracked().map_err(|(error, _)| error)
     }
 
-    /// Records that the program owning this plan uses the gateway, a gateway
-    /// is configured, and the loopback proxy is absent.
+    /// Records why the configured program is inactive.
     pub fn inactive(&self, reason: &str) {
         *self.inactive.borrow_mut() = Some(reason.to_owned());
+    }
+
+    /// A program outside this daemon's scope has no file operations. Keep its
+    /// reason in both per-program status and the combined dry-run report.
+    pub(crate) fn skipped(reason: &str) -> Self {
+        let plan = Self::default();
+        plan.inactive(reason);
+        plan.report.inactive.borrow_mut().push(reason.to_owned());
+        plan
     }
 
     /// The reason recorded by [`ReconcilePlan::inactive`], for tests.
@@ -90,6 +109,21 @@ impl ReconcilePlan {
 
     pub(super) fn operation_count(&self) -> usize {
         self.operations.borrow().len()
+    }
+
+    /// How many registry key plans are queued, for per-program completion
+    /// accounting: registry changes apply after every file operation, so a
+    /// program with pending registry work is not complete when its file
+    /// range is.
+    pub(super) fn registry_operation_count(&self) -> usize {
+        #[cfg(any(windows, test))]
+        {
+            self.registry.borrow().len()
+        }
+        #[cfg(not(any(windows, test)))]
+        {
+            0
+        }
     }
 
     pub(super) fn summary(&self) -> PlanSummary {
@@ -119,8 +153,17 @@ impl ReconcilePlan {
                 paths.push(change.path.clone());
             }
         }
+        let changes = differs || recorded;
+        #[cfg(any(windows, test))]
+        let changes = {
+            let registry = self.registry.borrow();
+            for key_plan in registry.iter() {
+                paths.push(key_plan.key.display_path());
+            }
+            changes || !registry.is_empty()
+        };
         PlanSummary {
-            changes: differs || recorded,
+            changes,
             conflicts,
             inactive: self.inactive.borrow().clone(),
             paths,
@@ -161,6 +204,23 @@ impl ReconcilePlan {
                 ));
             }
         }
+        #[cfg(windows)]
+        for key_plan in self.registry.borrow().iter() {
+            let display = key_plan.key.display_path();
+            let stop = || ApplyStop::Observed(display.clone());
+            let current = super::registry::read_values(&key_plan.key)
+                .with_context(|| format!("validate {} before applying plan", display.display()))
+                .map_err(|error| (error, stop()))?;
+            if current != key_plan.observed {
+                return Err((
+                    anyhow::anyhow!(
+                        "{} changed since reconciliation was planned; retry reconciliation",
+                        display.display()
+                    ),
+                    stop(),
+                ));
+            }
+        }
         for dir in self.private_dirs.0.into_inner() {
             if !dir.exists() {
                 crate::secure_fs::ensure_private_dir(&dir)
@@ -192,6 +252,13 @@ impl ReconcilePlan {
             })();
             result.map_err(|error| (error, ApplyStop::Operation(index)))?;
             tracing::info!(path = %change.path.display(), "applied reconciliation change");
+        }
+        #[cfg(windows)]
+        for (index, key_plan) in self.registry.into_inner().into_iter().enumerate() {
+            let key_path = key_plan.key.display_path();
+            super::registry::apply(&key_plan)
+                .map_err(|error| (error, ApplyStop::Registry(index, key_path.clone())))?;
+            tracing::info!(path = %key_path.display(), "applied reconciliation change");
         }
         Ok(())
     }
@@ -238,10 +305,28 @@ impl ReconcilePlan {
             }
             operations.push(change);
         }
+        #[cfg(any(windows, test))]
+        {
+            let registry = self.registry.get_mut();
+            for key_plan in other.registry.into_inner() {
+                let path = key_plan.key.display_path();
+                if registry.iter().any(|existing| existing.key == key_plan.key) {
+                    return Err((
+                        anyhow::anyhow!("multiple providers plan to modify {}", path.display()),
+                        path,
+                    ));
+                }
+                registry.push(key_plan);
+            }
+        }
         self.report
             .changes
             .get_mut()
             .extend(other.report.changes.into_inner());
+        self.report
+            .inactive
+            .get_mut()
+            .extend(other.report.inactive.into_inner());
         Ok(())
     }
 
@@ -281,6 +366,19 @@ impl ReconcilePlan {
     /// Create `dir` owner-only at apply time if it does not exist by then.
     pub(crate) fn ensure_private_dir(&self, dir: &Path) {
         self.private_dirs.0.borrow_mut().push(dir.to_owned());
+    }
+
+    /// Plan one Windows registry key's changes, applied after the file
+    /// operations.
+    #[cfg(any(windows, test))]
+    pub(crate) fn plan_registry_key(&self, key_plan: RegistryKeyPlan) {
+        self.registry.borrow_mut().push(key_plan);
+    }
+
+    /// The planned registry changes, for tests.
+    #[cfg(test)]
+    pub(crate) fn registry_key_plans(&self) -> Vec<RegistryKeyPlan> {
+        self.registry.borrow().clone()
     }
 
     pub(crate) fn remove_file(&self, path: &Path) -> io::Result<()> {

@@ -81,6 +81,7 @@ fn options() -> json_merge::MergeOptions {
         keyed_arrays: KEYED,
         // The file holds the pairing and possibly the user's own API keys.
         redact_diff: true,
+        ..json_merge::MergeOptions::default()
     }
 }
 

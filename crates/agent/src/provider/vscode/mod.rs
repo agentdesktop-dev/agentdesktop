@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use agentdesktop_core::config::{DaemonConfig, VsCodeCopilotChat};
-use agentdesktop_core::model::Discovery;
+use agentdesktop_core::model::{DaemonScope, Discovery};
 
 use super::{Provider, ReconcileContext};
 use crate::reconcile::ReconcilePlan;
@@ -56,6 +56,14 @@ impl Provider for VsCode {
     }
 
     fn plan(&self, ctx: &ReconcileContext, config: &DaemonConfig) -> anyhow::Result<ReconcilePlan> {
+        if let Some(plan) = ctx.skip_unless(
+            DaemonScope::User,
+            config.programs.vscode.is_some(),
+            Self::DISPLAY_NAME,
+        ) {
+            return Ok(plan);
+        }
+
         let configured = config.programs.vscode.as_ref().map(|program| {
             let gateway = config
                 .llm_gateway
@@ -68,10 +76,8 @@ impl Provider for VsCode {
             .as_ref()
             .map(|proxy| (proxy.address, &*proxy.pairing));
         let plan = ReconcilePlan::default();
-        // Both files live in the user's VS Code profile, so a system daemon has
-        // no paths and rejects the program before any provider writes.
         let paths = match (&self.chat_models_path, &self.settings_path) {
-            (Some(chat_models), Some(settings)) if ctx.merge_user_settings => {
+            (Some(chat_models), Some(settings)) => {
                 Some((chat_models.as_path(), settings.as_path()))
             }
             _ => None,
@@ -79,7 +85,7 @@ impl Provider for VsCode {
         let Some((chat_models_path, settings_path)) = paths else {
             if configured.is_some() {
                 anyhow::bail!(
-                    "{} Copilot Chat reads its custom models (chatLanguageModels.json) and the gateway override (settings.json) from the user's own VS Code profile; remove programs.vscode or run agentdesktop with --user (daemon.user: true) so it can manage those files",
+                    "{} user configuration paths are unavailable",
                     Self::DISPLAY_NAME
                 );
             }

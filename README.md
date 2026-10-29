@@ -56,6 +56,61 @@ corepack enable
 make install
 ```
 
+#### Linux without a desktop (RHEL 8, WSL, VDI)
+
+The `agentdesktop-linux-*` binaries include the desktop UI and need GTK,
+WebKitGTK 4.1, and glibc 2.34 or later. On hosts without them, such as RHEL 8,
+WSL, and virtual desktops, use `agentdesktop-headless-linux-*` instead. It runs
+the same daemon and command-line tools without the UI. It is statically linked,
+so it does not depend on the host's glibc or other system libraries:
+
+```sh
+curl -fLO https://github.com/agentdesktop-dev/agentdesktop/releases/latest/download/agentdesktop-headless-linux-amd64
+install -D -m 0755 agentdesktop-headless-linux-amd64 ~/.local/bin/agentdesktop
+agentdesktop --version
+```
+
+Every `agentdesktop` command in this guide works with the headless binary.
+`agentdesktop daemon --user` reads `~/.config/agentdesktop/config.yaml` (or
+`$XDG_CONFIG_HOME/agentdesktop/config.yaml`) and does not start without it.
+Create that file first, for example from
+[`examples/standalone/config.yaml`](examples/standalone/config.yaml):
+
+```sh
+mkdir -p ~/.config/agentdesktop
+curl -fL -o ~/.config/agentdesktop/config.yaml \
+  https://raw.githubusercontent.com/agentdesktop-dev/agentdesktop/main/examples/standalone/config.yaml
+```
+
+Edit it for your identity provider and gateway. To keep a user-mode daemon
+running, create a systemd user unit at
+`~/.config/systemd/user/agentdesktop.service` (on WSL, first set
+`systemd=true` under `[boot]` in `/etc/wsl.conf`):
+
+```ini
+[Unit]
+Description=Agentdesktop daemon
+
+[Service]
+ExecStart=%h/.local/bin/agentdesktop daemon --user
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now agentdesktop
+agentdesktop status
+agentdesktop enrollment
+```
+
+When the daemon cannot open a browser, it prints the sign-in URL. Open that URL
+in any browser on the same machine (on WSL, the Windows browser reaches the
+daemon's `localhost` callback). `agentdesktop login` uses device authorization
+and works from any device.
+
 ### 2. Preview the standalone example
 
 The repository includes a working standalone configuration for Claude Code,
@@ -766,7 +821,7 @@ device-wide state. The device page in the controller lists them under
 | `unchanged` | The program is configured and nothing needed to change. |
 | `removed` | The program is no longer configured and its managed content was removed. |
 | `conflict` | A managed file holds configuration the daemon will not overwrite; the detail names the file. |
-| `inactive` | The program uses the LLM gateway but the local LLM proxy is not running (see `llmProxy.error` in daemon-info): its entries were left pointing at the loopback port (`whenProxyUnavailable: failClosed`, the default; the detail says when no entries were in place, so the tool keeps its own settings) or removed (`failOpen`). |
+| `inactive` | The daemon's mode cannot manage the program, so its files are untouched and the detail names the required mode. Also used when the program uses the LLM gateway but the local LLM proxy is not running (see `llmProxy.error` in daemon-info): its entries were left pointing at the loopback port (`whenProxyUnavailable: failClosed`, the default; the detail says when no entries were in place, so the tool keeps its own settings) or removed (`failOpen`). |
 | `blocked` | The program had changes, but none were written because another program conflicted or failed; the detail names that program. |
 | `opted_out` | The program is configured, but the device user [opted out of it](#user-choice-of-managed-programs-opt-in); its managed content was removed. An older controller shows this as `unspecified`. |
 | `failed` | Planning or writing this program failed; the detail carries the error. |
@@ -919,13 +974,20 @@ runs this setup.
 | Tool | Discovery | Managed configuration | MCP and skills inventory | Sandbox policy |
 | --- | --- | --- | --- | --- |
 | Claude Code | Yes | Yes | MCP and skills | Yes |
-| Claude Desktop | Yes | Yes | MCP | — |
+| Claude Desktop | Yes | System mode | MCP | — |
 | Codex | Yes | Yes | MCP and skills | Yes |
 | Cursor | Yes | — | MCP and skills | — |
 | OpenCode | Yes | Yes | MCP | — |
 | VS Code | Yes | User mode (Copilot Chat) | MCP and skills | — |
 | Grok Build | Yes | System mode | MCP and skills | — |
 | GitHub Copilot CLI | Yes | User mode | — | — |
+| Pi | Yes | User mode | MCP and skills | — |
+
+A fleet policy can include programs for both user and system mode. Each daemon
+skips programs its mode cannot manage and reports them as **inactive** with a
+reason; supported programs continue applying. Skipped programs' files are left
+untouched, including when the program is removed from the policy. Cleanup requires
+a daemon running in the program's supported mode.
 
 > **Don't see your tool?** We're actively expanding this list and would love
 > your help. [Open an integration request](https://github.com/agentdesktop-dev/agentdesktop/issues/new)

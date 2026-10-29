@@ -4,6 +4,8 @@ pub mod model;
 pub mod serdes;
 pub mod telemetry;
 
+use std::{env, path::PathBuf};
+
 /// Version reported by endpoint processes. Release builds can override the
 /// workspace package version without rewriting Cargo manifests.
 pub const VERSION: &str = match option_env!("AGENTDESKTOP_VERSION") {
@@ -34,6 +36,37 @@ pub const DEFAULT_SOCKET_PATH: &str = "/var/run/agentdesktop/agentdesktop.sock";
 #[cfg(windows)]
 /// Default Windows named pipe exposed by the daemon to local clients.
 pub const DEFAULT_SOCKET_PATH: &str = r"\\.\pipe\agentdesktop";
+
+/// Daemon endpoint for local clients: `AGENTDESKTOP_SOCKET` when set, else the
+/// system socket when a system daemon is running, else the per-user socket.
+pub fn client_socket_path() -> PathBuf {
+    env::var_os("AGENTDESKTOP_SOCKET")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let system = PathBuf::from(DEFAULT_SOCKET_PATH);
+            if system.exists() {
+                return system;
+            }
+            user_socket_path().unwrap_or(system)
+        })
+}
+
+#[cfg(unix)]
+fn user_socket_path() -> Option<PathBuf> {
+    if let Some(runtime) = env::var_os("XDG_RUNTIME_DIR") {
+        return Some(PathBuf::from(runtime).join("agentdesktop.sock"));
+    }
+    let home = env::var_os("HOME").map(PathBuf::from)?;
+    let state = env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/state"));
+    Some(state.join("agentdesktop/agentdesktop.sock"))
+}
+
+#[cfg(windows)]
+fn user_socket_path() -> Option<PathBuf> {
+    None
+}
 
 #[cfg(test)]
 mod tests {

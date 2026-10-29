@@ -55,7 +55,7 @@ jobs:
           save: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install nextest
-        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
+        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2
         with:
           tool: nextest
 
@@ -102,19 +102,51 @@ jobs:
           toolchain: "1.98"
 
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ci-windows
           cache-workspace-crates: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install nextest
-        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
+        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2
         with:
           tool: nextest
 
       - name: Test agent
         run: cargo nextest run --locked --package agentdesktop-agent --lib
+
+  headless-linux:
+    name: Headless Linux static build
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends musl-tools
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.98"
+          targets: x86_64-unknown-linux-musl
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ci-headless-linux
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build headless binary
+        run: cargo build --locked --package agentdesktop-agent --bin agentdesktop-headless --target x86_64-unknown-linux-musl
+
+      - name: Verify static linking
+        run: .github/scripts/verify-static-binary.sh target/x86_64-unknown-linux-musl/debug/agentdesktop-headless
 
   container:
     name: Container

@@ -126,6 +126,7 @@ jobs:
             - Controller image: `${{ env.CONTROLLER_IMAGE }}:v${{ needs.setup.outputs.version }}`
             - Helm chart: `oci://${{ env.CHART_REGISTRY }}/agentdesktop-controller:${{ needs.setup.outputs.version }}`
             - Agentdesktop binaries for amd64 and arm64 on Linux, macOS, and Windows are attached below.
+            - Headless Linux binaries (`agentdesktop-headless-linux-*`) run the daemon and CLI without the desktop UI. They are statically linked and run on any Linux, including RHEL 8.
             - Signed Windows MSI installers for amd64 and arm64 are attached below.
             - Notarized macOS PKG installers for amd64 and arm64 are attached below.
             - Linux binaries include keyless Sigstore build provenance. Verify a downloaded binary with `gh attestation verify <FILE> --repo ${{ github.repository }}`.

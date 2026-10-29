@@ -752,10 +752,10 @@ fn conflict_on_a_non_object_file() {
     assert_eq!(fs::read(&path).unwrap(), b"[]\n");
 }
 
-// --- Provider::plan: system-mode rejection ----------------------------------
+// --- Provider::plan: system-mode skipping ----------------------------------
 
 #[test]
-fn system_mode_rejects_a_configured_program_before_writing_anything() {
+fn system_mode_skips_a_configured_program_without_writing_anything() {
     use super::Copilot;
     use crate::provider::{Provider, ReconcileContext};
     let dir = tempfile::tempdir().unwrap();
@@ -780,12 +780,15 @@ fn system_mode_rejects_a_configured_program_before_writing_anything() {
             providers_path: Some(path.clone()),
         },
     ] {
-        let error = match provider.plan(&context(false), &config) {
-            Ok(_) => panic!("system mode with programs.copilot configured must fail"),
-            Err(error) => error,
-        };
-        assert!(error.to_string().contains("--user"), "{error}");
-        assert!(error.to_string().contains("GitHub Copilot CLI"), "{error}");
+        let plan = provider
+            .plan(&context(false), &config)
+            .expect("system mode skips this program");
+        let reason = plan
+            .inactive_reason()
+            .expect("configured program is inactive");
+        assert!(reason.contains("--user"), "{reason}");
+        assert!(reason.contains("GitHub Copilot CLI"), "{reason}");
+        plan.apply().unwrap();
     }
     assert!(!path.exists(), "preflight failure must not write any files");
     // System mode with the program absent does nothing.

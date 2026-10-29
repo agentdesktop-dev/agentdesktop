@@ -41,7 +41,7 @@ jobs:
           persist-credentials: false
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -92,7 +92,7 @@ jobs:
           merge-multiple: true
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -231,8 +231,71 @@ jobs:
           path: release/agentdesktop-*
           if-no-files-found: error
 
+  # The daemon and CLI without the Tauri UI, statically linked against musl so
+  # it runs on any Linux, including RHEL 8 and other hosts without GTK/WebKit
+  # 4.1 or a recent glibc.
+  build-linux-headless-binaries:
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    env:
+      AGENTDESKTOP_VERSION: ${{ inputs.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - arch: arm64
+            target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install musl toolchain
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.98"
+          targets: ${{ matrix.target }}
+
+      - name: Build binary
+        shell: bash
+        run: cargo build --locked --release --package agentdesktop-agent --bin agentdesktop-headless --target "${{ matrix.target }}"
+
+      - name: Verify static linking
+        shell: bash
+        run: .github/scripts/verify-static-binary.sh "target/${{ matrix.target }}/release/agentdesktop-headless"
+
+      - name: Stage binary and checksum
+        shell: bash
+        env:
+          OUTPUT_NAME: agentdesktop-headless-linux-${{ matrix.arch }}
+        run: |
+          mkdir -p release
+          cp "target/${{ matrix.target }}/release/agentdesktop-headless" "release/${OUTPUT_NAME}"
+          (cd release && sha256sum "${OUTPUT_NAME}" > "${OUTPUT_NAME}.sha256")
+
+      - name: Upload binary
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-binary-linux-headless-${{ matrix.arch }}
+          path: release/agentdesktop-*
+          if-no-files-found: error
+
   attest-linux-binaries:
-    needs: build-linux-binaries
+    needs:
+      - build-linux-binaries
+      - build-linux-headless-binaries
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -252,3 +315,5 @@ jobs:
           subject-path: |
             release/agentdesktop-linux-amd64
             release/agentdesktop-linux-arm64
+            release/agentdesktop-headless-linux-amd64
+            release/agentdesktop-headless-linux-arm64

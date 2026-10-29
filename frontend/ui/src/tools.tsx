@@ -15,6 +15,7 @@ import cursorIcon from "./assets/cursor.svg";
 import grokIcon from "./assets/grok.svg";
 import ollamaIcon from "./assets/ollama.svg";
 import openCodeIcon from "./assets/opencode.svg";
+import piIcon from "./assets/pi.svg";
 
 export interface ToolMcpServer {
   name: string;
@@ -53,6 +54,7 @@ const toolIcons: Record<string, string> = {
   "grok-build": grokIcon,
   cursor: cursorIcon,
   opencode: openCodeIcon,
+  pi: piIcon,
   vscode: copilotIcon,
   "vscode-copilot": copilotIcon,
   copilot: copilotIcon,
@@ -69,6 +71,7 @@ export function friendlyTool(kind: string) {
     grok: "Grok Build",
     "grok-build": "Grok Build",
     opencode: "OpenCode",
+    pi: "Pi",
     vscode: "VS Code",
     "vscode-copilot": "VS Code",
     cursor: "Cursor",

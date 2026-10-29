@@ -4,7 +4,10 @@
 //! contributes no entries. Reconciliation is optional and only builds a plan.
 use std::path::PathBuf;
 
-use agentdesktop_core::{config::DaemonConfig, model::Discovery};
+use agentdesktop_core::{
+    config::DaemonConfig,
+    model::{DaemonScope, Discovery},
+};
 
 use crate::reconcile::ReconcilePlan;
 
@@ -18,6 +21,7 @@ mod json_merge;
 mod metadata;
 pub mod ollama;
 pub mod opencode;
+pub mod pi;
 pub(crate) mod shared;
 pub mod vscode;
 
@@ -55,4 +59,30 @@ pub struct ReconcileContext {
     /// failed, or no pairing could be created: such programs must then remove
     /// or neutralise any pointer they wrote earlier, never leave a stale one.
     pub llm_proxy: Option<crate::llm_proxy::LlmProxyContext>,
+}
+
+impl ReconcileContext {
+    /// Skip providers outside this daemon's scope before they read or clean up
+    /// any files. Only configured programs need an inactive status.
+    fn skip_unless(
+        &self,
+        required_scope: DaemonScope,
+        configured: bool,
+        display_name: &str,
+    ) -> Option<ReconcilePlan> {
+        if self.merge_user_settings == (required_scope == DaemonScope::User) {
+            return None;
+        }
+        Some(if configured {
+            let (required, current) = match required_scope {
+                DaemonScope::User => ("user mode (--user)", "system mode"),
+                DaemonScope::System => ("system mode", "user mode"),
+            };
+            ReconcilePlan::skipped(&format!(
+                "{display_name} requires {required}; skipped in {current}"
+            ))
+        } else {
+            ReconcilePlan::default()
+        })
+    }
 }
