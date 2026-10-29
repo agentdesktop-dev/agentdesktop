@@ -491,6 +491,14 @@ pub struct ControllerConfig {
     #[serde(default = "default_admin_listen")]
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub admin_listen: SocketAddr,
+    /// Address on which the controller serves Prometheus metrics at `/metrics`.
+    ///
+    /// Unset disables the endpoint. The endpoint has no authentication, so
+    /// expose it only to the metrics scraper. It reports fleet-wide counts and
+    /// never device hostnames, users, or tool inputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
+    pub metrics_listen: Option<SocketAddr>,
     /// SQLite or PostgreSQL URL used for controller state.
     #[serde(default = "default_controller_database_url")]
     pub database_url: String,
@@ -1885,6 +1893,33 @@ oidc:
             controller.tls.files().certificate,
             std::path::PathBuf::from("/etc/agentdesktop/tls/controller.pem")
         );
+    }
+
+    #[test]
+    fn controller_metrics_listen_is_off_unless_set() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "agentdesktop-metrics-config-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).expect("create configuration directory");
+        let base = "tls: /etc/agentdesktop/tls\noidc:\n  issuer: https://idp.example.com\n  clientId: agentdesktop\n";
+        let load = |name: &str, extra: &str| {
+            let path = directory.join(name);
+            std::fs::write(&path, format!("{base}{extra}")).expect("write configuration");
+            load_controller(&path).expect("load controller configuration")
+        };
+
+        assert_eq!(load("off.yaml", "").metrics_listen, None);
+        assert_eq!(
+            load("on.yaml", "metricsListen: 0.0.0.0:9090\n").metrics_listen,
+            Some("0.0.0.0:9090".parse().unwrap())
+        );
+
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]
