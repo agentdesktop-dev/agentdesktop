@@ -1,0 +1,107 @@
+# Dex and the controller play the organization's services, reached by their
+# service names. Each device is its own container with its own hostname, like
+# a separate machine. Only the ports below reach the host, on loopback.
+name: agentdesktop-enrollment
+
+services:
+  keys:
+    image: docker.io/library/alpine:3.22
+    environment:
+      CONTROLLER_SAN: DNS:controller
+    command:
+    - sh
+    - -c
+    - >-
+      [ -e /tmp/agentdesktop-keys/controller.pem ] ||
+      { apk add --no-cache bash openssl && bash /demo/create-keys.sh; }
+    volumes:
+    - keys:/tmp/agentdesktop-keys
+    - ../claude/create-keys.sh:/demo/create-keys.sh:ro
+
+  dex:
+    image: ghcr.io/dexidp/dex:v2.45.1
+    command: dex serve /etc/dex/config.yaml
+    # The controller fetches Dex's discovery document at startup.
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:5556/dex/.well-known/openid-configuration]
+      interval: 2s
+      retries: 30
+    volumes:
+    - ./dex.yaml:/etc/dex/config.yaml:ro
+
+  controller:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    command: [--config, /demo/controller.yaml]
+    user: "0:0"
+    depends_on:
+      keys:
+        condition: service_completed_successfully
+      dex:
+        condition: service_healthy
+    ports:
+    - 127.0.0.1:18080:18080 # Controller UI, through controller-ui
+    volumes:
+    - keys:/keys:ro
+    - controller-state:/state
+    - ./controller.yaml:/demo/controller.yaml:ro
+    - ./policy.yaml:/demo/policy.yaml:ro
+
+  # The controller's management UI listens on loopback only. Like
+  # `kubectl port-forward`, this joins the controller's network namespace and
+  # forwards the published port to it.
+  # TODO: remove this once the controller UI has authentication and can listen
+  # on a non-loopback address, and publish the UI port on `controller` instead.
+  controller-ui:
+    image: docker.io/library/alpine:3.22
+    network_mode: service:controller
+    command:
+    - sh
+    - -c
+    - apk add --no-cache socat && exec socat TCP-LISTEN:18080,fork,reuseaddr TCP:127.0.0.1:8080
+    depends_on:
+    - controller
+
+  headless:
+    build:
+      context: ../..
+      dockerfile: examples/enrollment/Dockerfile
+      target: headless
+    hostname: headless-device
+    depends_on:
+      keys:
+        condition: service_completed_successfully
+      controller:
+        condition: service_started
+    volumes:
+    - keys:/keys:ro
+    - headless-state:/var/lib/agentdesktop
+    - ./headless.yaml:/demo/agentdesktop.yaml:ro
+
+  desktop:
+    build:
+      context: ../..
+      dockerfile: examples/enrollment/Dockerfile
+      target: desktop
+    hostname: desktop-device
+    shm_size: 1gb
+    depends_on:
+      keys:
+        condition: service_completed_successfully
+      controller:
+        condition: service_started
+    ports:
+    - 127.0.0.1:16080:6080 # Desktop device (noVNC)
+    volumes:
+    - keys:/keys:ro
+    - desktop-state:/var/lib/agentdesktop
+    - desktop-home:/home/dev
+    - ./desktop.yaml:/demo/agentdesktop.yaml:ro
+
+volumes:
+  keys:
+  controller-state:
+  headless-state:
+  desktop-state:
+  desktop-home:
