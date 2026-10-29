@@ -908,6 +908,7 @@ code {
   line-height: 1.45;
 }
 
+/* biome-ignore lint/style/noDescendingSpecificity: component-scoped notice icon */
 .config-notice svg {
   flex: 0 0 auto;
   margin-top: 1px;

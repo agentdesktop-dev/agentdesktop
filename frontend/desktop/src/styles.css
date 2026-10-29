@@ -646,6 +646,7 @@ p {
   gap: 4px;
 }
 
+/* biome-ignore lint/style/noDescendingSpecificity: component-scoped preference label */
 .inline-preference strong {
   color: var(--ink);
   font-size: 12px;
@@ -968,6 +969,7 @@ p {
   gap: 7px;
 }
 
+/* biome-ignore lint/style/noDescendingSpecificity: component-scoped confirmation label */
 .logout-confirmation > strong {
   color: var(--danger-heading);
   font-size: 11px;
@@ -999,11 +1001,13 @@ p {
   gap: 4px;
 }
 
+/* biome-ignore lint/style/noDescendingSpecificity: component-scoped empty-state title */
 .empty-inline strong {
   color: var(--ink);
   font-size: 12px;
 }
 
+/* biome-ignore lint/style/noDescendingSpecificity: component-scoped empty-state description */
 .empty-inline span {
   line-height: 1.45;
 }
