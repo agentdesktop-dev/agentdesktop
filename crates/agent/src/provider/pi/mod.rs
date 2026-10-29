@@ -98,6 +98,7 @@ mod tests {
         let ctx = ReconcileContext {
             llm_proxy: None,
             merge_user_settings: false,
+            user_mode: false,
             credential_helper: root.path().join("agentdesktop"),
             socket: root.path().join("agentdesktop.sock"),
         };
@@ -123,6 +124,7 @@ mod tests {
         let mut ctx = ReconcileContext {
             llm_proxy: None,
             merge_user_settings: true,
+            user_mode: true,
             credential_helper: root.path().join("agentdesktop"),
             socket: root.path().join("agentdesktop.sock"),
         };
@@ -132,6 +134,7 @@ mod tests {
         assert!(pi.models_path.as_ref().unwrap().exists());
 
         ctx.merge_user_settings = false;
+        ctx.user_mode = false;
         pi.plan(&ctx, &DaemonConfig::default())
             .unwrap()
             .apply()
@@ -144,6 +147,7 @@ mod tests {
         let ctx = ReconcileContext {
             llm_proxy: None,
             merge_user_settings: false,
+            user_mode: false,
             credential_helper: "agentdesktop".into(),
             socket: "agentdesktop.sock".into(),
         };
