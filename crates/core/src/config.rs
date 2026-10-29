@@ -205,7 +205,9 @@ pub struct OpenCodeStartupConfig {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PiStartupConfig {
-    /// Model catalog file.
+    /// Model catalog file. A user daemon defaults to Pi's agent directory. A
+    /// system daemon manages Pi only when this and `settings` name one user's
+    /// files; it writes them as the owner of that user's Pi directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<PathBuf>,
     /// Settings file.
@@ -1189,7 +1191,8 @@ impl VsCodeConfig {
 ///
 /// Generated `providers.agentdesktop` values take precedence over overlapping
 /// `managedConfig` keys. Pi stores configuration under `~/.pi/agent` (or
-/// `PI_CODING_AGENT_DIR`), so management requires `--user`. System daemons skip it.
+/// `PI_CODING_AGENT_DIR`), so a user daemon manages it; a system daemon manages
+/// it only for the user named by `daemon.pi.models` and `daemon.pi.settings`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
