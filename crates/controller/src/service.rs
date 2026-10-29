@@ -15,7 +15,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 use x509_parser::{extensions::GeneralName, parse_x509_certificate};
 
-use agentdesktop_core::config::{LlmGatewayAuthentication, ProgramAuthentication, ProgramsConfig};
+use agentdesktop_core::config::{LlmGatewayAuthentication, ProgramsConfig};
 use agentdesktop_usage::UsageError;
 
 use crate::{
@@ -62,17 +62,7 @@ impl FleetAgentService {
 }
 
 fn subscription_is_configured_for_client(programs: &ProgramsConfig, client_id: &str) -> bool {
-    match client_id {
-        "claude-code" => programs
-            .claude_code
-            .as_ref()
-            .is_some_and(|program| program.auth == Some(ProgramAuthentication::Subscription)),
-        "claude-desktop" => programs
-            .claude_desktop
-            .as_ref()
-            .is_some_and(|program| program.auth == Some(ProgramAuthentication::Subscription)),
-        _ => false,
-    }
+    programs.subscription_auth(client_id).is_some()
 }
 
 #[tonic::async_trait]
@@ -657,6 +647,18 @@ mod tests {
         assert!(!subscription_is_configured_for_client(
             &config.programs,
             "codex"
+        ));
+        let codex = agentdesktop_core::config::parse_daemon(
+            "llmGateway:\n  url: https://gateway.example.com\n  proxyUrl: https://gateway.example.com/codex\n  authentication:\n    type: controllerJwt\n    audience: gateway\n    allowedClientIds: [codex]\nprograms:\n  codex:\n    auth: subscription\n",
+        )
+        .unwrap();
+        assert!(subscription_is_configured_for_client(
+            &codex.programs,
+            "codex"
+        ));
+        assert!(!subscription_is_configured_for_client(
+            &codex.programs,
+            "claude-code"
         ));
     }
 

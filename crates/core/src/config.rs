@@ -735,6 +735,25 @@ pub struct ProgramsConfig {
 }
 
 impl ProgramsConfig {
+    pub fn subscription_auth(&self, client_id: &str) -> Option<SubscriptionAuth> {
+        let (auth, mechanism) = match client_id {
+            "claude-code" => (
+                self.claude_code.as_ref()?.auth.as_ref(),
+                SubscriptionAuth::CredentialHelper,
+            ),
+            "claude-desktop" => (
+                self.claude_desktop.as_ref()?.auth.as_ref(),
+                SubscriptionAuth::CredentialHelper,
+            ),
+            "codex" => (
+                self.codex.as_ref()?.auth.as_ref(),
+                SubscriptionAuth::CredentialHelper,
+            ),
+            _ => return None,
+        };
+        (auth == Some(&ProgramAuthentication::Subscription)).then_some(mechanism)
+    }
+
     fn is_empty(&self) -> bool {
         self.claude_code.is_none()
             && self.claude_desktop.is_none()
@@ -745,6 +764,12 @@ impl ProgramsConfig {
             && self.vscode.is_none()
             && self.pi.is_none()
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubscriptionAuth {
+    CredentialHelper,
+    ClientPassthrough,
 }
 
 /// Settings reconciled into Claude Code's managed configuration.
@@ -797,6 +822,9 @@ pub struct CodexConfig {
     /// Whether this program uses the top-level LLM gateway.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub use_llm_gateway: bool,
+    /// Connect a ChatGPT subscription through Agentdesktop's OAuth credential helper.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<ProgramAuthentication>,
     /// Arbitrary values written to Codex's organization-managed TOML configuration.
     ///
     /// Use Codex's native snake_case configuration keys. TOML has no null value,
@@ -1540,6 +1568,16 @@ fn validate_daemon(
                     .as_ref()
                     .is_some_and(|program| program.use_llm_gateway),
             ),
+            (
+                "codex",
+                programs.codex.as_ref().is_some_and(|program| {
+                    program.auth == Some(ProgramAuthentication::Subscription)
+                }),
+                programs
+                    .codex
+                    .as_ref()
+                    .is_some_and(|program| program.use_llm_gateway),
+            ),
         ]
     {
         if subscription && (!uses_gateway || llm_gateway.is_none()) {
@@ -1932,6 +1970,10 @@ usage:
             "../../../examples/claude-subscription/config.yaml"
         ))
         .expect("Claude subscription user configuration example");
+        super::parse_local_daemon(include_str!(
+            "../../../examples/codex-subscription/config.yaml"
+        ))
+        .expect("Codex subscription user configuration example");
         let standalone =
             super::parse_local_daemon(include_str!("../../../examples/standalone/config.yaml"))
                 .expect("standalone daemon configuration example");
@@ -2028,6 +2070,74 @@ programs:
                 .to_string()
                 .contains("deviceAuthorization")
         );
+    }
+
+    #[test]
+    fn subscription_auth_uses_helpers_for_claude_and_codex() {
+        let config = parse_daemon(
+            "llmGateway:\n  url: https://gateway.example.com\n  proxyUrl: https://gateway.example.com/subscription\n  authentication:\n    type: controllerJwt\n    audience: gateway\n    allowedClientIds: [claude-code, claude-desktop, codex]\nprograms:\n  claudeCode:\n    auth: subscription\n  claudeDesktop: {}\n  codex:\n    auth: subscription\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.programs.subscription_auth("claude-code"),
+            Some(super::SubscriptionAuth::CredentialHelper)
+        );
+        assert_eq!(
+            config.programs.subscription_auth("codex"),
+            Some(super::SubscriptionAuth::CredentialHelper)
+        );
+        for client_id in ["claude-desktop", "copilot-cli", "opencode", "unknown"] {
+            assert_eq!(config.programs.subscription_auth(client_id), None);
+        }
+        assert_eq!(
+            super::ProgramsConfig::default().subscription_auth("codex"),
+            None
+        );
+    }
+
+    #[test]
+    fn codex_subscription_requires_an_authenticated_gateway_without_a_proxy() {
+        let valid = r#"
+llmGateway:
+  url: https://gateway.example.com
+  proxyUrl: https://gateway.example.com/codex
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
+    allowedClientIds: [codex]
+programs:
+  codex:
+    auth: subscription
+"#;
+        let config = parse_daemon(valid).expect("valid Codex subscription configuration");
+        parse_daemon(&valid.replace("  proxyUrl: https://gateway.example.com/codex\n", ""))
+            .expect("Codex helper does not require proxyUrl");
+        assert_eq!(
+            config.programs.codex.unwrap().auth,
+            Some(super::ProgramAuthentication::Subscription)
+        );
+        for (yaml, message) in [
+            (
+                "programs:\n  codex:\n    auth: subscription\n".to_owned(),
+                "use an LLM gateway",
+            ),
+            (
+                valid.replace("    auth: subscription", "    auth: subscription\n    useLlmGateway: false"),
+                "use an LLM gateway",
+            ),
+            (
+                valid.replace(
+                    "  authentication:\n    type: controllerJwt\n    audience: agentgateway\n    allowedClientIds: [codex]\n",
+                    "",
+                ),
+                "gateway authentication",
+            ),
+        ] {
+            assert!(
+                parse_daemon(&yaml).unwrap_err().to_string().contains(message),
+                "expected {message} for {yaml}"
+            );
+        }
     }
 
     #[test]
