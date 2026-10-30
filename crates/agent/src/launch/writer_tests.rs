@@ -112,6 +112,7 @@ fn the_executable_configuration_rule_covers_git_commondir_and_the_ide_directory_
         ssh_enabled: false,
         exists: &exists,
         is_dir: &is_dir,
+        console: crate::launch::plan::ConsolePlan::Window,
     });
     let denied = request.filesystem.denied_paths;
     assert!(denied.contains(&r"C:\ws\.git\commondir".to_owned()));
@@ -346,6 +347,7 @@ mod handler {
             _executor: &Path,
             request: &Path,
             _log: &Path,
+            _console: super::plan::ConsolePlan,
         ) -> io::Result<Box<dyn LaunchChild>> {
             // Record whether ~/.claude existed at spawn time (n1: ordering).
             *self.home_claude_existed.lock().unwrap() = self.home.join(".claude").is_dir();
@@ -443,6 +445,7 @@ mod handler {
                 program: "claude-code".into(),
                 cwd: cwd.clone(),
                 args: vec![],
+                console: None,
             }),
         )
         .await
@@ -511,6 +514,7 @@ mod handler {
             ssh_enabled: false,
             exists: &exists,
             is_dir: &is_dir,
+            console: crate::launch::plan::ConsolePlan::Window,
         });
         let readonly = &request.filesystem.readonly_paths;
         let denied = &request.filesystem.denied_paths;
@@ -602,6 +606,7 @@ async fn a_resolved_program_path_with_a_percent_sign_is_rejected() {
             program: "claude-code".into(),
             cwd,
             args: vec![],
+            console: None,
         }),
     )
     .await
@@ -641,6 +646,7 @@ fn the_environment_is_a_list_of_key_value_entries_and_a_missing_workspace_claude
         ssh_enabled: false,
         exists: &exists,
         is_dir: &is_dir,
+        console: crate::launch::plan::ConsolePlan::Window,
     });
     // MXC 1.0.0 takes `env` as `KEY=VALUE` strings, not an object (lab L2).
     assert!(request.process.env.iter().all(|entry| entry.contains('=')));
@@ -691,6 +697,7 @@ fn the_box_environment_has_home_set_to_the_daemon_home_when_daemon_env_has_no_ho
         ssh_enabled: false,
         exists: &exists,
         is_dir: &is_dir,
+        console: crate::launch::plan::ConsolePlan::Window,
     });
     assert!(
         request

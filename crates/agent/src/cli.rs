@@ -8,9 +8,9 @@ use agentdesktop_client as client;
 use agentdesktop_core::{
     config::DaemonConfig,
     model::{
-        Discovery, EnrollmentStatus, Health, Launch, LaunchRequest, LaunchStatus,
-        LlmGatewayCredential, LlmGatewayLoginStatus, ProgramChoice, ProgramManagement,
-        SessionCreated, SessionInfo, SessionRequest, TelemetryEventKind,
+        ConsoleAttach, Discovery, EnrollmentStatus, Health, Launch, LaunchConsole, LaunchRequest,
+        LaunchStatus, LlmGatewayCredential, LlmGatewayLoginStatus, ProgramChoice,
+        ProgramManagement, SessionCreated, SessionInfo, SessionRequest, TelemetryEventKind,
     },
 };
 use anyhow::Context;
@@ -50,14 +50,32 @@ pub enum ClientCommand {
         /// Program to run: `claude-code` (alias `claude`), `opencode` or
         /// `copilot` (Copilot CLI).
         program: String,
-        /// Wait for the box to exit and return the executor's exit code,
-        /// which does not carry the program's own code. Ctrl+C stops waiting
-        /// only; the program keeps running.
+        /// Wait for the box to exit. From a console the program runs in that
+        /// console (same-terminal hosting) and its own exit code is returned;
+        /// callers without a console get the windowed launch and the
+        /// executor's exit code. In same-terminal mode Ctrl+C reaches the
+        /// program; in windowed mode it stops the waiter only.
         #[arg(long)]
         wait: bool,
         /// Arguments passed to the program.
         #[arg(last = true)]
         args: Vec<String>,
+    },
+    /// Internal: attach the box to a client's console and run the executor.
+    #[command(hide = true)]
+    ConsoleAttach {
+        /// The requesting client process whose console to attach to.
+        #[arg(long)]
+        client_pid: u32,
+        /// The executor binary (`wxc-exec.exe`).
+        #[arg(long)]
+        executor: PathBuf,
+        /// The launch's request.json.
+        #[arg(long)]
+        request: PathBuf,
+        /// The launch's log file for helper diagnostics.
+        #[arg(long)]
+        log: PathBuf,
     },
     /// Handle an event emitted by a managed developer-tool hook.
     Hook {
@@ -290,7 +308,15 @@ pub async fn run(command: ClientCommand, socket: PathBuf) -> anyhow::Result<()> 
             args,
         } => {
             let cwd = std::env::current_dir().context("read the current directory")?;
-            let request = run_request(&program, cwd, args);
+            let mut request = run_request(&program, cwd, args);
+            // Same-terminal hosting: a waiting caller that owns a console hands
+            // it to the daemon; the boxed program runs there and its own exit
+            // code comes back. Callers without a console keep the window.
+            if wait && crate::launch::console::client_console_available() {
+                request.console = Some(ConsoleAttach {
+                    client_pid: std::process::id(),
+                });
+            }
             if wait {
                 let (code, line) = run_and_wait(&socket, &request, RUN_WAIT_POLL).await;
                 if let Some(line) = line {
@@ -308,6 +334,15 @@ pub async fn run(command: ClientCommand, socket: PathBuf) -> anyhow::Result<()> 
                 }
             }
         }
+        ClientCommand::ConsoleAttach {
+            client_pid,
+            executor,
+            request,
+            log,
+        } => match crate::launch::console::run_attach(client_pid, &executor, &request, &log) {
+            Ok(code) => std::process::exit(code),
+            Err(_) => std::process::exit(crate::launch::console::ATTACH_FAILED_EXIT),
+        },
         ClientCommand::LlmProxy {
             command: LlmProxyCommand::Session { command },
         } => run_session_command(command, &socket)
@@ -397,6 +432,7 @@ pub fn run_request(program: &str, cwd: PathBuf, args: Vec<String>) -> LaunchRequ
         program: program.to_owned(),
         cwd,
         args,
+        console: None,
     }
 }
 
@@ -443,6 +479,12 @@ pub(crate) async fn run_and_wait(
         Ok(launch) => launch,
         Err(error) => return (1, Some(one_line(&run_error_message(&error)))),
     };
+    // Same-terminal hosting: Ctrl+C belongs to the boxed program; the waiter
+    // must stay so the shell keeps waiting for `claude` like stock. In windowed
+    // mode the documented behaviour stays (Ctrl+C ends the waiter only).
+    if launch.console == LaunchConsole::Attached {
+        crate::launch::console::ignore_ctrl_c();
+    }
     loop {
         tokio::time::sleep(poll).await;
         let launches: Vec<Launch> = match client::get(socket, "/v1/launches").await {
@@ -612,6 +654,7 @@ mod tests {
                 program: "claude-code".into(),
                 cwd: cwd.clone(),
                 args: vec!["--model".into(), "x".into()],
+                console: None,
             }
         );
         assert_eq!(
@@ -620,6 +663,7 @@ mod tests {
                 program: "claude-code".into(),
                 cwd,
                 args: vec![],
+                console: None,
             }
         );
     }
@@ -704,6 +748,7 @@ mod tests {
             managed_hooks_locked: false,
             managed_mcp_locked: false,
             session_id: "test-session-id".into(),
+            console: agentdesktop_core::model::LaunchConsole::Window,
         };
         let line = super::run_success_line(&launch);
         assert_eq!(
@@ -824,6 +869,7 @@ mod tests {
                 program: "claude-code".into(),
                 cwd: "/work/app".into(),
                 args: vec![],
+                console: None,
             }
         }
 
@@ -842,6 +888,7 @@ mod tests {
                 managed_hooks_locked: false,
                 managed_mcp_locked: false,
                 session_id: "test-session-id".into(),
+                console: agentdesktop_core::model::LaunchConsole::Window,
             })
             .unwrap()
         }

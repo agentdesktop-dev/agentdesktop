@@ -4054,6 +4054,7 @@ fn pr4_plan(
         ssh_enabled: false,
         exists: &exists,
         is_dir: &is_dir,
+        console: crate::launch::plan::ConsolePlan::Window,
     };
     crate::launch::plan(&input, &crate::launch::profile::CLAUDE_CODE)
 }

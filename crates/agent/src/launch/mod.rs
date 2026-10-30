@@ -19,7 +19,8 @@ use crate::{api, secure_fs};
 use agentdesktop_core::{
     config::{ContainmentEgress, ContainmentStartupConfig, DaemonConfig},
     model::{
-        ContainmentInfo, DaemonScope, Launch, LaunchRequest, LaunchStatus, LlmGatewayCredential,
+        ConsoleAttach, ContainmentInfo, DaemonScope, Launch, LaunchConsole, LaunchRequest,
+        LaunchStatus, LlmGatewayCredential,
     },
 };
 use anyhow::Context;
@@ -33,6 +34,7 @@ use axum::{
     routing::{get, post},
 };
 
+pub(crate) mod console;
 pub(crate) mod engine;
 pub mod git_ssh;
 pub mod host;
@@ -412,6 +414,8 @@ pub struct LaunchInput<'a> {
     /// the ssh env vars and file grants enter the request (AC 6; a launch
     /// without ssh keeps byte-identical request bytes, AC 9).
     pub ssh_enabled: bool,
+    /// How the boxed program's console is provided (window or the client's).
+    pub console: plan::ConsolePlan,
     pub exists: &'a dyn Fn(&Path) -> bool,
     pub is_dir: &'a dyn Fn(&Path) -> bool,
 }
@@ -792,6 +796,7 @@ pub(crate) fn plan_program(
         readonly: readonly.into_iter().map(PathBuf::from).collect(),
         denied: denied.into_iter().map(PathBuf::from).collect(),
         egress: input.egress,
+        console: input.console,
     }
 }
 
@@ -1008,6 +1013,15 @@ impl IntegrityCheck {
     }
 }
 
+/// Whether an executor exit within the early-exit watch is the program's own
+/// result rather than a failed box start: only in same-terminal mode, where
+/// the executor's code is the program's and the caller's console showed the
+/// run — and never for the helper's reserved attach-failure code.
+fn early_exit_is_program_result(console: &plan::ConsolePlan, code: i32) -> bool {
+    matches!(console, plan::ConsolePlan::Attach { .. })
+        && code != crate::launch::console::ATTACH_FAILED_EXIT
+}
+
 fn stop_executor(child: &mut dyn LaunchChild, launch_id: &str) {
     if let Err(error) = child.kill() {
         tracing::warn!(launch_id, %error, "failed to stop the executor process");
@@ -1021,6 +1035,7 @@ pub trait Executor: Send + Sync {
         executor: &Path,
         request: &Path,
         log: &Path,
+        console: plan::ConsolePlan,
     ) -> io::Result<Box<dyn LaunchChild>>;
 }
 
@@ -1271,6 +1286,7 @@ async fn launch(
     let Some(profile) = profile::program_profile(&request.program) else {
         return Err(bad_request(unknown_program()));
     };
+    let console = console_plan(request.console);
     // Only the Claude box reads `<home>\.claude\settings.json`, so a
     // redirected Claude settings path refuses Claude launches only.
     if profile.is_claude() && state.claude_settings_overridden {
@@ -1358,6 +1374,7 @@ async fn launch(
             cwd,
             args,
             proxy_address,
+            console,
         },
     ));
     match started.await {
@@ -1367,6 +1384,34 @@ async fn launch(
             format!("launch task failed: {error}"),
         )),
     }
+}
+
+/// Validates the client's same-terminal attach request. Any failure, and any
+/// platform without the console handoff, downgrades to the windowed launch;
+/// the answer's `console` field reports what was used.
+fn console_plan(request: Option<ConsoleAttach>) -> plan::ConsolePlan {
+    #[cfg(windows)]
+    if let Some(attach) = request {
+        match crate::launch::console::validate_client(attach.client_pid) {
+            Ok(()) => {
+                return plan::ConsolePlan::Attach {
+                    client_pid: attach.client_pid,
+                };
+            }
+            Err(error) => {
+                // The full chain names the cause (another session or user, an
+                // elevated client) an operator needs.
+                tracing::warn!(
+                    client_pid = attach.client_pid,
+                    error = format!("{error:#}"),
+                    "console attach refused; launching windowed"
+                );
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = request;
+    plan::ConsolePlan::Window
 }
 
 fn too_many_sessions() -> LaunchError {
@@ -1445,6 +1490,8 @@ struct StartInput {
     cwd: PathBuf,
     args: Vec<String>,
     proxy_address: std::net::SocketAddr,
+    /// Validated console mode: window, or the requesting client's console.
+    console: plan::ConsolePlan,
 }
 
 /// Creates the launch directory, starts the executor, watches it for an early
@@ -1526,6 +1573,19 @@ async fn start_launch(
         .and_then(|git| git.ssh.as_ref())
         .filter(|ssh| !ssh.hosts.is_empty())
         .cloned();
+    // The ssh agent pipe server identifies the box by the executor's pid; in
+    // attach mode that pid is the helper's, not the box's. Keep the windowed
+    // launch until the helper reports the box pid (PR 7 residual).
+    let console = match (input.console, git_ssh.is_some()) {
+        (plan::ConsolePlan::Attach { .. }, true) => {
+            tracing::warn!(
+                launch_id,
+                "console attach is not supported with git.ssh hosts; launching windowed"
+            );
+            plan::ConsolePlan::Window
+        }
+        (console, _) => console,
+    };
     let ssh_hosts: Vec<String> = git_ssh
         .as_ref()
         .map(|ssh| ssh.hosts.clone())
@@ -1627,6 +1687,7 @@ async fn start_launch(
             pairing: session.pairing.to_string(),
             base_env: host.base_env(),
             ssh_enabled: git_ssh.is_some(),
+            console,
             exists: &exists,
             is_dir: &is_dir,
         },
@@ -1704,14 +1765,16 @@ async fn start_launch(
         );
     }
 
-    let mut child =
-        match state
-            .executor
-            .spawn(&launch_id, &input.executor, &request_path, &log_path)
-        {
-            Ok(child) => child,
-            Err(error) => return fail(&launch_dir, format!("start wxc-exec: {error}")),
-        };
+    let mut child = match state.executor.spawn(
+        &launch_id,
+        &input.executor,
+        &request_path,
+        &log_path,
+        launch_plan.console,
+    ) {
+        Ok(child) => child,
+        Err(error) => return fail(&launch_dir, format!("start wxc-exec: {error}")),
+    };
     let started_at = host.now();
     // The pid file is the sweep's only way to tell a live box from a stale
     // directory; without it the launch is not started.
@@ -1766,6 +1829,14 @@ async fn start_launch(
         match child.try_wait() {
             Ok(None) => {}
             Ok(Some(code)) => {
+                // In same-terminal mode a fast exit is the program's own,
+                // legitimate result (`claude --version`), shown on the
+                // caller's console; register the launch and let the poller
+                // record it. Only the helper's reserved attach-failure code
+                // stays a failed launch (lab AC-2, second run).
+                if early_exit_is_program_result(&launch_plan.console, code) {
+                    break;
+                }
                 integrity_check.verify_and_log(&launch_id).await;
                 let tail = log_tail(&log_path);
                 return fail(
@@ -1795,6 +1866,10 @@ async fn start_launch(
         container_id: state.engine.container_id(&launch_id),
         status: LaunchStatus::Running,
         exit_code: None,
+        console: match launch_plan.console {
+            plan::ConsolePlan::Window => LaunchConsole::Window,
+            plan::ConsolePlan::Attach { .. } => LaunchConsole::Attached,
+        },
         started_at_unix_seconds: started_at,
         ended_at_unix_seconds: None,
         integrity_drift: false,

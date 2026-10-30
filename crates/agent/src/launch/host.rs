@@ -232,7 +232,32 @@ impl Executor for ProcessExecutor {
         executor: &Path,
         request: &Path,
         log: &Path,
+        console: super::plan::ConsolePlan,
     ) -> io::Result<Box<dyn LaunchChild>> {
+        // Same-terminal hosting: the helper attaches to the client's console
+        // and runs the executor there; the launch child is the helper.
+        #[cfg(windows)]
+        if let super::plan::ConsolePlan::Attach { client_pid } = console {
+            let mut child =
+                crate::launch::console::spawn_helper(client_pid, executor, request, log)?;
+            let pid = child.id();
+            let start_time = match process_start_time(&child) {
+                Ok(start_time) => start_time,
+                Err(error) => {
+                    let _ = child.kill();
+                    return Err(io::Error::other(format!(
+                        "read process start time: {error:#}"
+                    )));
+                }
+            };
+            return Ok(Box::new(ProcessChild {
+                child,
+                pid,
+                start_time,
+            }));
+        }
+        #[cfg(not(windows))]
+        let _ = console;
         // The daemon opens the log file itself (it inherits the launch
         // directory's private DACL); the executor only inherits the handle, so
         // a daemon stop later never breaks the box's output.

@@ -969,6 +969,7 @@ fn launch_input<'a>(
         ssh_enabled: false,
         exists,
         is_dir,
+        console: crate::launch::plan::ConsolePlan::Window,
     }
 }
 
@@ -1144,6 +1145,66 @@ fn the_command_line_starts_the_program_through_cmd_without_autorun_or_delayed_ex
             .unwrap()
             .trim_end(),
         r#"cmd.exe /d /v:off /c start "agentdesktop: claude" /WAIT /D "C:\lab\ws pr1" "C:\Users\dev\.local\bin\claude.exe""#
+    );
+}
+
+#[test]
+fn the_attach_command_line_runs_the_program_without_start() {
+    // Same-terminal hosting: no `start`, so the boxed program inherits the
+    // executor's console and cmd returns the program's own exit code.
+    let request = request_json(&snapshot_existing(), &snapshot_directories(), |input| {
+        input.console = crate::launch::plan::ConsolePlan::Attach { client_pid: 4242 };
+    });
+    assert_eq!(
+        request["process"]["commandLine"],
+        concat!(
+            r#"cmd.exe /d /v:off /c ""C:\Users\dev\.local\bin\claude.exe" "#,
+            r#"--debug-file "C:\lab\ws pr1\pr1-l2.log" --allowedTools PowerShell""#
+        )
+    );
+    let without_args = request_json(&snapshot_existing(), &snapshot_directories(), |input| {
+        input.console = crate::launch::plan::ConsolePlan::Attach { client_pid: 4242 };
+        input.args.clear();
+    });
+    assert_eq!(
+        without_args["process"]["commandLine"],
+        r#"cmd.exe /d /v:off /c ""C:\Users\dev\.local\bin\claude.exe"""#
+    );
+}
+
+#[test]
+fn a_fast_exit_is_the_programs_own_result_only_in_attach_mode() {
+    // `claude --version` exits within the early-exit watch; in same-terminal
+    // mode that is the program's own result, not a failed box start. The
+    // helper's reserved attach-failure code and every windowed exit keep the
+    // early-exit failure path (lab AC-2, second run).
+    let attach = crate::launch::plan::ConsolePlan::Attach { client_pid: 4242 };
+    let window = crate::launch::plan::ConsolePlan::Window;
+    assert!(super::early_exit_is_program_result(&attach, 0));
+    assert!(super::early_exit_is_program_result(&attach, 1));
+    assert!(super::early_exit_is_program_result(&attach, 7));
+    assert!(!super::early_exit_is_program_result(
+        &attach,
+        crate::launch::console::ATTACH_FAILED_EXIT
+    ));
+    assert!(!super::early_exit_is_program_result(&window, 0));
+    assert!(!super::early_exit_is_program_result(&window, 7));
+}
+
+#[test]
+fn an_attach_request_from_the_daemon_own_process_downgrades_to_window() {
+    // The daemon must never attach to its own console; the same validation
+    // refuses a pid it cannot own (on every platform this test host rejects
+    // the request and launches windowed).
+    assert_eq!(
+        super::console_plan(Some(agentdesktop_core::model::ConsoleAttach {
+            client_pid: std::process::id(),
+        })),
+        crate::launch::plan::ConsolePlan::Window
+    );
+    assert_eq!(
+        super::console_plan(None),
+        crate::launch::plan::ConsolePlan::Window
     );
 }
 
@@ -1559,6 +1620,7 @@ fn launch(id: &str, started_at: u64) -> Launch {
         managed_settings_source: None,
         managed_hooks_locked: false,
         managed_mcp_locked: false,
+        console: agentdesktop_core::model::LaunchConsole::Window,
     }
 }
 
@@ -2106,6 +2168,7 @@ impl Executor for StubExecutor {
         executor: &Path,
         request: &Path,
         log: &Path,
+        _console: super::plan::ConsolePlan,
     ) -> io::Result<Box<dyn LaunchChild>> {
         if let Some(callback) = self.on_spawn.lock().unwrap().take() {
             callback();
@@ -2427,6 +2490,7 @@ impl Harness {
             program: "claude-code".into(),
             cwd: self.cwd.clone(),
             args: vec![],
+            console: None,
         })
         .unwrap()
     }
@@ -4257,6 +4321,7 @@ fn the_engine_reproduces_the_baseline_request_bytes() {
         ssh_enabled: false,
         exists: &exists_c,
         is_dir: &is_dir_c,
+        console: crate::launch::plan::ConsolePlan::Window,
     };
     let plan_c = plan(&input_c, &CLAUDE_CODE);
     let bytes_c = MxcEngine.request(&plan_c, LAUNCH_ID).unwrap();

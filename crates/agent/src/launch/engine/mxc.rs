@@ -4,7 +4,8 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 use super::Engine;
-use crate::launch::{plan::LaunchPlan, win};
+use crate::launch::plan::{ConsolePlan, LaunchPlan};
+use crate::launch::win;
 
 /// MXC sandbox engine.
 pub(crate) struct MxcEngine;
@@ -28,14 +29,25 @@ impl MxcEngine {
     /// final, nothing is read from the host.
     pub(crate) fn to_request(&self, plan: &LaunchPlan, launch_id: &str) -> MxcRequest {
         let cwd = win(&plan.cwd);
-        let mut command_line = format!(
-            "cmd.exe /d /v:off /c start \"{}\" /WAIT /D \"{cwd}\" \"{}\"",
-            plan.window_title,
-            win(&plan.program)
-        );
+        let mut command_line = match plan.console {
+            ConsolePlan::Window => format!(
+                "cmd.exe /d /v:off /c start \"{}\" /WAIT /D \"{cwd}\" \"{}\"",
+                plan.window_title,
+                win(&plan.program)
+            ),
+            // Same-terminal hosting: no `start`, so the boxed program runs on
+            // the executor's console (the client's) and cmd returns the
+            // program's own exit code.
+            ConsolePlan::Attach { .. } => {
+                format!("cmd.exe /d /v:off /c \"\"{}\"", win(&plan.program))
+            }
+        };
         for arg in &plan.args {
             command_line.push(' ');
             command_line.push_str(arg);
+        }
+        if matches!(plan.console, ConsolePlan::Attach { .. }) {
+            command_line.push('"');
         }
         MxcRequest {
             version: "1.0.0".into(),

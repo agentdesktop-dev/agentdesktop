@@ -124,10 +124,19 @@ anyway.
    # environment variables in action arguments. The pipe name is quoted: a
    # local account name may contain a space.
    $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument `
-       '/c ""C:\Program Files\Agent Desktop\agentdesktop.exe" --socket "\\.\pipe\agentdesktop-user-%USERNAME%" daemon --user"'
+       '/c ""C:\Program Files\Agent Desktop\agentdesktop.exe" --socket "\\.\pipe\agentdesktop-user-%USERNAME%" daemon --user --hidden"'
    $trigger = New-ScheduledTaskTrigger -AtLogOn
    Register-ScheduledTask -TaskName 'agentdesktop user daemon' -Action $action -Trigger $trigger
    ```
+
+   `--hidden` re-executes the daemon without a console and detaches it from
+   the task. The detached process has no console object at all: no window,
+   no minimized state and no taskbar entry. It inherits the standard
+   handles, so the task's log redirection keeps receiving the daemon's
+   output. Because the starting process exits, the scheduled task completes
+   once the daemon is running: Task Scheduler no longer supervises the
+   process, and the daemon is stopped through its pipe (or its pid), not by
+   ending the task.
 
    The pipe's access control admits SYSTEM and the daemon's own user only,
    so another local user's processes cannot reach a running daemon. The pipe

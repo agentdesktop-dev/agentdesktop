@@ -221,6 +221,32 @@ pub struct LaunchRequest {
     pub cwd: PathBuf,
     /// Arguments passed to the program.
     pub args: Vec<String>,
+    /// Ask the daemon to run the boxed program on this client's console
+    /// (same-terminal hosting). Older daemons ignore the field and launch
+    /// windowed; the answer's `console` says which mode was used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub console: Option<ConsoleAttach>,
+}
+
+/// The client console a launch may attach to.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsoleAttach {
+    /// The requesting client process. Only a process of the daemon's own user
+    /// and session is eligible; any other pid downgrades to `Window`.
+    pub client_pid: u32,
+}
+
+/// How a launch presents the boxed program's console.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LaunchConsole {
+    /// The boxed program gets its own console window (`start /WAIT`).
+    #[default]
+    Window,
+    /// The boxed program runs on the requesting client's console; its exit
+    /// code is the program's own.
+    Attached,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -242,6 +268,10 @@ pub struct Launch {
     pub container_id: String,
     pub status: LaunchStatus,
     pub exit_code: Option<i32>,
+    /// Console mode actually used (older daemons answer without the field:
+    /// `window`).
+    #[serde(default)]
+    pub console: LaunchConsole,
     pub started_at_unix_seconds: u64,
     pub ended_at_unix_seconds: Option<u64>,
     /// True once the executable configuration changed while this launch ran
@@ -558,9 +588,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        ContainmentInfo, ControllerConnectionError, ControllerConnectionStatus, Launch,
-        LaunchRequest, LaunchStatus, ProgramChoice, ProgramPosture, SessionCreated, SessionInfo,
-        SessionRequest,
+        ConsoleAttach, ContainmentInfo, ControllerConnectionError, ControllerConnectionStatus,
+        Launch, LaunchConsole, LaunchRequest, LaunchStatus, ProgramChoice, ProgramPosture,
+        SessionCreated, SessionInfo, SessionRequest,
     };
 
     #[test]
@@ -626,6 +656,7 @@ mod tests {
             program: "claude-code".into(),
             cwd: "/work/app".into(),
             args: vec!["--model".into(), "x".into()],
+            console: None,
         };
         assert_eq!(
             serde_json::to_value(&request).unwrap(),
@@ -640,6 +671,49 @@ mod tests {
         }))
         .unwrap();
         assert!(parsed.args.is_empty());
+        assert_eq!(parsed.console, None, "an old client sends no console field");
+    }
+
+    #[test]
+    fn launch_request_console_attach_round_trips() {
+        let request = LaunchRequest {
+            program: "claude-code".into(),
+            cwd: "/work/app".into(),
+            args: vec![],
+            console: Some(ConsoleAttach { client_pid: 4242 }),
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["console"], serde_json::json!({ "clientPid": 4242 }));
+        let parsed: LaunchRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, request);
+    }
+
+    #[test]
+    fn launch_without_console_decodes_as_window() {
+        let mut value = serde_json::to_value(Launch {
+            launch_id: "0123456789abcdef".into(),
+            program: "claude-code".into(),
+            cwd: "/work/app".into(),
+            container_id: "agentdesktop-0123456789abcdef".into(),
+            status: LaunchStatus::Running,
+            exit_code: None,
+            console: LaunchConsole::Attached,
+            started_at_unix_seconds: 1_700_000_000,
+            ended_at_unix_seconds: None,
+            integrity_drift: false,
+            managed_settings_source: None,
+            managed_hooks_locked: false,
+            managed_mcp_locked: false,
+            session_id: String::new(),
+        })
+        .unwrap();
+        value.as_object_mut().unwrap().remove("console");
+        let parsed: Launch = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            parsed.console,
+            LaunchConsole::Window,
+            "an old daemon's answer has no console field"
+        );
     }
 
     #[test]
@@ -658,6 +732,7 @@ mod tests {
             managed_settings_source: None,
             managed_hooks_locked: false,
             managed_mcp_locked: false,
+            console: crate::model::LaunchConsole::Window,
         };
         let json = serde_json::to_value(&running).unwrap();
         assert_eq!(json["launchId"], "0123456789abcdef");
@@ -705,6 +780,7 @@ mod tests {
             managed_settings_source: None,
             managed_hooks_locked: false,
             managed_mcp_locked: false,
+            console: crate::model::LaunchConsole::Window,
         };
         let json = serde_json::to_value(&without_drift).unwrap();
         assert!(json.get("integrityDrift").is_none());
@@ -742,6 +818,7 @@ mod tests {
             managed_hooks_locked: true,
             managed_mcp_locked: false,
             integrity_drift: false,
+            console: crate::model::LaunchConsole::Window,
         };
         let json = serde_json::to_value(&launch_with_fields).unwrap();
         assert_eq!(json["managedSettingsSource"], "file");
@@ -765,6 +842,7 @@ mod tests {
             managed_hooks_locked: false,
             managed_mcp_locked: false,
             integrity_drift: false,
+            console: crate::model::LaunchConsole::Window,
         };
         let json = serde_json::to_value(&launch_without_fields).unwrap();
         assert_eq!(json["managedSettingsSource"], serde_json::Value::Null);

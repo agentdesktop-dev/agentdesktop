@@ -69,6 +69,13 @@ pub struct DaemonArgs {
     /// Path to the local YAML configuration file.
     #[arg(long)]
     config: Option<PathBuf>,
+
+    /// Start the user daemon without a console window (Windows). The daemon
+    /// re-executes itself detached with its standard handles inherited, so
+    /// the scheduled task that started it completes and no console window
+    /// (and no taskbar entry) exists. Requires --user.
+    #[arg(long)]
+    hidden: bool,
 }
 
 struct ResolvedDaemonArgs {
@@ -415,12 +422,56 @@ fn user_claude_desktop_settings(_home: &Path, _config_home: &Path) -> PathBuf {
 }
 
 pub async fn run(args: DaemonArgs, socket: PathBuf) -> anyhow::Result<()> {
+    // `--hidden` (Windows user daemon): re-execute without a console and let
+    // this process exit. The child has no console object at all, so there is
+    // no window, no minimized state and no taskbar entry; it inherits the
+    // standard handles, so a task's log redirection keeps receiving output.
+    #[cfg(windows)]
+    if args.hidden && args.user {
+        detach_windowless()?;
+        return Ok(());
+    }
+    #[cfg(not(windows))]
+    if args.hidden && args.user {
+        eprintln!("agentdesktop: --hidden is only supported on Windows; starting normally");
+    }
     run_until_shutdown(args, socket, async {
         tokio::signal::ctrl_c()
             .await
             .context("wait for shutdown signal")
     })
     .await
+}
+
+/// The child command line for `--hidden`: the original arguments without
+/// `--hidden`, so the re-executed daemon starts normally (no second detach).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn detached_argv<I>(args: I) -> Vec<std::ffi::OsString>
+where
+    I: IntoIterator<Item = std::ffi::OsString>,
+{
+    args.into_iter()
+        .filter(|arg| arg.as_os_str() != std::ffi::OsStr::new("--hidden"))
+        .collect()
+}
+
+/// Re-executes this daemon without a console, keeping the standard handles.
+#[cfg(windows)]
+fn detach_windowless() -> anyhow::Result<()> {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let executable = std::env::current_exe().context("resolve the daemon executable")?;
+    let mut command = Command::new(executable);
+    command
+        .args(detached_argv(std::env::args_os().skip(1)))
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .creation_flags(CREATE_NO_WINDOW);
+    command.spawn().context("start the windowless daemon")?;
+    Ok(())
 }
 
 fn check_socket_flag(socket: &Path, user: bool) -> anyhow::Result<()> {
@@ -1708,6 +1759,7 @@ mod tests {
                 once: false,
                 dry_run: false,
                 config: None,
+                hidden: false,
             };
             let result = args.resolve(
                 config.daemon.unwrap(),
@@ -2565,7 +2617,27 @@ programs:
             once: false,
             dry_run: false,
             config: None,
+            hidden: false,
         }
+    }
+
+    #[test]
+    fn the_windowless_reexec_drops_only_hidden() {
+        use std::ffi::OsString;
+
+        let argv: Vec<OsString> = ["--hidden", "daemon", "--user", "--socket", r"\\.\pipe\x"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        assert_eq!(
+            super::detached_argv(argv),
+            ["daemon", "--user", "--socket", r"\\.\pipe\x"]
+                .iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>()
+        );
+        let plain: Vec<OsString> = ["daemon", "--user"].iter().map(OsString::from).collect();
+        assert_eq!(super::detached_argv(plain.clone()), plain);
     }
 
     fn resolve_error(args: DaemonArgs, startup: config::DaemonStartupConfig) -> anyhow::Error {
@@ -2714,6 +2786,7 @@ programs:
                 once,
                 dry_run,
                 config: None,
+                hidden: false,
             };
             let resolved = args
                 .resolve(
