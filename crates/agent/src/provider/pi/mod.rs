@@ -66,7 +66,7 @@ impl Provider for Pi {
         if for_user {
             // Pi reads these as the user, so files and any directories the plan
             // creates belong to whoever owns the user's Pi directory.
-            plan.set_owner(owner_of_nearest(models_path));
+            crate::reconcile::plan::plan_for_user(&plan, &[models_path, settings_path])?;
         }
         reconcile::plan(
             models_path,
@@ -77,28 +77,6 @@ impl Provider for Pi {
             &plan,
         )?;
         Ok(plan)
-    }
-}
-
-/// Owner of the closest existing ancestor of `path`, so a system daemon can
-/// hand Pi's files to the user they belong to. `None` off Unix or if nothing
-/// along the path can be inspected.
-fn owner_of_nearest(path: &std::path::Path) -> Option<crate::reconcile::plan::FileOwner> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        path.ancestors()
-            .skip(1)
-            .find_map(|dir| std::fs::metadata(dir).ok())
-            .map(|metadata| crate::reconcile::plan::FileOwner {
-                uid: metadata.uid(),
-                gid: metadata.gid(),
-            })
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        None
     }
 }
 

@@ -116,13 +116,17 @@ pub struct DaemonStartupConfig {
     pub reconcile_interval: Option<Duration>,
 }
 
-/// Local loopback LLM proxy settings. User mode only: the proxy hands out the
-/// current user's gateway credential, so a system daemon never runs one.
+/// Local loopback LLM proxy settings. The proxy hands the daemon's gateway
+/// credential to callers that present its pairing secret, which is written only
+/// into the managed user's owner-only files. A user daemon runs it for its own
+/// user; a system daemon only for the one user that `daemon.copilot.config` or
+/// both `daemon.vscode` paths name (single-user machines).
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LlmProxyStartupConfig {
-    /// Loopback address to listen on. Unset disables the proxy. Rejected in system mode.
+    /// Loopback address to listen on. Unset disables the proxy. In system mode,
+    /// accepted only with `daemon.copilot.config` or the `daemon.vscode` paths.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen: Option<SocketAddr>,
     /// Credential policy client ID used by the proxy. Defaults to `vscode`.
@@ -177,7 +181,8 @@ pub struct ToolConfigPath {
 pub struct VsCodeStartupConfig {
     /// `chatLanguageModels.json` to manage (the `ownModels` variant of
     /// `copilotChat`). Defaults to that file inside the per-OS VS Code user
-    /// profile directory.
+    /// profile directory. A system daemon has no default: set both this and
+    /// `settings` to manage one user's VS Code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<PathBuf>,
     /// The user `settings.json` to manage (the `githubModels` variant of
@@ -877,9 +882,10 @@ pub struct GrokConfig {
 /// `providers.json` is merged, never owned outright: the CLI has no
 /// managed-settings equivalent for providers, and users may have their own
 /// BYOK entries. See `provider::copilot::reconcile` in the agent crate for
-/// how this is turned into the merged document. User mode only: the file
-/// lives in the user's Copilot directory, so system daemons skip it with an
-/// inactive reason.
+/// how this is turned into the merged document. The file lives in the user's
+/// Copilot directory: a system daemon manages it only for the user that
+/// `daemon.copilot.config` names (written as that user), and otherwise skips
+/// it with an inactive reason.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1019,8 +1025,10 @@ impl CopilotConfig {
 /// route so VS Code keeps GitHub's own models and its own Copilot token while
 /// the daemon adds the gateway identity. See `provider::vscode::reconcile`
 /// and `provider::vscode::settings` in the agent crate for how each is turned
-/// into its merged document. User mode only: both files live in the user's
-/// VS Code profile directory, so system daemons skip it with an inactive reason.
+/// into its merged document. Both files live in the user's VS Code profile
+/// directory: a system daemon manages them only for the user that
+/// `daemon.vscode.config` and `daemon.vscode.settings` name (written as that
+/// user), and otherwise skips it with an inactive reason.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
