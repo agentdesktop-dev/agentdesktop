@@ -3493,7 +3493,6 @@ async fn sandbox_route_returns_401_when_oidc_device_authorization_is_false_and_n
                 controller: None,
                 llm_proxy: None,
                 usage_receiver: None,
-                intercept: None,
                 containment: None,
             },
             discovery,
@@ -3504,7 +3503,6 @@ async fn sandbox_route_returns_401_when_oidc_device_authorization_is_false_and_n
             logout: None,
             usage: None,
             programs: None,
-            intercept: None,
             violation_ledger: None,
         };
         let config = default_config();

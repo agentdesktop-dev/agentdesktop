@@ -2426,7 +2426,6 @@ impl Harness {
             logout: None,
             usage: None,
             programs: None,
-            intercept: None,
             violation_ledger: None,
         };
         let integrity_reads: IntegrityReads = Arc::new(Mutex::new(Vec::new()));

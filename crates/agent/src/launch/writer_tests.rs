@@ -384,7 +384,6 @@ mod handler {
             logout: None,
             usage: None,
             programs: None,
-            intercept: None,
             violation_ledger: None,
         };
         LaunchState {
