@@ -774,9 +774,11 @@ fn system_mode_skips_a_configured_program_without_writing_anything() {
     for provider in [
         Copilot {
             providers_path: None,
+            manage_for_user: false,
         },
         Copilot {
             providers_path: Some(path.clone()),
+            manage_for_user: false,
         },
     ] {
         let plan = provider
@@ -794,6 +796,7 @@ fn system_mode_skips_a_configured_program_without_writing_anything() {
     let absent = parse_programs("llmGateway:\n  url: https://gateway.example\n").unwrap();
     let plan = Copilot {
         providers_path: None,
+        manage_for_user: false,
     }
     .plan(&context(false), &absent)
     .unwrap();
@@ -805,6 +808,7 @@ fn system_mode_skips_a_configured_program_without_writing_anything() {
     // User mode without the proxy: a removal is planned, nothing to remove here.
     Copilot {
         providers_path: Some(path.clone()),
+        manage_for_user: false,
     }
     .plan(&context(true), &config)
     .unwrap()
@@ -1271,4 +1275,88 @@ fn known_pairing_keeps_entries_with_another_pairing() {
     .unwrap();
     changes.apply().unwrap();
     assert_eq!(our_provider_count(&read(&path)), 2);
+}
+
+// --- Provider::plan: system daemon managing one user's file ----------------
+
+fn system_context(dir: &std::path::Path) -> crate::provider::ReconcileContext {
+    crate::provider::ReconcileContext {
+        merge_user_settings: false,
+        credential_helper: dir.join("agentdesktop"),
+        socket: dir.join("agentdesktop.sock"),
+        llm_proxy: Some(crate::llm_proxy::LlmProxyContext {
+            address: listen_addr(),
+            pairing: PAIRING.into(),
+        }),
+    }
+}
+
+#[test]
+fn system_mode_manages_a_configured_users_providers_file() {
+    use super::Copilot;
+    use crate::provider::Provider;
+    let dir = tempfile::tempdir().unwrap();
+    let copilot_dir = dir.path().join("home/dev/.copilot");
+    let path = copilot_dir.join("providers.json");
+    let config = parse_programs(
+        "llmGateway:\n  url: https://gateway.example\nprograms:\n  copilot:\n    models:\n      gpt-4.1: {}\n",
+    )
+    .unwrap();
+
+    let plan = Copilot {
+        providers_path: Some(path.clone()),
+        manage_for_user: true,
+    }
+    .plan(&system_context(dir.path()), &config)
+    .unwrap();
+    assert!(plan.inactive_reason().is_none(), "{}", plan.render());
+    plan.apply().unwrap();
+
+    let written: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        find_provider(&written, "agentdesktop")["headers"]["x-agentdesktop-pairing"],
+        PAIRING
+    );
+    // The file and the directories created for it belong to the owner of the
+    // nearest existing ancestor (here the test user), the file owner-only.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let owner = fs::metadata(dir.path()).unwrap();
+        for created in [&path, &copilot_dir] {
+            let metadata = fs::metadata(created).unwrap();
+            assert_eq!((metadata.uid(), metadata.gid()), (owner.uid(), owner.gid()));
+        }
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn system_mode_refuses_a_user_symlink_in_the_path() {
+    use super::Copilot;
+    use crate::provider::Provider;
+    let dir = tempfile::tempdir().unwrap();
+    let elsewhere = dir.path().join("elsewhere");
+    let home = dir.path().join("home/dev");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, home.join(".copilot")).unwrap();
+    let config = parse_programs(
+        "llmGateway:\n  url: https://gateway.example\nprograms:\n  copilot:\n    models:\n      gpt-4.1: {}\n",
+    )
+    .unwrap();
+
+    let Err(error) = (Copilot {
+        providers_path: Some(home.join(".copilot/providers.json")),
+        manage_for_user: true,
+    })
+    .plan(&system_context(dir.path()), &config) else {
+        panic!("a user symlink in the path must be refused");
+    };
+    assert!(error.to_string().contains("symlink"), "{error:#}");
+    assert!(!elsewhere.join("providers.json").exists());
 }

@@ -314,9 +314,14 @@ conflicts, removal) and the settings the GitHub organisation owner controls
 
 `programs.copilot` makes the daemon write the Copilot CLI's BYOK provider
 registry so the CLI talks to the proxy's `/copilot-cli` route with client ID
-`copilot-cli`; nothing is edited by hand. User mode only (the file lives in the
-user's Copilot directory), and it needs `daemon.llmProxy.listen`, a configured
-`llmGateway`, and `copilot-cli` in `allowedClientIds`:
+`copilot-cli`; nothing is edited by hand. The file lives in the user's Copilot
+directory, so a user daemon manages its own user's file. A system daemon
+manages it only for the one user that `daemon.copilot.config` names (and VS
+Code only for the user that both `daemon.vscode` paths name), writing the
+files as that user and running the loopback proxy for them; this is meant for
+single-user machines, since every holder of the pairing secret uses the
+device's gateway credential. Either way it needs `daemon.llmProxy.listen`, a
+configured `llmGateway`, and `copilot-cli` in `allowedClientIds`:
 
 ```yaml
 programs:

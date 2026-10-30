@@ -96,6 +96,11 @@ impl Reconciler {
                     plugin_path: open_code_plugin_path,
                 }),
                 Box::new(VsCode {
+                    // A system daemon gets VS Code paths only from daemon.vscode,
+                    // which opts it in to managing that one user's profile.
+                    manage_for_user: !merge_user_settings
+                        && vscode_chat_models_path.is_some()
+                        && vscode_settings_path.is_some(),
                     chat_models_path: vscode_chat_models_path,
                     settings_path: vscode_settings_path,
                 }),
@@ -104,6 +109,8 @@ impl Reconciler {
                     managed_config_path: grok_managed_config_path,
                 }),
                 Box::new(Copilot {
+                    // Likewise daemon.copilot.config for Copilot CLI.
+                    manage_for_user: !merge_user_settings && copilot_providers_path.is_some(),
                     providers_path: copilot_providers_path,
                 }),
                 Box::new(Pi {

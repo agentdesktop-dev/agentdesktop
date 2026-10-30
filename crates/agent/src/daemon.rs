@@ -128,13 +128,21 @@ impl DaemonArgs {
         let user = self.user || startup.user;
         let socket = startup.socket.clone().unwrap_or(socket);
         let llm_proxy_listen = startup.llm_proxy.listen;
-        // The proxy issues the current user's gateway credential to whatever
-        // connects on loopback; a system daemon has no single user to act for.
-        // Checked first so a system-mode operator sees this reason, not a
-        // secondary one about the address or the run mode.
-        if !user && llm_proxy_listen.is_some() {
+        // The proxy issues the daemon's gateway credential to whatever
+        // presents its pairing secret on loopback. A user daemon acts for its
+        // own user; a system daemon only for the one user whose Copilot CLI or
+        // VS Code files daemon.copilot / daemon.vscode name, since the pairing
+        // is written only into that user's owner-only files. Checked first so a
+        // system-mode operator sees this reason, not a secondary one about the
+        // address or the run mode.
+        let names_proxy_user = startup.copilot.config.is_some()
+            || startup.vscode.config.is_some()
+            || startup.vscode.settings.is_some();
+        if !user && llm_proxy_listen.is_some() && !names_proxy_user {
             // clientId without listen is inert in either mode; only listen is rejected.
-            bail!("daemon.llmProxy.listen requires --user (or daemon.user: true)");
+            bail!(
+                "daemon.llmProxy.listen requires --user (or daemon.user: true), or in system mode daemon.copilot.config or daemon.vscode.config and daemon.vscode.settings naming the user it serves"
+            );
         }
         if llm_proxy_listen.is_some_and(|address| !address.ip().is_loopback()) {
             bail!("daemon.llmProxy.listen must be a loopback address");
@@ -154,21 +162,21 @@ impl DaemonArgs {
             .usage
             .clone()
             .filter(|_| !(self.once || self.dry_run));
-        // VS Code's chatLanguageModels.json and settings.json live in the
-        // user's own profile, like the Copilot CLI providers file: a system
-        // daemon has no user file to manage, so an explicit override is
-        // rejected up front.
-        if !user
-            && let Some(field) = [
-                ("config", startup.vscode.config.is_some()),
-                ("settings", startup.vscode.settings.is_some()),
-            ]
-            .into_iter()
-            .find_map(|(field, set)| set.then_some(field))
-        {
-            bail!("daemon.vscode.{field} requires --user (or daemon.user: true)");
-        }
         if !user {
+            // VS Code's chatLanguageModels.json and settings.json live in one
+            // user's profile, like the Copilot CLI providers file and Pi's
+            // files. A system daemon manages them only for the user they name;
+            // VS Code needs both paths, like Pi.
+            let (vscode_chat_models, vscode_settings) = match (
+                startup.vscode.config,
+                startup.vscode.settings,
+            ) {
+                (None, None) => (None, None),
+                (Some(config), Some(settings)) => (Some(config), Some(settings)),
+                _ => bail!(
+                    "daemon.vscode.config and daemon.vscode.settings must both be set to manage VS Code from a system daemon"
+                ),
+            };
             return Ok(ResolvedDaemonArgs {
                 user: false,
                 config,
@@ -177,7 +185,7 @@ impl DaemonArgs {
                     .unwrap_or_else(|| PathBuf::from(agentdesktop_core::DEFAULT_STATE_DIR)),
                 socket,
                 oidc_callback_listen: startup.oidc_callback_listen,
-                llm_proxy_listen: None,
+                llm_proxy_listen,
                 llm_proxy_client_id: llm_proxy_client_id.clone(),
                 usage,
                 claude_code: ResolvedToolConfigPath {
@@ -218,14 +226,11 @@ impl DaemonArgs {
                         .config
                         .unwrap_or_else(reconcile::default_grok_managed_config_path),
                 },
-                copilot_providers: {
-                    if startup.copilot.config.is_some() {
-                        bail!("daemon.copilot.config requires --user (or daemon.user: true)");
-                    }
-                    None
-                },
-                vscode_chat_models: None,
-                vscode_settings: None,
+                // Copilot CLI has no system-wide configuration either; manage it
+                // only for the user whose providers.json is named here.
+                copilot_providers: startup.copilot.config,
+                vscode_chat_models,
+                vscode_settings,
                 pi: {
                     // Pi has no system-wide configuration. A system daemon manages
                     // it only for the one user whose files are named here.
@@ -2286,15 +2291,23 @@ programs:
     }
 
     #[test]
-    fn system_mode_rejects_a_copilot_providers_path() {
+    fn system_mode_manages_copilot_for_a_named_user() {
         let mut startup = config::DaemonStartupConfig::default();
-        startup.copilot.config = Some(PathBuf::from("/tmp/providers.json"));
-        let error = resolve_error(daemon_args(false), startup);
-        assert!(
-            error
-                .to_string()
-                .contains("daemon.copilot.config requires --user"),
-            "{error:#}"
+        startup.copilot.config = Some(PathBuf::from("/home/dev/.copilot/providers.json"));
+        let resolved = daemon_args(false)
+            .resolve(
+                startup,
+                PathBuf::from("config.yaml"),
+                PathBuf::from(DEFAULT_SOCKET_PATH),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved.copilot_providers,
+            Some(PathBuf::from("/home/dev/.copilot/providers.json"))
+        );
+        assert_eq!(
+            resolved.llm_proxy_listen, None,
+            "no proxy unless configured"
         );
     }
 
@@ -2336,28 +2349,55 @@ programs:
     }
 
     #[test]
-    fn system_mode_rejects_a_vscode_settings_path() {
-        let mut startup = config::DaemonStartupConfig::default();
-        startup.vscode.settings = Some(PathBuf::from("/tmp/settings.json"));
-        let error = resolve_error(daemon_args(false), startup);
-        assert!(
-            error
-                .to_string()
-                .contains("daemon.vscode.settings requires --user"),
-            "{error:#}"
-        );
+    fn system_mode_rejects_a_single_vscode_path() {
+        for (config, settings) in [
+            (
+                None,
+                Some(PathBuf::from("/home/dev/.config/Code/User/settings.json")),
+            ),
+            (
+                Some(PathBuf::from(
+                    "/home/dev/.config/Code/User/chatLanguageModels.json",
+                )),
+                None,
+            ),
+        ] {
+            let mut startup = config::DaemonStartupConfig::default();
+            startup.vscode.config = config;
+            startup.vscode.settings = settings;
+            let error = resolve_error(daemon_args(false), startup);
+            assert!(
+                error
+                    .to_string()
+                    .contains("daemon.vscode.config and daemon.vscode.settings must both be set"),
+                "{error:#}"
+            );
+        }
     }
 
     #[test]
-    fn system_mode_rejects_a_vscode_chat_models_path() {
+    fn system_mode_manages_vscode_for_a_named_user() {
         let mut startup = config::DaemonStartupConfig::default();
-        startup.vscode.config = Some(PathBuf::from("/tmp/chatLanguageModels.json"));
-        let error = resolve_error(daemon_args(false), startup);
-        assert!(
-            error
-                .to_string()
-                .contains("daemon.vscode.config requires --user"),
-            "{error:#}"
+        startup.vscode.config = Some(PathBuf::from(
+            "/home/dev/.config/Code/User/chatLanguageModels.json",
+        ));
+        startup.vscode.settings = Some(PathBuf::from("/home/dev/.config/Code/User/settings.json"));
+        let resolved = daemon_args(false)
+            .resolve(
+                startup,
+                PathBuf::from("config.yaml"),
+                PathBuf::from(DEFAULT_SOCKET_PATH),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved.vscode_chat_models,
+            Some(PathBuf::from(
+                "/home/dev/.config/Code/User/chatLanguageModels.json"
+            ))
+        );
+        assert_eq!(
+            resolved.vscode_settings,
+            Some(PathBuf::from("/home/dev/.config/Code/User/settings.json"))
         );
     }
 
@@ -2371,6 +2411,34 @@ programs:
             error.to_string().contains("requires --user"),
             "unexpected error: {error:#}"
         );
+    }
+
+    #[test]
+    fn system_mode_runs_the_llm_proxy_for_a_named_user() {
+        let mut startup = startup_with_llm_proxy("127.0.0.1:18095");
+        startup.copilot.config = Some(PathBuf::from("/home/dev/.copilot/providers.json"));
+        let resolved = daemon_args(false)
+            .resolve(
+                startup.clone(),
+                PathBuf::from("config.yaml"),
+                PathBuf::from(DEFAULT_SOCKET_PATH),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved.llm_proxy_listen,
+            Some("127.0.0.1:18095".parse().unwrap())
+        );
+        // The loopback and run-mode rules still apply in system mode.
+        startup.llm_proxy.listen = Some("0.0.0.0:18095".parse().unwrap());
+        let error = resolve_error(daemon_args(false), startup.clone());
+        assert!(error.to_string().contains("loopback"), "{error:#}");
+        startup.llm_proxy.listen = Some("127.0.0.1:18095".parse().unwrap());
+        let once = DaemonArgs {
+            once: true,
+            ..daemon_args(false)
+        };
+        let error = resolve_error(once, startup);
+        assert!(error.to_string().contains("--once"), "{error:#}");
     }
 
     #[test]

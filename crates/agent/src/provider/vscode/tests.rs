@@ -667,10 +667,12 @@ fn system_mode_skips_a_configured_program_without_writing_anything() {
         VsCode {
             chat_models_path: None,
             settings_path: None,
+            manage_for_user: false,
         },
         VsCode {
             chat_models_path: Some(path.clone()),
             settings_path: Some(path.with_file_name("settings.json")),
+            manage_for_user: false,
         },
     ] {
         let plan = provider
@@ -722,6 +724,7 @@ fn github_models_through_the_provider_removes_the_chat_models_entry_and_writes_s
     let provider = VsCode {
         chat_models_path: Some(chat_models.clone()),
         settings_path: Some(settings.clone()),
+        manage_for_user: false,
     };
     // First `ownModels`: the custom-models entry exists.
     let own = parse_programs(
@@ -881,4 +884,63 @@ fn known_pairing_keeps_entries_with_another_pairing() {
     .unwrap();
     changes.apply().unwrap();
     assert_eq!(our_vendor_count(&read(&path)), 1);
+}
+
+// --- Provider::plan: system daemon managing one user's profile -------------
+
+#[test]
+fn system_mode_manages_a_configured_users_vscode_profile() {
+    use super::VsCode;
+    use crate::provider::{Provider, ReconcileContext};
+    let dir = tempfile::tempdir().unwrap();
+    let profile = dir.path().join("home/dev/.config/Code/User");
+    let chat_models = profile.join("chatLanguageModels.json");
+    let settings = profile.join("settings.json");
+    let context = ReconcileContext {
+        merge_user_settings: false,
+        credential_helper: dir.path().join("agentdesktop"),
+        socket: dir.path().join("agentdesktop.sock"),
+        llm_proxy: Some(crate::llm_proxy::LlmProxyContext {
+            address: "127.0.0.1:4000".parse().unwrap(),
+            pairing: "PAIRING-FIXTURE".into(),
+        }),
+    };
+    let config = parse_programs(
+        "llmGateway:\n  url: https://gateway.example\nprograms:\n  vscode:\n    models:\n      gpt-4.1-mini: {}\n",
+    )
+    .unwrap();
+
+    let plan = VsCode {
+        chat_models_path: Some(chat_models.clone()),
+        settings_path: Some(settings.clone()),
+        manage_for_user: true,
+    }
+    .plan(&context, &config)
+    .unwrap();
+    assert!(plan.inactive_reason().is_none(), "{}", plan.render());
+    plan.apply().unwrap();
+
+    let written = std::fs::read_to_string(&chat_models).unwrap();
+    assert!(written.contains("PAIRING-FIXTURE"), "{written}");
+    assert!(
+        written.contains("http://127.0.0.1:4000/vscode-copilot/v1"),
+        "{written}"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let owner = std::fs::metadata(dir.path()).unwrap();
+        for created in [&chat_models, &profile] {
+            let metadata = std::fs::metadata(created).unwrap();
+            assert_eq!((metadata.uid(), metadata.gid()), (owner.uid(), owner.gid()));
+        }
+        assert_eq!(
+            std::fs::metadata(&chat_models)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
 }

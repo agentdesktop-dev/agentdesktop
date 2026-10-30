@@ -22,10 +22,14 @@ pub(super) const PROVIDER_ANTHROPIC: &str =
     agentdesktop_core::config::CopilotConfig::PROVIDER_ANTHROPIC;
 
 /// GitHub Copilot CLI: points the user's `providers.json` at the loopback LLM
-/// proxy's `/copilot-cli` route. User mode only; `providers_path` is `None`
-/// for a system daemon, which has no user file to manage.
+/// proxy's `/copilot-cli` route. A user daemon manages its own user's file; a
+/// system daemon manages one user's file only when `daemon.copilot.config`
+/// names it (`manage_for_user`), and has no path otherwise.
 pub struct Copilot {
     pub providers_path: Option<PathBuf>,
+    /// Set for a system daemon configured with `daemon.copilot.config`: manage
+    /// that one user's file instead of skipping Copilot CLI as user-only.
+    pub manage_for_user: bool,
 }
 
 impl Copilot {
@@ -52,11 +56,15 @@ impl Provider for Copilot {
     }
 
     fn plan(&self, ctx: &ReconcileContext, config: &DaemonConfig) -> anyhow::Result<ReconcilePlan> {
-        if let Some(plan) = ctx.skip_unless(
-            DaemonScope::User,
-            config.programs.copilot.is_some(),
-            DISPLAY_NAME,
-        ) {
+        // A system daemon manages Copilot CLI only for a user whose file is configured.
+        let for_user = !ctx.merge_user_settings && self.manage_for_user;
+        if !for_user
+            && let Some(plan) = ctx.skip_unless(
+                DaemonScope::User,
+                config.programs.copilot.is_some(),
+                DISPLAY_NAME,
+            )
+        {
             return Ok(plan);
         }
 
@@ -78,6 +86,11 @@ impl Provider for Copilot {
             }
             return Ok(plan);
         };
+        if for_user {
+            // The CLI reads providers.json as the user: hand what the plan
+            // creates to whoever owns the user's Copilot directory.
+            crate::reconcile::plan::plan_for_user(&plan, &[path])?;
+        }
         reconcile::plan(path, proxy, configured, &plan)?;
         Ok(plan)
     }
