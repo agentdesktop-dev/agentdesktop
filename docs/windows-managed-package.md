@@ -283,22 +283,31 @@ program directory). Otherwise it executes
 agentdesktop.exe run --wait --socket "\\.\pipe\agentdesktop-user-<USERNAME>" claude -- <args>
 ```
 
-from the caller's working directory. The boxed program opens in its own
-console window; same-terminal hosting is not available. Notes:
+from the caller's working directory.
 
-- **Exit code**: `--wait` returns the launch's recorded exit code, which is
-  the EXECUTOR's exit code for the boxed session. It does not carry the
-  program's own exit code (measured: a boxed `claude` that itself exited 1
-  ended as executor exit 0). Scripts must not branch on the wrapped command's
-  exit code to detect program failures. Program-exit-code fidelity is a
-  planned launch-chain follow-up.
+From a console (Windows Terminal, the classic console host, PowerShell, Git
+Bash in a terminal) the boxed program runs in that **same terminal**: the
+launcher hands its console to the daemon, which hosts the box on it, so no
+second window appears. A caller **without** a console (a scheduled task,
+redirected stdio) or one the daemon may not attach to (an elevated terminal,
+or a launch with `git.ssh.hosts` configured) gets the **windowed fallback**:
+the box opens in its own console window. Notes:
+
+- **Exit code**: in the same-terminal case `--wait` returns the program's own
+  exit code (`claude --version` → 0, a program failure → its code). In the
+  windowed fallback the recorded code is the EXECUTOR's and does not carry the
+  program's own (measured: a boxed `claude` that itself exited 1 ended as
+  executor exit 0), so scripts in that case must not branch on it to detect
+  program failures.
 - **Failures** produce exactly one stderr line and exit code 1: daemon not
   running or unreachable (fail-closed, nothing native is started; no launcher
   contains the vendor binary's path, so no failure mode can fall back to a
   native run), a refused launch request, or a launch evicted or lost to a
   daemon restart while waiting.
-- **Ctrl+C** stops the waiting launcher only; the boxed program keeps running
-  in its window.
+- **Ctrl+C**: in the same-terminal case it reaches the boxed program (which
+  handles it as when run directly) and the launcher keeps waiting. In the
+  windowed fallback it stops the waiting launcher only; the boxed program
+  keeps running in its window.
 - **No wait timeout**: `--wait` polls until the launch ends and has no
   timeout of its own; a calling script that must bound the wait needs its
   own. The daemon's launch list is bounded and running launches are never
