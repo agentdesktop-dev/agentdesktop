@@ -28,6 +28,28 @@ pub struct DaemonConfig {
     /// Local execution sandbox required for managed developer tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<SandboxConfig>,
+    /// Wrap-mode transparency policy. Top-level, not under `programs` or
+    /// `daemon.containment`, because it is controller-delivered POLICY over
+    /// which program executables launch wrapped, while `programs` holds
+    /// per-program settings reconciliation and `daemon.containment` is the
+    /// device-local startup configuration of the launch machinery.
+    /// Accepted in controller-delivered
+    /// policy AND the local file, unlike `daemon.containment` (local-only,
+    /// startup settings, which must also be configured for the policy to
+    /// take effect). With a controller only the controller-delivered block
+    /// applies (a local block is ignored); a change takes effect at the
+    /// next launch and the next violation-scan tick after it is applied.
+    /// Without a controller the local block is read at startup only; with
+    /// `--once`/`--dry-run` the block is validated but no scan runs and no
+    /// posture is reported.
+    ///
+    /// A daemon that predates this setting rejects a configuration that
+    /// contains it, so upgrade the controller and then every device before
+    /// setting it in controller-delivered policy. A program field added to
+    /// `containment.programs` by a later release is the same break again:
+    /// upgrade before naming it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub containment: Option<ContainmentPolicy>,
     /// Telemetry collected from managed developer tools.
     #[serde(default, skip_serializing_if = "TelemetryConfig::is_empty")]
     pub telemetry: TelemetryConfig,
@@ -104,6 +126,11 @@ pub struct DaemonStartupConfig {
     /// Usage collection without a controller, from a gateway on this machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<UsageStartupConfig>,
+    /// Sandboxed launch (`agentdesktop run`): local startup settings only.
+    /// The controller-delivered wrap policy lives in the TOP-LEVEL
+    /// `containment` block, not here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub containment: Option<ContainmentStartupConfig>,
     /// Opt-in interval between periodic re-applies of the current
     /// configuration, which repair drift (a managed file deleted or edited by
     /// hand, a fixed conflict, a loosened mode) without rewriting anything
@@ -128,6 +155,288 @@ pub struct LlmProxyStartupConfig {
     /// Credential policy client ID used by the proxy. Defaults to `vscode`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+}
+
+/// Sandboxed launch settings.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContainmentStartupConfig {
+    /// Windows only. Absolute path to MXC `wxc-exec.exe`; no default. Read at
+    /// startup only (restart the daemon after changing it). Requires user
+    /// mode; ignored with `--once` and `--dry-run`.
+    pub executor: PathBuf,
+    /// Outbound network for the sandboxed program: `deny` (default) or `allow`. With `deny` the box reaches only loopback and configured egress routes. Read at startup only (restart the daemon after changing it); ignored with `--once` and `--dry-run`.
+    #[serde(default, skip_serializing_if = "ContainmentEgress::is_default")]
+    pub egress: ContainmentEgress,
+    /// Sandbox engine: `mxc` (default, the only engine). Read at startup only
+    /// (restart the daemon after changing it); ignored with `--once` and `--dry-run`.
+    #[serde(default, skip_serializing_if = "ContainmentEngine::is_default")]
+    pub engine: ContainmentEngine,
+    /// Central L7 egress endpoint (an agentgateway HTTPS listener whose
+    /// per-prefix routes are the central allowlist). When set, the relay sends
+    /// the box's git smart-HTTP requests to `https://<egress host>/<path>`
+    /// instead of directly to the remote. CONNECT is always refused, with or
+    /// without it. Read at startup only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_upstream: Option<EgressUpstreamConfig>,
+    /// Git over the relay: the remotes the box may fetch from and push to, and
+    /// the static credentials the relay attaches host-side. Absent = no git
+    /// egress. Read at startup only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<GitConfig>,
+}
+
+/// The central L7 egress endpoint the git leg chains to.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EgressUpstreamConfig {
+    /// HTTPS URL of the egress endpoint; must include a host and no
+    /// credentials, query or fragment.
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub url: Url,
+    /// Reserved for gateway-hop authentication, which is not available yet:
+    /// startup refuses a config that sets it (the relay sends only the git
+    /// credential in `Authorization`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication: Option<LlmGatewayAuthentication>,
+}
+
+/// Git repository access configuration.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitConfig {
+    /// List of HTTPS URL prefixes the box may fetch from.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+    /// List of HTTPS URL prefixes the box may push to (subset of allow).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub push_allow: Vec<String>,
+    /// Static git credentials for allowed hosts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credentials: Vec<GitCredentialEntry>,
+    /// Git over ssh: the box's ssh signs through a filtered agent proxy (the
+    /// key never enters the box) and reaches each host through a loopback
+    /// leg the daemon originates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<GitSshConfig>,
+}
+
+/// Git SSH access configuration.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitSshConfig {
+    /// Bare hostnames (port fixed at 22) the box may fetch from and push to
+    /// over ssh; host-granular. Empty or absent: no ssh at all.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_lowercase_hosts"
+    )]
+    pub hosts: Vec<String>,
+    /// SHA256 fingerprints (`SHA256:...`, as `ssh-add -l` prints them) of the
+    /// agent keys offered to the box. Empty or absent: no key is offered.
+    /// The literal `"*"` offers every key in the agent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<String>,
+}
+
+fn deserialize_lowercase_hosts<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let hosts: Vec<String> = Vec::deserialize(deserializer)?;
+    Ok(hosts.into_iter().map(|h| h.to_ascii_lowercase()).collect())
+}
+
+/// Git credential entry for a URL prefix.
+#[derive(Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitCredentialEntry {
+    /// URL prefix this credential applies to.
+    pub url_prefix: String,
+    /// Username for HTTP basic auth.
+    pub username: String,
+    /// Secret (password or token) for HTTP basic auth (never serialized).
+    #[serde(skip_serializing)]
+    pub secret: String,
+}
+
+// The secret never reaches a log or error through `{:?}` (the containing
+// configs derive Debug over this).
+impl std::fmt::Debug for GitCredentialEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitCredentialEntry")
+            .field("url_prefix", &self.url_prefix)
+            .field("username", &self.username)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Checks `daemon.containment`. With `windows == true` the executor must be an
+/// absolute Windows path (`X:\...` or `\\server\share\...`, judged on the
+/// string) to a file whose name ends in `.exe`, case-insensitively.
+pub fn validate_containment_startup(
+    cfg: &ContainmentStartupConfig,
+    windows: bool,
+) -> Result<(), String> {
+    if windows {
+        let text = cfg.executor.to_string_lossy();
+        let bytes = text.as_bytes();
+        let drive_absolute = bytes.len() > 2
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && bytes[2] == b'\\';
+        let unc_absolute = text.starts_with("\\\\")
+            && text[2..]
+                .split('\\')
+                .filter(|part| !part.is_empty())
+                .count()
+                >= 3;
+        let exe = text
+            .rsplit('\\')
+            .next()
+            .is_some_and(|name| name.to_ascii_lowercase().ends_with(".exe"));
+        if !(drive_absolute || unc_absolute) || !exe {
+            return Err(
+                "daemon.containment.executor must be an absolute path to wxc-exec.exe".to_owned(),
+            );
+        }
+    }
+
+    // Validate egress_upstream URL like LlmGatewayConfig.url, HTTPS only
+    // (the leg carries the git credential).
+    if let Some(upstream) = &cfg.egress_upstream {
+        if upstream.url.scheme() != "https" {
+            return Err("daemon.containment.egressUpstream.url must be an https:// URL".to_owned());
+        }
+        // v1 defers gateway-hop authentication (AC 2): a configured block
+        // would otherwise be silently ignored.
+        if upstream.authentication.is_some() {
+            return Err(
+                "daemon.containment.egressUpstream.authentication is not supported yet; remove it"
+                    .to_owned(),
+            );
+        }
+        if upstream.url.host().is_none() {
+            return Err("daemon.containment.egressUpstream.url must include a host".to_owned());
+        }
+        if upstream.url.username() != "" || upstream.url.password().is_some() {
+            return Err(
+                "daemon.containment.egressUpstream.url cannot include credentials".to_owned(),
+            );
+        }
+        if upstream.url.query().is_some() {
+            return Err("daemon.containment.egressUpstream.url cannot include a query".to_owned());
+        }
+        if upstream.url.fragment().is_some() {
+            return Err(
+                "daemon.containment.egressUpstream.url cannot include a fragment".to_owned(),
+            );
+        }
+    }
+
+    // Validate git allow/pushAllow URLs must be https:// (and parse, with a
+    // host: the relay reparses them on every request).
+    if let Some(git) = &cfg.git {
+        for (idx, url_str) in git.allow.iter().enumerate() {
+            if !Url::parse(url_str)
+                .is_ok_and(|url| url.scheme() == "https" && url.host_str().is_some())
+            {
+                return Err(format!(
+                    "daemon.containment.git.allow[{}] must be an https:// URL",
+                    idx
+                ));
+            }
+        }
+        for (idx, url_str) in git.push_allow.iter().enumerate() {
+            if !Url::parse(url_str)
+                .is_ok_and(|url| url.scheme() == "https" && url.host_str().is_some())
+            {
+                return Err(format!(
+                    "daemon.containment.git.pushAllow[{}] must be an https:// URL",
+                    idx
+                ));
+            }
+        }
+        // With egressUpstream the relay sends only the path to the egress
+        // endpoint, so a second host could never be told apart there: refuse
+        // more than one distinct (host, port) across both lists (DV-8).
+        if cfg.egress_upstream.is_some() {
+            let mut hosts: Vec<(String, Option<u16>)> = Vec::new();
+            for url_str in git.allow.iter().chain(&git.push_allow) {
+                if let Ok(url) = Url::parse(url_str)
+                    && let Some(host) = url.host_str()
+                {
+                    let key = (host.to_ascii_lowercase(), url.port_or_known_default());
+                    if !hosts.contains(&key) {
+                        hosts.push(key);
+                    }
+                }
+            }
+            if hosts.len() > 1 {
+                return Err(
+                    "daemon.containment.git: with egressUpstream set, git.allow and git.pushAllow must name a single host (the egress endpoint routes by path only)"
+                        .to_owned(),
+                );
+            }
+        }
+
+        // Validate git.ssh configuration (D5, D6, AC 1).
+        if let Some(ssh_config) = &git.ssh {
+            // D6: refuse both egressUpstream and git.ssh.hosts
+            if cfg.egress_upstream.is_some() && !ssh_config.hosts.is_empty() {
+                return Err(
+                    "daemon.containment.git.ssh: with egressUpstream set, ssh egress is not available (the egress endpoint is L7 https only)"
+                        .to_owned(),
+                );
+            }
+
+            // Validate hosts: bare hostname only (no scheme, path, port)
+            for (idx, host) in ssh_config.hosts.iter().enumerate() {
+                if !is_bare_hostname(host) {
+                    return Err(format!(
+                        "daemon.containment.git.ssh.hosts[{}] must be a bare hostname (no scheme, path, or port)",
+                        idx
+                    ));
+                }
+            }
+
+            // Validate keys: must be "SHA256:..." or "*"
+            for (idx, key) in ssh_config.keys.iter().enumerate() {
+                if key != "*" && !key.starts_with("SHA256:") {
+                    return Err(format!(
+                        "daemon.containment.git.ssh.keys[{}] must be a SHA256:... fingerprint or \"*\"",
+                        idx
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// A bare DNS hostname or IPv4 literal: dot-separated non-empty labels of
+/// ASCII letters, digits and `-`, no label starting with `-`. Everything else
+/// (scheme, path, port, whitespace, ssh_config patterns, `%` tokens) is
+/// refused: the value is written verbatim into the generated `ssh_config`
+/// and passed to `ssh-keygen -F`.
+fn is_bare_hostname(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 253
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && !label.starts_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
 }
 
 /// Token and cost collection for a daemon without a controller. agentgateway
@@ -220,6 +529,7 @@ impl Default for DaemonConfig {
             controller: None,
             llm_gateway: None,
             sandbox: None,
+            containment: None,
             telemetry: TelemetryConfig::default(),
             programs: ProgramsConfig::default(),
             program_selection: ProgramSelectionConfig::default(),
@@ -324,6 +634,160 @@ impl ProxyUnavailable {
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
+}
+
+/// Outbound network posture for sandboxed programs.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum ContainmentEgress {
+    /// Plain outbound access; model requests still go through the local LLM proxy.
+    Allow,
+    /// Loopback only.
+    #[default]
+    Deny,
+}
+
+impl ContainmentEgress {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Sandbox engine: `mxc` (default, the only engine). Read at startup only
+/// (restart the daemon after changing it); ignored with `--once` and `--dry-run`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum ContainmentEngine {
+    /// MXC (Windows AppContainer).
+    #[default]
+    Mxc,
+}
+
+impl ContainmentEngine {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Wrap-mode transparency policy, delivered either by the controller or the
+/// local file (unlike `daemon.containment`, which stays local-only). A
+/// program named here launches wrapped by default; see [`ContainmentMode`].
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContainmentPolicy {
+    #[serde(default, skip_serializing_if = "ContainmentProgramsConfig::is_empty")]
+    pub programs: ContainmentProgramsConfig,
+}
+
+/// One typed field per profiled program; not a map, so a daemon that does
+/// not know a program rejects the whole policy at parse time.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContainmentProgramsConfig {
+    /// Wrap-mode policy for Claude Code (launch program `claude-code`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_code: Option<ContainmentProgramPolicy>,
+    /// Wrap-mode policy for OpenCode (launch program `opencode`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_code: Option<ContainmentProgramPolicy>,
+    /// Wrap-mode policy for GitHub Copilot CLI (launch program `copilot`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copilot: Option<ContainmentProgramPolicy>,
+}
+
+impl ContainmentProgramsConfig {
+    fn is_empty(&self) -> bool {
+        self.claude_code.is_none() && self.open_code.is_none() && self.copilot.is_none()
+    }
+}
+
+/// Per-program wrap-mode policy.
+// `executable`'s string-level shape (absolute Windows path, `.exe`, no
+// forbidden character, no `\Users\` segment) is validated in
+// `validate_containment_policy` on every platform, because the controller
+// validates on Linux; the file-name-equals-profile and not-under-home checks
+// are the agent's.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContainmentProgramPolicy {
+    /// Defaults to `wrap` when a policy names the program.
+    #[serde(default)]
+    pub mode: ContainmentMode,
+    /// Absolute Windows path to the program's managed executable (`X:\...`
+    /// or `\\server\share\...`, ending in `.exe`, not under `\Users\`).
+    /// Required in wrap mode; ignored (and may be omitted) in native mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<PathBuf>,
+}
+
+/// Whether a profiled program launches into the box by default (`Wrap`) or
+/// keeps its plain native launch (`Native`, the explicit per-program
+/// opt-out). A third value (`off` and anything else) is refused by serde.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum ContainmentMode {
+    #[default]
+    Wrap,
+    Native,
+}
+
+/// String-level validation of a top-level `containment` block: run on every
+/// platform (the controller validates on Linux), because this knob is
+/// accepted in controller-delivered policy too.
+pub fn validate_containment_policy(policy: &ContainmentPolicy) -> Result<(), String> {
+    for (field, program) in [
+        ("claudeCode", &policy.programs.claude_code),
+        ("openCode", &policy.programs.open_code),
+        ("copilot", &policy.programs.copilot),
+    ] {
+        let Some(program) = program else { continue };
+        if program.mode != ContainmentMode::Wrap {
+            continue;
+        }
+        let path_field = format!("containment.programs.{field}.executable");
+        let Some(executable) = &program.executable else {
+            return Err(format!("{path_field} is required in wrap mode"));
+        };
+        let text = executable.to_string_lossy();
+        let bytes = text.as_bytes();
+        let drive_absolute = bytes.len() > 2
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && bytes[2] == b'\\';
+        let unc_absolute = text.starts_with("\\\\")
+            && text[2..]
+                .split('\\')
+                .filter(|part| !part.is_empty())
+                .count()
+                >= 3;
+        if !(drive_absolute || unc_absolute) {
+            return Err(format!(
+                "{path_field} must be an absolute Windows path (X:\\... or \\\\server\\share\\...)"
+            ));
+        }
+        let ends_in_exe = text
+            .rsplit('\\')
+            .next()
+            .is_some_and(|name| name.to_ascii_lowercase().ends_with(".exe"));
+        if !ends_in_exe {
+            return Err(format!("{path_field} must end in .exe"));
+        }
+        if text.contains(['"', '%', '!']) {
+            return Err(format!(
+                "{path_field} must not contain the characters \" % !"
+            ));
+        }
+        if text.to_ascii_lowercase().contains(r"\users\") {
+            return Err(format!("{path_field} must not be under \\Users\\"));
+        }
+    }
+    Ok(())
 }
 
 /// GitHub App user authorization for Copilot requests through the local proxy.
@@ -747,6 +1211,19 @@ impl ProgramsConfig {
     }
 }
 
+/// MCP server allowlist entry for `allowedMcpServers`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum McpServerRule {
+    /// User-assigned label; not a security control.
+    ServerName(String),
+    /// Command array, must be non-empty.
+    ServerCommand(Vec<String>),
+    /// Server URL, must be non-empty.
+    ServerUrl(String),
+}
+
 /// Settings reconciled into Claude Code's managed configuration.
 ///
 /// Arbitrary keys are written directly to Agentdesktop's managed-settings
@@ -761,9 +1238,58 @@ pub struct ClaudeCodeConfig {
     /// Upstream authentication used by this agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<ProgramAuthentication>,
+    /// Allow only managed hooks. Claude Code reads this only from managed sources.
+    /// Unset: not written to Claude Code's settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_managed_hooks_only: Option<bool>,
+    /// Allow only managed MCP servers. Claude Code reads this only from managed sources.
+    /// Unset: not written to Claude Code's settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_managed_mcp_servers_only: Option<bool>,
+    /// Allowed MCP servers list. Unset: not written to Claude Code's settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_mcp_servers: Option<Vec<McpServerRule>>,
     /// Arbitrary Claude Code managed-settings values, flattened into this object.
     #[serde(default, flatten)]
     pub settings: BTreeMap<String, serde_json::Value>,
+}
+
+impl ClaudeCodeConfig {
+    /// Called from daemon config validation, so the controller refuses the config before any device sees it.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(servers) = &self.allowed_mcp_servers {
+            for (i, rule) in servers.iter().enumerate() {
+                match rule {
+                    McpServerRule::ServerName(name) => {
+                        if name.is_empty()
+                            || !name
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                        {
+                            anyhow::bail!(
+                                "programs.claudeCode.allowedMcpServers[{i}]: serverName must match [A-Za-z0-9_-]+"
+                            );
+                        }
+                    }
+                    McpServerRule::ServerCommand(cmd) => {
+                        if cmd.is_empty() {
+                            anyhow::bail!(
+                                "programs.claudeCode.allowedMcpServers[{i}]: serverCommand must be a non-empty array"
+                            );
+                        }
+                    }
+                    McpServerRule::ServerUrl(url) => {
+                        if url.trim().is_empty() {
+                            anyhow::bail!(
+                                "programs.claudeCode.allowedMcpServers[{i}]: serverUrl must be non-empty"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Settings reconciled into Claude Desktop's managed configuration.
@@ -1359,9 +1885,17 @@ fn parse_local_daemon(contents: &str) -> anyhow::Result<DaemonConfig> {
             anyhow::bail!("daemon.usage.listen must be a loopback address");
         }
     }
+    if let Some(containment) = config
+        .daemon
+        .as_ref()
+        .and_then(|daemon| daemon.containment.as_ref())
+    {
+        validate_containment_startup(containment, cfg!(windows)).map_err(anyhow::Error::msg)?;
+    }
     validate_daemon(
         config.llm_gateway.as_ref(),
         config.sandbox.as_ref(),
+        config.containment.as_ref(),
         &config.programs,
     )?;
     Ok(config)
@@ -1372,6 +1906,7 @@ impl DaemonConfig {
     pub fn is_empty(&self) -> bool {
         self.llm_gateway.is_none()
             && self.sandbox.is_none()
+            && self.containment.is_none()
             && self.telemetry.is_empty()
             && self.programs.is_empty()
     }
@@ -1380,8 +1915,12 @@ impl DaemonConfig {
 fn validate_daemon(
     llm_gateway: Option<&LlmGatewayConfig>,
     sandbox: Option<&SandboxConfig>,
+    containment: Option<&ContainmentPolicy>,
     programs: &ProgramsConfig,
 ) -> anyhow::Result<()> {
+    if let Some(containment) = containment {
+        validate_containment_policy(containment).map_err(anyhow::Error::msg)?;
+    }
     if sandbox.is_some() {
         if programs.claude_desktop.is_some() {
             anyhow::bail!("sandbox is not supported for Claude Desktop");
@@ -1640,6 +2179,9 @@ fn validate_daemon(
         if !pi.models.is_empty() && !pi.models.contains_key(model) {
             anyhow::bail!("Pi model {model} is not declared in models");
         }
+    }
+    if let Some(claude_code) = &programs.claude_code {
+        claude_code.validate()?;
     }
     Ok(())
 }
@@ -2347,5 +2889,1134 @@ programs:
             "programs:\n  pi: {}\n  claudeDesktop: {}\n  grok: {}\n  copilot: {}\n  vscode: {}",
         )
         .expect("each daemon manages the programs supported in its mode");
+    }
+
+    fn containment(executor: &str) -> super::ContainmentStartupConfig {
+        super::ContainmentStartupConfig {
+            executor: executor.into(),
+            egress: super::ContainmentEgress::default(),
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: None,
+            git: None,
+        }
+    }
+
+    const CONTAINMENT_EXECUTOR_ERROR: &str =
+        "daemon.containment.executor must be an absolute path to wxc-exec.exe";
+
+    #[test]
+    fn containment_executor_on_windows_must_be_an_absolute_path_to_an_exe() {
+        for executor in [
+            r"wxc-exec.exe",
+            r"mxc\wxc-exec.exe",
+            r"\mxc\wxc-exec.exe",
+            r"C:wxc-exec.exe",
+        ] {
+            assert_eq!(
+                super::validate_containment_startup(&containment(executor), true),
+                Err(CONTAINMENT_EXECUTOR_ERROR.to_owned()),
+                "{executor} is not absolute"
+            );
+        }
+    }
+
+    #[test]
+    fn containment_executor_on_windows_accepts_drive_and_unc_paths_and_any_exe_case() {
+        for executor in [
+            r"C:\mxc\x64\wxc-exec.exe",
+            r"C:\mxc\x64\WXC-EXEC.EXE",
+            r"C:\mxc\x64\wxc-exec.Exe",
+            r"\\server\share\mxc\wxc-exec.exe",
+        ] {
+            assert_eq!(
+                super::validate_containment_startup(&containment(executor), true),
+                Ok(()),
+                "{executor}"
+            );
+        }
+    }
+
+    #[test]
+    fn containment_executor_on_windows_rejects_a_cmd_file() {
+        assert_eq!(
+            super::validate_containment_startup(&containment(r"C:\mxc\wxc-exec.cmd"), true),
+            Err(CONTAINMENT_EXECUTOR_ERROR.to_owned())
+        );
+        assert_eq!(
+            super::validate_containment_startup(&containment(r"C:\mxc\wxc-exec"), true),
+            Err(CONTAINMENT_EXECUTOR_ERROR.to_owned())
+        );
+    }
+
+    #[test]
+    fn containment_executor_is_not_checked_off_windows() {
+        for executor in ["wxc-exec.exe", "relative/wxc-exec.cmd", "/opt/mxc/wxc-exec"] {
+            assert_eq!(
+                super::validate_containment_startup(&containment(executor), false),
+                Ok(()),
+                "{executor}"
+            );
+        }
+    }
+
+    #[test]
+    fn daemon_containment_is_a_startup_setting_with_an_executor_path() {
+        let config = super::parse_local_daemon(
+            "daemon:\n  user: true\n  containment:\n    executor: 'C:\\mxc\\wxc-exec.exe'\n",
+        )
+        .expect("a containment block parses off Windows");
+        let containment = config
+            .daemon
+            .unwrap()
+            .containment
+            .expect("containment block");
+        assert_eq!(
+            containment.executor,
+            std::path::Path::new(r"C:\mxc\wxc-exec.exe")
+        );
+    }
+
+    #[test]
+    fn daemon_containment_rejects_unknown_fields_and_a_missing_executor() {
+        assert!(
+            super::parse_local_daemon(
+                "daemon:\n  containment:\n    executor: /x/wxc-exec\n    timeout: 5s\n"
+            )
+            .is_err()
+        );
+        assert!(super::parse_local_daemon("daemon:\n  containment: {}\n").is_err());
+    }
+
+    #[test]
+    fn daemon_containment_is_local_only_and_absent_by_default() {
+        let yaml = "daemon:\n  containment:\n    executor: 'C:\\mxc\\wxc-exec.exe'\n";
+        assert!(
+            parse_daemon(yaml)
+                .unwrap_err()
+                .to_string()
+                .contains("only allowed in the local")
+        );
+        let startup = super::DaemonStartupConfig::default();
+        assert!(startup.containment.is_none());
+        assert!(
+            serde_json::to_value(&startup)
+                .unwrap()
+                .get("containment")
+                .is_none(),
+            "an unset containment block is not serialized"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parse_rejects_a_relative_containment_executor_on_windows() {
+        let error =
+            super::parse_local_daemon("daemon:\n  containment:\n    executor: wxc-exec.exe\n")
+                .expect_err("relative executor");
+        assert!(
+            error.to_string().contains(CONTAINMENT_EXECUTOR_ERROR),
+            "{error:#}"
+        );
+        super::parse_local_daemon(
+            "daemon:\n  containment:\n    executor: 'C:\\mxc\\wxc-exec.exe'\n",
+        )
+        .expect("absolute executor");
+    }
+
+    // Managed-settings lock validation tests
+
+    #[test]
+    fn claudecode_config_accepts_both_boolean_locks() {
+        let yaml = r#"
+programs:
+  claudeCode:
+    allowManagedHooksOnly: true
+    allowManagedMcpServersOnly: false
+"#;
+        let config = parse_daemon(yaml).expect("valid config");
+        let claude = config.programs.claude_code.as_ref().unwrap();
+        assert_eq!(claude.allow_managed_hooks_only, Some(true));
+        assert_eq!(claude.allow_managed_mcp_servers_only, Some(false));
+    }
+
+    #[test]
+    fn claudecode_config_rejects_string_for_boolean_keys() {
+        let yaml_hooks = r#"
+programs:
+  claudeCode:
+    allowManagedHooksOnly: "yes"
+"#;
+        let error = parse_daemon(yaml_hooks).expect_err("string for boolean");
+        let msg = format!("{error:#}");
+        assert!(
+            msg.contains("programs.claudeCode.allowManagedHooksOnly"),
+            "error should name the key path: {msg}"
+        );
+
+        let yaml_mcp = r#"
+programs:
+  claudeCode:
+    allowManagedMcpServersOnly: "true"
+"#;
+        let error = parse_daemon(yaml_mcp).expect_err("string for boolean");
+        let msg = format!("{error:#}");
+        assert!(
+            msg.contains("programs.claudeCode.allowManagedMcpServersOnly"),
+            "error should name the key path: {msg}"
+        );
+    }
+
+    #[test]
+    fn claudecode_config_accepts_empty_allowed_mcp_servers() {
+        let yaml = r#"
+programs:
+  claudeCode:
+    allowedMcpServers: []
+"#;
+        let config = parse_daemon(yaml).expect("valid config");
+        let claude = config.programs.claude_code.as_ref().unwrap();
+        assert_eq!(
+            claude.allowed_mcp_servers.as_ref().map(|v| v.len()),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn claudecode_config_accepts_one_entry_of_each_kind() {
+        let yaml = r#"
+programs:
+  claudeCode:
+    allowedMcpServers:
+      - serverName: "my-server"
+      - serverCommand: ["npx", "-y", "server"]
+      - serverUrl: "https://mcp.example.com/*"
+"#;
+        let config = parse_daemon(yaml).expect("valid config");
+        let claude = config.programs.claude_code.as_ref().unwrap();
+        let servers = claude.allowed_mcp_servers.as_ref().unwrap();
+        assert_eq!(servers.len(), 3);
+    }
+
+    #[test]
+    fn claudecode_config_rejects_invalid_allowed_mcp_servers() {
+        // serverCommand as string not array
+        let yaml_cmd_string = r#"
+programs:
+  claudeCode:
+    allowedMcpServers:
+      - serverCommand: "npx"
+"#;
+        let error = parse_daemon(yaml_cmd_string).expect_err("string command");
+        let msg = format!("{error:#}");
+        assert!(
+            msg.contains("programs.claudeCode.allowedMcpServers[0]"),
+            "error should name the path: {msg}"
+        );
+
+        // Two keys in one entry
+        let yaml_two_keys = r#"
+programs:
+  claudeCode:
+    allowedMcpServers:
+      - serverName: "test"
+        serverUrl: "https://example.com"
+"#;
+        let error = parse_daemon(yaml_two_keys).expect_err("two keys");
+        let msg = format!("{error:#}");
+        assert!(
+            msg.contains("programs.claudeCode.allowedMcpServers"),
+            "error should name the path: {msg}"
+        );
+
+        // serverName with invalid characters
+        let yaml_invalid_name = r#"
+programs:
+  claudeCode:
+    allowedMcpServers:
+      - serverName: "a b"
+"#;
+        let error = parse_daemon(yaml_invalid_name).expect_err("invalid server name");
+        let msg = format!("{error:#}");
+        assert!(
+            msg.contains("programs.claudeCode.allowedMcpServers[0]"),
+            "error should name the path: {msg}"
+        );
+
+        // serverName empty
+        let yaml_empty_name = r#"
+programs:
+  claudeCode:
+    allowedMcpServers:
+      - serverName: ""
+"#;
+        let error = parse_daemon(yaml_empty_name).expect_err("empty server name");
+        let msg = format!("{error:#}");
+        assert!(
+            msg.contains("programs.claudeCode.allowedMcpServers[0]"),
+            "error should name the path: {msg}"
+        );
+        assert!(
+            msg.contains("serverName must match"),
+            "error should explain the rule: {msg}"
+        );
+
+        // serverUrl empty
+        let yaml_empty_url = r#"
+programs:
+  claudeCode:
+    allowedMcpServers:
+      - serverUrl: ""
+"#;
+        let error = parse_daemon(yaml_empty_url).expect_err("empty url");
+        let msg = format!("{error:#}");
+        assert!(
+            msg.contains("programs.claudeCode.allowedMcpServers[0]"),
+            "error should name the path: {msg}"
+        );
+        assert!(
+            msg.contains("serverUrl must be non-empty"),
+            "error should explain the rule: {msg}"
+        );
+
+        // serverCommand empty array
+        let yaml_empty_cmd = r#"
+programs:
+  claudeCode:
+    allowedMcpServers:
+      - serverCommand: []
+"#;
+        let error = parse_daemon(yaml_empty_cmd).expect_err("empty command");
+        let msg = format!("{error:#}");
+        assert!(
+            msg.contains("programs.claudeCode.allowedMcpServers[0]"),
+            "error should name the path: {msg}"
+        );
+        assert!(
+            msg.contains("serverCommand must be a non-empty array"),
+            "error should explain the rule: {msg}"
+        );
+
+        // Non-object entry
+        let yaml_non_object = r#"
+programs:
+  claudeCode:
+    allowedMcpServers:
+      - "just a string"
+"#;
+        let error = parse_daemon(yaml_non_object).expect_err("non-object entry");
+        let msg = format!("{error:#}");
+        assert!(
+            msg.contains("programs.claudeCode.allowedMcpServers"),
+            "error should name the path: {msg}"
+        );
+
+        // allowedMcpServers as object not array
+        let yaml_not_array = r#"
+programs:
+  claudeCode:
+    allowedMcpServers: {}
+"#;
+        let error = parse_daemon(yaml_not_array).expect_err("object not array");
+        let msg = format!("{error:#}");
+        assert!(
+            msg.contains("programs.claudeCode.allowedMcpServers"),
+            "error should name the path: {msg}"
+        );
+    }
+
+    #[test]
+    fn claudecode_config_passes_through_other_keys() {
+        let yaml = r#"
+programs:
+  claudeCode:
+    companyAnnouncements: "hello"
+    allowManagedHooksOnly: true
+"#;
+        let config = parse_daemon(yaml).expect("valid config");
+        let claude = config.programs.claude_code.as_ref().unwrap();
+        assert_eq!(claude.allow_managed_hooks_only, Some(true));
+        assert!(claude.settings.contains_key("companyAnnouncements"));
+    }
+
+    // AC 1: ContainmentEgress tests
+
+    #[test]
+    fn containment_egress_allow_parses() {
+        let config = super::parse_local_daemon(
+            "daemon:\n  containment:\n    executor: 'C:\\mxc\\wxc-exec.exe'\n    egress: allow\n",
+        )
+        .expect("allow parses");
+        let egress = config.daemon.unwrap().containment.unwrap().egress;
+        assert_eq!(egress, super::ContainmentEgress::Allow);
+    }
+
+    #[test]
+    fn containment_egress_deny_parses() {
+        let config = super::parse_local_daemon(
+            "daemon:\n  containment:\n    executor: 'C:\\mxc\\wxc-exec.exe'\n    egress: deny\n",
+        )
+        .expect("deny parses");
+        let egress = config.daemon.unwrap().containment.unwrap().egress;
+        assert_eq!(egress, super::ContainmentEgress::Deny);
+    }
+
+    #[test]
+    fn containment_egress_absent_defaults_to_deny() {
+        // PR 4 (AC 4): the default flipped from allow to deny.
+        let config = super::parse_local_daemon(
+            "daemon:\n  containment:\n    executor: 'C:\\mxc\\wxc-exec.exe'\n",
+        )
+        .expect("absent defaults");
+        let egress = config.daemon.unwrap().containment.unwrap().egress;
+        assert_eq!(egress, super::ContainmentEgress::Deny);
+    }
+
+    #[test]
+    fn containment_egress_rejects_deny_capitalized() {
+        assert!(
+            super::parse_local_daemon(
+                "daemon:\n  containment:\n    executor: /x/wxc-exec\n    egress: Deny\n"
+            )
+            .is_err(),
+            "Deny capitalized is rejected"
+        );
+    }
+
+    #[test]
+    fn containment_egress_rejects_block() {
+        assert!(
+            super::parse_local_daemon(
+                "daemon:\n  containment:\n    executor: /x/wxc-exec\n    egress: block\n"
+            )
+            .is_err(),
+            "block is rejected"
+        );
+    }
+
+    #[test]
+    fn containment_egress_unset_not_serialized() {
+        // PR 4: default flipped to Deny, so Deny is not serialized and Allow is
+        let cfg = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("/x/wxc-exec"),
+            egress: super::ContainmentEgress::Deny,
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: None,
+            git: None,
+        };
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert!(
+            json.get("egress").is_none(),
+            "default egress (Deny) is not serialized"
+        );
+
+        let cfg_allow = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("/x/wxc-exec"),
+            egress: super::ContainmentEgress::Allow,
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: None,
+            git: None,
+        };
+        let json_allow = serde_json::to_value(&cfg_allow).unwrap();
+        assert_eq!(
+            json_allow.get("egress").and_then(|v| v.as_str()),
+            Some("allow"),
+            "deny egress is serialized"
+        );
+    }
+
+    #[test]
+    fn containment_engine_explicit_mxc_parses() {
+        let config = super::parse_local_daemon(
+            "daemon:\n  containment:\n    executor: 'C:\\mxc\\wxc-exec.exe'\n    engine: mxc\n",
+        )
+        .expect("explicit mxc engine parses");
+        let engine = config.daemon.unwrap().containment.unwrap().engine;
+        assert_eq!(engine, super::ContainmentEngine::Mxc);
+    }
+
+    #[test]
+    fn containment_engine_rejects_mxc_capitalized() {
+        assert!(
+            super::parse_local_daemon(
+                "daemon:\n  containment:\n    executor: 'C:\\mxc\\wxc-exec.exe'\n    engine: MXC\n"
+            )
+            .is_err(),
+            "MXC capitalized is rejected"
+        );
+    }
+
+    #[test]
+    fn containment_engine_unset_not_serialized() {
+        let cfg = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("/x/wxc-exec"),
+            egress: super::ContainmentEgress::Allow,
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: None,
+            git: None,
+        };
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert!(
+            json.get("engine").is_none(),
+            "default engine is not serialized"
+        );
+    }
+
+    // PR 6 (AC-1): the top-level `containment` block (D1), accepted in both
+    // the local file and controller-delivered policy, unlike
+    // `daemon.containment`.
+
+    const WRAP_CLAUDE_YAML: &str = "containment:\n  programs:\n    claudeCode:\n      executable: 'C:\\Program Files\\Anthropic\\ClaudeCode\\claude.exe'\n";
+
+    #[test]
+    fn containment_program_without_mode_defaults_to_wrap() {
+        let config = super::parse_local_daemon(WRAP_CLAUDE_YAML).expect("wrap by default parses");
+        let claude = config
+            .containment
+            .expect("block present")
+            .programs
+            .claude_code
+            .expect("claudeCode present");
+        assert_eq!(claude.mode, super::ContainmentMode::Wrap);
+    }
+
+    #[test]
+    fn containment_mode_off_is_refused_naming_the_field() {
+        let yaml = "containment:\n  programs:\n    claudeCode:\n      mode: off\n      executable: 'C:\\Program Files\\Anthropic\\ClaudeCode\\claude.exe'\n";
+        let error = super::parse_local_daemon(yaml).unwrap_err();
+        let chain = format!("{error:#}");
+        assert!(
+            chain.contains("containment.programs.claudeCode.mode"),
+            "{chain}"
+        );
+    }
+
+    #[test]
+    fn containment_mode_third_value_is_refused() {
+        let yaml = "containment:\n  programs:\n    claudeCode:\n      mode: bogus\n      executable: 'C:\\Program Files\\Anthropic\\ClaudeCode\\claude.exe'\n";
+        assert!(super::parse_local_daemon(yaml).is_err());
+    }
+
+    #[test]
+    fn containment_native_mode_does_not_require_executable() {
+        let config = super::parse_local_daemon(
+            "containment:\n  programs:\n    claudeCode:\n      mode: native\n",
+        )
+        .expect("native mode needs no executable");
+        assert_eq!(
+            config
+                .containment
+                .unwrap()
+                .programs
+                .claude_code
+                .unwrap()
+                .mode,
+            super::ContainmentMode::Native
+        );
+    }
+
+    #[test]
+    fn containment_wrap_without_executable_is_refused_naming_the_field() {
+        let error = super::parse_local_daemon("containment:\n  programs:\n    claudeCode: {}\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("containment.programs.claudeCode.executable"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn containment_wrap_relative_path_is_refused() {
+        let yaml = "containment:\n  programs:\n    claudeCode:\n      executable: claude.exe\n";
+        let error = super::parse_local_daemon(yaml).unwrap_err().to_string();
+        assert!(
+            error.contains("containment.programs.claudeCode.executable"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn containment_wrap_forbidden_character_is_refused() {
+        for executable in [
+            r#"C:\Program Files\Anthropic\ClaudeCode\"claude.exe"#,
+            r"C:\Program Files\Anthropic\ClaudeCode\%claude.exe",
+            r"C:\Program Files\Anthropic\ClaudeCode\!claude.exe",
+        ] {
+            let yaml = format!(
+                "containment:\n  programs:\n    openCode:\n      executable: '{}'\n",
+                executable.replace('\'', "''")
+            );
+            let error = super::parse_local_daemon(&yaml).unwrap_err().to_string();
+            assert!(
+                error.contains("containment.programs.openCode.executable"),
+                "{executable}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn containment_wrap_users_path_is_refused_case_insensitively() {
+        for path in [
+            r"C:\Users\alice\.local\bin\claude.exe",
+            r"C:\USERS\alice\.local\bin\claude.exe",
+        ] {
+            let yaml =
+                format!("containment:\n  programs:\n    claudeCode:\n      executable: '{path}'\n");
+            let error = super::parse_local_daemon(&yaml).unwrap_err().to_string();
+            assert!(
+                error.contains("containment.programs.claudeCode.executable"),
+                "{path}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn containment_wrap_unc_path_ending_in_exe_case_insensitively_is_accepted() {
+        let yaml = r"containment:
+  programs:
+    copilot:
+      executable: '\\fileserver\share\Copilot.EXE'
+";
+        super::parse_local_daemon(yaml).expect("UNC path ending in .EXE is accepted");
+    }
+
+    #[test]
+    fn containment_block_runs_the_same_validation_through_parse_daemon() {
+        // N3: the controller validates on Linux; the string rules are not
+        // windows()-gated, unlike daemon.containment's path syntax.
+        let error = super::parse_daemon("containment:\n  programs:\n    claudeCode: {}\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("containment.programs.claudeCode.executable"));
+    }
+
+    #[test]
+    fn containment_round_trips_through_yaml() {
+        let config = super::parse_local_daemon(WRAP_CLAUDE_YAML).unwrap();
+        let rendered = crate::serdes::yamlviajson::to_string(&config).unwrap();
+        let reparsed = super::parse_local_daemon(&rendered).unwrap();
+        assert_eq!(
+            reparsed.containment.unwrap().programs.claude_code,
+            config.containment.unwrap().programs.claude_code
+        );
+    }
+
+    #[test]
+    fn daemon_config_without_containment_round_trips_unchanged() {
+        let yaml = "inventoryInterval: 15m\n";
+        let config = super::parse_local_daemon(yaml).unwrap();
+        assert!(config.containment.is_none());
+        let rendered = crate::serdes::yamlviajson::to_string(&config).unwrap();
+        assert!(
+            !rendered.contains("containment"),
+            "unset containment is not serialized: {rendered}"
+        );
+    }
+
+    #[test]
+    fn containment_counts_toward_daemon_config_is_empty() {
+        let config = super::parse_local_daemon(WRAP_CLAUDE_YAML).unwrap();
+        assert!(
+            !config.is_empty(),
+            "a config with only a containment block is not empty"
+        );
+    }
+
+    #[test]
+    fn containment_deny_unknown_fields_on_every_new_struct() {
+        for yaml in [
+            "containment:\n  bogus: true\n",
+            "containment:\n  programs:\n    bogus: true\n",
+            "containment:\n  programs:\n    claudeCode:\n      bogus: true\n",
+        ] {
+            assert!(
+                super::parse_local_daemon(yaml).is_err(),
+                "{yaml} is rejected"
+            );
+        }
+    }
+
+    /// DV-8: with egressUpstream set, git.allow + git.pushAllow must name a
+    /// single (host, port) — the egress endpoint routes by path only.
+    #[test]
+    fn containment_git_single_host_with_egress_upstream() {
+        let upstream = || {
+            Some(super::EgressUpstreamConfig {
+                url: url::Url::parse("https://egress.example.com").unwrap(),
+                authentication: None,
+            })
+        };
+        let cfg = |upstream, allow: &[&str], push_allow: &[&str]| super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("C:\\mxc\\wxc-exec.exe"),
+            egress: super::ContainmentEgress::default(),
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: upstream,
+            git: Some(super::GitConfig {
+                allow: allow.iter().map(|s| (*s).to_owned()).collect(),
+                push_allow: push_allow.iter().map(|s| (*s).to_owned()).collect(),
+                credentials: vec![],
+                ssh: None,
+            }),
+        };
+        // Two hosts in allow: refused.
+        let result = super::validate_containment_startup(
+            &cfg(
+                upstream(),
+                &["https://github.com/org/", "https://gitlab.com/org/"],
+                &[],
+            ),
+            true,
+        );
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.contains("single host")),
+            "{result:?}"
+        );
+        // A second host via pushAllow: refused too.
+        assert!(
+            super::validate_containment_startup(
+                &cfg(
+                    upstream(),
+                    &["https://github.com/org/"],
+                    &["https://gitlab.com/x/"]
+                ),
+                true,
+            )
+            .is_err()
+        );
+        // Case-insensitive host, default port: one key.
+        assert_eq!(
+            super::validate_containment_startup(
+                &cfg(
+                    upstream(),
+                    &["https://github.com/a/", "https://GitHub.com:443/b/"],
+                    &[]
+                ),
+                true,
+            ),
+            Ok(())
+        );
+        // Same host, different ports: two keys, refused.
+        assert!(
+            super::validate_containment_startup(
+                &cfg(
+                    upstream(),
+                    &["https://git.corp/", "https://git.corp:8443/"],
+                    &[]
+                ),
+                true,
+            )
+            .is_err()
+        );
+        // Without egressUpstream, two hosts stay allowed.
+        assert_eq!(
+            super::validate_containment_startup(
+                &cfg(
+                    None,
+                    &["https://github.com/org/", "https://gitlab.com/org/"],
+                    &[]
+                ),
+                true,
+            ),
+            Ok(())
+        );
+        // An entry without a host never passes (with or without upstream).
+        assert!(
+            super::validate_containment_startup(&cfg(upstream(), &["https://"], &[]), true)
+                .is_err()
+        );
+    }
+
+    /// The credential secret never reaches a `{:?}` rendering (manual Debug).
+    #[test]
+    fn git_credential_entry_debug_redacts_secret() {
+        let entry = super::GitCredentialEntry {
+            url_prefix: "https://github.com/org/".to_owned(),
+            username: "x-access-token".to_owned(),
+            secret: "sup3rs3cret-PAT".to_owned(),
+        };
+        let rendered = format!("{entry:?}");
+        assert!(!rendered.contains("sup3rs3cret-PAT"), "{rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        let containment = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("C:\\mxc\\wxc-exec.exe"),
+            egress: super::ContainmentEgress::default(),
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: None,
+            git: Some(super::GitConfig {
+                allow: vec!["https://github.com/org/".to_owned()],
+                push_allow: vec![],
+                credentials: vec![entry],
+                ssh: None,
+            }),
+        };
+        let rendered = format!("{containment:?}");
+        assert!(!rendered.contains("sup3rs3cret-PAT"), "{rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+    }
+
+    // PR 5 tests: ssh agent proxy and git over ssh
+
+    #[test]
+    fn git_ssh_config_parses_hosts_and_keys() {
+        let config = super::parse_local_daemon(
+            "daemon:\n  containment:\n    executor: 'C:\\mxc\\wxc-exec.exe'\n    git:\n      ssh:\n        hosts: ['github.com', 'gitlab.com']\n        keys: ['SHA256:abcd1234', '*']\n",
+        )
+        .expect("ssh config parses");
+        let ssh = config
+            .daemon
+            .unwrap()
+            .containment
+            .unwrap()
+            .git
+            .unwrap()
+            .ssh
+            .unwrap();
+        assert_eq!(ssh.hosts, vec!["github.com", "gitlab.com"]);
+        assert_eq!(ssh.keys, vec!["SHA256:abcd1234", "*"]);
+    }
+
+    #[test]
+    fn git_ssh_config_hosts_normalized_to_lowercase() {
+        let config = super::parse_local_daemon(
+            "daemon:\n  containment:\n    executor: 'C:\\mxc\\wxc-exec.exe'\n    git:\n      ssh:\n        hosts: ['GitHub.COM']\n",
+        )
+        .expect("ssh config parses");
+        let ssh = config
+            .daemon
+            .unwrap()
+            .containment
+            .unwrap()
+            .git
+            .unwrap()
+            .ssh
+            .unwrap();
+        assert_eq!(ssh.hosts, vec!["github.com"]);
+    }
+
+    #[test]
+    fn git_ssh_config_absent_round_trips_absent() {
+        let cfg = super::GitConfig {
+            allow: vec![],
+            push_allow: vec![],
+            credentials: vec![],
+            ssh: None,
+        };
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert!(json.get("ssh").is_none(), "absent ssh is not serialized");
+    }
+
+    #[test]
+    fn git_ssh_config_empty_hosts_and_keys_not_serialized() {
+        let cfg = super::GitSshConfig {
+            hosts: vec![],
+            keys: vec![],
+        };
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert!(json.get("hosts").is_none(), "empty hosts not serialized");
+        assert!(json.get("keys").is_none(), "empty keys not serialized");
+    }
+
+    #[test]
+    fn git_ssh_config_deny_unknown_fields() {
+        assert!(
+            super::parse_local_daemon(
+                "daemon:\n  containment:\n    executor: 'C:\\mxc\\wxc-exec.exe'\n    git:\n      ssh:\n        host: ['github.com']\n",
+            )
+            .is_err(),
+            "unknown field 'host' should be rejected"
+        );
+    }
+
+    #[test]
+    fn git_ssh_host_validation_rejects_scheme() {
+        let cfg = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("C:\\mxc\\wxc-exec.exe"),
+            egress: super::ContainmentEgress::default(),
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: None,
+            git: Some(super::GitConfig {
+                allow: vec![],
+                push_allow: vec![],
+                credentials: vec![],
+                ssh: Some(super::GitSshConfig {
+                    hosts: vec!["https://github.com".to_owned()],
+                    keys: vec![],
+                }),
+            }),
+        };
+        let error = super::validate_containment_startup(&cfg, true).expect_err("scheme rejected");
+        assert!(
+            error.contains("daemon.containment.git.ssh.hosts[0]"),
+            "error: {error}"
+        );
+        assert!(
+            error.contains("bare hostname (no scheme, path, or port)"),
+            "error: {error}"
+        );
+    }
+
+    #[test]
+    fn git_ssh_host_validation_charset() {
+        fn validate_host(host: &str) -> Result<(), String> {
+            let cfg = super::ContainmentStartupConfig {
+                executor: std::path::PathBuf::from("C:\\mxc\\wxc-exec.exe"),
+                egress: super::ContainmentEgress::default(),
+                engine: super::ContainmentEngine::default(),
+                egress_upstream: None,
+                git: Some(super::GitConfig {
+                    allow: vec![],
+                    push_allow: vec![],
+                    credentials: vec![],
+                    ssh: Some(super::GitSshConfig {
+                        hosts: vec![host.to_owned()],
+                        keys: vec![],
+                    }),
+                }),
+            };
+            super::validate_containment_startup(&cfg, true)
+        }
+        for host in [
+            "github.com",
+            "httpbin.org",
+            "httpd.corp.example",
+            "git-01.corp.example",
+            "github-demo",
+            "10.0.0.5",
+        ] {
+            assert_eq!(validate_host(host), Ok(()), "accepted: {host}");
+        }
+        for host in [
+            "a.com\n\tProxyCommand x",
+            "a.com ProxyCommand",
+            " github.com",
+            "a\tb",
+            "*",
+            "*.corp.example",
+            "git?.corp",
+            "%h",
+            "-oProxyCommand=x",
+            "a..com",
+            "github.com.",
+            ".github.com",
+        ] {
+            assert_eq!(
+                validate_host(host),
+                Err(
+                    "daemon.containment.git.ssh.hosts[0] must be a bare hostname (no scheme, path, or port)"
+                        .to_owned()
+                ),
+                "refused: {host}"
+            );
+        }
+    }
+
+    #[test]
+    fn git_ssh_host_validation_rejects_path() {
+        let cfg = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("C:\\mxc\\wxc-exec.exe"),
+            egress: super::ContainmentEgress::default(),
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: None,
+            git: Some(super::GitConfig {
+                allow: vec![],
+                push_allow: vec![],
+                credentials: vec![],
+                ssh: Some(super::GitSshConfig {
+                    hosts: vec!["github.com/org/repo".to_owned()],
+                    keys: vec![],
+                }),
+            }),
+        };
+        let error = super::validate_containment_startup(&cfg, true).expect_err("path rejected");
+        assert!(
+            error.contains("daemon.containment.git.ssh.hosts[0]"),
+            "error: {error}"
+        );
+        assert!(
+            error.contains("bare hostname (no scheme, path, or port)"),
+            "error: {error}"
+        );
+    }
+
+    #[test]
+    fn git_ssh_host_validation_rejects_port() {
+        let cfg = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("C:\\mxc\\wxc-exec.exe"),
+            egress: super::ContainmentEgress::default(),
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: None,
+            git: Some(super::GitConfig {
+                allow: vec![],
+                push_allow: vec![],
+                credentials: vec![],
+                ssh: Some(super::GitSshConfig {
+                    hosts: vec!["github.com:2222".to_owned()],
+                    keys: vec![],
+                }),
+            }),
+        };
+        let error = super::validate_containment_startup(&cfg, true).expect_err("port rejected");
+        assert!(
+            error.contains("daemon.containment.git.ssh.hosts[0]"),
+            "error: {error}"
+        );
+        assert!(
+            error.contains("bare hostname (no scheme, path, or port)"),
+            "error: {error}"
+        );
+    }
+
+    #[test]
+    fn git_ssh_host_validation_rejects_empty() {
+        let cfg = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("C:\\mxc\\wxc-exec.exe"),
+            egress: super::ContainmentEgress::default(),
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: None,
+            git: Some(super::GitConfig {
+                allow: vec![],
+                push_allow: vec![],
+                credentials: vec![],
+                ssh: Some(super::GitSshConfig {
+                    hosts: vec!["".to_owned()],
+                    keys: vec![],
+                }),
+            }),
+        };
+        let error = super::validate_containment_startup(&cfg, true).expect_err("empty rejected");
+        assert!(
+            error.contains("daemon.containment.git.ssh.hosts[0]"),
+            "error: {error}"
+        );
+    }
+
+    #[test]
+    fn git_ssh_key_validation_rejects_non_sha256() {
+        let cfg = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("C:\\mxc\\wxc-exec.exe"),
+            egress: super::ContainmentEgress::default(),
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: None,
+            git: Some(super::GitConfig {
+                allow: vec![],
+                push_allow: vec![],
+                credentials: vec![],
+                ssh: Some(super::GitSshConfig {
+                    hosts: vec![],
+                    keys: vec!["MD5:1234abcd".to_owned()],
+                }),
+            }),
+        };
+        let error = super::validate_containment_startup(&cfg, true)
+            .expect_err("non-SHA256 fingerprint rejected");
+        assert!(
+            error.contains("daemon.containment.git.ssh.keys[0]"),
+            "error: {error}"
+        );
+        assert!(
+            error.contains("must be a SHA256:... fingerprint or \"*\""),
+            "error: {error}"
+        );
+    }
+
+    #[test]
+    fn git_ssh_key_validation_accepts_sha256() {
+        let cfg = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("C:\\mxc\\wxc-exec.exe"),
+            egress: super::ContainmentEgress::default(),
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: None,
+            git: Some(super::GitConfig {
+                allow: vec![],
+                push_allow: vec![],
+                credentials: vec![],
+                ssh: Some(super::GitSshConfig {
+                    hosts: vec!["github.com".to_owned()],
+                    keys: vec!["SHA256:abcd1234".to_owned()],
+                }),
+            }),
+        };
+        assert!(super::validate_containment_startup(&cfg, true).is_ok());
+    }
+
+    #[test]
+    fn git_ssh_key_validation_accepts_wildcard() {
+        let cfg = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("C:\\mxc\\wxc-exec.exe"),
+            egress: super::ContainmentEgress::default(),
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: None,
+            git: Some(super::GitConfig {
+                allow: vec![],
+                push_allow: vec![],
+                credentials: vec![],
+                ssh: Some(super::GitSshConfig {
+                    hosts: vec!["github.com".to_owned()],
+                    keys: vec!["*".to_owned()],
+                }),
+            }),
+        };
+        assert!(super::validate_containment_startup(&cfg, true).is_ok());
+    }
+
+    #[test]
+    fn git_ssh_with_egress_upstream_and_hosts_rejected() {
+        let cfg = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("C:\\mxc\\wxc-exec.exe"),
+            egress: super::ContainmentEgress::default(),
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: Some(super::EgressUpstreamConfig {
+                url: url::Url::parse("https://gateway.example.com/forward").unwrap(),
+                authentication: None,
+            }),
+            git: Some(super::GitConfig {
+                allow: vec![],
+                push_allow: vec![],
+                credentials: vec![],
+                ssh: Some(super::GitSshConfig {
+                    hosts: vec!["github.com".to_owned()],
+                    keys: vec![],
+                }),
+            }),
+        };
+        let error = super::validate_containment_startup(&cfg, true)
+            .expect_err("egress_upstream + ssh.hosts rejected");
+        assert!(
+            error.contains("daemon.containment.git.ssh"),
+            "error: {error}"
+        );
+        assert!(
+            error.contains("with egressUpstream set, ssh egress is not available"),
+            "error: {error}"
+        );
+        assert!(error.contains("L7 https only"), "error: {error}");
+    }
+
+    #[test]
+    fn git_ssh_with_egress_upstream_and_empty_hosts_allowed() {
+        let cfg = super::ContainmentStartupConfig {
+            executor: std::path::PathBuf::from("C:\\mxc\\wxc-exec.exe"),
+            egress: super::ContainmentEgress::default(),
+            engine: super::ContainmentEngine::default(),
+            egress_upstream: Some(super::EgressUpstreamConfig {
+                url: url::Url::parse("https://gateway.example.com/forward").unwrap(),
+                authentication: None,
+            }),
+            git: Some(super::GitConfig {
+                allow: vec![],
+                push_allow: vec![],
+                credentials: vec![],
+                ssh: Some(super::GitSshConfig {
+                    hosts: vec![],
+                    keys: vec![],
+                }),
+            }),
+        };
+        assert!(
+            super::validate_containment_startup(&cfg, true).is_ok(),
+            "egress_upstream + empty ssh.hosts allowed"
+        );
     }
 }

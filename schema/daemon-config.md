@@ -2,6 +2,17 @@
 
 |Field|Type|Description|
 |-|-|-|
+|`containment`|object|Wrap-mode transparency policy. Top-level, not under `programs` or<br>`daemon.containment`, because it is controller-delivered POLICY over<br>which program executables launch wrapped, while `programs` holds<br>per-program settings reconciliation and `daemon.containment` is the<br>device-local startup configuration of the launch machinery.<br>Accepted in controller-delivered<br>policy AND the local file, unlike `daemon.containment` (local-only,<br>startup settings, which must also be configured for the policy to<br>take effect). With a controller only the controller-delivered block<br>applies (a local block is ignored); a change takes effect at the<br>next launch and the next violation-scan tick after it is applied.<br>Without a controller the local block is read at startup only; with<br>`--once`/`--dry-run` the block is validated but no scan runs and no<br>posture is reported.<br><br>A daemon that predates this setting rejects a configuration that<br>contains it, so upgrade the controller and then every device before<br>setting it in controller-delivered policy. A program field added to<br>`containment.programs` by a later release is the same break again:<br>upgrade before naming it.|
+|`containment.programs`|object|One typed field per profiled program; not a map, so a daemon that does<br>not know a program rejects the whole policy at parse time.|
+|`containment.programs.claudeCode`|object|Wrap-mode policy for Claude Code (launch program `claude-code`).|
+|`containment.programs.claudeCode.executable`|string|Absolute Windows path to the program's managed executable (`X:\...`<br>or `\\server\share\...`, ending in `.exe`, not under `\Users\`).<br>Required in wrap mode; ignored (and may be omitted) in native mode.|
+|`containment.programs.claudeCode.mode`|enum|Defaults to `wrap` when a policy names the program.<br>Possible values: `wrap`, `native`.|
+|`containment.programs.copilot`|object|Wrap-mode policy for GitHub Copilot CLI (launch program `copilot`).|
+|`containment.programs.copilot.executable`|string|Absolute Windows path to the program's managed executable (`X:\...`<br>or `\\server\share\...`, ending in `.exe`, not under `\Users\`).<br>Required in wrap mode; ignored (and may be omitted) in native mode.|
+|`containment.programs.copilot.mode`|enum|Defaults to `wrap` when a policy names the program.<br>Possible values: `wrap`, `native`.|
+|`containment.programs.openCode`|object|Wrap-mode policy for OpenCode (launch program `opencode`).|
+|`containment.programs.openCode.executable`|string|Absolute Windows path to the program's managed executable (`X:\...`<br>or `\\server\share\...`, ending in `.exe`, not under `\Users\`).<br>Required in wrap mode; ignored (and may be omitted) in native mode.|
+|`containment.programs.openCode.mode`|enum|Defaults to `wrap` when a policy names the program.<br>Possible values: `wrap`, `native`.|
 |`controller`|object|Controller connection settings. Omit this field to run without fleet management.|
 |`controller.address`|string|HTTPS address of the controller's fleet API.|
 |`controller.caCertificatePath`|string|Path to a PEM-encoded CA certificate used to verify the controller.<br><br>Omit this field to use the operating system's trusted certificate roots.|
@@ -15,6 +26,33 @@
 |`daemon.claudeDesktop.credentialHelper`|string|Credential helper path.|
 |`daemon.codex`|object|Codex paths.|
 |`daemon.codex.config`|string|Configuration file.|
+|`daemon.containment`|object|Sandboxed launch (`agentdesktop run`): local startup settings only.<br>The controller-delivered wrap policy lives in the TOP-LEVEL<br>`containment` block, not here.|
+|`daemon.containment.egress`|enum|Outbound network for the sandboxed program: `deny` (default) or `allow`. With `deny` the box reaches only loopback and configured egress routes. Read at startup only (restart the daemon after changing it); ignored with `--once` and `--dry-run`.<br>Possible values: `allow`, `deny`.|
+|`daemon.containment.egressUpstream`|object|Central L7 egress endpoint (an agentgateway HTTPS listener whose<br>per-prefix routes are the central allowlist). When set, the relay sends<br>the box's git smart-HTTP requests to `https://<egress host>/<path>`<br>instead of directly to the remote. CONNECT is always refused, with or<br>without it. Read at startup only.|
+|`daemon.containment.egressUpstream.authentication`|object|Reserved for gateway-hop authentication, which is not available yet:<br>startup refuses a config that sets it (the relay sends only the git<br>credential in `Authorization`).|
+|`daemon.containment.egressUpstream.authentication.allowedClientIds`|[]string|Client identifiers permitted to request credentials for this gateway.|
+|`daemon.containment.egressUpstream.authentication.audience`|string|Audience placed in the issued JWT. This must match the gateway's expected audience.|
+|`daemon.containment.egressUpstream.authentication.type`|enum|Possible values: `controllerJwt`.|
+|`daemon.containment.egressUpstream.authentication.allowInsecure`|boolean|Permit loopback HTTP endpoints for isolated local development.|
+|`daemon.containment.egressUpstream.authentication.clientId`|string|Public OpenID Connect client identifier.|
+|`daemon.containment.egressUpstream.authentication.deviceAuthorization`|boolean|Sign in with the OAuth 2.0 Device Authorization Grant (RFC 8628)<br>instead of a browser redirect to a local callback.<br><br>Use this on hosts without a local browser, such as servers reached<br>over SSH. Run `agentdesktop-headless login` to get a verification<br>URL and user code to approve from any other device. The identity<br>provider must support device authorization for this client.|
+|`daemon.containment.egressUpstream.authentication.issuer`|string|Exact OpenID Connect issuer URL.|
+|`daemon.containment.egressUpstream.authentication.redirectUri`|string|Loopback redirect URI registered for the native client.|
+|`daemon.containment.egressUpstream.authentication.scopes`|[]string|Scopes requested during sign-in.|
+|`daemon.containment.egressUpstream.authentication.type`|enum|Possible values: `oidc`.|
+|`daemon.containment.egressUpstream.url`|string|HTTPS URL of the egress endpoint; must include a host and no<br>credentials, query or fragment.|
+|`daemon.containment.engine`|enum|Sandbox engine: `mxc` (default, the only engine). Read at startup only<br>(restart the daemon after changing it); ignored with `--once` and `--dry-run`.<br>Possible values: `mxc`.|
+|`daemon.containment.executor`|string|Windows only. Absolute path to MXC `wxc-exec.exe`; no default. Read at<br>startup only (restart the daemon after changing it). Requires user<br>mode; ignored with `--once` and `--dry-run`.|
+|`daemon.containment.git`|object|Git over the relay: the remotes the box may fetch from and push to, and<br>the static credentials the relay attaches host-side. Absent = no git<br>egress. Read at startup only.|
+|`daemon.containment.git.allow`|[]string|List of HTTPS URL prefixes the box may fetch from.|
+|`daemon.containment.git.credentials`|[]object|Static git credentials for allowed hosts.|
+|`daemon.containment.git.credentials[].secret`|string|Secret (password or token) for HTTP basic auth (never serialized).|
+|`daemon.containment.git.credentials[].urlPrefix`|string|URL prefix this credential applies to.|
+|`daemon.containment.git.credentials[].username`|string|Username for HTTP basic auth.|
+|`daemon.containment.git.pushAllow`|[]string|List of HTTPS URL prefixes the box may push to (subset of allow).|
+|`daemon.containment.git.ssh`|object|Git over ssh: the box's ssh signs through a filtered agent proxy (the<br>key never enters the box) and reaches each host through a loopback<br>leg the daemon originates.|
+|`daemon.containment.git.ssh.hosts`|[]string|Bare hostnames (port fixed at 22) the box may fetch from and push to<br>over ssh; host-granular. Empty or absent: no ssh at all.|
+|`daemon.containment.git.ssh.keys`|[]string|SHA256 fingerprints (`SHA256:...`, as `ssh-add -l` prints them) of the<br>agent keys offered to the box. Empty or absent: no key is offered.<br>The literal `"*"` offers every key in the agent.|
 |`daemon.copilot`|object|GitHub Copilot CLI paths (`config` = the `providers.json` to manage;<br>defaults to `COPILOT_PROVIDERS_CONFIG`, `$COPILOT_HOME/providers.json`,<br>then `~/.copilot/providers.json`).|
 |`daemon.copilot.config`|string|Configuration file.|
 |`daemon.grok`|object|Grok Build paths.|
@@ -62,6 +100,12 @@
 |`programSelection.allowUserChoice`|boolean|Let the device user opt out of all configured programs, or choose the<br>ones to manage, with `agentdesktop programs set`.<br>Agentdesktop removes the settings it wrote for a program the user opts<br>out of, and reports the program as opted out.<br><br>Defaults to `false`: every configured program is managed and a choice<br>stored on the device is ignored until this is enabled again.|
 |`programs`|object|Per-program settings reconciled on this device.|
 |`programs.claudeCode`|object|Claude Code managed-settings configuration. Arbitrary keys are passed through directly.|
+|`programs.claudeCode.allowManagedHooksOnly`|boolean|Allow only managed hooks. Claude Code reads this only from managed sources.<br>Unset: not written to Claude Code's settings.|
+|`programs.claudeCode.allowManagedMcpServersOnly`|boolean|Allow only managed MCP servers. Claude Code reads this only from managed sources.<br>Unset: not written to Claude Code's settings.|
+|`programs.claudeCode.allowedMcpServers`|[]object|Allowed MCP servers list. Unset: not written to Claude Code's settings.|
+|`programs.claudeCode.allowedMcpServers[].serverName`|string|User-assigned label; not a security control.|
+|`programs.claudeCode.allowedMcpServers[].serverCommand`|[]string|Command array, must be non-empty.|
+|`programs.claudeCode.allowedMcpServers[].serverUrl`|string|Server URL, must be non-empty.|
 |`programs.claudeCode.auth`|enum|Upstream authentication used by this agent.<br>Possible values: `subscription`.|
 |`programs.claudeCode.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
 |`programs.claudeDesktop`|object|Claude Desktop system-managed configuration. User daemons skip it.<br>Arbitrary keys are passed through directly.|

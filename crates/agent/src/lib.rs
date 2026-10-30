@@ -7,8 +7,13 @@ pub mod gateway_oidc;
 mod github_oauth;
 pub mod identity;
 mod inventory_watch;
+pub mod launch;
 mod llm_proxy;
 pub mod oidc;
+// The production renderer is the PowerShell build script; the Rust
+// counterpart exists for the golden tests only.
+#[cfg(test)]
+mod packaging;
 mod program_choice;
 pub mod provider;
 pub mod reconcile;

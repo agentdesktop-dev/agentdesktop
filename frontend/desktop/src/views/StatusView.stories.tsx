@@ -5,6 +5,7 @@ import { DesktopStoryFrame } from "../stories/DesktopStoryFrame";
 import {
   approvedDevice,
   bootstrap,
+  containmentDaemonInfo,
   emptyDiscovery,
   managedConnector,
   managedDaemonInfo,
@@ -170,6 +171,32 @@ export const StandaloneUsageReceiverOff: Story = {
     await expect(
       local.getByText(
         `127.0.0.1:4319 (off: ${usageReceiverOffDaemonInfo.usageReceiver?.error})`,
+      ),
+    ).toBeVisible();
+  },
+};
+
+export const StandaloneContainmentUnavailable: Story = {
+  args: {
+    connector: {
+      ...standaloneConnector,
+      runtime: {
+        ...standaloneConnector.runtime,
+        daemon: containmentDaemonInfo,
+      },
+    },
+    discovery: emptyDiscovery,
+    managedDevice: unconfiguredDevice,
+  },
+  play: async ({ canvas }) => {
+    await userEvent.click(canvas.getByText("Advanced"));
+    const local = within(
+      canvas.getByRole("region", { name: "Daemon information" }),
+    );
+    await expect(local.getByText("Sandboxed launch")).toBeVisible();
+    await expect(
+      local.getByText(
+        `${containmentDaemonInfo.containment?.executor} (unavailable: ${containmentDaemonInfo.containment?.error})`,
       ),
     ).toBeVisible();
   },

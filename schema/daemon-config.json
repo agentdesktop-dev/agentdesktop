@@ -4,6 +4,17 @@
   "description": "Configuration for an Agentdesktop daemon.",
   "type": "object",
   "properties": {
+    "containment": {
+      "description": "Wrap-mode transparency policy. Top-level, not under `programs` or\n`daemon.containment`, because it is controller-delivered POLICY over\nwhich program executables launch wrapped, while `programs` holds\nper-program settings reconciliation and `daemon.containment` is the\ndevice-local startup configuration of the launch machinery.\nAccepted in controller-delivered\npolicy AND the local file, unlike `daemon.containment` (local-only,\nstartup settings, which must also be configured for the policy to\ntake effect). With a controller only the controller-delivered block\napplies (a local block is ignored); a change takes effect at the\nnext launch and the next violation-scan tick after it is applied.\nWithout a controller the local block is read at startup only; with\n`--once`/`--dry-run` the block is validated but no scan runs and no\nposture is reported.\n\nA daemon that predates this setting rejects a configuration that\ncontains it, so upgrade the controller and then every device before\nsetting it in controller-delivered policy. A program field added to\n`containment.programs` by a later release is the same break again:\nupgrade before naming it.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ContainmentPolicy"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "controller": {
       "description": "Controller connection settings. Omit this field to run without fleet management.",
       "anyOf": [
@@ -72,6 +83,30 @@
       "description": "Settings reconciled into Claude Code's managed configuration.\n\nArbitrary keys are written directly to Agentdesktop's managed-settings\ndrop-in. Generated gateway settings take precedence when values overlap.",
       "type": "object",
       "properties": {
+        "allowManagedHooksOnly": {
+          "description": "Allow only managed hooks. Claude Code reads this only from managed sources.\nUnset: not written to Claude Code's settings.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "allowManagedMcpServersOnly": {
+          "description": "Allow only managed MCP servers. Claude Code reads this only from managed sources.\nUnset: not written to Claude Code's settings.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "allowedMcpServers": {
+          "description": "Allowed MCP servers list. Unset: not written to Claude Code's settings.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/McpServerRule"
+          }
+        },
         "auth": {
           "description": "Upstream authentication used by this agent.",
           "anyOf": [
@@ -148,6 +183,152 @@
         }
       },
       "additionalProperties": false
+    },
+    "ContainmentEgress": {
+      "description": "Outbound network posture for sandboxed programs.",
+      "oneOf": [
+        {
+          "description": "Plain outbound access; model requests still go through the local LLM proxy.",
+          "type": "string",
+          "const": "allow"
+        },
+        {
+          "description": "Loopback only.",
+          "type": "string",
+          "const": "deny"
+        }
+      ]
+    },
+    "ContainmentEngine": {
+      "description": "Sandbox engine: `mxc` (default, the only engine). Read at startup only\n(restart the daemon after changing it); ignored with `--once` and `--dry-run`.",
+      "oneOf": [
+        {
+          "description": "MXC (Windows AppContainer).",
+          "type": "string",
+          "const": "mxc"
+        }
+      ]
+    },
+    "ContainmentMode": {
+      "description": "Whether a profiled program launches into the box by default (`Wrap`) or\nkeeps its plain native launch (`Native`, the explicit per-program\nopt-out). A third value (`off` and anything else) is refused by serde.",
+      "type": "string",
+      "enum": [
+        "wrap",
+        "native"
+      ]
+    },
+    "ContainmentPolicy": {
+      "description": "Wrap-mode transparency policy, delivered either by the controller or the\nlocal file (unlike `daemon.containment`, which stays local-only). A\nprogram named here launches wrapped by default; see [`ContainmentMode`].",
+      "type": "object",
+      "properties": {
+        "programs": {
+          "$ref": "#/$defs/ContainmentProgramsConfig"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ContainmentProgramPolicy": {
+      "description": "Per-program wrap-mode policy.",
+      "type": "object",
+      "properties": {
+        "executable": {
+          "description": "Absolute Windows path to the program's managed executable (`X:\\...`\nor `\\\\server\\share\\...`, ending in `.exe`, not under `\\Users\\`).\nRequired in wrap mode; ignored (and may be omitted) in native mode.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "description": "Defaults to `wrap` when a policy names the program.",
+          "$ref": "#/$defs/ContainmentMode",
+          "default": "wrap"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ContainmentProgramsConfig": {
+      "description": "One typed field per profiled program; not a map, so a daemon that does\nnot know a program rejects the whole policy at parse time.",
+      "type": "object",
+      "properties": {
+        "claudeCode": {
+          "description": "Wrap-mode policy for Claude Code (launch program `claude-code`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContainmentProgramPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "copilot": {
+          "description": "Wrap-mode policy for GitHub Copilot CLI (launch program `copilot`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContainmentProgramPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "openCode": {
+          "description": "Wrap-mode policy for OpenCode (launch program `opencode`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContainmentProgramPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ContainmentStartupConfig": {
+      "description": "Sandboxed launch settings.",
+      "type": "object",
+      "properties": {
+        "egress": {
+          "description": "Outbound network for the sandboxed program: `deny` (default) or `allow`. With `deny` the box reaches only loopback and configured egress routes. Read at startup only (restart the daemon after changing it); ignored with `--once` and `--dry-run`.",
+          "$ref": "#/$defs/ContainmentEgress"
+        },
+        "egressUpstream": {
+          "description": "Central L7 egress endpoint (an agentgateway HTTPS listener whose\nper-prefix routes are the central allowlist). When set, the relay sends\nthe box's git smart-HTTP requests to `https://<egress host>/<path>`\ninstead of directly to the remote. CONNECT is always refused, with or\nwithout it. Read at startup only.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EgressUpstreamConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "engine": {
+          "description": "Sandbox engine: `mxc` (default, the only engine). Read at startup only\n(restart the daemon after changing it); ignored with `--once` and `--dry-run`.",
+          "$ref": "#/$defs/ContainmentEngine"
+        },
+        "executor": {
+          "description": "Windows only. Absolute path to MXC `wxc-exec.exe`; no default. Read at\nstartup only (restart the daemon after changing it). Requires user\nmode; ignored with `--once` and `--dry-run`.",
+          "type": "string"
+        },
+        "git": {
+          "description": "Git over the relay: the remotes the box may fetch from and push to, and\nthe static credentials the relay attaches host-side. Absent = no git\negress. Read at startup only.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "executor"
+      ]
     },
     "ControllerConnectionConfig": {
       "description": "Connection settings used by a daemon to reach the fleet controller.",
@@ -250,6 +431,17 @@
           "$ref": "#/$defs/ToolConfigPath",
           "default": {}
         },
+        "containment": {
+          "description": "Sandboxed launch (`agentdesktop run`): local startup settings only.\nThe controller-delivered wrap policy lives in the TOP-LEVEL\n`containment` block, not here.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContainmentStartupConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "copilot": {
           "description": "GitHub Copilot CLI paths (`config` = the `providers.json` to manage;\ndefaults to `COPILOT_PROVIDERS_CONFIG`, `$COPILOT_HOME/providers.json`,\nthen `~/.copilot/providers.json`).",
           "$ref": "#/$defs/ToolConfigPath",
@@ -331,6 +523,95 @@
       },
       "additionalProperties": false
     },
+    "EgressUpstreamConfig": {
+      "description": "The central L7 egress endpoint the git leg chains to.",
+      "type": "object",
+      "properties": {
+        "authentication": {
+          "description": "Reserved for gateway-hop authentication, which is not available yet:\nstartup refuses a config that sets it (the relay sends only the git\ncredential in `Authorization`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LlmGatewayAuthentication"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "url": {
+          "description": "HTTPS URL of the egress endpoint; must include a host and no\ncredentials, query or fragment.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "url"
+      ]
+    },
+    "GitConfig": {
+      "description": "Git repository access configuration.",
+      "type": "object",
+      "properties": {
+        "allow": {
+          "description": "List of HTTPS URL prefixes the box may fetch from.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "credentials": {
+          "description": "Static git credentials for allowed hosts.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GitCredentialEntry"
+          }
+        },
+        "pushAllow": {
+          "description": "List of HTTPS URL prefixes the box may push to (subset of allow).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ssh": {
+          "description": "Git over ssh: the box's ssh signs through a filtered agent proxy (the\nkey never enters the box) and reaches each host through a loopback\nleg the daemon originates.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitSshConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "GitCredentialEntry": {
+      "description": "Git credential entry for a URL prefix.",
+      "type": "object",
+      "properties": {
+        "secret": {
+          "description": "Secret (password or token) for HTTP basic auth (never serialized).",
+          "type": "string",
+          "writeOnly": true
+        },
+        "urlPrefix": {
+          "description": "URL prefix this credential applies to.",
+          "type": "string"
+        },
+        "username": {
+          "description": "Username for HTTP basic auth.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "urlPrefix",
+        "username",
+        "secret"
+      ]
+    },
     "GitHubOAuthConfig": {
       "description": "GitHub App user authorization for Copilot requests through the local proxy.",
       "type": "object",
@@ -364,6 +645,27 @@
           "const": "request"
         }
       ]
+    },
+    "GitSshConfig": {
+      "description": "Git SSH access configuration.",
+      "type": "object",
+      "properties": {
+        "hosts": {
+          "description": "Bare hostnames (port fixed at 22) the box may fetch from and push to\nover ssh; host-granular. Empty or absent: no ssh at all.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "keys": {
+          "description": "SHA256 fingerprints (`SHA256:...`, as `ssh-add -l` prints them) of the\nagent keys offered to the box. Empty or absent: no key is offered.\nThe literal `\"*\"` offers every key in the agent.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
     },
     "GrokConfig": {
       "description": "Settings reconciled into Grok Build's organization-managed configuration.\n\nValues under `managedConfig` are written to Grok's `managed_config.toml`.\nWhen generated LLM-gateway settings overlap with those values,\nagentdesktop's generated values take precedence.\nOnly system mode is supported. Grok can delete or replace the user-level\nmanaged file during startup, so user daemons skip it with an inactive reason.",
@@ -542,6 +844,53 @@
         }
       },
       "additionalProperties": false
+    },
+    "McpServerRule": {
+      "description": "MCP server allowlist entry for `allowedMcpServers`.",
+      "oneOf": [
+        {
+          "description": "User-assigned label; not a security control.",
+          "type": "object",
+          "properties": {
+            "serverName": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "serverName"
+          ]
+        },
+        {
+          "description": "Command array, must be non-empty.",
+          "type": "object",
+          "properties": {
+            "serverCommand": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "serverCommand"
+          ]
+        },
+        {
+          "description": "Server URL, must be non-empty.",
+          "type": "object",
+          "properties": {
+            "serverUrl": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "serverUrl"
+          ]
+        }
+      ]
     },
     "OpenCodeConfig": {
       "description": "Settings reconciled into OpenCode's system-managed configuration.\n\nValues under `managedConfig` are written to OpenCode's managed JSONC file.\nWhen generated LLM gateway settings overlap with those values,\nAgentdesktop's generated values take precedence.",

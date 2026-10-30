@@ -8,7 +8,7 @@ use agentdesktop_core::config::{
     ClaudeCodeConfig, LlmGatewayAuthentication, LlmGatewayConfig, SandboxConfig,
 };
 use serde_json::{Value, json};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::reconcile::ReconcilePlan;
 
@@ -68,6 +68,18 @@ pub(super) fn plan(
 
     let settings = managed_settings(config, gateway, credential_helper, hooks, sandbox)?;
     if merge_existing {
+        if config.allow_managed_hooks_only.is_some()
+            || config.allow_managed_mcp_servers_only.is_some()
+        {
+            use std::sync::Once;
+            static USER_MODE_WARNING: Once = Once::new();
+            USER_MODE_WARNING.call_once(|| {
+                warn!(
+                    "allowManagedHooksOnly/allowManagedMcpServersOnly have no effect in user settings; \
+                     deliver them through the system daemon or MDM"
+                );
+            });
+        }
         json_merge::plan_merge(
             path,
             &merge_state_path,
@@ -163,6 +175,19 @@ fn managed_settings(
 ) -> anyhow::Result<Value> {
     let mut settings = serde_json::to_value(&config.settings)
         .context("serialize Claude Code pass-through settings")?;
+
+    // Insert typed containment lock fields if set
+    if let Some(allow_managed_hooks_only) = config.allow_managed_hooks_only {
+        settings["allowManagedHooksOnly"] = json!(allow_managed_hooks_only);
+    }
+    if let Some(allow_managed_mcp_servers_only) = config.allow_managed_mcp_servers_only {
+        settings["allowManagedMcpServersOnly"] = json!(allow_managed_mcp_servers_only);
+    }
+    if let Some(ref allowed_mcp_servers) = config.allowed_mcp_servers {
+        settings["allowedMcpServers"] =
+            serde_json::to_value(allowed_mcp_servers).context("serialize allowedMcpServers")?;
+    }
+
     if let Some(command) = hooks.tool_use {
         append_hook(&mut settings, "PreToolUse", command)?;
     }
@@ -553,6 +578,99 @@ programs:
             &[&path, &marker],
             &plan_fn,
         );
+    }
+
+    #[test]
+    fn system_mode_plan_with_all_three_keys_writes_them_at_top_level() {
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
+    allowedClientIds: [claude-code]
+programs:
+  claudeCode:
+    allowManagedHooksOnly: true
+    allowManagedMcpServersOnly: true
+    allowedMcpServers:
+      - serverUrl: https://mcp.example.com/*
+    env:
+      COMPANY_KEY: value
+    permissions:
+      defaultMode: plan
+"#,
+        )
+        .expect("valid daemon configuration");
+        let claude = config.programs.claude_code.as_ref().unwrap();
+        let gateway = config.llm_gateway.as_ref().unwrap();
+
+        let settings = managed_settings(
+            claude,
+            Some(gateway),
+            "agentdesktop credential",
+            Hooks::new(None, None),
+            None,
+        )
+        .expect("merged settings");
+
+        assert_eq!(settings["allowManagedHooksOnly"], true);
+        assert_eq!(settings["allowManagedMcpServersOnly"], true);
+        assert_eq!(
+            settings["allowedMcpServers"],
+            json!([{"serverUrl": "https://mcp.example.com/*"}])
+        );
+        assert_eq!(settings["env"]["COMPANY_KEY"], "value");
+        assert_eq!(
+            settings["env"]["ANTHROPIC_BASE_URL"],
+            "https://gateway.example.com/"
+        );
+        assert_eq!(settings["permissions"], json!({"defaultMode": "plan"}));
+        assert!(!settings.as_object().unwrap().contains_key("settings"));
+    }
+
+    #[test]
+    fn system_mode_plan_with_keys_unset_does_not_write_null() {
+        let config = parse_daemon(
+            r#"
+programs:
+  claudeCode:
+    env:
+      COMPANY_KEY: value
+"#,
+        )
+        .expect("valid daemon configuration");
+        let claude = config.programs.claude_code.as_ref().unwrap();
+
+        let settings = managed_settings(
+            claude,
+            None,
+            "agentdesktop credential",
+            Hooks::new(None, None),
+            None,
+        )
+        .expect("merged settings");
+
+        assert!(
+            !settings
+                .as_object()
+                .unwrap()
+                .contains_key("allowManagedHooksOnly")
+        );
+        assert!(
+            !settings
+                .as_object()
+                .unwrap()
+                .contains_key("allowManagedMcpServersOnly")
+        );
+        assert!(
+            !settings
+                .as_object()
+                .unwrap()
+                .contains_key("allowedMcpServers")
+        );
+        assert_eq!(settings["env"]["COMPANY_KEY"], "value");
     }
 
     #[cfg(unix)]

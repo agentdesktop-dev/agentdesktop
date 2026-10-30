@@ -81,6 +81,7 @@ files are not scanned until the adapter imports them into a Pi-owned file.
 | Sandbox configuration | ✅ | ◯ | ✅ | ◯ | ◯ | — | ◯ | ◯ | ◯ | ◯ |
 | Tool-use telemetry | ✅ | ◯ | ◯ | ◯ | ◯ | — | ◯ | ◯ | ◯ | ◯ |
 | Session-start telemetry | ✅ | ◯ | ◯ | ◯ | ◯ | — | ◯ | ◯ | ◯ | ◯ |
+| Sandboxed launch (Windows) | ✅ | ◯ | ◯ | ◯ | ◯ | — | ◯ | ◯ | ◯ | ◯ |
 
 - ◯ describes a gap in agentdesktop; it does not mean the upstream provider
   cannot support the feature.
