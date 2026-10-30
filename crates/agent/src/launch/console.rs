@@ -8,10 +8,17 @@
 //! runs in the caller's terminal and `cmd /c` (no `start`) returns the
 //! program's own exit code.
 
-/// The `console-attach` helper's own failure exit code (attach refused, job
-/// or spawn failure), distinct from any code the executor normally returns
-/// so the daemon can tell a failed attach from the program's own result.
+/// The `console-attach` helper's exit code when its own setup fails (attach
+/// refused, job or spawn failure) before the executor runs. The daemon does
+/// not key on this value — a program may legitimately exit with it — it
+/// distinguishes a real setup failure from the program's exit by the
+/// `ATTACH_STARTED_MARKER`, written only once the executor has been spawned.
 pub(crate) const ATTACH_FAILED_EXIT: i32 = 125;
+
+/// Marker file the helper writes into the launch directory once the executor
+/// is spawned and in the job. Its presence means a subsequent exit is the
+/// program's own result, not an attach-setup failure.
+pub(crate) const ATTACH_STARTED_MARKER: &str = "attach-started";
 
 #[cfg(windows)]
 pub(crate) use imp::*;
@@ -370,6 +377,15 @@ mod imp {
                 CloseHandle(job);
             }
             return Err(error).context("assign the executor to the launch job");
+        }
+        // The executor is spawned and in the job: from here any exit is the
+        // program's own result, so mark the launch started before resuming.
+        // The daemon reads this marker instead of overloading an exit code
+        // (Copilot review: exit 125 is a valid program result too).
+        if let Some(dir) = log.parent()
+            && let Err(error) = std::fs::write(dir.join(super::ATTACH_STARTED_MARKER), [])
+        {
+            append_log(log, &format!("write the attach-started marker: {error}"));
         }
         // SAFETY: valid thread/process handles; resume now that the job is in place.
         unsafe {

@@ -1014,12 +1014,16 @@ impl IntegrityCheck {
 }
 
 /// Whether an executor exit within the early-exit watch is the program's own
-/// result rather than a failed box start: only in same-terminal mode, where
-/// the executor's code is the program's and the caller's console showed the
-/// run — and never for the helper's reserved attach-failure code.
-fn early_exit_is_program_result(console: &plan::ConsolePlan, code: i32) -> bool {
+/// result rather than a failed box start: only in same-terminal mode, and only
+/// once the helper has written its started marker (the executor was spawned and
+/// in the job). Before that marker the exit is an attach-setup failure, whatever
+/// the code — the helper's failure exit is not distinguishable by value, since a
+/// program may legitimately exit with it (Copilot review).
+fn early_exit_is_program_result(console: &plan::ConsolePlan, launch_dir: &Path) -> bool {
     matches!(console, plan::ConsolePlan::Attach { .. })
-        && code != crate::launch::console::ATTACH_FAILED_EXIT
+        && launch_dir
+            .join(crate::launch::console::ATTACH_STARTED_MARKER)
+            .exists()
 }
 
 fn stop_executor(child: &mut dyn LaunchChild, launch_id: &str) {
@@ -1832,9 +1836,9 @@ async fn start_launch(
                 // In same-terminal mode a fast exit is the program's own,
                 // legitimate result (`claude --version`), shown on the
                 // caller's console; register the launch and let the poller
-                // record it. Only the helper's reserved attach-failure code
-                // stays a failed launch (lab AC-2, second run).
-                if early_exit_is_program_result(&launch_plan.console, code) {
+                // record it. An exit before the helper's started marker is an
+                // attach-setup failure and stays a failed launch.
+                if early_exit_is_program_result(&launch_plan.console, &launch_dir) {
                     break;
                 }
                 integrity_check.verify_and_log(&launch_id).await;
