@@ -990,6 +990,10 @@ fn the_integrity_roots_are_protected_in_the_request() {
             continue; // the identity-only folders are writable by design
         }
         let path = root.path.to_str().unwrap().replace('/', "\\");
+        let github = format!(r"{CWD}\.github");
+        if path.starts_with(&format!(r"{github}\")) && protected.contains(&github) {
+            continue; // covered by the whole-folder denial of a missing `.github`
+        }
         assert!(
             protected.contains(&path),
             "integrity root {path} is neither read-only nor denied in the request: {protected:?}"
@@ -1346,7 +1350,11 @@ fn a_git_file_of_a_worktree_or_submodule_is_left_as_it_is() {
         .chain(readonly(&request))
         .chain(denied(&request))
     {
-        assert!(!path.contains(r"C:\lab\ws pr1\.git"), "{path}");
+        // `.github` (the union pins) merely shares the prefix.
+        assert!(
+            path != r"C:\lab\ws pr1\.git" && !path.starts_with(r"C:\lab\ws pr1\.git\"),
+            "{path}"
+        );
     }
 }
 
@@ -3725,11 +3733,15 @@ fn the_engine_reproduces_the_baseline_request_bytes() {
       "C:\\lab\\ws pr1\\.git\\hooks"
     ],
     "deniedPaths": [
+      "C:\\lab\\ws pr1\\.github",
       "C:\\Users\\dev\\.claude\\hooks",
       "C:\\lab\\ws pr1\\HEAD",
       "C:\\lab\\ws pr1\\.claude\\settings.json",
       "C:\\lab\\ws pr1\\.claude\\hooks",
       "C:\\lab\\ws pr1\\.git\\commondir",
+      "C:\\lab\\ws pr1\\opencode.json",
+      "C:\\lab\\ws pr1\\opencode.jsonc",
+      "C:\\lab\\ws pr1\\.opencode",
       "C:\\Users\\dev\\.claude\\.credentials.json",
       "C:\\Users\\dev\\.claude\\history.jsonl",
       "C:\\Users\\dev\\.claude\\ide",
@@ -3818,11 +3830,15 @@ fn the_engine_reproduces_the_baseline_request_bytes() {
       "C:\\lab\\ws pr1\\.git\\hooks"
     ],
     "deniedPaths": [
+      "C:\\lab\\ws pr1\\.github",
       "C:\\Users\\dev\\.claude\\hooks",
       "C:\\lab\\ws pr1\\HEAD",
       "C:\\lab\\ws pr1\\.claude\\settings.json",
       "C:\\lab\\ws pr1\\.claude\\hooks",
       "C:\\lab\\ws pr1\\.git\\commondir",
+      "C:\\lab\\ws pr1\\opencode.json",
+      "C:\\lab\\ws pr1\\opencode.jsonc",
+      "C:\\lab\\ws pr1\\.opencode",
       "C:\\Users\\dev\\.claude\\.credentials.json",
       "C:\\Users\\dev\\.claude\\history.jsonl",
       "C:\\Users\\dev\\.claude\\ide",
@@ -3888,11 +3904,15 @@ fn the_engine_reproduces_the_baseline_request_bytes() {
     "deniedPaths": [
       "C:\\ws\\.claude",
       "C:\\ws\\.git",
+      "C:\\ws\\.github",
       "C:\\Users\\dev\\.claude\\settings.json",
       "C:\\Users\\dev\\.claude\\hooks",
       "C:\\Users\\dev\\.claude\\plugins",
       "C:\\ws\\.mcp.json",
       "C:\\ws\\HEAD",
+      "C:\\ws\\opencode.json",
+      "C:\\ws\\opencode.jsonc",
+      "C:\\ws\\.opencode",
       "C:\\Users\\dev\\.claude\\.credentials.json",
       "C:\\Users\\dev\\.claude\\history.jsonl",
       "C:\\Users\\dev\\.claude\\ide",
@@ -4102,7 +4122,7 @@ fn the_profile_base_env_keys_equal_the_replaced_base_env() {
         "ProgramData",
         "USERNAME",
     ];
-    assert_eq!(profile::CLAUDE_CODE.base_env_keys, expected);
+    assert_eq!(profile::SHARED.base_env_keys, expected);
 }
 
 #[test]
@@ -4128,9 +4148,9 @@ fn the_profile_runtime_entries_equal_the_replaced_runtime_list() {
     // array): the three home-relative entries and their order among the
     // discovered directories; the byte oracle (fixture (a)) pins the
     // positions in the request.
-    assert_eq!(profile::CLAUDE_CODE.runtime_share, r".local\share\claude");
-    assert_eq!(profile::CLAUDE_CODE.git_user_config, ".gitconfig");
-    assert_eq!(profile::CLAUDE_CODE.git_xdg_config, r".config\git\config");
+    assert_eq!(profile::CLAUDE_HOME.runtime_share, r".local\share\claude");
+    assert_eq!(profile::SHARED.git_user_config, ".gitconfig");
+    assert_eq!(profile::SHARED.git_xdg_config, r".config\git\config");
 }
 
 #[test]
@@ -4138,7 +4158,7 @@ fn the_profile_home_executable_config_equals_the_replaced_list() {
     // Baseline 8910230 crates/agent/src/launch/mod.rs:514-516 (the
     // `claude_dir` joins of `executable_config`).
     let expected: &[&str] = &["settings.json", "hooks", "plugins"];
-    assert_eq!(profile::CLAUDE_CODE.home_executable_config, expected);
+    assert_eq!(profile::CLAUDE_HOME.home_executable_config, expected);
 }
 
 #[test]
@@ -4146,10 +4166,10 @@ fn the_profile_workspace_entries_equal_the_replaced_lists() {
     // Baseline 8910230 crates/agent/src/launch/mod.rs:517-520 (the two `cwd`
     // joins of `executable_config`) and :526-530
     // (`workspace_claude_entries`).
-    assert_eq!(profile::CLAUDE_CODE.mcp_json, ".mcp.json");
-    assert_eq!(profile::CLAUDE_CODE.workspace_head, "HEAD");
+    assert_eq!(profile::SHARED.mcp_json, ".mcp.json");
+    assert_eq!(profile::SHARED.workspace_head, "HEAD");
     let expected: &[&str] = &["settings.json", "settings.local.json", "hooks"];
-    assert_eq!(profile::CLAUDE_CODE.workspace_claude_entries, expected);
+    assert_eq!(profile::SHARED.workspace_claude_entries, expected);
 }
 
 #[test]
@@ -4157,7 +4177,7 @@ fn the_profile_git_executable_config_equals_the_replaced_list() {
     // Baseline 8910230 crates/agent/src/launch/mod.rs:548-550 (the `.git`
     // pushes onto `executable_config`).
     let expected: &[&str] = &["config", "hooks", "commondir"];
-    assert_eq!(profile::CLAUDE_CODE.git_executable_config, expected);
+    assert_eq!(profile::SHARED.git_executable_config, expected);
 }
 
 #[test]
@@ -4175,10 +4195,10 @@ fn the_profile_denied_secrets_equal_the_replaced_secret_list() {
         ".azure",
         ".kube",
     ];
-    assert_eq!(profile::CLAUDE_CODE.denied_secrets, expected);
+    assert_eq!(profile::SHARED.denied_secrets, expected);
     // The single-segment entries double as the workspace-validation denied
     // home directories (baseline host.rs:50, `DENIED_HOME_DIRS`).
-    let denied_home_dirs: Vec<&str> = profile::CLAUDE_CODE
+    let denied_home_dirs: Vec<&str> = profile::SHARED
         .denied_secrets
         .iter()
         .copied()
@@ -4721,7 +4741,7 @@ const OPENCODE_MODEL_REFUSAL: &str =
     "programs.openCode.model must be set (and present in programs.openCode.models) for run";
 const COPILOT_MODELS_REFUSAL: &str =
     "programs.copilot.models needs an entry with provider agentdesktop-anthropic for run";
-const COPILOT_POLICY_REFUSAL: &str = "Copilot's managed settings require its own sandbox (sandbox.enabled), which cannot run inside the box; launch Copilot unboxed (mode A) or lift the requirement for boxed devices";
+const COPILOT_POLICY_REFUSAL: &str = "Copilot's managed settings require its own sandbox (sandbox.enabled), which cannot run inside the box; launch Copilot unboxed or lift the requirement for boxed devices";
 const EGRESS_ALLOW_REFUSAL: &str = "egress allow is supported for claude-code only";
 
 /// G9: the listener refusal for `token` (`serve`, `web`, `--port`, ...).
@@ -4760,12 +4780,16 @@ fn exe_of(program: &str) -> &'static str {
 }
 
 /// D5 (round-2 B1, test-author source re-check at v1.19.3): OpenCode's
-/// executable configuration under `config\opencode`.
-const OPENCODE_HOME_PINS: [&str; 18] = [
+/// executable configuration under `config\opencode`. Post-freeze DV-1 adds
+/// `tui.jsonc` and the legacy TOML `config` file (imported, merged and
+/// rewritten as `config.json` by OpenCode).
+const OPENCODE_HOME_PINS: [&str; 20] = [
     "opencode.json",
     "opencode.jsonc",
     "config.json",
+    "config",
     "tui.json",
+    "tui.jsonc",
     "AGENTS.md",
     "agents",
     "agent",
@@ -4783,7 +4807,7 @@ const OPENCODE_HOME_PINS: [&str; 18] = [
 ];
 
 /// D5: Copilot's executable configuration under `COPILOT_HOME` (config-dir
-/// reference); `config.json` is denied separately.
+/// reference); `config.json` is written by Copilot itself and not a pin.
 const COPILOT_HOME_PINS: [&str; 11] = [
     "settings.json",
     "mcp-config.json",
@@ -4813,6 +4837,21 @@ fn home_pins(program: &str) -> Vec<String> {
             .iter()
             .map(|entry| format!(r"{HARNESS}\copilot\{entry}"))
             .collect(),
+        other => panic!("{other}"),
+    }
+}
+
+/// DV-10: the harness-home pins the daemon pre-creates as `{}` (absolute,
+/// in the request's form). OpenCode's global trio and Copilot CLI's BYOK
+/// provider registry.
+fn pre_created_pins(program: &str) -> Vec<String> {
+    match program {
+        "opencode" => ["config.json", "opencode.json", "opencode.jsonc"]
+            .iter()
+            .map(|entry| format!(r"{HARNESS}\opencode\config\opencode\{entry}"))
+            .collect(),
+        "copilot" => vec![format!(r"{HARNESS}\copilot\providers.json")],
+        "claude-code" => Vec::new(),
         other => panic!("{other}"),
     }
 }
@@ -4854,6 +4893,8 @@ fn harness_dirs(program: &str) -> Vec<String> {
                 r"\state",
                 r"\cache",
                 r"\config\opencode",
+                r"\cache\opencode",
+                r"\cache\opencode\bin",
             ] {
                 dirs.push(format!(r"{HARNESS}\opencode{sub}"));
             }
@@ -4904,12 +4945,18 @@ fn plan_6a(
     plan_program(&input, profile_of(program), model_6a(program))
 }
 
+/// The fixture's arguments are Claude Code flags; the other programs get
+/// none.
 fn default_plan_6a(program: &str) -> plan::LaunchPlan {
     plan_6a(
         program,
         &existing_6a(program),
         &directories_6a(program),
-        |_| {},
+        |input| {
+            if program != "claude-code" {
+                input.args.clear();
+            }
+        },
     )
 }
 
@@ -5085,6 +5132,27 @@ fn the_opencode_harness_home_pins_cover_the_global_config_files_and_executable_d
             "{pin} (D5, B1)"
         );
     }
+}
+
+/// DV-1: a planted `tui.jsonc` or legacy `config` file is executable
+/// config like `opencode.json`; both are denied in a fresh harness home.
+/// DV-4: there is no singular `theme` directory to pin.
+#[test]
+fn the_opencode_box_denies_a_planted_tui_jsonc_and_legacy_config_file() {
+    let plan = default_plan_6a("opencode");
+    let denied = strings(&plan.denied);
+    for entry in ["tui.jsonc", "config"] {
+        let pin = format!(r"{HARNESS}\opencode\config\opencode\{entry}");
+        assert!(denied.contains(&pin), "{pin} (DV-1)");
+        assert!(recursive_roots("opencode").contains(&pin), "{pin} (D12)");
+    }
+    let home = profile_of("opencode").harness_home.as_ref().unwrap();
+    assert!(
+        !home
+            .executable_config
+            .contains(&r"opencode\config\opencode\theme"),
+        "DV-4"
+    );
 }
 
 #[test]
@@ -5477,6 +5545,23 @@ fn opencode_without_a_usable_model_answers_the_model_text() {
     }
 }
 
+/// Fix round 1 (DV-8): an empty `programs.openCode.model` is refused like an
+/// unset one, even when `models` has an empty key; no plan is built with
+/// `"model":"anthropic/"`.
+#[test]
+fn an_empty_opencode_model_answers_the_model_text_like_an_unset_one() {
+    for programs in [
+        "programs:\n  openCode:\n    model: \"\"\n    models:\n      claude-sonnet: {}\n",
+        "programs:\n  openCode:\n    model: \"\"\n    models:\n      \"\": {}\n",
+    ] {
+        assert_eq!(
+            program_preconditions(&with_gateway(programs), "opencode", DENY),
+            Err(OPENCODE_MODEL_REFUSAL.to_owned()),
+            "{programs}"
+        );
+    }
+}
+
 #[test]
 fn copilot_without_an_anthropic_model_entry_answers_the_models_text() {
     for programs in [
@@ -5671,11 +5756,42 @@ fn copilot_policies_without_sandbox_enabled_pass() {
         serde_json::json!({"model": "x"}),
     ] {
         assert_eq!(
-            copilot_sandbox_preflight(&[policy.clone()]),
+            copilot_sandbox_preflight(std::slice::from_ref(&policy)),
             Ok(()),
             "{policy}"
         );
     }
+}
+
+/// Fix round 1 (m5): registry value names are case-insensitive, so a
+/// policy written `Sandbox.Enabled`, or `Enabled` under a `Sandbox` key, is
+/// the same policy.
+#[test]
+fn registry_policy_names_are_matched_case_insensitively() {
+    for values in [
+        vec![(None, "Sandbox.Enabled".to_owned(), serde_json::json!(1))],
+        vec![(Some("sandbox"), "Enabled".to_owned(), serde_json::json!(1))],
+        vec![(
+            None,
+            "SANDBOX.enabled".to_owned(),
+            serde_json::json!("true"),
+        )],
+        vec![(None, "sandbox.enabled".to_owned(), serde_json::json!(1))],
+    ] {
+        let document =
+            serde_json::Value::Object(super::host::registry_policy_document(values.clone()));
+        assert_eq!(
+            copilot_sandbox_preflight(&[document]),
+            Err(COPILOT_POLICY_REFUSAL.to_owned()),
+            "{values:?}"
+        );
+    }
+    let off = serde_json::Value::Object(super::host::registry_policy_document([(
+        Some("sandbox"),
+        "Enabled".to_owned(),
+        serde_json::json!(0),
+    )]));
+    assert_eq!(copilot_sandbox_preflight(&[off]), Ok(()));
 }
 
 // ------------------------------------------------- pkg-cache probe (D4, G8, AC5)
@@ -5881,15 +5997,72 @@ fn every_profile_carries_the_union_workspace_pins() {
             assert!(protected.contains(&pin), "{program}: {pin} (D9)");
             assert!(!writable_6a(&plan, &pin) || protected.contains(&pin));
         }
-        // Present entries are read-only, absent ones denied.
+        // Present entries are read-only, absent ones denied, except the three
+        // OpenCode workspace entries in an OpenCode box: they are read-only
+        // whether or not they exist (a denied absent path ends OpenCode's
+        // config scan), and an OpenCode box never carries them as denials.
         let readonly: BTreeSet<String> = strings(&plan.readonly).into_iter().collect();
         assert!(readonly.contains(&format!(r"{CWD}\.mcp.json")), "{program}");
         let denied: BTreeSet<String> = strings(&plan.denied).into_iter().collect();
-        for absent in ["opencode.json", "opencode.jsonc", ".opencode", "HEAD"] {
-            assert!(
-                denied.contains(&format!(r"{CWD}\{absent}")),
-                "{program}: {absent}"
-            );
+        for absent in ["opencode.json", "opencode.jsonc", ".opencode"] {
+            let path = format!(r"{CWD}\{absent}");
+            if program == "opencode" {
+                assert!(readonly.contains(&path), "{program}: {absent} read-only");
+                assert!(!denied.contains(&path), "{program}: {absent} not denied");
+            } else {
+                assert!(denied.contains(&path), "{program}: {absent}");
+                assert!(!readonly.contains(&path), "{program}: {absent}");
+            }
+        }
+        assert!(denied.contains(&format!(r"{CWD}\HEAD")), "{program}: HEAD");
+    }
+}
+
+/// DV-11 (lab B-1): an absent workspace union entry under an existing parent
+/// can be granted read-only; MXC answers the box's read/info calls with
+/// ENOENT, not EPERM, which is what keeps OpenCode's config scan alive in a
+/// workspace that has none of the three. The entry still cannot be written.
+/// Every other program keeps read-only-when-present/denied-when-absent, and
+/// an OpenCode box keeps that rule for the rest of the workspace pins.
+#[test]
+fn opencode_workspace_union_entries_are_read_only_whether_or_not_they_exist() {
+    let trio = ["opencode.json", "opencode.jsonc", ".opencode"];
+    for program in PROGRAMS_6A {
+        // Absent.
+        let plan = default_plan_6a(program);
+        let readonly = strings(&plan.readonly);
+        let denied = strings(&plan.denied);
+        for entry in trio {
+            let path = format!(r"{CWD}\{entry}");
+            if program == "opencode" {
+                assert!(readonly.contains(&path), "{program}: {path} (DV-11)");
+                assert!(!denied.contains(&path), "{program}: {path} (DV-11)");
+            } else {
+                assert!(denied.contains(&path), "{program}: {path}");
+                assert!(!readonly.contains(&path), "{program}: {path}");
+            }
+        }
+        if program != "opencode" {
+            continue;
+        }
+        // The rest of the workspace pins keep their rule.
+        assert!(readonly.contains(&format!(r"{CWD}\.mcp.json")), "DV-11");
+        assert!(denied.contains(&format!(r"{CWD}\HEAD")), "DV-11");
+
+        // Present: the same read-only entries, still never denials.
+        let mut existing = existing_6a(program);
+        for entry in trio {
+            existing.insert(format!(r"{CWD}\{entry}"));
+        }
+        let plan = plan_6a(program, &existing, &directories_6a(program), |input| {
+            input.args.clear()
+        });
+        let readonly = strings(&plan.readonly);
+        let denied = strings(&plan.denied);
+        for entry in trio {
+            let path = format!(r"{CWD}\{entry}");
+            assert!(readonly.contains(&path), "{program}: {path} present");
+            assert!(!denied.contains(&path), "{program}: {path} present");
         }
     }
 }
@@ -6065,11 +6238,26 @@ fn the_copilot_box_env_carries_byok_provider_model_and_harness_dirs() {
     assert!(writable_6a(&plan, &format!(r"{HARNESS}\copilot")));
 }
 
+/// DV-12 (lab B-2): denying `config.json` alone ends Copilot CLI silently,
+/// so it lives under the read-write `COPILOT_HOME` grant. The untrusted
+/// parts are the other config-dir entries, which stay read-only or denied,
+/// and the package cache.
 #[test]
-fn the_copilot_box_denies_config_json_and_grants_the_pkg_cache_read_only() {
+fn the_copilot_box_leaves_config_json_writable_and_grants_the_pkg_cache_read_only() {
     let plan = default_plan_6a("copilot");
     let config_json = format!(r"{HARNESS}\copilot\config.json");
-    assert!(strings(&plan.denied).contains(&config_json), "D5");
+    assert!(
+        !strings(&plan.denied).contains(&config_json),
+        "DV-12: config.json is not denied"
+    );
+    assert!(
+        !strings(&plan.readonly).contains(&config_json),
+        "DV-12: config.json is not a read-only pin"
+    );
+    assert!(
+        writable_6a(&plan, &config_json),
+        "DV-12: config.json sits under the read-write COPILOT_HOME grant"
+    );
     let cache = format!(r"{HARNESS}\copilot-pkg");
     assert!(strings(&plan.readonly).contains(&cache), "D4");
     assert!(
@@ -6090,7 +6278,12 @@ fn the_copilot_box_denies_config_json_and_grants_the_pkg_cache_read_only() {
 #[test]
 fn harness_home_pins_are_read_only_when_present_and_denied_when_absent() {
     for program in ["opencode", "copilot"] {
-        let pins = home_pins(program);
+        // DV-10: the pre-created pins are read-only whether or not they
+        // exist; the rule below holds for every other pin.
+        let pre_created = pre_created_pins(program);
+        let (always_readonly, pins): (Vec<String>, Vec<String>) = home_pins(program)
+            .into_iter()
+            .partition(|pin| pre_created.contains(pin));
         let present = pins[0].clone();
         let mut existing = existing_6a(program);
         existing.insert(present.clone());
@@ -6101,7 +6294,333 @@ fn harness_home_pins_are_read_only_when_present_and_denied_when_absent() {
         for pin in &pins[1..] {
             assert!(denied.contains(pin), "{program}: {pin} (D5)");
         }
+        for pin in &always_readonly {
+            assert!(readonly.contains(pin), "{program}: {pin} (DV-10)");
+            assert!(!denied.contains(pin), "{program}: {pin} (DV-10)");
+        }
     }
+}
+
+/// Fix round 2 (DV-10, lab F-oc-1): MXC answers a denied path with EPERM,
+/// and OpenCode's bootstrap fails on EPERM reading its global `config.json`.
+/// In a fresh harness home the config trio is granted read-only (the daemon
+/// pre-creates it), never denied; it stays a pin and an integrity root. The
+/// legacy TOML `config` stays denied when absent.
+#[test]
+fn the_opencode_global_config_trio_is_read_only_not_denied_in_a_fresh_home() {
+    let plan = default_plan_6a("opencode");
+    let readonly = strings(&plan.readonly);
+    let denied = strings(&plan.denied);
+    let roots = recursive_roots("opencode");
+    let pins = home_pins("opencode");
+    for pin in pre_created_pins("opencode") {
+        assert!(readonly.contains(&pin), "{pin} (DV-10)");
+        assert!(!denied.contains(&pin), "{pin} (DV-10)");
+        assert!(pins.contains(&pin), "{pin} stays a D5 pin");
+        assert!(roots.contains(&pin), "{pin} stays a D12 root");
+    }
+    let legacy = format!(r"{HARNESS}\opencode\config\opencode\config");
+    assert!(denied.contains(&legacy), "{legacy} (DV-1)");
+    assert!(!readonly.contains(&legacy), "{legacy} (DV-1)");
+}
+
+/// DV-10/DV-12: the pre-created harness pins are per program: OpenCode's
+/// config trio and Copilot CLI's `providers.json`, each in a folder on the
+/// pre-create list; Claude Code gets none.
+#[test]
+fn the_pre_created_files_are_per_program() {
+    let home = PathBuf::from(HOME);
+    for program in PROGRAMS_6A {
+        let files: Vec<String> = harness_pre_create_files(profile_of(program), &home)
+            .iter()
+            .map(|path| path.to_str().unwrap().replace('/', "\\"))
+            .collect();
+        assert_eq!(files, pre_created_pins(program), "{program}");
+        let directories: Vec<String> = harness_pre_create(profile_of(program), &home)
+            .iter()
+            .map(|path| path.to_str().unwrap().replace('/', "\\"))
+            .collect();
+        for file in &files {
+            let (parent, _) = file.rsplit_once('\\').unwrap();
+            assert!(directories.iter().any(|dir| dir == parent), "{file}");
+        }
+    }
+    assert_eq!(PRE_CREATED_CONTENTS, b"{}\n");
+    let parsed: serde_json::Value =
+        serde_json::from_slice(PRE_CREATED_CONTENTS).expect("valid JSON");
+    assert_eq!(parsed, serde_json::json!({}));
+}
+
+/// Fix round 2 (DV-10): preparing the OpenCode home writes `{}` into each
+/// absent trio file and leaves an existing one byte for byte as it was; the
+/// legacy `config` is not created.
+#[test]
+fn preparing_the_opencode_home_pre_creates_absent_config_files_without_overwriting() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let profile = profile_of("opencode");
+    let files = harness_pre_create_files(profile, home);
+    assert_eq!(files.len(), 3);
+    std::fs::create_dir_all(files[1].parent().unwrap()).unwrap();
+    std::fs::write(&files[1], b"{\"theme\":\"user\"}").unwrap();
+    prepare_program_home(profile, home).unwrap();
+    assert_eq!(std::fs::read(&files[0]).unwrap(), PRE_CREATED_CONTENTS);
+    assert_eq!(std::fs::read(&files[1]).unwrap(), b"{\"theme\":\"user\"}");
+    assert_eq!(std::fs::read(&files[2]).unwrap(), PRE_CREATED_CONTENTS);
+    let legacy = super::harness_path(home, r"opencode\config\opencode\config");
+    assert!(!legacy.exists(), "the legacy TOML file is never created");
+    // A second launch leaves the pre-created files as they are.
+    std::fs::write(&files[0], b"{\"edited\":true}").unwrap();
+    prepare_program_home(profile, home).unwrap();
+    assert_eq!(std::fs::read(&files[0]).unwrap(), b"{\"edited\":true}");
+    for program in ["claude-code", "copilot"] {
+        let temp = tempfile::tempdir().unwrap();
+        prepare_program_home(profile_of(program), temp.path()).unwrap();
+        assert!(
+            !super::harness_path(temp.path(), r"opencode").exists(),
+            "{program}"
+        );
+    }
+}
+
+/// DV-12 (lab B-2): Copilot CLI reads its BYOK provider registry at startup
+/// and refuses to start when the file is missing or denied. Preparing the
+/// home writes `{}` into an absent `providers.json` and leaves an existing
+/// one byte for byte as it was; the file stays a pin and an integrity root.
+#[test]
+fn preparing_the_copilot_home_pre_creates_providers_json_without_overwriting() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let profile = profile_of("copilot");
+    let files = harness_pre_create_files(profile, home);
+    assert_eq!(files.len(), 1, "Copilot pre-creates exactly providers.json");
+    let providers = files[0].clone();
+    prepare_program_home(profile, home).unwrap();
+    assert_eq!(std::fs::read(&providers).unwrap(), PRE_CREATED_CONTENTS);
+
+    let existing = b"{\"github\":{\"enterprise\":\"example\"}}";
+    std::fs::write(&providers, existing).unwrap();
+    prepare_program_home(profile, home).unwrap();
+    assert_eq!(std::fs::read(&providers).unwrap(), existing);
+
+    let pin = format!(r"{HARNESS}\copilot\providers.json");
+    assert!(home_pins("copilot").contains(&pin), "{pin} (D5)");
+    assert!(recursive_roots("copilot").contains(&pin), "{pin} (D12)");
+    let plan = default_plan_6a("copilot");
+    assert!(strings(&plan.readonly).contains(&pin), "{pin} (DV-12)");
+    assert!(!strings(&plan.denied).contains(&pin), "{pin} (DV-12)");
+}
+
+/// DV-13 (lab O10): a box can rename the read-write cache root and recreate
+/// `cache\opencode\bin` with a planted executable. Preparing the home
+/// empties the bin before the plan and the integrity snapshot, so nothing a
+/// previous box put there is granted read-only and run.
+#[test]
+fn preparing_the_opencode_home_empties_a_non_empty_tool_bin() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let bin = super::harness_path(home, r"opencode\cache\opencode\bin");
+    std::fs::create_dir_all(bin.join("vscode-eslint")).unwrap();
+    std::fs::write(bin.join("rg.exe"), b"planted").unwrap();
+    std::fs::write(bin.join("vscode-eslint").join("server.js"), b"planted").unwrap();
+    let marker = super::harness_path(home, r"opencode\cache\marker.txt");
+    std::fs::write(&marker, b"kept").unwrap();
+
+    prepare_program_home(profile_of("opencode"), home).unwrap();
+
+    assert!(bin.is_dir(), "the bin is recreated as a directory");
+    assert_eq!(
+        std::fs::read_dir(&bin).unwrap().count(),
+        0,
+        "every child is removed"
+    );
+    assert_eq!(std::fs::read(&marker).unwrap(), b"kept");
+    assert!(!bin.join("vscode-eslint").exists());
+}
+
+#[test]
+fn preparing_the_opencode_home_leaves_an_empty_tool_bin_alone() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let bin = super::harness_path(home, r"opencode\cache\opencode\bin");
+    prepare_program_home(profile_of("opencode"), home).unwrap();
+    assert!(bin.is_dir(), "the pre-create pass makes the bin");
+    assert_eq!(std::fs::read_dir(&bin).unwrap().count(), 0);
+    // A launch over a prepared home is a no-op.
+    prepare_program_home(profile_of("opencode"), home).unwrap();
+    assert!(bin.is_dir());
+    assert_eq!(std::fs::read_dir(&bin).unwrap().count(), 0);
+}
+
+#[test]
+fn preparing_the_opencode_home_replaces_a_file_at_the_tool_bin() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let bin = super::harness_path(home, r"opencode\cache\opencode\bin");
+    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    std::fs::write(&bin, b"not a directory").unwrap();
+
+    prepare_program_home(profile_of("opencode"), home).unwrap();
+
+    assert!(bin.is_dir(), "the file is replaced by the directory");
+    assert_eq!(std::fs::read_dir(&bin).unwrap().count(), 0);
+}
+
+/// A reparse point at the bin itself fails the launch, naming the path: the
+/// cleanup must not be redirected outside the harness home.
+#[cfg(unix)]
+#[test]
+fn preparing_the_opencode_home_refuses_a_reparse_point_at_the_tool_bin() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let target = temp.path().join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("keep.txt"), b"keep").unwrap();
+    let bin = super::harness_path(home, r"opencode\cache\opencode\bin");
+    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&target, &bin).unwrap();
+
+    let error = prepare_program_home(profile_of("opencode"), home).unwrap_err();
+
+    let message = format!("{error:#}");
+    assert!(
+        message.contains(bin.to_str().unwrap()),
+        "the error names the path: {message}"
+    );
+    assert!(
+        std::fs::symlink_metadata(&bin)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link itself is left in place"
+    );
+    assert_eq!(std::fs::read(target.join("keep.txt")).unwrap(), b"keep");
+}
+
+/// A reparse point above the bin (the box renamed the read-write cache root
+/// and planted a link) would make the leaf lookup resolve to the target's
+/// real bin. Preparing must fail at the link, naming it, and leave the
+/// target untouched.
+#[cfg(unix)]
+#[test]
+fn preparing_the_opencode_home_refuses_a_reparse_point_above_the_tool_bin() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let target = temp.path().join("target");
+    std::fs::create_dir_all(target.join("bin")).unwrap();
+    std::fs::write(target.join("bin").join("sentinel.txt"), b"sentinel").unwrap();
+    let parent = super::harness_path(home, r"opencode\cache\opencode");
+    std::fs::create_dir_all(parent.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&target, &parent).unwrap();
+
+    let error = prepare_program_home(profile_of("opencode"), home).unwrap_err();
+
+    let message = format!("{error:#}");
+    assert!(
+        message.contains(parent.to_str().unwrap()),
+        "the error names the link: {message}"
+    );
+    assert!(
+        std::fs::symlink_metadata(&parent)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link itself is left in place"
+    );
+    assert_eq!(
+        std::fs::read(target.join("bin").join("sentinel.txt")).unwrap(),
+        b"sentinel",
+        "the target's bin is untouched"
+    );
+}
+
+/// A link inside the bin is removed as the link it is; the target keeps its
+/// contents.
+#[cfg(unix)]
+#[test]
+fn preparing_the_opencode_home_removes_a_symlink_inside_the_tool_bin_without_following_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let target = temp.path().join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("keep.txt"), b"keep").unwrap();
+    let bin = super::harness_path(home, r"opencode\cache\opencode\bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(&target, bin.join("planted-dir")).unwrap();
+    std::fs::write(bin.join("planted-file"), b"planted").unwrap();
+
+    prepare_program_home(profile_of("opencode"), home).unwrap();
+
+    assert!(
+        std::fs::symlink_metadata(bin.join("planted-dir")).is_err(),
+        "the link is gone, not followed"
+    );
+    assert!(!bin.join("planted-file").exists());
+    assert_eq!(std::fs::read(target.join("keep.txt")).unwrap(), b"keep");
+    assert_eq!(std::fs::read_dir(&bin).unwrap().count(), 0);
+}
+
+/// Fix round 1 (DV-6): OpenCode runs ripgrep and LSP servers from
+/// `<XDG_CACHE_HOME>\opencode\bin`. The folder is pre-created and read-only
+/// inside the read-write cache, so a box cannot plant an executable that a
+/// later box runs; the rest of the cache stays writable.
+#[test]
+fn the_opencode_tool_bin_is_pre_created_and_read_only_inside_the_cache() {
+    let bin = format!(r"{HARNESS}\opencode\cache\opencode\bin");
+    let pre_created: Vec<String> = harness_pre_create(profile_of("opencode"), &PathBuf::from(HOME))
+        .iter()
+        .map(|path| path.to_str().unwrap().replace('/', "\\"))
+        .collect();
+    assert!(pre_created.contains(&bin), "{pre_created:?}");
+    let plan = default_plan_6a("opencode");
+    let readonly = strings(&plan.readonly);
+    assert!(readonly.contains(&bin), "{readonly:?}");
+    assert!(!strings(&plan.readwrite).contains(&bin));
+    for planted in ["rg.exe", "gopls.exe", r"vscode-eslint\server.js"] {
+        let path = format!(r"{bin}\{planted}");
+        assert!(
+            readonly.iter().any(|entry| is_under_str(&path, entry)),
+            "{path} is not under a read-only grant"
+        );
+    }
+    assert!(writable_6a(
+        &plan,
+        &format!(r"{HARNESS}\opencode\cache\opencode\models.json")
+    ));
+    for program in ["claude-code", "copilot"] {
+        assert!(
+            !strings(&default_plan_6a(program).readonly).contains(&bin),
+            "{program}"
+        );
+    }
+}
+
+/// Fix round 1 (DV-7): the read-write grant is `config\opencode` itself, so
+/// the folder holding the pins is a grant root the box cannot rename or
+/// replace; `XDG_CONFIG_HOME` still names its parent.
+#[test]
+fn the_opencode_config_grant_is_the_pinned_folder_not_its_parent() {
+    let config = format!(r"{HARNESS}\opencode\config");
+    let pinned = format!(r"{config}\opencode");
+    let plan = default_plan_6a("opencode");
+    assert_eq!(plan.env["XDG_CONFIG_HOME"], config);
+    let readwrite = strings(&plan.readwrite);
+    assert!(readwrite.contains(&pinned), "{readwrite:?}");
+    assert!(
+        !readwrite.iter().any(|root| is_under_str(&config, root)),
+        "nothing grants {config} or an ancestor read-write: {readwrite:?}"
+    );
+    let protected = protected_6a(&plan);
+    for pin in home_pins("opencode") {
+        assert!(protected.contains(&pin), "{pin}");
+        let (parent, _) = pin.rsplit_once('\\').unwrap();
+        assert_eq!(parent, pinned, "{pin} sits directly in the grant root");
+    }
+    let pre_created: Vec<String> = harness_pre_create(profile_of("opencode"), &PathBuf::from(HOME))
+        .iter()
+        .map(|path| path.to_str().unwrap().replace('/', "\\"))
+        .collect();
+    assert!(pre_created.contains(&pinned), "{pre_created:?}");
 }
 
 #[test]
@@ -6214,8 +6733,8 @@ fn request_6a(program: &str) -> serde_json::Value {
         .expect("the request serializes")
 }
 
-/// AC1: the golden file is a scaffold until the writer generates and
-/// reviews it (`testdata/request-opencode.json` says so).
+/// AC1: the checked-in request (`testdata/request-opencode.json`), generated
+/// from this plan and reviewed by hand.
 #[test]
 fn the_opencode_request_matches_the_checked_in_snapshot() {
     let expected: serde_json::Value =
@@ -6327,6 +6846,9 @@ fn every_profiles_integrity_roots_are_protected_and_every_protected_entry_is_cla
                     r"\state",
                     r"\cache",
                     r"\config\opencode",
+                    // Read-only tool folder inside the cache, like Copilot's
+                    // package cache not a root.
+                    r"\cache\opencode\bin",
                 ] {
                     named.push(format!(r"{HARNESS}\opencode{sub}"));
                 }
@@ -6334,7 +6856,6 @@ fn every_profiles_integrity_roots_are_protected_and_every_protected_entry_is_cla
             _ => named.extend([
                 format!(r"{HARNESS}\copilot"),
                 format!(r"{HARNESS}\copilot-pkg"),
-                format!(r"{HARNESS}\copilot\config.json"),
             ]),
         }
         let plan = default_plan_6a(program);

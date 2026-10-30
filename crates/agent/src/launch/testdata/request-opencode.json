@@ -1,3 +1,110 @@
 {
-  "todo": "PR 6a writer: generate from plan_program for the opencode fixture in tests.rs, review, and confirm against the lab run (AC1)"
+  "version": "1.0.0",
+  "containment": "processcontainer",
+  "containerId": "agentdesktop-0123456789abcdef",
+  "ui": {
+    "disable": false,
+    "clipboard": "none",
+    "injection": false
+  },
+  "process": {
+    "commandLine": "cmd.exe /d /v:off /c start \"agentdesktop: opencode\" /WAIT /D \"C:\\lab\\ws pr1\" \"C:\\Users\\dev\\.local\\bin\\opencode.exe\"",
+    "cwd": "C:\\lab\\ws pr1",
+    "inheritDefaultEnv": false,
+    "env": [
+      "APPDATA=C:\\Users\\dev\\AppData\\Roaming",
+      "ComSpec=C:\\Windows\\system32\\cmd.exe",
+      "GIT_CONFIG_GLOBAL=C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\git_config",
+      "GIT_TERMINAL_PROMPT=0",
+      "HOME=C:\\Users\\dev",
+      "HOMEDRIVE=C:",
+      "HOMEPATH=\\Users\\dev",
+      "LOCALAPPDATA=C:\\Users\\dev\\AppData\\Local",
+      "OPENCODE_CONFIG_CONTENT={\"autoupdate\":false,\"enabled_providers\":[\"anthropic\"],\"model\":\"anthropic/claude-sonnet\",\"provider\":{\"anthropic\":{\"models\":{\"claude-sonnet\":{}},\"options\":{\"apiKey\":\"placeholder\",\"baseURL\":\"http://127.0.0.1:4000/sandbox/v1\",\"headers\":{\"x-agentdesktop-pairing\":\"test-pairing-value\"}}}},\"share\":\"disabled\"}",
+      "OPENCODE_DISABLE_AUTOUPDATE=1",
+      "OPENCODE_DISABLE_MODELS_FETCH=1",
+      "OPENCODE_DISABLE_PROJECT_CONFIG=1",
+      "PATH=C:\\Windows\\System32;C:\\Windows;C:\\Windows\\System32\\WindowsPowerShell\\v1.0;C:\\Program Files\\Git\\cmd;C:\\Users\\dev\\.local\\bin;C:\\lab\\agentdesktop",
+      "PATHEXT=.COM;.EXE;.BAT;.CMD",
+      "ProgramData=C:\\ProgramData",
+      "ProgramFiles=C:\\Program Files",
+      "SystemDrive=C:",
+      "SystemRoot=C:\\Windows",
+      "TEMP=C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\tmp",
+      "TERM=xterm-256color",
+      "TMP=C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\tmp",
+      "USERNAME=dev",
+      "USERPROFILE=C:\\Users\\dev",
+      "XDG_CACHE_HOME=C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\cache",
+      "XDG_CONFIG_HOME=C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\config",
+      "XDG_DATA_HOME=C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\data",
+      "XDG_STATE_HOME=C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\state",
+      "windir=C:\\Windows"
+    ]
+  },
+  "filesystem": {
+    "readwritePaths": [
+      "C:\\lab\\ws pr1",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\data",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\config\\opencode",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\state",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\cache",
+      "C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\tmp"
+    ],
+    "readonlyPaths": [
+      "C:\\Users\\dev\\.local\\bin",
+      "C:\\Program Files\\Git",
+      "C:\\lab\\agentdesktop",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\cache\\opencode\\bin",
+      "C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\git_config",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\config\\opencode\\opencode.json",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\config\\opencode\\opencode.jsonc",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\config\\opencode\\config.json",
+      "C:\\lab\\ws pr1\\.mcp.json",
+      "C:\\lab\\ws pr1\\.claude\\settings.local.json",
+      "C:\\lab\\ws pr1\\.git\\config",
+      "C:\\lab\\ws pr1\\.git\\hooks",
+      "C:\\lab\\ws pr1\\opencode.json",
+      "C:\\lab\\ws pr1\\opencode.jsonc",
+      "C:\\lab\\ws pr1\\.opencode"
+    ],
+    "deniedPaths": [
+      "C:\\lab\\ws pr1\\.github",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\config\\opencode\\config",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\config\\opencode\\tui.json",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\config\\opencode\\tui.jsonc",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\config\\opencode\\AGENTS.md",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\config\\opencode\\agents",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\config\\opencode\\agent",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\config\\opencode\\commands",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\config\\opencode\\command",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\config\\opencode\\modes",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\config\\opencode\\mode",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\config\\opencode\\plugins",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\config\\opencode\\plugin",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\config\\opencode\\skills",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\config\\opencode\\skill",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\config\\opencode\\tools",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\config\\opencode\\tool",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\opencode\\config\\opencode\\themes",
+      "C:\\lab\\ws pr1\\HEAD",
+      "C:\\lab\\ws pr1\\.claude\\settings.json",
+      "C:\\lab\\ws pr1\\.claude\\hooks",
+      "C:\\lab\\ws pr1\\.git\\commondir",
+      "C:\\Users\\dev\\.ssh",
+      "C:\\Users\\dev\\.aws",
+      "C:\\Users\\dev\\.azure",
+      "C:\\Users\\dev\\.kube",
+      "C:\\Users\\dev\\.gitconfig"
+    ]
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
+    },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "allow"
+    }
+  }
 }

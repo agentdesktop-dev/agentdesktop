@@ -700,57 +700,89 @@ pub fn verify(
     VerifyResult { changed }
 }
 
-/// Return the list of executable-config paths to check.
-/// Every executable-config entry of the launch profile, plus workspace
-/// `.claude` and `.git` (identity only).
+/// Return the list of executable-config paths to check for a Claude Code
+/// launch: see [`integrity_paths_for`].
 pub fn integrity_paths(home: &Path, cwd: &Path) -> Vec<IntegrityRoot> {
-    let profile = &super::profile::CLAUDE_CODE;
-    let claude_dir = home.join(".claude");
+    integrity_paths_for(&super::profile::CLAUDE_CODE, home, cwd)
+}
+
+/// The integrity roots of a launch of `profile`: its home's
+/// executable-config entries (Claude's `~\.claude` entries, or the harness
+/// home's pins), then every workspace executable-config entry (the union of
+/// the profiled harnesses), plus workspace `.claude`, `.git` and `.github`
+/// (identity only). Read-only grants the box cannot write (Copilot's
+/// package cache, the installations) are not roots.
+pub(crate) fn integrity_paths_for(
+    profile: &super::profile::ProgramProfile,
+    home: &Path,
+    cwd: &Path,
+) -> Vec<IntegrityRoot> {
+    let shared = &super::profile::SHARED;
+    let recursive = |path: PathBuf| IntegrityRoot {
+        path,
+        mode: RootMode::Recursive,
+    };
     let workspace_claude = cwd.join(".claude");
     let git = cwd.join(".git");
+    let mut roots: Vec<IntegrityRoot> = Vec::new();
+    if let Some(claude) = &profile.claude_home {
+        let claude_dir = home.join(claude.dir);
+        roots.extend(
+            claude
+                .home_executable_config
+                .iter()
+                .map(|entry| recursive(claude_dir.join(entry))),
+        );
+    }
+    if let Some(harness) = &profile.harness_home {
+        roots.extend(
+            harness
+                .executable_config
+                .iter()
+                .map(|entry| recursive(super::harness_path(home, entry))),
+        );
+    }
     // The workspace entries interleave with the two identity-only folders in
     // the order the watcher has always reported them.
-    let mut roots: Vec<IntegrityRoot> = profile
-        .home_executable_config
-        .iter()
-        .map(|entry| IntegrityRoot {
-            path: claude_dir.join(entry),
-            mode: RootMode::Recursive,
-        })
-        .collect();
     roots.push(IntegrityRoot {
         path: workspace_claude.clone(),
         mode: RootMode::IdentityOnly,
     });
     roots.extend(
-        profile
+        shared
             .workspace_claude_entries
             .iter()
-            .map(|entry| IntegrityRoot {
-                path: workspace_claude.join(entry),
-                mode: RootMode::Recursive,
-            }),
+            .map(|entry| recursive(workspace_claude.join(entry))),
     );
-    roots.push(IntegrityRoot {
-        path: cwd.join(profile.mcp_json),
-        mode: RootMode::Recursive,
-    });
+    roots.push(recursive(cwd.join(shared.mcp_json)));
     roots.push(IntegrityRoot {
         path: git.clone(),
         mode: RootMode::IdentityOnly,
     });
-    roots.push(IntegrityRoot {
-        path: cwd.join(profile.workspace_head),
-        mode: RootMode::Recursive,
-    });
+    roots.push(recursive(cwd.join(shared.workspace_head)));
     roots.extend(
-        profile
+        shared
             .git_executable_config
             .iter()
-            .map(|entry| IntegrityRoot {
-                path: git.join(entry),
-                mode: RootMode::Recursive,
-            }),
+            .map(|entry| recursive(git.join(entry))),
+    );
+    // The union workspace pins of the other profiled harnesses.
+    roots.extend(
+        shared
+            .workspace_union_entries
+            .iter()
+            .map(|entry| recursive(cwd.join(entry))),
+    );
+    let workspace_github = cwd.join(".github");
+    roots.push(IntegrityRoot {
+        path: workspace_github.clone(),
+        mode: RootMode::IdentityOnly,
+    });
+    roots.extend(
+        shared
+            .workspace_github_entries
+            .iter()
+            .map(|entry| recursive(workspace_github.join(entry))),
     );
     roots
 }
@@ -798,17 +830,4 @@ pub async fn run_periodic(
         }
         last_observed = current;
     }
-}
-
-/// PR 6a, D12: the integrity roots of a launch of `profile`: the D9 union at
-/// the workspace, the D5 executable-config entries of the harness home, and
-/// Claude's `~\.claude` entries for Claude. Test-first scaffolding; the writer
-/// may fold it into `integrity_paths` (compile-only test edit, ledgered).
-#[allow(dead_code)] // test-first scaffolding
-pub(crate) fn integrity_paths_for(
-    _profile: &super::profile::ProgramProfile,
-    _home: &Path,
-    _cwd: &Path,
-) -> Vec<IntegrityRoot> {
-    todo!("PR 6a: integrity roots per profile (D12)")
 }

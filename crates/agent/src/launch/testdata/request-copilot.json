@@ -1,3 +1,98 @@
 {
-  "todo": "PR 6a writer: generate from plan_program for the copilot fixture in tests.rs, review, and confirm against the lab run (AC1)"
+  "version": "1.0.0",
+  "containment": "processcontainer",
+  "containerId": "agentdesktop-0123456789abcdef",
+  "ui": {
+    "disable": false,
+    "clipboard": "none",
+    "injection": false
+  },
+  "process": {
+    "commandLine": "cmd.exe /d /v:off /c start \"agentdesktop: copilot\" /WAIT /D \"C:\\lab\\ws pr1\" \"C:\\Users\\dev\\.local\\bin\\copilot.exe\"",
+    "cwd": "C:\\lab\\ws pr1",
+    "inheritDefaultEnv": false,
+    "env": [
+      "APPDATA=C:\\Users\\dev\\AppData\\Roaming",
+      "COPILOT_AUTO_UPDATE=false",
+      "COPILOT_HOME=C:\\Users\\dev\\.agentdesktop\\harness\\copilot",
+      "COPILOT_MODEL=claude-sonnet-4-5",
+      "COPILOT_PKG_CACHE_HOME=C:\\Users\\dev\\.agentdesktop\\harness\\copilot-pkg",
+      "COPILOT_PROVIDER_API_KEY=placeholder",
+      "COPILOT_PROVIDER_BASE_URL=http://127.0.0.1:4000/sandbox",
+      "COPILOT_PROVIDER_HEADERS=x-agentdesktop-pairing: test-pairing-value",
+      "COPILOT_PROVIDER_TYPE=anthropic",
+      "ComSpec=C:\\Windows\\system32\\cmd.exe",
+      "GIT_CONFIG_GLOBAL=C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\git_config",
+      "GIT_TERMINAL_PROMPT=0",
+      "HOME=C:\\Users\\dev",
+      "HOMEDRIVE=C:",
+      "HOMEPATH=\\Users\\dev",
+      "LOCALAPPDATA=C:\\Users\\dev\\AppData\\Local",
+      "PATH=C:\\Windows\\System32;C:\\Windows;C:\\Windows\\System32\\WindowsPowerShell\\v1.0;C:\\Program Files\\Git\\cmd;C:\\Users\\dev\\.local\\bin;C:\\lab\\agentdesktop",
+      "PATHEXT=.COM;.EXE;.BAT;.CMD",
+      "ProgramData=C:\\ProgramData",
+      "ProgramFiles=C:\\Program Files",
+      "SystemDrive=C:",
+      "SystemRoot=C:\\Windows",
+      "TEMP=C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\tmp",
+      "TERM=xterm-256color",
+      "TMP=C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\tmp",
+      "USERNAME=dev",
+      "USERPROFILE=C:\\Users\\dev",
+      "windir=C:\\Windows"
+    ]
+  },
+  "filesystem": {
+    "readwritePaths": [
+      "C:\\lab\\ws pr1",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\copilot",
+      "C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\tmp"
+    ],
+    "readonlyPaths": [
+      "C:\\Users\\dev\\.local\\bin",
+      "C:\\Program Files\\Git",
+      "C:\\lab\\agentdesktop",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\copilot-pkg",
+      "C:\\Users\\dev\\.local\\state\\agentdesktop\\launches\\0123456789abcdef\\git_config",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\copilot\\providers.json",
+      "C:\\lab\\ws pr1\\.mcp.json",
+      "C:\\lab\\ws pr1\\.claude\\settings.local.json",
+      "C:\\lab\\ws pr1\\.git\\config",
+      "C:\\lab\\ws pr1\\.git\\hooks"
+    ],
+    "deniedPaths": [
+      "C:\\lab\\ws pr1\\.github",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\copilot\\settings.json",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\copilot\\mcp-config.json",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\copilot\\lsp-config.json",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\copilot\\copilot-instructions.md",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\copilot\\instructions",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\copilot\\agents",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\copilot\\skills",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\copilot\\hooks",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\copilot\\extensions",
+      "C:\\Users\\dev\\.agentdesktop\\harness\\copilot\\installed-plugins",
+      "C:\\lab\\ws pr1\\HEAD",
+      "C:\\lab\\ws pr1\\.claude\\settings.json",
+      "C:\\lab\\ws pr1\\.claude\\hooks",
+      "C:\\lab\\ws pr1\\.git\\commondir",
+      "C:\\lab\\ws pr1\\opencode.json",
+      "C:\\lab\\ws pr1\\opencode.jsonc",
+      "C:\\lab\\ws pr1\\.opencode",
+      "C:\\Users\\dev\\.ssh",
+      "C:\\Users\\dev\\.aws",
+      "C:\\Users\\dev\\.azure",
+      "C:\\Users\\dev\\.kube",
+      "C:\\Users\\dev\\.gitconfig"
+    ]
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
+    },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "allow"
+    }
+  }
 }

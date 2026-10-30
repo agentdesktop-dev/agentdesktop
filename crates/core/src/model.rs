@@ -188,7 +188,7 @@ pub struct ContainmentInfo {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LaunchRequest {
-    /// Provider id of the program to launch (`claude-code`).
+    /// Program ID to launch: `claude-code`, `opencode` or `copilot`.
     pub program: String,
     /// Workspace directory of the launch.
     pub cwd: PathBuf,

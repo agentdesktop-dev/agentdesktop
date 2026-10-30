@@ -17,7 +17,7 @@ use std::{
 
 use crate::{api, secure_fs};
 use agentdesktop_core::{
-    config::{ContainmentStartupConfig, DaemonConfig},
+    config::{ContainmentEgress, ContainmentStartupConfig, DaemonConfig},
     model::{
         ContainmentInfo, DaemonScope, Launch, LaunchRequest, LaunchStatus, LlmGatewayCredential,
     },
@@ -45,8 +45,6 @@ mod tests;
 #[cfg(test)]
 mod writer_tests;
 
-/// Provider id of the only program the launcher can start.
-const PROGRAM: &str = crate::provider::claude_code::ClaudeCode::ID;
 /// Exited launches kept in the registry after the running ones.
 const KEPT_EXITED: usize = 32;
 /// How long the handler watches a fresh box for an early exit; the ssh
@@ -59,13 +57,18 @@ const LOG_TAIL: usize = 4096;
 
 /// Startup snapshot for `daemon-info`. `None` when `daemon.containment` is
 /// unconfigured; otherwise `available` only with
-/// `user && windows && exists(executor) && !claude_settings_overridden`.
+/// `user && windows && exists(executor)`.
 /// The managed-settings posture fields are filled per request by `api::daemon_info`.
+///
+/// `daemon.claudeCode.config` (`_claude_settings_overridden`) no longer
+/// gates containment as a whole: it refuses Claude Code launches only, in
+/// the launch handler, because only the Claude box reads
+/// `<home>\.claude\settings.json`.
 pub fn containment_info(
     cfg: Option<&ContainmentStartupConfig>,
     user: bool,
     windows: bool,
-    claude_settings_overridden: bool,
+    _claude_settings_overridden: bool,
     exists: &dyn Fn(&Path) -> bool,
     engine_name: &'static str,
 ) -> Option<ContainmentInfo> {
@@ -77,11 +80,6 @@ pub fn containment_info(
         Some("Windows only".to_owned())
     } else if !exists(&cfg.executor) {
         Some(format!("executor not found: {executor}"))
-    } else if claude_settings_overridden {
-        Some(
-            "daemon.claudeCode.config must be unset for run (the box reads <home>\\.claude\\settings.json)"
-                .to_owned(),
-        )
     } else {
         None
     };
@@ -228,6 +226,13 @@ pub fn validate_cwd(cwd: &Path, ctx: &CwdContext, fs: &dyn CwdFs) -> Result<Path
             canonical_dir(&home.join(".claude")),
             "the Claude Code directory",
         ),
+        // The harness homes (and the box-private state of every program)
+        // live under `~\.agentdesktop`; a workspace grant there would widen
+        // the box to another program's home and pins.
+        (
+            canonical_dir(&home.join(".agentdesktop")),
+            "the agentdesktop harness directory",
+        ),
     ];
     guarded.extend(
         ctx.system_dirs
@@ -266,11 +271,41 @@ pub trait ProgramFs {
     fn is_file(&self, p: &Path) -> bool;
 }
 
-const PROGRAM_NOT_FOUND: &str = "Claude Code native install (claude.exe) not found for this user; npm installs are not supported in the box";
-
 /// Finds the native `claude.exe` for the daemon's user: `<home>\.local\bin`
 /// first, then each daemon `PATH` directory.
 pub fn resolve_program(
+    home: &Path,
+    path_dirs: &[PathBuf],
+    fs: &dyn ProgramFs,
+) -> Result<PathBuf, String> {
+    resolve_program_for(&profile::CLAUDE_CODE, home, path_dirs, fs)
+}
+
+/// The refusal for a program whose native executable was not found. npm
+/// shims (`.cmd`, `.ps1`, extensionless) never match: only the native exe
+/// does.
+fn program_not_found(profile: &profile::ProgramProfile) -> String {
+    let message = format!(
+        "{} native install ({}) not found for this user; npm installs are not supported in the box",
+        profile.display_name, profile.exe_name
+    );
+    if profile.is_claude() {
+        message
+    } else {
+        format!(
+            "{message} (place the native {} in ~\\.local\\bin)",
+            profile.exe_name
+        )
+    }
+}
+
+/// The native executable of `profile` for the daemon's user, from the
+/// profile's home candidates, then each daemon `PATH` directory. A
+/// candidate counts only when it really lives under the user's home or a
+/// `PATH` directory: both sides canonical, so a junction elsewhere is
+/// caught.
+pub(crate) fn resolve_program_for(
+    profile: &profile::ProgramProfile,
     home: &Path,
     path_dirs: &[PathBuf],
     fs: &dyn ProgramFs,
@@ -281,8 +316,12 @@ pub fn resolve_program(
         .map(PathBuf::as_path)
         .filter(|dir| !dir.as_os_str().is_empty())
         .collect();
-    let mut candidates = vec![home.join(".local").join("bin").join("claude.exe")];
-    candidates.extend(path_dirs.iter().map(|dir| dir.join("claude.exe")));
+    let mut candidates: Vec<PathBuf> = profile
+        .home_candidates
+        .iter()
+        .map(|relative| join_segments(home, relative).join(profile.exe_name))
+        .collect();
+    candidates.extend(path_dirs.iter().map(|dir| dir.join(profile.exe_name)));
     // A candidate counts only when it really lives under the user's home or a
     // PATH directory: both sides canonical, so a junction elsewhere is caught.
     let mut roots: Vec<PathBuf> = Vec::new();
@@ -303,7 +342,7 @@ pub fn resolve_program(
             return Ok(canonical);
         }
     }
-    Err(PROGRAM_NOT_FOUND.to_owned())
+    Err(program_not_found(profile))
 }
 
 /// Characters `cmd.exe` interprets even inside double quotes (`%`, `!`) or that
@@ -374,11 +413,40 @@ fn join(base: &str, rest: &str) -> String {
     format!("{}\\{rest}", base.trim_end_matches('\\'))
 }
 
-/// Resolves a launch input into a plan: the canonical executable, validated args,
-/// final environment, and existence-filtered paths. Existence filtering reflects
-/// MXC's grant rules. Pure: no host environment or filesystem reads beyond
-/// `input.exists` and `input.is_dir`.
-pub(crate) fn plan(input: &LaunchInput, profile: &profile::ClaudeCodeProfile) -> plan::LaunchPlan {
+/// `plan_program` for Claude Code (no model to inject); the byte oracles
+/// and the request snapshot go through it.
+#[cfg(test)]
+pub(crate) fn plan(input: &LaunchInput, profile: &profile::ProgramProfile) -> plan::LaunchPlan {
+    plan_program(input, profile, None)
+}
+
+/// `base` joined with a `\`-joined relative path, one `Path::join` per
+/// segment (the integrity watch and the host-side reads use real paths).
+pub(crate) fn join_segments(base: &Path, relative: &str) -> PathBuf {
+    relative
+        .split('\\')
+        .fold(base.to_owned(), |path, segment| path.join(segment))
+}
+
+/// A `\`-joined relative path under `base`, as the request carries it.
+fn join_relative(base: &str, relative: &str) -> String {
+    relative
+        .split('\\')
+        .fold(base.to_owned(), |path, segment| join(&path, segment))
+}
+
+/// Resolves a launch input into a plan for `profile`: the
+/// canonical executable, validated args, final environment, and
+/// existence-filtered paths. Existence filtering reflects MXC's grant rules.
+/// `model` is the resolved model (OpenCode: `programs.openCode.model`;
+/// Copilot: `copilot_wire_model`; Claude: `None`). Pure: no host
+/// environment or filesystem reads beyond `input.exists` and `input.is_dir`.
+pub(crate) fn plan_program(
+    input: &LaunchInput,
+    profile: &profile::ProgramProfile,
+    model: Option<&str>,
+) -> plan::LaunchPlan {
+    let shared = &profile::SHARED;
     let exists = |path: &str| (input.exists)(Path::new(path));
     let is_dir = |path: &str| (input.is_dir)(Path::new(path));
     let cwd = win(&input.cwd);
@@ -391,8 +459,9 @@ pub(crate) fn plan(input: &LaunchInput, profile: &profile::ClaudeCodeProfile) ->
         .map(|(dir, _)| dir.to_owned())
         .unwrap_or_default();
     let git_dir = input.git_dir.as_deref().map(win);
-    let program_files_claude = input.program_files_claude.as_deref().map(win);
-    let claude_dir = join(&home, ".claude");
+    let claude = profile.claude_home.as_ref();
+    let claude_dir = claude.map(|claude| join(&home, claude.dir));
+    let harness_root = join_relative(&home, profile::HARNESS_ROOT);
     let tmp = join(&launch_dir, "tmp");
 
     let system_root = input
@@ -420,20 +489,54 @@ pub(crate) fn plan(input: &LaunchInput, profile: &profile::ClaudeCodeProfile) ->
     env.insert("PATH".into(), path.join(";"));
     env.insert("TEMP".into(), tmp.clone());
     env.insert("TMP".into(), tmp.clone());
-    env.insert("CLAUDE_CONFIG_DIR".into(), claude_dir.clone());
+    if let (Some(claude), Some(claude_dir)) = (claude, &claude_dir) {
+        env.insert(claude.config_env.to_owned(), claude_dir.clone());
+    }
     for (key, value) in profile.fixed_env {
         env.insert((*key).to_owned(), (*value).to_owned());
     }
-    env.insert("ANTHROPIC_BASE_URL".into(), input.relay_base_url.clone());
-    env.insert(
-        "ANTHROPIC_CUSTOM_HEADERS".into(),
-        format!("{}: {}", crate::llm_proxy::PAIRING_HEADER, input.pairing),
-    );
+    // The relay and the session pairing, the only way to the model.
+    match profile.injection {
+        profile::InjectionStrategy::Env { base_url, headers } => {
+            env.insert(base_url.to_owned(), input.relay_base_url.clone());
+            env.insert(
+                headers.to_owned(),
+                format!("{}: {}", crate::llm_proxy::PAIRING_HEADER, input.pairing),
+            );
+        }
+        profile::InjectionStrategy::OpenCodeInlineConfig => {
+            // The handler refuses an unset or empty OpenCode model (409)
+            // before a plan is built.
+            debug_assert!(
+                model.is_some_and(|model| !model.is_empty()),
+                "an OpenCode plan needs a model"
+            );
+            env.insert(
+                "OPENCODE_CONFIG_CONTENT".into(),
+                opencode_config_content(
+                    &input.relay_base_url,
+                    &input.pairing,
+                    model.unwrap_or_default(),
+                )
+                .to_string(),
+            );
+        }
+    }
+    if let (Some(key), Some(model)) = (profile.model_env, model) {
+        env.insert(key.to_owned(), model.to_owned());
+    }
+    if let Some(harness) = &profile.harness_home {
+        for (key, relative) in harness.env_dirs {
+            env.insert((*key).to_owned(), join_relative(&harness_root, relative));
+        }
+    }
     env.insert("HOME".into(), home.clone());
     // AC 6: the box's git reads only the generated per-launch gitconfig.
     // GIT_CONFIG_GLOBAL replaces both global files (XDG and ~/.gitconfig),
     // which also fixes the documented [include] fail-closed breakage and
-    // stops the box reading PATs out of the user's configuration.
+    // stops the box reading PATs out of the user's configuration. OpenCode's
+    // `XDG_CONFIG_HOME` redirect therefore does not make git read anything in
+    // the harness home.
     let git_config = join(&launch_dir, GIT_CONFIG_FILE);
     env.insert("GIT_CONFIG_GLOBAL".into(), git_config.clone());
     // A 401 or refusal fails fast instead of git prompting on a console
@@ -462,19 +565,30 @@ pub(crate) fn plan(input: &LaunchInput, profile: &profile::ClaudeCodeProfile) ->
     let mut readonly: Vec<String> = Vec::new();
     let mut denied: Vec<String> = Vec::new();
     // Runtime directories: granted read-only when they exist, simply absent
-    // otherwise (nothing the box could create there matters). The profile's
-    // home-relative entries keep their positions among the discovered
+    // otherwise (nothing the box could create there matters). Claude's
+    // home-relative entry keeps its position among the discovered
     // directories; the request bytes pin the order.
     let runtime = [
         Some(exe_dir),
-        Some(join(&home, profile.runtime_share)),
+        claude.map(|claude| join(&home, claude.runtime_share)),
         git_dir,
         Some(client_exe_dir),
-        program_files_claude,
+        claude.and(input.program_files_claude.as_deref().map(win)),
     ];
     for candidate in runtime.into_iter().flatten() {
         if exists(&candidate) && !readonly.contains(&candidate) {
             readonly.push(candidate);
+        }
+    }
+    // Harness directories whose contents the program executes (Copilot's
+    // package cache, OpenCode's downloaded tools), read-only: code one box
+    // writes there would run in every later box.
+    if let Some(harness) = &profile.harness_home {
+        for relative in harness.readonly_dirs {
+            let directory = join_relative(&harness_root, relative);
+            if exists(&directory) {
+                readonly.push(directory);
+            }
         }
     }
     // The generated gitconfig: exactly the file, read-only (it is written
@@ -489,18 +603,32 @@ pub(crate) fn plan(input: &LaunchInput, profile: &profile::ClaudeCodeProfile) ->
     }
     // Executable configuration: read-only when present, denied when absent, so
     // the box can neither change nor create it.
-    let mut executable_config: Vec<String> = profile
-        .home_executable_config
-        .iter()
-        .map(|entry| join(&claude_dir, entry))
-        .collect();
-    executable_config.push(join(&cwd, profile.mcp_json));
-    executable_config.push(join(&cwd, profile.workspace_head));
+    let mut executable_config: Vec<String> = Vec::new();
+    if let (Some(claude), Some(claude_dir)) = (claude, &claude_dir) {
+        executable_config.extend(
+            claude
+                .home_executable_config
+                .iter()
+                .map(|entry| join(claude_dir, entry)),
+        );
+    }
+    // The harness home's executable configuration; the daemon creates
+    // every parent before the plan runs.
+    if let Some(harness) = &profile.harness_home {
+        executable_config.extend(
+            harness
+                .executable_config
+                .iter()
+                .map(|entry| join_relative(&harness_root, entry)),
+        );
+    }
+    executable_config.push(join(&cwd, shared.mcp_json));
+    executable_config.push(join(&cwd, shared.workspace_head));
     // MXC refuses a denied path whose parent folder does not exist
     // (lab-verified, 0x80070003), so a workspace without `.claude` gets the
     // folder itself denied instead of its executable-config entries.
     let workspace_claude = join(&cwd, ".claude");
-    let workspace_claude_entries: Vec<String> = profile
+    let workspace_claude_entries: Vec<String> = shared
         .workspace_claude_entries
         .iter()
         .map(|entry| join(&workspace_claude, entry))
@@ -523,21 +651,76 @@ pub(crate) fn plan(input: &LaunchInput, profile: &profile::ClaudeCodeProfile) ->
         // every branch switch, and the root `HEAD` rule already blocks a
         // bare-repo fall-through.
         executable_config.extend(
-            profile
+            shared
                 .git_executable_config
                 .iter()
                 .map(|entry| join(&git, entry)),
         );
     }
     // A `.git` file (worktree, submodule) is left as it is.
+    // The other harnesses' workspace executable configuration: pinned in
+    // every box, because a later unboxed reader executes whatever a box
+    // plants there. A program may ask for the entries read-only whether or
+    // not they exist: a denied absent path is fatal to the program's config
+    // scan, and the program's own switch keeps it from reading them.
+    let workspace_union: Vec<String> = shared
+        .workspace_union_entries
+        .iter()
+        .map(|entry| join(&cwd, entry))
+        .collect();
+    executable_config.extend(workspace_union.iter().cloned());
+    // `.github` follows the `.claude` rule: its entries when the folder (or
+    // one of them) exists, the folder itself denied otherwise.
+    let workspace_github = join(&cwd, ".github");
+    let workspace_github_entries: Vec<String> = shared
+        .workspace_github_entries
+        .iter()
+        .map(|entry| join(&workspace_github, entry))
+        .collect();
+    if exists(&workspace_github) || workspace_github_entries.iter().any(|path| exists(path)) {
+        executable_config.extend(workspace_github_entries);
+    } else {
+        denied.push(workspace_github);
+    }
+    // DV-10: the harness home's pre-created pins exist by the time the box
+    // starts (the daemon writes `{}` into an absent one before the plan
+    // runs), so they are read-only, never denied.
+    let pre_created: Vec<String> = profile
+        .harness_home
+        .iter()
+        .flat_map(|harness| harness.pre_created_files)
+        .map(|entry| join_relative(&harness_root, entry))
+        .collect();
     for path in executable_config {
-        if exists(&path) {
+        let always_readonly = pre_created.contains(&path)
+            || (profile.workspace_union_readonly_when_absent && workspace_union.contains(&path));
+        if exists(&path) || always_readonly {
             readonly.push(path);
         } else {
             denied.push(path);
         }
     }
-    for secret in profile.denied_secrets {
+    // Harness-home entries denied whether or not they exist; their parents
+    // are created before the plan runs. No program lists one today.
+    if let Some(harness) = &profile.harness_home {
+        denied.extend(
+            harness
+                .denied
+                .iter()
+                .map(|entry| join_relative(&harness_root, entry)),
+        );
+    }
+    for secret in shared.denied_secrets {
+        // An entry under a home folder needs that folder (MXC parent rule):
+        // Claude's launch creates `~\.claude`; for any other program the
+        // entry is denied only when the folder exists (ungranted, the folder
+        // is unreachable from the box anyway).
+        if let Some((parent, _)) = secret.rsplit_once('\\') {
+            let created = claude.is_some_and(|claude| claude.dir == parent);
+            if !created && !exists(&join(&home, parent)) {
+                continue;
+            }
+        }
         denied.push(join(&home, secret));
     }
     // AC 6: both real git user-configuration paths are denied, not granted
@@ -549,8 +732,8 @@ pub(crate) fn plan(input: &LaunchInput, profile: &profile::ClaudeCodeProfile) ->
     // exists; the XDG path's parent (`~/.config/git`) may not, so we only
     // deny it when the parent is present. Skipping the XDG deny when the
     // parent is absent is safe: under MXC that home path is unreachable anyway.
-    denied.push(join(&home, profile.git_user_config));
-    let xdg_config_path = join(&home, profile.git_xdg_config);
+    denied.push(join(&home, shared.git_user_config));
+    let xdg_config_path = join(&home, shared.git_xdg_config);
     // The XDG config path's parent directory may not exist on Windows hosts
     // without `~/.config/git`. MXC's denied-path rule requires the parent to
     // exist (CreateProcessSecurityEnvironment 0x80070003), so we only deny
@@ -564,11 +747,21 @@ pub(crate) fn plan(input: &LaunchInput, profile: &profile::ClaudeCodeProfile) ->
         }
     }
 
-    let mut readwrite = vec![
-        PathBuf::from(cwd),
-        PathBuf::from(claude_dir),
-        PathBuf::from(tmp),
-    ];
+    let mut readwrite = vec![PathBuf::from(cwd)];
+    if let Some(claude_dir) = claude_dir {
+        readwrite.push(PathBuf::from(claude_dir));
+    }
+    // The harness home's state directories (sessions, database, cache
+    // persist across launches, like `~\.claude\projects`).
+    if let Some(harness) = &profile.harness_home {
+        readwrite.extend(
+            harness
+                .readwrite_dirs
+                .iter()
+                .map(|relative| PathBuf::from(join_relative(&harness_root, relative))),
+        );
+    }
+    readwrite.push(PathBuf::from(tmp));
     // AC 6: the per-launch known_hosts is read-write, exactly the file, so
     // `accept-new` persists across connections within the launch. Worst case
     // of the grant is the box corrupting its own per-launch file (self-DoS;
@@ -608,22 +801,29 @@ pub trait CredentialSource: Send + Sync {
     ) -> Result<LlmGatewayCredential, (StatusCode, String)>;
 }
 
-/// The effective-configuration rules a launch needs; each failure names the
-/// field.
-pub(crate) fn preconditions(effective: &DaemonConfig) -> Result<(), String> {
+/// The gateway rules every program shares: an `llmGateway` with
+/// `authentication`.
+fn gateway_preconditions(effective: &DaemonConfig) -> Result<(), String> {
     let Some(gateway) = effective.llm_gateway.as_ref() else {
         return Err("llmGateway (with authentication) must be configured for run".to_owned());
     };
     if gateway.authentication.is_none() {
         return Err("llmGateway.authentication must be configured for run".to_owned());
     }
+    Ok(())
+}
+
+/// The effective-configuration rules a Claude Code launch needs; each
+/// failure names the field.
+pub(crate) fn preconditions(effective: &DaemonConfig) -> Result<(), String> {
+    gateway_preconditions(effective)?;
     let Some(claude_code) = effective.programs.claude_code.as_ref() else {
         return Err("programs.claudeCode must be configured for run".to_owned());
     };
     if !claude_code.use_llm_gateway {
         return Err("programs.claudeCode.useLlmGateway must be true for run".to_owned());
     }
-    if api::program_uses_subscription(effective, PROGRAM) {
+    if api::program_uses_subscription(effective, profile::CLAUDE_CODE.program) {
         return Err(
             "programs.claudeCode.auth: subscription sign-in is not available inside the box in PR 1"
                 .to_owned(),
@@ -636,6 +836,97 @@ pub(crate) fn preconditions(effective: &DaemonConfig) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// OpenCode and Copilot CLI need egress deny. Under `allow` they could
+/// reach other providers, remote config, plugin installs or a GitHub
+/// sign-in, past the relay.
+fn require_egress_deny(egress: ContainmentEgress) -> Result<(), String> {
+    if egress == ContainmentEgress::Allow {
+        return Err("egress allow is supported for claude-code only".to_owned());
+    }
+    Ok(())
+}
+
+/// Claude Code's rules; `egress: allow` stays supported for it.
+pub(crate) fn claude_code_preconditions(
+    effective: &DaemonConfig,
+    _egress: ContainmentEgress,
+) -> Result<(), String> {
+    preconditions(effective)
+}
+
+/// OpenCode's rules: egress deny, the gateway, `programs.openCode`
+/// with `useLlmGateway`, and a `model` that is one of its `models`.
+pub(crate) fn opencode_preconditions(
+    effective: &DaemonConfig,
+    egress: ContainmentEgress,
+) -> Result<(), String> {
+    require_egress_deny(egress)?;
+    gateway_preconditions(effective)?;
+    let Some(open_code) = effective.programs.open_code.as_ref() else {
+        return Err("programs.openCode must be configured for run".to_owned());
+    };
+    if !open_code.use_llm_gateway {
+        return Err("programs.openCode.useLlmGateway must be true for run".to_owned());
+    }
+    opencode_model(effective).map(|_| ())
+}
+
+/// The model a boxed OpenCode uses: `programs.openCode.model`, which must be
+/// non-empty and one of `programs.openCode.models`.
+fn opencode_model(effective: &DaemonConfig) -> Result<String, String> {
+    effective
+        .programs
+        .open_code
+        .as_ref()
+        .and_then(|open_code| {
+            open_code
+                .model
+                .as_ref()
+                .filter(|model| !model.is_empty() && open_code.models.contains_key(*model))
+        })
+        .cloned()
+        .ok_or_else(|| {
+            "programs.openCode.model must be set (and present in programs.openCode.models) for run"
+                .to_owned()
+        })
+}
+
+/// Copilot CLI's rules: egress deny, the gateway,
+/// `programs.copilot` with `useLlmGateway`, and a usable model entry with
+/// provider `agentdesktop-anthropic`.
+pub(crate) fn copilot_preconditions(
+    effective: &DaemonConfig,
+    egress: ContainmentEgress,
+) -> Result<(), String> {
+    require_egress_deny(egress)?;
+    gateway_preconditions(effective)?;
+    let Some(copilot) = effective.programs.copilot.as_ref() else {
+        return Err("programs.copilot must be configured for run".to_owned());
+    };
+    if !copilot.use_llm_gateway {
+        return Err("programs.copilot.useLlmGateway must be true for run".to_owned());
+    }
+    copilot_wire_model(effective).map(|_| ())
+}
+
+/// The effective-configuration rules of `program` under the
+/// launch's effective egress; `Err` is the 409 text naming the field.
+pub(crate) fn program_preconditions(
+    effective: &DaemonConfig,
+    program: &str,
+    egress: ContainmentEgress,
+) -> Result<(), String> {
+    let Some(profile) = profile::program_profile(program) else {
+        return Err(unknown_program());
+    };
+    (profile.preconditions)(effective, egress)
+}
+
+/// The refusal of a program without a profile.
+fn unknown_program() -> String {
+    format!("program must be one of {}", profile::PROGRAMS)
 }
 
 pub trait LaunchChild: Send {
@@ -745,6 +1036,21 @@ pub trait LaunchHost: Send + Sync {
         Arc::new(integrity::REAL_FS)
     }
     fn managed_sources(&self) -> crate::provider::claude_code::managed::ManagedSources;
+
+    /// Copilot CLI's local managed-policy documents (the
+    /// `HKLM`/`HKCU\SOFTWARE\Policies\GitHubCopilot` keys and
+    /// `%ProgramFiles%\GitHubCopilot\managed-settings.json`), parsed; empty
+    /// off Windows.
+    fn copilot_policies(&self) -> Vec<serde_json::Value> {
+        host::copilot_policies()
+    }
+
+    /// The PE product version of `executable` (`a.b.c.d`), read from
+    /// its version resource without running it; `None` when it has none or
+    /// off Windows.
+    fn product_version(&self, executable: &Path) -> Option<String> {
+        host::product_version(executable)
+    }
 
     /// The user's global git identity values the generated gitconfig copies
     /// read-only (AC 6), read host-side via `git config --global --get`
@@ -882,10 +1188,9 @@ pub struct LaunchState {
     /// come from its `allow` list.
     pub(crate) git: Option<agentdesktop_core::config::GitConfig>,
     pub(crate) engine: Arc<dyn engine::Engine>,
-    /// `daemon.claudeCode.config` is set (startup). PR 6a, D13 G1: a
-    /// claude-code-only launch refusal instead of a global containment gate.
-    /// Test-first plumbing: carried, not yet consulted (writer).
-    #[allow(dead_code)]
+    /// `daemon.claudeCode.config` is set (startup): Claude Code launches are
+    /// refused (the Claude box reads `<home>\.claude\settings.json`); other
+    /// programs are not affected.
     pub(crate) claude_settings_overridden: bool,
 }
 
@@ -951,15 +1256,26 @@ async fn launch(
             ));
         }
     };
-    if request.program != PROGRAM {
-        return Err(bad_request(format!("program must be {PROGRAM}")));
+    let Some(profile) = profile::program_profile(&request.program) else {
+        return Err(bad_request(unknown_program()));
+    };
+    // Only the Claude box reads `<home>\.claude\settings.json`, so a
+    // redirected Claude settings path refuses Claude launches only.
+    if profile.is_claude() && state.claude_settings_overridden {
+        return Err((
+            StatusCode::CONFLICT,
+            "daemon.claudeCode.config must be unset for run (the box reads <home>\\.claude\\settings.json)"
+                .to_owned(),
+        ));
     }
     let host = state.host.clone();
     let cwd =
         validate_cwd(&request.cwd, &host.cwd_context(), host.cwd_fs()).map_err(bad_request)?;
+    check_denied_args(profile, &request.args).map_err(bad_request)?;
     let args = check_args(&request.args).map_err(bad_request)?;
     let executable =
-        resolve_program(&host.home(), &host.path_dirs(), host.program_fs()).map_err(bad_request)?;
+        resolve_program_for(profile, &host.home(), &host.path_dirs(), host.program_fs())
+            .map_err(bad_request)?;
     if win(&executable).contains(PATH_FORBIDDEN) {
         return Err(bad_request(
             "program path contains a character cmd.exe interprets".to_owned(),
@@ -972,7 +1288,9 @@ async fn launch(
                 format!("read applied configuration: {error:#}"),
             )
         })?;
-    preconditions(&effective).map_err(|message| (StatusCode::CONFLICT, message))?;
+    let conflict = |message: String| (StatusCode::CONFLICT, message);
+    (profile.preconditions)(&effective, state.egress).map_err(conflict)?;
+    let model = program_launch_checks(profile, effective, &host, &executable).await?;
     let Some(proxy_address) = state.proxy_address else {
         return Err((
             StatusCode::CONFLICT,
@@ -984,8 +1302,8 @@ async fn launch(
     if state.sessions.len(state.host.now()) >= crate::llm_proxy::sessions::MAX_SESSIONS {
         return Err(too_many_sessions());
     }
-    state.session_policy.check(PROGRAM).await?;
-    let _credential = state.credentials.credential(PROGRAM, true).await?;
+    state.session_policy.check(profile.program).await?;
+    let _credential = state.credentials.credential(profile.program, true).await?;
 
     // From here on the work runs in its own task: a client that disconnects
     // during the early-exit watch must not leave a running box unregistered,
@@ -993,6 +1311,8 @@ async fn launch(
     let started = tokio::spawn(start_launch(
         state,
         StartInput {
+            profile,
+            model,
             executor,
             executable,
             cwd,
@@ -1016,8 +1336,70 @@ fn too_many_sessions() -> LaunchError {
     )
 }
 
+/// The model of a launch and the program's host-side launch checks
+/// (`ProgramProfile::launch_checks`), run off the async runtime: they read
+/// the registry, policy files, the exe's version resource and the package
+/// cache. A refusal answers 409; a failed read task answers 500.
+async fn program_launch_checks(
+    profile: &'static profile::ProgramProfile,
+    effective: DaemonConfig,
+    host: &Arc<dyn LaunchHost>,
+    executable: &Path,
+) -> Result<Option<String>, LaunchError> {
+    let checks = profile.launch_checks;
+    let host = host.clone();
+    let executable = executable.to_owned();
+    tokio::task::spawn_blocking(move || checks(&effective, host.as_ref(), &executable))
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "read {} launch prerequisites: {error}",
+                    profile.display_name
+                ),
+            )
+        })?
+        .map_err(|message| (StatusCode::CONFLICT, message))
+}
+
+/// Claude Code's launch checks: none, and no model to inject.
+pub(crate) fn no_launch_checks(
+    _effective: &DaemonConfig,
+    _host: &dyn LaunchHost,
+    _executable: &Path,
+) -> Result<Option<String>, String> {
+    Ok(None)
+}
+
+/// OpenCode's launch checks: its configured model.
+pub(crate) fn opencode_launch_checks(
+    effective: &DaemonConfig,
+    _host: &dyn LaunchHost,
+    _executable: &Path,
+) -> Result<Option<String>, String> {
+    opencode_model(effective).map(Some)
+}
+
+/// Copilot CLI's launch checks: the model, the local managed-policy
+/// pre-flight and the package-cache probe for the exe's version.
+pub(crate) fn copilot_launch_checks(
+    effective: &DaemonConfig,
+    host: &dyn LaunchHost,
+    executable: &Path,
+) -> Result<Option<String>, String> {
+    let model = copilot_wire_model(effective)?;
+    copilot_sandbox_preflight(&host.copilot_policies())?;
+    let version = host.product_version(executable);
+    let cache_home = harness_path(&host.home(), profile::COPILOT_PKG_CACHE);
+    probe_copilot_pkg_cache(&cache_home, version.as_deref())?;
+    Ok(Some(model))
+}
+
 /// What `start_launch` needs beyond the state: the checked request.
 struct StartInput {
+    profile: &'static profile::ProgramProfile,
+    model: Option<String>,
     executor: PathBuf,
     executable: PathBuf,
     cwd: PathBuf,
@@ -1040,8 +1422,9 @@ async fn start_launch(
         )
     })?;
 
+    let profile = input.profile;
     let session = match state.sessions.register(
-        PROGRAM,
+        profile.program,
         &format!("run {}", launch_id),
         crate::llm_proxy::sessions::DEFAULT_IDLE_TTL,
         host.now(),
@@ -1078,13 +1461,11 @@ async fn start_launch(
         let _ = std::fs::remove_dir_all(launch_dir);
         Err((StatusCode::INTERNAL_SERVER_ERROR, message))
     };
-    // `~\.claude` is granted read-write and its entries are denied or
-    // read-only: every one of those needs the folder to exist.
-    if let Err(error) = std::fs::create_dir_all(host.home().join(".claude")) {
-        return fail(
-            &launch_dir,
-            format!("prepare launch: create ~\\.claude: {error}"),
-        );
+    // `~\.claude` (Claude) or the harness home is granted read-write
+    // and its entries are denied or read-only: every one of those needs its
+    // folder to exist.
+    if let Err(error) = prepare_program_home(profile, &host.home()) {
+        return fail(&launch_dir, format!("prepare launch: {error:#}"));
     }
     if let Err(error) = create_launch_dir(&launch_dir) {
         return fail(&launch_dir, format!("prepare launch: {error:#}"));
@@ -1189,7 +1570,7 @@ async fn start_launch(
     warn_on_open_egress(state.egress);
     let exists = |path: &Path| host.exists(path);
     let is_dir = |path: &Path| host.is_dir(path);
-    let launch_plan = plan(
+    let launch_plan = plan_program(
         &LaunchInput {
             launch_id: launch_id.clone(),
             executable: input.executable,
@@ -1209,7 +1590,8 @@ async fn start_launch(
             exists: &exists,
             is_dir: &is_dir,
         },
-        &profile::CLAUDE_CODE,
+        profile,
+        input.model.as_deref(),
     );
     let request_bytes = match state.engine.request(&launch_plan, &launch_id) {
         Ok(bytes) => bytes,
@@ -1221,7 +1603,7 @@ async fn start_launch(
     };
 
     // Take the integrity snapshot before spawn
-    let integrity_roots = integrity::integrity_paths(&host.home(), &input.cwd);
+    let integrity_roots = integrity::integrity_paths_for(profile, &host.home(), &input.cwd);
     let integrity_fs = host.integrity_fs();
     let baseline = tokio::task::spawn_blocking({
         let roots = integrity_roots.clone();
@@ -1253,8 +1635,11 @@ async fn start_launch(
         fs: integrity_fs,
     };
 
-    // Snapshot the managed-settings posture before spawning the executor
-    let managed_posture = {
+    // Snapshot the managed-settings posture before spawning the executor.
+    // The posture is Claude Code's: other programs' launch rows carry none.
+    let managed_posture = if !profile.is_claude() {
+        crate::provider::claude_code::managed::ManagedSettingsPosture::default()
+    } else {
         let host_clone = host.clone();
         match tokio::task::spawn_blocking(move || {
             crate::provider::claude_code::managed::managed_settings_state(
@@ -1365,7 +1750,7 @@ async fn start_launch(
 
     let launch = Launch {
         launch_id: launch_id.clone(),
-        program: PROGRAM.to_owned(),
+        program: profile.program.to_owned(),
         cwd: input.cwd,
         container_id: state.engine.container_id(&launch_id),
         status: LaunchStatus::Running,
@@ -1427,6 +1812,190 @@ fn session_clock(host: &Arc<dyn LaunchHost>) -> ssh::SessionClock {
     let host = host.clone();
     Arc::new(move || host.now())
 }
+
+/// Creates the program's home before the plan runs: Claude's
+/// `~\.claude`; for a harness, `~\.agentdesktop` and `harness` private (the
+/// DACL replacement stays on those two, so a running box's grant deeper down
+/// is never stripped), then the pre-create list.
+fn prepare_program_home(profile: &profile::ProgramProfile, home: &Path) -> anyhow::Result<()> {
+    if profile.harness_home.is_some() {
+        let agentdesktop = home.join(".agentdesktop");
+        secure_fs::ensure_private_dir(&agentdesktop)?;
+        secure_fs::ensure_private_dir(&agentdesktop.join("harness"))?;
+    }
+    // The program recreates the wiped directories itself; empty them before
+    // the pre-create pass so a file or link in their place is replaced, and
+    // before the integrity snapshot so the baseline is the prepared state.
+    wipe_harness_dirs(profile, home)?;
+    for directory in harness_pre_create(profile, home) {
+        std::fs::create_dir_all(&directory)
+            .with_context(|| format!("create {}", directory.display()))?;
+    }
+    // DV-10: the pinned files the box must be able to read are written as
+    // an empty JSON object when absent; an existing file is left as it is.
+    for file in harness_pre_create_files(profile, home) {
+        match std::fs::symlink_metadata(&file) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                secure_fs::atomic_write(&file, PRE_CREATED_CONTENTS, 0o600)
+                    .with_context(|| format!("create {}", file.display()))?;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("inspect {}", file.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Empties the harness directories `profile` lists in `wiped_dirs`.
+///
+/// A previous box can rename a read-write directory above them and recreate
+/// the tree, so a stale file would otherwise be granted read-only and run.
+/// Fail closed: a removal error fails the launch, and a reparse point at the
+/// directory itself is refused instead of being followed.
+fn wipe_harness_dirs(profile: &profile::ProgramProfile, home: &Path) -> anyhow::Result<()> {
+    let Some(harness) = &profile.harness_home else {
+        return Ok(());
+    };
+    for relative in harness.wiped_dirs {
+        // A junction or symlink above the directory would make the leaf
+        // lookup resolve through it, so check every component of the path
+        // before touching anything.
+        if !no_reparse_ancestors(home, relative)? {
+            continue; // a missing component: nothing to wipe
+        }
+        wipe_directory(&harness_path(home, relative))?;
+    }
+    Ok(())
+}
+
+/// Checks `<home>\.agentdesktop\harness` and every component of `relative`
+/// below it with `symlink_metadata` (never followed). A reparse point
+/// anywhere fails: a box can rename a read-write directory above the wiped
+/// one and plant a link, and looking up the leaf through it would reach the
+/// target's real directory. Returns `false` when a component is missing
+/// (nothing exists, the pre-create pass rebuilds the tree); any other error
+/// fails the launch.
+fn no_reparse_ancestors(home: &Path, relative: &str) -> anyhow::Result<bool> {
+    let mut path = join_segments(home, profile::HARNESS_ROOT);
+    if !check_wipe_component(&path)? {
+        return Ok(false);
+    }
+    for segment in relative.split('\\') {
+        path.push(segment);
+        if !check_wipe_component(&path)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// One component of a wipe path: `true` when it exists and is not a reparse
+/// point, `false` when it is missing.
+fn check_wipe_component(path: &Path) -> anyhow::Result<bool> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspect {}", path.display()));
+        }
+    };
+    if is_reparse_point(&metadata) {
+        anyhow::bail!(
+            "{} is a reparse point; refusing to empty a directory below it",
+            path.display()
+        );
+    }
+    Ok(true)
+}
+
+/// Removes everything below `directory`, or replaces a non-directory with an
+/// empty directory. An absent directory is fine (the pre-create pass makes
+/// it). A reparse point at `directory` itself fails: emptying through a link
+/// would reach outside the harness home.
+fn wipe_directory(directory: &Path) -> anyhow::Result<()> {
+    let metadata = match std::fs::symlink_metadata(directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspect {}", directory.display()));
+        }
+    };
+    if is_reparse_point(&metadata) {
+        anyhow::bail!(
+            "{} is a reparse point; refusing to empty it",
+            directory.display()
+        );
+    }
+    if !metadata.is_dir() {
+        std::fs::remove_file(directory)
+            .with_context(|| format!("remove {}", directory.display()))?;
+        std::fs::create_dir_all(directory)
+            .with_context(|| format!("create {}", directory.display()))?;
+        return Ok(());
+    }
+    let mut removed = 0usize;
+    for entry in
+        std::fs::read_dir(directory).with_context(|| format!("read {}", directory.display()))?
+    {
+        let entry = entry.with_context(|| format!("read {}", directory.display()))?;
+        remove_entry_without_following(&entry.path())?;
+        removed += 1;
+    }
+    if removed > 0 {
+        tracing::warn!(
+            removed,
+            directory = %directory.display(),
+            "emptied a harness directory before the launch"
+        );
+    }
+    Ok(())
+}
+
+/// Removes `path`, recursing into real directories only: a reparse point is
+/// removed as the link it is, so the target is untouched.
+fn remove_entry_without_following(path: &Path) -> anyhow::Result<()> {
+    let metadata =
+        std::fs::symlink_metadata(path).with_context(|| format!("inspect {}", path.display()))?;
+    if is_reparse_point(&metadata) {
+        let removed = if metadata.is_dir() {
+            std::fs::remove_dir(path)
+        } else {
+            std::fs::remove_file(path)
+        };
+        return removed.with_context(|| format!("remove {}", path.display()));
+    }
+    if metadata.is_dir() {
+        for entry in std::fs::read_dir(path).with_context(|| format!("read {}", path.display()))? {
+            let entry = entry.with_context(|| format!("read {}", path.display()))?;
+            remove_entry_without_following(&entry.path())?;
+        }
+        return std::fs::remove_dir(path).with_context(|| format!("remove {}", path.display()));
+    }
+    std::fs::remove_file(path).with_context(|| format!("remove {}", path.display()))
+}
+
+/// Whether `metadata` (from `symlink_metadata`, so never followed) is a
+/// symlink or another reparse point. The Windows check is the attribute
+/// itself, which also catches junctions; `FileType::is_symlink` would not
+/// necessarily report a junction.
+#[cfg(windows)]
+fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
+/// The contents of a pre-created harness pin (DV-10): an empty JSON object
+/// and a newline, valid for OpenCode's `config.json`, `opencode.json` and
+/// `opencode.jsonc` and Copilot CLI's `providers.json`.
+pub(crate) const PRE_CREATED_CONTENTS: &[u8] = b"{}\n";
 
 /// Creates the private launch directory with the box's `tmp`.
 pub(crate) fn create_launch_dir(launch_dir: &Path) -> anyhow::Result<()> {
@@ -1828,105 +2397,250 @@ pub(crate) fn warn_on_open_egress(egress: agentdesktop_core::config::Containment
     }
 }
 
-// --- PR 6a: OpenCode and Copilot CLI launch profiles
-// (`specs/PR-6a-harness-profiles.md`). Test-first scaffolding: the seams the
-// spec-derived tests call, bodies `todo!()`. The writer may fold the `_for`
-// variants into the existing names (`resolve_program`, `plan`,
-// `preconditions`); the call-site renames in the tests are compile-only edits
-// with a ledger line.
+// --- OpenCode and Copilot CLI: argument, model, policy and cache rules.
 
-/// D3: the native executable of `profile` for the daemon's user, from the
-/// profile's home candidates, then each daemon `PATH` directory; same roots
-/// and canonicalization rule as `resolve_program`.
-#[allow(dead_code)] // test-first scaffolding
-pub(crate) fn resolve_program_for(
-    _profile: &profile::ProgramProfile,
-    _home: &Path,
-    _path_dirs: &[PathBuf],
-    _fs: &dyn ProgramFs,
-) -> Result<PathBuf, String> {
-    todo!("PR 6a: per-program executable resolution (D3)")
-}
-
-/// D6, G9: refuses (400 text) an argument equal to or prefixed by one of the
+/// Refuses (400 text) an argument equal to or prefixed by one of the
 /// profile's `denied_args`, or equal to one of its `denied_tokens`. Runs on
-/// the raw arguments, before `check_args` quotes them.
-#[allow(dead_code)] // test-first scaffolding
+/// the raw arguments, before `check_args` quotes them. The token rule is
+/// fail-closed: no flag-arity parsing, so a space-separated flag value equal
+/// to a denied token is refused too.
 pub(crate) fn check_denied_args(
-    _profile: &profile::ProgramProfile,
-    _args: &[String],
+    profile: &profile::ProgramProfile,
+    args: &[String],
 ) -> Result<(), String> {
-    todo!("PR 6a: per-profile denied arguments (D6, G9)")
+    for arg in args {
+        if let Some(denied) = profile
+            .denied_args
+            .iter()
+            .find(|denied| arg.starts_with(**denied))
+        {
+            return Err(denied_argument(denied));
+        }
+        if let Some(token) = profile.denied_tokens.iter().find(|token| arg == **token) {
+            return Err(denied_argument(token));
+        }
+    }
+    Ok(())
 }
 
-/// D11, D1b: the effective-configuration rules of `program` under the
-/// launch's effective egress; `Err` is the 409 text naming the field.
-#[allow(dead_code)] // test-first scaffolding
-pub(crate) fn program_preconditions(
-    _effective: &DaemonConfig,
-    _program: &str,
-    _egress: agentdesktop_core::config::ContainmentEgress,
-) -> Result<(), String> {
-    todo!("PR 6a: per-program preconditions (D11, D1b)")
+/// The 400 text for a refused argument: Copilot's own sandbox, or an
+/// in-box listener.
+fn denied_argument(denied: &str) -> String {
+    if denied == "--sandbox" {
+        "argument --sandbox is not available inside the box (the box is the sandbox)".to_owned()
+    } else {
+        format!(
+            "argument {denied} is not available inside the box (an in-box listener would expose the session pairing)"
+        )
+    }
 }
 
-/// D2b: the model name a boxed Copilot sends (`COPILOT_MODEL`): the first
+/// The model name a boxed Copilot sends (`COPILOT_MODEL`): the first
 /// `programs.copilot.models` entry (BTreeMap order) with provider
 /// `agentdesktop-anthropic`; `wireModel` (must be a string), else `modelId`,
 /// else the entry key. `Err` is the 409 text.
-#[allow(dead_code)] // test-first scaffolding
-pub(crate) fn copilot_wire_model(_effective: &DaemonConfig) -> Result<String, String> {
-    todo!("PR 6a: Copilot model selection (D2b)")
+pub(crate) fn copilot_wire_model(effective: &DaemonConfig) -> Result<String, String> {
+    let entry = effective.programs.copilot.as_ref().and_then(|copilot| {
+        copilot.models.iter().find(|(_, model)| {
+            model.provider == agentdesktop_core::config::CopilotProvider::AgentdesktopAnthropic
+        })
+    });
+    let Some((key, model)) = entry else {
+        return Err(
+            "programs.copilot.models needs an entry with provider agentdesktop-anthropic for run"
+                .to_owned(),
+        );
+    };
+    match model.extra.get("wireModel") {
+        Some(serde_json::Value::String(wire)) => Ok(wire.clone()),
+        Some(_) => Err(format!(
+            "programs.copilot.models entry {key}: wireModel must be a string"
+        )),
+        None => Ok(model.model_id.clone().unwrap_or_else(|| key.clone())),
+    }
 }
 
-/// D2a: the `OPENCODE_CONFIG_CONTENT` document: the Anthropic provider
+/// The `OPENCODE_CONFIG_CONTENT` document: the Anthropic provider
 /// pointed at `<relay>/v1` with the placeholder key and the pairing header,
-/// `model`/`enabled_providers` pinned, autoupdate and share off.
-#[allow(dead_code)] // test-first scaffolding
+/// `model`/`enabled_providers` pinned (a committed workspace config cannot
+/// re-route the model or re-enable another provider), autoupdate and share
+/// off. The model is registered under its `programs.openCode.models` key,
+/// which is also the model ID sent to the relay; the per-model object of
+/// that entry is not carried into the box. The document carries the session
+/// pairing: never log it.
 pub(crate) fn opencode_config_content(
-    _relay_base_url: &str,
-    _pairing: &str,
-    _model: &str,
+    relay_base_url: &str,
+    pairing: &str,
+    model: &str,
 ) -> serde_json::Value {
-    todo!("PR 6a: OpenCode inline config (D2a)")
+    let mut headers = serde_json::Map::new();
+    headers.insert(
+        crate::llm_proxy::PAIRING_HEADER.to_owned(),
+        serde_json::Value::String(pairing.to_owned()),
+    );
+    let mut models = serde_json::Map::new();
+    models.insert(model.to_owned(), serde_json::json!({}));
+    serde_json::json!({
+        "provider": {
+            "anthropic": {
+                "options": {
+                    "baseURL": format!("{}/v1", relay_base_url.trim_end_matches('/')),
+                    "apiKey": "placeholder",
+                    "headers": headers,
+                },
+                "models": models,
+            },
+        },
+        "model": format!("anthropic/{model}"),
+        "enabled_providers": ["anthropic"],
+        "autoupdate": false,
+        "share": "disabled",
+    })
 }
 
-/// D7: the Copilot require-sandbox pre-flight over the local managed-policy
-/// documents (registry key and `managed-settings.json`, already parsed);
-/// `Err` is the 409 text.
-#[allow(dead_code)] // test-first scaffolding
-pub(crate) fn copilot_sandbox_preflight(_policies: &[serde_json::Value]) -> Result<(), String> {
-    todo!("PR 6a: Copilot require-sandbox pre-flight (D7)")
+/// Whether a policy value turns a setting on: `true`, a non-zero number, or
+/// the strings `true`/`1` (registry policies carry strings and DWORDs).
+fn policy_enabled(value: Option<&serde_json::Value>) -> bool {
+    match value {
+        Some(serde_json::Value::Bool(enabled)) => *enabled,
+        Some(serde_json::Value::Number(number)) => number.as_f64().is_some_and(|n| n != 0.0),
+        Some(serde_json::Value::String(text)) => {
+            let text = text.trim();
+            text.eq_ignore_ascii_case("true") || text == "1"
+        }
+        _ => false,
+    }
 }
 
-/// D4, G8: the Copilot package-cache probe. `product_version` is the
-/// resolved exe's PE ProductVersion (`None` when it has none: fallback to
-/// "exactly one version directory"). Returns the non-empty
-/// `<cache_home>\pkg\win32-x64\<version>` directory, or the 409 text.
-#[allow(dead_code)] // test-first scaffolding
+/// The Copilot require-sandbox pre-flight over the local managed-policy
+/// documents (registry keys and `managed-settings.json`, already parsed);
+/// `Err` is the 409 text. A required Copilot sandbox cannot run inside the
+/// box (nested MXC fails closed).
+pub(crate) fn copilot_sandbox_preflight(policies: &[serde_json::Value]) -> Result<(), String> {
+    let required = policies.iter().any(|policy| {
+        policy_enabled(
+            policy
+                .get("sandbox")
+                .and_then(|sandbox| sandbox.get("enabled")),
+        )
+    });
+    if required {
+        return Err("Copilot's managed settings require its own sandbox (sandbox.enabled), which cannot run inside the box; launch Copilot unboxed or lift the requirement for boxed devices".to_owned());
+    }
+    Ok(())
+}
+
+/// The first three dot-separated parts of a PE ProductVersion; a fourth
+/// part is ignored.
+fn three_part_version(version: &str) -> String {
+    version
+        .trim()
+        .split('.')
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// A directory with at least one entry.
+fn non_empty_dir(path: &Path) -> bool {
+    std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_some())
+}
+
+/// The Copilot package-cache probe, a file read, never an
+/// execution. `product_version` is the resolved exe's PE ProductVersion
+/// (`None` when it has none: then exactly one version directory must be
+/// present). Returns the non-empty `<cache_home>\pkg\win32-x64\<version>`
+/// directory, or the 409 text naming the priming command.
 pub(crate) fn probe_copilot_pkg_cache(
-    _cache_home: &Path,
-    _product_version: Option<&str>,
+    cache_home: &Path,
+    product_version: Option<&str>,
 ) -> Result<PathBuf, String> {
-    todo!("PR 6a: Copilot package-cache probe (D4, G8)")
+    let versions = cache_home.join("pkg").join("win32-x64");
+    let refusal = |version: &str| {
+        format!(
+            "Copilot package cache not found for {version}: run copilot --version once outside the box with COPILOT_PKG_CACHE_HOME={}",
+            cache_home.display()
+        )
+    };
+    match product_version {
+        Some(version) => {
+            let version = three_part_version(version);
+            let directory = versions.join(&version);
+            if non_empty_dir(&directory) {
+                Ok(directory)
+            } else {
+                Err(refusal(&version))
+            }
+        }
+        None => {
+            // Without a PE version the cache must hold exactly one version
+            // (a stale second one could be the wrong one).
+            let directories: Vec<PathBuf> = std::fs::read_dir(&versions)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .map(|entry| entry.path())
+                        .filter(|path| path.is_dir())
+                        .collect()
+                })
+                .unwrap_or_default();
+            match directories.as_slice() {
+                [only] if non_empty_dir(only) => Ok(only.clone()),
+                _ => Err(refusal(
+                    "this copilot.exe (it carries no version; exactly one primed version is expected)",
+                )),
+            }
+        }
+    }
 }
 
-/// D5: the directories the daemon creates before `plan` runs for `profile`
-/// (the pre-create list), so the plan never denies a path whose parent is
-/// absent.
-#[allow(dead_code)] // test-first scaffolding
-pub(crate) fn harness_pre_create(_profile: &profile::ProgramProfile, _home: &Path) -> Vec<PathBuf> {
-    todo!("PR 6a: per-profile pre-create list (D5)")
+/// The pinned files the daemon writes as `{}` before `plan_program` runs
+/// when they are absent (DV-10); their folders are on the pre-create list.
+pub(crate) fn harness_pre_create_files(
+    profile: &profile::ProgramProfile,
+    home: &Path,
+) -> Vec<PathBuf> {
+    profile
+        .harness_home
+        .iter()
+        .flat_map(|harness| harness.pre_created_files)
+        .map(|entry| harness_path(home, entry))
+        .collect()
 }
 
-/// D1, D9, D10: `plan` for any profile. `model` is the resolved model
-/// (OpenCode: `programs.openCode.model`; Copilot: `copilot_wire_model`;
-/// Claude: `None`).
-#[allow(dead_code)] // test-first scaffolding
-pub(crate) fn plan_program(
-    _input: &LaunchInput,
-    _profile: &profile::ProgramProfile,
-    _model: Option<&str>,
-) -> plan::LaunchPlan {
-    todo!("PR 6a: per-profile launch plan (D1, D9, D10)")
+/// `<home>\.agentdesktop\harness` and a `\`-joined path below it.
+pub(crate) fn harness_path(home: &Path, relative: &str) -> PathBuf {
+    join_segments(&join_segments(home, profile::HARNESS_ROOT), relative)
+}
+
+/// The directories the daemon creates before `plan_program` runs for
+/// `profile` (the pre-create list), so the plan never denies a path whose
+/// parent is absent: Claude's `~\.claude`; every harness directory the
+/// environment points at, every read-write and read-only harness directory,
+/// and the parent of every pinned or denied entry.
+pub(crate) fn harness_pre_create(profile: &profile::ProgramProfile, home: &Path) -> Vec<PathBuf> {
+    let mut directories: Vec<PathBuf> = Vec::new();
+    let mut add = |directory: PathBuf| {
+        if !directories.contains(&directory) {
+            directories.push(directory);
+        }
+    };
+    if let Some(claude) = &profile.claude_home {
+        add(home.join(claude.dir));
+    }
+    if let Some(harness) = &profile.harness_home {
+        add(harness_path(home, harness.dir));
+        for (_, relative) in harness.env_dirs {
+            add(harness_path(home, relative));
+        }
+        for relative in harness.readwrite_dirs.iter().chain(harness.readonly_dirs) {
+            add(harness_path(home, relative));
+        }
+        for entry in harness.executable_config.iter().chain(harness.denied) {
+            if let Some((parent, _)) = entry.rsplit_once('\\') {
+                add(harness_path(home, parent));
+            }
+        }
+    }
+    directories
 }

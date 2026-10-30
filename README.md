@@ -731,7 +731,9 @@ token or cost records; see [Token and cost usage](#token-and-cost-usage).
 ## Sandboxed launch (Windows, preview)
 
 `agentdesktop run claude` starts Claude Code inside a Windows AppContainer so the
-agent sees the workspace, its own state and little else. The daemon drives
+agent sees the workspace, its own state and little else; `agentdesktop run
+opencode` and `agentdesktop run copilot` do the same for OpenCode and GitHub
+Copilot CLI (see **OpenCode and Copilot CLI in the box** below). The daemon drives
 Microsoft's MXC executor; nothing is installed on the device by Agentdesktop
 itself. Startup setting (local only, user mode):
 
@@ -860,10 +862,15 @@ effective configuration has no `llmGateway` with `authentication`, no
 `programs.claudeCode` with `useLlmGateway: true`, uses subscription sign-in
 (not available inside the box yet), or sets a top-level `sandbox` (Claude
 Code's own sandbox does not run inside the box; remove it or launch without
-`run`). `daemon.claudeCode.config` must stay unset: the box reads
-`~\.claude\settings.json`. With controller JWT authentication, `claude-code`
-must be in the controller's `allowedClientIds`; with `authentication.type: oidc`
-the client ID has no effect.
+`run`). With `daemon.claudeCode.config` set, Claude Code launches answer `409`
+(the box reads `~\.claude\settings.json`); other programs still launch.
+Behaviour change: this setting used to make containment unavailable as a
+whole. `containment.available` in daemon-info is now `true` on such a device
+and the reason text no longer appears there; a client that gated a Claude
+launch on `available` now gets the `409` from `run` instead. With controller
+JWT authentication, `claude-code` must be in the controller's
+`allowedClientIds`; with `authentication.type: oidc` the client ID has no
+effect.
 
 What the box can see: the workspace, `~\.claude` (skills, agents, commands,
 `CLAUDE.md` and `.claude.json` stay writable; `CLAUDE_CONFIG_DIR` points there),
@@ -875,7 +882,21 @@ configuration, nothing else), `~\.claude\settings.json`, `~\.claude\hooks`,
 `~\.claude\plugins`, the workspace's `.claude\settings*.json`, `.claude\hooks`,
 `.mcp.json`, a `HEAD` file at the workspace root, and `.git\config`,
 `.git\hooks` and `.git\commondir` of the workspace repository (`.git\HEAD`
-stays writable so branch switches work).
+stays writable so branch switches work). Every box also carries the workspace
+configuration of OpenCode and GitHub Copilot CLI under the same rule:
+`opencode.json`, `opencode.jsonc` and `.opencode` at the workspace root,
+and `.github\copilot`, `.github\mcp.json`, `.github\hooks` and
+`.github\agents` (a box may not plant configuration that a later, unboxed
+harness executes). An OpenCode box is the exception for its own three
+entries: `opencode.json`, `opencode.jsonc` and `.opencode` are read-only
+whether or not they exist (see "OpenCode and Copilot CLI in the box").
+When the workspace has no `.github` folder, the folder
+itself is denied (the sandbox cannot deny an entry whose parent folder is
+missing), so a boxed agent cannot create `.github\workflows` in a fresh
+repository; create `.github` outside the box first if the agent should write
+there. A checkout or pull inside the box that has to write one of these
+pinned paths cannot create or replace it; run that git operation outside the
+box.
 Each file or folder in that list is denied when it does not exist, so the box
 cannot create it in place; a workspace without a `.claude` folder gets
 the folder denied as a whole; a workspace without `.git` cannot `git init` one.
@@ -895,8 +916,9 @@ The daemon creates `~\.claude` if it is missing. Always denied:
 directory or one of its ancestors, or anything under `%SystemRoot%`,
 `%ProgramFiles%`, `%ProgramData%`, `AppData`, and the actual `%APPDATA%` and
 `%LOCALAPPDATA%` paths (Folder Redirection can place these outside `<home>\AppData`),
-`~\.claude`, the daemon's state directory or a denied path (`%ProgramFiles(x86)%`
-counts as a system directory). Outbound network is denied by default (see
+`~\.claude`, `~\.agentdesktop` (the harness homes), the daemon's state
+directory or a denied path (`%ProgramFiles(x86)%` counts as a system
+directory), nor contain one of them. Outbound network is denied by default (see
 above; `daemon.containment.egress: allow` opts out); the box can reach every loopback listener on this machine
 (host loopback is allowed so it can reach the local LLM proxy), and the
 clipboard is off in the box; a gateway behind a private CA is not supported
@@ -925,7 +947,8 @@ hooks do not reach the daemon from inside the box in this preview. Arguments
 containing `" % ^ & | < > !` or control characters are rejected, because
 `cmd.exe` starts the box's console window.
 
-`run` answers `400` for a rejected program, workspace or argument, `403` when
+`run` answers `400` for a rejected program (one of `claude-code`, `opencode`,
+`copilot`), workspace or argument, `403` when
 another user calls a user-mode daemon on Windows, `409` for the configuration
 rules above and when the local LLM proxy is not running, `429` when too many
 relay sessions exist (revoke unused ones), `401`/`424`/`502` straight from the
@@ -978,6 +1001,130 @@ repositories under the workspace, a renamed or recreated `.git` or `.claude` dir
 `.vscode\tasks.json` are not protected; `~\.claude\.claude.json` (user-scope
 MCP servers) and skills under `~\.claude` stay writable so the agent keeps its
 context; see "Managed settings for containment" below for delivery of managed `allowManaged*Only` locks.
+
+### OpenCode and Copilot CLI in the box
+
+`agentdesktop run opencode` and `agentdesktop run copilot` start the native
+`opencode.exe` / `copilot.exe` (found in `~\.local\bin`, then on the daemon's
+`PATH`; npm `.cmd`/`.ps1` shims are refused, and a Scoop or Chocolatey exe
+shim resolves but then fails in the box, because only the shim's folder is
+granted). For Copilot CLI place the native `copilot.exe` at
+`~\.local\bin\copilot.exe` (other install layouts are not verified yet). The
+box, the relay session, the workspace rules, the union workspace pins
+(OpenCode's own three entries differ, see the harness-home bullet), the
+denied secrets and the git and ssh relay are the same as for Claude Code; the
+git relay and ssh broker serve every program alike, so a boxed OpenCode or
+Copilot CLI can push and sign to the allowed hosts exactly as Claude Code can.
+What differs:
+
+- **Egress must be `deny`.** With `daemon.containment.egress: allow` both
+  answer `409 egress allow is supported for claude-code only`: with open
+  outbound OpenCode could reach other providers, remote configuration and
+  plugin installs, and Copilot CLI could sign in to GitHub, past the relay.
+- **Configuration.** `programs.openCode` needs `useLlmGateway: true` (the
+  default) and a non-empty `model` that is one of its `models` (that key is
+  sent to the relay as the Anthropic model ID; the entry's model object is not
+  passed into the box); `programs.copilot` needs
+  a `models` entry with `provider: agentdesktop-anthropic` (the first such
+  entry by key is used; its `wireModel`, which must be a string, else
+  `modelId`, else the key, becomes `COPILOT_MODEL`; a `--model` argument
+  overrides it, as Copilot CLI documents). A missing piece answers `409`
+  naming the field. The client ID is the program ID (`opencode`, `copilot`):
+  with controller JWT authentication `allowedClientIds` must list it or every
+  launch answers `409` (the unboxed Copilot CLI route keeps `copilot-cli`;
+  OpenCode's boxed and unboxed launches share `opencode`, told apart by the
+  session ID in the daemon log).
+- **Relay injection.** OpenCode gets its provider configuration inline in
+  `OPENCODE_CONFIG_CONTENT` (the Anthropic provider at the relay, the
+  session pairing as a header, `model` and `enabled_providers` pinned,
+  autoupdate and sharing off), plus `OPENCODE_DISABLE_AUTOUPDATE`,
+  `OPENCODE_DISABLE_MODELS_FETCH` and `OPENCODE_DISABLE_PROJECT_CONFIG`; a
+  managed OpenCode configuration (`%ProgramData%\opencode`,
+  `daemon.openCode.config`) is not visible in the box. Copilot CLI runs in
+  BYOK mode: `COPILOT_PROVIDER_TYPE=anthropic`, `COPILOT_PROVIDER_BASE_URL`
+  at the relay, a placeholder key, the pairing in `COPILOT_PROVIDER_HEADERS`,
+  and `COPILOT_AUTO_UPDATE=false`.
+- **Harness home.** Each program gets a home under
+  `~\.agentdesktop\harness\<program>` (beside the user's own tool state, so a
+  boxed run never touches the unboxed one; `~\.agentdesktop` and `harness` are
+  created private). OpenCode's `XDG_DATA_HOME`, `XDG_CONFIG_HOME`,
+  `XDG_STATE_HOME` and `XDG_CACHE_HOME` and Copilot's `COPILOT_HOME` point
+  there and are read-write (for `XDG_CONFIG_HOME` only its `opencode` folder,
+  which holds the pinned entries): sessions and OpenCode's database persist
+  across launches, like `~\.claude\projects`. OpenCode's
+  `cache\opencode\bin`, where it would download ripgrep and language
+  servers, is read-only in the box and daemon-managed: the daemon empties it
+  before every launch, so a file an earlier box left there after renaming the
+  cache root is removed before the next box could run it, and a reparse point
+  at the folder itself stops the launch. For OpenCode's grep and file search
+  place the native `rg.exe` beside `opencode.exe` (normally `~\.local\bin`),
+  whose folder is on the box's `PATH`. Two boxes of one program share that
+  home (as two Claude boxes share `~\.claude`), OpenCode's `opencode.db`
+  included. Its executable configuration is read-only when present and denied
+  when absent: for OpenCode the global `opencode.json`, `opencode.jsonc`,
+  `config.json`, the legacy `config` file, `tui.json`, `tui.jsonc`,
+  `AGENTS.md` and the `agent(s)`, `command(s)`, `mode(s)`, `plugin(s)`,
+  `skill(s)`, `tool(s)` and `themes` folders under `config\opencode`; for
+  Copilot CLI `settings.json`, `mcp-config.json`, `lsp-config.json`,
+  `providers.json`, `copilot-instructions.md` and the `instructions`,
+  `agents`, `skills`, `hooks`, `extensions` and `installed-plugins` folders.
+  OpenCode's global `config.json`, `opencode.json` and `opencode.jsonc` are
+  the exception: the daemon writes `{}` into each one that is absent before
+  the launch (an existing file is left as it is), so they are always
+  read-only. A denied path answers "operation not permitted" rather than "not
+  found", and OpenCode does not start when it cannot read its global config.
+  Copilot's `providers.json` is pre-created the same way, because Copilot CLI
+  refuses to start when it cannot read it. Copilot's `config.json` (sign-in
+  state and trusted folders) stays writeable under the `COPILOT_HOME` grant:
+  denying it alone ends the CLI silently, so this is the documented fallback.
+  Residual: the box can change Copilot's trusted-folder list, and Copilot
+  asks for folder trust for the workspace on launch. These entries are
+  integrity roots like `~\.claude\settings.json`. OpenCode also
+  treats `~\.opencode` under the real home as a configuration folder (even with
+  `OPENCODE_DISABLE_PROJECT_CONFIG`); the box cannot reach it only because
+  nothing grants it. An OpenCode box gets the three workspace entries
+  `opencode.json`, `opencode.jsonc` and `.opencode` read-only whether or not
+  they exist (a denied absent path aborts its config scan): it can create
+  each of the three once because the workspace is read-write, its own
+  `OPENCODE_DISABLE_PROJECT_CONFIG=1` stops it reading them, but a later
+  unboxed OpenCode could read a planted file. The union pins in every other
+  box are unchanged.
+- **Copilot package cache.** Copilot CLI extracts its runtime on first start,
+  which the box cannot do. The cache lives in
+  `~\.agentdesktop\harness\copilot-pkg` (read-only in the box) and is never
+  filled by the daemon: run `copilot --version` once outside the box with
+  `COPILOT_PKG_CACHE_HOME` set to that folder. Until a non-empty folder for
+  the exe's version exists there, `run copilot` answers `409` with that
+  command (an exe without a version resource needs exactly one primed
+  version). Both failure shapes outlast the 3 s early-exit watch, so they
+  show as a launch that starts and then exits: a cache that does not match
+  the exe makes Copilot retry the extraction for about 21 s and exit 1, and
+  a Copilot without a usable provider exits 1 after about 4 s
+  (`No authentication information found`).
+- **Refused arguments** (`400`): any argument that is or starts with
+  `--sandbox` for Copilot CLI (the box is the sandbox; its own cannot nest);
+  for OpenCode `serve` and `web` wherever they appear as a separate argument
+  (a positional prompt word `serve` is refused too) and any argument starting
+  with `--port`, `--hostname` or `--mdns`: an in-box listener would expose the
+  session pairing to every local process.
+- **Copilot sandbox policy.** If Copilot's local managed settings require its
+  own sandbox (`sandbox.enabled` under `HKLM` or `HKCU\SOFTWARE\Policies\GitHubCopilot`,
+  or in `%ProgramFiles%\GitHubCopilot\managed-settings.json`), `run copilot`
+  answers `409`: launch Copilot CLI unboxed or lift the requirement for boxed
+  devices. Server-managed policy is not fetched in BYOK mode, so these local
+  sources are the complete check as long as no GitHub sign-in is available to
+  the box and egress is `deny` (guaranteed for Copilot boxes). The box reads
+  the harness home's `config.json`, which holds a sign-in only if someone
+  signed in unboxed with `COPILOT_HOME` pointed there; that read-write
+  fallback is the chosen variant (denying the file ends the CLI silently), so
+  its trusted-folders residual above applies. A repository's
+  committed `.github\copilot\settings.json` that enables the sandbox is not
+  checked: measured on Copilot CLI 1.0.101, the boxed CLI still runs with that
+  setting in place (it does not take effect inside the box).
+
+Not pinned for any program: workspace instruction files (`AGENTS.md`,
+`.github\copilot-instructions.md` and the like are prompt input), editor files
+such as `.vscode\tasks.json`, and repository scripts in general.
 
 ### Managed settings for containment
 

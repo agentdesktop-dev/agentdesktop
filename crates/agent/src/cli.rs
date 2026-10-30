@@ -46,7 +46,8 @@ pub enum ClientCommand {
     /// Run a program in a sandbox (Windows AppContainer) with the current
     /// directory as its workspace. Arguments after `--` go to the program.
     Run {
-        /// Program to run: `claude-code` (alias `claude`).
+        /// Program to run: `claude-code` (alias `claude`), `opencode` or
+        /// `copilot` (Copilot CLI).
         program: String,
         /// Arguments passed to the program.
         #[arg(last = true)]
@@ -366,7 +367,9 @@ fn print_programs(management: &ProgramManagement) {
 }
 
 /// The launch request for `agentdesktop run <program>`; the alias `claude`
-/// maps to the provider id `claude-code`.
+/// maps to the provider id `claude-code`. `opencode` and `copilot` are their
+/// own IDs (the boxed Copilot CLI is `copilot`, distinct from the unboxed
+/// route identity `copilot-cli`).
 pub fn run_request(program: &str, cwd: PathBuf, args: Vec<String>) -> LaunchRequest {
     let program = if program == "claude" {
         "claude-code"

@@ -16,7 +16,7 @@ use axum::http::StatusCode;
 
 use super::{
     CredentialSource, CwdContext, CwdFs, Executor, LaunchChild, LaunchHost, PathKind, ProgramFs,
-    preconditions,
+    program_preconditions,
 };
 use crate::api;
 
@@ -94,7 +94,7 @@ impl LaunchHost for HostEnvironment {
     }
 
     fn base_env(&self) -> BTreeMap<String, String> {
-        super::profile::CLAUDE_CODE
+        super::profile::SHARED
             .base_env_keys
             .iter()
             .filter_map(|name| {
@@ -117,7 +117,7 @@ impl LaunchHost for HostEnvironment {
             // workspace may not be under them either. These are the profile's
             // top-level denied secrets (the `.claude` entries are guarded by
             // the workspace rules separately).
-            denied: super::profile::CLAUDE_CODE
+            denied: super::profile::SHARED
                 .denied_secrets
                 .iter()
                 .filter(|entry| !entry.contains('\\'))
@@ -309,7 +309,15 @@ impl CredentialSource for GatewayCredentialSource {
                     format!("read applied configuration: {error:#}"),
                 )
             })?;
-        preconditions(&effective).map_err(|message| (StatusCode::CONFLICT, message))?;
+        // The configuration is re-checked for the launching program (its
+        // client ID); the egress rule was applied by the launch handler
+        // against the startup setting, so it is not repeated here.
+        program_preconditions(
+            &effective,
+            client_id,
+            agentdesktop_core::config::ContainmentEgress::Deny,
+        )
+        .map_err(|message| (StatusCode::CONFLICT, message))?;
         let effective = if interactive {
             effective
         } else {
@@ -330,6 +338,120 @@ impl CredentialSource for GatewayCredentialSource {
             )
         })?
     }
+}
+
+/// `HKLM\SOFTWARE\Policies\GitHubCopilot`'s subkey path (also read under
+/// `HKCU`).
+#[cfg(windows)]
+const COPILOT_POLICY_KEY: &str = r"SOFTWARE\Policies\GitHubCopilot";
+
+/// Copilot CLI's local managed-policy documents, each parsed: the machine
+/// and per-user policy keys (see [`registry_policy_document`]) and
+/// `%ProgramFiles%\GitHubCopilot\managed-settings.json`. An absent source is
+/// skipped; an unreadable or invalid file is logged and skipped (Copilot
+/// would not apply it either).
+#[cfg(windows)]
+pub(crate) fn copilot_policies() -> Vec<serde_json::Value> {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+
+    let mut policies = Vec::new();
+    for hive in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
+        let document = registry_policy_document(
+            [
+                (COPILOT_POLICY_KEY.to_owned(), None),
+                (format!(r"{COPILOT_POLICY_KEY}\sandbox"), Some("sandbox")),
+            ]
+            .into_iter()
+            .flat_map(|(subkey, prefix)| {
+                windows::policy_values(hive, &subkey)
+                    .into_iter()
+                    .map(move |(name, value)| (prefix, name, value))
+            }),
+        );
+        if !document.is_empty() {
+            policies.push(serde_json::Value::Object(document));
+        }
+    }
+    if let Some(program_files) = std::env::var_os("ProgramFiles") {
+        let path = PathBuf::from(program_files)
+            .join("GitHubCopilot")
+            .join("managed-settings.json");
+        match std::fs::read_to_string(&path) {
+            Ok(text) => match serde_json::from_str(&text) {
+                Ok(document) => policies.push(document),
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), %error, "Copilot managed settings are not valid JSON; ignored by the launch pre-flight");
+                }
+            },
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "Copilot managed settings unreadable; ignored by the launch pre-flight");
+            }
+        }
+    }
+    policies
+}
+
+#[cfg(not(windows))]
+pub(crate) fn copilot_policies() -> Vec<serde_json::Value> {
+    Vec::new()
+}
+
+/// One hive's policy-key values as a document: a value named `a.b` lands at
+/// `a.b`, a value of the `sandbox` subkey (`prefix`) under `sandbox`.
+/// Registry value names are case-insensitive, so names are lowercased
+/// (`Sandbox.Enabled` reads as `sandbox.enabled`); the JSON policy file keeps
+/// its case.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn registry_policy_document(
+    values: impl IntoIterator<Item = (Option<&'static str>, String, serde_json::Value)>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut document = serde_json::Map::new();
+    for (prefix, name, value) in values {
+        let name = match prefix {
+            Some(prefix) => format!("{prefix}.{name}"),
+            None => name,
+        };
+        insert_dotted(&mut document, &name.to_lowercase(), value);
+    }
+    document
+}
+
+/// Inserts `value` at the dotted `name` (`sandbox.enabled`) of `document`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn insert_dotted(
+    document: &mut serde_json::Map<String, serde_json::Value>,
+    name: &str,
+    value: serde_json::Value,
+) {
+    match name.split_once('.') {
+        Some((head, rest)) if !head.is_empty() && !rest.is_empty() => {
+            let child = document
+                .entry(head.to_owned())
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            if !child.is_object() {
+                *child = serde_json::Value::Object(serde_json::Map::new());
+            }
+            if let Some(child) = child.as_object_mut() {
+                insert_dotted(child, rest, value);
+            }
+        }
+        _ => {
+            document.insert(name.to_owned(), value);
+        }
+    }
+}
+
+/// The PE product version of `executable` from its version resource
+/// (`VS_FIXEDFILEINFO`), formatted `a.b.c.d`; the file is read, never run.
+#[cfg(windows)]
+pub(crate) fn product_version(executable: &Path) -> Option<String> {
+    windows::product_version(executable)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn product_version(_executable: &Path) -> Option<String> {
+    None
 }
 
 /// Whether the process `pid` with creation time `start_time` is still alive:
@@ -628,6 +750,140 @@ pub(crate) mod windows {
             }
         }
         Ok(None)
+    }
+
+    /// The values of the registry key `subkey` under `hive`: `REG_SZ` and
+    /// `REG_EXPAND_SZ` as strings, `REG_DWORD` as numbers; other types are
+    /// skipped. A missing or unreadable key yields nothing.
+    pub(crate) fn policy_values(
+        hive: windows_sys::Win32::System::Registry::HKEY,
+        subkey: &str,
+    ) -> Vec<(String, serde_json::Value)> {
+        use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
+        use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS};
+        use windows_sys::Win32::System::Registry::{
+            HKEY, KEY_READ, REG_DWORD, REG_EXPAND_SZ, REG_SZ, RegCloseKey, RegEnumValueW,
+            RegOpenKeyExW,
+        };
+
+        let path: Vec<u16> = OsStr::new(subkey)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut key: HKEY = std::ptr::null_mut();
+        // SAFETY: `path` is null-terminated; `key` receives the handle.
+        if unsafe { RegOpenKeyExW(hive, path.as_ptr(), 0, KEY_READ, &mut key) } != ERROR_SUCCESS {
+            return Vec::new();
+        }
+        let mut values = Vec::new();
+        let mut data = vec![0u8; 1024];
+        let mut index = 0u32;
+        loop {
+            // Value names are at most 16,383 characters.
+            let mut name = vec![0u16; 16_384];
+            let mut name_len = name.len() as u32;
+            let mut kind = 0u32;
+            let mut data_len = data.len() as u32;
+            // SAFETY: every buffer is valid for the length passed with it.
+            let status = unsafe {
+                RegEnumValueW(
+                    key,
+                    index,
+                    name.as_mut_ptr(),
+                    &mut name_len,
+                    std::ptr::null(),
+                    &mut kind,
+                    data.as_mut_ptr(),
+                    &mut data_len,
+                )
+            };
+            if status == ERROR_MORE_DATA {
+                data.resize(data_len as usize, 0);
+                continue;
+            }
+            if status != ERROR_SUCCESS {
+                break;
+            }
+            index += 1;
+            let name = String::from_utf16_lossy(&name[..name_len as usize]);
+            let bytes = &data[..data_len as usize];
+            let value = match kind {
+                REG_SZ | REG_EXPAND_SZ => {
+                    let wide: Vec<u16> = bytes
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|pair| u16::from_le_bytes(*pair))
+                        .take_while(|unit| *unit != 0)
+                        .collect();
+                    serde_json::Value::String(String::from_utf16_lossy(&wide))
+                }
+                REG_DWORD if bytes.len() >= 4 => serde_json::Value::from(u32::from_le_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3],
+                ])),
+                _ => continue,
+            };
+            values.push((name, value));
+        }
+        // SAFETY: `key` was opened above.
+        unsafe { RegCloseKey(key) };
+        values
+    }
+
+    /// The `VS_FIXEDFILEINFO` product version of `executable`, `a.b.c.d`.
+    pub(crate) fn product_version(executable: &std::path::Path) -> Option<String> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            GetFileVersionInfoSizeW, GetFileVersionInfoW, VS_FIXEDFILEINFO, VerQueryValueW,
+        };
+
+        let path: Vec<u16> = executable
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut handle = 0u32;
+        // SAFETY: `path` is null-terminated.
+        let size = unsafe { GetFileVersionInfoSizeW(path.as_ptr(), &mut handle) };
+        if size == 0 {
+            return None;
+        }
+        let mut block = vec![0u8; size as usize];
+        // SAFETY: `block` holds `size` bytes.
+        if unsafe { GetFileVersionInfoW(path.as_ptr(), 0, size, block.as_mut_ptr().cast()) } == 0 {
+            return None;
+        }
+        let root = [u16::from(b'\\'), 0];
+        let mut info: *mut c_void = std::ptr::null_mut();
+        let mut info_len = 0u32;
+        // SAFETY: `block` is the version block filled above; `info` points
+        // into it on success.
+        if unsafe {
+            VerQueryValueW(
+                block.as_ptr().cast(),
+                root.as_ptr(),
+                &mut info,
+                &mut info_len,
+            )
+        } == 0
+            || info.is_null()
+            || (info_len as usize) < std::mem::size_of::<VS_FIXEDFILEINFO>()
+        {
+            return None;
+        }
+        // SAFETY: `info` points at a VS_FIXEDFILEINFO inside `block`, which
+        // outlives this read; the read is unaligned-safe.
+        let fixed = unsafe { std::ptr::read_unaligned(info.cast::<VS_FIXEDFILEINFO>()) };
+        if fixed.dwSignature != 0xFEEF_04BD {
+            return None;
+        }
+        Some(format!(
+            "{}.{}.{}.{}",
+            fixed.dwProductVersionMS >> 16,
+            fixed.dwProductVersionMS & 0xffff,
+            fixed.dwProductVersionLS >> 16,
+            fixed.dwProductVersionLS & 0xffff
+        ))
     }
 }
 

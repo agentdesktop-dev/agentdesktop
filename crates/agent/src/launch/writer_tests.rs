@@ -188,6 +188,52 @@ mod handler {
 
     static FS: Fs = Fs;
 
+    /// A launch-check task that fails (a panic in the off-runtime host
+    /// reads) is a daemon fault: 500, never the 409 of a refusal.
+    #[tokio::test]
+    async fn a_failed_launch_check_task_answers_500_not_409() {
+        fn failing(
+            _effective: &agentdesktop_core::config::DaemonConfig,
+            _host: &dyn LaunchHost,
+            _executable: &Path,
+        ) -> Result<Option<String>, String> {
+            // `resume_unwind` skips the panic hook: no "panicked" line in
+            // the test output.
+            std::panic::resume_unwind(Box::new("host read failed"))
+        }
+        static FAILING: profile::ProgramProfile = profile::ProgramProfile {
+            launch_checks: failing,
+            ..profile::COPILOT
+        };
+        fn refusing(
+            _effective: &agentdesktop_core::config::DaemonConfig,
+            _host: &dyn LaunchHost,
+            _executable: &Path,
+        ) -> Result<Option<String>, String> {
+            Err("refused".to_owned())
+        }
+        static REFUSING: profile::ProgramProfile = profile::ProgramProfile {
+            launch_checks: refusing,
+            ..profile::COPILOT
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let host: Arc<dyn LaunchHost> = Arc::new(Host {
+            home: temp.path().to_owned(),
+            state_dir: temp.path().to_owned(),
+        });
+        let effective: agentdesktop_core::config::DaemonConfig =
+            serde_yaml::from_str("{}").unwrap();
+        let (status, message) =
+            program_launch_checks(&FAILING, effective.clone(), &host, Path::new("copilot.exe"))
+                .await
+                .expect_err("the task failed");
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{message}");
+        assert_eq!(
+            program_launch_checks(&REFUSING, effective, &host, Path::new("copilot.exe")).await,
+            Err((StatusCode::CONFLICT, "refused".to_owned()))
+        );
+    }
+
     impl LaunchHost for Host {
         fn home(&self) -> PathBuf {
             self.home.clone()

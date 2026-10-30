@@ -731,13 +731,16 @@ fn verify_revert_to_baseline() {
 // AC 1 Tests: integrity_paths
 
 #[test]
-fn integrity_paths_returns_thirteen_roots() {
+fn integrity_paths_returns_the_claude_and_union_roots() {
     let home = PathBuf::from("/home/user");
     let cwd = PathBuf::from("/workspace");
 
     let paths = integrity_paths(&home, &cwd);
 
-    assert_eq!(paths.len(), 13);
+    // The 13 Claude roots plus the union workspace pins: `opencode.json`,
+    // `opencode.jsonc`, `.opencode`, the `.github` folder (identity only)
+    // and its four entries.
+    assert_eq!(paths.len(), 21);
 }
 
 #[test]
