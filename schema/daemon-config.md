@@ -21,7 +21,7 @@
 |`daemon.grok.config`|string|Configuration file.|
 |`daemon.llmProxy`|object|Local loopback LLM proxy.|
 |`daemon.llmProxy.clientId`|string|Credential policy client ID used by the proxy. Defaults to `vscode`.|
-|`daemon.llmProxy.listen`|string|Loopback address to listen on. Unset disables the proxy. Rejected in system mode.|
+|`daemon.llmProxy.listen`|string|Loopback address to listen on. Unset disables the proxy. In system mode,<br>accepted only with `daemon.copilot.config` or the `daemon.vscode` paths.|
 |`daemon.oidcCallbackListen`|string|Override the OIDC callback bind address.|
 |`daemon.openCode`|object|OpenCode paths.|
 |`daemon.openCode.config`|string|Configuration file.|
@@ -37,7 +37,7 @@
 |`daemon.usage.tokenFile`|string|Path to a file containing the bearer token agentgateway sends with each export. The token must be at least 32 characters.|
 |`daemon.user`|boolean|Manage the current user’s tool settings instead of system settings.|
 |`daemon.vscode`|object|VS Code paths (`config` = the `chatLanguageModels.json` to manage under<br>the `ownModels` variant of `copilotChat`, `settings` = the user<br>`settings.json` to manage under the `githubModels` variant; each<br>defaults to its file inside the per-OS VS Code user profile<br>directory).|
-|`daemon.vscode.config`|string|`chatLanguageModels.json` to manage (the `ownModels` variant of<br>`copilotChat`). Defaults to that file inside the per-OS VS Code user<br>profile directory.|
+|`daemon.vscode.config`|string|`chatLanguageModels.json` to manage (the `ownModels` variant of<br>`copilotChat`). Defaults to that file inside the per-OS VS Code user<br>profile directory. A system daemon has no default: set both this and<br>`settings` to manage one user's VS Code.|
 |`daemon.vscode.settings`|string|The user `settings.json` to manage (the `githubModels` variant of<br>`copilotChat`). Defaults to that file inside the per-OS VS Code user<br>profile directory.|
 |`inventoryInterval`|string|Interval between inventory refreshes. Defaults to `15m`, and must be<br>greater than zero.<br><br>Discovery walks user home directories and developer-tool configuration<br>files, so this trades inventory freshness against local disk activity.|
 |`llmGateway`|object|LLM gateway used by managed developer tools.|

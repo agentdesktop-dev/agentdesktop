@@ -500,7 +500,9 @@ fn apply_owner(paths: &[PathBuf], owner: Option<FileOwner>) -> anyhow::Result<()
     #[cfg(unix)]
     if let Some(owner) = owner {
         for path in paths {
-            std::os::unix::fs::chown(path, Some(owner.uid), Some(owner.gid))
+            // lchown: a path the user swapped for a symlink keeps root's
+            // change on the link itself, never on the file it points to.
+            std::os::unix::fs::lchown(path, Some(owner.uid), Some(owner.gid))
                 .with_context(|| format!("set owner of {}", path.display()))?;
         }
     }
@@ -514,7 +516,7 @@ fn owned_by(path: &Path, owner: Option<FileOwner>) -> bool {
     #[cfg(unix)]
     if let Some(owner) = owner {
         use std::os::unix::fs::MetadataExt;
-        return fs::metadata(path)
+        return fs::symlink_metadata(path)
             .map(|metadata| metadata.uid() == owner.uid && metadata.gid() == owner.gid)
             .unwrap_or(false);
     }
@@ -629,6 +631,59 @@ pub(crate) mod mode_repair {
             assert_eq!(metadata.modified().unwrap(), modified);
             assert_eq!(mode(file), 0o600, "a stricter mode must be left");
         }
+    }
+}
+
+/// Prepare `plan` to manage files in one user's profile from a system daemon:
+/// every file and directory it creates goes to the owner of the nearest
+/// existing ancestor of `paths[0]` (the user whose files they are).
+///
+/// Refuses when part of any path that the user owns is a symlink: the daemon
+/// runs as root, so a user-placed link could otherwise steer its writes and
+/// ownership changes to files outside that user's profile. Directories owned
+/// by someone else (`/`, `/home`) are trusted as they are.
+pub(crate) fn plan_for_user(plan: &ReconcilePlan, paths: &[&Path]) -> anyhow::Result<()> {
+    let owner = paths.first().and_then(|path| owner_of_nearest(path));
+    #[cfg(unix)]
+    if let Some(owner) = owner {
+        use std::os::unix::fs::MetadataExt;
+        for path in paths {
+            for component in path.ancestors() {
+                let Ok(metadata) = fs::symlink_metadata(component) else {
+                    continue;
+                };
+                if metadata.file_type().is_symlink() && metadata.uid() == owner.uid {
+                    anyhow::bail!(
+                        "refusing to manage {}: {} is a symlink owned by the user",
+                        path.display(),
+                        component.display()
+                    );
+                }
+            }
+        }
+    }
+    plan.set_owner(owner);
+    Ok(())
+}
+
+/// Owner of the closest existing ancestor of `path`. `None` off Unix or if
+/// nothing along the path can be inspected.
+pub(crate) fn owner_of_nearest(path: &Path) -> Option<FileOwner> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        path.ancestors()
+            .skip(1)
+            .find_map(|dir| fs::metadata(dir).ok())
+            .map(|metadata| FileOwner {
+                uid: metadata.uid(),
+                gid: metadata.gid(),
+            })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
     }
 }
 

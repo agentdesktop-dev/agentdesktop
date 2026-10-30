@@ -19,11 +19,15 @@ mod tests;
 /// "Custom Endpoint" model provider (`chatLanguageModels.json`, own models on
 /// the `/vscode-copilot` route) or through the Copilot Chat CAPI override in
 /// the user `settings.json` (GitHub's models on the `/vscode-copilot-capi`
-/// route). User mode only; both paths are `None` for a system daemon, which
-/// has no user profile to manage.
+/// route). A user daemon manages its own user's profile; a system daemon
+/// manages one user's profile only when `daemon.vscode.config` and
+/// `daemon.vscode.settings` name it (`manage_for_user`).
 pub struct VsCode {
     pub chat_models_path: Option<PathBuf>,
     pub settings_path: Option<PathBuf>,
+    /// Set for a system daemon configured with both `daemon.vscode` paths:
+    /// manage that one user's profile instead of skipping VS Code as user-only.
+    pub manage_for_user: bool,
 }
 impl VsCode {
     pub const ID: &'static str = "vscode";
@@ -56,11 +60,15 @@ impl Provider for VsCode {
     }
 
     fn plan(&self, ctx: &ReconcileContext, config: &DaemonConfig) -> anyhow::Result<ReconcilePlan> {
-        if let Some(plan) = ctx.skip_unless(
-            DaemonScope::User,
-            config.programs.vscode.is_some(),
-            Self::DISPLAY_NAME,
-        ) {
+        // A system daemon manages VS Code only for a user whose files are configured.
+        let for_user = !ctx.merge_user_settings && self.manage_for_user;
+        if !for_user
+            && let Some(plan) = ctx.skip_unless(
+                DaemonScope::User,
+                config.programs.vscode.is_some(),
+                Self::DISPLAY_NAME,
+            )
+        {
             return Ok(plan);
         }
 
@@ -91,6 +99,11 @@ impl Provider for VsCode {
             }
             return Ok(plan);
         };
+        if for_user {
+            // VS Code reads both files as the user: hand what the plan creates
+            // to whoever owns the user's VS Code profile.
+            crate::reconcile::plan::plan_for_user(&plan, &[chat_models_path, settings_path])?;
+        }
         // The two variants are exclusive: under `githubModels` the custom-models
         // entry is removed, under `ownModels` the settings override is removed.
         let own_models =
