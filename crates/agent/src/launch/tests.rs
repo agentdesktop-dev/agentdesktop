@@ -1173,22 +1173,25 @@ fn the_attach_command_line_runs_the_program_without_start() {
 }
 
 #[test]
-fn a_fast_exit_is_the_programs_own_result_only_in_attach_mode() {
+fn a_fast_exit_is_the_programs_own_result_only_after_the_attach_marker() {
     // `claude --version` exits within the early-exit watch; in same-terminal
-    // mode that is the program's own result, not a failed box start. The
-    // helper's reserved attach-failure code and every windowed exit keep the
-    // early-exit failure path (lab AC-2, second run).
+    // mode that is the program's own result once the helper has spawned the
+    // executor (its started marker is present), not a failed box start. Before
+    // the marker, and for every windowed launch, the early-exit failure path
+    // stays. The marker, not an exit-code value, is the discriminator, since a
+    // program may legitimately exit with the helper's failure code.
+    let dir = tempfile::tempdir().unwrap();
     let attach = crate::launch::plan::ConsolePlan::Attach { client_pid: 4242 };
     let window = crate::launch::plan::ConsolePlan::Window;
-    assert!(super::early_exit_is_program_result(&attach, 0));
-    assert!(super::early_exit_is_program_result(&attach, 1));
-    assert!(super::early_exit_is_program_result(&attach, 7));
-    assert!(!super::early_exit_is_program_result(
-        &attach,
-        crate::launch::console::ATTACH_FAILED_EXIT
-    ));
-    assert!(!super::early_exit_is_program_result(&window, 0));
-    assert!(!super::early_exit_is_program_result(&window, 7));
+    assert!(!super::early_exit_is_program_result(&attach, dir.path()));
+    std::fs::write(
+        dir.path()
+            .join(crate::launch::console::ATTACH_STARTED_MARKER),
+        [],
+    )
+    .unwrap();
+    assert!(super::early_exit_is_program_result(&attach, dir.path()));
+    assert!(!super::early_exit_is_program_result(&window, dir.path()));
 }
 
 #[test]
@@ -4069,6 +4072,7 @@ fn the_engine_reproduces_the_baseline_request_bytes() {
       "C:\\lab\\ws pr1\\HEAD",
       "C:\\lab\\ws pr1\\.claude\\settings.json",
       "C:\\lab\\ws pr1\\.claude\\hooks",
+      "C:\\lab\\ws pr1\\.git\\config.worktree",
       "C:\\lab\\ws pr1\\.git\\commondir",
       "C:\\lab\\ws pr1\\opencode.json",
       "C:\\lab\\ws pr1\\opencode.jsonc",
@@ -4166,6 +4170,7 @@ fn the_engine_reproduces_the_baseline_request_bytes() {
       "C:\\lab\\ws pr1\\HEAD",
       "C:\\lab\\ws pr1\\.claude\\settings.json",
       "C:\\lab\\ws pr1\\.claude\\hooks",
+      "C:\\lab\\ws pr1\\.git\\config.worktree",
       "C:\\lab\\ws pr1\\.git\\commondir",
       "C:\\lab\\ws pr1\\opencode.json",
       "C:\\lab\\ws pr1\\opencode.jsonc",
@@ -4507,8 +4512,10 @@ fn the_profile_workspace_entries_equal_the_replaced_lists() {
 #[test]
 fn the_profile_git_executable_config_equals_the_replaced_list() {
     // Baseline 8910230 crates/agent/src/launch/mod.rs:548-550 (the `.git`
-    // pushes onto `executable_config`).
-    let expected: &[&str] = &["config", "hooks", "commondir"];
+    // pushes onto `executable_config`), plus `config.worktree`: with
+    // `extensions.worktreeConfig` a box could otherwise write
+    // `core.sshCommand`/`credential.helper` there for a later unboxed git.
+    let expected: &[&str] = &["config", "config.worktree", "hooks", "commondir"];
     assert_eq!(profile::SHARED.git_executable_config, expected);
 }
 

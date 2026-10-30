@@ -81,7 +81,7 @@ pub(crate) const SHARED: SharedProfile = SharedProfile {
     mcp_json: ".mcp.json",
     workspace_head: "HEAD",
     workspace_claude_entries: &["settings.json", "settings.local.json", "hooks"],
-    git_executable_config: &["config", "hooks", "commondir"],
+    git_executable_config: &["config", "config.worktree", "hooks", "commondir"],
     workspace_union_entries: &["opencode.json", "opencode.jsonc", ".opencode"],
     workspace_github_entries: &["copilot", "mcp.json", "hooks", "agents"],
     denied_secrets: &[

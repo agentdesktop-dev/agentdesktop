@@ -737,10 +737,10 @@ fn integrity_paths_returns_the_claude_and_union_roots() {
 
     let paths = integrity_paths(&home, &cwd);
 
-    // The 13 Claude roots plus the union workspace pins: `opencode.json`,
-    // `opencode.jsonc`, `.opencode`, the `.github` folder (identity only)
-    // and its four entries.
-    assert_eq!(paths.len(), 21);
+    // The 13 Claude roots, plus `.git\config.worktree`, plus the union
+    // workspace pins: `opencode.json`, `opencode.jsonc`, `.opencode`, the
+    // `.github` folder (identity only) and its four entries.
+    assert_eq!(paths.len(), 22);
 }
 
 #[test]
