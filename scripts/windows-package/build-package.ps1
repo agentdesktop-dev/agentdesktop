@@ -185,8 +185,12 @@ function Render-Template([string]$Name) {
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 $cmdLauncher = (Render-Template 'claude.cmd.tmpl') -replace "`r?`n", "`r`n"
 [System.IO.File]::WriteAllText((Join-Path $staging 'launchers\claude.cmd'), $cmdLauncher, $utf8NoBom)
-# The sh launcher keeps LF line endings; Git Bash requires them.
-[System.IO.File]::WriteAllText((Join-Path $staging 'launchers\claude'), (Render-Template 'claude.tmpl'), $utf8NoBom)
+# The sh launcher must keep LF line endings; Git Bash cannot run a CRLF
+# shebang or shell control statements. Normalize explicitly rather than rely
+# on the checkout: claude.tmpl comes out CRLF under core.autocrlf=true, and
+# both Render-Template and WriteAllText would otherwise preserve it.
+$shLauncher = (Render-Template 'claude.tmpl') -replace "`r`n", "`n"
+[System.IO.File]::WriteAllText((Join-Path $staging 'launchers\claude'), $shLauncher, $utf8NoBom)
 [System.IO.File]::WriteAllText((Join-Path $staging '40-agentdesktop-package.json'), (Render-Template 'managed-settings-dropin.json.tmpl'), $utf8NoBom)
 
 # The version manifest agentdesktop discovery reads from beside the binary,
