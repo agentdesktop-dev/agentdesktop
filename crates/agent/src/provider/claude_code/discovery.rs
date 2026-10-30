@@ -14,9 +14,9 @@ use crate::provider::metadata;
 /// `settings_path` is the managed settings file the reconciler writes, so a
 /// `daemon.claudeCode.config` override is inventoried from the same place.
 pub(super) fn discover(settings_path: &Path) -> Option<Agent> {
-    let executable = metadata::find_executable("claude", executable_candidates())?;
+    let executable = metadata::find_executable(PATH_SEARCH_NAME, executable_candidates())?;
     Some(Agent {
-        version: metadata::version_after_component(&executable, "versions"),
+        version: executable_version(&executable, managed_install_executable().as_deref()),
         executable,
         kind: ClaudeCode::ID.to_owned(),
         mcp_servers: discover_mcp_servers(settings_path),
@@ -24,23 +24,82 @@ pub(super) fn discover(settings_path: &Path) -> Option<Agent> {
     })
 }
 
+/// On Windows, discovery considers only `.exe` candidates: a bare-name PATH
+/// search would find the managed package's own extensionless `claude`
+/// launcher script (prepended to the machine PATH) before any real install,
+/// and would report that script, with no version, as the Claude Code
+/// executable. Searching the extension-qualified name keeps the PATH walk to
+/// the real binary; the launcher scripts (extensionless sh and `.cmd`) are
+/// never reported.
+const PATH_SEARCH_NAME: &str = if cfg!(windows) {
+    "claude.exe"
+} else {
+    "claude"
+};
+
 fn executable_candidates() -> Vec<PathBuf> {
     let mut candidates = BTreeSet::new();
     for home in metadata::user_home_dirs() {
-        candidates.insert(home.join(".local/bin/claude"));
-        candidates.insert(home.join(".npm-global/bin/claude"));
-        #[cfg(windows)]
-        {
-            candidates.insert(home.join(".local/bin/claude.exe"));
-            candidates.insert(home.join("AppData/Roaming/npm/claude.cmd"));
-        }
+        candidates.extend(home_candidates(&home, cfg!(windows)));
     }
     #[cfg(target_os = "macos")]
     candidates.extend([
         PathBuf::from("/opt/homebrew/bin/claude"),
         PathBuf::from("/usr/local/bin/claude"),
     ]);
-    candidates.into_iter().collect()
+    with_managed_candidate(candidates, managed_install_executable())
+}
+
+/// The per-home candidates. On Windows only the `.exe` form is considered
+/// (see [`PATH_SEARCH_NAME`]): script launchers such as npm's `claude.cmd`
+/// are not reported as the executable.
+fn home_candidates(home: &Path, windows: bool) -> Vec<PathBuf> {
+    if windows {
+        vec![home.join(".local/bin/claude.exe")]
+    } else {
+        vec![
+            home.join(".local/bin/claude"),
+            home.join(".npm-global/bin/claude"),
+        ]
+    }
+}
+
+/// The managed package's install path of the binary,
+/// `%ProgramFiles%\Anthropic\ClaudeCode\claude.exe`. Distinct from
+/// `managed_root()` (`%ProgramFiles%\ClaudeCode`), which holds managed
+/// settings and is granted read-only to Claude boxes. `None` off Windows:
+/// the managed package is Windows-only.
+fn managed_install_executable() -> Option<PathBuf> {
+    #[cfg(windows)]
+    return metadata::env_path("ProgramFiles")
+        .map(|path| path.join("Anthropic").join("ClaudeCode").join("claude.exe"));
+    #[cfg(not(windows))]
+    None
+}
+
+/// The managed install is tried AFTER every existing candidate, so a
+/// pre-existing user copy keeps winning discovery unchanged. Appended to the
+/// sorted set rather than inserted into it, because the managed path sorts
+/// lexically before the user-profile candidates.
+fn with_managed_candidate(candidates: BTreeSet<PathBuf>, managed: Option<PathBuf>) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = candidates.into_iter().collect();
+    candidates.extend(managed);
+    candidates
+}
+
+/// When the found executable is the managed install, its version comes from
+/// the `agentdesktop-package.json` the managed package's build writes beside
+/// the binary — discovery never runs a tool, and the managed install has no
+/// version-named path component to read. Every other install keeps the
+/// path-derived version.
+fn executable_version(executable: &Path, managed: Option<&Path>) -> Option<String> {
+    if managed == Some(executable) {
+        return metadata::json_package_version(
+            &executable.with_file_name("agentdesktop-package.json"),
+            "claude-code",
+        );
+    }
+    metadata::version_after_component(executable, "versions")
 }
 
 fn discover_mcp_servers(settings_path: &Path) -> Vec<McpServer> {
@@ -241,14 +300,186 @@ fn mcp_server_from_entry(name: &str, value: &Value, source: &Path) -> Option<Mcp
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path};
+    use std::{
+        collections::BTreeSet,
+        fs,
+        path::{Path, PathBuf},
+    };
 
     use serde_json::json;
 
     use super::{
-        managed_mcp_servers_from_value, managed_settings_sources, mcp_servers_from_value,
-        merged_managed_mcp_servers,
+        PATH_SEARCH_NAME, executable_version, home_candidates, managed_mcp_servers_from_value,
+        managed_settings_sources, mcp_servers_from_value, merged_managed_mcp_servers,
+        with_managed_candidate,
     };
+    use crate::provider::metadata;
+
+    /// DV6-4 (adversarial/maintainer M2): discovery considers only `.exe`
+    /// candidates on Windows. The PATH search is extension-qualified, so the
+    /// managed package's extensionless `claude` launcher on the prepended
+    /// machine PATH (and any `claude.cmd`) is never reported, and the home
+    /// candidates carry no script paths.
+    #[test]
+    fn discovery_considers_only_exe_candidates_on_windows() {
+        if cfg!(windows) {
+            assert_eq!(PATH_SEARCH_NAME, "claude.exe");
+        } else {
+            assert_eq!(PATH_SEARCH_NAME, "claude");
+        }
+        let windows = home_candidates(Path::new(r"C:\Users\dev"), true);
+        assert!(!windows.is_empty());
+        for candidate in &windows {
+            assert!(
+                candidate.extension().is_some_and(|ext| ext == "exe"),
+                "{candidate:?}"
+            );
+        }
+        // The npm shim is a .cmd script: not a candidate on Windows.
+        assert!(
+            !windows
+                .iter()
+                .any(|candidate| { candidate.to_string_lossy().to_lowercase().contains("npm") })
+        );
+        // Off Windows the extensionless form is the executable itself.
+        let unix = home_candidates(Path::new("/home/dev"), false);
+        assert!(unix.iter().all(|candidate| candidate.extension().is_none()));
+    }
+
+    /// DV6-4: a directory holding the launcher scripts yields no discovery
+    /// hit, because only the `.exe` form is a candidate; a real binary
+    /// beside the scripts is found, and the scripts never are.
+    #[test]
+    fn a_launcher_directory_yields_no_hit_without_a_real_exe_beside_the_scripts() {
+        let launchers = tempfile::tempdir().unwrap();
+        fs::write(launchers.path().join("claude"), b"#!/bin/sh\n").unwrap();
+        fs::write(launchers.path().join("claude.cmd"), b"@echo off\r\n").unwrap();
+        let exe_candidate = launchers.path().join("claude.exe");
+        // The probe name is on no PATH (as in the sibling tests), so only
+        // the candidate list decides; the scripts exist but are no candidate.
+        let found =
+            metadata::find_executable("agentdesktop-test-no-such-tool", [exe_candidate.clone()]);
+        assert_eq!(found, None);
+
+        fs::write(&exe_candidate, b"not a program").unwrap();
+        let found =
+            metadata::find_executable("agentdesktop-test-no-such-tool", [exe_candidate.clone()]);
+        assert_eq!(found, Some(exe_candidate));
+    }
+
+    /// D9: the managed install candidate comes AFTER every existing one, even
+    /// though `C:\Program Files\...` sorts lexically before the user-profile
+    /// paths a plain set insert would have put it ahead of.
+    #[test]
+    fn the_managed_install_candidate_comes_after_every_existing_candidate() {
+        let existing: BTreeSet<PathBuf> = [
+            PathBuf::from(r"C:\Users\dev\.local\bin\claude.exe"),
+            PathBuf::from(r"C:\Users\dev\AppData\Roaming\npm\claude.cmd"),
+        ]
+        .into_iter()
+        .collect();
+        let managed = PathBuf::from(r"C:\Program Files\Anthropic\ClaudeCode\claude.exe");
+
+        let candidates = with_managed_candidate(existing.clone(), Some(managed.clone()));
+
+        assert_eq!(candidates.len(), existing.len() + 1);
+        assert_eq!(candidates.last(), Some(&managed));
+        assert!(
+            candidates[..existing.len()]
+                .iter()
+                .all(|candidate| *candidate != managed)
+        );
+
+        let unchanged = with_managed_candidate(existing.clone(), None);
+        assert_eq!(unchanged, existing.into_iter().collect::<Vec<_>>());
+    }
+
+    /// AC-2 (N9): with the managed install present and no match earlier,
+    /// discovery reports the managed path; with a `~\.local\bin` copy also
+    /// present it reports the existing first match, unchanged order.
+    #[test]
+    fn a_managed_install_is_found_only_when_no_existing_candidate_matches() {
+        let home = tempfile::tempdir().unwrap();
+        let install = tempfile::tempdir().unwrap();
+        let local_bin = home.path().join(".local/bin/claude.exe");
+        let managed = install.path().join("claude.exe");
+        fs::create_dir_all(local_bin.parent().unwrap()).unwrap();
+        fs::write(&managed, b"not a program").unwrap();
+        let candidates: BTreeSet<PathBuf> = [local_bin.clone()].into_iter().collect();
+
+        // The probe name is on no PATH, so resolution falls through to the
+        // candidate list, like a Windows host without `claude.exe` on PATH.
+        let found = metadata::find_executable(
+            "agentdesktop-test-no-such-tool",
+            with_managed_candidate(candidates.clone(), Some(managed.clone())),
+        );
+        assert_eq!(found, Some(managed.clone()));
+
+        fs::write(&local_bin, b"not a program").unwrap();
+        let found = metadata::find_executable(
+            "agentdesktop-test-no-such-tool",
+            with_managed_candidate(candidates, Some(managed)),
+        );
+        assert_eq!(found, Some(local_bin));
+    }
+
+    /// D9 (N9): the managed install's version comes from the
+    /// `agentdesktop-package.json` beside it, never from running it — the
+    /// file on disk is not a runnable program, so executing it instead of
+    /// reading the manifest could not produce this version.
+    #[test]
+    fn a_managed_install_reports_the_manifest_version_without_running_the_binary() {
+        let install = tempfile::tempdir().unwrap();
+        let executable = install.path().join("claude.exe");
+        fs::write(&executable, b"not a program").unwrap();
+        fs::write(
+            install.path().join("agentdesktop-package.json"),
+            br#"{ "name": "claude-code", "version": "2.1.98" }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            executable_version(&executable, Some(&executable)),
+            Some("2.1.98".to_owned())
+        );
+    }
+
+    /// D9: a managed install whose manifest is missing or names another
+    /// package has no version; nothing falls back to executing the binary.
+    #[test]
+    fn a_managed_install_without_its_manifest_has_no_version() {
+        let install = tempfile::tempdir().unwrap();
+        let executable = install.path().join("claude.exe");
+        fs::write(&executable, b"not a program").unwrap();
+        assert_eq!(executable_version(&executable, Some(&executable)), None);
+
+        fs::write(
+            install.path().join("agentdesktop-package.json"),
+            br#"{ "name": "other-tool", "version": "1.0.0" }"#,
+        )
+        .unwrap();
+        assert_eq!(executable_version(&executable, Some(&executable)), None);
+    }
+
+    /// D9: every non-managed install keeps the existing path-derived version.
+    #[test]
+    fn a_non_managed_executable_keeps_the_path_derived_version() {
+        let root = tempfile::tempdir().unwrap();
+        let versions = root.path().join("versions/2.0.14");
+        fs::create_dir_all(&versions).unwrap();
+        let executable = versions.join("claude");
+        fs::write(&executable, b"not a program").unwrap();
+
+        let managed = PathBuf::from(r"C:\Program Files\Anthropic\ClaudeCode\claude.exe");
+        assert_eq!(
+            executable_version(&executable, Some(&managed)),
+            Some("2.0.14".to_owned())
+        );
+        assert_eq!(
+            executable_version(&executable, None),
+            Some("2.0.14".to_owned())
+        );
+    }
 
     fn write_managed_servers(path: &Path, servers: serde_json::Value) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();

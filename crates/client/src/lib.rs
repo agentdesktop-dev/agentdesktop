@@ -31,6 +31,29 @@ async fn connect(endpoint: &Path) -> anyhow::Result<LocalStream> {
         .with_context(|| connect_error(endpoint))
 }
 
+/// The one-line refusal for a pipe that is not owned by this user or by
+/// SYSTEM: printed verbatim by the wrap launchers via `run --wait`, so it
+/// stays a single line.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn foreign_server_error(endpoint: &Path) -> String {
+    format!(
+        "refusing to use {}: the pipe is not owned by your user or SYSTEM",
+        endpoint.display()
+    )
+}
+
+/// The owner-SID acceptance rule: the pipe object's owner must be
+/// the caller's own user SID or SYSTEM (`S-1-5-18`, the system daemon).
+/// Pure and platform-independent so the comparison is unit-tested with
+/// injected SIDs; the Windows connect path feeds it the pipe object's owner
+/// read via `GetSecurityInfo`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn server_owner_allowed(owner_sid: &str, own_sid: &str) -> bool {
+    /// `S-1-5-18` (LocalSystem): the system daemon.
+    const SYSTEM_SID: &str = "S-1-5-18";
+    owner_sid == own_sid || owner_sid == SYSTEM_SID
+}
+
 #[cfg(windows)]
 async fn connect(endpoint: &Path) -> anyhow::Result<LocalStream> {
     // CreateFile returns ERROR_PIPE_BUSY when all server instances are in use.
@@ -38,8 +61,19 @@ async fn connect(endpoint: &Path) -> anyhow::Result<LocalStream> {
     // one of them, so follow the retry pattern recommended by Tokio.
     const ERROR_PIPE_BUSY: i32 = 231;
     loop {
-        match ClientOptions::new().open(endpoint.as_os_str()) {
-            Ok(client) => return Ok(client),
+        // SECURITY_IDENTIFICATION (with SECURITY_SQOS_PRESENT, which Tokio
+        // adds) keeps the server from impersonating this client's token.
+        // Tokio's default, kept explicit: the daemon pipe names are
+        // predictable, so the server at the other end is untrusted until
+        // verified below.
+        match ClientOptions::new()
+            .security_qos_flags(windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION)
+            .open(endpoint.as_os_str())
+        {
+            Ok(client) => {
+                server_identity::verify(&client, endpoint)?;
+                return Ok(client);
+            }
             Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
@@ -47,6 +81,148 @@ async fn connect(endpoint: &Path) -> anyhow::Result<LocalStream> {
                 return Err(error).with_context(|| connect_error(endpoint));
             }
         }
+    }
+}
+
+/// Verifies, before any request bytes are written, that the pipe is owned by
+/// this user or by SYSTEM. The per-user pipe name is predictable, so on a
+/// multi-user host another local user could create a pipe under this user's
+/// name before the real daemon binds it; the daemon's own pipe ACL protects
+/// the daemon from foreign clients, never a client from a foreign server.
+///
+/// The check reads the PIPE OBJECT's owner SID (`GetSecurityInfo` on the
+/// opened handle), not the server process's token: opening a SYSTEM
+/// process or its token is denied to a standard user, so a process-token
+/// read would refuse every standard-user call against the system daemon.
+/// `READ_CONTROL` arrives with the `GENERIC_READ` the open already needs,
+/// so exactly the clients the pipe's ACL admits can read the owner. A pipe
+/// squatted by another local user is owned by that user and refused.
+#[cfg(windows)]
+mod server_identity {
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+    use std::path::Path;
+
+    use anyhow::{Context, bail};
+    use tokio::net::windows::named_pipe::NamedPipeClient;
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, LocalFree};
+    use windows_sys::Win32::Security::{
+        Authorization::{ConvertSidToStringSidW, GetSecurityInfo, SE_KERNEL_OBJECT},
+        GetTokenInformation, OWNER_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    /// The pipe object's owner SID must satisfy [`super::server_owner_allowed`]
+    /// (the caller's own user SID, or SYSTEM). Anything else, including an
+    /// unreadable owner, is refused with a single line before any request is
+    /// written (fail closed).
+    pub(super) fn verify(client: &NamedPipeClient, endpoint: &Path) -> anyhow::Result<()> {
+        let context = || format!("verify the owner of the pipe at {}", endpoint.display());
+        let owner_sid = pipe_owner_sid(client).with_context(context)?;
+        // SAFETY: GetCurrentProcess returns the process pseudo-handle,
+        // which is not closed.
+        let own_sid = process_user_sid(unsafe { GetCurrentProcess() }).with_context(context)?;
+        if !super::server_owner_allowed(&owner_sid, &own_sid) {
+            bail!("{}", super::foreign_server_error(endpoint));
+        }
+        Ok(())
+    }
+
+    struct Handle(HANDLE);
+
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            // SAFETY: the handle was opened by this module.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    /// The owner SID of the pipe object behind the opened client handle.
+    fn pipe_owner_sid(client: &NamedPipeClient) -> anyhow::Result<String> {
+        let mut owner: *mut c_void = std::ptr::null_mut();
+        let mut descriptor: *mut c_void = std::ptr::null_mut();
+        // SAFETY: a connected client pipe handle (GENERIC_READ includes
+        // READ_CONTROL), null out-parameters for the unrequested parts, and
+        // a descriptor out-parameter the call allocates.
+        let status = unsafe {
+            GetSecurityInfo(
+                client.as_raw_handle() as HANDLE,
+                SE_KERNEL_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                &mut owner,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        if status != ERROR_SUCCESS {
+            return Err(std::io::Error::from_raw_os_error(status as i32))
+                .context("read the pipe owner");
+        }
+        // SAFETY: on success `owner` points into `descriptor`, a single
+        // LocalAlloc block the caller frees; the SID is read before the free.
+        let sid = unsafe { sid_string(owner) };
+        // SAFETY: the descriptor was allocated by GetSecurityInfo.
+        unsafe { LocalFree(descriptor) };
+        sid
+    }
+
+    fn process_user_sid(process: HANDLE) -> anyhow::Result<String> {
+        let mut token: HANDLE = std::ptr::null_mut();
+        // SAFETY: valid process handle and out-parameter.
+        if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
+            return Err(std::io::Error::last_os_error()).context("open the process token");
+        }
+        let token = Handle(token);
+        let mut length = 0u32;
+        // SAFETY: a size query; the null buffer is allowed with length 0.
+        unsafe {
+            GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut length);
+        }
+        if length == 0 {
+            bail!("TokenUser size query failed");
+        }
+        let mut buffer = vec![0u8; length as usize];
+        // SAFETY: the buffer is `length` bytes, as the size query asked for.
+        let ok = unsafe {
+            GetTokenInformation(
+                token.0,
+                TokenUser,
+                buffer.as_mut_ptr().cast::<c_void>(),
+                length,
+                &mut length,
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error()).context("read the token user");
+        }
+        // SAFETY: GetTokenInformation(TokenUser) fills a TOKEN_USER at the
+        // buffer start; the SID it names points into `buffer`, which
+        // outlives the call.
+        unsafe { sid_string((*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid) }
+    }
+
+    /// The string form of a SID pointer (`ConvertSidToStringSidW`).
+    ///
+    /// # Safety
+    /// `sid` must point at a valid SID that outlives the call.
+    unsafe fn sid_string(sid: *mut c_void) -> anyhow::Result<String> {
+        let mut text: *mut u16 = std::ptr::null_mut();
+        // SAFETY: the caller guarantees `sid`; `text` is a valid out-parameter.
+        if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
+            return Err(std::io::Error::last_os_error()).context("convert SID to string");
+        }
+        // SAFETY: a null-terminated UTF-16 string allocated by the system.
+        Ok(unsafe {
+            let mut len = 0usize;
+            while *text.add(len) != 0 {
+                len += 1;
+            }
+            let sid = String::from_utf16_lossy(std::slice::from_raw_parts(text, len));
+            LocalFree(text.cast::<c_void>());
+            sid
+        })
     }
 }
 
@@ -261,6 +437,38 @@ mod tests {
     use std::path::Path;
 
     use super::connect_error;
+
+    /// The refusal for a pipe owned by another user is exactly one line
+    /// (the wrap launchers print it verbatim) and names the endpoint.
+    #[test]
+    fn foreign_server_refusal_is_one_line_and_names_the_endpoint() {
+        let line = super::foreign_server_error(Path::new(r"\\.\pipe\agentdesktop-user-alice"));
+        assert_eq!(line.lines().count(), 1, "{line}");
+        assert!(line.contains(r"\\.\pipe\agentdesktop-user-alice"), "{line}");
+        assert!(line.starts_with("refusing"), "{line}");
+    }
+
+    /// DV6-6 owner rule with injected SIDs: the caller's own user and SYSTEM
+    /// are accepted; another user (a squatted pipe), BUILTIN\Administrators
+    /// and the empty string are refused. The user-vs-system cases cover both
+    /// deployments: a user daemon's pipe is owned by the user, the system
+    /// daemon's by SYSTEM.
+    #[test]
+    fn a_pipe_owner_is_accepted_only_for_the_callers_user_or_system() {
+        const ME: &str = "S-1-5-21-1-2-3-1001";
+        assert!(super::server_owner_allowed(ME, ME));
+        assert!(super::server_owner_allowed("S-1-5-18", ME));
+        // SYSTEM as the CALLER still accepts only its own SID or SYSTEM.
+        assert!(super::server_owner_allowed("S-1-5-18", "S-1-5-18"));
+        for foreign in [
+            "S-1-5-21-1-2-3-1002", // another local user: the squat case
+            "S-1-5-32-544",        // BUILTIN\Administrators
+            "S-1-5-19",            // LOCAL SERVICE
+            "",
+        ] {
+            assert!(!super::server_owner_allowed(foreign, ME), "{foreign}");
+        }
+    }
 
     #[test]
     fn connection_error_suggests_checking_the_daemon() {

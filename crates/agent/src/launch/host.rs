@@ -486,11 +486,12 @@ pub(crate) mod windows {
         },
         System::Threading::{
             GetExitCodeProcess, GetProcessTimes, OpenProcess, OpenProcessToken,
-            PROCESS_QUERY_LIMITED_INFORMATION,
+            PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
         },
     };
 
     use super::super::PipePeer;
+    use super::super::wrap::{ProcessFact, WrapEntry};
 
     /// Clears the inherit flag on the daemon's standard handles, so a child
     /// started with explicit stdio cannot receive them.
@@ -750,6 +751,85 @@ pub(crate) mod windows {
             }
         }
         Ok(None)
+    }
+
+    /// One fact per running process whose Toolhelp image name matches a wrap
+    /// entry's executable file name (prefilter; the detector matches the full
+    /// canonical image path). A process that cannot be opened is skipped (it
+    /// cannot be the daemon user's); one whose token cannot be read is
+    /// reported with `user_sid: None` and never counts as a violation.
+    pub(crate) fn wrap_process_snapshot(wrap: &[WrapEntry]) -> Result<Vec<ProcessFact>, String> {
+        let names: Vec<String> = wrap
+            .iter()
+            .filter_map(|entry| {
+                let text = entry.executable.to_string_lossy().replace('/', "\\");
+                text.rsplit('\\').next().map(str::to_lowercase)
+            })
+            .collect();
+        // SAFETY: plain system call.
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(format!(
+                "snapshot the process list: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let snapshot = Handle(snapshot);
+        // SAFETY: PROCESSENTRY32W is plain data; dwSize is set as documented.
+        let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut facts = Vec::new();
+        // SAFETY: valid snapshot handle and entry buffer.
+        if unsafe { Process32FirstW(snapshot.0, &mut entry) } != 0 {
+            loop {
+                let exe_file: Vec<u16> = entry
+                    .szExeFile
+                    .iter()
+                    .copied()
+                    .take_while(|unit| *unit != 0)
+                    .collect();
+                let exe_file = String::from_utf16_lossy(&exe_file).to_lowercase();
+                if names.contains(&exe_file)
+                    && let Some(fact) = wrap_process_fact(entry.th32ProcessID)
+                {
+                    facts.push(fact);
+                }
+                // SAFETY: valid snapshot handle and entry buffer.
+                if unsafe { Process32NextW(snapshot.0, &mut entry) } == 0 {
+                    break;
+                }
+            }
+        }
+        Ok(facts)
+    }
+
+    /// The scanner's facts about one process: full image path, creation time,
+    /// and token identity. `None` when the process cannot be opened or
+    /// queried (it exited, or belongs to a user the daemon cannot read).
+    fn wrap_process_fact(pid: u32) -> Option<ProcessFact> {
+        let process = open_process(pid).ok()?;
+        let start_time = creation_time(process.0).ok()?;
+        let mut buffer = vec![0u16; 32_768];
+        let mut length = buffer.len() as u32;
+        // SAFETY: the buffer is valid for `length` UTF-16 units.
+        let ok =
+            unsafe { QueryFullProcessImageNameW(process.0, 0, buffer.as_mut_ptr(), &mut length) };
+        if ok == 0 {
+            return None;
+        }
+        let image = std::path::PathBuf::from(String::from_utf16_lossy(&buffer[..length as usize]));
+        let (app_container, user_sid) = match peer_identity(pid) {
+            Ok(peer) => (peer.app_container, peer.user_sid),
+            // Fail closed: an unreadable identity never counts.
+            Err(_) => (false, None),
+        };
+        Some(ProcessFact {
+            pid,
+            start_time,
+            image,
+            app_container,
+            user_sid,
+        })
     }
 
     /// The values of the registry key `subkey` under `hive`: `REG_SZ` and

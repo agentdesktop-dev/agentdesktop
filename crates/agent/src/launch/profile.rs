@@ -205,6 +205,14 @@ pub(crate) type LaunchChecks = fn(
 pub(crate) struct ProgramProfile {
     /// Program ID, also the session client ID.
     pub program: &'static str,
+    /// The `containment.programs` field (camelCase) naming this program in
+    /// a wrap-mode policy, used in refusal messages.
+    pub containment_field: &'static str,
+    /// This program's entry in the policy's typed per-program fields. Lives
+    /// on the profile so adding a profiled program cannot miss the mapping.
+    pub containment_policy: fn(
+        &agentdesktop_core::config::ContainmentProgramsConfig,
+    ) -> Option<&agentdesktop_core::config::ContainmentProgramPolicy>,
     /// The program's name in messages.
     pub display_name: &'static str,
     /// Native executable file name.
@@ -251,6 +259,8 @@ impl ProgramProfile {
 
 pub(crate) const CLAUDE_CODE: ProgramProfile = ProgramProfile {
     program: crate::provider::claude_code::ClaudeCode::ID,
+    containment_field: "claudeCode",
+    containment_policy: |programs| programs.claude_code.as_ref(),
     display_name: "Claude Code",
     exe_name: "claude.exe",
     home_candidates: &[r".local\bin"],
@@ -285,6 +295,8 @@ pub(crate) const CLAUDE_CODE: ProgramProfile = ProgramProfile {
 /// from (there is no singular `theme`).
 pub(crate) const OPENCODE: ProgramProfile = ProgramProfile {
     program: "opencode",
+    containment_field: "openCode",
+    containment_policy: |programs| programs.open_code.as_ref(),
     display_name: "OpenCode",
     exe_name: "opencode.exe",
     home_candidates: &[r".local\bin"],
@@ -368,6 +380,8 @@ pub(crate) const OPENCODE: ProgramProfile = ProgramProfile {
 /// package cache is a read-only sibling the daemon never primes.
 pub(crate) const COPILOT: ProgramProfile = ProgramProfile {
     program: "copilot",
+    containment_field: "copilot",
+    containment_policy: |programs| programs.copilot.as_ref(),
     display_name: "Copilot CLI",
     exe_name: "copilot.exe",
     home_candidates: &[r".local\bin"],

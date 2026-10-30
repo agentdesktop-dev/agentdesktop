@@ -98,6 +98,7 @@ async fn streams_opaque_requests_with_current_credentials() {
                 discovery, enrollment: EnrollmentState::new(false), state_dir: dir.path().to_owned(),
                 oidc_callback_listen: None, telemetry: None, logout: None, usage: None,
                 programs: None,
+                violation_ledger: None,
             };
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let proxy_address = listener.local_addr().unwrap();
@@ -853,6 +854,7 @@ async fn pairing_is_checked_before_configuration_is_read() {
             logout: None,
             usage: None,
             programs: None,
+            violation_ledger: None,
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_address = listener.local_addr().unwrap();
@@ -1235,6 +1237,7 @@ async fn controller_jwt_state(
         logout: None,
         usage: None,
         programs: None,
+        violation_ledger: None,
     };
     (dir, state)
 }
@@ -1312,6 +1315,7 @@ async fn request_source_state(address: std::net::SocketAddr) -> (tempfile::TempD
         logout: None,
         usage: None,
         programs: None,
+        violation_ledger: None,
     };
     (dir, state)
 }
@@ -1383,6 +1387,7 @@ async fn capi_controller_jwt_state(
         logout: None,
         usage: None,
         programs: None,
+        violation_ledger: None,
     };
     (dir, state)
 }
@@ -3500,6 +3505,7 @@ async fn sandbox_route_returns_401_when_oidc_device_authorization_is_false_and_n
             usage: None,
             programs: None,
             intercept: None,
+            violation_ledger: None,
         };
         let config = default_config();
         let sessions = config.sessions.clone();

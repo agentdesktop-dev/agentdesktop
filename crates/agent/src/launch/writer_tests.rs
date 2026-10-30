@@ -10,7 +10,21 @@ use super::*;
 fn the_user_mode_pipe_admits_system_and_the_daemon_user_only() {
     assert_eq!(
         user_mode_pipe_sddl("S-1-5-21-1-2-3-1001"),
-        "D:P(A;;GA;;;SY)(A;;GA;;;S-1-5-21-1-2-3-1001)"
+        "O:S-1-5-21-1-2-3-1001D:P(A;;GA;;;SY)(A;;GA;;;S-1-5-21-1-2-3-1001)"
+    );
+}
+
+#[test]
+fn the_pipe_security_descriptors_carry_an_explicit_owner() {
+    let user = user_mode_pipe_sddl("S-1-5-21-1-2-3-1001");
+    assert!(user.starts_with("O:S-1-5-21-1-2-3-1001D:P("), "{user}");
+    assert!(
+        SYSTEM_PIPE_SDDL.starts_with("O:SYD:P("),
+        "{SYSTEM_PIPE_SDDL}"
+    );
+    assert_eq!(
+        SYSTEM_PIPE_SDDL,
+        "O:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)"
     );
 }
 
@@ -369,6 +383,7 @@ mod handler {
             usage: None,
             programs: None,
             intercept: None,
+            violation_ledger: None,
         };
         LaunchState {
             app,
@@ -387,6 +402,7 @@ mod handler {
                 managed_hooks_locked: false,
                 managed_mcp_locked: false,
                 managed_settings_error: None,
+                programs: BTreeMap::new(),
             }),
             daemon_sid: None,
             sessions: crate::llm_proxy::sessions::SessionRegistry::default(),

@@ -182,6 +182,33 @@ pub struct ContainmentInfo {
     /// Error reading managed settings, when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_settings_error: Option<String>,
+    /// Posture of each wrap-mode program named by the `containment` policy,
+    /// keyed by launch id (`claude-code`, `opencode`, `copilot`). Filled per
+    /// request from the device-local violation ledger; empty without a
+    /// `containment` policy, or on a daemon that is not a Windows user-mode
+    /// daemon.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub programs: BTreeMap<String, ProgramPosture>,
+}
+
+/// Posture of one wrap-mode program, serialized camelCase: `mode`,
+/// `executable`, `aliasesPresent`, `violations`,
+/// `lastViolationUnixSeconds`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgramPosture {
+    pub mode: crate::config::ContainmentMode,
+    /// Configured `containment.programs.<p>.executable` (lossy display string).
+    pub executable: String,
+    /// Every launcher payload file exists and the launcher directory
+    /// appears in the machine PATH value (HKLM Session-Manager `Path`). Does
+    /// not prove PATH order within a given live session.
+    pub aliases_present: bool,
+    /// Distinct `(pid, startTime)` native processes of the managed
+    /// executable seen since daemon start; resets on daemon restart.
+    pub violations: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_violation_unix_seconds: Option<u64>,
 }
 
 /// Body of `POST /v1/launch`.
@@ -528,9 +555,12 @@ pub struct SessionInfo {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{
         ContainmentInfo, ControllerConnectionError, ControllerConnectionStatus, Launch,
-        LaunchRequest, LaunchStatus, ProgramChoice, SessionCreated, SessionInfo, SessionRequest,
+        LaunchRequest, LaunchStatus, ProgramChoice, ProgramPosture, SessionCreated, SessionInfo,
+        SessionRequest,
     };
 
     #[test]
@@ -565,6 +595,7 @@ mod tests {
             managed_hooks_locked: false,
             managed_mcp_locked: false,
             managed_settings_error: None,
+            programs: BTreeMap::new(),
         };
         assert_eq!(
             serde_json::to_value(&available).unwrap(),
@@ -752,6 +783,7 @@ mod tests {
             managed_hooks_locked: false,
             managed_mcp_locked: true,
             managed_settings_error: Some("cannot read file".into()),
+            programs: BTreeMap::new(),
         };
         let json = serde_json::to_value(&info_with_fields).unwrap();
         assert_eq!(json["managedSettingsSource"], "hklm");
@@ -771,6 +803,7 @@ mod tests {
             managed_hooks_locked: false,
             managed_mcp_locked: false,
             managed_settings_error: None,
+            programs: BTreeMap::new(),
         };
         let json = serde_json::to_value(&info_without_fields).unwrap();
         assert_eq!(json["managedSettingsSource"], serde_json::Value::Null);
@@ -784,6 +817,91 @@ mod tests {
         );
         let again: ContainmentInfo = serde_json::from_value(json).unwrap();
         assert_eq!(again, info_without_fields);
+    }
+
+    // PR 6 (AC-2): ContainmentInfo.programs / ProgramPosture.
+
+    fn containment_info_without_programs() -> ContainmentInfo {
+        ContainmentInfo {
+            executor: r"C:\mxc\x64\wxc-exec.exe".into(),
+            engine: "mxc".to_owned(),
+            available: true,
+            error: None,
+            managed_settings_source: None,
+            managed_hooks_locked: false,
+            managed_mcp_locked: false,
+            managed_settings_error: None,
+            programs: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn containment_info_omits_programs_when_empty() {
+        let json = serde_json::to_value(containment_info_without_programs()).unwrap();
+        assert!(
+            !json.as_object().unwrap().contains_key("programs"),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn program_posture_serializes_camel_case_with_the_frozen_field_names() {
+        let posture = ProgramPosture {
+            mode: crate::config::ContainmentMode::Wrap,
+            executable: r"C:\Program Files\Anthropic\ClaudeCode\claude.exe".to_owned(),
+            aliases_present: true,
+            violations: 2,
+            last_violation_unix_seconds: Some(1_700_000_000),
+        };
+        assert_eq!(
+            serde_json::to_value(&posture).unwrap(),
+            serde_json::json!({
+                "mode": "wrap",
+                "executable": r"C:\Program Files\Anthropic\ClaudeCode\claude.exe",
+                "aliasesPresent": true,
+                "violations": 2,
+                "lastViolationUnixSeconds": 1_700_000_000u64,
+            })
+        );
+    }
+
+    #[test]
+    fn program_posture_omits_last_violation_when_absent() {
+        let posture = ProgramPosture {
+            mode: crate::config::ContainmentMode::Native,
+            executable: r"C:\x\claude.exe".to_owned(),
+            aliases_present: false,
+            violations: 0,
+            last_violation_unix_seconds: None,
+        };
+        let json = serde_json::to_value(&posture).unwrap();
+        assert!(
+            !json
+                .as_object()
+                .unwrap()
+                .contains_key("lastViolationUnixSeconds"),
+            "{json}"
+        );
+        assert_eq!(json["mode"], "native");
+    }
+
+    #[test]
+    fn containment_info_programs_round_trips_keyed_by_launch_id() {
+        let mut info = containment_info_without_programs();
+        info.programs.insert(
+            "claude-code".to_owned(),
+            ProgramPosture {
+                mode: crate::config::ContainmentMode::Wrap,
+                executable: r"C:\Program Files\Anthropic\ClaudeCode\claude.exe".to_owned(),
+                aliases_present: true,
+                violations: 0,
+                last_violation_unix_seconds: None,
+            },
+        );
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["programs"]["claude-code"]["mode"], "wrap");
+        let again: ContainmentInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(again, info);
     }
 
     #[test]

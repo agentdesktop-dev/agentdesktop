@@ -46,6 +46,12 @@ pub struct AppState {
     pub usage: Option<UsageStore>,
     /// The device user's program choice; `None` serves no program routes.
     pub programs: Option<ProgramControl>,
+    /// Distinct native runs of wrap-mode programs' managed executables,
+    /// counted by the violation scan since daemon start (report-only).
+    /// `Some` only in a Windows user-mode daemon whose `daemon.containment`
+    /// is present; daemon-info fills per-program posture from it.
+    pub(crate) violation_ledger:
+        Option<Arc<std::sync::Mutex<crate::launch::wrap::ViolationLedger>>>,
 }
 
 /// Reads and changes the device user's program choice, and re-applies the
@@ -356,7 +362,55 @@ async fn daemon_info(State(state): State<AppState>) -> Json<DaemonInfo> {
             }
         }
     }
+    // Per-program wrap posture, device-local: mode and executable from the
+    // applied configuration, launcher presence, and the violation ledger.
+    // Absent off Windows and outside a user-mode daemon with
+    // `daemon.containment` (the ledger exists only there).
+    if let Some(ledger) = state.violation_ledger.clone()
+        && info.containment.is_some()
+    {
+        let config = state.config.clone();
+        let state_dir = state.state_dir.clone();
+        match tokio::task::spawn_blocking(move || wrap_postures(&config, &state_dir, &ledger)).await
+        {
+            Ok(programs) => {
+                if let Some(containment) = info.containment.as_mut() {
+                    containment.programs = programs;
+                }
+            }
+            Err(error) => {
+                tracing::debug!("failed to join wrap posture task: {error:#}");
+            }
+        }
+    }
     Json(info)
+}
+
+/// The wrap-mode programs' posture for daemon-info, read per request from the
+/// applied configuration and the violation ledger. An unreadable applied
+/// configuration reports no posture (the launch route answers 500 for it).
+fn wrap_postures(
+    config: &DaemonConfig,
+    state_dir: &std::path::Path,
+    ledger: &std::sync::Mutex<crate::launch::wrap::ViolationLedger>,
+) -> std::collections::BTreeMap<String, agentdesktop_core::model::ProgramPosture> {
+    let effective = match load_effective_config(config, state_dir) {
+        Ok(effective) => effective,
+        Err(error) => {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                "wrap posture skipped: the applied configuration is unreadable"
+            );
+            return std::collections::BTreeMap::new();
+        }
+    };
+    let Some(policy) = effective.containment else {
+        return std::collections::BTreeMap::new();
+    };
+    let ledger = ledger
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    crate::launch::wrap::program_postures(&policy, &ledger)
 }
 
 async fn config(State(state): State<AppState>) -> Json<DaemonConfig> {
@@ -387,7 +441,17 @@ pub(crate) fn load_effective_config(
     match std::fs::read_to_string(&path) {
         Ok(contents) => agentdesktop_core::config::parse_daemon(&contents)
             .map_err(|error| error.context("parse applied remote configuration")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(config.clone()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Before the first remote configuration is applied, the local
+            // file still backs the gateway and program fields, but with a
+            // controller configured only the controller-delivered
+            // `containment` block ever applies: a local block must not make
+            // wrapped launches (or the violation scan) behave differently
+            // before and after the first push.
+            let mut config = config.clone();
+            config.containment = None;
+            Ok(config)
+        }
         Err(error) => Err(error.into()),
     }
 }
@@ -821,6 +885,7 @@ mod tests {
             logout: None,
             usage: None,
             programs: None,
+            violation_ledger: None,
         };
         let cache = Arc::new(crate::llm_proxy::CredentialCache::default());
         let expiry = SystemTime::now()
@@ -1072,6 +1137,137 @@ llmGateway:
             gateway.authentication,
             Some(agentdesktop_core::config::LlmGatewayAuthentication::Oidc { .. })
         ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // PR 6 (AC-1, N1): applied-config wiring for the `containment` block.
+
+    fn temp_state_dir(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "agentdesktop-api-containment-{name}-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ))
+    }
+
+    #[test]
+    fn a_controller_delivered_containment_block_applies_over_a_local_file_without_one() {
+        let root = temp_state_dir("remote-wraps");
+        fs::create_dir_all(&root).unwrap();
+        let local = parse_daemon(
+            r#"
+controller:
+  address: https://controller.example.com
+"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("remote-config.yaml"),
+            r#"
+containment:
+  programs:
+    claudeCode:
+      executable: 'C:\Program Files\Anthropic\ClaudeCode\claude.exe'
+"#,
+        )
+        .unwrap();
+
+        let effective = load_effective_config(&local, &root).unwrap();
+
+        let claude = effective
+            .containment
+            .expect("the controller-delivered block applies")
+            .programs
+            .claude_code
+            .expect("claudeCode present");
+        assert_eq!(
+            claude.mode,
+            agentdesktop_core::config::ContainmentMode::Wrap
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_local_containment_block_is_ignored_once_a_controller_is_configured() {
+        let root = temp_state_dir("local-ignored");
+        fs::create_dir_all(&root).unwrap();
+        // N1: a controller-configured daemon's local `containment` block is
+        // never consulted; `load_effective_config` reads only the
+        // controller-delivered `remote-config.yaml`.
+        let local = parse_daemon(
+            r#"
+controller:
+  address: https://controller.example.com
+containment:
+  programs:
+    claudeCode:
+      executable: 'C:\should\not\apply\claude.exe'
+"#,
+        );
+        // The local file itself is accepted (containment is a valid
+        // top-level field); what matters is that it never reaches `effective`
+        // once a controller is configured and a remote config is applied.
+        let local = local.unwrap_or_else(|error| {
+            panic!("a local containment block parses before any controller applies: {error:#}")
+        });
+        fs::write(
+            root.join("remote-config.yaml"),
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
+    allowedClientIds: [claude-code]
+"#,
+        )
+        .unwrap();
+
+        let effective = load_effective_config(&local, &root).unwrap();
+
+        assert!(
+            effective.containment.is_none(),
+            "the local containment block is ignored once a controller applies a remote config"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Adversarial m4: with a controller configured, the local `containment`
+    /// block must not apply BEFORE the first `remote-config.yaml` exists
+    /// either; the other local fields keep backing the fallback as before.
+    #[test]
+    fn a_local_containment_block_does_not_apply_before_the_first_remote_config() {
+        let root = temp_state_dir("local-ignored-before-first-push");
+        fs::create_dir_all(&root).unwrap();
+        let local = parse_daemon(
+            r#"
+controller:
+  address: https://controller.example.com
+llmGateway:
+  url: http://127.0.0.1:4001
+  authentication:
+    type: oidc
+    issuer: https://login.example.com
+    clientId: local-dev
+containment:
+  programs:
+    claudeCode:
+      executable: 'C:\should\not\apply\claude.exe'
+"#,
+        )
+        .unwrap();
+        // No remote-config.yaml in `root`.
+
+        let effective = load_effective_config(&local, &root).unwrap();
+
+        assert!(
+            effective.containment.is_none(),
+            "no containment applies before the first controller push"
+        );
+        assert!(
+            effective.llm_gateway.is_some(),
+            "the pre-existing fallback for the other local fields is unchanged"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -42,6 +42,9 @@ pub(crate) mod profile;
 pub(crate) mod ssh;
 #[cfg(test)]
 mod tests;
+pub(crate) mod wrap;
+#[cfg(test)]
+mod wrap_tests;
 #[cfg(test)]
 mod writer_tests;
 
@@ -92,6 +95,9 @@ pub fn containment_info(
         managed_hooks_locked: false,
         managed_mcp_locked: false,
         managed_settings_error: None,
+        // Per-program posture is filled per request from the device-local
+        // violation ledger (`api::daemon_info`), not here.
+        programs: BTreeMap::new(),
     })
 }
 
@@ -119,11 +125,17 @@ pub fn peer_allowed(peer: Option<&PipePeer>, daemon_sid: Option<&str>) -> bool {
 #[cfg(windows)]
 pub use host::peer_identity;
 
-/// `D:P(A;;GA;;;SY)(A;;GA;;;<sid>)`: the user-mode pipe admits SYSTEM and the
-/// daemon's own user only.
+/// `O:<sid>D:P(A;;GA;;;SY)(A;;GA;;;<sid>)`: the user-mode pipe is owned by
+/// the daemon's own user and admits SYSTEM and that user only. The explicit
+/// owner is what the client's owner check reads.
 pub fn user_mode_pipe_sddl(sid: &str) -> String {
-    format!("D:P(A;;GA;;;SY)(A;;GA;;;{sid})")
+    format!("O:{sid}D:P(A;;GA;;;SY)(A;;GA;;;{sid})")
 }
+
+/// The system daemon's pipe: owned by SYSTEM (explicit, so the client's owner
+/// check does not depend on the token's default owner), full access for
+/// SYSTEM and Administrators, read/write for interactive users.
+pub const SYSTEM_PIPE_SDDL: &str = "O:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PathKind {
@@ -1273,14 +1285,9 @@ async fn launch(
         validate_cwd(&request.cwd, &host.cwd_context(), host.cwd_fs()).map_err(bad_request)?;
     check_denied_args(profile, &request.args).map_err(bad_request)?;
     let args = check_args(&request.args).map_err(bad_request)?;
-    let executable =
-        resolve_program_for(profile, &host.home(), &host.path_dirs(), host.program_fs())
-            .map_err(bad_request)?;
-    if win(&executable).contains(PATH_FORBIDDEN) {
-        return Err(bad_request(
-            "program path contains a character cmd.exe interprets".to_owned(),
-        ));
-    }
+    // The applied configuration is read BEFORE resolving: wrap mode
+    // resolves the configured executable, so a config read failure (500)
+    // precedes a native not-found (400).
     let effective =
         api::load_effective_config(&state.app.config, &state.app.state_dir).map_err(|error| {
             (
@@ -1288,6 +1295,39 @@ async fn launch(
                 format!("read applied configuration: {error:#}"),
             )
         })?;
+    // In wrap mode only `containment.programs.<p>.executable` is resolved;
+    // `~\.local\bin` and PATH are not searched. Native mode (the
+    // explicit per-program opt-out, or no policy entry) keeps the native
+    // resolution unchanged.
+    let wrap_entry = effective
+        .containment
+        .as_ref()
+        .and_then(|policy| (profile.containment_policy)(&policy.programs))
+        .filter(|entry| entry.mode == agentdesktop_core::config::ContainmentMode::Wrap);
+    let executable = match wrap_entry {
+        Some(entry) => {
+            // Validation requires the path in wrap mode; refuse defensively
+            // if an applied config ever lacks it.
+            let configured = entry.executable.clone().ok_or_else(|| {
+                (
+                    StatusCode::CONFLICT,
+                    format!(
+                        "containment.programs.{}.executable is required in wrap mode",
+                        profile.containment_field
+                    ),
+                )
+            })?;
+            wrap::resolve_managed_program(profile, &configured, &host.home(), host.program_fs())
+                .map_err(|message| (StatusCode::CONFLICT, message))?
+        }
+        None => resolve_program_for(profile, &host.home(), &host.path_dirs(), host.program_fs())
+            .map_err(bad_request)?,
+    };
+    if win(&executable).contains(PATH_FORBIDDEN) {
+        return Err(bad_request(
+            "program path contains a character cmd.exe interprets".to_owned(),
+        ));
+    }
     let conflict = |message: String| (StatusCode::CONFLICT, message);
     (profile.preconditions)(&effective, state.egress).map_err(conflict)?;
     let model = program_launch_checks(profile, effective, &host, &executable).await?;

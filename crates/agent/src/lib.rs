@@ -11,6 +11,10 @@ pub mod launch;
 mod llm_proxy;
 pub mod oidc;
 use subscription_oauth::openai as openai_oauth;
+// The production renderer is the PowerShell build script; the Rust
+// counterpart exists for the golden tests only.
+#[cfg(test)]
+mod packaging;
 mod program_choice;
 pub mod provider;
 pub mod reconcile;

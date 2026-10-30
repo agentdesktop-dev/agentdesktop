@@ -4,6 +4,17 @@
   "description": "Configuration for an Agentdesktop daemon.",
   "type": "object",
   "properties": {
+    "containment": {
+      "description": "Wrap-mode transparency policy. Top-level, not under `programs` or\n`daemon.containment`, because it is controller-delivered POLICY over\nwhich program executables launch wrapped, while `programs` holds\nper-program settings reconciliation and `daemon.containment` is the\ndevice-local startup configuration of the launch machinery.\nAccepted in controller-delivered\npolicy AND the local file, unlike `daemon.containment` (local-only,\nstartup settings, which must also be configured for the policy to\ntake effect). With a controller only the controller-delivered block\napplies (a local block is ignored); a change takes effect at the\nnext launch and the next violation-scan tick after it is applied.\nWithout a controller the local block is read at startup only; with\n`--once`/`--dry-run` the block is validated but no scan runs and no\nposture is reported.\n\nA daemon that predates this setting rejects a configuration that\ncontains it, so upgrade the controller and then every device before\nsetting it in controller-delivered policy. A program field added to\n`containment.programs` by a later release is the same break again:\nupgrade before naming it.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ContainmentPolicy"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "controller": {
       "description": "Controller connection settings. Omit this field to run without fleet management.",
       "anyOf": [
@@ -209,6 +220,83 @@
         }
       ]
     },
+    "ContainmentMode": {
+      "description": "Whether a profiled program launches into the box by default (`Wrap`) or\nkeeps its plain native launch (`Native`, the explicit per-program\nopt-out). A third value (`off` and anything else) is refused by serde.",
+      "type": "string",
+      "enum": [
+        "wrap",
+        "native"
+      ]
+    },
+    "ContainmentPolicy": {
+      "description": "Wrap-mode transparency policy, delivered either by the controller or the\nlocal file (unlike `daemon.containment`, which stays local-only). A\nprogram named here launches wrapped by default; see [`ContainmentMode`].",
+      "type": "object",
+      "properties": {
+        "programs": {
+          "$ref": "#/$defs/ContainmentProgramsConfig"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ContainmentProgramPolicy": {
+      "description": "Per-program wrap-mode policy.",
+      "type": "object",
+      "properties": {
+        "executable": {
+          "description": "Absolute Windows path to the program's managed executable (`X:\\...`\nor `\\\\server\\share\\...`, ending in `.exe`, not under `\\Users\\`).\nRequired in wrap mode; ignored (and may be omitted) in native mode.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "description": "Defaults to `wrap` when a policy names the program.",
+          "$ref": "#/$defs/ContainmentMode",
+          "default": "wrap"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ContainmentProgramsConfig": {
+      "description": "One typed field per profiled program; not a map, so a daemon that does\nnot know a program rejects the whole policy at parse time.",
+      "type": "object",
+      "properties": {
+        "claudeCode": {
+          "description": "Wrap-mode policy for Claude Code (launch program `claude-code`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContainmentProgramPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "copilot": {
+          "description": "Wrap-mode policy for GitHub Copilot CLI (launch program `copilot`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContainmentProgramPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "openCode": {
+          "description": "Wrap-mode policy for OpenCode (launch program `opencode`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContainmentProgramPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "ContainmentStartupConfig": {
       "description": "Sandboxed launch settings.",
       "type": "object",
@@ -355,7 +443,7 @@
           "default": {}
         },
         "containment": {
-          "description": "Sandboxed launch (`agentdesktop run`).",
+          "description": "Sandboxed launch (`agentdesktop run`): local startup settings only.\nThe controller-delivered wrap policy lives in the TOP-LEVEL\n`containment` block, not here.",
           "anyOf": [
             {
               "$ref": "#/$defs/ContainmentStartupConfig"

@@ -134,7 +134,17 @@ impl DaemonArgs {
         socket: PathBuf,
     ) -> anyhow::Result<ResolvedDaemonArgs> {
         let user = self.user || startup.user;
-        let socket = startup.socket.clone().unwrap_or(socket);
+        // A non-default socket only arrives here from `daemon --user --socket`
+        // (run_until_shutdown refuses it for the system daemon); the flag wins
+        // over `daemon.socket` so one shared, non-env-expanded config file can
+        // coexist with per-user pipe names from the task line (DV6-8). A
+        // `--socket` equal to the default is indistinguishable from no flag, so
+        // the config value wins then (harmless for per-user names; not fixed).
+        let socket = if socket != Path::new(DEFAULT_SOCKET_PATH) {
+            socket
+        } else {
+            startup.socket.clone().unwrap_or(socket)
+        };
         let llm_proxy_listen = startup.llm_proxy.listen;
         // The proxy issues the current user's gateway credential to whatever
         // connects on loopback; a system daemon has no single user to act for.
@@ -413,6 +423,13 @@ pub async fn run(args: DaemonArgs, socket: PathBuf) -> anyhow::Result<()> {
     .await
 }
 
+fn check_socket_flag(socket: &Path, user: bool) -> anyhow::Result<()> {
+    if socket != Path::new(DEFAULT_SOCKET_PATH) && !user {
+        bail!("set daemon.socket in the configuration file; --socket is for client commands");
+    }
+    Ok(())
+}
+
 /// Serves the local API until the `shutdown` future resolves or fails.
 pub async fn run_until_shutdown<F>(
     args: DaemonArgs,
@@ -422,9 +439,12 @@ pub async fn run_until_shutdown<F>(
 where
     F: Future<Output = anyhow::Result<()>> + Send,
 {
-    if socket != Path::new(DEFAULT_SOCKET_PATH) {
-        bail!("set daemon.socket in the configuration file; --socket is for client commands");
-    }
+    // `daemon --user` accepts `--socket`: the per-user pipe name on Windows
+    // comes from one shared scheduled-task line (`%USERNAME%` expanded at
+    // start), and config `daemon.socket` values are not env-expanded, so a
+    // shared config file cannot carry per-user names (DV6-8). The system
+    // daemon keeps refusing the flag.
+    check_socket_flag(&socket, args.user)?;
     let config_path = match args.config.clone() {
         Some(path) => path,
         None if args.user => std::env::var_os("XDG_CONFIG_HOME")
@@ -712,6 +732,38 @@ where
         ));
     }
     let has_controller = config.controller.is_some();
+    // The violation ledger exists only in a Windows user-mode daemon whose
+    // `daemon.containment` is present: the same daemons whose launch routes
+    // work. The system daemon receives the same policy and must not scan.
+    let violation_ledger = (cfg!(windows) && args.user && args.containment.is_some())
+        .then(|| std::sync::Arc::new(std::sync::Mutex::new(launch::wrap::ViolationLedger::new())));
+    // A device that receives a `containment` policy block without the local
+    // `daemon.containment` prerequisite reports no posture and refuses
+    // launches with the existing 409; warn so the gap is visible, at startup
+    // (the initial watch value) and on each applied configuration. Windows
+    // only: launches, the scan and the posture exist only there, so a macOS
+    // or Linux user daemon receiving the same fleet policy stays quiet.
+    if cfg!(windows) && args.user && args.containment.is_none() {
+        let mut configs = current_config.subscribe();
+        tokio::spawn(async move {
+            loop {
+                {
+                    let current = configs.borrow_and_update();
+                    if current
+                        .as_ref()
+                        .is_some_and(|current| current.config.containment.is_some())
+                    {
+                        tracing::warn!(
+                            "the applied configuration carries a containment policy, but daemon.containment is not configured on this device: launches are refused and no wrap posture is reported"
+                        );
+                    }
+                }
+                if configs.changed().await.is_err() {
+                    return;
+                }
+            }
+        });
+    }
     let state = api::AppState {
         config,
         daemon_info,
@@ -724,7 +776,32 @@ where
         logout,
         usage: usage_store,
         programs: Some(program_control),
+        violation_ledger: violation_ledger.clone(),
     };
+    // Native runs of a wrap-mode program's managed executable become posture
+    // violations: a report-only scan every VIOLATION_SCAN_INTERVAL, reading
+    // the applied configuration once per tick.
+    #[cfg(windows)]
+    if let Some(ledger) = violation_ledger {
+        let daemon_user_sid = daemon_sid
+            .clone()
+            .expect("a Windows user-mode daemon read its own SID above");
+        tokio::spawn(launch::wrap::scan_loop(
+            state.config.clone(),
+            state.state_dir.clone(),
+            daemon_user_sid,
+            ledger,
+            launch::wrap::native_process_snapshot,
+            || {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_secs())
+                    .unwrap_or(0)
+            },
+        ));
+    }
+    #[cfg(not(windows))]
+    drop(violation_ledger);
     // Sandbox sessions (`/sandbox` route): one registry shared by the proxy,
     // the local API that mints and revokes sessions, and the sweep.
     let sessions = llm_proxy::sessions::SessionRegistry::default();
@@ -1370,10 +1447,9 @@ async fn serve_named_pipe(
     // Full access for SYSTEM and Administrators, read/write for interactive
     // users: the system daemon serves every user of the device. A user-mode
     // daemon admits its own user only (`peer_check` is that user's SID).
-    const SYSTEM_PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)";
     let sddl = match &peer_check {
         Some(sid) => launch::user_mode_pipe_sddl(sid),
-        None => SYSTEM_PIPE_SDDL.to_owned(),
+        None => launch::SYSTEM_PIPE_SDDL.to_owned(),
     };
     let mut server = match first_instance {
         Some(s) => s,
@@ -1920,6 +1996,7 @@ programs:
             logout: None,
             usage: None,
             programs: None,
+            violation_ledger: None,
         });
 
         for (method, expected_status) in [("GET", "200 OK"), ("POST", "405 Method Not Allowed")] {
@@ -2059,6 +2136,7 @@ programs:
             logout: None,
             usage: store,
             programs: None,
+            violation_ledger: None,
         });
         let (mut client, server) = tokio::io::duplex(64 * 1024);
         let connection = tokio::spawn(serve_local_connection(server, app));
@@ -2145,6 +2223,7 @@ programs:
             logout: None,
             usage: None,
             programs: None,
+            violation_ledger: None,
         });
 
         for endpoint in ["/v1/health", "/v1/config", "/v1/daemon-info"] {
@@ -2498,6 +2577,79 @@ programs:
             Ok(_) => panic!("resolve succeeded unexpectedly"),
             Err(error) => error,
         }
+    }
+
+    #[test]
+    fn socket_flag_gate_decisions() {
+        let custom = Path::new(r"\\.\pipe\agentdesktop-user-alice");
+        let error = crate::daemon::check_socket_flag(custom, false).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "set daemon.socket in the configuration file; --socket is for client commands"
+        );
+        crate::daemon::check_socket_flag(custom, true).unwrap();
+        crate::daemon::check_socket_flag(Path::new(DEFAULT_SOCKET_PATH), false).unwrap();
+    }
+
+    #[test]
+    fn user_mode_socket_flag_overrides_the_config_socket() {
+        // DV6-8: the scheduled-task wrapper passes the per-user pipe name on
+        // the command line; it must win over a shared config's daemon.socket.
+        let flag = PathBuf::from(r"\\.\pipe\agentdesktop-user-alice");
+        let startup = config::DaemonStartupConfig {
+            socket: Some(PathBuf::from(r"\\.\pipe\agentdesktop-from-config")),
+            ..Default::default()
+        };
+        let resolved = daemon_args(true)
+            .resolve(startup, PathBuf::from("config.yaml"), flag.clone())
+            .unwrap();
+        assert_eq!(resolved.socket, flag);
+
+        // Without a config value the flag is used as given, not replaced by
+        // the user-mode default socket path.
+        let resolved = daemon_args(true)
+            .resolve(
+                config::DaemonStartupConfig::default(),
+                PathBuf::from("config.yaml"),
+                flag.clone(),
+            )
+            .unwrap();
+        assert_eq!(resolved.socket, flag);
+    }
+
+    #[test]
+    fn user_mode_without_the_flag_keeps_the_config_socket() {
+        let startup = config::DaemonStartupConfig {
+            socket: Some(PathBuf::from(r"\\.\pipe\agentdesktop-from-config")),
+            ..Default::default()
+        };
+        let resolved = daemon_args(true)
+            .resolve(
+                startup,
+                PathBuf::from("config.yaml"),
+                PathBuf::from(DEFAULT_SOCKET_PATH),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved.socket,
+            PathBuf::from(r"\\.\pipe\agentdesktop-from-config")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_system_daemon_still_refuses_a_socket_flag() {
+        // The refusal precedes config loading, so no config file is needed.
+        let error = super::run_until_shutdown(
+            daemon_args(false),
+            PathBuf::from(r"\\.\pipe\agentdesktop-user-alice"),
+            async { anyhow::Ok(()) },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "set daemon.socket in the configuration file; --socket is for client commands"
+        );
     }
 
     fn startup_with_containment() -> config::DaemonStartupConfig {

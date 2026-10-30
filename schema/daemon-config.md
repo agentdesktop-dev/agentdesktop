@@ -2,6 +2,17 @@
 
 |Field|Type|Description|
 |-|-|-|
+|`containment`|object|Wrap-mode transparency policy. Top-level, not under `programs` or<br>`daemon.containment`, because it is controller-delivered POLICY over<br>which program executables launch wrapped, while `programs` holds<br>per-program settings reconciliation and `daemon.containment` is the<br>device-local startup configuration of the launch machinery.<br>Accepted in controller-delivered<br>policy AND the local file, unlike `daemon.containment` (local-only,<br>startup settings, which must also be configured for the policy to<br>take effect). With a controller only the controller-delivered block<br>applies (a local block is ignored); a change takes effect at the<br>next launch and the next violation-scan tick after it is applied.<br>Without a controller the local block is read at startup only; with<br>`--once`/`--dry-run` the block is validated but no scan runs and no<br>posture is reported.<br><br>A daemon that predates this setting rejects a configuration that<br>contains it, so upgrade the controller and then every device before<br>setting it in controller-delivered policy. A program field added to<br>`containment.programs` by a later release is the same break again:<br>upgrade before naming it.|
+|`containment.programs`|object|One typed field per profiled program; not a map, so a daemon that does<br>not know a program rejects the whole policy at parse time.|
+|`containment.programs.claudeCode`|object|Wrap-mode policy for Claude Code (launch program `claude-code`).|
+|`containment.programs.claudeCode.executable`|string|Absolute Windows path to the program's managed executable (`X:\...`<br>or `\\server\share\...`, ending in `.exe`, not under `\Users\`).<br>Required in wrap mode; ignored (and may be omitted) in native mode.|
+|`containment.programs.claudeCode.mode`|enum|Defaults to `wrap` when a policy names the program.<br>Possible values: `wrap`, `native`.|
+|`containment.programs.copilot`|object|Wrap-mode policy for GitHub Copilot CLI (launch program `copilot`).|
+|`containment.programs.copilot.executable`|string|Absolute Windows path to the program's managed executable (`X:\...`<br>or `\\server\share\...`, ending in `.exe`, not under `\Users\`).<br>Required in wrap mode; ignored (and may be omitted) in native mode.|
+|`containment.programs.copilot.mode`|enum|Defaults to `wrap` when a policy names the program.<br>Possible values: `wrap`, `native`.|
+|`containment.programs.openCode`|object|Wrap-mode policy for OpenCode (launch program `opencode`).|
+|`containment.programs.openCode.executable`|string|Absolute Windows path to the program's managed executable (`X:\...`<br>or `\\server\share\...`, ending in `.exe`, not under `\Users\`).<br>Required in wrap mode; ignored (and may be omitted) in native mode.|
+|`containment.programs.openCode.mode`|enum|Defaults to `wrap` when a policy names the program.<br>Possible values: `wrap`, `native`.|
 |`controller`|object|Controller connection settings. Omit this field to run without fleet management.|
 |`controller.address`|string|HTTPS address of the controller's fleet API.|
 |`controller.caCertificatePath`|string|Path to a PEM-encoded CA certificate used to verify the controller.<br><br>Omit this field to use the operating system's trusted certificate roots.|
@@ -15,7 +26,7 @@
 |`daemon.claudeDesktop.credentialHelper`|string|Credential helper path.|
 |`daemon.codex`|object|Codex paths.|
 |`daemon.codex.config`|string|Configuration file.|
-|`daemon.containment`|object|Sandboxed launch (`agentdesktop run`).|
+|`daemon.containment`|object|Sandboxed launch (`agentdesktop run`): local startup settings only.<br>The controller-delivered wrap policy lives in the TOP-LEVEL<br>`containment` block, not here.|
 |`daemon.containment.egress`|enum|Outbound network for the sandboxed program: `deny` (default) or `allow`. With `deny` the box reaches only loopback and configured egress routes. Read at startup only (restart the daemon after changing it); ignored with `--once` and `--dry-run`.<br>Possible values: `allow`, `deny`.|
 |`daemon.containment.egressUpstream`|object|Central L7 egress endpoint (an agentgateway HTTPS listener whose<br>per-prefix routes are the central allowlist). When set, the relay sends<br>the box's git smart-HTTP requests to `https://<egress host>/<path>`<br>instead of directly to the remote. CONNECT is always refused, with or<br>without it. Read at startup only.|
 |`daemon.containment.egressUpstream.authentication`|object|Reserved for gateway-hop authentication, which is not available yet:<br>startup refuses a config that sets it (the relay sends only the git<br>credential in `Authorization`).|

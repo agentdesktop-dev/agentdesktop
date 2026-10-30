@@ -79,7 +79,31 @@ export interface DaemonInfo {
     managedHooksLocked?: boolean;
     managedMcpLocked?: boolean;
     managedSettingsError?: string;
+    /**
+     * Posture of each wrap-mode program the applied `containment` policy
+     * names, keyed by launch id (`claude-code`, `opencode`, `copilot`).
+     * Absent without a policy, off Windows, and outside a user-mode daemon.
+     */
+    programs?: Record<string, ProgramPosture>;
   };
+}
+
+/** Posture of one wrap-mode program, device-local. */
+export interface ProgramPosture {
+  mode: "wrap" | "native";
+  /** The configured `containment.programs.<p>.executable`. */
+  executable: string;
+  /**
+   * Every launcher payload file exists and the launcher directory appears in
+   * the machine PATH value; does not prove PATH order in a live session.
+   */
+  aliasesPresent: boolean;
+  /**
+   * Distinct native processes of the managed executable seen since daemon
+   * start; resets on daemon restart.
+   */
+  violations: number;
+  lastViolationUnixSeconds?: number;
 }
 
 export interface ConnectorRuntime {

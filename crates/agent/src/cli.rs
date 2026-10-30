@@ -1,15 +1,16 @@
 use std::{
     io::Read,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use agentdesktop_client as client;
 use agentdesktop_core::{
     config::DaemonConfig,
     model::{
-        Discovery, EnrollmentStatus, Health, Launch, LaunchRequest, LlmGatewayCredential,
-        LlmGatewayLoginStatus, ProgramChoice, ProgramManagement, SessionCreated, SessionInfo,
-        SessionRequest, TelemetryEventKind,
+        Discovery, EnrollmentStatus, Health, Launch, LaunchRequest, LaunchStatus,
+        LlmGatewayCredential, LlmGatewayLoginStatus, ProgramChoice, ProgramManagement,
+        SessionCreated, SessionInfo, SessionRequest, TelemetryEventKind,
     },
 };
 use anyhow::Context;
@@ -49,6 +50,11 @@ pub enum ClientCommand {
         /// Program to run: `claude-code` (alias `claude`), `opencode` or
         /// `copilot` (Copilot CLI).
         program: String,
+        /// Wait for the box to exit and return the executor's exit code,
+        /// which does not carry the program's own code. Ctrl+C stops waiting
+        /// only; the program keeps running.
+        #[arg(long)]
+        wait: bool,
         /// Arguments passed to the program.
         #[arg(last = true)]
         args: Vec<String>,
@@ -278,9 +284,20 @@ pub async fn run(command: ClientCommand, socket: PathBuf) -> anyhow::Result<()> 
             .await?;
             println!("{}", response.credential);
         }
-        ClientCommand::Run { program, args } => {
+        ClientCommand::Run {
+            program,
+            wait,
+            args,
+        } => {
             let cwd = std::env::current_dir().context("read the current directory")?;
             let request = run_request(&program, cwd, args);
+            if wait {
+                let (code, line) = run_and_wait(&socket, &request, RUN_WAIT_POLL).await;
+                if let Some(line) = line {
+                    eprintln!("{line}");
+                }
+                std::process::exit(code);
+            }
             match client::post_json_response::<_, Launch>(&socket, "/v1/launch", &request).await {
                 Ok(launch) => {
                     println!("{}", run_success_line(&launch));
@@ -400,6 +417,60 @@ pub fn run_error_message(error: &anyhow::Error) -> String {
         Some(status) => status.to_string(),
         None => format!("{error:#}"),
     }
+}
+
+/// Poll cadence of `agentdesktop run --wait`.
+pub(crate) const RUN_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Posts `request`, then polls `GET /v1/launches` every `poll` and
+/// selects the launch id client-side (the route has no filter) until it
+/// exits, is evicted, or the daemon becomes unreachable. Returns the exit
+/// code and, except on a clean exit, exactly one stderr line (newlines in the
+/// underlying error joined with `; `; only `--wait` joins, default `run`
+/// output is unchanged):
+/// - the launch reaches `exited`: no output, exit `exitCode`, or 1 when null;
+/// - the POST is refused (transport error, any non-2xx): exit 1, one line;
+/// - the launch id is absent from a later poll (evicted, or the daemon
+///   restarted): `"launch <id> is no longer known to the daemon"`, exit 1;
+/// - the daemon becomes unreachable while waiting: exit 1.
+pub(crate) async fn run_and_wait(
+    socket: &Path,
+    request: &LaunchRequest,
+    poll: Duration,
+) -> (i32, Option<String>) {
+    let launch = match client::post_json_response::<_, Launch>(socket, "/v1/launch", request).await
+    {
+        Ok(launch) => launch,
+        Err(error) => return (1, Some(one_line(&run_error_message(&error)))),
+    };
+    loop {
+        tokio::time::sleep(poll).await;
+        let launches: Vec<Launch> = match client::get(socket, "/v1/launches").await {
+            Ok(launches) => launches,
+            Err(error) => return (1, Some(one_line(&run_error_message(&error)))),
+        };
+        match launches.iter().find(|l| l.launch_id == launch.launch_id) {
+            Some(found) if found.status == LaunchStatus::Exited => {
+                return (found.exit_code.unwrap_or(1), None);
+            }
+            Some(_) => {}
+            None => {
+                return (
+                    1,
+                    Some(format!(
+                        "launch {} is no longer known to the daemon",
+                        launch.launch_id
+                    )),
+                );
+            }
+        }
+    }
+}
+
+/// Joins the lines of an error message into one, for `--wait`'s single
+/// stderr line.
+fn one_line(message: &str) -> String {
+    message.lines().collect::<Vec<_>>().join("; ")
 }
 
 async fn report_claude_pre_tool_use(
@@ -556,7 +627,7 @@ mod tests {
     #[test]
     fn run_passes_everything_after_the_separator_to_the_program() {
         let cli = parse(&["run", "claude", "--", "--socket", "x.sock", "--model", "x"]);
-        let ClientCommand::Run { program, args } = cli.command else {
+        let ClientCommand::Run { program, args, .. } = cli.command else {
             panic!("expected the run command");
         };
         assert_eq!(program, "claude");
@@ -639,6 +710,277 @@ mod tests {
             line,
             "launched 0123456789abcdef (container agentdesktop-0123456789abcdef)"
         );
+    }
+
+    // PR 6 (AC-4): `run --wait`.
+
+    #[test]
+    fn run_wait_is_off_by_default_and_parses_as_a_flag() {
+        let cli = parse(&["run", "claude"]);
+        let ClientCommand::Run { wait, .. } = cli.command else {
+            panic!("expected the run command");
+        };
+        assert!(!wait, "default run behaviour is unchanged without --wait");
+
+        let cli = parse(&["run", "claude", "--wait"]);
+        let ClientCommand::Run { wait, .. } = cli.command else {
+            panic!("expected the run command");
+        };
+        assert!(wait);
+    }
+
+    #[cfg(target_os = "linux")]
+    mod run_and_wait_tests {
+        use std::{
+            convert::Infallible,
+            path::PathBuf,
+            sync::{Arc, Mutex},
+            time::Duration,
+        };
+
+        use agentdesktop_core::model::{Launch, LaunchRequest, LaunchStatus};
+        use bytes::Bytes;
+        use http_body_util::{BodyExt, Full};
+        use hyper::{Request, Response, service::service_fn};
+        use hyper_util::rt::TokioIo;
+        use tokio::net::UnixListener;
+
+        use super::super::run_and_wait;
+
+        /// One canned HTTP response: status and body.
+        type Canned = (u16, String);
+
+        /// A daemon stand-in on a Unix socket. `/v1/launch` always answers
+        /// `post_launch`; `/v1/launches` answers the next entry of
+        /// `launches_sequence` (each GET consumes one; the last entry repeats).
+        struct FakeDaemon {
+            socket: PathBuf,
+            task: tokio::task::JoinHandle<()>,
+        }
+
+        impl Drop for FakeDaemon {
+            fn drop(&mut self) {
+                self.task.abort();
+                let _ = std::fs::remove_file(&self.socket);
+            }
+        }
+
+        fn fake_daemon(
+            name: &str,
+            post_launch: Canned,
+            launches_sequence: Vec<Canned>,
+        ) -> FakeDaemon {
+            let socket = std::env::temp_dir().join(format!(
+                "agentdesktop-cli-test-{}-{name}.sock",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&socket);
+            let listener = UnixListener::bind(&socket).unwrap();
+            let post_launch = Arc::new(post_launch);
+            let launches_sequence = Arc::new(Mutex::new(launches_sequence));
+            let task = tokio::spawn(async move {
+                loop {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let post_launch = post_launch.clone();
+                    let launches_sequence = launches_sequence.clone();
+                    tokio::spawn(async move {
+                        let _ = hyper::server::conn::http1::Builder::new()
+                            .serve_connection(
+                                TokioIo::new(stream),
+                                service_fn(move |request: Request<hyper::body::Incoming>| {
+                                    let post_launch = post_launch.clone();
+                                    let launches_sequence = launches_sequence.clone();
+                                    async move {
+                                        let path = request.uri().path().to_owned();
+                                        let _ = request.into_body().collect().await;
+                                        let (status, body) = if path == "/v1/launch" {
+                                            (*post_launch).clone()
+                                        } else {
+                                            let mut sequence = launches_sequence.lock().unwrap();
+                                            if sequence.len() > 1 {
+                                                sequence.remove(0)
+                                            } else {
+                                                sequence[0].clone()
+                                            }
+                                        };
+                                        Ok::<_, Infallible>(
+                                            Response::builder()
+                                                .status(status)
+                                                .body(Full::new(Bytes::from(body)))
+                                                .unwrap(),
+                                        )
+                                    }
+                                }),
+                            )
+                            .await;
+                    });
+                }
+            });
+            FakeDaemon { socket, task }
+        }
+
+        fn request() -> LaunchRequest {
+            LaunchRequest {
+                program: "claude-code".into(),
+                cwd: "/work/app".into(),
+                args: vec![],
+            }
+        }
+
+        fn launch_json(status: LaunchStatus, exit_code: Option<i32>) -> String {
+            serde_json::to_string(&Launch {
+                launch_id: "0123456789abcdef".into(),
+                program: "claude-code".into(),
+                cwd: "/work/app".into(),
+                container_id: "agentdesktop-0123456789abcdef".into(),
+                status,
+                exit_code,
+                started_at_unix_seconds: 1_700_000_000,
+                ended_at_unix_seconds: None,
+                integrity_drift: false,
+                managed_settings_source: None,
+                managed_hooks_locked: false,
+                managed_mcp_locked: false,
+                session_id: "test-session-id".into(),
+            })
+            .unwrap()
+        }
+
+        #[tokio::test]
+        async fn an_exited_launch_with_a_code_prints_nothing_and_returns_it() {
+            let running = launch_json(LaunchStatus::Running, None);
+            let exited = launch_json(LaunchStatus::Exited, Some(7));
+            let daemon = fake_daemon(
+                "exit-code",
+                (201, running.clone()),
+                vec![(200, format!("[{running}]")), (200, format!("[{exited}]"))],
+            );
+            let (code, line) =
+                run_and_wait(&daemon.socket, &request(), Duration::from_millis(1)).await;
+            assert_eq!(code, 7);
+            assert_eq!(line, None);
+        }
+
+        #[tokio::test]
+        async fn an_exited_launch_with_no_code_returns_one() {
+            let exited = launch_json(LaunchStatus::Exited, None);
+            let daemon = fake_daemon(
+                "exit-null",
+                (201, exited.clone()),
+                vec![(200, format!("[{exited}]"))],
+            );
+            let (code, line) =
+                run_and_wait(&daemon.socket, &request(), Duration::from_millis(1)).await;
+            assert_eq!(code, 1);
+            assert_eq!(line, None);
+        }
+
+        #[tokio::test]
+        async fn a_refused_post_answers_exit_1_with_one_stderr_line() {
+            for status in [400u16, 403, 404, 409, 500] {
+                let daemon = fake_daemon(
+                    &format!("post-refused-{status}"),
+                    (status, "refused".to_owned()),
+                    vec![(200, "[]".to_owned())],
+                );
+                let (code, line) =
+                    run_and_wait(&daemon.socket, &request(), Duration::from_millis(1)).await;
+                assert_eq!(code, 1, "status {status}");
+                let line = line.unwrap_or_else(|| panic!("status {status} needs a stderr line"));
+                assert_eq!(line.lines().count(), 1, "{line}");
+            }
+        }
+
+        /// AC-4: no failure mode of `run --wait` falls back to running a
+        /// native `claude.exe`. A sentinel executable sits beside the test's
+        /// socket; had anything executed it, the marker file would exist.
+        #[tokio::test]
+        async fn a_sentinel_claude_exe_beside_the_test_never_runs() {
+            use std::os::unix::fs::PermissionsExt;
+
+            let dir = tempfile::tempdir().unwrap();
+            let sentinel = dir.path().join("claude.exe");
+            let marker = dir.path().join("marker");
+            std::fs::write(
+                &sentinel,
+                format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+            )
+            .unwrap();
+            std::fs::set_permissions(&sentinel, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            // A refused POST and a vanished id both end the wait with exit 1;
+            // neither may start anything natively.
+            let daemon = fake_daemon(
+                "sentinel",
+                (409, "refused".to_owned()),
+                vec![(200, "[]".to_owned())],
+            );
+            let (code, line) =
+                run_and_wait(&daemon.socket, &request(), Duration::from_millis(1)).await;
+            assert_eq!(code, 1);
+            assert!(line.is_some());
+            assert!(!marker.exists(), "the sentinel claude.exe was executed");
+        }
+
+        #[tokio::test]
+        async fn an_id_that_vanishes_mid_wait_is_reported_and_exits_1() {
+            let running = launch_json(LaunchStatus::Running, None);
+            let daemon = fake_daemon(
+                "evicted",
+                (201, running.clone()),
+                vec![(200, format!("[{running}]")), (200, "[]".to_owned())],
+            );
+            let (code, line) =
+                run_and_wait(&daemon.socket, &request(), Duration::from_millis(1)).await;
+            assert_eq!(code, 1);
+            assert_eq!(
+                line,
+                Some("launch 0123456789abcdef is no longer known to the daemon".to_owned())
+            );
+        }
+
+        /// Serves exactly the POST `/v1/launch`, then stops: the socket file
+        /// is removed, so the first poll's connect fails (unreachable mid-wait).
+        #[tokio::test]
+        async fn an_unreachable_daemon_while_waiting_exits_1_with_one_line() {
+            let running = launch_json(LaunchStatus::Running, None);
+            let socket = std::env::temp_dir().join(format!(
+                "agentdesktop-cli-test-{}-midwait.sock",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&socket);
+            let listener = UnixListener::bind(&socket).unwrap();
+            let task = tokio::spawn({
+                let socket = socket.clone();
+                async move {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(
+                            TokioIo::new(stream),
+                            service_fn(move |request: Request<hyper::body::Incoming>| {
+                                let running = running.clone();
+                                async move {
+                                    let _ = request.into_body().collect().await;
+                                    Ok::<_, Infallible>(
+                                        Response::builder()
+                                            .status(201)
+                                            .body(Full::new(Bytes::from(running)))
+                                            .unwrap(),
+                                    )
+                                }
+                            }),
+                        )
+                        .await;
+                    drop(listener);
+                    let _ = std::fs::remove_file(&socket);
+                }
+            });
+            let (code, line) = run_and_wait(&socket, &request(), Duration::from_millis(1)).await;
+            task.abort();
+            assert_eq!(code, 1);
+            let line = line.unwrap();
+            assert_eq!(line.lines().count(), 1, "{line}");
+        }
     }
 
     fn session_command(args: &[&str]) -> Result<SessionCommand, clap::Error> {

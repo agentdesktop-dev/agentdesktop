@@ -135,6 +135,7 @@ fn containment_info_is_available_for_a_user_mode_windows_daemon_with_the_executo
             managed_hooks_locked: false,
             managed_mcp_locked: false,
             managed_settings_error: None,
+            programs: BTreeMap::new(),
         }
     );
 }
@@ -300,6 +301,39 @@ impl ProgramFs for RealFs {
 
     fn is_file(&self, path: &Path) -> bool {
         path.is_file()
+    }
+}
+
+/// The harness's program filesystem: the real filesystem, plus
+/// wrap-configured executables. The harness runs where the policy's
+/// `C:\...` path cannot exist as a real file, so a Windows-absolute path
+/// outside the harness root is answered as an existing file, canonical as
+/// given; native resolution still goes to the real filesystem. The wrap
+/// resolver's own refusals are covered by the pure tests in `wrap_tests.rs`.
+struct WrapAwareProgramFs {
+    /// The harness's canonical temp root; real files live under it.
+    root: PathBuf,
+}
+
+impl WrapAwareProgramFs {
+    fn pretend(&self, path: &Path) -> bool {
+        let text = path.to_string_lossy();
+        let windows_absolute =
+            text.starts_with(r"\\") || (text.len() > 2 && text.as_bytes()[1] == b':');
+        windows_absolute && !path.starts_with(&self.root)
+    }
+}
+
+impl ProgramFs for WrapAwareProgramFs {
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        if self.pretend(path) {
+            return Ok(path.to_owned());
+        }
+        std::fs::canonicalize(path)
+    }
+
+    fn is_file(&self, path: &Path) -> bool {
+        self.pretend(path) || path.is_file()
     }
 }
 
@@ -1157,6 +1191,54 @@ fn the_path_has_no_git_entry_without_git() {
     assert!(!readonly(&request).iter().any(|path| path.contains("Git")));
 }
 
+// PR 6 (AC-8b, AC-8d): plan_program's in-box PATH, pure.
+
+/// AC-8b: wrap mode resolves `containment.programs.<p>.executable` instead
+/// of `resolve_program_for`, but `plan_program` itself takes only the
+/// resolved `executable` and knows nothing about which resolver produced it.
+/// Holding the resolved directory fixed, the computed PATH must be identical
+/// however the executable was resolved.
+#[test]
+fn the_in_box_path_is_the_same_for_a_wrap_resolved_and_a_native_resolved_executable_in_the_same_directory()
+ {
+    let exe_dir = r"C:\Program Files\Anthropic\ClaudeCode";
+    let path_for = |executable: PathBuf| {
+        let request = request_json(&snapshot_existing(), &snapshot_directories(), |input| {
+            input.executable = executable;
+        });
+        env_map(&request)["PATH"].clone()
+    };
+    // Native resolution (`resolve_program_for`) would have found this exact
+    // file; wrap resolution (`resolve_managed_program`, D8) resolves the
+    // admin-installed path directly. Both land in the same directory here.
+    let native_like = path_for(PathBuf::from(format!(r"{exe_dir}\claude.exe")));
+    let wrap_like = path_for(PathBuf::from(format!(r"{exe_dir}\claude.exe")));
+    assert_eq!(native_like, wrap_like);
+    assert!(native_like.contains(exe_dir), "{native_like}");
+}
+
+/// AC-8d (v3.1, N7): the launcher directory the MSI prepends to the machine
+/// PATH is never added to the in-box PATH, under any input: a box must
+/// resolve `claude` to the program directory, never the launcher.
+#[test]
+fn the_in_box_path_never_contains_the_launcher_directory() {
+    // DV6-5: the packaged launcher directory lives under the product MSI's
+    // own install directory (Tauri productName "Agent Desktop").
+    const LAUNCHER_DIR: &str = r"C:\Program Files\Agent Desktop\launchers";
+    for tweak in [None, Some(r"C:\lab\ws pr1" as &str)] {
+        let request = request_json(&snapshot_existing(), &snapshot_directories(), |input| {
+            if let Some(cwd) = tweak {
+                input.cwd = PathBuf::from(cwd);
+            }
+        });
+        let path = env_map(&request)["PATH"].clone();
+        assert!(
+            !path.to_lowercase().contains(&LAUNCHER_DIR.to_lowercase()),
+            "{path}"
+        );
+    }
+}
+
 #[test]
 fn the_request_contains_no_percent_sign_and_no_forward_slash_in_any_path() {
     // Inputs with `/` in every position a path can come from.
@@ -1767,6 +1849,12 @@ struct FakeHost {
     managed_file_error: Option<&'static str>,
     /// `(host, line)` pairs `known_hosts_seed` answers from.
     known_hosts: Vec<(&'static str, &'static str)>,
+    /// Real filesystem plus wrap-configured Windows-absolute executables.
+    wrap_fs: WrapAwareProgramFs,
+    /// The daemon PATH directories native resolution searches (empty unless
+    /// the Setup asks for one; the wrap sentinel test plants a native
+    /// claude.exe there).
+    path_dirs: Vec<PathBuf>,
 }
 
 impl LaunchHost for FakeHost {
@@ -1789,7 +1877,7 @@ impl LaunchHost for FakeHost {
     }
 
     fn path_dirs(&self) -> Vec<PathBuf> {
-        Vec::new()
+        self.path_dirs.clone()
     }
 
     fn base_env(&self) -> BTreeMap<String, String> {
@@ -1811,7 +1899,7 @@ impl LaunchHost for FakeHost {
     }
 
     fn program_fs(&self) -> &dyn ProgramFs {
-        &RealFs
+        &self.wrap_fs
     }
 
     fn exists(&self, path: &Path) -> bool {
@@ -1936,6 +2024,30 @@ struct StubExecutor {
     dir_existed_at_kill: Arc<Mutex<Option<bool>>>,
     /// Called at the start of `spawn` if set.
     on_spawn: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// When true, `spawn` really executes the request's resolved program
+    /// where it exists on this host (the AC-4/AC-7 sentinel test), so a
+    /// resolver regression produces a running process, not just a string.
+    #[cfg(unix)]
+    run_resolved_program: AtomicBool,
+}
+
+/// The program of an MXC `commandLine` (the third quoted token: window
+/// title, cwd, program), with `win()`'s backslashes mapped back to this
+/// host's separators. Executes it when it exists here (the configured
+/// `C:\...` wrap path never does) and panics if that execution cannot start
+/// or fails: the sentinel assertions rely on execution really happening.
+#[cfg(unix)]
+fn run_command_line_program(command_line: &str) -> PathBuf {
+    let quoted: Vec<&str> = command_line.split('"').skip(1).step_by(2).collect();
+    assert!(quoted.len() >= 3, "unexpected commandLine: {command_line}");
+    let program = PathBuf::from(quoted[2].replace('\\', "/"));
+    if program.exists() {
+        let status = std::process::Command::new(&program)
+            .status()
+            .unwrap_or_else(|error| panic!("execute {}: {error}", program.display()));
+        assert!(status.success(), "{} failed", program.display());
+    }
+    program
 }
 
 impl StubExecutor {
@@ -2004,12 +2116,20 @@ impl Executor for StubExecutor {
         let launch_dir = request
             .parent()
             .expect("request.json is inside the launch directory");
+        let request_json = std::fs::read_to_string(request).ok();
+        #[cfg(unix)]
+        if self.run_resolved_program.load(Ordering::SeqCst) {
+            let value: serde_json::Value =
+                serde_json::from_str(request_json.as_deref().expect("request.json readable"))
+                    .expect("request.json parses");
+            run_command_line_program(value["process"]["commandLine"].as_str().unwrap());
+        }
         self.spawns.lock().unwrap().push(SpawnCall {
             launch_id: launch_id.to_owned(),
             executor: executor.to_owned(),
             request: request.to_owned(),
             log: log.to_owned(),
-            request_json: std::fs::read_to_string(request).ok(),
+            request_json,
             token: std::fs::read_to_string(launch_dir.join("credential").join("token")).ok(),
         });
         let text = self.log_text.lock().unwrap().clone();
@@ -2056,6 +2176,10 @@ struct Setup {
     client_exe_name: Option<&'static str>,
     /// PR 6a, G1: `daemon.claudeCode.config` set at startup.
     claude_settings_overridden: bool,
+    /// Creates one real directory under the harness root and serves it as a
+    /// daemon PATH directory (`FakeHost::path_dirs`); `Harness::path_dir`
+    /// then names it.
+    extra_path_dir: bool,
 }
 
 impl Default for Setup {
@@ -2082,6 +2206,7 @@ impl Default for Setup {
             known_hosts: Vec::new(),
             client_exe_name: None,
             claude_settings_overridden: false,
+            extra_path_dir: false,
         }
     }
 }
@@ -2098,6 +2223,9 @@ struct Harness {
     integrity_reads: IntegrityReads,
     #[allow(dead_code)]
     sessions: crate::llm_proxy::sessions::SessionRegistry,
+    /// The directory `Setup::extra_path_dir` created, `None` otherwise.
+    #[allow(dead_code)]
+    path_dir: Option<PathBuf>,
 }
 
 fn strip_verbatim(path: PathBuf) -> PathBuf {
@@ -2149,6 +2277,11 @@ impl Harness {
             std::fs::create_dir_all(&bin).unwrap();
             std::fs::write(bin.join("claude.exe"), b"MZ").unwrap();
         }
+        let path_dir = setup.extra_path_dir.then(|| {
+            let tools = root.join("tools");
+            std::fs::create_dir_all(&tools).unwrap();
+            tools
+        });
         if let Some(remote) = setup.remote_config {
             std::fs::write(state_dir.join("remote-config.yaml"), remote).unwrap();
         }
@@ -2172,6 +2305,8 @@ impl Harness {
             pid_as_dir: AtomicBool::new(false),
             dir_existed_at_kill: Arc::new(Mutex::new(None)),
             on_spawn: Mutex::new(None),
+            #[cfg(unix)]
+            run_resolved_program: AtomicBool::new(false),
         });
         let executor_path = client_exe_dir.join("wxc-exec.exe");
         let availability = match setup.availability {
@@ -2184,6 +2319,7 @@ impl Harness {
                 managed_hooks_locked: false,
                 managed_mcp_locked: false,
                 managed_settings_error: None,
+                programs: BTreeMap::new(),
             }),
             Availability::Unavailable(error) => Some(ContainmentInfo {
                 executor: executor_path.display().to_string(),
@@ -2194,6 +2330,7 @@ impl Harness {
                 managed_hooks_locked: false,
                 managed_mcp_locked: false,
                 managed_settings_error: None,
+                programs: BTreeMap::new(),
             }),
             Availability::Missing => None,
         };
@@ -2227,6 +2364,7 @@ impl Harness {
             usage: None,
             programs: None,
             intercept: None,
+            violation_ledger: None,
         };
         let integrity_reads: IntegrityReads = Arc::new(Mutex::new(Vec::new()));
         let state = LaunchState {
@@ -2246,6 +2384,8 @@ impl Harness {
                 managed_file: setup.managed_file,
                 managed_file_error: setup.managed_file_error,
                 known_hosts: setup.known_hosts,
+                wrap_fs: WrapAwareProgramFs { root: root.clone() },
+                path_dirs: path_dir.iter().cloned().collect(),
             }),
             registry: LaunchRegistry::new(),
             availability,
@@ -2278,6 +2418,7 @@ impl Harness {
             credentials,
             integrity_reads,
             sessions: setup.sessions,
+            path_dir,
         }
     }
 
@@ -2618,7 +2759,10 @@ async fn an_unreadable_applied_configuration_answers_500() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn the_program_is_resolved_before_the_configuration_is_read() {
+async fn the_configuration_is_read_before_the_program_is_resolved() {
+    // Wrap mode resolves the configured executable from the applied
+    // configuration, so the handler reads the configuration first and a
+    // config read failure (500) precedes a native not-found (400).
     let h = Harness::start(Setup {
         config: "controller:\n  address: https://controller.example.com\n",
         remote_config: Some("llmGateway: [this is not a gateway"),
@@ -2626,7 +2770,9 @@ async fn the_program_is_resolved_before_the_configuration_is_read() {
         ..Setup::default()
     })
     .await;
-    assert_eq!(h.launch(&h.body()).await.0, 400);
+    let (status, body) = h.launch(&h.body()).await;
+    assert_eq!(status, 500, "{body}");
+    assert!(body.starts_with("read applied configuration: "), "{body}");
 }
 
 // ------------------------------------------------------------ 409 preconditions
@@ -2767,6 +2913,128 @@ async fn the_handler_asks_for_an_interactive_credential_for_claude_code() {
     assert_eq!(
         h.credentials.calls(),
         vec![("claude-code".to_owned(), true)]
+    );
+}
+
+// PR 6 (AC-8a, D1, D8, N13): with a wrap entry, the LaunchRequest written
+// for the box carries the configured executable, not the native resolution.
+const WRAP_CLAUDE_CONFIG: &str = r#"
+llmGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: oidc
+    issuer: https://login.example.com
+    clientId: agentdesktop
+programs:
+  claudeCode: {}
+containment:
+  programs:
+    claudeCode:
+      executable: 'C:\Program Files\Anthropic\ClaudeCode\claude.exe'
+"#;
+
+#[tokio::test(start_paused = true)]
+async fn a_wrap_entry_launch_uses_the_configured_executable_not_the_native_resolution() {
+    let h = Harness::start(Setup {
+        config: WRAP_CLAUDE_CONFIG,
+        ..Setup::default()
+    })
+    .await;
+
+    let launched = h.launch_ok().await;
+
+    let spawns = h.executor.spawns();
+    let request: serde_json::Value =
+        serde_json::from_str(spawns[0].request_json.as_deref().unwrap()).unwrap();
+    let command_line = request["process"]["commandLine"].as_str().unwrap();
+    assert!(
+        command_line.contains(r"C:\Program Files\Anthropic\ClaudeCode\claude.exe"),
+        "wrap mode must launch the configured executable, not ~\\.local\\bin\\claude.exe: {command_line}"
+    );
+    assert!(!launched.launch_id.is_empty());
+}
+
+/// Proves the sentinel harness below can fail: `run_command_line_program`
+/// really executes a program that exists on this host, so a resolver
+/// regression that puts the sentinel into the command line leaves a marker.
+#[cfg(unix)]
+#[test]
+fn the_sentinel_harness_executor_really_executes_an_existing_program() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("ran");
+    let exe = dir.path().join("claude.exe");
+    std::fs::write(&exe, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let command_line = format!(
+        "cmd.exe /d /v:off /c start \"agentdesktop: claude\" /WAIT /D \"{}\" \"{}\"",
+        dir.path().display(),
+        exe.display().to_string().replace('/', "\\")
+    );
+    let program = run_command_line_program(&command_line);
+    assert_eq!(program, exe);
+    assert!(marker.exists(), "the program was not executed");
+}
+
+/// AC-4/AC-7 sentinel, falsifiable (fix round 2; adversarial m9 /
+/// conformance m4 said the previous sentinel could not fail): a native
+/// `claude.exe` sits exactly where a regressed wrap resolver would find it,
+/// in the fake home's `.local/bin` AND in a daemon PATH directory, and the
+/// harness executor really executes whatever program lands in the spawned
+/// request. In wrap mode only the configured `C:\...` executable (which
+/// does not exist on this host) may appear there, so the sentinel never
+/// runs and its marker never appears. Verified falsifiable by temporarily
+/// forcing the handler's native-resolution arm: the sentinel then resolves,
+/// runs, and this test fails first on the command-line assertion below (the
+/// marker assertion fails on its own once the earlier asserts are removed;
+/// that change is not committed).
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn a_wrap_launch_never_resolves_or_runs_the_sentinel_native_claude() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let h = Harness::start(Setup {
+        config: WRAP_CLAUDE_CONFIG,
+        claude_installed: false,
+        extra_path_dir: true,
+        ..Setup::default()
+    })
+    .await;
+    h.executor
+        .run_resolved_program
+        .store(true, Ordering::SeqCst);
+
+    let marker = h.home.join("sentinel-ran");
+    let bin = h.home.join(".local").join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for dir in [&bin, h.path_dir.as_ref().unwrap()] {
+        let sentinel = dir.join("claude.exe");
+        std::fs::write(
+            &sentinel,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&sentinel, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    h.launch_ok().await;
+
+    let spawns = h.executor.spawns();
+    assert_eq!(spawns.len(), 1);
+    let request: serde_json::Value =
+        serde_json::from_str(spawns[0].request_json.as_deref().unwrap()).unwrap();
+    let command_line = request["process"]["commandLine"].as_str().unwrap();
+    assert!(
+        command_line.contains(r"C:\Program Files\Anthropic\ClaudeCode\claude.exe"),
+        "{command_line}"
+    );
+    assert!(
+        !command_line.contains(".local") && !command_line.contains("tools"),
+        "the sentinel path leaked into the command line: {command_line}"
+    );
+    assert!(
+        !marker.exists(),
+        "the sentinel native claude.exe was resolved and executed"
     );
 }
 

@@ -54,6 +54,27 @@ export const containmentDaemonInfo: DaemonInfo = {
   },
 };
 
+export const wrapPostureDaemonInfo: DaemonInfo = {
+  ...standaloneDaemonInfo,
+  containment: {
+    executor: "C:\\Program Files\\mxc\\wxc-exec.exe",
+    engine: "mxc",
+    available: true,
+    managedSettingsSource: "file",
+    managedHooksLocked: true,
+    managedMcpLocked: true,
+    programs: {
+      "claude-code": {
+        mode: "wrap",
+        executable: "C:\\Program Files\\Anthropic\\ClaudeCode\\claude.exe",
+        aliasesPresent: true,
+        violations: 1,
+        lastViolationUnixSeconds: 1761731200,
+      },
+    },
+  },
+};
+
 export const usageReceiverOffDaemonInfo: DaemonInfo = {
   ...standaloneDaemonInfo,
   usageReceiver: {

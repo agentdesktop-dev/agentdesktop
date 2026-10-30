@@ -760,6 +760,32 @@ daemon:
     #   url: https://egress.example.com
 ```
 
+**Wrap mode (preview).** A top-level `containment` policy block
+(controller-delivered, or in the local file on controller-less devices)
+makes the boxed launch the default for a named program:
+
+```yaml
+containment:
+  programs:
+    claudeCode:
+      executable: 'C:\Program Files\Anthropic\ClaudeCode\claude.exe'
+```
+
+`mode` defaults to `wrap`; `mode: native` is the per-program opt-out. In wrap
+mode `agentdesktop run claude` launches only the configured executable
+(`~\.local\bin` and PATH are not searched), `agentdesktop run --wait` returns
+the launch's recorded exit code to the calling shell (the executor's code,
+not the program's own), and a Windows user-mode daemon reports per-program
+posture in its daemon-info under `containment.programs.<program>`: `mode`,
+`executable`, `aliasesPresent`, `violations` and `lastViolationUnixSeconds`
+(a report-only scan of native runs of the managed binary). A daemon that
+predates this setting rejects a configuration that contains it, so upgrade
+the controller and then every device before setting it in
+controller-delivered policy. The managed package that installs the vendor
+binary, the PATH-first `claude` launchers and the updater-off drop-in is
+built from the recipe in `scripts/windows-package/`; the deployment guide is
+[docs/windows-managed-package.md](docs/windows-managed-package.md).
+
 **Egress is denied by default.** A box has no direct outbound network unless
 `daemon.containment.egress: allow` is set; with `allow` the daemon logs
 `egress allow: the box has unrestricted outbound` at every launch. A config
@@ -1219,7 +1245,7 @@ Behaviour change for the user-mode daemon on Windows: its pipe now admits the
 owning user only (SYSTEM and that user's SID), no longer every interactive user.
 On a device that also runs the system service, set `daemon.socket` to a per-user
 pipe (for example `\\.\pipe\agentdesktop-<username>`) and pass it to `run` with
-`--socket` (or `AGENTDESKTOP_SOCKET` in the unified binary); this preview adds no
+`--socket` (or `AGENTDESKTOP_SOCKET` in the unified binary). A scheduled task can instead start the daemon with `daemon --user --socket <pipe>`, which takes precedence over `daemon.socket`; this preview adds no
 pipe discovery or Windows logon autostart.
 
 ### Sandbox route and per-session pairing

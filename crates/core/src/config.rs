@@ -28,6 +28,28 @@ pub struct DaemonConfig {
     /// Local execution sandbox required for managed developer tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<SandboxConfig>,
+    /// Wrap-mode transparency policy. Top-level, not under `programs` or
+    /// `daemon.containment`, because it is controller-delivered POLICY over
+    /// which program executables launch wrapped, while `programs` holds
+    /// per-program settings reconciliation and `daemon.containment` is the
+    /// device-local startup configuration of the launch machinery.
+    /// Accepted in controller-delivered
+    /// policy AND the local file, unlike `daemon.containment` (local-only,
+    /// startup settings, which must also be configured for the policy to
+    /// take effect). With a controller only the controller-delivered block
+    /// applies (a local block is ignored); a change takes effect at the
+    /// next launch and the next violation-scan tick after it is applied.
+    /// Without a controller the local block is read at startup only; with
+    /// `--once`/`--dry-run` the block is validated but no scan runs and no
+    /// posture is reported.
+    ///
+    /// A daemon that predates this setting rejects a configuration that
+    /// contains it, so upgrade the controller and then every device before
+    /// setting it in controller-delivered policy. A program field added to
+    /// `containment.programs` by a later release is the same break again:
+    /// upgrade before naming it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub containment: Option<ContainmentPolicy>,
     /// Telemetry collected from managed developer tools.
     #[serde(default, skip_serializing_if = "TelemetryConfig::is_empty")]
     pub telemetry: TelemetryConfig,
@@ -104,7 +126,9 @@ pub struct DaemonStartupConfig {
     /// Usage collection without a controller, from a gateway on this machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<UsageStartupConfig>,
-    /// Sandboxed launch (`agentdesktop run`).
+    /// Sandboxed launch (`agentdesktop run`): local startup settings only.
+    /// The controller-delivered wrap policy lives in the TOP-LEVEL
+    /// `containment` block, not here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub containment: Option<ContainmentStartupConfig>,
     /// Opt-in interval between periodic re-applies of the current
@@ -505,6 +529,7 @@ impl Default for DaemonConfig {
             controller: None,
             llm_gateway: None,
             sandbox: None,
+            containment: None,
             telemetry: TelemetryConfig::default(),
             programs: ProgramsConfig::default(),
             program_selection: ProgramSelectionConfig::default(),
@@ -644,6 +669,125 @@ impl ContainmentEngine {
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
+}
+
+/// Wrap-mode transparency policy, delivered either by the controller or the
+/// local file (unlike `daemon.containment`, which stays local-only). A
+/// program named here launches wrapped by default; see [`ContainmentMode`].
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContainmentPolicy {
+    #[serde(default, skip_serializing_if = "ContainmentProgramsConfig::is_empty")]
+    pub programs: ContainmentProgramsConfig,
+}
+
+/// One typed field per profiled program; not a map, so a daemon that does
+/// not know a program rejects the whole policy at parse time.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContainmentProgramsConfig {
+    /// Wrap-mode policy for Claude Code (launch program `claude-code`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_code: Option<ContainmentProgramPolicy>,
+    /// Wrap-mode policy for OpenCode (launch program `opencode`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_code: Option<ContainmentProgramPolicy>,
+    /// Wrap-mode policy for GitHub Copilot CLI (launch program `copilot`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copilot: Option<ContainmentProgramPolicy>,
+}
+
+impl ContainmentProgramsConfig {
+    fn is_empty(&self) -> bool {
+        self.claude_code.is_none() && self.open_code.is_none() && self.copilot.is_none()
+    }
+}
+
+/// Per-program wrap-mode policy.
+// `executable`'s string-level shape (absolute Windows path, `.exe`, no
+// forbidden character, no `\Users\` segment) is validated in
+// `validate_containment_policy` on every platform, because the controller
+// validates on Linux; the file-name-equals-profile and not-under-home checks
+// are the agent's.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContainmentProgramPolicy {
+    /// Defaults to `wrap` when a policy names the program.
+    #[serde(default)]
+    pub mode: ContainmentMode,
+    /// Absolute Windows path to the program's managed executable (`X:\...`
+    /// or `\\server\share\...`, ending in `.exe`, not under `\Users\`).
+    /// Required in wrap mode; ignored (and may be omitted) in native mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<PathBuf>,
+}
+
+/// Whether a profiled program launches into the box by default (`Wrap`) or
+/// keeps its plain native launch (`Native`, the explicit per-program
+/// opt-out). A third value (`off` and anything else) is refused by serde.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum ContainmentMode {
+    #[default]
+    Wrap,
+    Native,
+}
+
+/// String-level validation of a top-level `containment` block: run on every
+/// platform (the controller validates on Linux), because this knob is
+/// accepted in controller-delivered policy too.
+pub fn validate_containment_policy(policy: &ContainmentPolicy) -> Result<(), String> {
+    for (field, program) in [
+        ("claudeCode", &policy.programs.claude_code),
+        ("openCode", &policy.programs.open_code),
+        ("copilot", &policy.programs.copilot),
+    ] {
+        let Some(program) = program else { continue };
+        if program.mode != ContainmentMode::Wrap {
+            continue;
+        }
+        let path_field = format!("containment.programs.{field}.executable");
+        let Some(executable) = &program.executable else {
+            return Err(format!("{path_field} is required in wrap mode"));
+        };
+        let text = executable.to_string_lossy();
+        let bytes = text.as_bytes();
+        let drive_absolute = bytes.len() > 2
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && bytes[2] == b'\\';
+        let unc_absolute = text.starts_with("\\\\")
+            && text[2..]
+                .split('\\')
+                .filter(|part| !part.is_empty())
+                .count()
+                >= 3;
+        if !(drive_absolute || unc_absolute) {
+            return Err(format!(
+                "{path_field} must be an absolute Windows path (X:\\... or \\\\server\\share\\...)"
+            ));
+        }
+        let ends_in_exe = text
+            .rsplit('\\')
+            .next()
+            .is_some_and(|name| name.to_ascii_lowercase().ends_with(".exe"));
+        if !ends_in_exe {
+            return Err(format!("{path_field} must end in .exe"));
+        }
+        if text.contains(['"', '%', '!']) {
+            return Err(format!(
+                "{path_field} must not contain the characters \" % !"
+            ));
+        }
+        if text.to_ascii_lowercase().contains(r"\users\") {
+            return Err(format!("{path_field} must not be under \\Users\\"));
+        }
+    }
+    Ok(())
 }
 
 /// GitHub App user authorization for Copilot requests through the local proxy.
@@ -1797,6 +1941,7 @@ fn parse_local_daemon(contents: &str) -> anyhow::Result<DaemonConfig> {
     validate_daemon(
         config.llm_gateway.as_ref(),
         config.sandbox.as_ref(),
+        config.containment.as_ref(),
         &config.programs,
     )?;
     Ok(config)
@@ -1807,6 +1952,7 @@ impl DaemonConfig {
     pub fn is_empty(&self) -> bool {
         self.llm_gateway.is_none()
             && self.sandbox.is_none()
+            && self.containment.is_none()
             && self.telemetry.is_empty()
             && self.programs.is_empty()
     }
@@ -1815,8 +1961,12 @@ impl DaemonConfig {
 fn validate_daemon(
     llm_gateway: Option<&LlmGatewayConfig>,
     sandbox: Option<&SandboxConfig>,
+    containment: Option<&ContainmentPolicy>,
     programs: &ProgramsConfig,
 ) -> anyhow::Result<()> {
+    if let Some(containment) = containment {
+        validate_containment_policy(containment).map_err(anyhow::Error::msg)?;
+    }
     if sandbox.is_some() {
         if programs.claude_desktop.is_some() {
             anyhow::bail!("sandbox is not supported for Claude Desktop");
@@ -3337,6 +3487,181 @@ programs:
             json.get("engine").is_none(),
             "default engine is not serialized"
         );
+    }
+
+    // PR 6 (AC-1): the top-level `containment` block (D1), accepted in both
+    // the local file and controller-delivered policy, unlike
+    // `daemon.containment`.
+
+    const WRAP_CLAUDE_YAML: &str = "containment:\n  programs:\n    claudeCode:\n      executable: 'C:\\Program Files\\Anthropic\\ClaudeCode\\claude.exe'\n";
+
+    #[test]
+    fn containment_program_without_mode_defaults_to_wrap() {
+        let config = super::parse_local_daemon(WRAP_CLAUDE_YAML).expect("wrap by default parses");
+        let claude = config
+            .containment
+            .expect("block present")
+            .programs
+            .claude_code
+            .expect("claudeCode present");
+        assert_eq!(claude.mode, super::ContainmentMode::Wrap);
+    }
+
+    #[test]
+    fn containment_mode_off_is_refused_naming_the_field() {
+        let yaml = "containment:\n  programs:\n    claudeCode:\n      mode: off\n      executable: 'C:\\Program Files\\Anthropic\\ClaudeCode\\claude.exe'\n";
+        let error = super::parse_local_daemon(yaml).unwrap_err();
+        let chain = format!("{error:#}");
+        assert!(
+            chain.contains("containment.programs.claudeCode.mode"),
+            "{chain}"
+        );
+    }
+
+    #[test]
+    fn containment_mode_third_value_is_refused() {
+        let yaml = "containment:\n  programs:\n    claudeCode:\n      mode: bogus\n      executable: 'C:\\Program Files\\Anthropic\\ClaudeCode\\claude.exe'\n";
+        assert!(super::parse_local_daemon(yaml).is_err());
+    }
+
+    #[test]
+    fn containment_native_mode_does_not_require_executable() {
+        let config = super::parse_local_daemon(
+            "containment:\n  programs:\n    claudeCode:\n      mode: native\n",
+        )
+        .expect("native mode needs no executable");
+        assert_eq!(
+            config
+                .containment
+                .unwrap()
+                .programs
+                .claude_code
+                .unwrap()
+                .mode,
+            super::ContainmentMode::Native
+        );
+    }
+
+    #[test]
+    fn containment_wrap_without_executable_is_refused_naming_the_field() {
+        let error = super::parse_local_daemon("containment:\n  programs:\n    claudeCode: {}\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("containment.programs.claudeCode.executable"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn containment_wrap_relative_path_is_refused() {
+        let yaml = "containment:\n  programs:\n    claudeCode:\n      executable: claude.exe\n";
+        let error = super::parse_local_daemon(yaml).unwrap_err().to_string();
+        assert!(
+            error.contains("containment.programs.claudeCode.executable"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn containment_wrap_forbidden_character_is_refused() {
+        for executable in [
+            r#"C:\Program Files\Anthropic\ClaudeCode\"claude.exe"#,
+            r"C:\Program Files\Anthropic\ClaudeCode\%claude.exe",
+            r"C:\Program Files\Anthropic\ClaudeCode\!claude.exe",
+        ] {
+            let yaml = format!(
+                "containment:\n  programs:\n    openCode:\n      executable: '{}'\n",
+                executable.replace('\'', "''")
+            );
+            let error = super::parse_local_daemon(&yaml).unwrap_err().to_string();
+            assert!(
+                error.contains("containment.programs.openCode.executable"),
+                "{executable}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn containment_wrap_users_path_is_refused_case_insensitively() {
+        for path in [
+            r"C:\Users\alice\.local\bin\claude.exe",
+            r"C:\USERS\alice\.local\bin\claude.exe",
+        ] {
+            let yaml =
+                format!("containment:\n  programs:\n    claudeCode:\n      executable: '{path}'\n");
+            let error = super::parse_local_daemon(&yaml).unwrap_err().to_string();
+            assert!(
+                error.contains("containment.programs.claudeCode.executable"),
+                "{path}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn containment_wrap_unc_path_ending_in_exe_case_insensitively_is_accepted() {
+        let yaml = r"containment:
+  programs:
+    copilot:
+      executable: '\\fileserver\share\Copilot.EXE'
+";
+        super::parse_local_daemon(yaml).expect("UNC path ending in .EXE is accepted");
+    }
+
+    #[test]
+    fn containment_block_runs_the_same_validation_through_parse_daemon() {
+        // N3: the controller validates on Linux; the string rules are not
+        // windows()-gated, unlike daemon.containment's path syntax.
+        let error = super::parse_daemon("containment:\n  programs:\n    claudeCode: {}\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("containment.programs.claudeCode.executable"));
+    }
+
+    #[test]
+    fn containment_round_trips_through_yaml() {
+        let config = super::parse_local_daemon(WRAP_CLAUDE_YAML).unwrap();
+        let rendered = crate::serdes::yamlviajson::to_string(&config).unwrap();
+        let reparsed = super::parse_local_daemon(&rendered).unwrap();
+        assert_eq!(
+            reparsed.containment.unwrap().programs.claude_code,
+            config.containment.unwrap().programs.claude_code
+        );
+    }
+
+    #[test]
+    fn daemon_config_without_containment_round_trips_unchanged() {
+        let yaml = "inventoryInterval: 15m\n";
+        let config = super::parse_local_daemon(yaml).unwrap();
+        assert!(config.containment.is_none());
+        let rendered = crate::serdes::yamlviajson::to_string(&config).unwrap();
+        assert!(
+            !rendered.contains("containment"),
+            "unset containment is not serialized: {rendered}"
+        );
+    }
+
+    #[test]
+    fn containment_counts_toward_daemon_config_is_empty() {
+        let config = super::parse_local_daemon(WRAP_CLAUDE_YAML).unwrap();
+        assert!(
+            !config.is_empty(),
+            "a config with only a containment block is not empty"
+        );
+    }
+
+    #[test]
+    fn containment_deny_unknown_fields_on_every_new_struct() {
+        for yaml in [
+            "containment:\n  bogus: true\n",
+            "containment:\n  programs:\n    bogus: true\n",
+            "containment:\n  programs:\n    claudeCode:\n      bogus: true\n",
+        ] {
+            assert!(
+                super::parse_local_daemon(yaml).is_err(),
+                "{yaml} is rejected"
+            );
+        }
     }
 
     /// DV-8: with egressUpstream set, git.allow + git.pushAllow must name a
