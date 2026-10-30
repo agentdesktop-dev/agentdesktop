@@ -46,6 +46,9 @@ export function DeviceTable({
                 <div className="device-cell">
                   <div>
                     <strong>{device.hostname || "Unnamed device"}</strong>
+                    {device.enrolled_by_name && (
+                      <span title="Enrolled by">{device.enrolled_by_name}</span>
+                    )}
                     <span>{device.id.slice(0, 8)}</span>
                   </div>
                 </div>

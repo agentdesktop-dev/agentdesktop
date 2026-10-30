@@ -60,6 +60,10 @@ export function DeviceView({
     (total, runtime) => total + runtime.models.length,
     0,
   );
+  // Shown only when the identity provider gave a readable name.
+  const enrolledBy: Array<[string, string]> = device.enrolled_by_name
+    ? [["Enrolled by", device.enrolled_by_name]]
+    : [];
   return (
     <div className="stack">
       <Link href="/devices" className="back-link">
@@ -87,6 +91,7 @@ export function DeviceView({
               ["Agent version", device.agent_version || "Unknown"],
               ["Last seen", formatTime(device.last_seen_at)],
               ["Enrolled", formatDate(device.created_at)],
+              ...enrolledBy,
             ]}
           />
         </section>

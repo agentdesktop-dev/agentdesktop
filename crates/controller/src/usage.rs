@@ -3,7 +3,7 @@
 use agentdesktop_usage::Labels;
 use anyhow::Context;
 
-use crate::database::Database;
+use crate::database::{Database, readable_name};
 
 /// Labels from enrolled devices: hostnames, and the email (or another
 /// readable IdP claim) of the user who enrolled each device.
@@ -24,19 +24,6 @@ pub async fn labels(database: &Database) -> anyhow::Result<Labels> {
         }
     }
     Ok(labels)
-}
-
-fn readable_name(idp_claims: &str) -> Option<String> {
-    let claims: serde_json::Value = serde_json::from_str(idp_claims).ok()?;
-    ["email", "preferred_username", "name"]
-        .into_iter()
-        .find_map(|claim| {
-            claims
-                .get(claim)?
-                .as_str()
-                .filter(|value| !value.is_empty())
-        })
-        .map(str::to_owned)
 }
 
 #[cfg(test)]

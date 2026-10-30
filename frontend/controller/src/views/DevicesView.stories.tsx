@@ -36,6 +36,33 @@ export const SearchesDevices: Story = {
   },
 };
 
+export const ShowsWhoEnrolledEachDevice: Story = {
+  play: async ({ canvas }) => {
+    // Two Macs can be told apart even when the OS name is generic.
+    await expect(canvas.getByText("Mac.lan")).toBeVisible();
+    await expect(canvas.getByText("sam.okafor@example.com")).toBeVisible();
+    // The fixture Mac and the failed-config device share an owner, so expect both rows.
+    await expect(canvas.getAllByText("developer@example.com")).toHaveLength(2);
+  },
+};
+
+export const SearchesByOwner: Story = {
+  play: async ({ canvas }) => {
+    await userEvent.type(
+      canvas.getByRole("textbox", { name: "Search devices" }),
+      "okafor",
+    );
+    await expect(canvas.getByText("Mac.lan")).toBeVisible();
+    await expect(canvas.queryByText("build-linux")).not.toBeInTheDocument();
+  },
+};
+
+export const DeviceWithoutAReadableOwnerStillRenders: Story = {
+  play: async ({ canvas }) => {
+    await expect(canvas.getByText("build-linux")).toBeVisible();
+  },
+};
+
 export const NoMatches: Story = {
   play: async ({ canvas }) => {
     await userEvent.type(
