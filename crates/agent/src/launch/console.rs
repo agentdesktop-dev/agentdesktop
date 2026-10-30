@@ -65,9 +65,9 @@ mod imp {
             },
             RemoteDesktop::ProcessIdToSessionId,
             Threading::{
-                CreateProcessW, DETACHED_PROCESS, GetExitCodeProcess, INFINITE, OpenProcess,
-                OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, STARTF_USESTDHANDLES,
-                STARTUPINFOW, WaitForSingleObject,
+                CREATE_SUSPENDED, CreateProcessW, DETACHED_PROCESS, GetExitCodeProcess, INFINITE,
+                OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, ResumeThread,
+                STARTF_USESTDHANDLES, STARTUPINFOW, TerminateProcess, WaitForSingleObject,
             },
         },
     };
@@ -242,6 +242,12 @@ mod imp {
             );
             return Err(error).with_context(|| format!("attach to process {client_pid}'s console"));
         }
+        // FreeConsole and AttachConsole reset the process's console-control
+        // handler table, so re-install the ignore-Ctrl+C handler now that we
+        // hold the client's console; otherwise a CTRL_C_EVENT would reach the
+        // default handler and the kill-on-close job would take the box down
+        // instead of letting the program handle the interrupt (Copilot review).
+        ignore_ctrl_c();
         let attributes = SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: std::ptr::null_mut(),
@@ -287,13 +293,26 @@ mod imp {
         let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         // SAFETY: the info struct is valid for the documented size.
-        unsafe {
+        let configured = unsafe {
             SetInformationJobObject(
                 job,
                 JobObjectExtendedLimitInformation,
                 (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast::<c_void>(),
                 std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            );
+            )
+        };
+        if configured == 0 {
+            // Fail closed: without kill-on-close the job cannot clean up the box
+            // (Copilot review: a silently unconfigured job disables cleanup).
+            let error = io::Error::last_os_error();
+            append_log(log, &format!("configure the launch job: {error}"));
+            // SAFETY: valid handles owned here.
+            unsafe {
+                CloseHandle(job);
+                CloseHandle(input);
+                CloseHandle(output);
+            }
+            return Err(error).context("configure the launch job");
         }
         let mut command_line: Vec<u16> =
             format!("\"{}\" \"{}\"", executor.display(), request.display())
@@ -318,7 +337,7 @@ mod imp {
                 std::ptr::null(),
                 std::ptr::null(),
                 1,
-                0,
+                CREATE_SUSPENDED,
                 std::ptr::null(),
                 std::ptr::null(),
                 &startup,
@@ -330,9 +349,31 @@ mod imp {
             append_log(log, &format!("start the executor: {error}"));
             return Err(error).context("start the executor");
         }
-        // SAFETY: the process handle is valid until closed below.
+        // Assign to the job before resuming, so no descendant can be created in
+        // the window between spawn and assignment and survive the kill-on-close
+        // cleanup (Copilot review). The executor was created suspended.
+        // SAFETY: the process/thread handles are valid until closed below.
+        let assigned = unsafe { AssignProcessToJobObject(job, process.hProcess) };
+        if assigned == 0 {
+            let error = io::Error::last_os_error();
+            append_log(
+                log,
+                &format!("assign the executor to the launch job: {error}"),
+            );
+            // SAFETY: valid handles owned here; terminate the still-suspended executor.
+            unsafe {
+                TerminateProcess(process.hProcess, 1);
+                CloseHandle(process.hProcess);
+                CloseHandle(process.hThread);
+                CloseHandle(input);
+                CloseHandle(output);
+                CloseHandle(job);
+            }
+            return Err(error).context("assign the executor to the launch job");
+        }
+        // SAFETY: valid thread/process handles; resume now that the job is in place.
         unsafe {
-            AssignProcessToJobObject(job, process.hProcess);
+            ResumeThread(process.hThread);
             WaitForSingleObject(process.hProcess, INFINITE);
         }
         let mut code = 1u32;
