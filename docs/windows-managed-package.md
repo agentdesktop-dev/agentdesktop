@@ -308,6 +308,13 @@ the box opens in its own console window. Notes:
   handles it as when run directly) and the launcher keeps waiting. In the
   windowed fallback it stops the waiting launcher only; the boxed program
   keeps running in its window.
+- **Window close**: closing the terminal window (same-terminal case) or the
+  box's own window (windowed fallback) ends the boxed program, the helper and
+  the executor; the daemon records the launch as exited and revokes its relay
+  session within a few seconds. In the same-terminal case the recorded exit
+  code is `-1073741510` (`0xC000013A`, the console-close termination), so a
+  script must not read it as a program failure. Measured with the classic
+  console host and Windows Terminal (no confirmation dialog for a single tab).
 - **No wait timeout**: `--wait` polls until the launch ends and has no
   timeout of its own; a calling script that must bound the wait needs its
   own. The daemon's launch list is bounded and running launches are never

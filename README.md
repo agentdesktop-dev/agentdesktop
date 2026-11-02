@@ -1275,6 +1275,11 @@ its own console window, Ctrl+C stops only the waiting client, and the
 recorded exit code is the executor's, not the program's, so a script in that
 case must not branch on it to detect program failures. Both forms report the
 same launch record and session; nothing changes in what the box may see.
+Closing the window (either form) ends the box: the console close reaches the
+boxed program, the helper and the executor, the launch is recorded as exited
+and its relay session is revoked, within a few seconds. In the attached form
+the recorded exit code is then `-1073741510` (`0xC000013A`, the console-close
+termination), not a program result.
 
 `agentdesktop daemon --user --hidden` re-executes the daemon without a console
 window (no window, no minimized state, no taskbar entry) and detaches it from
