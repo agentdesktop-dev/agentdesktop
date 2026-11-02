@@ -17,7 +17,7 @@ use agentdesktop_agent::{
 };
 use agentdesktop_client as client;
 use agentdesktop_core::{
-    DEFAULT_SOCKET_PATH, VERSION,
+    DEFAULT_SOCKET_PATH, VERSION, client_socket_path,
     config::DaemonConfig,
     model::{
         ControllerConnectionStatus, DaemonInfo, DeviceUsage, Discovery, EnrollmentStatus, Health,
@@ -173,35 +173,6 @@ struct ManagedDeviceSnapshot {
     organization_name: Option<String>,
     enrollment: &'static str,
     detail: Option<String>,
-}
-
-fn socket_path() -> PathBuf {
-    env::var_os("AGENTDESKTOP_SOCKET")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let system = PathBuf::from(DEFAULT_SOCKET_PATH);
-            if system.exists() {
-                return system;
-            }
-            user_socket_path().unwrap_or(system)
-        })
-}
-
-#[cfg(unix)]
-fn user_socket_path() -> Option<PathBuf> {
-    if let Some(runtime) = env::var_os("XDG_RUNTIME_DIR") {
-        return Some(PathBuf::from(runtime).join("agentdesktop.sock"));
-    }
-    let home = env::var_os("HOME").map(PathBuf::from)?;
-    let state = env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".local/state"));
-    Some(state.join("agentdesktop/agentdesktop.sock"))
-}
-
-#[cfg(windows)]
-fn user_socket_path() -> Option<PathBuf> {
-    None
 }
 
 #[cfg(target_os = "macos")]
@@ -367,7 +338,7 @@ async fn ensure_desktop_daemon() -> anyhow::Result<()> {
         remove_user_launch_agent(&paths).await;
         return Ok(());
     }
-    if client::get::<Health>(&socket_path(), "/v1/health")
+    if client::get::<Health>(&client_socket_path(), "/v1/health")
         .await
         .is_ok()
     {
@@ -426,19 +397,19 @@ fn load_settings(app: &AppHandle) -> Result<Settings, String> {
 }
 
 async fn daemon_config() -> Result<DaemonConfig, String> {
-    client::get(&socket_path(), "/v1/config")
+    client::get(&client_socket_path(), "/v1/config")
         .await
         .map_err(|error| format!("{error:#}"))
 }
 
 async fn enrollment_status() -> Result<EnrollmentStatus, String> {
-    client::get(&socket_path(), "/v1/enrollment")
+    client::get(&client_socket_path(), "/v1/enrollment")
         .await
         .map_err(|error| format!("{error:#}"))
 }
 
 async fn read_connector_status() -> ConnectorSnapshot {
-    let endpoint = socket_path();
+    let endpoint = client_socket_path();
     read_connector_status_at(&endpoint).await
 }
 
@@ -589,7 +560,7 @@ async fn get_managed_device_status() -> Result<ManagedDeviceSnapshot, String> {
 
 #[tauri::command]
 async fn get_discovery() -> Result<Discovery, String> {
-    client::get(&socket_path(), "/v1/discovery")
+    client::get(&client_socket_path(), "/v1/discovery")
         .await
         .map_err(|error| format!("{error:#}"))
 }
@@ -600,7 +571,7 @@ async fn get_device_usage(range: String, utc_offset_minutes: i32) -> Result<Devi
         return Err(format!("unknown usage range {range}"));
     }
     client::get(
-        &socket_path(),
+        &client_socket_path(),
         &format!("/v1/usage?range={range}&utcOffsetMinutes={utc_offset_minutes}"),
     )
     .await
@@ -609,21 +580,21 @@ async fn get_device_usage(range: String, utc_offset_minutes: i32) -> Result<Devi
 
 #[tauri::command]
 async fn logout_managed_device() -> Result<(), String> {
-    client::post_json(&socket_path(), "/v1/logout", &())
+    client::post_json(&client_socket_path(), "/v1/logout", &())
         .await
         .map_err(|error| format!("{error:#}"))
 }
 
 #[tauri::command]
 async fn get_program_management() -> Result<ProgramManagement, String> {
-    client::get(&socket_path(), "/v1/programs")
+    client::get(&client_socket_path(), "/v1/programs")
         .await
         .map_err(|error| format!("{error:#}"))
 }
 
 #[tauri::command]
 async fn set_program_choice(choice: ProgramChoice) -> Result<ProgramManagement, String> {
-    client::post_json_decode(&socket_path(), "/v1/programs/choice", &choice)
+    client::post_json_decode(&client_socket_path(), "/v1/programs/choice", &choice)
         .await
         .map_err(|error| format!("{error:#}"))
 }
@@ -764,7 +735,7 @@ fn run_command(command: Command, socket: Option<PathBuf>) -> anyhow::Result<()> 
                     daemon::run(*args, socket).await
                 }
                 Command::Client(command) => {
-                    let socket = socket.unwrap_or_else(socket_path);
+                    let socket = socket.unwrap_or_else(client_socket_path);
                     cli::run(command, socket).await
                 }
             }

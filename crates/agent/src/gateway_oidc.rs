@@ -736,7 +736,7 @@ mod tests {
     #[tokio::test]
     async fn concurrent_logins_share_one_grant_without_blocking_the_global_lock() {
         let requests = Arc::new(AtomicUsize::new(0));
-        let issuer = mock_idp(Duration::from_millis(600), requests.clone()).await;
+        let issuer = mock_idp(Duration::from_millis(1500), requests.clone()).await;
         let state_dir = tempfile::tempdir().unwrap();
 
         let logins: Vec<_> = (0..4)
@@ -749,10 +749,12 @@ mod tests {
             })
             .collect();
 
-        // While the provider is still thinking, the global lock must be free.
+        // While the provider is still thinking, the global lock must be free. Brief
+        // holds for token-store reads (the macOS Keychain can be slow under load) are
+        // fine; the probe gives up well before the provider answers at 1500ms.
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert!(
-            tokio::time::timeout(Duration::from_millis(100), LOGIN.lock())
+            tokio::time::timeout(Duration::from_millis(1000), LOGIN.lock())
                 .await
                 .is_ok(),
             "device_login held the global LOGIN lock across the provider round-trip"

@@ -2,11 +2,13 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -108,6 +110,7 @@ const packagePath = path.join(
 const stagingDirectory = mkdtempSync(path.join(tmpdir(), "agentdesktop-pkg-"));
 const payloadRoot = path.join(stagingDirectory, "root");
 const installerScriptsDirectory = path.join(stagingDirectory, "scripts");
+const installerResourcesDirectory = path.join(stagingDirectory, "resources");
 
 try {
   const applicationsDirectory = path.join(payloadRoot, "Applications");
@@ -158,17 +161,45 @@ try {
     "--ownership",
     "recommended",
   ];
+  const componentPath = path.join(
+    stagingDirectory,
+    "agentdesktop-component.pkg",
+  );
+  packageArguments.push(componentPath);
+  run("/usr/bin/pkgbuild", packageArguments);
+
+  cpSync(path.join(macosDirectory, "resources"), installerResourcesDirectory, {
+    recursive: true,
+  });
+  const welcomePath = path.join(installerResourcesDirectory, "welcome.html");
+  writeFileSync(
+    welcomePath,
+    readFileSync(welcomePath, "utf8").replace(
+      "{{AGENTDESKTOP_LOGO}}",
+      readFileSync(path.join(nativeDirectory, "icons", "128x128.png")).toString(
+        "base64",
+      ),
+    ),
+  );
+  const productArguments = [
+    "--distribution",
+    path.join(macosDirectory, "distribution.xml"),
+    "--resources",
+    installerResourcesDirectory,
+    "--package-path",
+    stagingDirectory,
+  ];
   if (process.env.APPLE_INSTALLER_SIGNING_IDENTITY) {
-    packageArguments.push(
+    productArguments.push(
       "--sign",
       process.env.APPLE_INSTALLER_SIGNING_IDENTITY,
     );
     if (process.env.APPLE_INSTALLER_KEYCHAIN) {
-      packageArguments.push("--keychain", process.env.APPLE_INSTALLER_KEYCHAIN);
+      productArguments.push("--keychain", process.env.APPLE_INSTALLER_KEYCHAIN);
     }
   }
-  packageArguments.push(packagePath);
-  run("/usr/bin/pkgbuild", packageArguments);
+  productArguments.push(packagePath);
+  run("/usr/bin/productbuild", productArguments);
 } finally {
   rmSync(stagingDirectory, { force: true, recursive: true });
 }

@@ -80,13 +80,22 @@ listens on 127.0.0.1:4319 (`daemon.usage` in `config.yaml`) and keeps this
 machine's usage. Open the desktop app and select **Usage** to see tokens and
 cost by tool and model.
 
+## Pi
+
+Uncomment `programs.pi` in `config.yaml` to enable Pi with `claude-sonnet-4-5`.
+Run `pi` while the daemon is running to use that model through the gateway.
+Pi requires `--user`; authenticated gateway configuration cannot be applied
+with `--once` in user mode. Pi and Claude Desktop can share a policy: user
+daemons skip Claude Desktop, and system daemons skip Pi, with an inactive reason.
+
+
 ## Claude Desktop
 
 In the Claude Code example, we ran with `--user`. This runs the daemon as an unprivileged user.
 
 Claude Desktop, however, requires root configuration.
 
-Uncomment the Claude Desktop configuration in `config.yaml` and save the file.
+Uncomment the Claude Desktop configuration in `config.yaml`, then save the file.
 Then run the daemon as root:
 
 ```sh

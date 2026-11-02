@@ -18,6 +18,10 @@ programs:
   claudeCode:
     useLlmGateway: true
     companyAnnouncements: ["Using the local Agentgateway through Agentdesktop"]
-#    Claude desktop cannot run with --user. Uncomment to enable
+#  Pi is optional and requires --user.
+#  pi:
+#    useLlmGateway: true
+#    model: claude-sonnet-4-5
+#  Claude Desktop requires system mode; user daemons skip it.
 #  claudeDesktop:
 #    useLlmGateway: true
