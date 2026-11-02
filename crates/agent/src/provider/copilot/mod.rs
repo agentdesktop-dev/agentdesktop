@@ -48,6 +48,8 @@ impl Provider for Copilot {
         Discovery {
             agents: discovery::discover().into_iter().collect(),
             model_runtimes: Vec::new(),
+            browser_pacs: Vec::new(),
+            pac_fetches: Vec::new(),
         }
     }
 

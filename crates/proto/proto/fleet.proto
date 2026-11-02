@@ -177,6 +177,38 @@ message Heartbeat {
 message Inventory {
   repeated Discovery discoveries = 1;
   repeated ModelRuntime model_runtimes = 2;
+  // The PAC browser policy sets, one entry per browser that is installed or
+  // has policy. Absent from older agents.
+  repeated BrowserPac browser_pacs = 3;
+  // One fetch per distinct PAC URL in browser_pacs: the PAC's identity on
+  // this device (SHA-256 of the body), never its content.
+  repeated PacFetch pac_fetches = 4;
+}
+
+message PacFetch {
+  string url = 1;
+  // Lowercase hex SHA-256 of the body; empty when the fetch failed.
+  string sha256 = 2;
+  uint64 size = 3;
+  // Why the fetch failed, at most 1024 bytes; empty on success.
+  string error = 4;
+}
+
+message BrowserPac {
+  // chrome | edge | chromium | firefox
+  string browser = 1;
+  // system | snap | flatpak, or empty when only policy was found.
+  string packaging = 2;
+  // Empty when policy sets no PAC.
+  string pac_url = 3;
+  // The value came from a user-overridable (recommended) policy location.
+  bool recommended = 4;
+  // Firefox Proxy.Locked.
+  bool locked = 5;
+  // The policy file the value came from.
+  string source = 6;
+  // A read error or conflicting policy files, at most 1024 bytes.
+  string detail = 7;
 }
 
 message ModelRuntime {

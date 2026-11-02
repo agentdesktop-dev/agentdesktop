@@ -96,6 +96,11 @@ async fn main() -> anyhow::Result<()> {
             gateway_jwt_enabled: gateway_jwt_issuer.is_some(),
             usage_enabled: usage_ingest.is_some(),
         },
+        config
+            .browser_egress
+            .as_ref()
+            .and_then(|browser_egress| browser_egress.compliance.as_ref())
+            .map(|compliance| compliance.pac_url.clone()),
     );
     let ca_certificate =
         std::fs::read_to_string(&tls.client_ca_certificate).with_context(|| {

@@ -1,5 +1,6 @@
 pub mod anthropic_oauth;
 pub mod api;
+mod browser_pac;
 pub mod cli;
 pub mod daemon;
 pub mod enrollment;

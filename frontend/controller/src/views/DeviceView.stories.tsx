@@ -5,6 +5,7 @@ import { ControllerStoryFrame } from "../stories/ControllerStoryFrame";
 import {
   deviceDetail,
   deviceUsageReport,
+  differsDeviceDetail,
   emptyDeviceDetail,
   emptyUsageReport,
   failedDeviceDetail,
@@ -97,6 +98,19 @@ export const OlderAgentWithoutProgramStatus: Story = {
         "Per-program status is not reported by this agent version",
       ),
     ).toBeVisible();
+  },
+};
+
+export const BrowsersSetDifferentPacs: Story = {
+  args: { device: differsDeviceDetail },
+  play: async ({ canvas }) => {
+    await expect(canvas.getByText("PAC differs")).toBeVisible();
+    await expect(
+      canvas.getByText("https://old-pac.corp.example/ai-egress.pac", {
+        selector: "small",
+      }),
+    ).toBeVisible();
+    await expect(canvas.getByText("PAC not reachable")).toBeVisible();
   },
 };
 

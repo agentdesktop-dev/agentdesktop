@@ -21,6 +21,34 @@ export type Device = {
   config_updated_at: number | null;
   discovery_count: number;
   installed_tools: string[];
+  browser_pac: DeviceBrowserPac;
+};
+
+export type BrowserPacCompliance = {
+  state: "compliant" | "not_compliant" | "not_reported";
+  reason: string | null;
+};
+
+/** The PAC browser policy sets, one value per device. */
+export type DeviceBrowserPac = {
+  state: "found" | "absent" | "differs" | "not_reported";
+  url: string | null;
+  /** SHA-256 of the PAC this device fetched from `url`: its identity. */
+  sha256: string | null;
+  size: number | null;
+  fetch_error: string | null;
+  /** Null without a fleet compliance profile (browserEgress.compliance). */
+  compliance: BrowserPacCompliance | null;
+};
+
+export type BrowserPacRecord = {
+  browser: string;
+  packaging: string;
+  pac_url: string | null;
+  recommended: boolean;
+  locked: boolean;
+  source: string | null;
+  detail: string | null;
 };
 
 export type ProgramStatus = {
@@ -64,6 +92,13 @@ export type DeviceDetail = Device & {
     kind: string;
     models: Array<{ name: string }>;
   }>;
+  browser_pacs: BrowserPacRecord[];
+  pac_fetches: Array<{
+    url: string;
+    sha256?: string;
+    size?: number;
+    error?: string;
+  }>;
   recent_events: Array<{
     id: string;
     timestamp_unix_ms: number;
@@ -85,6 +120,18 @@ export type Overview = {
   config_failures: number;
   active_revision: number | null;
   recent_devices: Device[];
+  browser_pac: {
+    found: number;
+    absent: number;
+    differs: number;
+    not_reported: number;
+    /** Null without a fleet compliance profile. */
+    expected_pac_url: string | null;
+    compliant: number;
+    not_compliant: number;
+    /** Devices that found a PAC, grouped by URL and SHA-256 of what they fetched. */
+    versions: Array<{ url: string; sha256: string | null; devices: number }>;
+  };
 };
 
 export type ControllerSettings = {
