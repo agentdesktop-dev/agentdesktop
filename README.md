@@ -735,7 +735,14 @@ agent sees the workspace, its own state and little else; `agentdesktop run
 opencode` and `agentdesktop run copilot` do the same for OpenCode and GitHub
 Copilot CLI (see **OpenCode and Copilot CLI in the box** below). The daemon drives
 Microsoft's MXC executor; nothing is installed on the device by Agentdesktop
-itself. Startup setting (local only, user mode):
+itself. This is an OS container around the tool, distinct from the tool's own
+sandbox setting that the shared sandbox policy configures (a Claude Code
+configuration with a top-level `sandbox` is refused for a boxed launch, see
+below). The pieces and the brokered channels between them:
+
+![Sandboxed launch architecture](docs/sandboxed-launch-architecture.png)
+
+Startup setting (local only, user mode):
 
 ```yaml
 daemon:
@@ -774,8 +781,9 @@ containment:
 `mode` defaults to `wrap`; `mode: native` is the per-program opt-out. In wrap
 mode `agentdesktop run claude` launches only the configured executable
 (`~\.local\bin` and PATH are not searched), `agentdesktop run --wait` returns
-the launch's recorded exit code to the calling shell (the executor's code,
-not the program's own), and a Windows user-mode daemon reports per-program
+the program's own exit code when the box runs in the caller's terminal and
+the executor's code in the windowed fallback (see **Same-terminal hosting and
+the hidden daemon** below), and a Windows user-mode daemon reports per-program
 posture in its daemon-info under `containment.programs.<program>`: `mode`,
 `executable`, `aliasesPresent`, `violations` and `lastViolationUnixSeconds`
 (a report-only scan of native runs of the managed binary). A daemon that
@@ -907,7 +915,8 @@ that file; it carries `user.name`, `user.email`, `user.signingkey`,
 configuration, nothing else), `~\.claude\settings.json`, `~\.claude\hooks`,
 `~\.claude\plugins`, the workspace's `.claude\settings*.json`, `.claude\hooks`,
 `.mcp.json`, a `HEAD` file at the workspace root, and `.git\config`,
-`.git\hooks` and `.git\commondir` of the workspace repository (`.git\HEAD`
+`.git\config.worktree`, `.git\hooks` and `.git\commondir` of the workspace
+repository (`.git\HEAD`
 stays writable so branch switches work). Every box also carries the workspace
 configuration of OpenCode and GitHub Copilot CLI under the same rule:
 `opencode.json`, `opencode.jsonc` and `.opencode` at the workspace root,
@@ -971,7 +980,7 @@ occupy the sign-in's loopback redirect port, failing a concurrent sign-in
 (the token itself stays protected). Telemetry
 hooks do not reach the daemon from inside the box in this preview. Arguments
 containing `" % ^ & | < > !` or control characters are rejected, because
-`cmd.exe` starts the box's console window.
+the box is started through `cmd.exe` (with `start` in the windowed fallback).
 
 `run` answers `400` for a rejected program (one of `claude-code`, `opencode`,
 `copilot`), workspace or argument, `403` when
@@ -993,8 +1002,9 @@ it; Claude Code's own atomic save does this). That covers every read-only entry
 above that sits inside a writable folder: `~\.claude\settings.json` (hooks,
 `apiKeyHelper`), `~\.claude\hooks`, `~\.claude\plugins`, the workspace's
 `.claude\settings*.json` and `.claude\hooks` (which can also be committed to the
-repository), `.mcp.json`, the workspace-root `HEAD`, and `.git\config`, `.git\hooks`
-and `.git\commondir`. A `.git` file (worktree or submodule) is box-writable (a rewrite
+repository), `.mcp.json`, the workspace-root `HEAD`, and `.git\config`,
+`.git\config.worktree`, `.git\hooks` and `.git\commondir`. A `.git` file (worktree or
+submodule) is box-writable (a rewrite
 is not prevented). The boxed agent can
 change these, and the next unboxed session reads them (Claude Code outside the box;
 git outside the box, where `core.fsmonitor` and `core.hooksPath` run code). The
@@ -1246,7 +1256,33 @@ owning user only (SYSTEM and that user's SID), no longer every interactive user.
 On a device that also runs the system service, set `daemon.socket` to a per-user
 pipe (for example `\\.\pipe\agentdesktop-<username>`) and pass it to `run` with
 `--socket` (or `AGENTDESKTOP_SOCKET` in the unified binary). A scheduled task can instead start the daemon with `daemon --user --socket <pipe>`, which takes precedence over `daemon.socket`; this preview adds no
-pipe discovery or Windows logon autostart.
+pipe discovery, and logon autostart is the fleet's scheduled task (see the
+deployment guide, [docs/windows-managed-package.md](docs/windows-managed-package.md)).
+
+### Same-terminal hosting and the hidden daemon
+
+From a console (Windows Terminal, the classic console host, PowerShell, Git
+Bash in a terminal) `agentdesktop run --wait` hosts the box in that same
+terminal: the client hands its console to the daemon, which validates the
+caller (same user, same session) and starts a hidden `console-attach` helper
+that attaches to the console and spawns the executor with the console's
+handles inherited, so no second window appears, Ctrl+C reaches the boxed
+program (the client keeps waiting), and `--wait` returns the program's own
+exit code. A caller without a console (a scheduled task, redirected stdio),
+an elevated terminal the daemon may not attach to, or a launch with
+`git.ssh.hosts` configured gets the **windowed fallback**: the box opens in
+its own console window, Ctrl+C stops only the waiting client, and the
+recorded exit code is the executor's, not the program's, so a script in that
+case must not branch on it to detect program failures. Both forms report the
+same launch record and session; nothing changes in what the box may see.
+
+`agentdesktop daemon --user --hidden` re-executes the daemon without a console
+window (no window, no minimized state, no taskbar entry) and detaches it from
+the starting process; the standard handles are inherited, so a scheduled
+task's log redirection keeps receiving the daemon's output. Because the
+starting process exits, a logon scheduled task that uses it completes once
+the daemon runs: Task Scheduler no longer supervises the daemon, which is
+stopped through its pipe or its pid, not by ending the task.
 
 ### Sandbox route and per-session pairing
 
@@ -1581,7 +1617,9 @@ runs this setup.
 - **Tool-native configuration:** safely merge managed values into the formats
   expected by each tool while preserving unrelated user settings.
 - **Shared sandbox policy:** translate filesystem and network restrictions into
-  the native sandbox configuration supported by Claude Code and Codex.
+  the native sandbox configuration supported by Claude Code and Codex (the
+  tool's own sandbox; running a tool inside an OS container is the separate
+  **Sandboxed launch** preview above).
 - **User and device identity:** bind a locally generated device key and
   certificate to the user who enrolled the workstation through OIDC.
 - **Runtime credentials:** give supported tools short-lived credentials instead
