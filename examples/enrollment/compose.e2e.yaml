@@ -1,0 +1,28 @@
+# Overrides for e2e.sh. The test runs only the organization's services and two
+# headless devices, one per enrollment flow, and publishes nothing on the host
+# so it can run next to the lab.
+services:
+  controller:
+    ports: !reset []
+
+  # Enrolls with the browser flow. e2e.sh signs in from inside this container,
+  # so Dex redirects to the daemon's loopback callback as a local browser would.
+  headless-browser:
+    build:
+      context: ../..
+      dockerfile: examples/enrollment/Dockerfile
+      target: headless
+    hostname: headless-browser-device
+    depends_on:
+      keys:
+        condition: service_completed_successfully
+      controller:
+        condition: service_started
+    volumes:
+    - keys:/keys:ro
+    - headless-browser-state:/var/lib/agentdesktop
+    # Same daemon configuration as the desktop device: the browser flow.
+    - ./desktop.yaml:/demo/agentdesktop.yaml:ro
+
+volumes:
+  headless-browser-state:

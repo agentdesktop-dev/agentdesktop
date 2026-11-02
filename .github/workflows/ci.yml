@@ -158,3 +158,14 @@ jobs:
           persist-credentials: false
       - name: Build controller image
         run: make docker BUILD_PROFILE=debug
+
+  enrollment-e2e:
+    name: Enrollment e2e
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test enrollment against Dex and the controller
+        run: make e2e-enrollment BUILD_PROFILE=debug

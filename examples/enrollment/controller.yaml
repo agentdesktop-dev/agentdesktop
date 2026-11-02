@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=../../schema/controller-config.json
+fleetListen: 0.0.0.0:8443
+adminListen: 127.0.0.1:8080
+allowInsecureDev: true
+databaseUrl: sqlite:///state/controller.db?mode=rwc
+tls: /keys
+
+oidc:
+  issuer: http://dex:5556/dex
+  clientId: agentdesktop-lab
+
+daemonConfig:
+  path: /demo/policy.yaml
+
+gatewayJwt:
+  privateKey: /keys/gateway-jwt-key.pem

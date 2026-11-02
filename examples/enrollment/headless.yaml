@@ -1,0 +1,6 @@
+# yaml-language-server: $schema=../../schema/daemon-config.json
+controller:
+  address: https://controller:8443
+  caCertificatePath: /keys/device-ca.pem
+  heartbeatInterval: 30s
+  deviceAuthorization: true
