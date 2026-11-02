@@ -2,7 +2,9 @@ use super::OpenCode;
 
 use std::path::Path;
 
-use agentdesktop_core::config::{LlmGatewayAuthentication, LlmGatewayConfig, OpenCodeConfig};
+use agentdesktop_core::config::{
+    LlmGatewayAuthentication, LlmGatewayConfig, OpenCodeApi, OpenCodeConfig,
+};
 use anyhow::Context;
 use serde_json::{Value, json};
 use tracing::debug;
@@ -69,8 +71,12 @@ fn managed_config(
         .as_deref()
         .context("OpenCode gateway configuration has no model")?;
     let provider_name = "agentdesktop";
+    let npm = match config.api.unwrap_or_default() {
+        OpenCodeApi::OpenaiResponses => "@ai-sdk/openai",
+        OpenCodeApi::OpenaiCompletions => "@ai-sdk/openai-compatible",
+    };
     let provider = json!({
-        "npm": "@ai-sdk/openai",
+        "npm": npm,
         "name": "Agentdesktop",
         "options": {
             "baseURL": responses_base_url(gateway),
@@ -342,6 +348,55 @@ programs:
             "https://gateway.example.com/proxy/v1"
         );
         assert_eq!(provider["models"]["gpt-company"]["name"], "Company GPT");
+    }
+
+    #[test]
+    fn completions_api_selects_openai_compatible_provider() {
+        let config = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
+    allowedClientIds: [opencode]
+programs:
+  openCode:
+    api: openai-completions
+    model: qwen
+    models:
+      qwen: {}
+    managedConfig:
+      provider:
+        agentdesktop:
+          npm: "@ai-sdk/openai"
+"#,
+        )
+        .expect("valid daemon configuration");
+        let open_code = config.programs.open_code.as_ref().unwrap();
+        let gateway = config.llm_gateway.as_ref().unwrap();
+        let settings = managed_config(open_code, Some(gateway), None).expect("merged settings");
+
+        let provider = &settings["provider"]["agentdesktop"];
+        assert_eq!(provider["npm"], "@ai-sdk/openai-compatible");
+        assert_eq!(
+            provider["options"]["baseURL"],
+            "https://gateway.example.com/v1"
+        );
+        assert_eq!(settings["model"], "agentdesktop/qwen");
+    }
+
+    #[test]
+    fn unknown_api_is_rejected() {
+        let error = parse_daemon(
+            r#"
+programs:
+  openCode:
+    api: anthropic-messages
+"#,
+        )
+        .expect_err("unknown dialect");
+        assert!(format!("{error:#}").contains("anthropic-messages"));
     }
 
     #[test]
