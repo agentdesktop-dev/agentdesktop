@@ -107,6 +107,11 @@ impl Reconciler {
                     providers_path: copilot_providers_path,
                 }),
                 Box::new(Pi {
+                    // A system daemon gets Pi paths only from daemon.pi, which
+                    // opts it in to managing that one user's Pi.
+                    manage_for_user: !merge_user_settings
+                        && pi_models_path.is_some()
+                        && pi_settings_path.is_some(),
                     models_path: pi_models_path,
                     settings_path: pi_settings_path,
                 }),

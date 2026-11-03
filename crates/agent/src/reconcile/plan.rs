@@ -3,7 +3,7 @@ use super::DryRunReport;
 use super::registry::RegistryKeyPlan;
 use anyhow::Context;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::BTreeMap,
     fs, io,
     path::{Path, PathBuf},
@@ -26,6 +26,17 @@ pub struct ReconcilePlan {
     /// Why the configured program cannot be managed in this daemon's mode or
     /// cannot use the gateway (the loopback proxy is absent).
     inactive: RefCell<Option<String>>,
+    /// Owner for files and directories this plan creates, when a system daemon
+    /// manages a file in one user's profile. `None` keeps the daemon's owner.
+    owner: Cell<Option<FileOwner>>,
+}
+
+/// The user and group a planned file or directory is handed to after it is
+/// written. Applied on Unix only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FileOwner {
+    pub uid: u32,
+    pub gid: u32,
 }
 
 /// What one provider's plan contains, taken before it is appended to the
@@ -61,13 +72,14 @@ struct FileChange {
     path: PathBuf,
     contents: Option<Vec<u8>>,
     permissions: u32,
+    owner: Option<FileOwner>,
 }
 
 /// A directory to create owner-only before the file changes are applied.
 /// Used for a directory that will hold a secret-bearing file and does not
 /// exist yet; an existing directory is left as it is.
 #[derive(Default)]
-struct PrivateDirs(RefCell<Vec<PathBuf>>);
+struct PrivateDirs(RefCell<Vec<(PathBuf, Option<FileOwner>)>>);
 
 impl ReconcilePlan {
     pub fn render(&self) -> String {
@@ -221,9 +233,11 @@ impl ReconcilePlan {
                 ));
             }
         }
-        for dir in self.private_dirs.0.into_inner() {
+        for (dir, owner) in self.private_dirs.0.into_inner() {
             if !dir.exists() {
+                let created = missing_dirs(&dir);
                 crate::secure_fs::ensure_private_dir(&dir)
+                    .and_then(|()| apply_owner(&created, owner))
                     .map_err(|error| (error, ApplyStop::PrivateDir(dir.clone())))?;
             }
         }
@@ -231,6 +245,7 @@ impl ReconcilePlan {
         for (index, change) in self.operations.into_inner().into_iter().enumerate() {
             if let Some(contents) = &change.contents
                 && already_in_place(&change.path, contents, change.permissions, &observed)
+                && owned_by(&change.path, change.owner)
             {
                 continue;
             }
@@ -242,9 +257,17 @@ impl ReconcilePlan {
                             .parent()
                             .filter(|p| !p.as_os_str().is_empty())
                             .unwrap_or_else(|| Path::new("."));
+                        let created = missing_dirs(parent);
                         fs::create_dir_all(parent)
                             .with_context(|| format!("create directory {}", parent.display()))?;
-                        crate::secure_fs::atomic_write(&change.path, &contents, change.permissions)
+                        crate::secure_fs::atomic_write(
+                            &change.path,
+                            &contents,
+                            change.permissions,
+                        )?;
+                        let mut owned = created;
+                        owned.push(change.path.clone());
+                        apply_owner(&owned, change.owner)
                     }
                     None => fs::remove_file(&change.path)
                         .with_context(|| format!("remove {}", change.path.display())),
@@ -359,13 +382,23 @@ impl ReconcilePlan {
             path: path.to_owned(),
             contents: Some(contents.to_vec()),
             permissions,
+            owner: self.owner.get(),
         });
         Ok(())
     }
 
     /// Create `dir` owner-only at apply time if it does not exist by then.
     pub(crate) fn ensure_private_dir(&self, dir: &Path) {
-        self.private_dirs.0.borrow_mut().push(dir.to_owned());
+        self.private_dirs
+            .0
+            .borrow_mut()
+            .push((dir.to_owned(), self.owner.get()));
+    }
+
+    /// Hand every file and directory this plan creates to `owner` (Unix).
+    /// Used when a system daemon manages a file inside one user's profile.
+    pub(crate) fn set_owner(&self, owner: Option<FileOwner>) {
+        self.owner.set(owner);
     }
 
     /// Plan one Windows registry key's changes, applied after the file
@@ -387,6 +420,7 @@ impl ReconcilePlan {
             path: path.to_owned(),
             contents: None,
             permissions: 0,
+            owner: None,
         });
         Ok(())
     }
@@ -446,6 +480,49 @@ fn already_in_place(
 /// Whether the file at `path` grants a permission bit outside `mode`.
 /// Unix: the current mode has a bit outside `mode`. A missing file, and any
 /// file on non-Unix, is false.
+/// Directories from `dir` upward that do not exist yet, deepest first, so the
+/// ones a write creates can be handed to the plan's owner afterwards.
+fn missing_dirs(dir: &Path) -> Vec<PathBuf> {
+    let mut missing = Vec::new();
+    let mut current = Some(dir);
+    while let Some(path) = current {
+        if path.as_os_str().is_empty() || path.exists() {
+            break;
+        }
+        missing.push(path.to_path_buf());
+        current = path.parent();
+    }
+    missing
+}
+
+/// Give `paths` to `owner`. A no-op without an owner and on non-Unix systems.
+fn apply_owner(paths: &[PathBuf], owner: Option<FileOwner>) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    if let Some(owner) = owner {
+        for path in paths {
+            std::os::unix::fs::chown(path, Some(owner.uid), Some(owner.gid))
+                .with_context(|| format!("set owner of {}", path.display()))?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (paths, owner);
+    Ok(())
+}
+
+/// Whether `path` already belongs to `owner` (always true without an owner).
+fn owned_by(path: &Path, owner: Option<FileOwner>) -> bool {
+    #[cfg(unix)]
+    if let Some(owner) = owner {
+        use std::os::unix::fs::MetadataExt;
+        return fs::metadata(path)
+            .map(|metadata| metadata.uid() == owner.uid && metadata.gid() == owner.gid)
+            .unwrap_or(false);
+    }
+    #[cfg(not(unix))]
+    let _ = (path, owner);
+    true
+}
+
 pub(crate) fn grants_beyond(path: &Path, mode: u32) -> bool {
     #[cfg(unix)]
     {

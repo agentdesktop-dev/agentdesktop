@@ -227,12 +227,20 @@ impl DaemonArgs {
                 vscode_chat_models: None,
                 vscode_settings: None,
                 pi: {
-                    if startup.pi.models.is_some() || startup.pi.settings.is_some() {
-                        bail!("daemon.pi paths require --user (or daemon.user: true)");
-                    }
-                    ResolvedPiStartupConfig {
-                        models: None,
-                        settings: None,
+                    // Pi has no system-wide configuration. A system daemon manages
+                    // it only for the one user whose files are named here.
+                    match (startup.pi.models, startup.pi.settings) {
+                        (None, None) => ResolvedPiStartupConfig {
+                            models: None,
+                            settings: None,
+                        },
+                        (Some(models), Some(settings)) => ResolvedPiStartupConfig {
+                            models: Some(models),
+                            settings: Some(settings),
+                        },
+                        _ => bail!(
+                            "daemon.pi.models and daemon.pi.settings must both be set to manage Pi from a system daemon"
+                        ),
                     }
                 },
                 reconcile_interval: startup.reconcile_interval,
@@ -1408,7 +1416,7 @@ mod tests {
     use tokio::sync::{mpsc, watch};
 
     #[test]
-    fn pi_startup_paths_require_user_mode() {
+    fn pi_startup_paths_resolve_in_both_modes() {
         for user in [false, true] {
             let file = tempfile::NamedTempFile::new().unwrap();
             std::fs::write(
@@ -1430,17 +1438,8 @@ mod tests {
                 file.path().to_path_buf(),
                 agentdesktop_core::DEFAULT_SOCKET_PATH.into(),
             );
-            if !user {
-                assert!(
-                    result
-                        .err()
-                        .unwrap()
-                        .to_string()
-                        .contains("daemon.pi paths require --user")
-                );
-                continue;
-            }
-            let resolved = result.unwrap();
+            // A system daemon uses them to manage that one user's Pi.
+            let resolved = result.unwrap_or_else(|error| panic!("user={user}: {error:#}"));
             assert_eq!(
                 resolved.pi.models.as_deref(),
                 Some(Path::new("custom/pi-models.json"))
@@ -2321,6 +2320,19 @@ programs:
             )
             .unwrap();
         assert_eq!(resolved.reconcile_interval, Some(Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn system_mode_rejects_a_single_pi_path() {
+        let mut startup = config::DaemonStartupConfig::default();
+        startup.pi.models = Some(PathBuf::from("/home/dev/.pi/agent/models.json"));
+        let error = resolve_error(daemon_args(false), startup);
+        assert!(
+            error
+                .to_string()
+                .contains("daemon.pi.models and daemon.pi.settings must both be set"),
+            "{error:#}"
+        );
     }
 
     #[test]
