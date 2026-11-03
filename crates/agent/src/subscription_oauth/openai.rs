@@ -160,13 +160,21 @@ async fn request_token(
         .context("request ChatGPT subscription OAuth token")?;
     let status = response.status();
     if !status.is_success() {
-        let invalid_grant = response.json::<Value>().await.ok().is_some_and(|body| {
+        let permanent_refresh_error = response.json::<Value>().await.ok().is_some_and(|body| {
             matches!(
-                body["error"].as_str(),
-                Some("invalid_grant" | "invalid_refresh_token")
+                body["error"]
+                    .as_str()
+                    .or_else(|| body["error"]["code"].as_str()),
+                Some(
+                    "invalid_grant"
+                        | "invalid_refresh_token"
+                        | "refresh_token_expired"
+                        | "refresh_token_reused"
+                        | "refresh_token_invalidated"
+                )
             )
         });
-        if refreshing && (status == reqwest::StatusCode::UNAUTHORIZED || invalid_grant) {
+        if refreshing && (status == reqwest::StatusCode::UNAUTHORIZED || permanent_refresh_error) {
             return Err(ReauthorizationRequired.into());
         }
         bail!("ChatGPT OAuth token endpoint rejected the request ({status})");
@@ -344,6 +352,65 @@ mod tests {
         assert_eq!(stored.access_token, "refreshed-access");
         assert_eq!(stored.account_id, "account-1");
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn nested_permanent_refresh_errors_require_reauthorization() {
+        for (status, code, permanent) in [
+            (
+                reqwest::StatusCode::BAD_REQUEST,
+                "refresh_token_reused",
+                true,
+            ),
+            (
+                reqwest::StatusCode::BAD_REQUEST,
+                "refresh_token_expired",
+                true,
+            ),
+            (
+                reqwest::StatusCode::BAD_REQUEST,
+                "refresh_token_invalidated",
+                true,
+            ),
+            (reqwest::StatusCode::BAD_REQUEST, "invalid_grant", true),
+            (
+                reqwest::StatusCode::BAD_REQUEST,
+                "invalid_refresh_token",
+                true,
+            ),
+            (reqwest::StatusCode::BAD_REQUEST, "unknown_error", false),
+            (
+                reqwest::StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_exceeded",
+                false,
+            ),
+            (
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                "temporary_failure",
+                false,
+            ),
+        ] {
+            for refreshing in [true, false] {
+                let (endpoint, server) = token_server(
+                    status,
+                    serde_json::json!({
+                        "error": {"code": code, "message": "secret-refresh-token-must-not-leak"}
+                    }),
+                )
+                .await;
+                let error = request_token(&endpoint, &refresh_form("original-refresh"), refreshing)
+                    .await
+                    .err()
+                    .unwrap();
+                server.abort();
+                assert_eq!(
+                    error.is::<ReauthorizationRequired>(),
+                    refreshing && permanent,
+                    "status={status}, code={code}, refreshing={refreshing}"
+                );
+                assert!(!format!("{error:#}").contains("secret-refresh-token"));
+            }
+        }
     }
 
     #[tokio::test]
