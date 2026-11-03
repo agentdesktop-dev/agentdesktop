@@ -828,9 +828,27 @@ pub struct OpenCodeConfig {
     /// one model is required when a top-level `llmGateway` is configured.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub models: BTreeMap<String, serde_json::Value>,
+    /// OpenAI API dialect of the managed LLM gateway provider. Defaults to
+    /// `openai-responses`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<OpenCodeApi>,
     /// Arbitrary values written to OpenCode's system-managed configuration.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub managed_config: BTreeMap<String, serde_json::Value>,
+}
+
+/// OpenAI API dialect OpenCode uses for the managed LLM gateway provider.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum OpenCodeApi {
+    /// OpenAI Responses API (`/v1/responses`) through `@ai-sdk/openai`.
+    #[default]
+    OpenaiResponses,
+    /// OpenAI Chat Completions API (`/v1/chat/completions`) through
+    /// `@ai-sdk/openai-compatible`, for OpenAI-compatible backends such as
+    /// vLLM that do not accept replayed Responses input items.
+    OpenaiCompletions,
 }
 
 /// Settings reconciled into Grok Build's organization-managed configuration.

@@ -543,10 +543,36 @@
       },
       "additionalProperties": false
     },
+    "OpenCodeApi": {
+      "description": "OpenAI API dialect OpenCode uses for the managed LLM gateway provider.",
+      "oneOf": [
+        {
+          "description": "OpenAI Responses API (`/v1/responses`) through `@ai-sdk/openai`.",
+          "type": "string",
+          "const": "openai-responses"
+        },
+        {
+          "description": "OpenAI Chat Completions API (`/v1/chat/completions`) through\n`@ai-sdk/openai-compatible`, for OpenAI-compatible backends such as\nvLLM that do not accept replayed Responses input items.",
+          "type": "string",
+          "const": "openai-completions"
+        }
+      ]
+    },
     "OpenCodeConfig": {
       "description": "Settings reconciled into OpenCode's system-managed configuration.\n\nValues under `managedConfig` are written to OpenCode's managed JSONC file.\nWhen generated LLM gateway settings overlap with those values,\nAgentdesktop's generated values take precedence.",
       "type": "object",
       "properties": {
+        "api": {
+          "description": "OpenAI API dialect of the managed LLM gateway provider. Defaults to\n`openai-responses`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OpenCodeApi"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "managedConfig": {
           "description": "Arbitrary values written to OpenCode's system-managed configuration.",
           "type": "object",
