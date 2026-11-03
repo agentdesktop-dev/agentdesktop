@@ -26,6 +26,7 @@ export const macDevice: Device = {
   last_seen_at: now - 12,
   enrolled_by_issuer: "https://issuer.example",
   enrolled_by_subject: "developer@example.com",
+  enrolled_by_name: "developer@example.com",
   config_revision: 4,
   config_state: 1,
   config_error: null,
@@ -40,6 +41,8 @@ export const linuxDevice: Device = {
   hostname: "build-linux",
   os: "linux",
   architecture: "x86_64",
+  // Enrolled with an identity that carries no readable name: the row must still render.
+  enrolled_by_name: null,
   last_seen_at: null,
   config_revision: null,
   config_state: null,
@@ -57,11 +60,24 @@ export const failedDevice: Device = {
   config_error: "The managed configuration contains an unsupported key.",
 };
 
-export const devices = [macDevice, linuxDevice, failedDevice];
+export const genericNameDevice: Device = {
+  ...macDevice,
+  id: "device-generic-24681357",
+  hostname: "Mac.lan",
+  enrolled_by_subject: "00u-generic",
+  enrolled_by_name: "sam.okafor@example.com",
+};
+
+export const devices = [
+  macDevice,
+  linuxDevice,
+  failedDevice,
+  genericNameDevice,
+];
 
 export const overview: Overview = {
-  total_devices: 3,
-  online_devices: 2,
+  total_devices: 4,
+  online_devices: 3,
   offline_devices: 1,
   config_failures: 1,
   active_revision: 4,

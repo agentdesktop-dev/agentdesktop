@@ -18,7 +18,7 @@ export function DevicesView({
   const filtered = useMemo(
     () =>
       devices.filter((device) =>
-        `${device.hostname} ${device.os} ${device.agent_version}`
+        `${device.hostname} ${device.enrolled_by_name ?? ""} ${device.os} ${device.agent_version}`
           .toLowerCase()
           .includes(search.toLowerCase()),
       ),

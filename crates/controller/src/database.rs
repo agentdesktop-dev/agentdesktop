@@ -31,6 +31,10 @@ pub struct DeviceSummary {
     pub last_seen_at: Option<i64>,
     pub enrolled_by_issuer: String,
     pub enrolled_by_subject: String,
+    /// Readable name of the user who enrolled the device (their email, else
+    /// their preferred username, else their name), when the identity provider
+    /// supplied one. Only this derived value is returned, never the raw claims.
+    pub enrolled_by_name: Option<String>,
     pub config_revision: Option<i64>,
     pub config_state: Option<i64>,
     pub config_error: Option<String>,
@@ -50,6 +54,7 @@ struct DeviceRow {
     last_seen_at: Option<i64>,
     enrolled_by_issuer: String,
     enrolled_by_subject: String,
+    idp_claims_json: Option<String>,
     config_revision: Option<i64>,
     config_state: Option<i64>,
     config_error: Option<String>,
@@ -69,6 +74,7 @@ impl From<DeviceRow> for DeviceSummary {
             last_seen_at: row.last_seen_at,
             enrolled_by_issuer: row.enrolled_by_issuer,
             enrolled_by_subject: row.enrolled_by_subject,
+            enrolled_by_name: row.idp_claims_json.as_deref().and_then(readable_name),
             config_revision: row.config_revision,
             config_state: row.config_state,
             config_error: row.config_error,
@@ -245,6 +251,22 @@ impl TryFrom<TelemetryEventRow> for TelemetryEventRecord {
     }
 }
 
+/// The readable name of an enrolled user from their stored identity claims: the
+/// first non-empty of `email`, `preferred_username` and `name`. Shared by the
+/// device list and the usage labels so both name a user the same way.
+pub(crate) fn readable_name(idp_claims: &str) -> Option<String> {
+    let claims: serde_json::Value = serde_json::from_str(idp_claims).ok()?;
+    ["email", "preferred_username", "name"]
+        .into_iter()
+        .find_map(|claim| {
+            claims
+                .get(claim)?
+                .as_str()
+                .filter(|value| !value.is_empty())
+        })
+        .map(str::to_owned)
+}
+
 impl Database {
     pub async fn connect(url: &str) -> anyhow::Result<Self> {
         sqlx::any::install_default_drivers();
@@ -323,7 +345,7 @@ impl Database {
         let rows: Vec<DeviceRow> = sqlx::query_as(
             "SELECT d.id, d.hostname, d.os, d.architecture, d.agent_version,
                     d.created_at, d.last_seen_at, d.enrolled_by_issuer,
-                    d.enrolled_by_subject, cs.revision AS config_revision,
+                    d.enrolled_by_subject, d.idp_claims_json, cs.revision AS config_revision,
                     cs.state AS config_state, cs.error AS config_error,
                     cs.updated_at AS config_updated_at, COUNT(x.kind) AS discovery_count
              FROM devices d
@@ -331,7 +353,8 @@ impl Database {
              LEFT JOIN discoveries x ON x.device_id = d.id
              GROUP BY d.id, d.hostname, d.os, d.architecture, d.agent_version,
                       d.created_at, d.last_seen_at, d.enrolled_by_issuer,
-                      d.enrolled_by_subject, cs.revision, cs.state, cs.error, cs.updated_at
+                      d.enrolled_by_subject, d.idp_claims_json, cs.revision, cs.state,
+                      cs.error, cs.updated_at
              ORDER BY d.last_seen_at DESC, d.hostname ASC",
         )
         .fetch_all(&self.pool)
@@ -357,7 +380,7 @@ impl Database {
         let device: Option<DeviceRow> = sqlx::query_as(
             "SELECT d.id, d.hostname, d.os, d.architecture, d.agent_version,
                     d.created_at, d.last_seen_at, d.enrolled_by_issuer,
-                    d.enrolled_by_subject, cs.revision AS config_revision,
+                    d.enrolled_by_subject, d.idp_claims_json, cs.revision AS config_revision,
                     cs.state AS config_state, cs.error AS config_error,
                     cs.updated_at AS config_updated_at, COUNT(x.kind) AS discovery_count
              FROM devices d
@@ -366,7 +389,8 @@ impl Database {
              WHERE d.id = $1
              GROUP BY d.id, d.hostname, d.os, d.architecture, d.agent_version,
                       d.created_at, d.last_seen_at, d.enrolled_by_issuer,
-                      d.enrolled_by_subject, cs.revision, cs.state, cs.error, cs.updated_at",
+                      d.enrolled_by_subject, d.idp_claims_json, cs.revision, cs.state,
+                      cs.error, cs.updated_at",
         )
         .bind(device_id)
         .fetch_optional(&self.pool)
@@ -746,7 +770,7 @@ mod tests {
         ProgramState, ProgramStatus, Skill, TelemetryEvent, ToolUseEvent, telemetry_event,
     };
 
-    use super::Database;
+    use super::{Database, readable_name};
 
     #[tokio::test]
     async fn persists_device_inventory_and_telemetry() {
@@ -864,6 +888,98 @@ mod tests {
             .await
             .expect("enroll device");
         (database, path)
+    }
+
+    #[test]
+    fn readable_name_prefers_email_then_username_then_name() {
+        let all = r#"{"email":"a@x.io","preferred_username":"alex","name":"Alex A"}"#;
+        assert_eq!(readable_name(all).as_deref(), Some("a@x.io"));
+        let no_email = r#"{"preferred_username":"alex","name":"Alex A"}"#;
+        assert_eq!(readable_name(no_email).as_deref(), Some("alex"));
+        assert_eq!(
+            readable_name(r#"{"name":"Alex A"}"#).as_deref(),
+            Some("Alex A")
+        );
+    }
+
+    #[test]
+    fn readable_name_skips_empty_and_non_string_claims_and_bad_json() {
+        // An empty email must fall through to the next claim, not win.
+        let empty_email = r#"{"email":"","preferred_username":"alex"}"#;
+        assert_eq!(readable_name(empty_email).as_deref(), Some("alex"));
+        // A non-string claim is ignored rather than rendered.
+        assert_eq!(
+            readable_name(r#"{"email":42,"name":"Alex"}"#).as_deref(),
+            Some("Alex")
+        );
+        assert_eq!(readable_name(r#"{"email":["a@x.io"]}"#), None);
+        assert_eq!(readable_name("{}"), None);
+        assert_eq!(readable_name("not json"), None);
+        assert_eq!(readable_name(""), None);
+    }
+
+    #[tokio::test]
+    async fn the_device_list_and_detail_name_who_enrolled_the_device() {
+        let (database, path) = test_database("owner-name").await;
+        let claims = BTreeMap::from([
+            ("sub".to_owned(), serde_json::json!("subject-2")),
+            ("email".to_owned(), serde_json::json!("alex@example.com")),
+            ("groups".to_owned(), serde_json::json!(["admins"])),
+        ]);
+        database
+            .enroll_device("owned", "owned-host", "issuer", "subject-2", Some(&claims))
+            .await
+            .expect("enroll a device with claims");
+
+        let devices = database.list_devices().await.expect("list devices");
+        let owned = devices
+            .iter()
+            .find(|d| d.id == "owned")
+            .expect("owned device");
+        assert_eq!(owned.enrolled_by_name.as_deref(), Some("alex@example.com"));
+        // The device enrolled with no claims shows no owner, not an error.
+        let unowned = devices
+            .iter()
+            .find(|d| d.id == "device")
+            .expect("unowned device");
+        assert_eq!(unowned.enrolled_by_name, None);
+
+        let detail = database
+            .get_device("owned")
+            .await
+            .expect("load device")
+            .expect("device exists");
+        assert_eq!(
+            detail.device.enrolled_by_name.as_deref(),
+            Some("alex@example.com")
+        );
+
+        // Only the derived name is returned: the raw claims (groups, sub, ...) never are.
+        let json = serde_json::to_string(&devices).expect("serialize");
+        assert!(json.contains("alex@example.com"));
+        assert!(
+            !json.contains("admins"),
+            "raw claims must not reach the API: {json}"
+        );
+        assert!(!json.contains("idp_claims"), "claims column leaked: {json}");
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn a_device_with_unreadable_stored_claims_still_lists() {
+        let (database, path) = test_database("bad-claims").await;
+        sqlx::query("UPDATE devices SET idp_claims_json = 'not json' WHERE id = 'device'")
+            .execute(database.pool())
+            .await
+            .expect("corrupt the stored claims");
+        let devices = database.list_devices().await.expect("list must not fail");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].enrolled_by_name, None);
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
     }
 
     fn program_status(program: &str, state: ProgramState, detail: &str) -> ProgramStatus {

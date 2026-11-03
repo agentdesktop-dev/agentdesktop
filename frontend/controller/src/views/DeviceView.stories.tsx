@@ -46,6 +46,25 @@ export const Healthy: Story = {
   },
 };
 
+export const ShowsWhoEnrolledTheDevice: Story = {
+  play: async ({ canvas }) => {
+    await expect(canvas.getByText("Enrolled by")).toBeVisible();
+    // The owner appears in the device information list.
+    await expect(
+      canvas.getAllByText("developer@example.com").length,
+    ).toBeGreaterThan(0);
+  },
+};
+
+export const OmitsEnrolledByWithoutAReadableName: Story = {
+  args: { device: { ...deviceDetail, enrolled_by_name: null } },
+  play: async ({ canvas }) => {
+    await expect(canvas.queryByText("Enrolled by")).not.toBeInTheDocument();
+    // Everything else on the page is unaffected.
+    await expect(canvas.getByText("Device information")).toBeVisible();
+  },
+};
+
 export const BrowsesDiscoveredCapabilities: Story = {
   play: async ({ canvas }) => {
     await userEvent.click(

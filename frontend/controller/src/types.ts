@@ -15,6 +15,8 @@ export type Device = {
   last_seen_at: number | null;
   enrolled_by_issuer: string;
   enrolled_by_subject: string;
+  /** Readable name of the user who enrolled the device, when the IdP gave one. */
+  enrolled_by_name?: string | null;
   config_revision: number | null;
   config_state: number | null;
   config_error: string | null;
