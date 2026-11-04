@@ -902,6 +902,91 @@ frontendPolicies:
 The desktop app then shows **Usage**. [`examples/standalone`](examples/standalone)
 runs this setup.
 
+## Controller metrics
+
+The controller records fleet health with the OpenTelemetry SDK. Set a listen
+address to serve the metrics for Prometheus:
+
+```yaml
+metricsListen: 0.0.0.0:9090
+```
+
+Unset (the default) serves nothing. `GET /metrics` on that address needs no
+authentication, so reach it only from the scraper (for example a Kubernetes
+`Service` that is not exposed outside the cluster). It is separate from
+`adminListen`, which must stay on loopback.
+
+To push the same metrics over OTLP as well, set the standard OpenTelemetry
+variables on the controller, for example
+`OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4317`. Push is on only when
+`OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` is set;
+`OTEL_METRICS_EXPORTER=none` or `OTEL_SDK_DISABLED=true` turn it off.
+
+- **gRPC only.** Any other `OTEL_EXPORTER_OTLP_PROTOCOL` (or
+  `..._METRICS_PROTOCOL`) value, such as `http/protobuf`, stops the controller
+  at startup with an error naming the variable.
+- **Plaintext or TLS.** An `http://` endpoint is plaintext; `https://` uses TLS
+  and trusts the platform's root certificates and Mozilla's embedded roots, so
+  it works in an image without a CA bundle. For a collector behind a private CA,
+  point `OTEL_EXPORTER_OTLP_CERTIFICATE` (or `..._METRICS_CERTIFICATE`) at the
+  CA's PEM file; an unreadable file stops the controller at startup.
+- **Failures are logged.** An export that fails (an untrusted certificate, an
+  unreachable collector) is logged as a warning or error; it never affects the
+  fleet API.
+- Headers, timeout and compression use the standard `OTEL_EXPORTER_OTLP_*`
+  variables. `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` set the
+  resource, which defaults to `service.name=agentdesktop-controller` and
+  carries `service.version`; `OTEL_SERVICE_NAME` wins over both.
+
+| Instrument | Prometheus name | Kind | Attributes |
+| --- | --- | --- | --- |
+| `agentdesktop.devices` | `agentdesktop_devices` | up-down counter | `os.type`, `agentdesktop.agent.version`, `agentdesktop.device.config.state`, `agentdesktop.device.last_seen` |
+| `agentdesktop.config.revision` | `agentdesktop_config_revision` | gauge | none |
+| `agentdesktop.inventory.items` | `agentdesktop_inventory_items` | up-down counter | `agentdesktop.inventory.kind` (`mcp_server`, `skill`) |
+| `agentdesktop.device.streams` | `agentdesktop_device_streams` | up-down counter | none |
+| `agentdesktop.device.messages` | `agentdesktop_device_messages_total` | counter | `agentdesktop.device.message.type`; `error.type` when storing the message failed |
+| `agentdesktop.telemetry.events` | `agentdesktop_telemetry_events_total` | counter | `event.name` (`session.new`, `tool.use`) |
+
+Device and inventory counts are additive across attribute sets, so they are
+up-down counters: over OTLP a backend sums them. Prometheus exposes them as
+gauges.
+
+Attribute values are a fixed set; nothing a device sends is recorded as it is.
+`os.type` is `darwin`, `linux`, `windows` or `unknown`. The agent version is
+kept only when it is `MAJOR.MINOR.PATCH` with an optional short pre-release, and
+is `unknown` otherwise. `agentdesktop.device.config.state` is `applied`,
+`failed` or `unreported`, and `agentdesktop.device.last_seen` is `online` (seen
+in the last 90 seconds, as in the management UI), `1h`, `24h`, `older` or
+`never`. Hostnames, users, device IDs and tool or MCP server names are never
+recorded. Every series also carries `otel_scope_name`, and the resource is
+exposed as `target_info`.
+
+The device and inventory counts and the configuration revision come from the
+database, which the controller reads every 30 seconds, not on each scrape. If
+that read fails or takes longer than 20 seconds, they are left out of the scrape
+until it succeeds again; the counters are still served. The counters and the
+stream count live in memory and start from zero when the controller restarts.
+
+**Aggregating across replicas.** Every replica reads the same database, so each
+reports the same `agentdesktop_devices`, `agentdesktop_config_revision` and
+`agentdesktop_inventory_items`. Average those across replicas, then sum (the same
+applies to the OTLP series, one set per replica):
+
+```promql
+sum by (os_type) (avg without (instance, pod) (agentdesktop_devices))
+```
+
+`agentdesktop_device_streams` and the two counters are per replica, so sum them
+directly:
+
+```promql
+sum (agentdesktop_device_streams)
+sum by (error_type) (rate(agentdesktop_device_messages_total[5m]))
+```
+
+These cover fleet health. Token and cost usage is in
+[Token and cost usage](#token-and-cost-usage).
+
 ## Core capabilities
 
 - **AI tool discovery:** detect supported developer tools and their versions
