@@ -487,10 +487,13 @@ pub struct ControllerConfig {
     #[serde(default = "default_fleet_listen")]
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub fleet_listen: SocketAddr,
-    /// Loopback address on which the controller management UI listens.
+    /// Address on which the controller management UI listens. Local mode requires loopback.
     #[serde(default = "default_admin_listen")]
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub admin_listen: SocketAddr,
+    /// Management authentication, separate from device enrollment. Defaults to local-only access.
+    #[serde(default)]
+    pub admin_access: ControllerAdminAccess,
     /// SQLite or PostgreSQL URL used for controller state.
     #[serde(default = "default_controller_database_url")]
     pub database_url: String,
@@ -515,6 +518,58 @@ pub struct ControllerConfig {
     /// This escape hatch is only appropriate for isolated local development.
     #[serde(default)]
     pub allow_insecure_dev: bool,
+}
+
+/// Authentication and exposure policy for the management API and UI.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "mode", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ControllerAdminAccess {
+    /// Unauthenticated access restricted to an IPv4 or IPv6 loopback listener.
+    #[default]
+    Local,
+    /// Remote management through a compiled-in authentication extension. The standard
+    /// controller has no such extension and rejects this mode at startup.
+    Authenticated(Box<ControllerAdminAuthenticated>),
+}
+
+/// Exposure settings shared by every management authentication extension.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerAdminAuthenticated {
+    /// Exact external HTTPS origin, without a path other than `/`.
+    pub public_url: String,
+    /// How HTTPS reaches the management listener.
+    pub transport: ControllerAdminTransport,
+    /// Settings owned and validated by the compiled-in authentication extension.
+    /// Relative paths inside it are resolved from the controller configuration directory.
+    pub provider: serde_json::Map<String, serde_json::Value>,
+    /// Directory containing the loaded configuration file; empty for parsed documents.
+    #[serde(skip)]
+    pub config_directory: PathBuf,
+}
+
+impl ControllerAdminAuthenticated {
+    /// Resolves an extension-owned relative path against the configuration directory.
+    pub fn resolve_path(&self, path: &Path) -> PathBuf {
+        self.config_directory.join(path)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "mode", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ControllerAdminTransport {
+    /// HTTPS terminates at a trusted proxy; the plaintext listener must not be public.
+    Proxy,
+    /// The management listener terminates TLS directly.
+    Tls {
+        /// PEM certificate chain. Relative paths are resolved from the configuration directory.
+        certificate: PathBuf,
+        /// PEM private key. Relative paths are resolved from the configuration directory.
+        key: PathBuf,
+    },
 }
 
 /// OpenID Connect settings used for interactive device enrollment.
@@ -1300,6 +1355,13 @@ pub fn load_controller(path: &Path) -> anyhow::Result<ControllerConfig> {
     if let Some(usage) = &mut config.usage {
         resolve_relative(&mut usage.token_file, directory);
     }
+    if let ControllerAdminAccess::Authenticated(admin) = &mut config.admin_access {
+        admin.config_directory = directory.to_path_buf();
+        if let ControllerAdminTransport::Tls { certificate, key } = &mut admin.transport {
+            resolve_relative(certificate, directory);
+            resolve_relative(key, directory);
+        }
+    }
     match &mut config.tls {
         ControllerTlsConfig::Directory(path) => resolve_relative(path, directory),
         ControllerTlsConfig::Files(tls) => {
@@ -1316,8 +1378,12 @@ pub fn load_controller(path: &Path) -> anyhow::Result<ControllerConfig> {
 pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
     let config: ControllerConfig =
         crate::serdes::yamlviajson::from_str(contents).context("parse controller configuration")?;
-    if !config.admin_listen.ip().is_loopback() {
-        anyhow::bail!("adminListen must use a loopback address");
+    match &config.admin_access {
+        ControllerAdminAccess::Local if !config.admin_listen.ip().is_loopback() => {
+            anyhow::bail!("adminListen must use a loopback address in local adminAccess mode");
+        }
+        ControllerAdminAccess::Local => {}
+        ControllerAdminAccess::Authenticated(admin) => validate_admin_authenticated(admin)?,
     }
     let oidc = &config.oidc;
     if oidc.client_id.trim().is_empty() {
@@ -1350,6 +1416,58 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
         }
     }
     Ok(config)
+}
+
+fn validate_admin_authenticated(admin: &ControllerAdminAuthenticated) -> anyhow::Result<()> {
+    let public = validate_admin_https_url(&admin.public_url, "adminAccess.publicUrl")?;
+    if public.path() != "/"
+        || admin.public_url.split_once("://").is_some_and(|(_, rest)| {
+            rest.split_once('/')
+                .is_some_and(|(_, path)| !path.is_empty())
+        })
+    {
+        anyhow::bail!("adminAccess.publicUrl must be an HTTPS origin without a path");
+    }
+    if let ControllerAdminTransport::Tls { certificate, key } = &admin.transport {
+        require_admin_path(certificate, "adminAccess.transport.certificate")?;
+        require_admin_path(key, "adminAccess.transport.key")?;
+    }
+    Ok(())
+}
+
+fn validate_admin_https_url(value: &str, field: &str) -> anyhow::Result<Url> {
+    let url = Url::parse(value).with_context(|| format!("parse {field} URL"))?;
+    if value
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+        || !value.starts_with("https://")
+        || value.contains('\\')
+        || url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || value.split("://").nth(1).is_some_and(|rest| {
+            rest.split('/')
+                .next()
+                .is_some_and(|authority| authority.contains('@'))
+        })
+    {
+        anyhow::bail!("{field} must use HTTPS without userinfo, query, or fragment");
+    }
+    Ok(url)
+}
+
+fn require_admin_text(value: &str, field: &str) -> anyhow::Result<()> {
+    if value.trim().is_empty() {
+        anyhow::bail!("{field} cannot be empty");
+    }
+    Ok(())
+}
+
+fn require_admin_path(value: &Path, field: &str) -> anyhow::Result<()> {
+    require_admin_text(&value.to_string_lossy(), field)
 }
 
 fn resolve_relative(path: &mut PathBuf, directory: &Path) {
@@ -1726,6 +1844,167 @@ mod tests {
     use super::{
         DaemonConfig, LlmGatewayAuthentication, load_controller, parse_controller, parse_daemon,
     };
+
+    fn admin_document() -> serde_json::Value {
+        serde_json::json!({
+            "oidc": {"issuer": "https://enrollment.example", "clientId": "devices"},
+            "tls": "fleet-tls",
+            "adminListen": "0.0.0.0:8080",
+            "adminAccess": {
+                "mode": "authenticated",
+                "publicUrl": "https://admin.example",
+                "transport": {"mode": "proxy"},
+                "provider": {
+                    "oidc": {"issuer": "https://identity.example", "clientSecretFile": "admin-secret"}
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn admin_local_default_is_loopback_only_including_ipv6() {
+        let mut document = admin_document();
+        document.as_object_mut().unwrap().remove("adminAccess");
+        document.as_object_mut().unwrap().remove("adminListen");
+        let config = parse_controller(&document.to_string()).unwrap();
+        assert!(matches!(
+            config.admin_access,
+            super::ControllerAdminAccess::Local
+        ));
+        assert_eq!(config.admin_listen, "127.0.0.1:8080".parse().unwrap());
+        for listen in ["127.0.0.1:8080", "127.12.34.56:8080", "[::1]:8080"] {
+            document["adminListen"] = listen.into();
+            assert!(parse_controller(&document.to_string()).is_ok(), "{listen}");
+        }
+        for listen in [
+            "0.0.0.0:8080",
+            "[::]:8080",
+            "192.0.2.1:8080",
+            "[::ffff:127.0.0.1]:8080",
+        ] {
+            document["adminListen"] = listen.into();
+            assert!(parse_controller(&document.to_string()).is_err(), "{listen}");
+        }
+    }
+
+    #[test]
+    fn admin_authenticated_keeps_provider_settings_opaque() {
+        let config = parse_controller(&admin_document().to_string()).unwrap();
+        let super::ControllerAdminAccess::Authenticated(admin) = &config.admin_access else {
+            panic!("expected authenticated");
+        };
+        assert_eq!(
+            admin.provider["oidc"]["clientSecretFile"],
+            serde_json::json!("admin-secret")
+        );
+        let serialized = serde_json::to_value(&config).unwrap();
+        assert_eq!(serialized["adminAccess"]["mode"], "authenticated");
+        assert_eq!(
+            serialized["adminAccess"]["publicUrl"],
+            "https://admin.example"
+        );
+        assert!(serialized["adminAccess"].get("configDirectory").is_none());
+        assert_eq!(
+            serialized["adminAccess"]["provider"],
+            admin_document()["adminAccess"]["provider"]
+        );
+        parse_controller(&serialized.to_string()).unwrap();
+    }
+
+    #[test]
+    fn admin_authenticated_rejects_unsafe_exposure_even_in_dev_mode() {
+        use serde_json::json;
+        let cases = [
+            ("/adminAccess/publicUrl", json!("http://admin.example")),
+            (
+                "/adminAccess/publicUrl",
+                json!("https://admin.example/path"),
+            ),
+            (
+                "/adminAccess/publicUrl",
+                json!("https://admin.example/a/.."),
+            ),
+            (
+                "/adminAccess/publicUrl",
+                json!("https://admin.example/?a=1"),
+            ),
+            (
+                "/adminAccess/publicUrl",
+                json!("https://admin.example/#fragment"),
+            ),
+            ("/adminAccess/publicUrl", json!("https://@admin.example")),
+            (
+                "/adminAccess/publicUrl",
+                json!("https://user@admin.example"),
+            ),
+            ("/adminAccess/publicUrl", json!("https://admin.exa\nmple")),
+            (
+                "/adminAccess/transport",
+                json!({"mode":"tls", "certificate":"", "key":"key.pem"}),
+            ),
+            (
+                "/adminAccess/transport",
+                json!({"mode":"tls", "certificate":"cert.pem", "key":""}),
+            ),
+            ("/adminAccess/transport", json!({"mode":"plaintext"})),
+            ("/adminAccess/provider", json!("settings")),
+            ("/adminAccess/provider", json!(["settings"])),
+            ("/adminAccess/configDirectory", json!("/etc")),
+            ("/adminAccess/unknownSetting", json!(true)),
+        ];
+        for (pointer, value) in cases {
+            let mut document = admin_document();
+            document["allowInsecureDev"] = true.into();
+            let (parent, key) = pointer.rsplit_once('/').unwrap();
+            document.pointer_mut(parent).unwrap()[key] = value.clone();
+            assert!(
+                parse_controller(&document.to_string()).is_err(),
+                "accepted invalid {pointer}={value}"
+            );
+        }
+        for field in ["publicUrl", "transport", "provider"] {
+            let mut document = admin_document();
+            document["adminAccess"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(parse_controller(&document.to_string()).is_err(), "{field}");
+        }
+    }
+
+    #[test]
+    fn admin_paths_resolve_from_config_directory() {
+        let directory = std::env::current_dir()
+            .unwrap()
+            .join(format!(".admin-config-test-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let mut document = admin_document();
+        document["adminAccess"]["transport"] = serde_json::json!({
+            "mode":"tls", "certificate":"admin-cert.pem", "key":"admin-key.pem"
+        });
+        let path = directory.join("controller.yaml");
+        std::fs::write(&path, document.to_string()).unwrap();
+        let result = load_controller(&path);
+        std::fs::remove_dir_all(&directory).unwrap();
+        let super::ControllerAdminAccess::Authenticated(admin) = result.unwrap().admin_access
+        else {
+            panic!("expected authenticated");
+        };
+        assert_eq!(admin.config_directory, directory);
+        assert_eq!(
+            admin.resolve_path(std::path::Path::new("admin-secret")),
+            directory.join("admin-secret")
+        );
+        assert_eq!(
+            admin.resolve_path(std::path::Path::new("/run/secrets/admin")),
+            std::path::Path::new("/run/secrets/admin")
+        );
+        let super::ControllerAdminTransport::Tls { certificate, key } = admin.transport else {
+            panic!("expected tls");
+        };
+        assert_eq!(certificate, directory.join("admin-cert.pem"));
+        assert_eq!(key, directory.join("admin-key.pem"));
+    }
 
     #[test]
     fn startup_settings_are_local_only_and_reject_unknown_fields() {

@@ -11,8 +11,10 @@ agentdesktop-core.workspace = true
 agentdesktop-proto.workspace = true
 agentdesktop-usage.workspace = true
 anyhow.workspace = true
+async-trait = "0.1"
 aws-lc-rs.workspace = true
 axum.workspace = true
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 base64.workspace = true
 clap.workspace = true
 futures-core.workspace = true
@@ -37,3 +39,7 @@ time.workspace = true
 url.workspace = true
 uuid.workspace = true
 x509-parser.workspace = true
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util.workspace = true

@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 
+import { useAuth } from "./auth";
+
 export function useApi<T>(path: string) {
+  const { request } = useAuth();
   const [query, setQuery] = useState<{
     path: string;
     data: T | null;
@@ -12,9 +15,8 @@ export function useApi<T>(path: string) {
     const controller = new AbortController();
     let active = true;
     setQuery({ path, data: null, error: null, loading: true });
-    fetch(path, { signal: controller.signal })
+    request(path, { signal: controller.signal })
       .then(async (response) => {
-        if (!response.ok) throw new Error(await response.text());
         return response.json() as Promise<T>;
       })
       .then((response) => {
@@ -36,7 +38,7 @@ export function useApi<T>(path: string) {
       active = false;
       controller.abort();
     };
-  }, [path]);
+  }, [path, request]);
 
   return query.path === path
     ? query
