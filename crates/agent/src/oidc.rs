@@ -36,6 +36,11 @@ pub(crate) const DEFAULT_DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(5)
 /// RFC 8628 section 3.5: `slow_down` increases the interval by 5 seconds.
 const DEVICE_POLL_SLOW_DOWN: Duration = Duration::from_secs(5);
 const DEVICE_CODE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_code";
+/// Bound on a refresh-token request. The daemon refreshes in the background,
+/// and a half-open connection (left behind when the computer sleeps) would
+/// otherwise hold the refresh, and the controller session waiting on it,
+/// forever.
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 const BRAND_MARK_SVG: &str = include_str!("../../../images/mark.svg");
 
 pub(crate) fn page(title: &str, content: &str) -> String {
@@ -581,6 +586,7 @@ pub(crate) async fn refresh_access_token(
 ) -> anyhow::Result<TokenResponse> {
     let response = reqwest::Client::new()
         .post(endpoint)
+        .timeout(REFRESH_TIMEOUT)
         .form(&[
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
