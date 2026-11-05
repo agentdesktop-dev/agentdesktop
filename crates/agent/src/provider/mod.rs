@@ -50,6 +50,8 @@ pub trait Provider: Send + Sync {
 #[derive(Clone)]
 pub struct ReconcileContext {
     pub merge_user_settings: bool,
+    /// Whether the daemon is running in user mode rather than managing system files.
+    pub user_mode: bool,
     pub credential_helper: PathBuf,
     pub socket: PathBuf,
     /// The bound loopback LLM proxy, for programs whose client files point at

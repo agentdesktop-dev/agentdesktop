@@ -766,6 +766,7 @@ fn system_mode_skips_a_configured_program_without_writing_anything() {
     .unwrap();
     let context = |merge_user_settings: bool| ReconcileContext {
         merge_user_settings,
+        user_mode: merge_user_settings,
         credential_helper: dir.path().join("agentdesktop"),
         socket: dir.path().join("agentdesktop.sock"),
         llm_proxy: None,

@@ -137,6 +137,17 @@
       "description": "Settings reconciled into Codex's organization-managed configuration.\n\nValues under `managedConfig` are written to Codex's `managed_config.toml`.\nWhen generated LLM-gateway settings overlap with those values,\nAgentdesktop's generated values take precedence.",
       "type": "object",
       "properties": {
+        "auth": {
+          "description": "Connect a ChatGPT subscription through Agentdesktop's OAuth credential helper.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProgramAuthentication"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "managedConfig": {
           "description": "Arbitrary values written to Codex's organization-managed TOML configuration.\n\nUse Codex's native snake_case configuration keys. TOML has no null value,\nso null values cannot be reconciled.",
           "type": "object",

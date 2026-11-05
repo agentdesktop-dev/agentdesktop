@@ -649,7 +649,53 @@ pub(crate) async fn wait_for_authorization_code_with_page(
     page: AuthorizationPage,
     open_browser: bool,
 ) -> anyhow::Result<Option<String>> {
+    wait_for_authorization_code_with_callback(
+        authorization_url,
+        redirect_uri,
+        expected_state,
+        callback_listen,
+        page,
+        open_browser,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn wait_for_subscription_authorization_code(
+    authorization_url: &str,
+    provider_callback: &Url,
+    expected_state: String,
+    callback_listen: Option<SocketAddr>,
+    open_browser: bool,
+) -> anyhow::Result<Option<String>> {
+    let prompt_uri =
+        Url::parse("http://localhost:51327/callback").expect("valid subscription prompt URI");
+    wait_for_authorization_code_with_callback(
+        authorization_url,
+        &prompt_uri,
+        expected_state,
+        callback_listen,
+        AuthorizationPage::Subscription,
+        open_browser,
+        Some(provider_callback),
+    )
+    .await
+}
+
+async fn wait_for_authorization_code_with_callback(
+    authorization_url: &str,
+    redirect_uri: &Url,
+    expected_state: String,
+    callback_listen: Option<SocketAddr>,
+    page: AuthorizationPage,
+    open_browser: bool,
+    provider_callback: Option<&Url>,
+) -> anyhow::Result<Option<String>> {
     let listener = bind_callback(redirect_uri, callback_listen).await?;
+    let provider_listener = match provider_callback {
+        Some(callback) => Some(bind_callback(callback, None).await?),
+        None => None,
+    };
     let (result_sender, result_receiver) = oneshot::channel();
     let state = CallbackState {
         expected_state,
@@ -658,13 +704,32 @@ pub(crate) async fn wait_for_authorization_code_with_page(
         result: Arc::new(Mutex::new(Some(result_sender))),
     };
     let callback_path = redirect_uri.path().to_owned();
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/", get(authorization_prompt))
         .route("/continue", get(continue_authorization))
         .route("/skip", get(skip_authorization))
         .route("/flow-ready", get(flow_ready))
-        .route(&callback_path, get(callback))
-        .with_state(state);
+        .route(&callback_path, get(callback));
+    if let Some(provider_callback) = provider_callback
+        && provider_callback.path() != callback_path
+    {
+        app = app.route(provider_callback.path(), get(callback));
+    }
+    let app = app.with_state(state);
+    let provider_server = provider_listener.map(|listener| {
+        let app = app.clone();
+        let (shutdown, stopped) = oneshot::channel::<()>();
+        (
+            shutdown,
+            tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async move {
+                        let _ = stopped.await;
+                    })
+                    .await
+            }),
+        )
+    });
     let (shutdown_sender, shutdown_receiver) = oneshot::channel::<()>();
     let server = tokio::spawn(async move {
         axum::serve(listener, app)
@@ -693,13 +758,22 @@ pub(crate) async fn wait_for_authorization_code_with_page(
         tracing::info!(%prompt_url, "continuing in existing Agentdesktop authorization page");
     }
 
-    let authorization_code = tokio::time::timeout(CALLBACK_TIMEOUT, result_receiver)
-        .await
-        .context("timed out waiting for OIDC callback")?
-        .context("OIDC callback server stopped")??;
+    let authorization_code = async {
+        tokio::time::timeout(CALLBACK_TIMEOUT, result_receiver)
+            .await
+            .context("timed out waiting for OIDC callback")?
+            .context("OIDC callback server stopped")?
+    }
+    .await;
     let _ = shutdown_sender.send(());
+    if let Some((shutdown, provider_server)) = provider_server {
+        let _ = shutdown.send(());
+        provider_server
+            .await
+            .context("join provider OAuth callback server")??;
+    }
     server.await.context("join OIDC callback server")??;
-    Ok(authorization_code)
+    authorization_code
 }
 
 async fn authorization_prompt(State(state): State<CallbackState>) -> Html<String> {
@@ -754,15 +828,15 @@ pub(crate) async fn continue_subscription_page(
         .route("/flow-ready", get(continued_flow_ready))
         .with_state(state);
     tokio::spawn(async move {
-        let result = axum::serve(listener, app)
+        axum::serve(listener, app)
             .with_graceful_shutdown(async move {
                 let _ = tokio::time::timeout(CALLBACK_TIMEOUT, viewed_receiver).await;
             })
-            .await;
-        if let Err(error) = result {
-            tracing::warn!(%error, "serve continued Agentdesktop authorization page");
-        }
-    });
+            .await
+    })
+    .await
+    .context("join continued Agentdesktop authorization page")?
+    .context("serve continued Agentdesktop authorization page")?;
     Ok(())
 }
 
@@ -876,7 +950,7 @@ mod tests {
 
     use super::{
         AuthorizationPage, DevicePoll, TokenResponse, apply_refreshed_tokens,
-        classify_device_token_error, poll_device_token,
+        classify_device_token_error, continue_subscription_page, poll_device_token,
     };
     use crate::identity::{Identity, OAuthCredentials};
 
@@ -989,6 +1063,126 @@ mod tests {
             classify_device_token_error(b"<html>bad gateway</html>"),
             DevicePoll::Failed(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn subscription_prompt_accepts_a_separate_registered_provider_callback() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let prompt_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let prompt_address = prompt_listener.local_addr().unwrap();
+            let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let provider_address = provider_listener.local_addr().unwrap();
+            drop((prompt_listener, provider_listener));
+            let prompt = url::Url::parse(&format!("http://{prompt_address}/callback")).unwrap();
+            let mut provider =
+                url::Url::parse(&format!("http://{provider_address}/auth/callback")).unwrap();
+            let callback = provider.clone();
+            let task = tokio::spawn(async move {
+                super::wait_for_authorization_code_with_callback(
+                    "https://provider.example/authorize",
+                    &prompt,
+                    "expected-state".to_owned(),
+                    None,
+                    super::AuthorizationPage::Subscription,
+                    false,
+                    Some(&callback),
+                )
+                .await
+            });
+            let client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap();
+            loop {
+                if let Ok(response) = client
+                    .get(format!("http://{prompt_address}/flow-ready"))
+                    .send()
+                    .await
+                    && response.status().is_success()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            let response = client
+                .get(format!("http://{prompt_address}/continue"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.headers()["location"],
+                "https://provider.example/authorize"
+            );
+            provider
+                .query_pairs_mut()
+                .extend_pairs([("state", "expected-state"), ("code", "provider-code")]);
+            let response = client.get(provider).send().await.unwrap();
+            assert!(response.status().is_success());
+            assert!(
+                response
+                    .text()
+                    .await
+                    .unwrap()
+                    .contains("Agentdesktop connected")
+            );
+            assert_eq!(
+                task.await.unwrap().unwrap().as_deref(),
+                Some("provider-code")
+            );
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn continued_subscription_page_waits_for_view_and_then_stops() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            drop(listener);
+            let redirect = url::Url::parse("http://localhost:51327/callback").unwrap();
+            let server = tokio::spawn(async move {
+                continue_subscription_page(&redirect, Some(address), true).await
+            });
+            let client = reqwest::Client::new();
+            loop {
+                if let Ok(response) = client
+                    .get(format!("http://{address}/flow-ready"))
+                    .send()
+                    .await
+                    && response.status().is_success()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(
+                !server.is_finished(),
+                "listener must remain owned until page visit"
+            );
+            let response = client
+                .get(format!("http://{address}/"))
+                .send()
+                .await
+                .unwrap();
+            assert!(
+                response
+                    .text()
+                    .await
+                    .unwrap()
+                    .contains("Agentdesktop connected")
+            );
+            server.await.unwrap().unwrap();
+            assert!(
+                client
+                    .get(format!("http://{address}/"))
+                    .send()
+                    .await
+                    .is_err()
+            );
+        })
+        .await
+        .unwrap();
     }
 
     #[test]

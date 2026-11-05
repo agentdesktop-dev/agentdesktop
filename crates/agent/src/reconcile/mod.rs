@@ -74,6 +74,7 @@ impl Reconciler {
         Self {
             context: ReconcileContext {
                 merge_user_settings,
+                user_mode: merge_user_settings,
                 credential_helper,
                 socket,
                 llm_proxy: None,

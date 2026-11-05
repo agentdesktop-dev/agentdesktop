@@ -1,17 +1,12 @@
-use std::{
-    net::SocketAddr,
-    path::Path,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::{net::SocketAddr, path::Path};
 
-use agentdesktop_core::http::ClientExt;
-use agentdesktop_core::model::LlmGatewayCredential;
+use agentdesktop_core::{http::ClientExt, model::LlmGatewayCredential};
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
 use url::Url;
 
-use crate::{oidc, secret_store::SecretStore};
+use super::{LoginState, OAuthProvider};
+use crate::subscription::SubscriptionCredential;
 
 // These are the production Claude subscription OAuth settings used by Claude Code
 // 2.1.237. Anthropic does not currently publish them as a stable third-party API.
@@ -21,12 +16,9 @@ const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const REDIRECT_URI: &str = "http://localhost:51327/callback";
 const SCOPE: &str = "user:inference";
 const REQUESTED_LIFETIME_SECONDS: u64 = 365 * 24 * 60 * 60;
-const EXPIRY_SKEW_SECONDS: u64 = 60;
-const SECRET_SERVICE: &str = "dev.agentdesktop.anthropic-subscription";
-const SECRET_ACCOUNT: &str = "claude";
 
-static LOGIN: Mutex<()> = Mutex::const_new(());
-static DECLINED_FOR_PROCESS: AtomicBool = AtomicBool::new(false);
+static LOGIN: LoginState = LoginState::new();
+struct Anthropic;
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,61 +50,54 @@ pub async fn credential(
     callback_listen: Option<SocketAddr>,
     open_browser: bool,
 ) -> anyhow::Result<Option<LlmGatewayCredential>> {
-    let state_dir = state_dir.to_owned();
-    tokio::spawn(async move { credential_inner(&state_dir, callback_listen, open_browser).await })
-        .await
-        .context("join Anthropic subscription OAuth task")?
+    Ok(
+        super::credential(&Anthropic, &LOGIN, state_dir, callback_listen, open_browser)
+            .await?
+            .map(|credential| credential.token),
+    )
 }
 
-async fn credential_inner(
-    state_dir: &Path,
-    callback_listen: Option<SocketAddr>,
-    open_browser: bool,
-) -> anyhow::Result<Option<LlmGatewayCredential>> {
-    let _login = LOGIN.lock().await;
-    let store = SecretStore::new(state_dir)?;
-    let redirect_uri = Url::parse(REDIRECT_URI).expect("static Anthropic redirect URI is valid");
-    if let Some(stored) = load(&store)?
-        && stored.expires_at_unix_seconds > now().saturating_add(EXPIRY_SKEW_SECONDS)
-    {
-        if !open_browser {
-            oidc::continue_subscription_page(&redirect_uri, callback_listen, true).await?;
-        }
-        return Ok(Some(as_credential(&stored)));
-    }
-    if DECLINED_FOR_PROCESS.load(Ordering::Relaxed) {
-        if !open_browser {
-            oidc::continue_subscription_page(&redirect_uri, callback_listen, false).await?;
-        }
-        return Ok(None);
+#[async_trait::async_trait]
+impl OAuthProvider for Anthropic {
+    type Token = StoredToken;
+    const NAME: &'static str = "Anthropic";
+    const SERVICE: &'static str = "dev.agentdesktop.anthropic-subscription";
+    const ACCOUNT: &'static str = "claude";
+    const REDIRECT_URI: &'static str = REDIRECT_URI;
+
+    fn authorization_url(&self, redirect: &Url, state: &str, challenge: &str) -> Url {
+        authorization_url(redirect, state, challenge)
     }
 
-    let state = oidc::random_secret();
-    let (verifier, challenge) = oidc::pkce();
-    let authorization_url = authorization_url(&redirect_uri, &state, &challenge);
-    let authorization_code = oidc::wait_for_authorization_code_with_page(
-        authorization_url.as_str(),
-        &redirect_uri,
-        state.clone(),
-        callback_listen,
-        oidc::AuthorizationPage::Subscription,
-        open_browser,
-    )
-    .await?;
-    let Some(authorization_code) = authorization_code else {
-        DECLINED_FOR_PROCESS.store(true, Ordering::Relaxed);
-        return Ok(None);
-    };
-    let response = exchange_authorization_code(&authorization_code, &verifier, &state).await?;
-    if !response.token_type.eq_ignore_ascii_case("bearer") {
-        bail!("Anthropic OAuth endpoint returned unsupported token type");
+    fn expires_at(&self, token: &StoredToken) -> u64 {
+        token.expires_at_unix_seconds
     }
-    let stored = StoredToken {
-        access_token: response.access_token,
-        expires_at_unix_seconds: now().saturating_add(response.expires_in),
-    };
-    save(&store, &stored)?;
-    Ok(Some(as_credential(&stored)))
+
+    fn credential_from_token(&self, token: StoredToken) -> SubscriptionCredential {
+        SubscriptionCredential {
+            token: LlmGatewayCredential {
+                credential: token.access_token,
+                expires_at_unix_seconds: token.expires_at_unix_seconds,
+            },
+            account_id: None,
+        }
+    }
+
+    async fn exchange(
+        &self,
+        code: &str,
+        verifier: &str,
+        state: &str,
+    ) -> anyhow::Result<StoredToken> {
+        let response = exchange_authorization_code(code, verifier, state).await?;
+        if !response.token_type.eq_ignore_ascii_case("bearer") {
+            bail!("Anthropic OAuth endpoint returned unsupported token type");
+        }
+        Ok(StoredToken {
+            access_token: response.access_token,
+            expires_at_unix_seconds: super::now().saturating_add(response.expires_in),
+        })
+    }
 }
 
 fn authorization_url(redirect_uri: &Url, state: &str, challenge: &str) -> Url {
@@ -151,35 +136,6 @@ async fn exchange_authorization_code(
         )
         .await
         .context("exchange Anthropic subscription authorization code")
-}
-
-fn load(store: &SecretStore) -> anyhow::Result<Option<StoredToken>> {
-    store
-        .get_optional(SECRET_SERVICE, SECRET_ACCOUNT)?
-        .map(|value| serde_json::from_str(&value).context("decode stored Anthropic OAuth token"))
-        .transpose()
-}
-
-fn save(store: &SecretStore, token: &StoredToken) -> anyhow::Result<()> {
-    store.set(
-        SECRET_SERVICE,
-        SECRET_ACCOUNT,
-        &serde_json::to_string(token).context("encode Anthropic OAuth token")?,
-    )
-}
-
-fn as_credential(token: &StoredToken) -> LlmGatewayCredential {
-    LlmGatewayCredential {
-        credential: token.access_token.clone(),
-        expires_at_unix_seconds: token.expires_at_unix_seconds,
-    }
-}
-
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 #[cfg(test)]

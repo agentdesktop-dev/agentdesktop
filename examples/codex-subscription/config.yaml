@@ -1,0 +1,17 @@
+daemon:
+  user: true
+
+llmGateway:
+  url: http://127.0.0.1:4002/v1
+  authentication:
+    type: oidc
+    issuer: http://127.0.0.1:5558/dex
+    clientId: agentdesktop-local
+    scopes: [openid, email, offline_access]
+    allowInsecure: true
+
+programs:
+  codex:
+    auth: subscription
+    managedConfig:
+      model: gpt-5.4
