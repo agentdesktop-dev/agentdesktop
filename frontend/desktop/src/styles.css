@@ -581,6 +581,22 @@ p {
   gap: 4px;
 }
 
+.inline-preference strong {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.logout-confirmation > strong {
+  color: var(--danger-heading);
+  font-size: 11px;
+}
+
+.empty-inline strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
 .runtime-card > summary strong,
 .advanced-config > summary strong {
   color: var(--ink);
@@ -646,15 +662,13 @@ p {
   gap: 4px;
 }
 
-.inline-preference strong {
-  color: var(--ink);
-  font-size: 12px;
-  font-weight: 600;
-}
-
 .inline-preference span {
   color: var(--muted);
   font-size: 10px;
+}
+
+.empty-inline span {
+  line-height: 1.45;
 }
 
 .status-row > div span {
@@ -968,11 +982,6 @@ p {
   gap: 7px;
 }
 
-.logout-confirmation > strong {
-  color: var(--danger-heading);
-  font-size: 11px;
-}
-
 .logout-confirmation > div {
   display: flex;
   gap: 7px;
@@ -997,15 +1006,6 @@ p {
   display: flex;
   flex-direction: column;
   gap: 4px;
-}
-
-.empty-inline strong {
-  color: var(--ink);
-  font-size: 12px;
-}
-
-.empty-inline span {
-  line-height: 1.45;
 }
 
 .page-error {

@@ -820,6 +820,11 @@ code {
   display: none;
 }
 
+.config-notice svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
 .wizard-section-summary > svg {
   flex: 0 0 auto;
   color: var(--subtle);
@@ -906,11 +911,6 @@ code {
   border-radius: 4px;
   font-size: 11px;
   line-height: 1.45;
-}
-
-.config-notice svg {
-  flex: 0 0 auto;
-  margin-top: 1px;
 }
 
 .telemetry-options {
