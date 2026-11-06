@@ -195,7 +195,8 @@ pub struct OpenCodeStartupConfig {
     /// Configuration file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<PathBuf>,
-    /// Credential plugin path.
+    /// Credential plugin path (OpenCode 1 plugin file). The OpenCode 2 plugin
+    /// is written next to it as a directory: `<dir>/<name>/index.js`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin: Option<PathBuf>,
 }

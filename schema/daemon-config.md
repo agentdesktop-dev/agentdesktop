@@ -25,7 +25,7 @@
 |`daemon.oidcCallbackListen`|string|Override the OIDC callback bind address.|
 |`daemon.openCode`|object|OpenCode paths.|
 |`daemon.openCode.config`|string|Configuration file.|
-|`daemon.openCode.plugin`|string|Credential plugin path.|
+|`daemon.openCode.plugin`|string|Credential plugin path (OpenCode 1 plugin file). The OpenCode 2 plugin<br>is written next to it as a directory: `<dir>/<name>/index.js`.|
 |`daemon.pi`|object|Pi paths.|
 |`daemon.pi.models`|string|Model catalog file.|
 |`daemon.pi.settings`|string|Settings file.|
