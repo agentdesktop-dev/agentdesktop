@@ -10,9 +10,10 @@ import {
   Settings,
   SlidersHorizontal,
 } from "lucide-react";
-import type { ReactNode } from "react";
-
+import { type ReactNode, useState } from "react";
+import type { ControllerExtension } from "../extensions";
 import { Link } from "../router";
+import type { AdminSession } from "../types";
 
 const navigation = [
   { href: "/", label: "Overview", icon: Gauge },
@@ -26,15 +27,30 @@ export function ControllerShell({
   children,
   onRefresh,
   path,
+  session,
+  onLogout,
+  extensions = [],
 }: {
   children: ReactNode;
   onRefresh: () => void;
   path: string;
+  session?: AdminSession;
+  onLogout?: () => Promise<void>;
+  extensions?: ControllerExtension[];
 }) {
   const { theme } = useTheme();
+  const [loggingOut, setLoggingOut] = useState(false);
+  const items = [
+    ...navigation,
+    ...extensions.map((extension) => ({
+      href: extension.path,
+      label: extension.label,
+      icon: extension.icon,
+    })),
+  ];
   const pageTitle = path.startsWith("/devices/")
     ? "Device details"
-    : (navigation.find((item) => item.href === path)?.label ?? "Overview");
+    : (items.find((item) => item.href === path)?.label ?? "Overview");
 
   return (
     <div className="app-shell">
@@ -48,7 +64,7 @@ export function ControllerShell({
           <img className="brand-icon" src={agentdesktopMark} alt="" />
         </div>
         <nav className="primary-nav" aria-label="Primary navigation">
-          {navigation.map((item) => {
+          {items.map((item) => {
             const active =
               item.href === "/" ? path === "/" : path.startsWith(item.href);
             return (
@@ -70,9 +86,37 @@ export function ControllerShell({
       <main className="main-area">
         <header className="topbar">
           <h1>{pageTitle}</h1>
-          <button type="button" className="refresh-button" onClick={onRefresh}>
-            <RefreshCw size={14} /> Refresh
-          </button>
+          <div className="session-actions">
+            {session && (
+              <div className="session-identity">
+                <span>
+                  {session.mode === "local" ? "Local mode" : session.subject}
+                </span>
+                <span className="badge neutral">{session.role}</span>
+                {session.mode === "oidc" && onLogout && (
+                  <button
+                    type="button"
+                    className="refresh-button"
+                    disabled={loggingOut}
+                    onClick={() => {
+                      if (loggingOut) return;
+                      setLoggingOut(true);
+                      void onLogout().finally(() => setLoggingOut(false));
+                    }}
+                  >
+                    {loggingOut ? "Signing out…" : "Sign out"}
+                  </button>
+                )}
+              </div>
+            )}
+            <button
+              type="button"
+              className="refresh-button"
+              onClick={onRefresh}
+            >
+              <RefreshCw size={14} /> Refresh
+            </button>
+          </div>
         </header>
         <div className="page-content">{children}</div>
       </main>

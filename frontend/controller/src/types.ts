@@ -5,6 +5,16 @@ import type {
   UsageTotals,
 } from "@agentdesktop/ui";
 
+export type AdminSession = {
+  mode: "local" | "oidc";
+  authenticated: boolean;
+  role: "viewer" | "operator" | null;
+  subject: string | null;
+  assurance: string | null;
+  recent_auth_required: boolean;
+  permissions?: string[];
+};
+
 export type Device = {
   id: string;
   hostname: string;

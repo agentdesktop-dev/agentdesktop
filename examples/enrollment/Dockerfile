@@ -29,8 +29,8 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 COPY images ./images
 RUN --mount=type=cache,id=agentdesktop-lab-headless-target-${TARGETARCH},target=/app/target \
-    --mount=type=cache,id=agentdesktop-cargo-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=agentdesktop-cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=agentdesktop-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=agentdesktop-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     case "${BUILD_PROFILE}" in \
       release) flags=--release ;; \
       debug) flags= ;; \
@@ -57,8 +57,8 @@ COPY images ./images
 COPY frontend/desktop/assets frontend/desktop/assets
 COPY --from=ui /app/frontend/desktop/dist frontend/desktop/dist
 RUN --mount=type=cache,id=agentdesktop-lab-target-${TARGETARCH},target=/app/target \
-    --mount=type=cache,id=agentdesktop-cargo-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=agentdesktop-cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=agentdesktop-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=agentdesktop-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     case "${BUILD_PROFILE}" in \
       release) flags=--release ;; \
       debug) flags= ;; \
