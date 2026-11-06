@@ -122,6 +122,9 @@ pub async fn serve_router(
     if let ControllerAdminAccess::Authenticated(config) = &access
         && let ControllerAdminTransport::Tls { certificate, key } = &config.transport
     {
+        // Builds that enable both rustls backends (the workspace's test dependencies
+        // do) leave no automatic default, so select the one the controller uses.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(certificate, key)
             .await
             .context("load admin TLS identity")?;
