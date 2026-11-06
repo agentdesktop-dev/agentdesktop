@@ -900,6 +900,7 @@ fn system_mode_manages_a_configured_users_vscode_profile() {
     let settings = profile.join("settings.json");
     let context = ReconcileContext {
         merge_user_settings: false,
+        user_mode: false,
         credential_helper: dir.path().join("agentdesktop"),
         socket: dir.path().join("agentdesktop.sock"),
         llm_proxy: Some(crate::llm_proxy::LlmProxyContext {

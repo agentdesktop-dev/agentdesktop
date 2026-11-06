@@ -187,6 +187,7 @@ mod tests {
         let ctx = ReconcileContext {
             llm_proxy: None,
             merge_user_settings: false,
+            user_mode: false,
             credential_helper: root.path().join("agentdesktop"),
             socket: root.path().join("agentdesktop.sock"),
         };

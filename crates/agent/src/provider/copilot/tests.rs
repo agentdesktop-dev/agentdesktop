@@ -1283,6 +1283,7 @@ fn known_pairing_keeps_entries_with_another_pairing() {
 fn system_context(dir: &std::path::Path) -> crate::provider::ReconcileContext {
     crate::provider::ReconcileContext {
         merge_user_settings: false,
+        user_mode: false,
         credential_helper: dir.join("agentdesktop"),
         socket: dir.join("agentdesktop.sock"),
         llm_proxy: Some(crate::llm_proxy::LlmProxyContext {
