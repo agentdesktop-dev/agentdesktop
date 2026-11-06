@@ -8,6 +8,7 @@ use super::{Provider, ReconcileContext};
 use crate::reconcile::ReconcilePlan;
 
 pub(super) mod discovery;
+pub mod managed;
 mod reconcile;
 
 #[derive(Clone)]

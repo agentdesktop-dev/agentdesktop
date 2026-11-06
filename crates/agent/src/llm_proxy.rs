@@ -3,8 +3,9 @@ mod routes;
 
 pub(crate) use routes::{CAPI_ROUTE, CODEX_ROUTE, PAIRING_HEADER};
 use routes::{
-    RouteCredential, Upstream, bearer_or_header, constant_time_eq, host_is_loopback, match_route,
-    path_escapes_base, resembles_route, split_path_pairing, upstream_base,
+    GIT_ROUTE, GIT_SSH_ROUTE, RouteCredential, RouteIdentity, SANDBOX_ROUTE, Upstream,
+    bearer_or_header, constant_time_eq, host_is_loopback, match_route, path_escapes_base,
+    resembles_route, split_path_pairing, upstream_base,
 };
 
 pub(crate) use cache::CredentialCache;
@@ -32,6 +33,9 @@ use tokio::{net::TcpListener, task::JoinSet};
 use agentdesktop_core::config::GitHubTokenSource;
 
 use crate::api::{self, AppState};
+
+pub(crate) mod sessions;
+use sessions::SessionRegistry;
 
 type ProxyClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>;
 type ProxyBody = BoxBody<Bytes, hyper::Error>;
@@ -127,8 +131,18 @@ pub(crate) struct ProxyConfig {
     /// Client id for requests that match no prefixed route (the original,
     /// hand-configured shape from the README).
     pub default_client_id: String,
-    /// Pairing value required on every route.
+    /// Device pairing value required on every route except the sandbox
+    /// route, which takes a session pairing from `sessions`.
     pub pairing: Arc<str>,
+    /// Per-session pairings accepted on the `/sandbox` route.
+    pub sessions: SessionRegistry,
+    /// `daemon.containment.git`: the fetch/push allowlists and static
+    /// credentials the git routes serve. `None` (or an empty allow list)
+    /// means no git egress: the listener is exactly the 3b shape.
+    pub git: Option<agentdesktop_core::config::GitConfig>,
+    /// `daemon.containment.egressUpstream.url`: when set, the git leg is sent
+    /// to this central L7 egress endpoint instead of directly to the remote.
+    pub egress_upstream: Option<url::Url>,
 }
 
 impl std::fmt::Debug for ProxyConfig {
@@ -136,6 +150,12 @@ impl std::fmt::Debug for ProxyConfig {
         f.debug_struct("ProxyConfig")
             .field("default_client_id", &self.default_client_id)
             .field("pairing", &"<redacted>")
+            .field("sessions", &self.sessions.len(now_unix()))
+            .field(
+                "git_allow",
+                &self.git.as_ref().map_or(0, |git| git.allow.len()),
+            )
+            .field("egress_upstream", &self.egress_upstream)
             .finish()
     }
 }
@@ -265,10 +285,23 @@ pub(crate) async fn serve_with_cache(
                         let cache = cache.clone();
                         let slot = slot.clone();
                         async move {
-                            let response = match forward(request, &client, &state, &config, &cache, &slot).await {
-                                Ok(response) => response,
+                            let mut log = RequestLog::default();
+                            let response = match forward(request, &client, &state, &config, &cache, &slot, &mut log).await {
+                                Ok(response) => match log.sandbox.take() {
+                                    // A sandbox request: the event is emitted
+                                    // when the response body ends, so it can
+                                    // carry the bytes delivered and the outcome.
+                                    Some(sandbox) => {
+                                        let status = response.status().as_u16();
+                                        response.map(|body| LoggedBody::new(body, sandbox.with_status(status, None)).boxed())
+                                    }
+                                    None => response,
+                                },
                                 Err(error) => {
                                     tracing::warn!(status = %error.status, code = error.code, message = %error.message, "LLM proxy request failed");
+                                    if let Some(sandbox) = log.sandbox.take() {
+                                        sandbox.with_status(error.status.as_u16(), Some(error.code)).emit(0, "complete");
+                                    }
                                     error.into_response()
                                 }
                             };
@@ -302,6 +335,182 @@ pub(crate) async fn serve_with_cache(
     }
 }
 
+/// What `forward` records about a request for the sandbox request log. Only a
+/// request on the sandbox route fills `sandbox`; every other route logs
+/// nothing new. Drop guard: if the handler future is dropped (client
+/// disconnected) before `forward` or `LoggedBody` emitted the log, RequestLog's
+/// Drop emits with outcome=canceled.
+#[derive(Debug, Default)]
+pub(crate) struct RequestLog {
+    pub sandbox: Option<SandboxRequest>,
+}
+
+impl Drop for RequestLog {
+    fn drop(&mut self) {
+        // If sandbox is still present, the request was canceled before the
+        // normal log paths (error arm or LoggedBody) took it and emitted.
+        if let Some(request) = self.sandbox.take() {
+            request.emit(0, "canceled");
+        }
+    }
+}
+
+/// One request on the sandbox route, as its log event reports it: never a
+/// header, a body, a query string or a pairing value.
+#[derive(Debug)]
+pub(crate) struct SandboxRequest {
+    /// Session id once the pairing matched; `-` until then.
+    pub session: Option<String>,
+    pub client_id: Option<String>,
+    pub method: String,
+    /// The path as sent, prefix stripped, query omitted.
+    pub path: String,
+    /// Upstream status, or the proxy's refusal status.
+    pub status: u16,
+    /// The refusal code; `-` for a forwarded request.
+    pub code: Option<&'static str>,
+    /// Buffered request body length; 0 when refused before the body was read.
+    pub bytes_in: usize,
+    /// Destination host of a git or CONNECT request; `-` on model lines.
+    pub host: Option<String>,
+    /// `allow` / `refuse` / `upstream` on git and CONNECT lines; `-` on
+    /// model lines.
+    pub decision: Option<&'static str>,
+    /// Set when a session revocation cut the response body short: the line
+    /// then reports `outcome="canceled"` (git routes only).
+    pub revoked: Option<Arc<std::sync::atomic::AtomicBool>>,
+    started: std::time::Instant,
+}
+
+impl SandboxRequest {
+    fn new(method: &Method, path: &str) -> Self {
+        Self {
+            session: None,
+            client_id: None,
+            method: method.to_string(),
+            path: path.to_owned(),
+            status: 0,
+            code: None,
+            bytes_in: 0,
+            host: None,
+            decision: None,
+            revoked: None,
+            started: std::time::Instant::now(),
+        }
+    }
+
+    fn with_status(mut self, status: u16, code: Option<&'static str>) -> Self {
+        self.status = status;
+        self.code = code;
+        self
+    }
+
+    /// The one `info` event per sandbox request.
+    fn emit(&self, bytes_out: u64, outcome: &'static str) {
+        tracing::info!(
+            session = self.session.as_deref().unwrap_or("-"),
+            client_id = self.client_id.as_deref().unwrap_or("-"),
+            method = %self.method,
+            path = %self.path,
+            status = self.status,
+            code = self.code.unwrap_or("-"),
+            bytes_in = self.bytes_in,
+            bytes_out,
+            duration_ms = self.started.elapsed().as_millis() as u64,
+            outcome,
+            host = self.host.as_deref().unwrap_or("-"),
+            decision = self.decision.unwrap_or("-"),
+            "LLM proxy sandbox request"
+        );
+    }
+}
+
+/// Response body of a sandbox request: counts the data bytes delivered and
+/// emits the request log once, when the upstream body ends (`complete`, also
+/// when hyper drops a body that has reported its end without polling for the
+/// trailing `None`), fails, or is dropped before its end because the client
+/// went away (`aborted`).
+pub(crate) struct LoggedBody {
+    inner: ProxyBody,
+    log: SandboxRequest,
+    bytes_out: u64,
+    emitted: bool,
+}
+
+impl LoggedBody {
+    fn new(inner: ProxyBody, log: SandboxRequest) -> Self {
+        Self {
+            inner,
+            log,
+            bytes_out: 0,
+            emitted: false,
+        }
+    }
+
+    fn finish(&mut self, outcome: &'static str) {
+        let revoked = self
+            .log
+            .revoked
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst));
+        let outcome = if revoked { "canceled" } else { outcome };
+        if !self.emitted {
+            self.emitted = true;
+            self.log.emit(self.bytes_out, outcome);
+        }
+    }
+}
+
+impl hyper::body::Body for LoggedBody {
+    type Data = Bytes;
+    type Error = hyper::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Bytes>, hyper::Error>>> {
+        let polled = std::pin::Pin::new(&mut self.inner).poll_frame(cx);
+        match &polled {
+            std::task::Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    self.bytes_out += data.len() as u64;
+                }
+                // hyper stops polling once the body reports its end (a
+                // Content-Length body after its last frame) and never asks
+                // for the trailing `None`: that is a completed response too.
+                if hyper::body::Body::is_end_stream(&self.inner) {
+                    self.finish("complete");
+                }
+            }
+            std::task::Poll::Ready(Some(Err(_))) => self.finish("aborted"),
+            std::task::Poll::Ready(None) => self.finish("complete"),
+            std::task::Poll::Pending => {}
+        }
+        polled
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+impl Drop for LoggedBody {
+    fn drop(&mut self) {
+        // An empty body (204, HEAD) is never polled at all; a body dropped
+        // before its end was cut off by the client.
+        let outcome = if hyper::body::Body::is_end_stream(&self.inner) {
+            "complete"
+        } else {
+            "aborted"
+        };
+        self.finish(outcome);
+    }
+}
+
 /// A refused or failed request, rendered as an OpenAI-style JSON error so the
 /// LLM clients display the message instead of dropping the connection.
 #[derive(Debug)]
@@ -317,6 +526,15 @@ impl ProxyError {
             StatusCode::FORBIDDEN,
             "pairing_invalid",
             "agentdesktop proxy: pairing value missing or wrong; re-apply the managed configuration",
+        )
+    }
+
+    /// The sandbox route's refusal: a session pairing that matches nothing.
+    fn session_invalid() -> Self {
+        Self::new(
+            StatusCode::FORBIDDEN,
+            "pairing_invalid",
+            "agentdesktop proxy: session pairing missing, expired or revoked; start a new session",
         )
     }
 
@@ -370,30 +588,11 @@ async fn forward(
     config: &ProxyConfig,
     cache: &Arc<CredentialCache>,
     tunnel_slot: &PendingTunnel,
+    log: &mut RequestLog,
 ) -> Result<Response<ProxyBody>, ProxyError> {
-    if !host_is_loopback(request.headers()) {
-        return Err(ProxyError::new(
-            StatusCode::FORBIDDEN,
-            "host_not_allowed",
-            "agentdesktop proxy: Host must be a loopback address",
-        ));
-    }
-    // This listener is for local native clients, not browser scripts or tunnels.
-    if request.headers().contains_key(ORIGIN) || request.method() == Method::CONNECT {
-        return Err(ProxyError::new(
-            StatusCode::FORBIDDEN,
-            "browser_not_allowed",
-            "agentdesktop proxy: browser requests and CONNECT are not supported",
-        ));
-    }
-    if request.method() == Method::OPTIONS {
-        return Err(ProxyError::new(
-            StatusCode::METHOD_NOT_ALLOWED,
-            "method_not_allowed",
-            "agentdesktop proxy: OPTIONS is not supported",
-        ));
-    }
-    // Pure string work on the path first; no configuration is read yet.
+    // Pure string work on the path first; no configuration is read yet. It
+    // comes before every check so a refused sandbox request is logged with
+    // its route and path.
     let path_and_query = request
         .uri()
         .path_and_query()
@@ -403,7 +602,82 @@ async fn forward(
         Some((path, query)) => (path, Some(query)),
         None => (path_and_query.as_str(), None),
     };
-    // The pairing value is required on every route. It travels in its own
+    // Matched once; the route decides pairing placement, upgrade handling,
+    // the ping exemption, client id, credential mode and upstream.
+    let matched = match_route(path);
+    let matched_route = matched.map(|(route, _)| route);
+    if let Some((route, rest)) = matched
+        && route.identity == RouteIdentity::Session
+    {
+        log.sandbox = Some(SandboxRequest::new(request.method(), rest));
+    }
+    // CONNECT and absolute-form requests (the forward-proxy request forms)
+    // skip the Host-loopback gate (their target is not this listener), carry
+    // their pairing as Proxy-Authorization credentials, and are ALWAYS
+    // refused after the pairing check: the egress architecture is L7 git
+    // routes on the loopback listener, never tunnels (AC 3).
+    if request.method() == Method::CONNECT || request.uri().scheme().is_some() {
+        return handle_connect_request(&request, config, log);
+    }
+    if !host_is_loopback(request.headers()) {
+        return Err(ProxyError::new(
+            StatusCode::FORBIDDEN,
+            "host_not_allowed",
+            "agentdesktop proxy: Host must be a loopback address",
+        ));
+    }
+    // This listener is for local native clients, not browser scripts.
+    if request.headers().contains_key(ORIGIN) {
+        return Err(ProxyError::new(
+            StatusCode::FORBIDDEN,
+            "browser_not_allowed",
+            "agentdesktop proxy: browser requests are not supported",
+        ));
+    }
+    if request.method() == Method::OPTIONS {
+        return Err(ProxyError::new(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "method_not_allowed",
+            "agentdesktop proxy: OPTIONS is not supported",
+        ));
+    }
+    // The origin-form git routes (AC 5) and the ssh refusal route: session
+    // paired (the generated gitconfig carries the pairing in PAIRING_HEADER),
+    // served only for the hosts `git.allow` names. Not reachable without a
+    // registered session.
+    let git_route = match (route_rest(path, GIT_SSH_ROUTE), route_rest(path, GIT_ROUTE)) {
+        (Some(rest), _) => Some((true, rest)),
+        (None, Some(rest)) => Some((false, rest)),
+        (None, None) => None,
+    };
+    if let Some((ssh_refusal, rest)) = git_route {
+        log.sandbox = Some(SandboxRequest::new(request.method(), rest));
+        let offered = request
+            .headers()
+            .get(PAIRING_HEADER)
+            .and_then(|value| value.to_str().ok());
+        let found = offered
+            .and_then(|offered| config.sessions.authorize(offered, now_unix()))
+            .ok_or_else(ProxyError::session_invalid)?;
+        if let Some(sandbox) = log.sandbox.as_mut() {
+            sandbox.session = Some(found.id.clone());
+            sandbox.client_id = Some(found.client_id.clone());
+            sandbox.decision = Some("refuse");
+        }
+        if path_escapes_base(path) {
+            return Err(ProxyError::new(
+                StatusCode::BAD_REQUEST,
+                "path_invalid",
+                "agentdesktop proxy: path must not contain '..' segments",
+            ));
+        }
+        if ssh_refusal {
+            return Ok(ssh_refused_response(rest, query, log));
+        }
+        return handle_git_request(request, client, config, found, rest, query, log).await;
+    }
+    // A pairing value is required on every route: the device pairing, or a
+    // session pairing on the sandbox route. It travels in its own
     // header, so Authorization keeps one meaning (the client's own token on the
     // pass-through shapes) and the pairing is never mistaken for a credential.
     // The CAPI route's client (VS Code) cannot add a header, so there the
@@ -412,10 +686,8 @@ async fn forward(
     // nothing about this device and costs it no work.
     let pairing_ok =
         |offered: &str| constant_time_eq(offered.as_bytes(), config.pairing.as_bytes());
-    // Matched once; the route decides pairing placement, upgrade handling,
-    // the ping exemption, client id, credential mode and upstream.
-    let matched = match_route(path);
-    let matched_route = matched.map(|(route, _)| route);
+    // The sandbox route's session, once its pairing matched.
+    let mut session: Option<sessions::SessionRef> = None;
     let capi_rest = match matched {
         Some((route, rest)) if route.pairing_in_path => {
             let Some((segment, remainder)) = split_path_pairing(rest) else {
@@ -425,6 +697,26 @@ async fn forward(
                 return Err(ProxyError::pairing_invalid());
             }
             Some(remainder.to_owned())
+        }
+        // The sandbox route takes a session pairing in the header: looked up
+        // and its idle timeout restarted under one lock. The device pairing
+        // never opens this route (a file that holds it must not become a
+        // session), and a session pairing opens no other route (below, it
+        // never equals the device pairing).
+        Some((route, _)) if route.identity == RouteIdentity::Session => {
+            let offered = request
+                .headers()
+                .get(PAIRING_HEADER)
+                .and_then(|value| value.to_str().ok());
+            let found = offered
+                .and_then(|offered| config.sessions.authorize(offered, now_unix()))
+                .ok_or_else(ProxyError::session_invalid)?;
+            if let Some(sandbox) = log.sandbox.as_mut() {
+                sandbox.session = Some(found.id.clone());
+                sandbox.client_id = Some(found.client_id.clone());
+            }
+            session = Some(found);
+            None
         }
         _ => {
             let offered = request
@@ -459,7 +751,7 @@ async fn forward(
         return Err(ProxyError::new(
             StatusCode::NOT_FOUND,
             "route_unknown",
-            "agentdesktop proxy: unknown route; the managed prefixes are /copilot-cli, /vscode-copilot, /vscode-copilot-passthrough and /vscode-copilot-capi",
+            "agentdesktop proxy: unknown route; the managed prefixes are /copilot-cli, /vscode-copilot, /vscode-copilot-passthrough, /vscode-copilot-capi and /sandbox",
         ));
     }
     let effective =
@@ -496,7 +788,13 @@ async fn forward(
                 ));
             }
             (
-                route.client_id.to_owned(),
+                match route.identity {
+                    RouteIdentity::Fixed(client_id) => client_id.to_owned(),
+                    RouteIdentity::Session => session
+                        .as_ref()
+                        .map(|session| session.client_id.clone())
+                        .ok_or_else(ProxyError::session_invalid)?,
+                },
                 Some(route.credential),
                 upstream_base(gateway, route.upstream),
                 capi_rest.as_deref().unwrap_or(rest),
@@ -573,6 +871,9 @@ async fn forward(
             }
         })?
         .to_bytes();
+    if let Some(sandbox) = log.sandbox.as_mut() {
+        sandbox.bytes_in = body.len();
+    }
     let mut request = Request::from_parts(parts, ());
 
     strip_hop_headers(request.headers_mut());
@@ -732,7 +1033,15 @@ async fn forward(
                     // fetches and the others find its credential in the cache.
                     let fetch = {
                         let state = state.clone();
-                        let effective = effective.clone();
+                        // On the sandbox route, the daemon never starts an interactive
+                        // sign-in on behalf of a box: if the stored session is
+                        // unusable, the box's request fails and the user signs in on
+                        // the host.
+                        let effective = if session.is_some() {
+                            api::non_interactive(effective.clone())
+                        } else {
+                            effective.clone()
+                        };
                         let client_id = client_id.clone();
                         let cache = cache.clone();
                         let cache_key = cache_key.clone();
@@ -776,7 +1085,19 @@ async fn forward(
                                 format!("credential fetch failed: {error}"),
                             ))
                         })?
-                        .map_err(ProxyError::credential)?;
+                        .map_err(|(status, message)| {
+                            // On the sandbox route, a 401 means deviceAuthorization is
+                            // false or the token is missing/expired. The endpoint for
+                            // device flow (agentdesktop-headless login) refuses with 424
+                            // in that configuration, so the honest guidance is to sign in
+                            // on the host session (the daemon's own environment).
+                            let message = if session.is_some() && status == StatusCode::UNAUTHORIZED {
+                                "LLM gateway sign-in required. Sign in on the host (the machine running the daemon), not inside the sandbox.".to_owned()
+                            } else {
+                                message
+                            };
+                            ProxyError::credential((status, message))
+                        })?;
                     let (credential, deadline, cached) = fetched;
                     from_cache = cached;
                     fetched_now = !cached;
@@ -908,6 +1229,635 @@ fn strip_hop_headers(headers: &mut HeaderMap) {
         "upgrade",
     ] {
         headers.remove(name);
+    }
+}
+
+// --- PR 4: git over the relay (origin-form routes) and the CONNECT refusal.
+
+/// The smart-HTTP endpoint shapes the git routes serve (AC 5). Everything
+/// else under `/git/...` — including dumb-protocol requests — is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitEndpoint {
+    FetchDiscovery,
+    FetchRpc,
+    PushDiscovery,
+    PushRpc,
+}
+
+impl GitEndpoint {
+    fn is_push(self) -> bool {
+        matches!(self, Self::PushDiscovery | Self::PushRpc)
+    }
+
+    fn is_rpc(self) -> bool {
+        matches!(self, Self::FetchRpc | Self::PushRpc)
+    }
+
+    fn service(self) -> &'static str {
+        match self {
+            Self::FetchDiscovery | Self::FetchRpc => "git-upload-pack",
+            Self::PushDiscovery | Self::PushRpc => "git-receive-pack",
+        }
+    }
+}
+
+/// Classifies a request under the git route by the final path segment and the
+/// `service` query parameter only: discovery `GET <repo>/info/refs?service=…`,
+/// RPC `POST <repo>/git-upload-pack` / `<repo>/git-receive-pack`. `None` for
+/// every other shape, notably dumb-protocol requests (`info/refs` without
+/// `service`, `/objects/...`).
+fn classify_git_endpoint(path: &str, query: Option<&str>) -> Option<GitEndpoint> {
+    let service = query.and_then(|query| {
+        query
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("service="))
+    });
+    if path.ends_with("/info/refs") {
+        return match service {
+            Some("git-upload-pack") => Some(GitEndpoint::FetchDiscovery),
+            Some("git-receive-pack") => Some(GitEndpoint::PushDiscovery),
+            _ => None,
+        };
+    }
+    match path.rsplit('/').next() {
+        Some("git-upload-pack") => Some(GitEndpoint::FetchRpc),
+        Some("git-receive-pack") => Some(GitEndpoint::PushRpc),
+        _ => None,
+    }
+}
+
+/// A policy refusal rendered as git itself expects it: `200 OK` with the
+/// service's advertisement (discovery) or result (RPC) content type and a
+/// single `ERR` pkt-line, which git prints as `fatal: remote error: <message>`.
+fn pkt_line_err_response(service: &str, is_rpc: bool, message: &str) -> Response<ProxyBody> {
+    let kind = if is_rpc { "result" } else { "advertisement" };
+    let line = format!("ERR {message}\n");
+    let body = format!("{:04x}{line}", line.len() + 4);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, format!("application/x-{service}-{kind}"))
+        .body(
+            Full::new(Bytes::from(body))
+                .map_err(|never| match never {})
+                .boxed(),
+        )
+        .expect("static response")
+}
+
+/// The upload-pack shape of [`pkt_line_err_response`]; the receive-pack legs
+/// go through `pkt_line_err_response` with their own service name.
+fn pkt_line_err(message: &str, is_rpc: bool) -> Response<ProxyBody> {
+    pkt_line_err_response("git-upload-pack", is_rpc, message)
+}
+
+/// The path remainder after `prefix` when `path` matches it at a `/` boundary
+/// (the `match_route` rule), starting with `/`.
+fn route_rest<'p>(path: &'p str, prefix: &str) -> Option<&'p str> {
+    let rest = path.strip_prefix(prefix)?;
+    if rest.is_empty() {
+        Some("/")
+    } else {
+        rest.starts_with('/').then_some(rest)
+    }
+}
+
+/// Whether `url` is under the configured prefix (AC 5): host compared
+/// case-insensitively (both sides go through `url::Url`, which lowercases
+/// hosts), explicit and default ports equal under `port_or_known_default`,
+/// and the path matched on the configured prefix per path element —
+/// case-sensitive, trailing slash normalized, never on a partial segment.
+/// The scheme is not compared: startup validation pins configured prefixes
+/// to `https`, and the relay connects with the prefix's scheme.
+fn git_prefix_matches(prefix: &str, url: &url::Url) -> bool {
+    let Ok(prefix) = url::Url::parse(prefix) else {
+        return false;
+    };
+    let (Some(prefix_host), Some(host)) = (prefix.host_str(), url.host_str()) else {
+        return false;
+    };
+    if !prefix_host.eq_ignore_ascii_case(host)
+        || prefix.port_or_known_default() != url.port_or_known_default()
+    {
+        return false;
+    }
+    let wanted: Vec<&str> = prefix.path().split('/').filter(|s| !s.is_empty()).collect();
+    let got: Vec<&str> = url.path().split('/').filter(|s| !s.is_empty()).collect();
+    got.len() >= wanted.len() && got[..wanted.len()] == wanted[..]
+}
+
+/// Whether a redirect target stays inside the allow entry: same scheme as the
+/// entry (a Location may not downgrade the credentialed leg, e.g.
+/// `http://host:443/…`, which the port-aware prefix match admits) and under
+/// its prefix.
+fn git_redirect_stays_in(allow_entry: &str, next: &url::Url) -> bool {
+    url::Url::parse(allow_entry).is_ok_and(|entry| entry.scheme() == next.scheme())
+        && git_prefix_matches(allow_entry, next)
+}
+
+/// How specific a configured prefix is: its path-element count, then its
+/// length (the longest-prefix rule for credential selection).
+fn git_prefix_specificity(prefix: &str) -> (usize, usize) {
+    let elements = url::Url::parse(prefix)
+        .map(|parsed| parsed.path().split('/').filter(|s| !s.is_empty()).count())
+        .unwrap_or(0);
+    (elements, prefix.trim_end_matches('/').len())
+}
+
+/// The longest-prefix credential entry for the destination, if any. The
+/// caller gates on the allowlist first: no credential is ever attached for a
+/// host that is not in `git.allow`.
+fn select_git_credential<'c>(
+    credentials: &'c [agentdesktop_core::config::GitCredentialEntry],
+    url: &url::Url,
+) -> Option<&'c agentdesktop_core::config::GitCredentialEntry> {
+    credentials
+        .iter()
+        .filter(|entry| git_prefix_matches(&entry.url_prefix, url))
+        .max_by_key(|entry| git_prefix_specificity(&entry.url_prefix))
+}
+
+/// The credential the relay attaches for `url`: `None` unless the destination
+/// is admitted by `git.allow` (no credential is ever injected for a host
+/// outside the allowlist, chained or not), else the longest-prefix static
+/// entry, if any.
+fn git_credential_for<'c>(
+    git: &'c agentdesktop_core::config::GitConfig,
+    url: &url::Url,
+) -> Option<&'c agentdesktop_core::config::GitCredentialEntry> {
+    if !git
+        .allow
+        .iter()
+        .any(|prefix| git_prefix_matches(prefix, url))
+    {
+        return None;
+    }
+    select_git_credential(&git.credentials, url)
+}
+
+/// Answer on the `/git-ssh` refusal route: the generated gitconfig maps
+/// ssh-form remotes of allowlisted hosts without a
+/// `daemon.containment.git.ssh.hosts` entry here so the user sees a pkt-line
+/// `ERR` instead of a deny-mode timeout.
+fn ssh_refused_response(
+    rest: &str,
+    query: Option<&str>,
+    log: &mut RequestLog,
+) -> Response<ProxyBody> {
+    if let Some(sandbox) = log.sandbox.as_mut() {
+        let host = rest.trim_start_matches('/').split('/').next().unwrap_or("");
+        sandbox.host = Some(host.to_owned());
+        sandbox.decision = Some("refuse");
+    }
+    const MESSAGE: &str = "ssh remotes are not enabled for this host; use the https remote or add the host to daemon.containment.git.ssh.hosts";
+    match classify_git_endpoint(rest, query) {
+        Some(endpoint) if endpoint.is_push() => {
+            pkt_line_err_response(endpoint.service(), endpoint.is_rpc(), MESSAGE)
+        }
+        Some(endpoint) => pkt_line_err(MESSAGE, endpoint.is_rpc()),
+        None => pkt_line_err(MESSAGE, false),
+    }
+}
+
+/// CONNECT and absolute-form requests: the pairing check first (the session
+/// pairing travels as `Proxy-Authorization: Basic base64("<pairing>:")`,
+/// compared constant-time through the registry's digest comparison), then an
+/// unconditional refusal — the product egress contract is L7 routes, there
+/// is no tunnel to establish (AC 3). Never forwards, never returns `Ok`.
+fn handle_connect_request(
+    request: &Request<Incoming>,
+    config: &ProxyConfig,
+    log: &mut RequestLog,
+) -> Result<Response<ProxyBody>, ProxyError> {
+    let host = request
+        .uri()
+        .authority()
+        .map(|authority| authority.to_string())
+        .or_else(|| {
+            request
+                .headers()
+                .get(HOST)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "-".to_owned());
+    let mut entry = SandboxRequest::new(request.method(), "/");
+    entry.host = Some(host);
+    entry.decision = Some("refuse");
+    log.sandbox = Some(entry);
+    let session = request
+        .headers()
+        .get("proxy-authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            let (scheme, credentials) = value.split_once(' ')?;
+            scheme
+                .eq_ignore_ascii_case("basic")
+                .then(|| credentials.trim())
+        })
+        .and_then(|encoded| {
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .ok()
+        })
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .and_then(|credentials| {
+            // Pairing as the username, empty password.
+            let (pairing, password) = credentials.split_once(':')?;
+            password
+                .is_empty()
+                .then(|| config.sessions.authorize(pairing, now_unix()))
+                .flatten()
+        })
+        .ok_or_else(ProxyError::session_invalid)?;
+    if let Some(sandbox) = log.sandbox.as_mut() {
+        sandbox.session = Some(session.id);
+        sandbox.client_id = Some(session.client_id);
+    }
+    Err(ProxyError::new(
+        StatusCode::FORBIDDEN,
+        "egress_not_supported",
+        "agentdesktop proxy: egress tunnels are not supported; outbound access is limited to the configured git routes",
+    ))
+}
+
+/// How often an in-flight git request (and the ssh broker and legs) checks
+/// whether its session was revoked.
+pub(crate) const REVOCATION_POLL: Duration = Duration::from_millis(50);
+
+/// A git response body that ends as soon as its session is revoked (AC 1).
+/// The registry is read without restarting the idle timeout; the revocation
+/// is recorded in `revoked` so the request log reports `outcome="canceled"`.
+struct RevocableBody {
+    inner: ProxyBody,
+    sessions: SessionRegistry,
+    session_id: String,
+    check: std::pin::Pin<Box<tokio::time::Sleep>>,
+    revoked: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl RevocableBody {
+    fn cut(&self) -> bool {
+        if self.revoked.load(std::sync::atomic::Ordering::SeqCst) {
+            return true;
+        }
+        if self.sessions.live(&self.session_id, now_unix()) {
+            return false;
+        }
+        self.revoked
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        true
+    }
+}
+
+impl hyper::body::Body for RevocableBody {
+    type Data = Bytes;
+    type Error = hyper::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Bytes>, hyper::Error>>> {
+        if self.cut() {
+            return std::task::Poll::Ready(None);
+        }
+        let polled = std::pin::Pin::new(&mut self.inner).poll_frame(cx);
+        if polled.is_pending() {
+            // Wake up periodically to notice a revocation while the upstream
+            // is silent.
+            while self.check.as_mut().poll(cx).is_ready() {
+                if self.cut() {
+                    return std::task::Poll::Ready(None);
+                }
+                let next = tokio::time::Instant::now() + REVOCATION_POLL;
+                self.check.as_mut().reset(next);
+            }
+        }
+        polled
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.revoked.load(std::sync::atomic::Ordering::SeqCst) || self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+/// How many upstream redirects the daemon follows itself (never relayed to
+/// the box); the next one is refused (AC 5).
+const GIT_REDIRECT_HOPS: usize = 3;
+
+/// A request on the origin-form git route: allowlist gate, smart-HTTP
+/// classification, pushAllow gate, host-side credential injection, redirect
+/// following, and the chained leg through `egressUpstream` when configured
+/// (direct otherwise). Revocation aborts an in-flight request; the log entry
+/// then reports `outcome="canceled"`.
+async fn handle_git_request(
+    request: Request<Incoming>,
+    client: &ProxyClient,
+    config: &ProxyConfig,
+    session: sessions::SessionRef,
+    rest: &str,
+    query: Option<&str>,
+    log: &mut RequestLog,
+) -> Result<Response<ProxyBody>, ProxyError> {
+    let refuse = |message: String| {
+        Err(ProxyError::new(
+            StatusCode::FORBIDDEN,
+            "git_host_not_allowed",
+            message,
+        ))
+    };
+    // `/git/<host[:port]>/<path>`: authority and path, taken as sent.
+    let without_slash = rest.trim_start_matches('/');
+    let (authority, repo_path) = match without_slash.find('/') {
+        Some(index) => (&without_slash[..index], &without_slash[index..]),
+        None => (without_slash, "/"),
+    };
+    if let Some(sandbox) = log.sandbox.as_mut() {
+        sandbox.host = Some(authority.to_owned());
+    }
+    if authority.is_empty() {
+        return refuse("agentdesktop proxy: the git route is /git/<host[:port]>/<path>".to_owned());
+    }
+    // The reconstructed destination is matched against the configured
+    // prefixes again before connecting: the gitconfig rewrite is a
+    // convenience, not the gate (AC 5).
+    let destination_text = match query {
+        Some(query) => format!("https://{authority}{repo_path}?{query}"),
+        None => format!("https://{authority}{repo_path}"),
+    };
+    let Ok(destination) = url::Url::parse(&destination_text) else {
+        return refuse(format!(
+            "agentdesktop proxy: not a valid git destination: {authority}{repo_path}"
+        ));
+    };
+    let git = config.git.as_ref();
+    let allow_entry = git.and_then(|git| {
+        git.allow
+            .iter()
+            .find(|prefix| git_prefix_matches(prefix, &destination))
+    });
+    let Some(allow_entry) = allow_entry else {
+        return refuse(format!(
+            "agentdesktop proxy: {authority} is not in daemon.containment.git.allow"
+        ));
+    };
+    // The connection scheme comes from the matched allow entry; startup
+    // validation pins configured entries to https.
+    let scheme = url::Url::parse(allow_entry)
+        .map(|parsed| parsed.scheme().to_owned())
+        .unwrap_or_else(|_| "https".to_owned());
+    let mut destination = destination;
+    let _ = destination.set_scheme(&scheme);
+    let Some(endpoint) = classify_git_endpoint(repo_path, query) else {
+        return refuse(
+            "agentdesktop proxy: only the smart-HTTP git endpoints are served (info/refs?service=…, git-upload-pack, git-receive-pack)"
+                .to_owned(),
+        );
+    };
+    let method_ok = if endpoint.is_rpc() {
+        request.method() == Method::POST
+    } else {
+        request.method() == Method::GET
+    };
+    if !method_ok {
+        return refuse(format!(
+            "agentdesktop proxy: {} is not how {} is requested",
+            request.method(),
+            endpoint.service(),
+        ));
+    }
+    if endpoint.is_push() {
+        let push_allowed = git.is_some_and(|git| {
+            git.push_allow
+                .iter()
+                .any(|prefix| git_prefix_matches(prefix, &destination))
+        });
+        if !push_allowed {
+            // git expects its own envelope here, not a JSON refusal.
+            return Ok(pkt_line_err_response(
+                endpoint.service(),
+                endpoint.is_rpc(),
+                &format!("push to {authority} is not allowed by daemon.containment.git.pushAllow"),
+            ));
+        }
+    }
+    // Host-side credential: static entries only in this PR, longest prefix,
+    // only for hosts the allowlist admitted (checked above). The box never
+    // sees it and the secret is never serialized back.
+    let credential = git
+        .and_then(|git| git_credential_for(git, &destination))
+        .map(|entry| {
+            base64::engine::general_purpose::STANDARD
+                .encode(format!("{}:{}", entry.username, entry.secret))
+        });
+
+    // Buffer the body so redirects and the 503 retry can resend it.
+    let (parts, body) = request.into_parts();
+    let body = http_body_util::Limited::new(body, MAX_REQUEST_BODY)
+        .collect()
+        .await
+        .map_err(|error| {
+            if error
+                .downcast_ref::<http_body_util::LengthLimitError>()
+                .is_some()
+            {
+                ProxyError::new(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "body_too_large",
+                    format!(
+                        "agentdesktop proxy: request body exceeds {} bytes",
+                        MAX_REQUEST_BODY
+                    ),
+                )
+            } else {
+                ProxyError::new(
+                    StatusCode::BAD_REQUEST,
+                    "body_invalid",
+                    format!("agentdesktop proxy: could not read the request body: {error}"),
+                )
+            }
+        })?
+        .to_bytes();
+    if let Some(sandbox) = log.sandbox.as_mut() {
+        sandbox.bytes_in = body.len();
+    }
+    let mut base_headers = parts.headers;
+    strip_hop_headers(&mut base_headers);
+    for header in [
+        AUTHORIZATION.as_str(),
+        "x-api-key",
+        "api-key",
+        "x-llm-token",
+        PAIRING_HEADER,
+    ] {
+        base_headers.remove(header);
+    }
+
+    let decision = if config.egress_upstream.is_some() {
+        "upstream"
+    } else {
+        "allow"
+    };
+    let mut current = destination;
+    let mut hops = 0;
+    let mut retried_503 = false;
+    loop {
+        // The git leg: direct, or chained as plain smart-HTTP to the central
+        // L7 egress endpoint with the path case preserved and Host/SNI = the
+        // egress host. The Authorization header carries only the git
+        // credential — no gateway-hop auth in v1 (AC 2).
+        let target = match &config.egress_upstream {
+            Some(upstream) => {
+                let path_and_query = match current.query() {
+                    Some(query) => format!("{}?{query}", current.path()),
+                    None => current.path().to_owned(),
+                };
+                format!(
+                    "{}{path_and_query}",
+                    upstream.as_str().trim_end_matches('/')
+                )
+            }
+            None => current.to_string(),
+        };
+        let uri: Uri = target.parse().map_err(|_| {
+            ProxyError::new(
+                StatusCode::BAD_GATEWAY,
+                "git_upstream_unreachable",
+                "agentdesktop proxy: could not form the upstream git URL",
+            )
+        })?;
+        let host_value = HeaderValue::from_str(
+            uri.authority()
+                .map(|authority| authority.as_str())
+                .unwrap_or(""),
+        )
+        .map_err(|_| {
+            ProxyError::new(
+                StatusCode::BAD_GATEWAY,
+                "git_upstream_unreachable",
+                "agentdesktop proxy: invalid upstream git host",
+            )
+        })?;
+        let mut attempt = Request::new(Full::new(body.clone()));
+        *attempt.method_mut() = parts.method.clone();
+        *attempt.uri_mut() = uri;
+        *attempt.headers_mut() = base_headers.clone();
+        attempt.headers_mut().insert(HOST, host_value);
+        if let Some(credential) = &credential {
+            let mut value =
+                HeaderValue::from_str(&format!("Basic {credential}")).map_err(|_| {
+                    ProxyError::new(
+                        StatusCode::BAD_GATEWAY,
+                        "git_upstream_unreachable",
+                        "agentdesktop proxy: invalid git credential header",
+                    )
+                })?;
+            value.set_sensitive(true);
+            attempt.headers_mut().insert(AUTHORIZATION, value);
+        }
+        // Revocation cancels an in-flight request (AC 1): the watch polls the
+        // registry read-only, so waiting does not keep the session alive.
+        let revoked = async {
+            loop {
+                if !config.sessions.live(&session.id, now_unix()) {
+                    return;
+                }
+                tokio::time::sleep(REVOCATION_POLL).await;
+            }
+        };
+        // `biased` with the revoked arm first: the revoked future checks
+        // `sessions.live` on its first poll, so a session revoked during body
+        // collect or between hops never sends anything upstream.
+        let response = tokio::select! {
+            biased;
+            () = revoked => {
+                if let Some(sandbox) = log.sandbox.take() {
+                    sandbox
+                        .with_status(StatusCode::FORBIDDEN.as_u16(), Some("pairing_invalid"))
+                        .emit(0, "canceled");
+                }
+                return Err(ProxyError::session_invalid());
+            }
+            sent = tokio::time::timeout(RESPONSE_HEADERS_TIMEOUT, client.request(attempt)) => sent,
+        };
+        let response = response
+            .map_err(|_| {
+                ProxyError::new(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "git_upstream_unreachable",
+                    "agentdesktop proxy: the git upstream did not answer in time",
+                )
+            })?
+            .map_err(|error| {
+                ProxyError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "git_upstream_unreachable",
+                    format!("agentdesktop proxy: git upstream unreachable: {error}"),
+                )
+            })?;
+        // A 503 from the egress upstream is retried exactly once (observed
+        // once in validation, assumed transient), except a push RPC, which
+        // is not replayed (DV-7: a replayed push is not idempotent); the
+        // second — or a push's first — surfaces.
+        if config.egress_upstream.is_some()
+            && response.status() == StatusCode::SERVICE_UNAVAILABLE
+            && !retried_503
+            && !matches!(endpoint, GitEndpoint::PushRpc)
+        {
+            retried_503 = true;
+            continue;
+        }
+        // Redirects are never relayed to the box: followed here, at most
+        // GIT_REDIRECT_HOPS hops, only while the target keeps the allow
+        // entry's scheme and prefix.
+        if response.status().is_redirection() {
+            let location = response
+                .headers()
+                .get("location")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|location| current.join(location).ok());
+            let Some(next) = location else {
+                return refuse(format!(
+                    "agentdesktop proxy: {authority} answered with an unusable redirect"
+                ));
+            };
+            if hops >= GIT_REDIRECT_HOPS {
+                return refuse(format!(
+                    "agentdesktop proxy: {authority} redirected more than {GIT_REDIRECT_HOPS} times"
+                ));
+            }
+            if !git_redirect_stays_in(allow_entry, &next) {
+                return refuse(format!(
+                    "agentdesktop proxy: {authority} redirected outside the allowed prefix"
+                ));
+            }
+            hops += 1;
+            current = next;
+            continue;
+        }
+        let revoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if let Some(sandbox) = log.sandbox.as_mut() {
+            sandbox.decision = Some(decision);
+            sandbox.revoked = Some(revoked.clone());
+        }
+        let mut response = response;
+        strip_hop_headers(response.headers_mut());
+        // Revocation also cuts a response body that is already streaming
+        // (a long pack transfer), not just a request waiting for headers.
+        let sessions = config.sessions.clone();
+        return Ok(response.map(|body| {
+            RevocableBody {
+                inner: body.boxed(),
+                sessions,
+                session_id: session.id.clone(),
+                check: Box::pin(tokio::time::sleep(REVOCATION_POLL)),
+                revoked,
+            }
+            .boxed()
+        }));
     }
 }
 

@@ -1,13 +1,19 @@
-use std::{io::Read, path::PathBuf};
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use agentdesktop_client as client;
 use agentdesktop_core::{
     config::DaemonConfig,
     model::{
-        Discovery, EnrollmentStatus, Health, LlmGatewayCredential, LlmGatewayLoginStatus,
-        ProgramChoice, ProgramManagement, TelemetryEventKind,
+        ConsoleAttach, Discovery, EnrollmentStatus, Health, Launch, LaunchConsole, LaunchRequest,
+        LaunchStatus, LlmGatewayCredential, LlmGatewayLoginStatus, ProgramChoice,
+        ProgramManagement, SessionCreated, SessionInfo, SessionRequest, TelemetryEventKind,
     },
 };
+use anyhow::Context;
 use clap::Subcommand;
 use serde::Deserialize;
 
@@ -38,11 +44,148 @@ pub enum ClientCommand {
         #[command(subcommand)]
         command: Option<ProgramsCommand>,
     },
+    /// Run a program in a sandbox (Windows AppContainer) with the current
+    /// directory as its workspace. Arguments after `--` go to the program.
+    Run {
+        /// Program to run: `claude-code` (alias `claude`), `opencode` or
+        /// `copilot` (Copilot CLI).
+        program: String,
+        /// Wait for the box to exit. From a console the program runs in that
+        /// console (same-terminal hosting) and its own exit code is returned;
+        /// callers without a console get the windowed launch and the
+        /// executor's exit code. In same-terminal mode Ctrl+C reaches the
+        /// program; in windowed mode it stops the waiter only.
+        #[arg(long)]
+        wait: bool,
+        /// Arguments passed to the program.
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+    /// Internal: attach the box to a client's console and run the executor.
+    #[command(hide = true)]
+    ConsoleAttach {
+        /// The requesting client process whose console to attach to.
+        #[arg(long)]
+        client_pid: u32,
+        /// The executor binary (`wxc-exec.exe`).
+        #[arg(long)]
+        executor: PathBuf,
+        /// The launch's request.json.
+        #[arg(long)]
+        request: PathBuf,
+        /// The launch's log file for helper diagnostics.
+        #[arg(long)]
+        log: PathBuf,
+    },
     /// Handle an event emitted by a managed developer-tool hook.
     Hook {
         #[command(subcommand)]
         hook: HookCommand,
     },
+    /// Manage the local LLM proxy.
+    LlmProxy {
+        #[command(subcommand)]
+        command: LlmProxyCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum LlmProxyCommand {
+    /// Manage sandbox sessions on the proxy.
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SessionCommand {
+    /// Register a session and print its pairing as JSON.
+    Create {
+        /// Credential policy client ID the session presents to the gateway.
+        #[arg(long)]
+        client_id: String,
+        /// Human-readable name for the session.
+        #[arg(long)]
+        label: String,
+        /// Seconds without a request after which the session expires.
+        #[arg(long)]
+        ttl_seconds: Option<u64>,
+    },
+    /// List registered sessions.
+    List,
+    /// Revoke a session.
+    Revoke {
+        /// Session ID from `session create` or `session list`.
+        id: String,
+    },
+}
+
+/// The message printed for a failed `llm-proxy session` command: the daemon's
+/// own text for a missing session, a hint at the bound, else the status and
+/// body as the client reports them.
+fn session_error_message(error: &anyhow::Error) -> String {
+    match error.downcast_ref::<agentdesktop_client::StatusError>() {
+        Some(status) if status.status == 404 && !status.body.is_empty() => status.body.clone(),
+        Some(status) if status.status == 404 => {
+            "this daemon has no session API (upgrade agentdesktop)".to_owned()
+        }
+        Some(status) if status.status == 429 => {
+            crate::llm_proxy::sessions::too_many_sessions_message()
+        }
+        Some(status) => status.to_string(),
+        None => format!("{error:#}"),
+    }
+}
+
+const SESSIONS_PATH: &str = "/v1/llm-proxy/sessions";
+
+/// A session id as the daemon mints it: 16 lowercase hexadecimal characters.
+fn valid_session_id(id: &str) -> bool {
+    id.len() == 16
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+async fn run_session_command(command: SessionCommand, socket: &Path) -> anyhow::Result<()> {
+    match command {
+        SessionCommand::Create {
+            client_id,
+            label,
+            ttl_seconds,
+        } => {
+            // The only place the pairing is shown: the caller passes it into
+            // the sandboxed program's environment.
+            let created: SessionCreated = client::post_json_response(
+                socket,
+                SESSIONS_PATH,
+                &SessionRequest {
+                    client_id,
+                    label,
+                    ttl_seconds,
+                },
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&created)?);
+        }
+        SessionCommand::List => {
+            let sessions: Vec<SessionInfo> = client::get(socket, SESSIONS_PATH).await?;
+            for session in sessions {
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    session.id, session.client_id, session.label, session.expires_at_unix_seconds
+                );
+            }
+        }
+        SessionCommand::Revoke { id } => {
+            if !valid_session_id(&id) {
+                anyhow::bail!("session id must be 16 lowercase hexadecimal characters");
+            }
+            client::delete(socket, &format!("{SESSIONS_PATH}/{id}")).await?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Subcommand)]
@@ -159,6 +302,52 @@ pub async fn run(command: ClientCommand, socket: PathBuf) -> anyhow::Result<()> 
             .await?;
             println!("{}", response.credential);
         }
+        ClientCommand::Run {
+            program,
+            wait,
+            args,
+        } => {
+            let cwd = std::env::current_dir().context("read the current directory")?;
+            let mut request = run_request(&program, cwd, args);
+            // Same-terminal hosting: a waiting caller that owns a console hands
+            // it to the daemon; the boxed program runs there and its own exit
+            // code comes back. Callers without a console keep the window.
+            if wait && crate::launch::console::client_console_available() {
+                request.console = Some(ConsoleAttach {
+                    client_pid: std::process::id(),
+                });
+            }
+            if wait {
+                let (code, line) = run_and_wait(&socket, &request, RUN_WAIT_POLL).await;
+                if let Some(line) = line {
+                    eprintln!("{line}");
+                }
+                std::process::exit(code);
+            }
+            match client::post_json_response::<_, Launch>(&socket, "/v1/launch", &request).await {
+                Ok(launch) => {
+                    println!("{}", run_success_line(&launch));
+                }
+                Err(error) => {
+                    eprintln!("{}", run_error_message(&error));
+                    std::process::exit(1);
+                }
+            }
+        }
+        ClientCommand::ConsoleAttach {
+            client_pid,
+            executor,
+            request,
+            log,
+        } => match crate::launch::console::run_attach(client_pid, &executor, &request, &log) {
+            Ok(code) => std::process::exit(code),
+            Err(_) => std::process::exit(crate::launch::console::ATTACH_FAILED_EXIT),
+        },
+        ClientCommand::LlmProxy {
+            command: LlmProxyCommand::Session { command },
+        } => run_session_command(command, &socket)
+            .await
+            .map_err(|error| anyhow::anyhow!(session_error_message(&error)))?,
         ClientCommand::Hook {
             hook: HookCommand::ClaudePreToolUse { include_input },
         } => {
@@ -227,6 +416,103 @@ fn print_programs(management: &ProgramManagement) {
             );
         }
     }
+}
+
+/// The launch request for `agentdesktop run <program>`; the alias `claude`
+/// maps to the provider id `claude-code`. `opencode` and `copilot` are their
+/// own IDs (the boxed Copilot CLI is `copilot`, distinct from the unboxed
+/// route identity `copilot-cli`).
+pub fn run_request(program: &str, cwd: PathBuf, args: Vec<String>) -> LaunchRequest {
+    let program = if program == "claude" {
+        "claude-code"
+    } else {
+        program
+    };
+    LaunchRequest {
+        program: program.to_owned(),
+        cwd,
+        args,
+        console: None,
+    }
+}
+
+/// The line `agentdesktop run` prints on stdout for a successful launch.
+pub fn run_success_line(launch: &Launch) -> String {
+    format!(
+        "launched {} (container {})",
+        launch.launch_id, launch.container_id
+    )
+}
+
+/// The line `agentdesktop run` prints on stderr for a failed launch request.
+pub fn run_error_message(error: &anyhow::Error) -> String {
+    match error.downcast_ref::<agentdesktop_client::StatusError>() {
+        Some(status) if status.status == 404 => {
+            "this daemon does not support `run` (upgrade agentdesktop)".to_owned()
+        }
+        Some(status) => status.to_string(),
+        None => format!("{error:#}"),
+    }
+}
+
+/// Poll cadence of `agentdesktop run --wait`.
+pub(crate) const RUN_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Posts `request`, then polls `GET /v1/launches` every `poll` and
+/// selects the launch id client-side (the route has no filter) until it
+/// exits, is evicted, or the daemon becomes unreachable. Returns the exit
+/// code and, except on a clean exit, exactly one stderr line (newlines in the
+/// underlying error joined with `; `; only `--wait` joins, default `run`
+/// output is unchanged):
+/// - the launch reaches `exited`: no output, exit `exitCode`, or 1 when null;
+/// - the POST is refused (transport error, any non-2xx): exit 1, one line;
+/// - the launch id is absent from a later poll (evicted, or the daemon
+///   restarted): `"launch <id> is no longer known to the daemon"`, exit 1;
+/// - the daemon becomes unreachable while waiting: exit 1.
+pub(crate) async fn run_and_wait(
+    socket: &Path,
+    request: &LaunchRequest,
+    poll: Duration,
+) -> (i32, Option<String>) {
+    let launch = match client::post_json_response::<_, Launch>(socket, "/v1/launch", request).await
+    {
+        Ok(launch) => launch,
+        Err(error) => return (1, Some(one_line(&run_error_message(&error)))),
+    };
+    // Same-terminal hosting: Ctrl+C belongs to the boxed program; the waiter
+    // must stay so the shell keeps waiting for `claude` like stock. In windowed
+    // mode the documented behaviour stays (Ctrl+C ends the waiter only).
+    if launch.console == LaunchConsole::Attached {
+        crate::launch::console::ignore_ctrl_c();
+    }
+    loop {
+        tokio::time::sleep(poll).await;
+        let launches: Vec<Launch> = match client::get(socket, "/v1/launches").await {
+            Ok(launches) => launches,
+            Err(error) => return (1, Some(one_line(&run_error_message(&error)))),
+        };
+        match launches.iter().find(|l| l.launch_id == launch.launch_id) {
+            Some(found) if found.status == LaunchStatus::Exited => {
+                return (found.exit_code.unwrap_or(1), None);
+            }
+            Some(_) => {}
+            None => {
+                return (
+                    1,
+                    Some(format!(
+                        "launch {} is no longer known to the daemon",
+                        launch.launch_id
+                    )),
+                );
+            }
+        }
+    }
+}
+
+/// Joins the lines of an error message into one, for `--wait`'s single
+/// stderr line.
+fn one_line(message: &str) -> String {
+    message.lines().collect::<Vec<_>>().join("; ")
 }
 
 async fn report_claude_pre_tool_use(
@@ -311,9 +597,16 @@ fn claude_client_id_for_entrypoint(entrypoint: Option<&str>) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use agentdesktop_core::model::{ProgramChoice, TelemetryEventKind};
+    use std::path::PathBuf;
 
-    use super::{parse_claude_pre_tool_use, parse_program_choice};
+    use agentdesktop_client::StatusError;
+    use agentdesktop_core::model::{LaunchRequest, ProgramChoice, TelemetryEventKind};
+    use clap::Parser;
+
+    use super::{
+        ClientCommand, LlmProxyCommand, SessionCommand, parse_claude_pre_tool_use,
+        parse_program_choice, run_error_message, run_request, session_error_message,
+    };
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
@@ -336,6 +629,525 @@ mod tests {
             }
         );
         assert!(parse_program_choice(&args(&["none", "codex"])).is_err());
+    }
+
+    /// Mirrors the binaries: a global `--socket` plus the flattened client commands.
+    #[derive(Parser)]
+    struct TestCli {
+        #[arg(long, global = true, default_value = "default.sock")]
+        socket: PathBuf,
+        #[command(subcommand)]
+        command: ClientCommand,
+    }
+
+    fn parse(args: &[&str]) -> TestCli {
+        TestCli::try_parse_from(std::iter::once("agentdesktop").chain(args.iter().copied()))
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    #[test]
+    fn run_maps_the_claude_alias_to_the_provider_id() {
+        let cwd = PathBuf::from("/work/app");
+        assert_eq!(
+            run_request("claude", cwd.clone(), vec!["--model".into(), "x".into()]),
+            LaunchRequest {
+                program: "claude-code".into(),
+                cwd: cwd.clone(),
+                args: vec!["--model".into(), "x".into()],
+                console: None,
+            }
+        );
+        assert_eq!(
+            run_request("claude-code", cwd.clone(), vec![]),
+            LaunchRequest {
+                program: "claude-code".into(),
+                cwd,
+                args: vec![],
+                console: None,
+            }
+        );
+    }
+
+    #[test]
+    fn run_passes_everything_after_the_separator_to_the_program() {
+        let cli = parse(&["run", "claude", "--", "--socket", "x.sock", "--model", "x"]);
+        let ClientCommand::Run { program, args, .. } = cli.command else {
+            panic!("expected the run command");
+        };
+        assert_eq!(program, "claude");
+        assert_eq!(args, ["--socket", "x.sock", "--model", "x"]);
+        assert_eq!(
+            cli.socket,
+            PathBuf::from("default.sock"),
+            "--socket after -- belongs to the program"
+        );
+    }
+
+    #[test]
+    fn run_honours_the_socket_flag_before_the_separator_and_allows_no_arguments() {
+        let cli = parse(&["--socket", "mine.sock", "run", "claude", "--", "--debug"]);
+        assert_eq!(cli.socket, PathBuf::from("mine.sock"));
+        let ClientCommand::Run { args, .. } = cli.command else {
+            panic!("expected the run command");
+        };
+        assert_eq!(args, ["--debug"]);
+
+        let cli = parse(&["run", "claude", "--socket", "late.sock"]);
+        assert_eq!(cli.socket, PathBuf::from("late.sock"));
+        let ClientCommand::Run { args, .. } = cli.command else {
+            panic!("expected the run command");
+        };
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn run_error_message_maps_404_to_an_upgrade_hint() {
+        let error = anyhow::Error::new(StatusError {
+            status: 404,
+            body: String::new(),
+        });
+        assert_eq!(
+            run_error_message(&error),
+            "this daemon does not support `run` (upgrade agentdesktop)"
+        );
+    }
+
+    #[test]
+    fn run_error_message_prints_the_body_after_the_status() {
+        let error = anyhow::Error::new(StatusError {
+            status: 409,
+            body: "executor not found: C:\\missing\\wxc-exec.exe".into(),
+        });
+        assert_eq!(
+            run_error_message(&error),
+            "daemon returned 409 Conflict: executor not found: C:\\missing\\wxc-exec.exe"
+        );
+    }
+
+    #[test]
+    fn run_error_message_keeps_the_text_of_a_transport_error() {
+        let error = anyhow::anyhow!("connect to /tmp/x.sock\nCheck that the daemon is running.");
+        assert!(run_error_message(&error).contains("connect to /tmp/x.sock"));
+    }
+
+    // AC 4: run_success_line test
+    #[test]
+    fn run_success_line_formats_launch_and_container_id() {
+        use agentdesktop_core::model::{Launch, LaunchStatus};
+        let launch = Launch {
+            launch_id: "0123456789abcdef".into(),
+            program: "claude-code".into(),
+            cwd: "/work/app".into(),
+            container_id: "agentdesktop-0123456789abcdef".into(),
+            status: LaunchStatus::Running,
+            exit_code: None,
+            started_at_unix_seconds: 1_700_000_000,
+            ended_at_unix_seconds: None,
+            integrity_drift: false,
+            managed_settings_source: None,
+            managed_hooks_locked: false,
+            managed_mcp_locked: false,
+            session_id: "test-session-id".into(),
+            console: agentdesktop_core::model::LaunchConsole::Window,
+        };
+        let line = super::run_success_line(&launch);
+        assert_eq!(
+            line,
+            "launched 0123456789abcdef (container agentdesktop-0123456789abcdef)"
+        );
+    }
+
+    // PR 6 (AC-4): `run --wait`.
+
+    #[test]
+    fn run_wait_is_off_by_default_and_parses_as_a_flag() {
+        let cli = parse(&["run", "claude"]);
+        let ClientCommand::Run { wait, .. } = cli.command else {
+            panic!("expected the run command");
+        };
+        assert!(!wait, "default run behaviour is unchanged without --wait");
+
+        let cli = parse(&["run", "claude", "--wait"]);
+        let ClientCommand::Run { wait, .. } = cli.command else {
+            panic!("expected the run command");
+        };
+        assert!(wait);
+    }
+
+    #[cfg(target_os = "linux")]
+    mod run_and_wait_tests {
+        use std::{
+            convert::Infallible,
+            path::PathBuf,
+            sync::{Arc, Mutex},
+            time::Duration,
+        };
+
+        use agentdesktop_core::model::{Launch, LaunchRequest, LaunchStatus};
+        use bytes::Bytes;
+        use http_body_util::{BodyExt, Full};
+        use hyper::{Request, Response, service::service_fn};
+        use hyper_util::rt::TokioIo;
+        use tokio::net::UnixListener;
+
+        use super::super::run_and_wait;
+
+        /// One canned HTTP response: status and body.
+        type Canned = (u16, String);
+
+        /// A daemon stand-in on a Unix socket. `/v1/launch` always answers
+        /// `post_launch`; `/v1/launches` answers the next entry of
+        /// `launches_sequence` (each GET consumes one; the last entry repeats).
+        struct FakeDaemon {
+            socket: PathBuf,
+            task: tokio::task::JoinHandle<()>,
+        }
+
+        impl Drop for FakeDaemon {
+            fn drop(&mut self) {
+                self.task.abort();
+                let _ = std::fs::remove_file(&self.socket);
+            }
+        }
+
+        fn fake_daemon(
+            name: &str,
+            post_launch: Canned,
+            launches_sequence: Vec<Canned>,
+        ) -> FakeDaemon {
+            let socket = std::env::temp_dir().join(format!(
+                "agentdesktop-cli-test-{}-{name}.sock",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&socket);
+            let listener = UnixListener::bind(&socket).unwrap();
+            let post_launch = Arc::new(post_launch);
+            let launches_sequence = Arc::new(Mutex::new(launches_sequence));
+            let task = tokio::spawn(async move {
+                loop {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let post_launch = post_launch.clone();
+                    let launches_sequence = launches_sequence.clone();
+                    tokio::spawn(async move {
+                        let _ = hyper::server::conn::http1::Builder::new()
+                            .serve_connection(
+                                TokioIo::new(stream),
+                                service_fn(move |request: Request<hyper::body::Incoming>| {
+                                    let post_launch = post_launch.clone();
+                                    let launches_sequence = launches_sequence.clone();
+                                    async move {
+                                        let path = request.uri().path().to_owned();
+                                        let _ = request.into_body().collect().await;
+                                        let (status, body) = if path == "/v1/launch" {
+                                            (*post_launch).clone()
+                                        } else {
+                                            let mut sequence = launches_sequence.lock().unwrap();
+                                            if sequence.len() > 1 {
+                                                sequence.remove(0)
+                                            } else {
+                                                sequence[0].clone()
+                                            }
+                                        };
+                                        Ok::<_, Infallible>(
+                                            Response::builder()
+                                                .status(status)
+                                                .body(Full::new(Bytes::from(body)))
+                                                .unwrap(),
+                                        )
+                                    }
+                                }),
+                            )
+                            .await;
+                    });
+                }
+            });
+            FakeDaemon { socket, task }
+        }
+
+        fn request() -> LaunchRequest {
+            LaunchRequest {
+                program: "claude-code".into(),
+                cwd: "/work/app".into(),
+                args: vec![],
+                console: None,
+            }
+        }
+
+        fn launch_json(status: LaunchStatus, exit_code: Option<i32>) -> String {
+            serde_json::to_string(&Launch {
+                launch_id: "0123456789abcdef".into(),
+                program: "claude-code".into(),
+                cwd: "/work/app".into(),
+                container_id: "agentdesktop-0123456789abcdef".into(),
+                status,
+                exit_code,
+                started_at_unix_seconds: 1_700_000_000,
+                ended_at_unix_seconds: None,
+                integrity_drift: false,
+                managed_settings_source: None,
+                managed_hooks_locked: false,
+                managed_mcp_locked: false,
+                session_id: "test-session-id".into(),
+                console: agentdesktop_core::model::LaunchConsole::Window,
+            })
+            .unwrap()
+        }
+
+        #[tokio::test]
+        async fn an_exited_launch_with_a_code_prints_nothing_and_returns_it() {
+            let running = launch_json(LaunchStatus::Running, None);
+            let exited = launch_json(LaunchStatus::Exited, Some(7));
+            let daemon = fake_daemon(
+                "exit-code",
+                (201, running.clone()),
+                vec![(200, format!("[{running}]")), (200, format!("[{exited}]"))],
+            );
+            let (code, line) =
+                run_and_wait(&daemon.socket, &request(), Duration::from_millis(1)).await;
+            assert_eq!(code, 7);
+            assert_eq!(line, None);
+        }
+
+        #[tokio::test]
+        async fn an_exited_launch_with_no_code_returns_one() {
+            let exited = launch_json(LaunchStatus::Exited, None);
+            let daemon = fake_daemon(
+                "exit-null",
+                (201, exited.clone()),
+                vec![(200, format!("[{exited}]"))],
+            );
+            let (code, line) =
+                run_and_wait(&daemon.socket, &request(), Duration::from_millis(1)).await;
+            assert_eq!(code, 1);
+            assert_eq!(line, None);
+        }
+
+        #[tokio::test]
+        async fn a_refused_post_answers_exit_1_with_one_stderr_line() {
+            for status in [400u16, 403, 404, 409, 500] {
+                let daemon = fake_daemon(
+                    &format!("post-refused-{status}"),
+                    (status, "refused".to_owned()),
+                    vec![(200, "[]".to_owned())],
+                );
+                let (code, line) =
+                    run_and_wait(&daemon.socket, &request(), Duration::from_millis(1)).await;
+                assert_eq!(code, 1, "status {status}");
+                let line = line.unwrap_or_else(|| panic!("status {status} needs a stderr line"));
+                assert_eq!(line.lines().count(), 1, "{line}");
+            }
+        }
+
+        /// AC-4: no failure mode of `run --wait` falls back to running a
+        /// native `claude.exe`. A sentinel executable sits beside the test's
+        /// socket; had anything executed it, the marker file would exist.
+        #[tokio::test]
+        async fn a_sentinel_claude_exe_beside_the_test_never_runs() {
+            use std::os::unix::fs::PermissionsExt;
+
+            let dir = tempfile::tempdir().unwrap();
+            let sentinel = dir.path().join("claude.exe");
+            let marker = dir.path().join("marker");
+            std::fs::write(
+                &sentinel,
+                format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+            )
+            .unwrap();
+            std::fs::set_permissions(&sentinel, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            // A refused POST and a vanished id both end the wait with exit 1;
+            // neither may start anything natively.
+            let daemon = fake_daemon(
+                "sentinel",
+                (409, "refused".to_owned()),
+                vec![(200, "[]".to_owned())],
+            );
+            let (code, line) =
+                run_and_wait(&daemon.socket, &request(), Duration::from_millis(1)).await;
+            assert_eq!(code, 1);
+            assert!(line.is_some());
+            assert!(!marker.exists(), "the sentinel claude.exe was executed");
+        }
+
+        #[tokio::test]
+        async fn an_id_that_vanishes_mid_wait_is_reported_and_exits_1() {
+            let running = launch_json(LaunchStatus::Running, None);
+            let daemon = fake_daemon(
+                "evicted",
+                (201, running.clone()),
+                vec![(200, format!("[{running}]")), (200, "[]".to_owned())],
+            );
+            let (code, line) =
+                run_and_wait(&daemon.socket, &request(), Duration::from_millis(1)).await;
+            assert_eq!(code, 1);
+            assert_eq!(
+                line,
+                Some("launch 0123456789abcdef is no longer known to the daemon".to_owned())
+            );
+        }
+
+        /// Serves exactly the POST `/v1/launch`, then stops: the socket file
+        /// is removed, so the first poll's connect fails (unreachable mid-wait).
+        #[tokio::test]
+        async fn an_unreachable_daemon_while_waiting_exits_1_with_one_line() {
+            let running = launch_json(LaunchStatus::Running, None);
+            let socket = std::env::temp_dir().join(format!(
+                "agentdesktop-cli-test-{}-midwait.sock",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&socket);
+            let listener = UnixListener::bind(&socket).unwrap();
+            let task = tokio::spawn({
+                let socket = socket.clone();
+                async move {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(
+                            TokioIo::new(stream),
+                            service_fn(move |request: Request<hyper::body::Incoming>| {
+                                let running = running.clone();
+                                async move {
+                                    let _ = request.into_body().collect().await;
+                                    Ok::<_, Infallible>(
+                                        Response::builder()
+                                            .status(201)
+                                            .body(Full::new(Bytes::from(running)))
+                                            .unwrap(),
+                                    )
+                                }
+                            }),
+                        )
+                        .await;
+                    drop(listener);
+                    let _ = std::fs::remove_file(&socket);
+                }
+            });
+            let (code, line) = run_and_wait(&socket, &request(), Duration::from_millis(1)).await;
+            task.abort();
+            assert_eq!(code, 1);
+            let line = line.unwrap();
+            assert_eq!(line.lines().count(), 1, "{line}");
+        }
+    }
+
+    fn session_command(args: &[&str]) -> Result<SessionCommand, clap::Error> {
+        let mut argv = vec!["agentdesktop", "llm-proxy", "session"];
+        argv.extend_from_slice(args);
+        match TestCli::try_parse_from(argv)?.command {
+            ClientCommand::LlmProxy {
+                command: LlmProxyCommand::Session { command },
+            } => Ok(command),
+            _ => panic!("expected an llm-proxy session command"),
+        }
+    }
+
+    #[test]
+    fn parses_session_create_with_and_without_a_ttl() {
+        let SessionCommand::Create {
+            client_id,
+            label,
+            ttl_seconds,
+        } = session_command(&[
+            "create",
+            "--client-id",
+            "claude-code",
+            "--label",
+            "lab session",
+            "--ttl-seconds",
+            "120",
+        ])
+        .unwrap()
+        else {
+            panic!("expected create");
+        };
+        assert_eq!(client_id, "claude-code");
+        assert_eq!(label, "lab session");
+        assert_eq!(ttl_seconds, Some(120));
+
+        let SessionCommand::Create { ttl_seconds, .. } =
+            session_command(&["create", "--client-id", "my_tool", "--label", "x"]).unwrap()
+        else {
+            panic!("expected create");
+        };
+        assert_eq!(ttl_seconds, None);
+    }
+
+    #[test]
+    fn session_create_requires_a_client_id_a_label_and_a_numeric_ttl() {
+        assert!(session_command(&["create", "--label", "x"]).is_err());
+        assert!(session_command(&["create", "--client-id", "claude-code"]).is_err());
+        assert!(
+            session_command(&[
+                "create",
+                "--client-id",
+                "claude-code",
+                "--label",
+                "x",
+                "--ttl-seconds",
+                "soon",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parses_session_list_and_revoke() {
+        assert!(matches!(
+            session_command(&["list"]).unwrap(),
+            SessionCommand::List
+        ));
+        let SessionCommand::Revoke { id } =
+            session_command(&["revoke", "0123456789abcdef"]).unwrap()
+        else {
+            panic!("expected revoke");
+        };
+        assert_eq!(id, "0123456789abcdef");
+        assert!(session_command(&["revoke"]).is_err());
+        assert!(session_command(&[]).is_err());
+        assert!(session_command(&["show"]).is_err());
+    }
+
+    fn status_error(status: u16, body: &str) -> anyhow::Error {
+        anyhow::Error::new(agentdesktop_client::StatusError {
+            status,
+            body: body.to_owned(),
+        })
+    }
+
+    #[test]
+    fn session_error_message_names_the_session_for_404() {
+        assert_eq!(
+            session_error_message(&status_error(404, "no session 0123456789abcdef")),
+            "no session 0123456789abcdef"
+        );
+    }
+
+    #[test]
+    fn session_error_message_explains_429() {
+        assert_eq!(
+            session_error_message(&status_error(
+                429,
+                "too many sessions (64); revoke unused ones"
+            )),
+            "too many sessions (64); revoke unused ones"
+        );
+        // The message is the CLI's own, whatever body the daemon sent.
+        assert_eq!(
+            session_error_message(&status_error(429, "")),
+            "too many sessions (64); revoke unused ones"
+        );
+    }
+
+    #[test]
+    fn session_error_message_reports_other_statuses_with_reason_and_body() {
+        assert_eq!(
+            session_error_message(&status_error(409, "the local LLM proxy is not running")),
+            "daemon returned 409 Conflict: the local LLM proxy is not running"
+        );
+        assert_eq!(
+            session_error_message(&status_error(500, "boom")),
+            "daemon returned 500 Internal Server Error: boom"
+        );
     }
 
     #[test]
@@ -369,5 +1181,37 @@ mod tests {
         assert_eq!(tool_input.as_ref().unwrap()["command"], "cargo test");
         assert!(!serialized.contains("session-secret"));
         assert!(!serialized.contains("transcript"));
+    }
+}
+
+#[cfg(test)]
+mod session_cli_tests {
+    use super::{session_error_message, valid_session_id};
+
+    #[test]
+    fn a_session_id_is_sixteen_lowercase_hex_characters() {
+        assert!(valid_session_id("0123456789abcdef"));
+        for bad in [
+            "0123456789ABCDEF",
+            "0123456789abcde",
+            "0123456789abcdef0",
+            "a?b",
+            "",
+            "a b",
+        ] {
+            assert!(!valid_session_id(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_404_means_an_older_daemon_without_the_session_api() {
+        let error = anyhow::Error::new(agentdesktop_client::StatusError {
+            status: 404,
+            body: String::new(),
+        });
+        assert_eq!(
+            session_error_message(&error),
+            "this daemon has no session API (upgrade agentdesktop)"
+        );
     }
 }
