@@ -1,7 +1,7 @@
 use super::providers::local::LocalAccess;
 use super::*;
 use crate::database::Database;
-use crate::management::http::local_host;
+use crate::management::http::is_loopback_host;
 use agentdesktop_core::config::ControllerAdminAccess;
 use axum::{
     body::Body,
@@ -235,16 +235,29 @@ async fn local_mode_keeps_ui_api_and_bootstrap_without_session_tables() {
 #[tokio::test]
 async fn local_mode_rejects_rebinding_and_cross_site_mutations() {
     let auth = Auth::new(Arc::new(LocalAccess));
-    for host in ["localhost:8080", "127.0.0.1:8080", "[::1]:8080"] {
-        assert!(local_host(host));
+    // Every loopback address `adminListen` accepts in local mode, not just .1.
+    for host in [
+        "localhost:8080",
+        "LOCALHOST:8080",
+        "127.0.0.1:8080",
+        "127.12.34.56:8080",
+        "127.255.255.254",
+        "[::1]:8080",
+    ] {
+        assert!(is_loopback_host(host), "{host}");
     }
     for host in [
         "evil.example",
         "localhost.evil.example",
         "evil@localhost",
         "localhost/path",
+        "128.0.0.1:8080",
+        "10.0.0.1:8080",
+        "[::ffff:127.0.0.1]:8080",
+        "[::2]:8080",
+        "",
     ] {
-        assert!(!local_host(host));
+        assert!(!is_loopback_host(host), "{host}");
     }
     let mut headers = HeaderMap::new();
     headers.insert(header::HOST, HeaderValue::from_static("evil.example"));

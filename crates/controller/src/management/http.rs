@@ -95,7 +95,10 @@ pub fn private_routes(router: Router) -> Router {
     ))
 }
 
-pub fn local_host(host: &str) -> bool {
+/// Whether a `Host` header names this machine: `localhost` or any loopback address,
+/// matching the loopback addresses local mode accepts for `adminListen`. Rejecting
+/// other names stops DNS rebinding from reaching the unauthenticated listener.
+pub fn is_loopback_host(host: &str) -> bool {
     let Ok(url) = url::Url::parse(&format!("http://{host}")) else {
         return false;
     };
@@ -104,10 +107,12 @@ pub fn local_host(host: &str) -> bool {
         && url.path() == "/"
         && url.query().is_none()
         && url.fragment().is_none()
-        && matches!(
-            url.host_str(),
-            Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
-        )
+        && match url.host() {
+            Some(url::Host::Domain(domain)) => domain == "localhost",
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            None => false,
+        }
 }
 
 async fn safeguard_request(State(policy): State<Policy>, request: Request, next: Next) -> Response {
@@ -115,7 +120,7 @@ async fn safeguard_request(State(policy): State<Policy>, request: Request, next:
         && request
             .headers()
             .get(header::HOST)
-            .is_some_and(|host| !host.to_str().ok().is_some_and(local_host))
+            .is_some_and(|host| !host.to_str().ok().is_some_and(is_loopback_host))
     {
         tracing::warn!("local management request has non-loopback Host");
         return Error(StatusCode::FORBIDDEN, "non_loopback_host").into_response();
