@@ -52,15 +52,15 @@ notarization online.
 The macOS jobs run in the protected `production-signing` GitHub environment.
 Configure these there:
 
-| Name | Kind | Value |
-| --- | --- | --- |
-| `APPLE_APPLICATION_CERTIFICATE` | Secret | Base64-encoded `.p12` with the Developer ID Application certificate and private key |
-| `APPLE_CERTIFICATE_PASSWORD` | Secret | Password protecting that `.p12` |
-| `APPLE_INSTALLER_CERTIFICATE` | Secret | Base64-encoded `.p12` with the Developer ID Installer certificate and private key |
-| `APPLE_INSTALLER_CERTIFICATE_PASSWORD` | Secret | Password protecting that `.p12` |
-| `APPLE_API_KEY` | Secret | Contents of an App Store Connect team API key (`.p8`) |
-| `APPLE_API_KEY_ID` | Variable | ID of that API key |
-| `APPLE_API_ISSUER` | Variable | Issuer ID of that API key |
+| Name                                   | Kind     | Value                                                                               |
+| -------------------------------------- | -------- | ----------------------------------------------------------------------------------- |
+| `APPLE_APPLICATION_CERTIFICATE`        | Secret   | Base64-encoded `.p12` with the Developer ID Application certificate and private key |
+| `APPLE_CERTIFICATE_PASSWORD`           | Secret   | Password protecting that `.p12`                                                     |
+| `APPLE_INSTALLER_CERTIFICATE`          | Secret   | Base64-encoded `.p12` with the Developer ID Installer certificate and private key   |
+| `APPLE_INSTALLER_CERTIFICATE_PASSWORD` | Secret   | Password protecting that `.p12`                                                     |
+| `APPLE_API_KEY`                        | Secret   | Contents of an App Store Connect team API key (`.p8`)                               |
+| `APPLE_API_KEY_ID`                     | Variable | ID of that API key                                                                  |
+| `APPLE_API_ISSUER`                     | Variable | Issuer ID of that API key                                                           |
 
 Only the Apple Developer Account Holder can create Developer ID certificates.
 `notarytool` needs a team API key; individual keys do not work. Missing values
