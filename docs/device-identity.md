@@ -35,6 +35,12 @@ matches the subject recorded for the device named in the certificate. A device
 certificate alone, or a valid user token presented with another user's
 device certificate, is rejected.
 
+The exception is a device enrolled with an enrollment token (see
+[Token flow](#token-flow)): it was provisioned by the operator, for example
+through an MDM, and no user signed in on it. The controller records the
+token's name instead of an IdP issuer and subject, identifies the device by its
+certificate alone, and issues it no gateway credentials.
+
 Key properties:
 
 - The device private key never leaves the workstation. The daemon sends only a
@@ -253,6 +259,63 @@ daemon's controller connection. The IdP must advertise a
 4. `CompleteEnrollment` proceeds as in the browser flow. There is no nonce to
    check, because the device grant does not carry one.
 
+### Token flow
+
+For devices an MDM provisions without any user action, set
+`enrollmentTokenPath` in the daemon's controller connection to a root-only
+file the MDM drops next to `config.yaml`. The controller is configured with
+the same token under `enrollmentTokens`, read from a file like
+`usage.tokenFile`:
+
+```yaml
+# controller
+enrollmentTokens:
+  - name: jamf
+    file: /etc/agentdesktop/enrollment-token-jamf
+```
+
+```yaml
+# daemon
+controller:
+  address: https://controller.example.com:8443
+  enrollmentTokenPath: /etc/agentdesktop/enrollment-token
+```
+
+```mermaid
+sequenceDiagram
+    participant Daemon
+    participant Controller
+    Daemon->>Daemon: Read the token. Generate device key pair and CSR
+    Daemon->>Controller: EnrollWithToken(hostname, CSR, enrollment_token) over server-auth TLS
+    Controller->>Controller: Match the token in constant time. New device_id. Sign CSR with device CA (30 days)
+    Controller->>Controller: Store device with hostname and the token's name, no user
+    Controller-->>Daemon: device_id, certificate chain, expiry
+    Daemon->>Daemon: Save certificate to identity.json and private key to the secret store. No OIDC tokens
+    Daemon->>Controller: Connect stream over mTLS, no Bearer token
+    Controller->>Controller: Read device_id from client certificate SAN. Require a device enrolled with a token
+```
+
+1. The daemon reads the token and sends `EnrollWithToken` with the hostname,
+   the CSR, and the token, over server-authenticated TLS. The status goes
+   straight from `starting` to `enrolling`; there is no sign-in URL.
+2. The controller compares the token with each configured token in constant
+   time and rejects the call as `Unauthenticated` when none matches.
+3. It generates the device ID and signs the CSR as in the other flows, and
+   stores the device with its hostname and the token's name. The device has
+   no IdP issuer, subject, or claims.
+4. The daemon stores the identity without OIDC tokens. Afterwards it sends no
+   bearer token, and the controller authenticates it by the certificate
+   alone. `RenewDeviceCertificate` works as usual; `GetLlmGatewayCredential`
+   is refused with `FailedPrecondition`, because a gateway credential names
+   the enrolled user and the device has none.
+
+The token is a shared secret of the operator, not of a user: anyone holding
+it can enroll devices and receive the daemon configuration. Keep it readable
+by root only, and rotate it by adding a new named token, re-provisioning the
+devices, and removing the old one. The device list reports which token
+enrolled each device (`enrollment_token` in `GET /api/v1/devices`), so devices
+of a retired token can be found and deleted.
+
 ### Controller validation
 
 On `CompleteEnrollment` the controller:
@@ -316,6 +379,10 @@ Every other authenticated RPC (`RenewDeviceCertificate`,
 `GetLlmGatewayCredential`, `GetDeviceUsage`) performs the same certificate
 plus UserInfo check, so the IdP sees one UserInfo call per protected request.
 
+A device enrolled with a token has no OIDC tokens: it sends no bearer token,
+nothing is refreshed or revalidated, and its stream stays open until the
+connection drops or the device is deleted.
+
 ## Gateway credentials
 
 When the gateway is configured with `authentication.type: controllerJwt`,
@@ -375,3 +442,8 @@ IdP. The controller rejects the next authenticated call and closes open
 streams within 5 minutes. A daemon whose stream is closed as
 `Unauthenticated`, or whose refresh token is rejected, discards its identity
 and must enroll again.
+
+A device enrolled with a token has no user to disable. Delete the device in
+the controller: its next authenticated call is rejected as `Unauthenticated`
+and the daemon enrolls again, which succeeds only while its token is still
+configured.

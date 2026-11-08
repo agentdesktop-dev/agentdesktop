@@ -789,14 +789,18 @@ async fn connect(
     info!(address = %controller.address, "connected to controller");
     controller_status.mark_connected().await;
     let mut heartbeat = time::interval(controller.heartbeat_interval);
-    let reconnect_at = identity.oauth.expires_at_unix_seconds.saturating_sub(60);
+    // Without OIDC tokens (token enrollment) there is nothing to refresh.
+    let reconnect_at = identity
+        .oauth
+        .as_ref()
+        .map(|oauth| oauth.expires_at_unix_seconds.saturating_sub(60));
     let oauth_reconnect = time::sleep(Duration::from_secs(
-        reconnect_at.saturating_sub(unix_time_seconds()),
+        reconnect_at.map_or(0, |at| at.saturating_sub(unix_time_seconds())),
     ));
     tokio::pin!(oauth_reconnect);
     loop {
         tokio::select! {
-            _ = &mut oauth_reconnect => {
+            _ = &mut oauth_reconnect, if reconnect_at.is_some() => {
                 info!("reconnecting controller stream to refresh OIDC access token");
                 return Ok(());
             }
@@ -1262,7 +1266,10 @@ async fn client_with(
 }
 
 fn authenticate_request<T>(identity: &Identity, request: &mut Request<T>) -> anyhow::Result<()> {
-    let access_token = &identity.oauth.access_token;
+    let Some(oauth) = &identity.oauth else {
+        return Ok(());
+    };
+    let access_token = &oauth.access_token;
     request.metadata_mut().insert(
         "authorization",
         format!("Bearer {access_token}")
@@ -1314,13 +1321,16 @@ async fn refresh_oauth_if_needed(
     identity: &mut Identity,
     identity_path: &Path,
 ) -> anyhow::Result<()> {
-    let oauth = &identity.oauth;
+    let Some(oauth) = &identity.oauth else {
+        return Ok(());
+    };
     if oauth.expires_at_unix_seconds <= unix_time_seconds().saturating_add(120) {
         let _guard = OAUTH_REFRESH_MUTEX.lock().await;
         match identity::load(identity_path) {
             Ok(Some(stored))
-                if stored.oauth.expires_at_unix_seconds
-                    > unix_time_seconds().saturating_add(120) =>
+                if stored.oauth.as_ref().is_some_and(|stored| {
+                    stored.expires_at_unix_seconds > unix_time_seconds().saturating_add(120)
+                }) =>
             {
                 *identity = stored;
                 return Ok(());
@@ -1952,6 +1962,7 @@ mod tests {
             ca_certificate_path: ca_certificate_path.map(std::path::Path::to_path_buf),
             heartbeat_interval: Duration::from_secs(30),
             device_authorization: false,
+            enrollment_token_path: None,
         }
     }
 

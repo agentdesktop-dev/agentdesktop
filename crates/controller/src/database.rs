@@ -14,10 +14,14 @@ pub struct Database {
     pool: AnyPool,
 }
 
+#[derive(Debug)]
 pub struct DevicePrincipal {
     pub issuer: String,
     pub subject: String,
     pub idp_claims: Option<BTreeMap<String, serde_json::Value>>,
+    /// Name of the enrollment token the device enrolled with. Such a device
+    /// has no user: `issuer` and `subject` are empty.
+    pub enrollment_token: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -35,6 +39,9 @@ pub struct DeviceSummary {
     /// their preferred username, else their name), when the identity provider
     /// supplied one. Only this derived value is returned, never the raw claims.
     pub enrolled_by_name: Option<String>,
+    /// Name of the enrollment token the device enrolled with, for devices
+    /// enrolled without a user.
+    pub enrollment_token: Option<String>,
     pub config_revision: Option<i64>,
     pub config_state: Option<i64>,
     pub config_error: Option<String>,
@@ -55,6 +62,7 @@ struct DeviceRow {
     enrolled_by_issuer: String,
     enrolled_by_subject: String,
     idp_claims_json: Option<String>,
+    enrollment_token: Option<String>,
     config_revision: Option<i64>,
     config_state: Option<i64>,
     config_error: Option<String>,
@@ -75,6 +83,7 @@ impl From<DeviceRow> for DeviceSummary {
             enrolled_by_issuer: row.enrolled_by_issuer,
             enrolled_by_subject: row.enrolled_by_subject,
             enrolled_by_name: row.idp_claims_json.as_deref().and_then(readable_name),
+            enrollment_token: row.enrollment_token,
             config_revision: row.config_revision,
             config_state: row.config_state,
             config_error: row.config_error,
@@ -298,6 +307,7 @@ impl Database {
         enrolled_by_issuer: &str,
         enrolled_by_subject: &str,
         idp_claims: Option<&BTreeMap<String, serde_json::Value>>,
+        enrollment_token: Option<&str>,
     ) -> anyhow::Result<()> {
         let idp_claims_json = idp_claims
             .map(serde_json::to_string)
@@ -307,8 +317,8 @@ impl Database {
         sqlx::query(
             "INSERT INTO devices
                 (id, hostname, created_at, last_seen_at, enrolled_by_issuer,
-                 enrolled_by_subject, idp_claims_json)
-             VALUES ($1, $2, $3, $3, $4, $5, $6)",
+                 enrolled_by_subject, idp_claims_json, enrollment_token)
+             VALUES ($1, $2, $3, $3, $4, $5, $6, $7)",
         )
         .bind(device_id)
         .bind(hostname)
@@ -316,6 +326,7 @@ impl Database {
         .bind(enrolled_by_issuer)
         .bind(enrolled_by_subject)
         .bind(idp_claims_json)
+        .bind(enrollment_token)
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
@@ -323,8 +334,13 @@ impl Database {
     }
 
     pub async fn device_principal(&self, device_id: &str) -> anyhow::Result<DevicePrincipal> {
-        let (issuer, subject, idp_claims_json): (String, String, Option<String>) = sqlx::query_as(
-            "SELECT enrolled_by_issuer, enrolled_by_subject, idp_claims_json
+        let (issuer, subject, idp_claims_json, enrollment_token): (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT enrolled_by_issuer, enrolled_by_subject, idp_claims_json, enrollment_token
              FROM devices WHERE id = $1",
         )
         .bind(device_id)
@@ -338,6 +354,7 @@ impl Database {
             issuer,
             subject,
             idp_claims,
+            enrollment_token,
         })
     }
 
@@ -345,7 +362,8 @@ impl Database {
         let rows: Vec<DeviceRow> = sqlx::query_as(
             "SELECT d.id, d.hostname, d.os, d.architecture, d.agent_version,
                     d.created_at, d.last_seen_at, d.enrolled_by_issuer,
-                    d.enrolled_by_subject, d.idp_claims_json, cs.revision AS config_revision,
+                    d.enrolled_by_subject, d.idp_claims_json, d.enrollment_token,
+                    cs.revision AS config_revision,
                     cs.state AS config_state, cs.error AS config_error,
                     cs.updated_at AS config_updated_at, COUNT(x.kind) AS discovery_count
              FROM devices d
@@ -353,7 +371,7 @@ impl Database {
              LEFT JOIN discoveries x ON x.device_id = d.id
              GROUP BY d.id, d.hostname, d.os, d.architecture, d.agent_version,
                       d.created_at, d.last_seen_at, d.enrolled_by_issuer,
-                      d.enrolled_by_subject, d.idp_claims_json, cs.revision, cs.state,
+                      d.enrolled_by_subject, d.idp_claims_json, d.enrollment_token, cs.revision, cs.state,
                       cs.error, cs.updated_at
              ORDER BY d.last_seen_at DESC, d.hostname ASC",
         )
@@ -380,7 +398,8 @@ impl Database {
         let device: Option<DeviceRow> = sqlx::query_as(
             "SELECT d.id, d.hostname, d.os, d.architecture, d.agent_version,
                     d.created_at, d.last_seen_at, d.enrolled_by_issuer,
-                    d.enrolled_by_subject, d.idp_claims_json, cs.revision AS config_revision,
+                    d.enrolled_by_subject, d.idp_claims_json, d.enrollment_token,
+                    cs.revision AS config_revision,
                     cs.state AS config_state, cs.error AS config_error,
                     cs.updated_at AS config_updated_at, COUNT(x.kind) AS discovery_count
              FROM devices d
@@ -389,7 +408,7 @@ impl Database {
              WHERE d.id = $1
              GROUP BY d.id, d.hostname, d.os, d.architecture, d.agent_version,
                       d.created_at, d.last_seen_at, d.enrolled_by_issuer,
-                      d.enrolled_by_subject, d.idp_claims_json, cs.revision, cs.state,
+                      d.enrolled_by_subject, d.idp_claims_json, d.enrollment_token, cs.revision, cs.state,
                       cs.error, cs.updated_at",
         )
         .bind(device_id)
@@ -786,7 +805,14 @@ mod tests {
             ("email".to_owned(), serde_json::json!("john@example.com")),
         ]);
         database
-            .enroll_device("device", "host", "issuer", "subject", Some(&idp_claims))
+            .enroll_device(
+                "device",
+                "host",
+                "issuer",
+                "subject",
+                Some(&idp_claims),
+                None,
+            )
             .await
             .expect("enroll device");
         let front_matter = BTreeMap::from([
@@ -884,7 +910,7 @@ mod tests {
             .await
             .expect("connect test database");
         database
-            .enroll_device("device", "host", "issuer", "subject", None)
+            .enroll_device("device", "host", "issuer", "subject", None, None)
             .await
             .expect("enroll device");
         (database, path)
@@ -927,7 +953,14 @@ mod tests {
             ("groups".to_owned(), serde_json::json!(["admins"])),
         ]);
         database
-            .enroll_device("owned", "owned-host", "issuer", "subject-2", Some(&claims))
+            .enroll_device(
+                "owned",
+                "owned-host",
+                "issuer",
+                "subject-2",
+                Some(&claims),
+                None,
+            )
             .await
             .expect("enroll a device with claims");
 

@@ -290,6 +290,9 @@ pub async fn enroll(
     enrollment: &EnrollmentState,
     callback_listen: Option<SocketAddr>,
 ) -> anyhow::Result<Identity> {
+    if let Some(token_path) = &controller.enrollment_token_path {
+        return crate::token_enrollment::enroll(controller, enrollment, token_path).await;
+    }
     if controller.device_authorization {
         return enroll_with_device_authorization(controller, enrollment).await;
     }
@@ -386,7 +389,7 @@ async fn enroll_with_device_authorization(
     complete_enrollment(&mut client, begin, &device_key, &csr, tokens).await
 }
 
-fn device_csr() -> anyhow::Result<(KeyPair, CertificateSigningRequest)> {
+pub(crate) fn device_csr() -> anyhow::Result<(KeyPair, CertificateSigningRequest)> {
     let device_key = KeyPair::generate().context("generate device TLS private key")?;
     let mut certificate_params = CertificateParams::new(Vec::<String>::new())?;
     certificate_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
@@ -441,11 +444,11 @@ async fn complete_enrollment(
         client_private_key_pem: device_key.serialize_pem(),
         client_certificate_expires_at_unix_seconds: response
             .client_certificate_expires_at_unix_seconds,
-        oauth: OAuthCredentials {
+        oauth: Some(OAuthCredentials {
             access_token: tokens.access_token,
             refresh_token,
             expires_at_unix_seconds: unix_time_seconds().saturating_add(tokens.expires_in),
-        },
+        }),
         oauth_token_endpoint: begin.token_endpoint,
         oauth_client_id: begin.client_id,
     })
@@ -574,7 +577,10 @@ pub(crate) async fn poll_device_token(
 pub async fn refresh(identity: &mut Identity) -> anyhow::Result<()> {
     let endpoint = &identity.oauth_token_endpoint;
     let client_id = &identity.oauth_client_id;
-    let current = &identity.oauth;
+    let current = identity
+        .oauth
+        .as_ref()
+        .context("device identity has no OIDC tokens to refresh")?;
     let response = refresh_access_token(endpoint, client_id, &current.refresh_token).await?;
     apply_refreshed_tokens(identity, response)
 }
@@ -610,12 +616,17 @@ fn apply_refreshed_tokens(identity: &mut Identity, response: TokenResponse) -> a
     if !response.token_type.eq_ignore_ascii_case("Bearer") {
         bail!("OIDC token endpoint returned unsupported token type");
     }
-    let current_refresh_token = identity.oauth.refresh_token.clone();
-    identity.oauth = OAuthCredentials {
+    let current_refresh_token = identity
+        .oauth
+        .as_ref()
+        .context("device identity has no OIDC tokens to refresh")?
+        .refresh_token
+        .clone();
+    identity.oauth = Some(OAuthCredentials {
         access_token: response.access_token,
         refresh_token: response.refresh_token.unwrap_or(current_refresh_token),
         expires_at_unix_seconds: unix_time_seconds().saturating_add(response.expires_in),
-    };
+    });
     Ok(())
 }
 
@@ -1263,11 +1274,11 @@ mod tests {
             client_certificate_pem: "certificate".to_owned(),
             client_private_key_pem: "key".to_owned(),
             client_certificate_expires_at_unix_seconds: u64::MAX,
-            oauth: OAuthCredentials {
+            oauth: Some(OAuthCredentials {
                 access_token: "old-access".to_owned(),
                 refresh_token: "old-refresh".to_owned(),
                 expires_at_unix_seconds: 0,
-            },
+            }),
             oauth_token_endpoint: "https://idp.example/token".to_owned(),
             oauth_client_id: "client".to_owned(),
         };
@@ -1283,7 +1294,7 @@ mod tests {
             },
         )
         .unwrap();
-        let oauth = identity.oauth;
+        let oauth = identity.oauth.unwrap();
         assert_eq!(oauth.access_token, "new-access");
         assert_eq!(oauth.refresh_token, "new-refresh");
         assert!(oauth.expires_at_unix_seconds > 0);

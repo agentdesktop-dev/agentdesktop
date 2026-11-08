@@ -179,6 +179,13 @@
           "description": "Enroll with the OAuth 2.0 Device Authorization Grant (RFC 8628) instead\nof a browser redirect to a local callback.\n\nUse this on hosts without a local browser, such as servers reached over\nSSH. The daemon logs a verification URL and user code to approve from\nany other device. The identity provider must support device\nauthorization for the controller's client.",
           "type": "boolean"
         },
+        "enrollmentTokenPath": {
+          "description": "Path to a file holding an enrollment token issued by the controller\noperator (see the controller's `enrollmentTokens`).\n\nSet this on devices provisioned by an MDM: the daemon enrolls with the\ntoken and no user signs in. The device is afterwards identified by its\ncertificate alone and gets no LLM gateway credentials.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "heartbeatInterval": {
           "description": "Interval between device heartbeats. Defaults to `30s`.",
           "type": "string",

@@ -22,7 +22,10 @@ pub struct Identity {
     pub client_certificate_pem: String,
     pub client_private_key_pem: String,
     pub client_certificate_expires_at_unix_seconds: u64,
-    pub oauth: OAuthCredentials,
+    /// The enrolling user's OIDC tokens. `None` for a device enrolled with an
+    /// enrollment token, which the controller identifies by its certificate
+    /// alone; `oauth_token_endpoint` and `oauth_client_id` are empty then.
+    pub oauth: Option<OAuthCredentials>,
     pub oauth_token_endpoint: String,
     pub oauth_client_id: String,
 }
@@ -109,14 +112,15 @@ pub fn load(path: &Path) -> anyhow::Result<Option<Identity>> {
 fn read_secrets(
     secrets: &SecretStore,
     device_id: &str,
-) -> anyhow::Result<(String, OAuthCredentials)> {
+) -> anyhow::Result<(String, Option<OAuthCredentials>)> {
     let client_private_key_pem = secrets
         .get(TLS_KEY_SERVICE, device_id)
         .context("read device TLS private key")?;
     let oauth = secrets
-        .get(OAUTH_SERVICE, device_id)
-        .context("read OAuth credentials")?;
-    let oauth = serde_json::from_str(&oauth).context("decode stored OAuth credentials")?;
+        .get_optional(OAUTH_SERVICE, device_id)
+        .context("read OAuth credentials")?
+        .map(|oauth| serde_json::from_str(&oauth).context("decode stored OAuth credentials"))
+        .transpose()?;
     Ok((client_private_key_pem, oauth))
 }
 
@@ -124,15 +128,20 @@ pub fn save(path: &Path, identity: &Identity) -> anyhow::Result<()> {
     let parent = path.parent().context("identity path has no parent")?;
     secure_fs::ensure_private_dir(parent)?;
     let secrets = SecretStore::new(parent)?;
-    let oauth = serde_json::to_string(&identity.oauth)?;
-    for (service, secret, operation) in [
-        (
-            TLS_KEY_SERVICE,
-            identity.client_private_key_pem.as_str(),
-            "store device TLS private key",
-        ),
-        (OAUTH_SERVICE, oauth.as_str(), "store OAuth credentials"),
-    ] {
+    let oauth = identity
+        .oauth
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    let mut items = vec![(
+        TLS_KEY_SERVICE,
+        identity.client_private_key_pem.as_str(),
+        "store device TLS private key",
+    )];
+    if let Some(oauth) = &oauth {
+        items.push((OAUTH_SERVICE, oauth.as_str(), "store OAuth credentials"));
+    }
+    for (service, secret, operation) in items {
         // The macOS Keychain adds a new item whenever looking up the existing
         // one fails, including when the item is there but unreadable (after a
         // code-signature change), and leaves the unreadable copy behind as a
@@ -317,11 +326,11 @@ mod tests {
             client_certificate_pem: "certificate".to_owned(),
             client_private_key_pem: "private-key".to_owned(),
             client_certificate_expires_at_unix_seconds: 123,
-            oauth: OAuthCredentials {
+            oauth: Some(OAuthCredentials {
                 access_token: "access-token".to_owned(),
                 refresh_token: "refresh-token".to_owned(),
                 expires_at_unix_seconds: 456,
-            },
+            }),
             oauth_token_endpoint: "https://issuer.example/token".to_owned(),
             oauth_client_id: "client-1".to_owned(),
         }
@@ -356,8 +365,11 @@ mod tests {
 
         let loaded = load(&path).unwrap().unwrap();
         assert_eq!(loaded.client_private_key_pem, "private-key");
-        assert_eq!(loaded.oauth.access_token, "access-token");
-        assert_eq!(loaded.oauth.refresh_token, "refresh-token");
+        assert_eq!(loaded.oauth.as_ref().unwrap().access_token, "access-token");
+        assert_eq!(
+            loaded.oauth.as_ref().unwrap().refresh_token,
+            "refresh-token"
+        );
 
         delete(&path, "device-1").unwrap();
         assert!(!path.exists());
@@ -437,7 +449,10 @@ mod tests {
 
         let loaded = load(&path).unwrap().unwrap();
         assert_eq!(loaded.client_private_key_pem, "private-key");
-        assert_eq!(loaded.oauth.refresh_token, "refresh-token");
+        assert_eq!(
+            loaded.oauth.as_ref().unwrap().refresh_token,
+            "refresh-token"
+        );
         assert_eq!(secret_count(&directory), 2);
         fs::remove_dir_all(directory).unwrap();
     }

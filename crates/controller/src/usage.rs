@@ -62,6 +62,7 @@ mod tests {
                     &serde_json::from_value(serde_json::json!({ "email": "john@example.com" }))
                         .unwrap(),
                 ),
+                None,
             )
             .await
             .unwrap();
@@ -71,6 +72,7 @@ mod tests {
                 "ci-runner",
                 "issuer",
                 "user-456",
+                None,
                 None,
             )
             .await

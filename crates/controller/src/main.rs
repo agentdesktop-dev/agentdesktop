@@ -7,7 +7,7 @@ use agentdesktop_controller::{
     device_ca::DeviceCertificateIssuer,
     gateway_jwt::{self, GatewayJwtIssuer},
     oidc::OidcProvider,
-    service::FleetAgentService,
+    service::{EnrollmentToken, FleetAgentService},
 };
 use agentdesktop_core::{DEFAULT_CONTROLLER_CONFIG_PATH, config, telemetry};
 use agentdesktop_proto::fleet::fleet_agent_server::FleetAgentServer;
@@ -54,6 +54,15 @@ async fn main() -> anyhow::Result<()> {
     .await
     .context("initialize OIDC enrollment")?;
     tracing::info!("OIDC enrollment enabled");
+    let enrollment_tokens = config
+        .enrollment_tokens
+        .iter()
+        .map(|token| EnrollmentToken::load(&token.name, &token.file))
+        .collect::<anyhow::Result<Vec<_>>>()
+        .context("initialize token enrollment")?;
+    if !enrollment_tokens.is_empty() {
+        tracing::info!(tokens = enrollment_tokens.len(), "token enrollment enabled");
+    }
     let gateway_jwt_issuer = config
         .gateway_jwt
         .as_ref()
@@ -116,7 +125,8 @@ async fn main() -> anyhow::Result<()> {
         gateway_jwt_issuer,
         Some(device_certificate_issuer),
     )
-    .with_usage_collection(usage_ingest.is_some());
+    .with_usage_collection(usage_ingest.is_some())
+    .with_enrollment_tokens(enrollment_tokens);
 
     let certificate = std::fs::read(&tls.certificate)
         .with_context(|| format!("read TLS certificate from {}", tls.certificate.display()))?;

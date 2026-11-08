@@ -30,6 +30,13 @@
       "type": "string",
       "default": "sqlite://agentdesktop-controller.db?mode=rwc"
     },
+    "enrollmentTokens": {
+      "description": "Tokens that enroll operator-provisioned devices without a user\nsign-in. See `enrollmentTokenPath` in the daemon configuration.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ControllerEnrollmentTokenConfig"
+      }
+    },
     "fleetListen": {
       "description": "Address on which the device-facing gRPC fleet API listens.",
       "type": "string",
@@ -91,6 +98,25 @@
       "additionalProperties": false,
       "required": [
         "path"
+      ]
+    },
+    "ControllerEnrollmentTokenConfig": {
+      "description": "An enrollment token for devices provisioned by an MDM or similar.",
+      "type": "object",
+      "properties": {
+        "file": {
+          "description": "Path to a file containing the token. The token must be at least 32\nprintable ASCII characters.\n\nRelative paths are resolved from the controller configuration directory.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Name recorded on devices enrolled with this token.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "file"
       ]
     },
     "ControllerGatewayJwtConfig": {

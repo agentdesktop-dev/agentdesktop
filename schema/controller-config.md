@@ -8,6 +8,9 @@
 |`daemonConfig.path`|string|Path to the watched YAML configuration distributed to enrolled devices.<br><br>Relative paths are resolved from the controller configuration directory.<br>Valid file changes are published to connected devices automatically.|
 |`daemonConfig.revision`|integer|Monotonically increasing revision assigned to the daemon configuration.|
 |`databaseUrl`|string|SQLite or PostgreSQL URL used for controller state.|
+|`enrollmentTokens`|[]object|Tokens that enroll operator-provisioned devices without a user<br>sign-in. See `enrollmentTokenPath` in the daemon configuration.|
+|`enrollmentTokens[].file`|string|Path to a file containing the token. The token must be at least 32<br>printable ASCII characters.<br><br>Relative paths are resolved from the controller configuration directory.|
+|`enrollmentTokens[].name`|string|Name recorded on devices enrolled with this token.|
 |`fleetListen`|string|Address on which the device-facing gRPC fleet API listens.|
 |`gatewayJwt`|object|LLM gateway JWT signing settings.|
 |`gatewayJwt.issuer`|string|Issuer claim placed in generated JWTs.|
