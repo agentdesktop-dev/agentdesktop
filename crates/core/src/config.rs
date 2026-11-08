@@ -476,6 +476,14 @@ pub struct ControllerConnectionConfig {
     /// authorization for the controller's client.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub device_authorization: bool,
+    /// Path to a file holding an enrollment token issued by the controller
+    /// operator (see the controller's `enrollmentTokens`).
+    ///
+    /// Set this on devices provisioned by an MDM: the daemon enrolls with the
+    /// token and no user signs in. The device is afterwards identified by its
+    /// certificate alone and gets no LLM gateway credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrollment_token_path: Option<PathBuf>,
 }
 
 /// Startup configuration for the Agentdesktop fleet controller.
@@ -496,6 +504,10 @@ pub struct ControllerConfig {
     pub database_url: String,
     /// OpenID Connect settings used for device enrollment and authorization.
     pub oidc: ControllerOidcConfig,
+    /// Tokens that enroll operator-provisioned devices without a user
+    /// sign-in. See `enrollmentTokenPath` in the daemon configuration.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enrollment_tokens: Vec<ControllerEnrollmentTokenConfig>,
     /// Daemon configuration distributed to enrolled devices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daemon_config: Option<ControllerDaemonConfig>,
@@ -529,6 +541,20 @@ pub struct ControllerOidcConfig {
     /// Redirect URI registered for the native enrollment client.
     #[serde(default = "default_oidc_redirect_uri")]
     pub redirect_uri: String,
+}
+
+/// An enrollment token for devices provisioned by an MDM or similar.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerEnrollmentTokenConfig {
+    /// Name recorded on devices enrolled with this token.
+    pub name: String,
+    /// Path to a file containing the token. The token must be at least 32
+    /// printable ASCII characters.
+    ///
+    /// Relative paths are resolved from the controller configuration directory.
+    pub file: PathBuf,
 }
 
 /// Controller-owned daemon configuration file and its revision.
@@ -1300,6 +1326,9 @@ pub fn load_controller(path: &Path) -> anyhow::Result<ControllerConfig> {
     if let Some(usage) = &mut config.usage {
         resolve_relative(&mut usage.token_file, directory);
     }
+    for token in &mut config.enrollment_tokens {
+        resolve_relative(&mut token.file, directory);
+    }
     match &mut config.tls {
         ControllerTlsConfig::Directory(path) => resolve_relative(path, directory),
         ControllerTlsConfig::Files(tls) => {
@@ -1347,6 +1376,15 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
         }
         if gateway.lifetime.is_zero() {
             anyhow::bail!("gatewayJwt.lifetime must be greater than zero");
+        }
+    }
+    let mut token_names = std::collections::BTreeSet::new();
+    for token in &config.enrollment_tokens {
+        if token.name.trim().is_empty() {
+            anyhow::bail!("enrollmentTokens[].name cannot be empty");
+        }
+        if !token_names.insert(token.name.as_str()) {
+            anyhow::bail!("enrollmentTokens[].name {:?} is used twice", token.name);
         }
     }
     Ok(config)
@@ -2256,6 +2294,35 @@ llmGateway:
 "#;
         let error = parse_daemon(invalid).expect_err("invalid allowlist entry must fail");
         assert!(format!("{error:#}").contains("invalid LLM gateway client ID"));
+    }
+
+    #[test]
+    fn controller_enrollment_tokens_are_named_once() {
+        let configuration = |tokens: &str| {
+            parse_controller(&format!(
+                "tls: /etc/agentdesktop/tls\noidc:\n  issuer: https://idp.example.com\n  clientId: agentdesktop\nenrollmentTokens:\n{tokens}"
+            ))
+        };
+        let controller = configuration(
+            "  - name: jamf\n    file: /etc/agentdesktop/jamf\n  - name: intune\n    file: /etc/agentdesktop/intune\n",
+        )
+        .expect("two named tokens");
+        assert_eq!(controller.enrollment_tokens.len(), 2);
+        assert!(configuration("  - name: ''\n    file: /etc/agentdesktop/jamf\n").is_err());
+        assert!(
+            configuration(
+                "  - name: jamf\n    file: /etc/agentdesktop/a\n  - name: jamf\n    file: /etc/agentdesktop/b\n",
+            )
+            .is_err()
+        );
+        let daemon = parse_daemon(
+            "controller:\n  address: https://controller.example.com\n  enrollmentTokenPath: /etc/agentdesktop/enrollment-token\n",
+        )
+        .expect("daemon enrollment token path");
+        assert_eq!(
+            daemon.controller.unwrap().enrollment_token_path.as_deref(),
+            Some(std::path::Path::new("/etc/agentdesktop/enrollment-token"))
+        );
     }
 
     #[test]

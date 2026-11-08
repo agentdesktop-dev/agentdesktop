@@ -1009,7 +1009,10 @@ locally and can request credentials for an LLM gateway through the daemon.
 In controller-managed mode, the daemon generates its private device key on the
 workstation and sends only a certificate signing request to the controller.
 After enrollment, protected controller operations require the device
-certificate and a valid token for the user who enrolled it.
+certificate and a valid token for the user who enrolled it. Devices an MDM
+provisions without a user can instead enroll with an operator-issued
+enrollment token and are then identified by their certificate alone; see
+[Device identity and enrollment](docs/device-identity.md#token-flow).
 
 When a supported tool requests gateway access, the controller can issue a
 short-lived JWT containing the user, device ID, allowed client label, audience,

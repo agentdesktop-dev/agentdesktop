@@ -4,9 +4,10 @@ use agentdesktop_proto::fleet::{
     AgentMessage, BeginEnrollmentRequest, BeginEnrollmentResponse, CompleteEnrollmentRequest,
     ConfigStatus, ControllerMessage, DeviceCertificateResponse, DeviceUsageRequest,
     DeviceUsageResponse, EnrollResponse, LlmGatewayCredentialRequest, LlmGatewayCredentialResponse,
-    RenewDeviceCertificateRequest, agent_message, controller_message,
+    RenewDeviceCertificateRequest, TokenEnrollmentRequest, agent_message, controller_message,
     fleet_agent_server::FleetAgent,
 };
+use anyhow::Context;
 use futures_core::Stream;
 use tokio::{sync::mpsc, time};
 use tokio_stream::wrappers::ReceiverStream;
@@ -34,6 +35,40 @@ pub struct FleetAgentService {
     gateway_jwt_issuer: Option<GatewayJwtIssuer>,
     device_certificate_issuer: Option<DeviceCertificateIssuer>,
     usage_enabled: bool,
+    enrollment_tokens: Vec<EnrollmentToken>,
+}
+
+/// A token that enrolls operator-provisioned devices without a user.
+#[derive(Clone)]
+pub struct EnrollmentToken {
+    pub name: String,
+    pub token: String,
+}
+
+impl EnrollmentToken {
+    /// Reads the token from `file`: at least 32 printable ASCII characters.
+    pub fn load(name: &str, file: &std::path::Path) -> anyhow::Result<Self> {
+        let contents = std::fs::read_to_string(file)
+            .with_context(|| format!("read enrollment token {name} from {}", file.display()))?;
+        let token = contents.trim();
+        if token.len() < 32 || !token.bytes().all(|byte| byte.is_ascii_graphic()) {
+            anyhow::bail!(
+                "enrollment token {name} in {} must be at least 32 printable ASCII characters",
+                file.display()
+            );
+        }
+        Ok(Self {
+            name: name.to_owned(),
+            token: token.to_owned(),
+        })
+    }
+}
+
+/// A device identified by its certificate, with its enrollment record.
+#[derive(Debug)]
+struct AuthenticatedDevice {
+    device_id: String,
+    principal: DevicePrincipal,
 }
 
 impl FleetAgentService {
@@ -51,6 +86,7 @@ impl FleetAgentService {
             gateway_jwt_issuer,
             device_certificate_issuer,
             usage_enabled: false,
+            enrollment_tokens: Vec::new(),
         }
     }
 
@@ -59,6 +95,27 @@ impl FleetAgentService {
         self.usage_enabled = enabled;
         self
     }
+
+    /// Accepts `EnrollWithToken` with any of `tokens`.
+    pub fn with_enrollment_tokens(mut self, tokens: Vec<EnrollmentToken>) -> Self {
+        self.enrollment_tokens = tokens;
+        self
+    }
+}
+
+/// The name of the configured token equal to `presented`, compared in
+/// constant time.
+fn enrollment_token_name<'a>(tokens: &'a [EnrollmentToken], presented: &str) -> Option<&'a str> {
+    tokens
+        .iter()
+        .find(|token| {
+            aws_lc_rs::constant_time::verify_slices_are_equal(
+                token.token.as_bytes(),
+                presented.as_bytes(),
+            )
+            .is_ok()
+        })
+        .map(|token| token.name.as_str())
 }
 
 fn subscription_is_configured_for_client(programs: &ProgramsConfig, client_id: &str) -> bool {
@@ -108,6 +165,28 @@ impl FleetAgent for FleetAgentService {
             &completed.subject,
             Some(&completed.idp_claims),
             &csr_der,
+            None,
+        )
+        .await
+    }
+
+    async fn enroll_with_token(
+        &self,
+        request: Request<TokenEnrollmentRequest>,
+    ) -> Result<Response<EnrollResponse>, Status> {
+        let request = request.into_inner();
+        let token = enrollment_token_name(&self.enrollment_tokens, &request.enrollment_token)
+            .ok_or_else(|| {
+                warn!(hostname = %request.hostname, "rejected unknown enrollment token");
+                Status::unauthenticated("enrollment token rejected")
+            })?;
+        self.enroll_device(
+            &request.hostname,
+            "",
+            "",
+            None,
+            &request.certificate_signing_request_der,
+            Some(token),
         )
         .await
     }
@@ -116,7 +195,7 @@ impl FleetAgent for FleetAgentService {
         &self,
         request: Request<RenewDeviceCertificateRequest>,
     ) -> Result<Response<DeviceCertificateResponse>, Status> {
-        let device_id = self.authenticate_device(&request).await?;
+        let device_id = self.authenticate_device(&request).await?.device_id;
         let issuer = self.device_certificate_issuer.as_ref().ok_or_else(|| {
             Status::failed_precondition("device certificate issuance is disabled")
         })?;
@@ -137,7 +216,15 @@ impl FleetAgent for FleetAgentService {
         &self,
         request: Request<LlmGatewayCredentialRequest>,
     ) -> Result<Response<LlmGatewayCredentialResponse>, Status> {
-        let device_id = self.authenticate_device(&request).await?;
+        let AuthenticatedDevice {
+            device_id,
+            principal,
+        } = self.authenticate_device(&request).await?;
+        if principal.enrollment_token.is_some() {
+            return Err(Status::failed_precondition(
+                "LLM gateway credentials require a device enrolled by a user",
+            ));
+        }
         let LlmGatewayCredentialRequest {
             client_id,
             subscription,
@@ -187,11 +274,6 @@ impl FleetAgent for FleetAgentService {
         let issuer = self.gateway_jwt_issuer.as_ref().ok_or_else(|| {
             Status::failed_precondition("controller gateway JWT issuer is not configured")
         })?;
-        let principal = self
-            .database
-            .device_principal(&device_id)
-            .await
-            .map_err(internal)?;
         let subject = if principal.subject.is_empty() {
             device_id.as_str()
         } else {
@@ -225,7 +307,7 @@ impl FleetAgent for FleetAgentService {
         &self,
         request: Request<DeviceUsageRequest>,
     ) -> Result<Response<DeviceUsageResponse>, Status> {
-        let device_id = self.authenticate_device(&request).await?;
+        let device_id = self.authenticate_device(&request).await?.device_id;
         agentdesktop_usage::device_usage(
             &self.database.usage(),
             Some(&device_id),
@@ -244,13 +326,20 @@ impl FleetAgent for FleetAgentService {
         &self,
         request: Request<tonic::Streaming<AgentMessage>>,
     ) -> Result<Response<Self::ConnectStream>, Status> {
-        let authenticated_device_id = self.authenticate_device(&request).await?;
-        let oauth_revalidation = (
-            self.oidc.clone().ok_or_else(|| {
-                Status::failed_precondition("OIDC access-token validation is disabled")
-            })?,
-            bearer_credential(request.metadata())?.to_owned(),
-        );
+        let AuthenticatedDevice {
+            device_id: authenticated_device_id,
+            principal: enrolled_principal,
+        } = self.authenticate_device(&request).await?;
+        // A device enrolled with a token has no user token to revalidate.
+        let oauth_revalidation = match enrolled_principal.enrollment_token {
+            Some(_) => None,
+            None => Some((
+                self.oidc.clone().ok_or_else(|| {
+                    Status::failed_precondition("OIDC access-token validation is disabled")
+                })?,
+                bearer_credential(request.metadata())?.to_owned(),
+            )),
+        };
 
         let mut inbound = request.into_inner();
         let (sender, receiver) = mpsc::channel(8);
@@ -287,20 +376,14 @@ impl FleetAgent for FleetAgentService {
         let database = self.database.clone();
         let auth_sender = sender.clone();
         tokio::spawn(async move {
-            let enrolled_principal = match database.device_principal(&authenticated_device_id).await
-            {
-                Ok(principal) => principal,
-                Err(error) => {
-                    error!(%error, device_id = %authenticated_device_id, "failed to load stream identity");
-                    return;
-                }
-            };
             let mut auth_interval = time::interval(std::time::Duration::from_secs(5 * 60));
             auth_interval.tick().await;
             loop {
                 tokio::select! {
-                _ = auth_interval.tick() => {
-                    let (oidc, access_token) = &oauth_revalidation;
+                _ = auth_interval.tick(), if oauth_revalidation.is_some() => {
+                    let Some((oidc, access_token)) = &oauth_revalidation else {
+                        continue;
+                    };
                     match oidc.authenticate_access_token(access_token).await {
                         Ok(principal) if oidc_principals_match(&principal, &enrolled_principal) => {}
                         Ok(_) => {
@@ -360,36 +443,25 @@ impl FleetAgent for FleetAgentService {
 }
 
 impl FleetAgentService {
-    async fn authenticate_device<T>(&self, request: &Request<T>) -> Result<String, Status> {
+    async fn authenticate_device<T>(
+        &self,
+        request: &Request<T>,
+    ) -> Result<AuthenticatedDevice, Status> {
         let certificate_device_id = peer_certificate_device_id(request)?;
         self.authenticate_device_identity(certificate_device_id.as_deref(), request.metadata())
             .await
     }
 
+    /// Authenticates the device named in the certificate. A device enrolled
+    /// with a token is identified by the certificate alone; any other device
+    /// must also present the access token of the user who enrolled it.
     async fn authenticate_device_identity(
         &self,
         certificate_device_id: Option<&str>,
         metadata: &tonic::metadata::MetadataMap,
-    ) -> Result<String, Status> {
+    ) -> Result<AuthenticatedDevice, Status> {
         let device_id = certificate_device_id
             .ok_or_else(|| Status::unauthenticated("missing device certificate"))?;
-        let access_token = bearer_credential(metadata)?;
-        let oidc = self.oidc.as_ref().ok_or_else(|| {
-            Status::failed_precondition("OIDC access-token validation is disabled")
-        })?;
-        let access_principal = oidc
-            .authenticate_access_token(access_token)
-            .await
-            .map_err(invalid_access_token)?;
-        self.authenticate_device_certificate_identity(device_id, &access_principal)
-            .await
-    }
-
-    async fn authenticate_device_certificate_identity(
-        &self,
-        device_id: &str,
-        access_principal: &OidcPrincipal,
-    ) -> Result<String, Status> {
         let principal = self
             .database
             .device_principal(device_id)
@@ -398,12 +470,25 @@ impl FleetAgentService {
                 warn!(%error, device_id, "certificate references an unknown device");
                 Status::unauthenticated("unrecognized device certificate")
             })?;
-        if !oidc_principals_match(access_principal, &principal) {
-            return Err(Status::permission_denied(
-                "access token principal does not match enrolled device user",
-            ));
+        if principal.enrollment_token.is_none() {
+            let access_token = bearer_credential(metadata)?;
+            let oidc = self.oidc.as_ref().ok_or_else(|| {
+                Status::failed_precondition("OIDC access-token validation is disabled")
+            })?;
+            let access_principal = oidc
+                .authenticate_access_token(access_token)
+                .await
+                .map_err(invalid_access_token)?;
+            if !oidc_principals_match(&access_principal, &principal) {
+                return Err(Status::permission_denied(
+                    "access token principal does not match enrolled device user",
+                ));
+            }
         }
-        Ok(device_id.to_owned())
+        Ok(AuthenticatedDevice {
+            device_id: device_id.to_owned(),
+            principal,
+        })
     }
 
     async fn enroll_device(
@@ -413,6 +498,7 @@ impl FleetAgentService {
         enrolled_by_subject: &str,
         idp_claims: Option<&std::collections::BTreeMap<String, serde_json::Value>>,
         csr_der: &[u8],
+        enrollment_token: Option<&str>,
     ) -> Result<Response<EnrollResponse>, Status> {
         let device_id = Uuid::new_v4().to_string();
         let issued_certificate = self
@@ -428,6 +514,7 @@ impl FleetAgentService {
                 enrolled_by_issuer,
                 enrolled_by_subject,
                 idp_claims,
+                enrollment_token,
             )
             .await
             .map_err(internal)?;
@@ -436,6 +523,7 @@ impl FleetAgentService {
             hostname,
             enrolled_by_issuer,
             enrolled_by_subject,
+            enrollment_token,
             "enrolled device"
         );
 
@@ -623,10 +711,11 @@ fn invalid_access_token(err: anyhow::Error) -> Status {
 #[cfg(test)]
 mod tests {
     use rcgen::{CertificateParams, KeyPair};
-    use tonic::Code;
+    use tonic::{Code, metadata::MetadataMap};
 
     use super::{
-        FleetAgentService, device_id_from_certificate, subscription_is_configured_for_client,
+        EnrollmentToken, FleetAgentService, device_id_from_certificate, enrollment_token_name,
+        oidc_principals_match, subscription_is_configured_for_client,
     };
     use crate::{daemon_config::DaemonConfigStore, database::Database, oidc::OidcPrincipal};
 
@@ -662,89 +751,132 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn device_authentication_binds_oidc_issuer_and_subject() {
-        let device_id = "7ca03414-bb20-4c80-98ef-7b0538b988ba";
+    async fn test_database(name: &str) -> Database {
         let path = std::env::temp_dir().join(format!(
-            "agentdesktop-mtls-{}-{}.db",
+            "agentdesktop-{name}-{}-{}.db",
             std::process::id(),
             rand::random::<u64>()
         ));
-        let database = Database::connect(&format!("sqlite://{}?mode=rwc", path.display()))
+        Database::connect(&format!("sqlite://{}?mode=rwc", path.display()))
             .await
-            .expect("connect database");
-        database
-            .enroll_device(device_id, "host", "issuer", "subject", None)
-            .await
-            .expect("enroll device");
-        let service =
-            FleetAgentService::new(None, database, DaemonConfigStore::new(None), None, None);
-        let principal = |issuer: &str, subject: &str| OidcPrincipal {
+            .expect("connect database")
+    }
+
+    fn principal(issuer: &str, subject: &str) -> OidcPrincipal {
+        OidcPrincipal {
             issuer: issuer.to_owned(),
             subject: subject.to_owned(),
-        };
-        assert_eq!(
-            service
-                .authenticate_device_certificate_identity(
-                    device_id,
-                    &principal("issuer", "subject"),
-                )
-                .await
-                .unwrap(),
-            device_id
-        );
+        }
+    }
 
+    #[tokio::test]
+    async fn device_authentication_binds_oidc_issuer_and_subject() {
+        let device_id = "7ca03414-bb20-4c80-98ef-7b0538b988ba";
+        let database = test_database("mtls").await;
+        database
+            .enroll_device(device_id, "host", "issuer", "subject", None, None)
+            .await
+            .expect("enroll device");
+        let enrolled = database.device_principal(device_id).await.unwrap();
+        assert!(oidc_principals_match(
+            &principal("issuer", "subject"),
+            &enrolled
+        ));
         for mismatched in [
             principal("issuer", "other-subject"),
             principal("other-issuer", "subject"),
             principal("other-issuer", "other-subject"),
         ] {
-            let status = service
-                .authenticate_device_certificate_identity(device_id, &mismatched)
-                .await
-                .expect_err("mismatched OIDC principal must fail");
-            assert_eq!(status.code(), Code::PermissionDenied);
+            assert!(!oidc_principals_match(&mismatched, &enrolled));
         }
 
+        let service =
+            FleetAgentService::new(None, database, DaemonConfigStore::new(None), None, None);
         let status = service
-            .authenticate_device_certificate_identity(
-                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-                &principal("issuer", "subject"),
+            .authenticate_device_identity(
+                Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                &MetadataMap::new(),
             )
             .await
             .expect_err("unknown device certificate must fail");
+        assert_eq!(status.code(), Code::Unauthenticated);
+        let status = service
+            .authenticate_device_identity(Some(device_id), &MetadataMap::new())
+            .await
+            .expect_err("a user-enrolled device must present an access token");
         assert_eq!(status.code(), Code::Unauthenticated);
     }
 
     #[tokio::test]
     async fn legacy_device_without_enrolled_issuer_fails_closed() {
+        let database = test_database("empty-issuer").await;
+        database
+            .enroll_device("device", "host", "", "subject", None, None)
+            .await
+            .expect("enroll legacy device");
+        let enrolled = database.device_principal("device").await.unwrap();
+        assert!(!oidc_principals_match(&principal("", "subject"), &enrolled));
+    }
+
+    #[tokio::test]
+    async fn a_token_enrolled_device_is_authenticated_by_its_certificate_alone() {
         let device_id = "7ca03414-bb20-4c80-98ef-7b0538b988ba";
-        let path = std::env::temp_dir().join(format!(
-            "agentdesktop-empty-issuer-{}-{}.db",
+        let database = test_database("token-device").await;
+        database
+            .enroll_device(device_id, "host", "", "", None, Some("jamf"))
+            .await
+            .expect("enroll device with a token");
+        let service =
+            FleetAgentService::new(None, database, DaemonConfigStore::new(None), None, None);
+        let device = service
+            .authenticate_device_identity(Some(device_id), &MetadataMap::new())
+            .await
+            .expect("no access token is needed");
+        assert_eq!(device.device_id, device_id);
+        assert_eq!(device.principal.enrollment_token.as_deref(), Some("jamf"));
+    }
+
+    #[test]
+    fn an_enrollment_token_names_only_an_exact_match() {
+        let tokens = vec![
+            EnrollmentToken {
+                name: "jamf".to_owned(),
+                token: "a".repeat(32),
+            },
+            EnrollmentToken {
+                name: "intune".to_owned(),
+                token: "b".repeat(32),
+            },
+        ];
+        assert_eq!(
+            enrollment_token_name(&tokens, &"b".repeat(32)),
+            Some("intune")
+        );
+        assert_eq!(enrollment_token_name(&tokens, &"a".repeat(31)), None);
+        assert_eq!(enrollment_token_name(&tokens, &"a".repeat(33)), None);
+        assert_eq!(enrollment_token_name(&tokens, ""), None);
+        assert_eq!(enrollment_token_name(&[], &"a".repeat(32)), None);
+    }
+
+    #[test]
+    fn an_enrollment_token_file_must_hold_a_long_printable_token() {
+        let directory = std::env::temp_dir().join(format!(
+            "agentdesktop-enrollment-token-{}-{}",
             std::process::id(),
             rand::random::<u64>()
         ));
-        let database = Database::connect(&format!("sqlite://{}?mode=rwc", path.display()))
-            .await
-            .expect("connect database");
-        database
-            .enroll_device(device_id, "host", "", "subject", None)
-            .await
-            .expect("enroll legacy device");
-        let service =
-            FleetAgentService::new(None, database, DaemonConfigStore::new(None), None, None);
-
-        let status = service
-            .authenticate_device_certificate_identity(
-                device_id,
-                &OidcPrincipal {
-                    issuer: String::new(),
-                    subject: "subject".to_owned(),
-                },
-            )
-            .await
-            .expect_err("empty enrolled issuer must fail closed");
-        assert_eq!(status.code(), Code::PermissionDenied);
+        std::fs::create_dir(&directory).unwrap();
+        let file = directory.join("token");
+        std::fs::write(&file, format!("{}\n", "x".repeat(40))).unwrap();
+        let token = EnrollmentToken::load("jamf", &file).unwrap();
+        assert_eq!(token.name, "jamf");
+        assert_eq!(token.token, "x".repeat(40));
+        std::fs::write(&file, "x".repeat(31)).unwrap();
+        assert!(EnrollmentToken::load("jamf", &file).is_err());
+        std::fs::write(&file, format!("{} {}", "x".repeat(20), "y".repeat(20))).unwrap();
+        assert!(EnrollmentToken::load("jamf", &file).is_err());
+        assert!(EnrollmentToken::load("jamf", &directory.join("missing")).is_err());
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]
@@ -774,7 +906,7 @@ mod tests {
             .await
             .unwrap();
         database
-            .enroll_device("device", "host", "issuer", "subject", None)
+            .enroll_device("device", "host", "issuer", "subject", None, None)
             .await
             .unwrap();
         let accepted = ConfigStatus {

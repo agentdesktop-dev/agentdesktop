@@ -5,6 +5,10 @@ package agentdesktop.fleet.v1;
 service FleetAgent {
   rpc BeginEnrollment(BeginEnrollmentRequest) returns (BeginEnrollmentResponse);
   rpc CompleteEnrollment(CompleteEnrollmentRequest) returns (EnrollResponse);
+  // Enrolls a device the operator provisioned (for example through an MDM)
+  // with a controller-issued enrollment token instead of a user sign-in. The
+  // device is afterwards authenticated by its certificate alone.
+  rpc EnrollWithToken(TokenEnrollmentRequest) returns (EnrollResponse);
   rpc RenewDeviceCertificate(RenewDeviceCertificateRequest) returns (DeviceCertificateResponse);
   rpc GetLlmGatewayCredential(LlmGatewayCredentialRequest) returns (LlmGatewayCredentialResponse);
   rpc GetDeviceUsage(DeviceUsageRequest) returns (DeviceUsageResponse);
@@ -50,6 +54,12 @@ message CompleteEnrollmentRequest {
   string code_verifier = 3;
   bytes certificate_signing_request_der = 4;
   string id_token = 5;
+}
+
+message TokenEnrollmentRequest {
+  string hostname = 1;
+  bytes certificate_signing_request_der = 2;
+  string enrollment_token = 3;
 }
 
 message RenewDeviceCertificateRequest {
