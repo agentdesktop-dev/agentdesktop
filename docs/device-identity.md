@@ -218,11 +218,13 @@ native app (RFC 8252):
    authorization URL on `/v1/enrollment`. How the browser gets there depends
    on how the daemon runs:
    - **As a system service** (the normal install: LaunchDaemon, Windows
-     service, systemd), the daemon runs outside any user session and cannot
-     open a browser. Its attempt to do so fails and is only logged. The user
-     clicks sign-in in the desktop app, which reads the URL from
-     `/v1/enrollment` and opens it in the user's browser. The browser goes
-     straight to the IdP.
+     service, systemd), the daemon runs outside any user session and does not
+     try to open a browser (it is neither in `--user` mode nor attached to a
+     terminal). Such an attempt would not simply fail: on macOS, `open` run by
+     the root daemon starts Safari in the console session, on the daemon's
+     landing page, instead of the user's browser. The user clicks sign-in in
+     the desktop app, which reads the URL from `/v1/enrollment` and opens it
+     in the user's browser. The browser goes straight to the IdP.
    - **In the user's session** (`sudo` from a terminal, `--user` mode,
      development), the daemon opens the browser on its own landing page, and
      **Continue to sign in** redirects to the IdP.
