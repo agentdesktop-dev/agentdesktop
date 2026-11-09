@@ -2,6 +2,7 @@ use crate::{
     daemon_config::{self, DaemonConfigStore},
     database::Database,
     device_ca::DeviceCertificateIssuer,
+    fleet_limits::FLEET_LIMITS,
     gateway_jwt::{self, GatewayJwtIssuer},
     management::{self, Settings, State},
     oidc::OidcProvider,
@@ -122,10 +123,12 @@ pub async fn run(
             tls.client_ca_certificate.display()
         )
     })?;
-    let tls_config = ServerTlsConfig::new()
-        .identity(Identity::from_pem(certificate, key))
-        .client_ca_root(Certificate::from_pem(client_ca))
-        .client_auth_optional(true);
+    let tls_config = FLEET_LIMITS.tls(
+        ServerTlsConfig::new()
+            .identity(Identity::from_pem(certificate, key))
+            .client_ca_root(Certificate::from_pem(client_ca))
+            .client_auth_optional(true),
+    );
     let mut server = Server::builder()
         .accept_http1(true)
         .tls_config(tls_config)?;
