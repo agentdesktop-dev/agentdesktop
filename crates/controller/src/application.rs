@@ -128,8 +128,9 @@ pub async fn run(
             .client_ca_root(Certificate::from_pem(client_ca))
             .client_auth_optional(true),
     );
+    let fleet_connections = FLEET_LIMITS.connections();
     let mut server = FLEET_LIMITS
-        .server()
+        .server(&fleet_connections)
         .accept_http1(true)
         .tls_config(tls_config)?;
 
@@ -144,7 +145,7 @@ pub async fn run(
         }
         server
             .add_routes(routes)
-            .serve_with_incoming(FLEET_LIMITS.incoming(fleet_listen)?)
+            .serve_with_incoming(FLEET_LIMITS.incoming(fleet_listen, &fleet_connections)?)
             .await
             .context("serve fleet gRPC API")
     };

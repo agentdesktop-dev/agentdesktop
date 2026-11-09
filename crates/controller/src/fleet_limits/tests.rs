@@ -20,7 +20,7 @@ use tonic::{
     transport::{Identity, ServerTlsConfig, server::TcpIncoming},
 };
 
-use super::{FLEET_LIMITS, FleetLimits};
+use super::{Connections, FLEET_LIMITS, FleetLimits};
 
 /// Limits small enough for tests to observe; anything a test does not exercise
 /// stays at the production value.
@@ -109,17 +109,27 @@ impl FleetAgent for Slow {
 
 /// Serves `service` with `limits`, over TLS when `identity` is given.
 async fn serve(limits: FleetLimits, identity: Option<Identity>, service: Slow) -> SocketAddr {
+    serve_tracked(limits, identity, service).await.0
+}
+
+/// Like `serve`, also returning the connection registry.
+async fn serve_tracked(
+    limits: FleetLimits,
+    identity: Option<Identity>,
+    service: Slow,
+) -> (SocketAddr, Connections) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let mut server = limits.server();
+    let connections = limits.connections();
+    let mut server = limits.server(&connections);
     if let Some(identity) = identity {
         server = server
             .tls_config(limits.tls(ServerTlsConfig::new().identity(identity)))
             .unwrap();
     }
     let router = server.add_service(limits.fleet_service(service));
-    tokio::spawn(router.serve_with_incoming(limits.limit_connections(TcpIncoming::from(listener))));
-    address
+    tokio::spawn(router.serve_with_incoming(connections.incoming(TcpIncoming::from(listener))));
+    (address, connections)
 }
 
 async fn client(address: SocketAddr) -> FleetAgentClient<tonic::transport::Channel> {
@@ -388,11 +398,152 @@ async fn connections_over_the_per_address_cap_are_closed() {
 }
 
 #[tokio::test]
-async fn connections_over_the_total_cap_are_closed() {
+async fn at_the_total_cap_the_longest_idle_connection_makes_room() {
     let mut limits = limits();
     limits.max_connections = 2;
+    let address = serve(
+        limits,
+        None,
+        Slow {
+            delay: Duration::ZERO,
+        },
+    )
+    .await;
+    let oldest = TcpStream::connect(address).await.unwrap();
+    time::sleep(Duration::from_millis(50)).await;
+    let newer = TcpStream::connect(address).await.unwrap();
+    time::sleep(Duration::from_millis(50)).await;
 
-    connections_over_cap(limits).await;
+    let newest = TcpStream::connect(address).await.unwrap();
+
+    bounded(until_closed(oldest)).await;
+    assert!(stays_open(newest).await, "the new connection was refused");
+    drop(newer);
+}
+
+#[tokio::test]
+async fn at_the_total_cap_a_new_connection_is_closed_when_every_connection_is_busy() {
+    let mut limits = limits();
+    limits.max_connections = 1;
+    limits.request = Duration::from_secs(5);
+    let address = serve(
+        limits,
+        None,
+        Slow {
+            delay: Duration::from_millis(500),
+        },
+    )
+    .await;
+    let (_outbound, receiver) = mpsc::channel::<AgentMessage>(1);
+    let mut stream = bounded(client(address).await.connect(ReceiverStream::new(receiver)))
+        .await
+        .expect("open the stream")
+        .into_inner();
+
+    let newcomer = TcpStream::connect(address).await.unwrap();
+    bounded(until_closed(newcomer)).await;
+
+    // The busy connection was kept.
+    assert!(bounded(stream.message()).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn a_connection_that_never_sends_anything_is_closed() {
+    let mut limits = limits();
+    limits.first_request = Duration::from_millis(200);
+    let address = serve(
+        limits,
+        None,
+        Slow {
+            delay: Duration::ZERO,
+        },
+    )
+    .await;
+
+    let stream = TcpStream::connect(address).await.unwrap();
+
+    bounded(until_closed(stream)).await;
+}
+
+#[tokio::test]
+async fn a_connection_that_never_makes_a_request_is_closed() {
+    let mut limits = limits();
+    limits.first_request = Duration::from_millis(200);
+    // Keepalive alone would also close this connection; keep it out of the way.
+    limits.keepalive_interval = Duration::from_secs(60);
+    limits.keepalive_timeout = Duration::from_secs(60);
+    let address = serve(
+        limits,
+        None,
+        Slow {
+            delay: Duration::ZERO,
+        },
+    )
+    .await;
+    let mut stream = TcpStream::connect(address).await.unwrap();
+
+    // A valid HTTP/2 preface and SETTINGS frame, then no request.
+    stream
+        .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00")
+        .await
+        .unwrap();
+
+    bounded(until_closed(stream)).await;
+}
+
+#[tokio::test]
+async fn a_connection_idle_after_its_last_request_is_closed() {
+    let mut limits = limits();
+    limits.first_request = Duration::from_secs(5);
+    limits.idle_connection = Duration::from_millis(200);
+    let (address, connections) = serve_tracked(
+        limits,
+        None,
+        Slow {
+            delay: Duration::ZERO,
+        },
+    )
+    .await;
+    let mut client = client(address).await;
+    bounded(client.begin_enrollment(BeginEnrollmentRequest::default()))
+        .await
+        .unwrap();
+    assert_eq!(connections.open_count(), 1);
+
+    bounded(async {
+        while connections.open_count() > 0 {
+            time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn an_open_stream_keeps_its_connection_from_going_idle() {
+    let mut limits = limits();
+    limits.request = Duration::from_secs(5);
+    limits.idle_connection = Duration::from_millis(200);
+    // Messages arrive further apart than the idle limit.
+    let address = serve(
+        limits,
+        None,
+        Slow {
+            delay: Duration::from_millis(500),
+        },
+    )
+    .await;
+    let (_outbound, receiver) = mpsc::channel::<AgentMessage>(1);
+    let mut stream = bounded(client(address).await.connect(ReceiverStream::new(receiver)))
+        .await
+        .expect("open the stream")
+        .into_inner();
+
+    for message in 0..2 {
+        let received = bounded(stream.message())
+            .await
+            .unwrap_or_else(|error| panic!("stream ended at message {message}: {error}"));
+        assert!(received.is_some(), "stream closed at message {message}");
+    }
 }
 
 mod enrollment {
