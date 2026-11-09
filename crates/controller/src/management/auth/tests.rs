@@ -357,6 +357,29 @@ async fn authenticated_configuration_is_rejected_without_a_provider() {
 }
 
 #[tokio::test]
+async fn local_configuration_is_rejected_with_a_provider() {
+    let (database, path) = database().await;
+    let error = match super::super::router(
+        state(database),
+        None,
+        &ControllerAdminAccess::Local,
+        super::super::Extensions {
+            authentication: Some(Arc::new(TokenProvider)),
+            ..Default::default()
+        },
+    ) {
+        Ok(_) => panic!("a compiled-in provider must not run under the local policy"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("requires adminAccess.mode authenticated")
+    );
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
 async fn middleware_supplies_context_and_handlers_own_authorization() {
     async fn without_context(_auth: Context) -> StatusCode {
         panic!("a handler without authenticated context must not execute");

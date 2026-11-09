@@ -42,7 +42,8 @@ pub type AssetLookup = fn(&str) -> Option<Cow<'static, [u8]>>;
 /// Compiled-in management extensions. Routes are authenticated before being merged.
 #[derive(Default)]
 pub struct Extensions {
-    /// Absent for local access; authenticated access requires an explicit provider.
+    /// Required for authenticated access, and rejected for local access, which always
+    /// uses the built-in loopback provider.
     pub authentication: Option<Arc<dyn auth::Provider>>,
     /// Extension-owned APIs, protected separately from public auth/JWKS routes.
     pub routes: Vec<ProtectedRoutes>,
@@ -88,15 +89,22 @@ impl State {
 struct Assets;
 
 /// Selects the management authentication provider for the configured access mode.
-/// Remote (authenticated) access requires a compiled-in extension provider.
+/// Local access always uses the built-in loopback provider; remote (authenticated)
+/// access requires a compiled-in provider. Mismatches fail at startup rather than
+/// running a provider under the other mode's HTTP policy.
 pub fn auth(access: &ControllerAdminAccess, extensions: &Extensions) -> anyhow::Result<Auth> {
-    match (&extensions.authentication, access) {
-        (Some(provider), _) => Ok(Auth::new(provider.clone())),
-        (None, ControllerAdminAccess::Local) => {
+    match (access, &extensions.authentication) {
+        (ControllerAdminAccess::Local, None) => {
             Ok(Auth::new(Arc::new(auth::providers::local::LocalAccess)))
         }
-        (None, ControllerAdminAccess::Authenticated(_)) => anyhow::bail!(
+        (ControllerAdminAccess::Authenticated(_), Some(provider)) => {
+            Ok(Auth::new(provider.clone()))
+        }
+        (ControllerAdminAccess::Authenticated(_), None) => anyhow::bail!(
             "adminAccess.mode authenticated requires a compiled-in authentication provider; this controller supports only local admin access"
+        ),
+        (ControllerAdminAccess::Local, Some(_)) => anyhow::bail!(
+            "this controller has a compiled-in authentication provider, which requires adminAccess.mode authenticated; local mode would bypass it"
         ),
     }
 }
