@@ -55,7 +55,7 @@ impl FleetAgentService {
             device_certificate_issuer,
             usage_enabled: false,
             enrollment: FLEET_LIMITS.enrollment(),
-            device_streams: DeviceStreams::default(),
+            device_streams: FLEET_LIMITS.device_streams(),
         }
     }
 
@@ -257,7 +257,15 @@ impl FleetAgent for FleetAgentService {
         &self,
         request: Request<tonic::Streaming<AgentMessage>>,
     ) -> Result<Response<Self::ConnectStream>, Status> {
-        let authenticated_device_id = self.authenticate_device(&request).await?;
+        // Rate-limit opens per device before checking the access token, which
+        // calls the identity provider.
+        let certificate_device_id = peer_certificate_device_id(&request)?;
+        if let Some(device_id) = &certificate_device_id {
+            self.device_streams.admit_open(device_id)?;
+        }
+        let authenticated_device_id = self
+            .authenticate_device_identity(certificate_device_id.as_deref(), request.metadata())
+            .await?;
         let oauth_revalidation = (
             self.oidc.clone().ok_or_else(|| {
                 Status::failed_precondition("OIDC access-token validation is disabled")
@@ -285,7 +293,6 @@ impl FleetAgent for FleetAgentService {
         let database = self.database.clone();
         let auth_sender = sender;
         let mut device_stream = self.device_streams.open(&authenticated_device_id);
-        let mut message_budget = FLEET_LIMITS.stream_messages();
         tokio::spawn(async move {
             let enrolled_principal = match database.device_principal(&authenticated_device_id).await
             {
@@ -348,7 +355,7 @@ impl FleetAgent for FleetAgentService {
                 }
                 message = inbound.message() => match message {
                     Ok(Some(message)) => {
-                        if !message_budget.take(time::Instant::now()) {
+                        if !device_stream.take_message(time::Instant::now()) {
                             warn!(device_id = %authenticated_device_id, "closing stream after the device exceeded its message rate");
                             let _ = auth_sender
                                 .send(Err(Status::resource_exhausted("too many messages on this stream")))

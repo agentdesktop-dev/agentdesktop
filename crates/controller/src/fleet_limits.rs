@@ -88,13 +88,19 @@ pub struct FleetLimits {
     /// many devices can share one address behind NAT.
     pub enrollment_burst: u32,
     pub enrollment_refill: Duration,
-    /// Messages a device may send on one `Connect` stream: up to
+    /// Messages a device may send on its `Connect` streams: up to
     /// `stream_message_burst` at once, refilled at one per
-    /// `stream_message_refill`. Devices send a heartbeat every 30 seconds,
-    /// inventory periodically and one telemetry event per tool event, so this is
-    /// far above normal use; a stream over budget is closed.
+    /// `stream_message_refill`. The budget belongs to the device, so
+    /// reconnecting does not reset it. Devices send a heartbeat every 30
+    /// seconds, inventory periodically and one telemetry event per tool event,
+    /// so this is far above normal use; a stream over budget is closed.
     pub stream_message_burst: u32,
     pub stream_message_refill: Duration,
+    /// How often a device may open a `Connect` stream: up to
+    /// `stream_open_burst` at once, refilled at one per `stream_open_refill`.
+    /// Each open checks the access token with the identity provider.
+    pub stream_open_burst: u32,
+    pub stream_open_refill: Duration,
 }
 
 /// Production limits.
@@ -117,6 +123,8 @@ pub const FLEET_LIMITS: FleetLimits = FleetLimits {
     enrollment_refill: Duration::from_secs(1),
     stream_message_burst: 600,
     stream_message_refill: Duration::from_millis(50),
+    stream_open_burst: 20,
+    stream_open_refill: Duration::from_secs(60),
 };
 
 impl FleetLimits {
@@ -172,16 +180,9 @@ impl FleetLimits {
         EnrollmentLimiter::new(self)
     }
 
-    /// A fresh message budget for one `Connect` stream.
-    pub fn stream_messages(&self) -> MessageBudget {
-        MessageBudget {
-            bucket: Bucket {
-                tokens: f64::from(self.stream_message_burst),
-                updated: Instant::now(),
-            },
-            burst: f64::from(self.stream_message_burst),
-            refill: self.stream_message_refill,
-        }
+    /// Per-device `Connect` state: one stream per device, and its budgets.
+    pub fn device_streams(&self) -> DeviceStreams {
+        DeviceStreams::new(self)
     }
 }
 
@@ -317,32 +318,28 @@ fn take_token(bucket: &mut Bucket, now: Instant, refill: Duration, burst: f64) -
     true
 }
 
-/// Messages a device may send on one `Connect` stream.
-pub struct MessageBudget {
-    bucket: Bucket,
-    burst: f64,
-    refill: Duration,
-}
-
-impl MessageBudget {
-    /// Takes one message from the budget, or returns false when it is spent.
-    pub fn take(&mut self, now: Instant) -> bool {
-        take_token(&mut self.bucket, now, self.refill, self.burst)
-    }
-}
-
-/// Open `Connect` streams by device. A device has at most one: opening a new
-/// stream tells the device's previous stream to close. A device that reconnects
-/// (after sleep, for example) is never blocked by a stream the controller has
-/// not yet noticed is dead.
-#[derive(Clone, Default)]
+/// `Connect` state by device. A device has at most one open stream: opening a
+/// new stream tells the device's previous one to close, so a device that
+/// reconnects (after sleep, for example) is never blocked by a stream the
+/// controller has not yet noticed is dead. The device's message budget and its
+/// budget for opening streams live here too, so reconnecting does not reset them.
+#[derive(Clone)]
 pub struct DeviceStreams {
-    open: Arc<Mutex<HashMap<String, Registration>>>,
+    devices: Arc<Mutex<HashMap<String, DeviceState>>>,
     next: Arc<AtomicU64>,
+    limits: FleetLimits,
 }
 
-/// A device's current stream: its generation and the signal that replaces it.
-type Registration = (u64, oneshot::Sender<()>);
+struct DeviceState {
+    /// The open stream's generation and the signal that replaces it.
+    current: Option<(u64, oneshot::Sender<()>)>,
+    messages: Bucket,
+    opens: Bucket,
+}
+
+/// Device entries kept before idle ones (no open stream) are dropped. Only
+/// devices with a certificate from the device CA get an entry.
+const MAX_TRACKED_DEVICES: usize = 100_000;
 
 /// A registered `Connect` stream. `superseded` resolves when the same device
 /// opens a newer stream; dropping this unregisters it.
@@ -354,14 +351,68 @@ pub struct DeviceStream {
 }
 
 impl DeviceStreams {
+    pub fn new(limits: &FleetLimits) -> Self {
+        Self {
+            devices: Arc::default(),
+            next: Arc::default(),
+            limits: *limits,
+        }
+    }
+
+    fn with_device<T>(&self, device_id: &str, f: impl FnOnce(&mut DeviceState) -> T) -> T {
+        let mut devices = self
+            .devices
+            .lock()
+            .expect("device stream registry lock poisoned");
+        if devices.len() >= MAX_TRACKED_DEVICES && !devices.contains_key(device_id) {
+            devices.retain(|_, device| device.current.is_some());
+        }
+        let now = Instant::now();
+        let device = devices
+            .entry(device_id.to_owned())
+            .or_insert_with(|| DeviceState {
+                current: None,
+                messages: Bucket {
+                    tokens: f64::from(self.limits.stream_message_burst),
+                    updated: now,
+                },
+                opens: Bucket {
+                    tokens: f64::from(self.limits.stream_open_burst),
+                    updated: now,
+                },
+            });
+        f(device)
+    }
+
+    /// Admits one more `Connect` from `device_id`, or rejects it with
+    /// `RESOURCE_EXHAUSTED` when the device opens streams too often. Call this
+    /// before any per-stream work, such as checking the access token.
+    pub fn admit_open(&self, device_id: &str) -> Result<(), Status> {
+        let limits = self.limits;
+        let admitted = self.with_device(device_id, |device| {
+            take_token(
+                &mut device.opens,
+                Instant::now(),
+                limits.stream_open_refill,
+                f64::from(limits.stream_open_burst),
+            )
+        });
+        if admitted {
+            Ok(())
+        } else {
+            tracing::warn!(device_id, "device opened Connect streams too often");
+            Err(Status::resource_exhausted(
+                "this device opened too many streams; retry later",
+            ))
+        }
+    }
+
     pub fn open(&self, device_id: &str) -> DeviceStream {
         let generation = self.next.fetch_add(1, Ordering::Relaxed);
         let (replace, superseded) = oneshot::channel();
-        let previous = self
-            .open
-            .lock()
-            .expect("device stream registry lock poisoned")
-            .insert(device_id.to_owned(), (generation, replace));
+        let previous = self.with_device(device_id, |device| {
+            device.current.replace((generation, replace))
+        });
         if let Some((_, previous)) = previous {
             let _ = previous.send(());
         }
@@ -374,19 +425,36 @@ impl DeviceStreams {
     }
 }
 
+impl DeviceStream {
+    /// Takes one message from the device's budget, or returns false when it is spent.
+    pub fn take_message(&self, now: Instant) -> bool {
+        let limits = self.streams.limits;
+        self.streams.with_device(&self.device_id, |device| {
+            take_token(
+                &mut device.messages,
+                now,
+                limits.stream_message_refill,
+                f64::from(limits.stream_message_burst),
+            )
+        })
+    }
+}
+
 impl Drop for DeviceStream {
     fn drop(&mut self) {
-        let mut open = self
+        let mut devices = self
             .streams
-            .open
+            .devices
             .lock()
             .expect("device stream registry lock poisoned");
         // A newer stream for the same device keeps its registration.
-        if open
-            .get(&self.device_id)
-            .is_some_and(|(generation, _)| *generation == self.generation)
+        if let Some(device) = devices.get_mut(&self.device_id)
+            && device
+                .current
+                .as_ref()
+                .is_some_and(|(generation, _)| *generation == self.generation)
         {
-            open.remove(&self.device_id);
+            device.current = None;
         }
     }
 }

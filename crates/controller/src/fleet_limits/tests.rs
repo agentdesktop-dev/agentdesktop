@@ -741,9 +741,13 @@ mod device_streams {
     use super::super::{DeviceStreams, FLEET_LIMITS};
     use super::Duration;
 
+    fn streams() -> DeviceStreams {
+        FLEET_LIMITS.device_streams()
+    }
+
     #[test]
     fn a_newer_stream_from_the_same_device_replaces_the_older_one() {
-        let streams = DeviceStreams::default();
+        let streams = streams();
         let mut older = streams.open("device-a");
         let mut other_device = streams.open("device-b");
 
@@ -756,7 +760,7 @@ mod device_streams {
 
     #[test]
     fn a_replaced_stream_closing_keeps_the_newer_registration() {
-        let streams = DeviceStreams::default();
+        let streams = streams();
         let older = streams.open("device-a");
         let mut newer = streams.open("device-a");
 
@@ -769,25 +773,65 @@ mod device_streams {
 
     #[test]
     fn a_closed_stream_is_unregistered() {
-        let streams = DeviceStreams::default();
+        let streams = streams();
         drop(streams.open("device-a"));
 
-        assert!(streams.open.lock().unwrap().is_empty());
+        assert!(
+            streams.devices.lock().unwrap()["device-a"]
+                .current
+                .is_none(),
+            "the closed stream is still registered"
+        );
     }
 
     #[test]
-    fn a_stream_gets_its_message_burst_then_the_refill_rate() {
+    fn a_device_gets_its_message_burst_then_the_refill_rate() {
         let mut limits = FLEET_LIMITS;
         limits.stream_message_burst = 3;
         limits.stream_message_refill = Duration::from_secs(1);
-        let mut budget = limits.stream_messages();
+        let stream = limits.device_streams().open("device-a");
         let start = Instant::now();
 
         for _ in 0..3 {
-            assert!(budget.take(start));
+            assert!(stream.take_message(start));
         }
-        assert!(!budget.take(start), "burst exceeded");
-        assert!(budget.take(start + Duration::from_secs(1)));
-        assert!(!budget.take(start + Duration::from_secs(1)));
+        assert!(!stream.take_message(start), "burst exceeded");
+        assert!(stream.take_message(start + Duration::from_secs(1)));
+        assert!(!stream.take_message(start + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn reconnecting_does_not_reset_the_message_budget() {
+        let mut limits = FLEET_LIMITS;
+        limits.stream_message_burst = 2;
+        limits.stream_message_refill = Duration::from_secs(3600);
+        let streams = limits.device_streams();
+        let now = Instant::now();
+        let first = streams.open("device-a");
+        assert!(first.take_message(now));
+        assert!(first.take_message(now));
+        drop(first);
+
+        let second = streams.open("device-a");
+
+        assert!(!second.take_message(now), "a new stream got a fresh budget");
+    }
+
+    #[test]
+    fn a_device_that_opens_streams_too_often_is_refused() {
+        let mut limits = FLEET_LIMITS;
+        limits.stream_open_burst = 2;
+        let streams = limits.device_streams();
+
+        streams.admit_open("device-a").expect("first open");
+        streams.admit_open("device-a").expect("second open");
+        let error = streams
+            .admit_open("device-a")
+            .expect_err("third open admitted");
+
+        assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+        streams
+            .admit_open("device-b")
+            .expect("another device is unaffected");
     }
 }
