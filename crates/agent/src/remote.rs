@@ -1230,24 +1230,15 @@ async fn client_with(
         .connect_timeout(timeouts.connect)
         .http2_keep_alive_interval(timeouts.keepalive_interval)
         .keep_alive_timeout(timeouts.keepalive_timeout);
-    let mut tls_config = ClientTlsConfig::new();
-    let mut custom_tls = false;
-    if let Some(path) = &controller.ca_certificate_path {
-        let pem = std::fs::read(path)
-            .with_context(|| format!("read controller CA certificate from {}", path.display()))?;
-        tls_config = tls_config.ca_certificate(Certificate::from_pem(pem));
-        custom_tls = true;
-    }
+    let mut tls_config =
+        ClientTlsConfig::new().ca_certificate(controller_ca(&controller.ca_certificate_path)?);
     if let Some(identity) = identity {
         tls_config = tls_config.identity(TlsIdentity::from_pem(
             &identity.client_certificate_pem,
             &identity.client_private_key_pem,
         ));
-        custom_tls = true;
     }
-    if custom_tls {
-        endpoint = endpoint.tls_config(tls_config)?;
-    }
+    endpoint = endpoint.tls_config(tls_config)?;
     let channel = match time::timeout(timeouts.connect, endpoint.connect()).await {
         Ok(channel) => {
             channel.with_context(|| format!("connect to controller at {}", controller.address))?
@@ -1259,6 +1250,24 @@ async fn client_with(
         ),
     };
     Ok(FleetAgentClient::new(channel))
+}
+
+/// Reads the CA that the controller's certificate must chain to. The daemon trusts
+/// only this CA for the controller, so a missing or malformed file is reported here
+/// rather than as an opaque TLS handshake failure.
+fn controller_ca(path: &Path) -> anyhow::Result<Certificate> {
+    use rustls::pki_types::{CertificateDer, pem::PemObject};
+
+    let pem = std::fs::read(path)
+        .with_context(|| format!("read controller CA certificate from {}", path.display()))?;
+    let certificates = CertificateDer::pem_slice_iter(&pem).collect::<Result<Vec<_>, _>>();
+    if !certificates.is_ok_and(|certificates| !certificates.is_empty()) {
+        bail!(
+            "controller.caCertificatePath {} does not contain a PEM certificate",
+            path.display()
+        );
+    }
+    Ok(Certificate::from_pem(pem))
 }
 
 fn authenticate_request<T>(identity: &Identity, request: &mut Request<T>) -> anyhow::Result<()> {
@@ -1943,16 +1952,28 @@ mod tests {
         address
     }
 
-    fn controller_at(
+    /// A controller connection whose CA file holds `ca_pem`. The directory guard
+    /// keeps the file alive for the test.
+    fn controller_with_ca(
         address: String,
-        ca_certificate_path: Option<&std::path::Path>,
-    ) -> ControllerConnectionConfig {
-        ControllerConnectionConfig {
+        ca_pem: &str,
+    ) -> (tempfile::TempDir, ControllerConnectionConfig) {
+        let directory = tempfile::tempdir().unwrap();
+        let ca_certificate_path = directory.path().join("ca.pem");
+        std::fs::write(&ca_certificate_path, ca_pem).unwrap();
+        let controller = ControllerConnectionConfig {
             address,
-            ca_certificate_path: ca_certificate_path.map(std::path::Path::to_path_buf),
+            ca_certificate_path,
             heartbeat_interval: Duration::from_secs(30),
             device_authorization: false,
-        }
+        };
+        (directory, controller)
+    }
+
+    /// A controller connection with a valid (self-signed) CA file.
+    fn controller_at(address: String) -> (tempfile::TempDir, ControllerConnectionConfig) {
+        let ca = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        controller_with_ca(address, &ca.cert.pem())
     }
 
     fn short_timeouts() -> ControllerTimeouts {
@@ -1984,11 +2005,7 @@ mod tests {
 
     #[tokio::test]
     async fn connecting_gives_up_when_the_tls_handshake_never_finishes() {
-        let ca = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
-        let directory = tempfile::tempdir().unwrap();
-        let ca_path = directory.path().join("ca.pem");
-        std::fs::write(&ca_path, ca.cert.pem()).unwrap();
-        let controller = controller_at(format!("https://{}", silent_peer().await), Some(&ca_path));
+        let (_ca, controller) = controller_at(format!("https://{}", silent_peer().await));
 
         let error = bounded(client_with(&controller, None, short_timeouts()))
             .await
@@ -2002,7 +2019,7 @@ mod tests {
 
     #[tokio::test]
     async fn opening_the_stream_gives_up_when_the_controller_never_answers() {
-        let controller = controller_at(format!("http://{}", silent_peer().await), None);
+        let (_ca, controller) = controller_at(format!("http://{}", silent_peer().await));
         let mut client = bounded(client_with(&controller, None, short_timeouts()))
             .await
             .unwrap();
@@ -2024,7 +2041,7 @@ mod tests {
 
     #[tokio::test]
     async fn keepalive_closes_a_connection_whose_peer_stopped_answering() {
-        let controller = controller_at(format!("http://{}", silent_peer().await), None);
+        let (_ca, controller) = controller_at(format!("http://{}", silent_peer().await));
         let timeouts = ControllerTimeouts {
             keepalive_interval: Duration::from_millis(100),
             keepalive_timeout: Duration::from_millis(100),
@@ -2045,5 +2062,43 @@ mod tests {
             !format!("{error:#}").contains("did not answer within"),
             "the stream timeout fired instead of the keepalive: {error:#}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_missing_controller_ca_file_is_reported_with_its_path() {
+        let (directory, mut controller) = controller_at("https://controller.example".to_owned());
+        controller.ca_certificate_path = directory.path().join("missing.pem");
+
+        let error = client_with(&controller, None, short_timeouts())
+            .await
+            .expect_err("a missing CA file was accepted");
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("read controller CA certificate from")
+                && message.contains("missing.pem"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_controller_ca_file_without_a_pem_certificate_is_rejected() {
+        for contents in [
+            "",
+            "not a certificate",
+            "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n",
+        ] {
+            let (_ca, controller) =
+                controller_with_ca("https://controller.example".to_owned(), contents);
+
+            let error = client_with(&controller, None, short_timeouts())
+                .await
+                .expect_err("a CA file without a certificate was accepted");
+
+            assert!(
+                format!("{error:#}").contains("does not contain a PEM certificate"),
+                "unexpected error for {contents:?}: {error:#}"
+            );
+        }
     }
 }

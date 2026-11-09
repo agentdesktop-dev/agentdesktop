@@ -169,11 +169,8 @@
           "type": "string"
         },
         "caCertificatePath": {
-          "description": "Path to a PEM-encoded CA certificate used to verify the controller.\n\nOmit this field to use the operating system's trusted certificate roots.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "description": "Path to the PEM-encoded CA certificate that signed the controller's fleet API\ncertificate. Required: the daemon trusts only this CA for the controller, not\nthe operating system's certificate roots.",
+          "type": "string"
         },
         "deviceAuthorization": {
           "description": "Enroll with the OAuth 2.0 Device Authorization Grant (RFC 8628) instead\nof a browser redirect to a local callback.\n\nUse this on hosts without a local browser, such as servers reached over\nSSH. The daemon logs a verification URL and user code to approve from\nany other device. The identity provider must support device\nauthorization for the controller's client.",
@@ -187,7 +184,8 @@
       },
       "additionalProperties": false,
       "required": [
-        "address"
+        "address",
+        "caCertificatePath"
       ]
     },
     "CopilotConfig": {

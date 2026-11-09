@@ -971,6 +971,7 @@ programs:
             r#"
 controller:
   address: https://controller.example.com
+  caCertificatePath: controller-ca.pem
 "#,
         )
         .unwrap();
