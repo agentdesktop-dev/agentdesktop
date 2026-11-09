@@ -809,6 +809,14 @@ stage.
 
 ![Agentdesktop controller device inventory](images/controller-ui.png)
 
+The controller management UI/API accepts unauthenticated access only on a
+loopback `adminListen` address (default `127.0.0.1:8080`), and rejects
+cross-site browser mutations and non-loopback `Host` headers. Reach it remotely
+through an SSH tunnel. Remote management (`adminAccess.mode: authenticated`)
+requires a controller build with a compiled-in authentication provider; the
+standard executable rejects it at startup. Device enrollment is configured separately.
+See the [controller configuration schema](schema/controller-config.md).
+
 ### Configuration status
 
 Each apply reports the outcome for every managed program, next to the

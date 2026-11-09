@@ -282,7 +282,7 @@ impl Database {
         Ok(Self { pool })
     }
 
-    pub(crate) fn pool(&self) -> &AnyPool {
+    pub fn pool(&self) -> &AnyPool {
         &self.pool
     }
 

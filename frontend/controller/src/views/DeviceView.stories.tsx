@@ -153,6 +153,33 @@ export const DeleteFailed: Story = {
   },
 };
 
+export const ViewerCannotDelete: Story = {
+  args: { canDelete: false },
+  play: async ({ canvas }) => {
+    await expect(
+      canvas.queryByRole("button", { name: "Delete device" }),
+    ).not.toBeInTheDocument();
+  },
+};
+
+export const RecentAuthenticationRequired: Story = {
+  args: {
+    deleteOpen: true,
+    deleteError: "Sign in again before deleting this device.",
+    reauthenticate: true,
+  },
+  play: async ({ canvas }) => {
+    const dialog = within(canvas.getByRole("dialog"));
+    await expect(
+      dialog.getByRole("link", { name: "Sign in again" }),
+    ).toHaveAttribute("href", "/auth/login?reauthenticate=true");
+    await expect(
+      dialog.queryByRole("button", { name: "Delete device" }),
+    ).not.toBeInTheDocument();
+    await expect(canvas.getByRole("button", { name: "Cancel" })).toBeEnabled();
+  },
+};
+
 export const Deleting: Story = {
   args: { deleteOpen: true, deleting: true },
 };

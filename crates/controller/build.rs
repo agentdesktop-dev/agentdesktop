@@ -10,6 +10,7 @@ fn main() {
         "../../frontend/ui/src",
         "../../frontend/controller/index.html",
         "../../frontend/controller/package.json",
+        "../../frontend/controller/public",
         "../../frontend/controller/tsconfig.app.json",
         "../../frontend/controller/vite.config.ts",
         "../../frontend/controller/src",

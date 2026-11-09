@@ -35,6 +35,8 @@ import { Link } from "../router";
 import type { DeviceDetail, ProgramStatus, UsageReport } from "../types";
 
 export interface DeviceViewProps {
+  canDelete?: boolean;
+  reauthenticate?: boolean;
   deleteError: string | null;
   deleteOpen: boolean;
   deleting: boolean;
@@ -47,6 +49,8 @@ export interface DeviceViewProps {
 }
 
 export function DeviceView({
+  canDelete = true,
+  reauthenticate = false,
   deleteError,
   deleteOpen,
   deleting,
@@ -256,27 +260,30 @@ export function DeviceView({
           ]}
         />
       </section>
-      <section className="danger-zone">
-        <div>
-          <h3>Delete device</h3>
-          <p>
-            Remove this device, its credential, inventory, telemetry, and
-            configuration status.
-          </p>
-        </div>
-        <button
-          type="button"
-          className="destructive-button"
-          onClick={onDeleteRequest}
-        >
-          <Trash2 size={14} /> Delete device
-        </button>
-      </section>
-      {deleteOpen && (
+      {canDelete && (
+        <section className="danger-zone">
+          <div>
+            <h3>Delete device</h3>
+            <p>
+              Remove this device, its credential, inventory, telemetry, and
+              configuration status.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="destructive-button"
+            onClick={onDeleteRequest}
+          >
+            <Trash2 size={14} /> Delete device
+          </button>
+        </section>
+      )}
+      {canDelete && deleteOpen && (
         <DeleteDeviceDialog
           hostname={device.hostname}
           deleting={deleting}
           error={deleteError}
+          reauthenticate={reauthenticate}
           onCancel={onDeleteCancel}
           onConfirm={onDeleteConfirm}
         />
@@ -337,12 +344,14 @@ function DeleteDeviceDialog({
   hostname,
   deleting,
   error,
+  reauthenticate,
   onCancel,
   onConfirm,
 }: {
   hostname: string;
   deleting: boolean;
   error: string | null;
+  reauthenticate: boolean;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
@@ -368,7 +377,11 @@ function DeleteDeviceDialog({
           running agent will be rejected the next time it connects and must be
           re-enrolled.
         </p>
-        {error && <div className="dialog-error">{error}</div>}
+        {error && (
+          <div className="dialog-error" role="alert">
+            {error}
+          </div>
+        )}
       </div>
       <div className="dialog-actions">
         <button
@@ -379,14 +392,20 @@ function DeleteDeviceDialog({
         >
           Cancel
         </button>
-        <button
-          type="button"
-          className="destructive-button"
-          disabled={deleting}
-          onClick={onConfirm}
-        >
-          {deleting ? "Deleting…" : "Delete device"}
-        </button>
+        {reauthenticate ? (
+          <a className="button primary" href="/auth/login?reauthenticate=true">
+            Sign in again
+          </a>
+        ) : (
+          <button
+            type="button"
+            className="destructive-button"
+            disabled={deleting}
+            onClick={onConfirm}
+          >
+            {deleting ? "Deleting…" : "Delete device"}
+          </button>
+        )}
       </div>
     </dialog>
   );
