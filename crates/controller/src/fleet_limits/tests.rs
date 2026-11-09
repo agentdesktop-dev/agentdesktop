@@ -623,11 +623,11 @@ async fn an_open_stream_keeps_its_connection_from_going_idle() {
 }
 
 mod enrollment {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
     use tokio::time::Instant;
 
-    use super::super::{FLEET_LIMITS, FleetLimits, MAX_TRACKED_PEERS};
+    use super::super::{FLEET_LIMITS, FleetLimits, PEERS_PER_GENERATION, address_key};
     use super::Duration;
 
     fn limits(in_flight: usize, burst: u32) -> FleetLimits {
@@ -720,18 +720,56 @@ mod enrollment {
         assert!(limiter.admit(None).is_err());
     }
 
+    fn numbered(index: usize) -> IpAddr {
+        let [a, b, c, d] = u32::try_from(index).unwrap().to_be_bytes();
+        IpAddr::V4(Ipv4Addr::new(10 | a, b, c, d))
+    }
+
     #[test]
-    fn idle_peers_are_dropped_when_the_table_is_full() {
+    fn the_peer_table_stays_bounded_while_addresses_keep_changing() {
         let limiter = limits(64, 1).enrollment();
-        let start = Instant::now();
-        for index in 0..MAX_TRACKED_PEERS {
-            let [a, b, c, d] = u32::try_from(index).unwrap().to_be_bytes();
-            assert!(limiter.take(IpAddr::V4(Ipv4Addr::new(10 | a, b, c, d)), start));
+        let now = Instant::now();
+
+        for index in 0..5 * PEERS_PER_GENERATION {
+            assert!(limiter.take(numbered(index), now));
         }
 
-        // Once every bucket has refilled, a new peer evicts the idle ones.
-        assert!(limiter.take(peer(1), start + Duration::from_secs(10)));
-        assert_eq!(limiter.peers.lock().unwrap().len(), 1);
+        assert!(limiter.peers.lock().unwrap().len() <= 2 * PEERS_PER_GENERATION);
+    }
+
+    #[test]
+    fn a_peer_seen_recently_keeps_its_spent_budget_when_the_table_turns_over() {
+        let limiter = limits(64, 1).enrollment();
+        let now = Instant::now();
+        assert!(limiter.take(peer(1), now));
+
+        // Fill a generation so peer 1 moves to the previous one.
+        for index in 0..PEERS_PER_GENERATION {
+            assert!(limiter.take(numbered(index), now));
+        }
+
+        assert!(!limiter.take(peer(1), now), "the spent budget was reset");
+    }
+
+    fn v6(address: &str) -> IpAddr {
+        address.parse::<Ipv6Addr>().unwrap().into()
+    }
+
+    #[test]
+    fn addresses_in_one_ipv6_64_share_a_budget() {
+        let limiter = limits(64, 1).enrollment();
+        let now = Instant::now();
+
+        assert!(limiter.take(v6("2001:db8:1:2::1"), now));
+        assert!(!limiter.take(v6("2001:db8:1:2:ffff::9"), now));
+        assert!(limiter.take(v6("2001:db8:1:3::1"), now), "another /64");
+    }
+
+    #[test]
+    fn ipv4_mapped_addresses_count_as_ipv4() {
+        assert_eq!(address_key(v6("::ffff:192.0.2.1")), peer(1));
+        assert_eq!(address_key(peer(1)), peer(1));
+        assert_eq!(address_key(v6("2001:db8::1")), v6("2001:db8::"));
     }
 }
 

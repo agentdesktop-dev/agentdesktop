@@ -42,7 +42,7 @@ use tonic::{
 };
 use tower_layer::Layer;
 
-use super::FleetLimits;
+use super::{FleetLimits, address_key};
 
 /// Open fleet connections and their request activity, shared by the listener
 /// (which admits, times out and evicts connections) and the request layer (which
@@ -63,6 +63,7 @@ struct Shared {
 #[derive(Default)]
 struct State {
     open: HashMap<SocketAddr, Arc<Activity>>,
+    /// Open connections by `address_key`.
     per_address: HashMap<IpAddr, usize>,
     /// Connections in the order they became idle. An entry is stale once its
     /// connection makes a request or closes; `Activity::idle_epoch` tells.
@@ -199,9 +200,10 @@ impl Connections {
             );
             return None;
         }
-        let count = state.per_address.entry(peer.ip()).or_default();
+        let address = address_key(peer.ip());
+        let count = state.per_address.entry(address).or_default();
         if *count >= self.shared.connections_per_address {
-            tracing::debug!(address = %peer.ip(), "per-address fleet connection limit reached; closing connection");
+            tracing::debug!(%address, "per-address fleet connection limit reached; closing connection");
             return None;
         }
         *count += 1;
@@ -238,10 +240,11 @@ impl Connections {
         {
             state.open.remove(&peer);
         }
-        if let Some(count) = state.per_address.get_mut(&peer.ip()) {
+        let address = address_key(peer.ip());
+        if let Some(count) = state.per_address.get_mut(&address) {
             *count -= 1;
             if *count == 0 {
-                state.per_address.remove(&peer.ip());
+                state.per_address.remove(&address);
             }
         }
     }

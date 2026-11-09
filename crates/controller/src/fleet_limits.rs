@@ -8,7 +8,7 @@ use std::{
     collections::HashMap,
     convert::Infallible,
     io,
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv6Addr, SocketAddr},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -54,8 +54,9 @@ pub struct FleetLimits {
     pub keepalive_timeout: Duration,
     /// TCP keepalive probe interval, for peers that vanish without closing.
     pub tcp_keepalive: Duration,
-    /// Open connections allowed in total and from one client address. A
-    /// connection over either cap is closed as soon as it is accepted. The
+    /// Open connections allowed in total and from one client address (an IPv4
+    /// address or an IPv6 /64). A connection over either cap is closed as soon
+    /// as it is accepted. The
     /// per-address cap is high because many devices can share an address behind
     /// NAT, or appear to when a load balancer rewrites client addresses.
     pub max_connections: usize,
@@ -247,17 +248,59 @@ impl<T> NamedService for FleetService<T> {
     const NAME: &'static str = SERVICE_NAME;
 }
 
+/// The address a per-address limit counts against: an IPv4 address, or the /64
+/// network of an IPv6 one, since one IPv6 host usually controls a whole /64.
+pub(crate) fn address_key(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V4(_) => address,
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(Ipv6Addr::from(u128::from(v6) & (u128::MAX << 64))),
+        },
+    }
+}
+
 /// Admission control for the unauthenticated enrollment RPCs.
 #[derive(Clone)]
 pub struct EnrollmentLimiter {
     in_flight: Arc<Semaphore>,
-    peers: Arc<Mutex<HashMap<IpAddr, Bucket>>>,
+    peers: Arc<Mutex<PeerBuckets>>,
     burst: f64,
     refill: Duration,
 }
 
-/// Peer buckets kept before idle (full) ones are dropped.
-const MAX_TRACKED_PEERS: usize = 10_000;
+/// Enrollment buckets by address, in two generations. When the current
+/// generation fills up it becomes the previous one, and the old previous one is
+/// dropped; a peer found in the previous generation moves back to the current
+/// one. Active peers keep their buckets, and the table never holds more than
+/// two generations.
+#[derive(Default)]
+struct PeerBuckets {
+    current: HashMap<IpAddr, Bucket>,
+    previous: HashMap<IpAddr, Bucket>,
+}
+
+const PEERS_PER_GENERATION: usize = 10_000;
+
+impl PeerBuckets {
+    fn bucket(&mut self, peer: IpAddr, fresh: Bucket) -> &mut Bucket {
+        if !self.current.contains_key(&peer) {
+            let bucket = self.previous.remove(&peer).unwrap_or(fresh);
+            if self.current.len() >= PEERS_PER_GENERATION {
+                self.previous = std::mem::take(&mut self.current);
+            }
+            self.current.insert(peer, bucket);
+        }
+        self.current
+            .get_mut(&peer)
+            .expect("bucket was just inserted")
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.current.len() + self.previous.len()
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Bucket {
@@ -281,7 +324,7 @@ impl EnrollmentLimiter {
         if let Some(peer) = peer
             && !self.take(peer.ip(), Instant::now())
         {
-            tracing::warn!(peer = %peer.ip(), "enrollment rate limit exceeded");
+            tracing::warn!(peer = %address_key(peer.ip()), "enrollment rate limit exceeded");
             return Err(Status::resource_exhausted(
                 "too many enrollment requests from this address; retry later",
             ));
@@ -294,15 +337,13 @@ impl EnrollmentLimiter {
 
     fn take(&self, peer: IpAddr, now: Instant) -> bool {
         let mut peers = self.peers.lock().expect("enrollment limiter lock poisoned");
-        if peers.len() >= MAX_TRACKED_PEERS && !peers.contains_key(&peer) {
-            let burst = self.burst;
-            let refill = self.refill;
-            peers.retain(|_, bucket| refilled(*bucket, now, refill, burst) < burst);
-        }
-        let bucket = peers.entry(peer).or_insert(Bucket {
-            tokens: self.burst,
-            updated: now,
-        });
+        let bucket = peers.bucket(
+            address_key(peer),
+            Bucket {
+                tokens: self.burst,
+                updated: now,
+            },
+        );
         take_token(bucket, now, self.refill, self.burst)
     }
 }
