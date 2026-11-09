@@ -585,20 +585,28 @@ pub struct ControllerFleetLimitsConfig {
     /// Open fleet connections allowed in total. At the limit, the connection
     /// idle the longest is closed to admit a new one; when none is idle, the
     /// new one is closed. Defaults to `50000`.
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub max_connections: usize,
     /// Open fleet connections allowed from one client address: an IPv4
     /// address, or an IPv6 /64. Raise it when more devices share an address,
     /// such as behind a NAT or a load balancer that does not preserve client
     /// addresses. Defaults to `4096`.
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub connections_per_address: usize,
-    /// Largest request a device may send, in bytes. Defaults to `4194304`
+    /// Largest message, in bytes, that a device and the controller may send
+    /// each other. Requests from clients without a device certificate, such as
+    /// enrollment, stay limited to 64 KiB. Devices accept at most 4 MiB, so
+    /// raising this only raises what devices may send. Defaults to `4194304`
     /// (4 MiB).
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub max_message_bytes: usize,
     /// Enrollment requests in progress at once across all clients. Enrollment
     /// calls the identity provider. Defaults to `64`.
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub enrollment_in_flight: usize,
     /// Enrollments one client address may start at once; it then gets one more
     /// every `enrollmentRefill`. Defaults to `60`.
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub enrollment_burst: u32,
     /// Time for a client address to get back one enrollment. Defaults to `1s`.
     #[serde(with = "humantime_serde")]
@@ -607,6 +615,7 @@ pub struct ControllerFleetLimitsConfig {
     /// Messages one device may send at once on its `Connect` stream; it then
     /// gets one more every `deviceMessageRefill`. A device over its budget is
     /// disconnected. Defaults to `600`.
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub device_message_burst: u32,
     /// Time for a device to get back one message. Defaults to `50ms`.
     #[serde(with = "humantime_serde")]

@@ -214,14 +214,14 @@
           "type": "integer",
           "format": "uint",
           "default": 4096,
-          "minimum": 0
+          "minimum": 1
         },
         "deviceMessageBurst": {
           "description": "Messages one device may send at once on its `Connect` stream; it then\ngets one more every `deviceMessageRefill`. A device over its budget is\ndisconnected. Defaults to `600`.",
           "type": "integer",
           "format": "uint32",
           "default": 600,
-          "minimum": 0
+          "minimum": 1
         },
         "deviceMessageRefill": {
           "description": "Time for a device to get back one message. Defaults to `50ms`.",
@@ -233,14 +233,14 @@
           "type": "integer",
           "format": "uint32",
           "default": 60,
-          "minimum": 0
+          "minimum": 1
         },
         "enrollmentInFlight": {
           "description": "Enrollment requests in progress at once across all clients. Enrollment\ncalls the identity provider. Defaults to `64`.",
           "type": "integer",
           "format": "uint",
           "default": 64,
-          "minimum": 0
+          "minimum": 1
         },
         "enrollmentRefill": {
           "description": "Time for a client address to get back one enrollment. Defaults to `1s`.",
@@ -252,14 +252,14 @@
           "type": "integer",
           "format": "uint",
           "default": 50000,
-          "minimum": 0
+          "minimum": 1
         },
         "maxMessageBytes": {
-          "description": "Largest request a device may send, in bytes. Defaults to `4194304`\n(4 MiB).",
+          "description": "Largest message, in bytes, that a device and the controller may send\neach other. Requests from clients without a device certificate, such as\nenrollment, stay limited to 64 KiB. Devices accept at most 4 MiB, so\nraising this only raises what devices may send. Defaults to `4194304`\n(4 MiB).",
           "type": "integer",
           "format": "uint",
           "default": 4194304,
-          "minimum": 0
+          "minimum": 1
         }
       },
       "additionalProperties": false
