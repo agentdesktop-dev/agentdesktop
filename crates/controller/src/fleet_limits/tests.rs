@@ -1,9 +1,9 @@
 use std::{net::SocketAddr, pin::Pin, time::Duration};
 
 use agentdesktop_proto::fleet::{
-    AgentMessage, BeginEnrollmentRequest, BeginEnrollmentResponse, CompleteEnrollmentRequest,
-    ControllerMessage, DeviceCertificateResponse, DeviceUsageRequest, DeviceUsageResponse,
-    EnrollResponse, LlmGatewayCredentialRequest, LlmGatewayCredentialResponse,
+    AgentMessage, ControllerMessage, DeviceCertificateResponse, DeviceUsageRequest,
+    DeviceUsageResponse, EnrollDeviceRequest, EnrollResponse, LlmGatewayCredentialRequest,
+    LlmGatewayCredentialResponse, LoginConfiguration, LoginConfigurationRequest,
     RenewDeviceCertificateRequest, fleet_agent_client::FleetAgentClient,
     fleet_agent_server::FleetAgent,
 };
@@ -44,17 +44,17 @@ type MessageStream = Pin<Box<dyn Stream<Item = Result<ControllerMessage, Status>
 impl FleetAgent for Slow {
     type ConnectStream = MessageStream;
 
-    async fn begin_enrollment(
+    async fn get_login_configuration(
         &self,
-        _: Request<BeginEnrollmentRequest>,
-    ) -> Result<Response<BeginEnrollmentResponse>, Status> {
+        _: Request<LoginConfigurationRequest>,
+    ) -> Result<Response<LoginConfiguration>, Status> {
         time::sleep(self.delay).await;
-        Ok(Response::new(BeginEnrollmentResponse::default()))
+        Ok(Response::new(LoginConfiguration::default()))
     }
 
-    async fn complete_enrollment(
+    async fn enroll_device(
         &self,
-        _: Request<CompleteEnrollmentRequest>,
+        _: Request<EnrollDeviceRequest>,
     ) -> Result<Response<EnrollResponse>, Status> {
         Err(Status::unimplemented("test"))
     }
@@ -182,7 +182,7 @@ async fn a_request_that_runs_too_long_is_ended() {
     let error = bounded(
         client(address)
             .await
-            .begin_enrollment(BeginEnrollmentRequest::default()),
+            .get_login_configuration(LoginConfigurationRequest {}),
     )
     .await
     .expect_err("a request outlived the request timeout");
@@ -298,8 +298,8 @@ async fn two_calls_on_one_connection(limits: FleetLimits) -> Duration {
     let started = time::Instant::now();
     let (a, b) = bounded(async {
         tokio::join!(
-            first.begin_enrollment(BeginEnrollmentRequest::default()),
-            second.begin_enrollment(BeginEnrollmentRequest::default()),
+            first.get_login_configuration(LoginConfigurationRequest {}),
+            second.get_login_configuration(LoginConfigurationRequest {}),
         )
     })
     .await;
@@ -343,14 +343,10 @@ async fn an_oversized_enrollment_request_is_rejected() {
     )
     .await;
 
-    let error = bounded(
-        client(address)
-            .await
-            .begin_enrollment(BeginEnrollmentRequest {
-                hostname: "h".repeat(512),
-                ..Default::default()
-            }),
-    )
+    let error = bounded(client(address).await.enroll_device(EnrollDeviceRequest {
+        hostname: "h".repeat(512),
+        ..Default::default()
+    }))
     .await
     .expect_err("an oversized enrollment request was accepted");
 
@@ -486,7 +482,7 @@ async fn enrollment_gets_the_small_limit_even_with_a_device_certificate() {
     let mut client = tls_client(address, &pki, true).await;
 
     // Over the unauthenticated limit but within the device limit.
-    let error = bounded(client.begin_enrollment(BeginEnrollmentRequest {
+    let error = bounded(client.enroll_device(EnrollDeviceRequest {
         hostname: "h".repeat(512),
         ..Default::default()
     }))
@@ -568,7 +564,7 @@ async fn a_tls_connection_idle_after_its_last_request_is_closed() {
     limits.idle_connection = Duration::from_millis(200);
     let (address, connections) = serve_mtls(limits, &pki).await;
     let mut client = tls_client(address, &pki, true).await;
-    bounded(client.begin_enrollment(BeginEnrollmentRequest::default()))
+    bounded(client.get_login_configuration(LoginConfigurationRequest {}))
         .await
         .unwrap();
     assert_eq!(connections.open_count(), 1);
@@ -835,7 +831,7 @@ async fn a_connection_idle_after_its_last_request_is_closed() {
     )
     .await;
     let mut client = client(address).await;
-    bounded(client.begin_enrollment(BeginEnrollmentRequest::default()))
+    bounded(client.get_login_configuration(LoginConfigurationRequest {}))
         .await
         .unwrap();
     assert_eq!(connections.open_count(), 1);
@@ -866,7 +862,7 @@ async fn a_response_the_client_never_accepts_does_not_keep_its_connection_busy()
     let mut stalled = FleetAgentClient::new(channel);
     let call = tokio::spawn(async move {
         stalled
-            .begin_enrollment(BeginEnrollmentRequest::default())
+            .get_login_configuration(LoginConfigurationRequest {})
             .await
     });
     bounded(async {
@@ -1009,13 +1005,13 @@ async fn a_request_without_a_body_does_not_keep_its_connection_from_eviction() {
     // A request whose body never comes: tonic waits for it until the request
     // timeout, before any handler runs.
     anonymous
-        .write_all(&grpc_request_headers(1, "BeginEnrollment", false))
+        .write_all(&grpc_request_headers(1, "GetLoginConfiguration", false))
         .await
         .unwrap();
     // A request that ends at once. Its response shows the server has started
     // both.
     anonymous
-        .write_all(&grpc_request_headers(3, "BeginEnrollment", true))
+        .write_all(&grpc_request_headers(3, "GetLoginConfiguration", true))
         .await
         .unwrap();
     bounded(until_response_headers(&mut anonymous, 3)).await;
@@ -1164,9 +1160,9 @@ fn fleet_paths_are_classified_by_the_table() {
         );
     }
     assert_eq!(rpc_class(&format!("/{SERVICE_NAME}/Unknown")), None);
-    assert_eq!(rpc_class("/other.Service/BeginEnrollment"), None);
+    assert_eq!(rpc_class("/other.Service/EnrollDevice"), None);
     assert!(super::is_enrollment(&format!(
-        "/{SERVICE_NAME}/CompleteEnrollment"
+        "/{SERVICE_NAME}/EnrollDevice"
     )));
     assert!(super::is_connect(&format!("/{SERVICE_NAME}/Connect")));
     assert!(!super::is_enrollment(&format!("/{SERVICE_NAME}/Connect")));
@@ -1274,12 +1270,17 @@ mod enrollment {
     }
 
     #[tokio::test]
-    async fn completing_an_enrollment_does_not_spend_the_address_budget() {
+    async fn enrolling_spends_the_address_budget() {
         let limiter = limits(64, 1).enrollment();
         let address = Some(SocketAddr::new(peer(1), 4000));
-        let _begin = limiter.admit(address).expect("begin");
+        let _configuration = limiter.admit(address).expect("login configuration");
 
-        let _complete = limiter.admit_completion().await.expect("complete");
+        let error = limiter
+            .admit_enrollment(address)
+            .await
+            .expect_err("an enrollment over the address budget was admitted");
+
+        assert_eq!(error.code(), tonic::Code::ResourceExhausted);
     }
 
     fn one_slot(completion_wait: Duration) -> FleetLimits {
@@ -1290,30 +1291,30 @@ mod enrollment {
     }
 
     #[tokio::test]
-    async fn completing_an_enrollment_waits_for_a_slot() {
+    async fn enrolling_waits_for_a_slot() {
         let limiter = one_slot(Duration::from_secs(5)).enrollment();
-        let begin = limiter.admit(None).expect("begin");
+        let other = limiter.admit(None).expect("other request");
         let waiting = tokio::spawn({
             let limiter = limiter.clone();
-            async move { limiter.admit_completion().await.map(drop) }
+            async move { limiter.admit_enrollment(None).await.map(drop) }
         });
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(!waiting.is_finished(), "completion did not wait");
+        assert!(!waiting.is_finished(), "enrollment did not wait");
 
-        drop(begin);
+        drop(other);
 
         waiting
             .await
             .unwrap()
-            .expect("completion admitted once a slot freed");
+            .expect("enrollment admitted once a slot freed");
     }
 
     #[tokio::test]
-    async fn completing_an_enrollment_gives_up_after_the_wait() {
+    async fn enrolling_gives_up_after_the_wait() {
         let limiter = one_slot(Duration::from_millis(50)).enrollment();
-        let _begin = limiter.admit(None).expect("begin");
+        let _other = limiter.admit(None).expect("other request");
 
-        let error = limiter.admit_completion().await.expect_err("admitted");
+        let error = limiter.admit_enrollment(None).await.expect_err("admitted");
 
         assert_eq!(error.code(), tonic::Code::ResourceExhausted);
     }
@@ -1537,7 +1538,7 @@ mod fleet_service {
     };
 
     use agentdesktop_proto::fleet::{
-        AgentMessage, BeginEnrollmentRequest, CompleteEnrollmentRequest, DaemonConfig,
+        AgentMessage, DaemonConfig, EnrollDeviceRequest, LoginConfigurationRequest,
         fleet_agent_server::FleetAgent,
     };
     use axum::{
@@ -1566,7 +1567,7 @@ mod fleet_service {
     /// accepts any access token.
     const AUTHORIZATION: &str = "Bearer access-token";
 
-    /// One enrollment slot, which `CompleteEnrollment` waits for only briefly.
+    /// One enrollment slot, which `EnrollDevice` waits for only briefly.
     const ONE_ENROLLMENT_SLOT: FleetLimits = {
         let mut limits = FLEET_LIMITS;
         limits.configured.enrollment_in_flight = 1;
@@ -1728,55 +1729,46 @@ mod fleet_service {
     struct Enrollment(FleetAgentService);
 
     impl Enrollment {
-        /// Begins a browser enrollment, which needs nothing from the identity
-        /// provider, and returns its ID.
-        async fn begin(self) -> Result<String, Status> {
-            let request = BeginEnrollmentRequest {
-                hostname: "host".to_owned(),
-                code_challenge: "c".repeat(43),
-                device_authorization: false,
-            };
-            let response = self.0.begin_enrollment(Request::new(request)).await?;
-            Ok(response.into_inner().enrollment_id)
+        /// Reads the login configuration, which needs nothing from the
+        /// identity provider.
+        async fn login_configuration(self) -> Result<(), Status> {
+            self.0
+                .get_login_configuration(Request::new(LoginConfigurationRequest {}))
+                .await
+                .map(drop)
         }
 
-        /// Begins an enrollment with the device grant, which asks the identity
-        /// provider for a device code.
-        async fn begin_with_device_grant(self) -> Result<String, Status> {
-            let request = BeginEnrollmentRequest {
-                hostname: "host".to_owned(),
-                code_challenge: String::new(),
-                device_authorization: true,
-            };
-            let response = self.0.begin_enrollment(Request::new(request)).await?;
-            Ok(response.into_inner().enrollment_id)
-        }
-
-        /// Completes `enrollment_id` with an ID token signed by a key the
-        /// controller has not seen, so it asks the identity provider for its
-        /// keys again before anything else.
-        async fn complete(self, enrollment_id: String) -> Result<(), Status> {
+        /// Enrolls a new device with an ID token signed by a key the controller
+        /// has not seen, so it asks the identity provider for its keys again
+        /// before anything else.
+        async fn enroll(self) -> Result<(), Status> {
+            let key = rcgen::KeyPair::generate().unwrap();
+            let csr = rcgen::CertificateParams::new(Vec::<String>::new())
+                .unwrap()
+                .serialize_request(&key)
+                .unwrap();
             let header = json!({ "alg": "RS256", "kid": "rotated" }).to_string();
-            let mut request = Request::new(CompleteEnrollmentRequest {
-                enrollment_id,
+            let mut request = Request::new(EnrollDeviceRequest {
+                hostname: "host".to_owned(),
+                certificate_signing_request_der: csr.der().to_vec(),
                 id_token: format!("{}.e30.c2ln", URL_SAFE_NO_PAD.encode(header)),
-                ..Default::default()
             });
             request
                 .metadata_mut()
                 .insert("authorization", AUTHORIZATION.parse().unwrap());
-            self.0.complete_enrollment(request).await.map(drop)
+            self.0.enroll_device(request).await.map(drop)
         }
 
         /// Asserts that every slot is taken: neither handler is admitted.
         async fn assert_full(self) {
-            let begun = self.clone().begin().await.expect_err("an enrollment began");
-            assert_eq!(begun.code(), Code::ResourceExhausted, "{begun}");
-            let completed = self
-                .complete(String::new())
+            let read = self
+                .clone()
+                .login_configuration()
                 .await
-                .expect_err("an enrollment completed");
-            assert_eq!(completed.code(), Code::ResourceExhausted, "{completed}");
+                .expect_err("the login configuration was read");
+            assert_eq!(read.code(), Code::ResourceExhausted, "{read}");
+            let enrolled = self.enroll().await.expect_err("a device enrolled");
+            assert_eq!(enrolled.code(), Code::ResourceExhausted, "{enrolled}");
         }
     }
 
@@ -1818,34 +1810,13 @@ mod fleet_service {
         bounded(until_open_at_most(&connections, 0)).await;
     }
 
-    /// `BeginEnrollment` holds its in-flight slot while it waits on the
-    /// identity provider, and frees it when it ends.
+    /// `EnrollDevice` holds its in-flight slot while it waits on the identity
+    /// provider, and frees it when it ends.
     #[tokio::test]
-    async fn a_beginning_enrollment_holds_its_slot_while_it_runs() {
+    async fn an_enrollment_holds_its_slot_while_it_runs() {
         let mut controller = Controller::start(ONE_ENROLLMENT_SLOT).await;
         controller.idp.stall();
-        let running = tokio::spawn(controller.enrollment().begin_with_device_grant());
-        assert_eq!(controller.idp.held_request().await, "/device");
-
-        controller.enrollment().assert_full().await;
-
-        running.abort();
-        let _ = running.await;
-        controller
-            .enrollment()
-            .begin()
-            .await
-            .expect("the slot was not freed");
-    }
-
-    /// `CompleteEnrollment` holds its in-flight slot while it waits on the
-    /// identity provider, and frees it when it ends.
-    #[tokio::test]
-    async fn a_completing_enrollment_holds_its_slot_while_it_runs() {
-        let mut controller = Controller::start(ONE_ENROLLMENT_SLOT).await;
-        let enrollment_id = controller.enrollment().begin().await.unwrap();
-        controller.idp.stall();
-        let running = tokio::spawn(controller.enrollment().complete(enrollment_id));
+        let running = tokio::spawn(controller.enrollment().enroll());
         assert_eq!(controller.idp.held_request().await, "/keys");
 
         controller.enrollment().assert_full().await;
@@ -1854,7 +1825,7 @@ mod fleet_service {
         let _ = running.await;
         controller
             .enrollment()
-            .begin()
+            .login_configuration()
             .await
             .expect("the slot was not freed");
     }

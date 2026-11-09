@@ -473,7 +473,8 @@ pub struct ControllerConnectionConfig {
     /// Use this on hosts without a local browser, such as servers reached over
     /// SSH. The daemon logs a verification URL and user code to approve from
     /// any other device. The identity provider must support device
-    /// authorization for the controller's client.
+    /// authorization for the controller's client. The daemon must be able to
+    /// reach the IdP's device-authorization and token endpoints directly.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub device_authorization: bool,
 }

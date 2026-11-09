@@ -87,9 +87,9 @@ pub struct FleetLimits {
     /// (rejected by its handler, but only after the request has been decoded).
     /// Enrollment requests are small (a hostname and a CSR).
     pub unauthenticated_message_bytes: usize,
-    /// How long `CompleteEnrollment` waits for an in-flight slot before it is
+    /// How long `EnrollDevice` waits for an in-flight slot before it is
     /// refused. It waits rather than failing at once because the user has
-    /// already signed in, and a refusal makes them start over.
+    /// already signed in.
     pub enrollment_completion_wait: Duration,
     /// How often a device may open a `Connect` stream: up to
     /// `stream_open_burst` in a burst, refilled at one per `stream_open_refill`.
@@ -259,8 +259,8 @@ enum RpcClass {
 /// Every `FleetAgent` method in `fleet.proto`, with its class. A test fails
 /// when an RPC is missing here, so a new or renamed one cannot skip its limits.
 const RPC_CLASSES: &[(&str, RpcClass)] = &[
-    ("BeginEnrollment", RpcClass::Enrollment),
-    ("CompleteEnrollment", RpcClass::Enrollment),
+    ("GetLoginConfiguration", RpcClass::Enrollment),
+    ("EnrollDevice", RpcClass::Enrollment),
     ("RenewDeviceCertificate", RpcClass::Device),
     ("GetLlmGatewayCredential", RpcClass::Device),
     ("GetDeviceUsage", RpcClass::Device),
@@ -443,9 +443,36 @@ impl EnrollmentLimiter {
         }
     }
 
-    /// Admits one `BeginEnrollment` from `peer`, or rejects it with
+    /// Admits one `GetLoginConfiguration` from `peer`, or rejects it with
     /// `RESOURCE_EXHAUSTED`. Hold the returned permit until the request finishes.
     pub fn admit(&self, peer: Option<SocketAddr>) -> Result<OwnedSemaphorePermit, Status> {
+        self.spend(peer)?;
+        self.in_flight
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| in_flight_refusal())
+    }
+
+    /// Admits one `EnrollDevice` from `peer`. It spends the address's budget
+    /// like `admit`, since enrolling does not depend on an earlier admitted
+    /// request, then waits up to `enrollment_completion_wait` for an in-flight
+    /// slot rather than failing at once. Hold the returned permit until the
+    /// request finishes.
+    pub async fn admit_enrollment(
+        &self,
+        peer: Option<SocketAddr>,
+    ) -> Result<OwnedSemaphorePermit, Status> {
+        self.spend(peer)?;
+        match tokio::time::timeout(self.completion_wait, self.in_flight.clone().acquire_owned())
+            .await
+        {
+            Ok(Ok(permit)) => Ok(permit),
+            _ => Err(in_flight_refusal()),
+        }
+    }
+
+    /// Spends one request from `peer`'s budget, or rejects the request.
+    fn spend(&self, peer: Option<SocketAddr>) -> Result<(), Status> {
         // The address's budget is spent before a slot is sought, so a request
         // refused for want of a slot still counts against it. Otherwise, while
         // a flood holds every slot, the flooding addresses would keep their
@@ -464,23 +491,7 @@ impl EnrollmentLimiter {
                 "too many enrollment requests from this address; retry later",
             ));
         }
-        self.in_flight
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| in_flight_refusal())
-    }
-
-    /// Admits one `CompleteEnrollment`, waiting up to `enrollment_completion_wait`
-    /// for an in-flight slot. It does not spend the address's budget: completing
-    /// needs an enrollment that `BeginEnrollment` started (and paid for), and each
-    /// enrollment completes at most once, so an unknown one fails at a lookup.
-    pub async fn admit_completion(&self) -> Result<OwnedSemaphorePermit, Status> {
-        match tokio::time::timeout(self.completion_wait, self.in_flight.clone().acquire_owned())
-            .await
-        {
-            Ok(Ok(permit)) => Ok(permit),
-            _ => Err(in_flight_refusal()),
-        }
+        Ok(())
     }
 
     fn take(&self, peer: IpAddr, now: Instant) -> bool {

@@ -93,15 +93,15 @@ struct ProviderMetadata {
 
 /// RFC 8628 section 3.2 device authorization response.
 #[derive(Deserialize)]
-struct DeviceAuthorizationResponse {
-    device_code: String,
-    user_code: String,
-    verification_uri: String,
+pub(crate) struct DeviceAuthorizationResponse {
+    pub(crate) device_code: String,
+    pub(crate) user_code: String,
+    pub(crate) verification_uri: String,
     #[serde(default)]
-    verification_uri_complete: Option<String>,
-    expires_in: u64,
+    pub(crate) verification_uri_complete: Option<String>,
+    pub(crate) expires_in: u64,
     #[serde(default)]
-    interval: Option<u64>,
+    pub(crate) interval: Option<u64>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -403,8 +403,18 @@ async fn request_device_grant(
         .device_authorization_endpoint
         .clone()
         .context("OIDC provider does not support device authorization")?;
+    let device = request_device_authorization(endpoint, client_id, scopes).await?;
+    Ok((metadata, device))
+}
+
+pub(crate) async fn request_device_authorization(
+    endpoint: Url,
+    client_id: &str,
+    scopes: &[String],
+) -> anyhow::Result<DeviceAuthorizationResponse> {
     let device = reqwest::Client::new()
         .post(endpoint)
+        .timeout(DEVICE_REQUEST_TIMEOUT)
         .form(&device_authorization_form(client_id, scopes))
         .send()
         .await
@@ -414,12 +424,11 @@ async fn request_device_grant(
         .json::<DeviceAuthorizationResponse>()
         .await
         .context("decode OIDC device authorization response")?;
-    Ok((metadata, validate_device(device)?))
+    validate_device(device)
 }
 
 /// Rejects a device-authorization response that could not be acted on, and caps its
-/// timing. Mirrors the controller's `device_enrollment_response` checks: an empty code
-/// or a non-URL verification address would publish an unusable `awaitingAuthentication`
+/// timing. An empty code or a non-URL verification address would publish an unusable `awaitingAuthentication`
 /// status, and an unbounded `expires_in` overflows `Instant + Duration` in the
 /// background poll task, which would panic before it cleared the pending entry.
 fn validate_device(
