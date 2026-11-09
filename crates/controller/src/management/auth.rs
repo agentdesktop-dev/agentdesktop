@@ -49,22 +49,27 @@ pub trait Provider: Send + Sync {
     /// These routes are merged outside ordinary API protection, so the provider
     /// enforces each endpoint's own requirements:
     ///
-    /// - `GET /auth/session`: always 200 for a signed-in or anonymous browser (401
-    ///   is also treated as anonymous) with JSON `{ mode: "local" | "oidc",
+    /// - `GET /auth/session`: returns 200 with JSON `{ mode: "local" | "authenticated",
     ///   authenticated, subject, role: "viewer" | "operator" | null, permissions:
-    ///   [String], assurance, recent_auth_required }`. `permissions` only drives what
-    ///   the UI shows; handlers still check every operation.
+    ///   [String], assurance, recent_auth_required }` for both signed-in and anonymous
+    ///   browsers. Anonymous sessions use `authenticated: false` and null identity,
+    ///   role, and assurance fields. This endpoint does not return 401 for sign-out.
+    ///   `permissions` only drives what the UI shows; handlers still check every
+    ///   operation.
     /// - `GET /auth/login`: starts sign-in (`?reauthenticate=true` forces a fresh
     ///   one) and eventually redirects back to `/`.
     /// - `POST /auth/logout`: ends the session; 204.
     /// - `POST /auth/activity`: foreground user activity that may extend an idle
     ///   session; 204, or 401 when the session has ended.
     ///
-    /// Errors are JSON `{ "error": code }`; 401 means signed out, and 403 with
-    /// `reauthentication_required` asks the UI to offer a fresh sign-in.
+    /// Errors are JSON `{ "error": code }`; 401 on protected API requests means
+    /// signed out, and 403 with `reauthentication_required` asks the UI to offer a
+    /// fresh sign-in.
     fn routes(&self) -> Router;
-    /// Verify credentials without resolving permissions or installing middleware.
-    /// `None` means no authenticated identity; malformed/invalid credentials return
+    /// Verify credentials and return identity evidence, without deciding whether that
+    /// identity may perform any particular operation. `Context::require` delegates
+    /// those checks to `check`.
+    /// `None` means no authenticated identity; malformed/invalid credentials return 
     /// an error. Browser mode must reject API-only service credentials.
     async fn authenticate(
         &self,
@@ -77,7 +82,6 @@ pub trait Provider: Send + Sync {
     ///
     /// `principal` is who; `access.resource` is which instance (or collection/global
     /// scope); `access.resource_class` and `access.verb` name the operation.
-    /// Mutation requirements derive from the verb, not a separate caller-supplied flag.
     async fn check(
         &self,
         principal: &Principal,
@@ -150,7 +154,7 @@ impl<S: Send + Sync> FromRequestParts<S> for Context {
 }
 
 #[derive(Clone)]
-/// Router-facing facade over the compiled-in provider; contains no OIDC implementation.
+/// Router-facing facade over the compiled-in authentication provider.
 pub struct Auth {
     provider: Arc<dyn Provider>,
 }

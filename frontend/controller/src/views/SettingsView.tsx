@@ -12,7 +12,7 @@ export function SettingsView({
   data?: ControllerSettings | null;
   loading?: boolean;
   error?: string | null;
-  authMode?: "local" | "oidc";
+  authMode?: "local" | "authenticated";
 }) {
   return (
     <div className="stack">
@@ -71,11 +71,11 @@ export function SettingsView({
       <section className="local-notice">
         <div>
           <strong>
-            {authMode === "oidc" ? "Organization sign-in" : "Local mode"}
+            {authMode === "authenticated" ? "Authenticated access" : "Local mode"}
           </strong>
           <span>
-            {authMode === "oidc"
-              ? "Access follows your organization's role assignments. Sessions end after a period without foreground interaction; sensitive actions may require signing in again."
+            {authMode === "authenticated"
+              ? "Access follows assigned permissions. Sessions end after a period without foreground interaction; sensitive actions may require signing in again."
               : "The admin interface is available on loopback interfaces without organization sign-in."}
           </span>
         </div>

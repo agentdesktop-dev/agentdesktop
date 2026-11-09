@@ -1,5 +1,8 @@
 use serde_json::{Map, Value};
 
+pub const LOCAL_ISSUER: &str = "local";
+pub const LOCAL_SUBJECT: &str = "localhost";
+
 #[derive(Clone, Debug)]
 /// Distinguishes local access, human sessions and app-only service tokens so grants
 /// cannot accidentally cross credential types.
@@ -36,8 +39,8 @@ pub struct Principal {
 impl Principal {
     pub fn local() -> Self {
         Self {
-            issuer: "local".into(),
-            subject: "localhost".into(),
+            issuer: LOCAL_ISSUER.into(),
+            subject: LOCAL_SUBJECT.into(),
             kind: PrincipalKind::Local,
             claims: Map::new(),
             auth_time: None,

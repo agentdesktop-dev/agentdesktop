@@ -6,7 +6,7 @@ import type {
 } from "@agentdesktop/ui";
 
 export type AdminSession = {
-  mode: "local" | "oidc";
+  mode: "local" | "authenticated";
   authenticated: boolean;
   role: "viewer" | "operator" | null;
   subject: string | null;

@@ -25,10 +25,10 @@ type Story = StoryObj<typeof meta>;
 
 export const AllCapabilities: Story = {};
 
-export const OrganizationSignIn: Story = {
-  args: { authMode: "oidc" },
+export const AuthenticatedAccess: Story = {
+  args: { authMode: "authenticated" },
   play: async ({ canvas }) => {
-    await expect(canvas.getByText("Organization sign-in")).toBeVisible();
+    await expect(canvas.getByText("Authenticated access")).toBeVisible();
     await expect(
       canvas.queryByText("Local access only"),
     ).not.toBeInTheDocument();

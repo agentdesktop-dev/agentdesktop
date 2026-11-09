@@ -49,7 +49,7 @@ type AuthContextValue = {
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 const signedOut: AdminSession = {
-  mode: "oidc",
+  mode: "authenticated",
   authenticated: false,
   role: null,
   subject: null,
@@ -175,7 +175,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   useEffect(() => {
-    if (!session?.authenticated || session.mode !== "oidc") return;
+    if (!session?.authenticated || session.mode === "local") return;
     let lastActivity: number | null = null;
     let pending = false;
     const activity = (event: Event) => {

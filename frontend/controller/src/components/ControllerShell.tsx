@@ -93,7 +93,7 @@ export function ControllerShell({
                   {session.mode === "local" ? "Local mode" : session.subject}
                 </span>
                 <span className="badge neutral">{session.role}</span>
-                {session.mode === "oidc" && onLogout && (
+                {session.mode !== "local" && onLogout && (
                   <button
                     type="button"
                     className="refresh-button"

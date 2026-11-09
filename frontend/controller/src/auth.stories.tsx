@@ -7,8 +7,8 @@ import { ControllerShell } from "./components/ControllerShell";
 import { SessionScreen } from "./components/SessionScreen";
 import type { AdminSession } from "./types";
 
-const oidc: AdminSession = {
-  mode: "oidc",
+const authenticatedSession: AdminSession = {
+  mode: "authenticated",
   authenticated: true,
   role: "operator",
   subject: "admin@example.com",
@@ -103,7 +103,7 @@ function mockSession(session: AdminSession, status = 204, code = "") {
 export const Anonymous: Story = {
   beforeEach: () => {
     const mock = mockSession({
-      ...oidc,
+      ...authenticatedSession,
       authenticated: false,
       role: null,
       subject: null,
@@ -120,11 +120,11 @@ export const Anonymous: Story = {
 
 export const OperatorMutationAndLogout: Story = {
   beforeEach: () => {
-    const mock = mockSession(oidc);
+    const mock = mockSession(authenticatedSession);
     return () => mock.mockRestore();
   },
   play: async ({ canvas }) => {
-    await expect(await canvas.findByText(oidc.subject as string)).toBeVisible();
+    await expect(await canvas.findByText(authenticatedSession.subject as string)).toBeVisible();
     await userEvent.click(
       canvas.getByRole("button", { name: "Delete test device" }),
     );
@@ -138,7 +138,7 @@ export const OperatorMutationAndLogout: Story = {
 
 export const ExpiredMutation: Story = {
   beforeEach: () => {
-    const mock = mockSession(oidc, 401, "unauthenticated");
+    const mock = mockSession(authenticatedSession, 401, "unauthenticated");
     return () => mock.mockRestore();
   },
   play: async ({ canvas }) => {
@@ -153,7 +153,7 @@ export const ExpiredMutation: Story = {
 
 export const ReauthenticationResponse: Story = {
   beforeEach: () => {
-    const mock = mockSession(oidc, 403, "reauthentication_required");
+    const mock = mockSession(authenticatedSession, 403, "reauthentication_required");
     return () => mock.mockRestore();
   },
   play: async ({ canvas }) => {
@@ -172,7 +172,7 @@ export const ReauthenticationResponse: Story = {
 export const LocalMode: Story = {
   beforeEach: () => {
     const mock = mockSession({
-      ...oidc,
+      ...authenticatedSession,
       mode: "local",
       subject: null,
     });
@@ -192,7 +192,7 @@ export const LocalMode: Story = {
 
 export const ForbiddenMutation: Story = {
   beforeEach: () => {
-    const mock = mockSession({ ...oidc, role: "viewer" }, 403, "forbidden");
+    const mock = mockSession({ ...authenticatedSession, role: "viewer" }, 403, "forbidden");
     return () => mock.mockRestore();
   },
   play: async ({ canvas }) => {
@@ -220,20 +220,20 @@ export const SessionUnauthorized: Story = {
 
 export const SessionCheckRetry: Story = {
   beforeEach: () => {
-    const mock = mockSession(oidc);
+    const mock = mockSession(authenticatedSession);
     mock.mockRejectedValueOnce(new Error("offline"));
     return () => mock.mockRestore();
   },
   play: async ({ canvas }) => {
     await expect(await canvas.findByRole("alert")).toBeVisible();
     await userEvent.click(canvas.getByRole("button", { name: "Try again" }));
-    await expect(await canvas.findByText(oidc.subject as string)).toBeVisible();
+    await expect(await canvas.findByText(authenticatedSession.subject as string)).toBeVisible();
   },
 };
 
 export const PassiveAndSyntheticEventsAreNotActivity: Story = {
   beforeEach: () => {
-    const mock = mockSession(oidc);
+    const mock = mockSession(authenticatedSession);
     return () => mock.mockRestore();
   },
   play: async ({ canvas, canvasElement }) => {
@@ -254,7 +254,7 @@ export const PassiveAndSyntheticEventsAreNotActivity: Story = {
 
 export const ExpiredRead: Story = {
   beforeEach: () => {
-    const mock = mockSession(oidc, 401, "unauthenticated");
+    const mock = mockSession(authenticatedSession, 401, "unauthenticated");
     return () => mock.mockRestore();
   },
   play: async ({ canvas }) => {
@@ -269,7 +269,7 @@ export const ExpiredRead: Story = {
 
 export const ProviderUnavailable: Story = {
   beforeEach: () => {
-    const mock = mockSession(oidc, 503, "identity_provider_unavailable");
+    const mock = mockSession(authenticatedSession, 503, "identity_provider_unavailable");
     return () => mock.mockRestore();
   },
   play: async ({ canvas }) => {

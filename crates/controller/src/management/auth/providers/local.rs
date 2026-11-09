@@ -9,7 +9,7 @@ use serde_json::json;
 
 use super::super::{
     Error, Provider, RequestMode,
-    authentication::Principal,
+    authentication::{LOCAL_SUBJECT, Principal},
     authorization::{AccessRequest, permission_names},
 };
 
@@ -28,16 +28,11 @@ impl Provider for LocalAccess {
                 get(|| async {
                     Json(json!({
                         "mode":"local", "authenticated":true, "role":"operator",
-                        "subject":"localhost", "assurance":null,
+                        "subject":LOCAL_SUBJECT, "assurance":null,
                         "recent_auth_required":false, "permissions":permission_names()
                     }))
                 }),
             )
-            .route(
-                "/auth/login",
-                get(|| async { axum::response::Redirect::to("/") }),
-            )
-            .route("/auth/logout", post(|| async { StatusCode::NO_CONTENT }))
             .route("/auth/activity", post(|| async { StatusCode::NO_CONTENT }))
     }
 

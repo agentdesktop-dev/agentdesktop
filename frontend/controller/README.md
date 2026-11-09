@@ -21,8 +21,8 @@ local development.
 The UI reads `GET /auth/session` before requesting fleet data. The controller
 serves local (loopback) mode, which grants every operation without sign-in.
 A controller built with a compiled-in authentication provider can instead supply
-OIDC login, cookie-backed sessions, and role-based permissions behind the same
-session API; the browser never stores identity-provider tokens. The `Provider`
+interactive sign-in, cookie-backed sessions, and permission-based access behind
+the same session API; the browser never stores identity-provider tokens. The `Provider`
 trait in `crates/controller/src/management/auth.rs` documents that contract.
 
 The controller rejects unsafe requests from other origins using the browser's
