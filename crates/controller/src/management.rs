@@ -2,7 +2,7 @@
 //! Handler authorization is explicit; authentication and policy implementations are
 //! supplied through `auth`, independently of the fleet enrollment API.
 
-use std::{borrow::Cow, net::SocketAddr, sync::Arc};
+use std::{borrow::Cow, net::SocketAddr, path::Path, sync::Arc};
 
 use anyhow::Context as _;
 use axum::{
@@ -130,12 +130,10 @@ pub async fn serve_router(
     if let ControllerAdminAccess::Authenticated(config) = &access
         && let ControllerAdminTransport::Tls { certificate, key } = &config.transport
     {
-        // Builds that enable both rustls backends (the workspace's test dependencies
-        // do) leave no automatic default, so select the one the controller uses.
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(certificate, key)
-            .await
-            .context("load admin TLS identity")?;
+        let tls = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(admin_tls_config(
+            certificate,
+            key,
+        )?));
         info!(listen = %address, "controller authenticated admin HTTPS listening");
         axum_server::from_tcp_rustls(listener.into_std()?, tls)?
             .serve(app.into_make_service())
@@ -146,6 +144,31 @@ pub async fn serve_router(
         axum::serve(listener, app).await?;
     }
     Ok(())
+}
+
+/// Admin TLS identity with an explicit crypto provider, so the listener does not
+/// depend on which rustls backends the final binary happens to enable.
+fn admin_tls_config(certificate: &Path, key: &Path) -> anyhow::Result<rustls::ServerConfig> {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+    let certificates = CertificateDer::pem_file_iter(certificate)
+        .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+        .with_context(|| format!("read admin TLS certificate {}", certificate.display()))?;
+    anyhow::ensure!(
+        !certificates.is_empty(),
+        "admin TLS certificate {} contains no certificates",
+        certificate.display()
+    );
+    let key = PrivateKeyDer::from_pem_file(key)
+        .with_context(|| format!("read admin TLS key {}", key.display()))?;
+    let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()?
+    .with_no_client_auth()
+    .with_single_cert(certificates, key)
+    .context("load admin TLS identity")?;
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(config)
 }
 
 /// Compose authenticated APIs/UI and deliberately public auth/JWKS endpoints.

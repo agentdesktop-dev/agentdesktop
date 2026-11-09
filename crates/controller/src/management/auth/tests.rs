@@ -681,6 +681,8 @@ async fn direct_tls_transport_serves_the_authenticated_router_over_https_only() 
     );
     let response = client.get(&url).bearer_auth("viewer").send().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    // The listener advertises ALPN, so HTTP/2 clients negotiate it.
+    assert_eq!(response.version(), reqwest::Version::HTTP_2);
     assert!(
         client
             .get(format!("http://{address}/api/v1/devices"))
