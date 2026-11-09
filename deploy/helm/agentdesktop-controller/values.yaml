@@ -38,6 +38,12 @@ tlsSecretName: agentdesktop-controller-tls
 service:
   type: LoadBalancer
   port: 443
+  # Local keeps devices' own addresses visible to the controller, which limits
+  # connections and enrollment per client address. With Cluster, Kubernetes may
+  # replace them with node addresses, so the per-address limits act as shared
+  # ones. Applies only to LoadBalancer and NodePort services; set to "" to use
+  # the Kubernetes default.
+  externalTrafficPolicy: Local
 
 resources: {}
 
