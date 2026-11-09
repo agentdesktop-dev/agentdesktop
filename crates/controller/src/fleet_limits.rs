@@ -26,7 +26,10 @@ use tonic::{
     Status,
     codegen::{Service, http},
     server::NamedService,
-    transport::{Server, ServerTlsConfig, server::TcpIncoming},
+    transport::{
+        Server, ServerTlsConfig,
+        server::{TcpConnectInfo, TcpIncoming, TlsConnectInfo},
+    },
 };
 use tower_layer::{Identity, Stack};
 
@@ -71,9 +74,11 @@ pub struct FleetLimits {
     pub streams_per_connection: u32,
     /// Largest encoded message an enrolled device's calls may send or receive.
     pub max_message_bytes: usize,
-    /// Largest enrollment request. Enrollment runs before a device is
-    /// authenticated, and its requests are small (a hostname and a CSR).
-    pub enrollment_message_bytes: usize,
+    /// Largest request from a caller without a device certificate: enrollment,
+    /// which runs before a device has one, and any other call made without one
+    /// (rejected by its handler, but only after the request has been decoded).
+    /// Enrollment requests are small (a hostname and a CSR).
+    pub unauthenticated_message_bytes: usize,
     /// Enrollment requests (`BeginEnrollment`, `CompleteEnrollment`) running at
     /// once across all clients. Enrollment calls the identity provider, so this
     /// also bounds the load a flood can put on it.
@@ -106,7 +111,7 @@ pub const FLEET_LIMITS: FleetLimits = FleetLimits {
     requests_per_connection: 32,
     streams_per_connection: 64,
     max_message_bytes: 4 * 1024 * 1024,
-    enrollment_message_bytes: 64 * 1024,
+    unauthenticated_message_bytes: 64 * 1024,
     enrollment_in_flight: 64,
     enrollment_burst: 60,
     enrollment_refill: Duration::from_secs(1),
@@ -154,8 +159,8 @@ impl FleetLimits {
     pub fn fleet_service<T: FleetAgent>(&self, service: T) -> FleetService<T> {
         let service = Arc::new(service);
         FleetService {
-            enrollment: FleetAgentServer::from_arc(service.clone())
-                .max_decoding_message_size(self.enrollment_message_bytes)
+            unauthenticated: FleetAgentServer::from_arc(service.clone())
+                .max_decoding_message_size(self.unauthenticated_message_bytes)
                 .max_encoding_message_size(self.max_message_bytes),
             devices: FleetAgentServer::from_arc(service)
                 .max_decoding_message_size(self.max_message_bytes)
@@ -180,18 +185,18 @@ impl FleetLimits {
     }
 }
 
-/// The fleet gRPC service, with a smaller request limit for the enrollment RPCs.
-/// Tonic sets message limits per service, so enrollment requests go to their own
-/// instance of the generated server.
+/// The fleet gRPC service, with a smaller request limit for enrollment and for
+/// callers without a device certificate. Tonic sets message limits per service,
+/// so those requests go to their own instance of the generated server.
 pub struct FleetService<T> {
-    enrollment: FleetAgentServer<T>,
+    unauthenticated: FleetAgentServer<T>,
     devices: FleetAgentServer<T>,
 }
 
 impl<T> Clone for FleetService<T> {
     fn clone(&self) -> Self {
         Self {
-            enrollment: self.enrollment.clone(),
+            unauthenticated: self.unauthenticated.clone(),
             devices: self.devices.clone(),
         }
     }
@@ -203,6 +208,16 @@ fn is_enrollment(path: &str) -> bool {
         .is_some_and(|method| matches!(method, "/BeginEnrollment" | "/CompleteEnrollment"))
 }
 
+/// Whether the TLS client presented a certificate signed by the device CA
+/// (the handshake rejects any other).
+fn has_device_certificate<B>(request: &http::Request<B>) -> bool {
+    request
+        .extensions()
+        .get::<TlsConnectInfo<TcpConnectInfo>>()
+        .and_then(TlsConnectInfo::peer_certs)
+        .is_some_and(|certificates| !certificates.is_empty())
+}
+
 impl<T, B> Service<http::Request<B>> for FleetService<T>
 where
     FleetAgentServer<T>: Service<http::Request<B>, Error = Infallible>,
@@ -212,15 +227,15 @@ where
     type Future = <FleetAgentServer<T> as Service<http::Request<B>>>::Future;
 
     fn poll_ready(&mut self, context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        match self.enrollment.poll_ready(context) {
+        match self.unauthenticated.poll_ready(context) {
             Poll::Ready(Ok(())) => self.devices.poll_ready(context),
             other => other,
         }
     }
 
     fn call(&mut self, request: http::Request<B>) -> Self::Future {
-        if is_enrollment(request.uri().path()) {
-            self.enrollment.call(request)
+        if is_enrollment(request.uri().path()) || !has_device_certificate(&request) {
+            self.unauthenticated.call(request)
         } else {
             self.devices.call(request)
         }

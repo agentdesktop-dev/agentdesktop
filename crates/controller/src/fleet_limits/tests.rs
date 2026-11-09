@@ -109,23 +109,22 @@ impl FleetAgent for Slow {
 
 /// Serves `service` with `limits`, over TLS when `identity` is given.
 async fn serve(limits: FleetLimits, identity: Option<Identity>, service: Slow) -> SocketAddr {
-    serve_tracked(limits, identity, service).await.0
+    let tls = identity.map(|identity| ServerTlsConfig::new().identity(identity));
+    serve_tracked(limits, tls, service).await.0
 }
 
-/// Like `serve`, also returning the connection registry.
+/// Like `serve`, with any TLS configuration, also returning the connection registry.
 async fn serve_tracked(
     limits: FleetLimits,
-    identity: Option<Identity>,
+    tls: Option<ServerTlsConfig>,
     service: Slow,
 ) -> (SocketAddr, Connections) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let connections = limits.connections();
     let mut server = limits.server(&connections);
-    if let Some(identity) = identity {
-        server = server
-            .tls_config(limits.tls(ServerTlsConfig::new().identity(identity)))
-            .unwrap();
+    if let Some(tls) = tls {
+        server = server.tls_config(limits.tls(tls)).unwrap();
     }
     let router = server.add_service(limits.fleet_service(service));
     tokio::spawn(router.serve_with_incoming(connections.incoming(TcpIncoming::from(listener))));
@@ -288,7 +287,7 @@ async fn streams_beyond_the_per_connection_limit_wait() {
 fn small_messages() -> FleetLimits {
     let mut limits = limits();
     limits.max_message_bytes = 1024;
-    limits.enrollment_message_bytes = 128;
+    limits.unauthenticated_message_bytes = 128;
     limits
 }
 
@@ -317,36 +316,113 @@ async fn an_oversized_enrollment_request_is_rejected() {
     assert_eq!(error.code(), Code::OutOfRange, "{error}");
 }
 
-#[tokio::test]
-async fn device_calls_keep_the_larger_message_limit() {
-    let address = serve(
-        small_messages(),
-        None,
+/// A device CA with a server certificate for `localhost` and a device certificate.
+struct Pki {
+    ca: tonic::transport::Certificate,
+    server: Identity,
+    device: Identity,
+}
+
+fn pki() -> Pki {
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair, KeyUsagePurpose,
+    };
+
+    let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![
+        KeyUsagePurpose::KeyCertSign,
+        KeyUsagePurpose::DigitalSignature,
+    ];
+    let ca = CertifiedIssuer::self_signed(ca_params, KeyPair::generate().unwrap()).unwrap();
+    let leaf = |name: &str| {
+        let key = KeyPair::generate().unwrap();
+        let certificate = CertificateParams::new(vec![name.to_owned()])
+            .unwrap()
+            .signed_by(&key, &ca)
+            .unwrap();
+        Identity::from_pem(certificate.pem(), key.serialize_pem())
+    };
+    Pki {
+        ca: tonic::transport::Certificate::from_pem(ca.pem()),
+        server: leaf("localhost"),
+        device: leaf("device"),
+    }
+}
+
+/// Serves with the production TLS shape: device CA, client certificate optional.
+async fn serve_mtls(limits: FleetLimits, pki: &Pki) -> SocketAddr {
+    let tls = ServerTlsConfig::new()
+        .identity(pki.server.clone())
+        .client_ca_root(pki.ca.clone())
+        .client_auth_optional(true);
+    serve_tracked(
+        limits,
+        Some(tls),
         Slow {
             delay: Duration::ZERO,
         },
     )
-    .await;
-    let mut client = client(address).await;
-
-    // Over the enrollment limit but within the device limit: reaches the handler.
-    let within = bounded(
-        client.renew_device_certificate(RenewDeviceCertificateRequest {
-            certificate_signing_request_der: vec![0; 512],
-        }),
-    )
     .await
-    .expect_err("the test service rejects every renewal");
+    .0
+}
+
+async fn tls_client(
+    address: SocketAddr,
+    pki: &Pki,
+    device: bool,
+) -> FleetAgentClient<tonic::transport::Channel> {
+    let mut tls = tonic::transport::ClientTlsConfig::new()
+        .ca_certificate(pki.ca.clone())
+        .domain_name("localhost");
+    if device {
+        tls = tls.identity(pki.device.clone());
+    }
+    let channel = tonic::transport::Endpoint::from_shared(format!("https://{address}"))
+        .unwrap()
+        .tls_config(tls)
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    FleetAgentClient::new(channel)
+}
+
+fn renewal(bytes: usize) -> RenewDeviceCertificateRequest {
+    RenewDeviceCertificateRequest {
+        certificate_signing_request_der: vec![0; bytes],
+    }
+}
+
+#[tokio::test]
+async fn device_calls_keep_the_larger_message_limit() {
+    let pki = pki();
+    let address = serve_mtls(small_messages(), &pki).await;
+    let mut client = tls_client(address, &pki, true).await;
+
+    // Over the unauthenticated limit but within the device limit: reaches the handler.
+    let within = bounded(client.renew_device_certificate(renewal(512)))
+        .await
+        .expect_err("the test service rejects every renewal");
     assert_eq!(within.code(), Code::Unimplemented, "{within}");
 
-    let over = bounded(
-        client.renew_device_certificate(RenewDeviceCertificateRequest {
-            certificate_signing_request_der: vec![0; 4096],
-        }),
-    )
-    .await
-    .expect_err("an oversized device request was accepted");
+    let over = bounded(client.renew_device_certificate(renewal(4096)))
+        .await
+        .expect_err("an oversized device request was accepted");
     assert_eq!(over.code(), Code::OutOfRange, "{over}");
+}
+
+#[tokio::test]
+async fn callers_without_a_device_certificate_get_the_small_limit_on_every_call() {
+    let pki = pki();
+    let address = serve_mtls(small_messages(), &pki).await;
+    let mut client = tls_client(address, &pki, false).await;
+
+    let error = bounded(client.renew_device_certificate(renewal(512)))
+        .await
+        .expect_err("a large request without a certificate reached the handler");
+
+    assert_eq!(error.code(), Code::OutOfRange, "{error}");
 }
 
 /// Whether the server keeps `stream` open for a while. An accepted connection
