@@ -283,8 +283,14 @@ impl Connections {
     }
 
     fn start_request(&self, peer: SocketAddr) -> Option<RequestGuard> {
-        let activity = self.state().open.get(&peer)?.clone();
-        activity.in_flight.fetch_add(1, Ordering::AcqRel);
+        // Counted under the registry lock, which `evict_idle` holds, so a
+        // connection is never evicted once its request has started.
+        let activity = {
+            let state = self.state();
+            let activity = state.open.get(&peer)?.clone();
+            activity.in_flight.fetch_add(1, Ordering::AcqRel);
+            activity
+        };
         activity.used.store(true, Ordering::Release);
         activity.touch();
         Some(RequestGuard {
@@ -475,18 +481,26 @@ struct RequestGuard {
 impl Drop for RequestGuard {
     fn drop(&mut self) {
         self.activity.touch();
-        if self.activity.in_flight.fetch_sub(1, Ordering::AcqRel) == 1 {
-            let epoch = self.activity.idle_epoch.fetch_add(1, Ordering::AcqRel) + 1;
-            self.connections.state().mark_idle(self.peer, epoch);
-            if let Some(waker) = self
+        // Under the registry lock, like `start_request`, so `evict_idle` never
+        // sees the connection idle before it is queued with its new epoch.
+        let idle = {
+            let mut state = self.connections.state();
+            let idle = self.activity.in_flight.fetch_sub(1, Ordering::AcqRel) == 1;
+            if idle {
+                let epoch = self.activity.idle_epoch.fetch_add(1, Ordering::AcqRel) + 1;
+                state.mark_idle(self.peer, epoch);
+            }
+            idle
+        };
+        if idle
+            && let Some(waker) = self
                 .activity
                 .waker
                 .lock()
                 .expect("connection waker lock poisoned")
                 .take()
-            {
-                waker.wake();
-            }
+        {
+            waker.wake();
         }
     }
 }
