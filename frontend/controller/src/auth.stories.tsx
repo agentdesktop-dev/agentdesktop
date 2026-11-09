@@ -124,7 +124,9 @@ export const OperatorMutationAndLogout: Story = {
     return () => mock.mockRestore();
   },
   play: async ({ canvas }) => {
-    await expect(await canvas.findByText(authenticatedSession.subject as string)).toBeVisible();
+    await expect(
+      await canvas.findByText(authenticatedSession.subject as string),
+    ).toBeVisible();
     await userEvent.click(
       canvas.getByRole("button", { name: "Delete test device" }),
     );
@@ -153,7 +155,11 @@ export const ExpiredMutation: Story = {
 
 export const ReauthenticationResponse: Story = {
   beforeEach: () => {
-    const mock = mockSession(authenticatedSession, 403, "reauthentication_required");
+    const mock = mockSession(
+      authenticatedSession,
+      403,
+      "reauthentication_required",
+    );
     return () => mock.mockRestore();
   },
   play: async ({ canvas }) => {
@@ -192,7 +198,11 @@ export const LocalMode: Story = {
 
 export const ForbiddenMutation: Story = {
   beforeEach: () => {
-    const mock = mockSession({ ...authenticatedSession, role: "viewer" }, 403, "forbidden");
+    const mock = mockSession(
+      { ...authenticatedSession, role: "viewer" },
+      403,
+      "forbidden",
+    );
     return () => mock.mockRestore();
   },
   play: async ({ canvas }) => {
@@ -227,7 +237,9 @@ export const SessionCheckRetry: Story = {
   play: async ({ canvas }) => {
     await expect(await canvas.findByRole("alert")).toBeVisible();
     await userEvent.click(canvas.getByRole("button", { name: "Try again" }));
-    await expect(await canvas.findByText(authenticatedSession.subject as string)).toBeVisible();
+    await expect(
+      await canvas.findByText(authenticatedSession.subject as string),
+    ).toBeVisible();
   },
 };
 
@@ -269,7 +281,11 @@ export const ExpiredRead: Story = {
 
 export const ProviderUnavailable: Story = {
   beforeEach: () => {
-    const mock = mockSession(authenticatedSession, 503, "identity_provider_unavailable");
+    const mock = mockSession(
+      authenticatedSession,
+      503,
+      "identity_provider_unavailable",
+    );
     return () => mock.mockRestore();
   },
   play: async ({ canvas }) => {

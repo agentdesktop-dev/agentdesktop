@@ -71,7 +71,9 @@ export function SettingsView({
       <section className="local-notice">
         <div>
           <strong>
-            {authMode === "authenticated" ? "Authenticated access" : "Local mode"}
+            {authMode === "authenticated"
+              ? "Authenticated access"
+              : "Local mode"}
           </strong>
           <span>
             {authMode === "authenticated"
