@@ -53,7 +53,8 @@ pub struct FleetLimits {
     /// PING waits before the connection is closed.
     pub keepalive_interval: Duration,
     pub keepalive_timeout: Duration,
-    /// TCP keepalive probe interval, for peers that vanish without closing.
+    /// How long a connection may be silent before TCP keepalive probes start,
+    /// for peers that vanish without closing.
     pub tcp_keepalive: Duration,
     /// Open connections allowed in total and from one client address (an IPv4
     /// address or an IPv6 /64). A connection over either cap is closed as soon
