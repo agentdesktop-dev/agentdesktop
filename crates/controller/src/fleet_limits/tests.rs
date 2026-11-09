@@ -5,6 +5,7 @@ use agentdesktop_proto::fleet::{
     ControllerMessage, DeviceCertificateResponse, DeviceUsageRequest, DeviceUsageResponse,
     EnrollResponse, LlmGatewayCredentialRequest, LlmGatewayCredentialResponse,
     RenewDeviceCertificateRequest,
+    fleet_agent_client::FleetAgentClient,
     fleet_agent_server::{FleetAgent, FleetAgentServer},
 };
 use futures_core::Stream;
@@ -16,17 +17,19 @@ use tokio::{
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{
-    Request, Response, Status, Streaming,
-    transport::{Identity, Server, ServerTlsConfig, server::TcpIncoming},
+    Code, Request, Response, Status, Streaming,
+    transport::{Identity, ServerTlsConfig, server::TcpIncoming},
 };
 
-use super::FleetLimits;
+use super::{FLEET_LIMITS, FleetLimits};
 
-/// Limits small enough for tests to observe.
+/// Limits small enough for tests to observe; anything a test does not exercise
+/// stays at the production value.
 fn limits() -> FleetLimits {
-    FleetLimits {
-        tls_handshake: Duration::from_millis(200),
-    }
+    let mut limits = FLEET_LIMITS;
+    limits.tls_handshake = Duration::from_millis(200);
+    limits.request = Duration::from_millis(200);
+    limits
 }
 
 /// Fails the test, instead of hanging it, when the server never ends the wait.
@@ -107,7 +110,7 @@ impl FleetAgent for Slow {
 async fn serve(limits: FleetLimits, identity: Option<Identity>, service: Slow) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let mut server = Server::builder();
+    let mut server = limits.server();
     if let Some(identity) = identity {
         server = server
             .tls_config(limits.tls(ServerTlsConfig::new().identity(identity)))
@@ -116,6 +119,16 @@ async fn serve(limits: FleetLimits, identity: Option<Identity>, service: Slow) -
     let router = server.add_service(FleetAgentServer::new(service));
     tokio::spawn(router.serve_with_incoming(TcpIncoming::from(listener)));
     address
+}
+
+async fn client(address: SocketAddr) -> FleetAgentClient<tonic::transport::Channel> {
+    // The generated `connect` RPC shadows the client's `connect` constructor.
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    FleetAgentClient::new(channel)
 }
 
 /// Reads and discards everything the server sends until it closes the connection.
@@ -141,4 +154,46 @@ async fn a_client_that_never_finishes_the_tls_handshake_is_disconnected() {
     let stream = TcpStream::connect(address).await.unwrap();
 
     bounded(until_closed(stream)).await;
+}
+
+#[tokio::test]
+async fn a_request_that_runs_too_long_is_ended() {
+    let address = serve(
+        limits(),
+        None,
+        Slow {
+            delay: Duration::from_secs(30),
+        },
+    )
+    .await;
+
+    let error = bounded(
+        client(address)
+            .await
+            .begin_enrollment(BeginEnrollmentRequest::default()),
+    )
+    .await
+    .expect_err("a request outlived the request timeout");
+
+    assert_eq!(error.code(), Code::Cancelled, "{error}");
+}
+
+#[tokio::test]
+async fn the_request_timeout_does_not_end_an_open_stream() {
+    // Each message arrives after more than the request timeout.
+    let delay = limits().request * 2;
+    let address = serve(limits(), None, Slow { delay }).await;
+    let (_outbound, receiver) = mpsc::channel::<AgentMessage>(1);
+
+    let mut stream = bounded(client(address).await.connect(ReceiverStream::new(receiver)))
+        .await
+        .expect("open the stream")
+        .into_inner();
+
+    for message in 0..2 {
+        let received = bounded(stream.message())
+            .await
+            .unwrap_or_else(|error| panic!("stream ended at message {message}: {error}"));
+        assert!(received.is_some(), "stream closed at message {message}");
+    }
 }

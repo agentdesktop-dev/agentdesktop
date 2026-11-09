@@ -14,7 +14,7 @@ use agentdesktop_usage::UsageIngest;
 use anyhow::Context;
 use tonic::{
     service::Routes,
-    transport::{Certificate, Identity, Server, ServerTlsConfig},
+    transport::{Certificate, Identity, ServerTlsConfig},
 };
 
 /// Runs fleet and management listeners with application-owned extensions.
@@ -129,7 +129,8 @@ pub async fn run(
             .client_ca_root(Certificate::from_pem(client_ca))
             .client_auth_optional(true),
     );
-    let mut server = Server::builder()
+    let mut server = FLEET_LIMITS
+        .server()
         .accept_http1(true)
         .tls_config(tls_config)?;
 
