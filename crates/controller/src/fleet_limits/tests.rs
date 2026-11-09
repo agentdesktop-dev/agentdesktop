@@ -623,6 +623,30 @@ async fn an_open_stream_keeps_its_connection_from_going_idle() {
 }
 
 #[test]
+fn the_configuration_defaults_match_the_default_limits() {
+    use agentdesktop_core::config::ControllerFleetLimitsConfig;
+
+    assert_eq!(
+        FLEET_LIMITS.configured(&ControllerFleetLimitsConfig::default()),
+        FLEET_LIMITS
+    );
+}
+
+#[test]
+fn configured_limits_replace_the_defaults() {
+    use agentdesktop_core::config::ControllerFleetLimitsConfig;
+
+    let limits = FLEET_LIMITS.configured(&ControllerFleetLimitsConfig {
+        connections_per_address: 20_000,
+        device_message_refill: Duration::from_millis(10),
+        ..ControllerFleetLimitsConfig::default()
+    });
+
+    assert_eq!(limits.connections_per_address, 20_000);
+    assert_eq!(limits.device_message_refill, Duration::from_millis(10));
+}
+
+#[test]
 fn a_repeated_warning_is_logged_once_per_interval_with_its_count() {
     let warning = super::ThrottledWarning::new();
     let start = tokio::time::Instant::now();
@@ -882,8 +906,8 @@ mod device_streams {
     #[test]
     fn a_device_gets_its_message_burst_then_the_refill_rate() {
         let mut limits = FLEET_LIMITS;
-        limits.stream_message_burst = 3;
-        limits.stream_message_refill = Duration::from_secs(1);
+        limits.device_message_burst = 3;
+        limits.device_message_refill = Duration::from_secs(1);
         let stream = limits.device_streams().open("device-a");
         let start = Instant::now();
 
@@ -898,8 +922,8 @@ mod device_streams {
     #[test]
     fn reconnecting_does_not_reset_the_message_budget() {
         let mut limits = FLEET_LIMITS;
-        limits.stream_message_burst = 2;
-        limits.stream_message_refill = Duration::from_secs(3600);
+        limits.device_message_burst = 2;
+        limits.device_message_refill = Duration::from_secs(3600);
         let streams = limits.device_streams();
         let now = Instant::now();
         let first = streams.open("device-a");

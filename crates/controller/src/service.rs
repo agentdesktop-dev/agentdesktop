@@ -22,7 +22,7 @@ use crate::{
     daemon_config::DaemonConfigStore,
     database::{Database, DevicePrincipal},
     device_ca::DeviceCertificateIssuer,
-    fleet_limits::{DeviceStreams, EnrollmentLimiter, FLEET_LIMITS},
+    fleet_limits::{DeviceStreams, EnrollmentLimiter, FLEET_LIMITS, FleetLimits},
     gateway_jwt::GatewayJwtIssuer,
     oidc::{OidcPrincipal, OidcProvider},
 };
@@ -59,9 +59,10 @@ impl FleetAgentService {
         }
     }
 
-    /// Replaces the enrollment admission limits (tests use small ones).
-    pub fn with_enrollment_limiter(mut self, enrollment: EnrollmentLimiter) -> Self {
-        self.enrollment = enrollment;
+    /// Replaces the default enrollment and `Connect` limits.
+    pub fn with_fleet_limits(mut self, limits: &FleetLimits) -> Self {
+        self.enrollment = limits.enrollment();
+        self.device_streams = limits.device_streams();
         self
     }
 
@@ -727,7 +728,7 @@ mod tests {
         };
         let service =
             FleetAgentService::new(None, database, DaemonConfigStore::new(None), None, None)
-                .with_enrollment_limiter(full.enrollment());
+                .with_fleet_limits(&full);
 
         // Without the limiter these fail later, with "OIDC enrollment is disabled".
         let begin = service

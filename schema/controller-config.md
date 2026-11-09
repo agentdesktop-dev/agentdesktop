@@ -18,6 +18,15 @@
 |`daemonConfig.path`|string|Path to the watched YAML configuration distributed to enrolled devices.<br><br>Relative paths are resolved from the controller configuration directory.<br>Valid file changes are published to connected devices automatically.|
 |`daemonConfig.revision`|integer|Monotonically increasing revision assigned to the daemon configuration.|
 |`databaseUrl`|string|SQLite or PostgreSQL URL used for controller state.|
+|`fleetLimits`|object|Limits on the device-facing fleet API that depend on the deployment.|
+|`fleetLimits.connectionsPerAddress`|integer|Open fleet connections allowed from one client address: an IPv4<br>address, or an IPv6 /64. Raise it when more devices share an address,<br>such as behind a NAT or a load balancer that does not preserve client<br>addresses. Defaults to `4096`.|
+|`fleetLimits.deviceMessageBurst`|integer|Messages one device may send at once on its `Connect` stream; it then<br>gets one more every `deviceMessageRefill`. A device over its budget is<br>disconnected. Defaults to `600`.|
+|`fleetLimits.deviceMessageRefill`|string|Time for a device to get back one message. Defaults to `50ms`.|
+|`fleetLimits.enrollmentBurst`|integer|Enrollments one client address may start at once; it then gets one more<br>every `enrollmentRefill`. Defaults to `60`.|
+|`fleetLimits.enrollmentInFlight`|integer|Enrollment requests in progress at once across all clients. Enrollment<br>calls the identity provider. Defaults to `64`.|
+|`fleetLimits.enrollmentRefill`|string|Time for a client address to get back one enrollment. Defaults to `1s`.|
+|`fleetLimits.maxConnections`|integer|Open fleet connections allowed in total. At the limit, the connection<br>idle the longest is closed to admit a new one; when none is idle, the<br>new one is closed. Defaults to `50000`.|
+|`fleetLimits.maxMessageBytes`|integer|Largest request a device may send, in bytes. Defaults to `4194304`<br>(4 MiB).|
 |`fleetListen`|string|Address on which the device-facing gRPC fleet API listens.|
 |`gatewayJwt`|object|LLM gateway JWT signing settings.|
 |`gatewayJwt.issuer`|string|Issuer claim placed in generated JWTs.|

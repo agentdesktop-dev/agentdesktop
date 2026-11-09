@@ -508,6 +508,9 @@ pub struct ControllerConfig {
     /// Token and cost collection from agentgateway access logs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<ControllerUsageConfig>,
+    /// Limits on the device-facing fleet API that depend on the deployment.
+    #[serde(default)]
+    pub fleet_limits: ControllerFleetLimitsConfig,
     /// TLS identities used by the device-facing fleet API.
     ///
     /// A string selects a directory containing `controller.pem`,
@@ -570,6 +573,60 @@ pub enum ControllerAdminTransport {
         /// PEM private key. Relative paths are resolved from the configuration directory.
         key: PathBuf,
     },
+}
+
+/// Limits on the device-facing fleet API that depend on the deployment: how
+/// many devices connect, how many share one client address, and how much they
+/// send. Unset fields keep their defaults.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct ControllerFleetLimitsConfig {
+    /// Open fleet connections allowed in total. At the limit, the connection
+    /// idle the longest is closed to admit a new one; when none is idle, the
+    /// new one is closed. Defaults to `50000`.
+    pub max_connections: usize,
+    /// Open fleet connections allowed from one client address: an IPv4
+    /// address, or an IPv6 /64. Raise it when more devices share an address,
+    /// such as behind a NAT or a load balancer that does not preserve client
+    /// addresses. Defaults to `4096`.
+    pub connections_per_address: usize,
+    /// Largest request a device may send, in bytes. Defaults to `4194304`
+    /// (4 MiB).
+    pub max_message_bytes: usize,
+    /// Enrollment requests in progress at once across all clients. Enrollment
+    /// calls the identity provider. Defaults to `64`.
+    pub enrollment_in_flight: usize,
+    /// Enrollments one client address may start at once; it then gets one more
+    /// every `enrollmentRefill`. Defaults to `60`.
+    pub enrollment_burst: u32,
+    /// Time for a client address to get back one enrollment. Defaults to `1s`.
+    #[serde(with = "humantime_serde")]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub enrollment_refill: Duration,
+    /// Messages one device may send at once on its `Connect` stream; it then
+    /// gets one more every `deviceMessageRefill`. A device over its budget is
+    /// disconnected. Defaults to `600`.
+    pub device_message_burst: u32,
+    /// Time for a device to get back one message. Defaults to `50ms`.
+    #[serde(with = "humantime_serde")]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub device_message_refill: Duration,
+}
+
+impl Default for ControllerFleetLimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: 50_000,
+            connections_per_address: 4_096,
+            max_message_bytes: 4 * 1024 * 1024,
+            enrollment_in_flight: 64,
+            enrollment_burst: 60,
+            enrollment_refill: Duration::from_secs(1),
+            device_message_burst: 600,
+            device_message_refill: Duration::from_millis(50),
+        }
+    }
 }
 
 /// OpenID Connect settings used for interactive device enrollment.
@@ -1413,6 +1470,24 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
         }
         if gateway.lifetime.is_zero() {
             anyhow::bail!("gatewayJwt.lifetime must be greater than zero");
+        }
+    }
+    let limits = &config.fleet_limits;
+    for (field, zero) in [
+        ("maxConnections", limits.max_connections == 0),
+        ("connectionsPerAddress", limits.connections_per_address == 0),
+        ("maxMessageBytes", limits.max_message_bytes == 0),
+        ("enrollmentInFlight", limits.enrollment_in_flight == 0),
+        ("enrollmentBurst", limits.enrollment_burst == 0),
+        ("enrollmentRefill", limits.enrollment_refill.is_zero()),
+        ("deviceMessageBurst", limits.device_message_burst == 0),
+        (
+            "deviceMessageRefill",
+            limits.device_message_refill.is_zero(),
+        ),
+    ] {
+        if zero {
+            anyhow::bail!("fleetLimits.{field} must be greater than zero");
         }
     }
     Ok(config)
@@ -2562,6 +2637,42 @@ oidc:
 "#,
         )
         .expect("explicit insecure development configuration");
+    }
+
+    #[test]
+    fn controller_fleet_limits_default_and_parse() {
+        let base = r#"
+tls: /etc/agentdesktop/tls
+oidc:
+  issuer: https://idp.example.com
+  clientId: agentdesktop
+"#;
+        assert_eq!(
+            parse_controller(base).expect("defaults").fleet_limits,
+            super::ControllerFleetLimitsConfig::default()
+        );
+
+        let configured = parse_controller(&format!(
+            "{base}fleetLimits:\n  connectionsPerAddress: 20000\n  enrollmentRefill: 250ms\n"
+        ))
+        .expect("configured limits")
+        .fleet_limits;
+        assert_eq!(configured.connections_per_address, 20_000);
+        assert_eq!(
+            configured.enrollment_refill,
+            std::time::Duration::from_millis(250)
+        );
+        assert_eq!(
+            configured.max_connections, 50_000,
+            "unset fields keep defaults"
+        );
+
+        let error = parse_controller(&format!("{base}fleetLimits:\n  enrollmentRefill: 0s\n"))
+            .expect_err("zero refill");
+        assert!(
+            error.to_string().contains("fleetLimits.enrollmentRefill"),
+            "{error}"
+        );
     }
 
     #[test]

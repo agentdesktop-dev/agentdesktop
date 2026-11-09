@@ -103,6 +103,7 @@ pub async fn run(
     let device_certificate_issuer = DeviceCertificateIssuer::from_pem(ca_certificate, &ca_key)
         .context("initialize device certificate issuer")?;
     tracing::info!("device certificate issuance enabled");
+    let limits = FLEET_LIMITS.configured(&config.fleet_limits);
     let service = FleetAgentService::new(
         Some(oidc),
         database,
@@ -110,7 +111,8 @@ pub async fn run(
         gateway_jwt_issuer,
         Some(device_certificate_issuer),
     )
-    .with_usage_collection(usage_ingest.is_some());
+    .with_usage_collection(usage_ingest.is_some())
+    .with_fleet_limits(&limits);
 
     let certificate = std::fs::read(&tls.certificate)
         .with_context(|| format!("read TLS certificate from {}", tls.certificate.display()))?;
@@ -122,14 +124,14 @@ pub async fn run(
             tls.client_ca_certificate.display()
         )
     })?;
-    let tls_config = FLEET_LIMITS.tls(
+    let tls_config = limits.tls(
         ServerTlsConfig::new()
             .identity(Identity::from_pem(certificate, key))
             .client_ca_root(Certificate::from_pem(client_ca))
             .client_auth_optional(true),
     );
-    let fleet_connections = FLEET_LIMITS.connections();
-    let mut server = FLEET_LIMITS
+    let fleet_connections = limits.connections();
+    let mut server = limits
         .server(&fleet_connections)
         .accept_http1(true)
         .tls_config(tls_config)?;
@@ -139,13 +141,13 @@ pub async fn run(
     tracing::info!(listen = %fleet_listen, "fleet controller listening");
     let fleet = async move {
         let mut routes = Routes::from(gateway_jwt::routes(gateway_jwks))
-            .add_service(FLEET_LIMITS.fleet_service(service));
+            .add_service(limits.fleet_service(service));
         if let Some(usage_ingest) = usage_ingest {
             routes = routes.add_service(usage_ingest);
         }
         server
             .add_routes(routes)
-            .serve_with_incoming(FLEET_LIMITS.incoming(fleet_listen, &fleet_connections)?)
+            .serve_with_incoming(limits.incoming(fleet_listen, &fleet_connections)?)
             .await
             .context("serve fleet gRPC API")
     };

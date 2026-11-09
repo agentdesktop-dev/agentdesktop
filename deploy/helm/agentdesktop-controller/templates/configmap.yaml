@@ -20,6 +20,10 @@ data:
     gatewayJwt:
 {{ toYaml . | indent 6 }}
     {{- end }}
+    {{- with .Values.fleetLimits }}
+    fleetLimits:
+{{ toYaml . | indent 6 }}
+    {{- end }}
     {{- with .Values.daemonConfig }}
     daemonConfig:
       path: /etc/agentdesktop/config/daemon.yaml

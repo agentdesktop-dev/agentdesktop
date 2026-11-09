@@ -37,6 +37,20 @@
       "type": "string",
       "default": "sqlite://agentdesktop-controller.db?mode=rwc"
     },
+    "fleetLimits": {
+      "description": "Limits on the device-facing fleet API that depend on the deployment.",
+      "$ref": "#/$defs/ControllerFleetLimitsConfig",
+      "default": {
+        "connectionsPerAddress": 4096,
+        "deviceMessageBurst": 600,
+        "deviceMessageRefill": "50ms",
+        "enrollmentBurst": 60,
+        "enrollmentInFlight": 64,
+        "enrollmentRefill": "1s",
+        "maxConnections": 50000,
+        "maxMessageBytes": 4194304
+      }
+    },
     "fleetListen": {
       "description": "Address on which the device-facing gRPC fleet API listens.",
       "type": "string",
@@ -190,6 +204,65 @@
       "required": [
         "path"
       ]
+    },
+    "ControllerFleetLimitsConfig": {
+      "description": "Limits on the device-facing fleet API that depend on the deployment: how\nmany devices connect, how many share one client address, and how much they\nsend. Unset fields keep their defaults.",
+      "type": "object",
+      "properties": {
+        "connectionsPerAddress": {
+          "description": "Open fleet connections allowed from one client address: an IPv4\naddress, or an IPv6 /64. Raise it when more devices share an address,\nsuch as behind a NAT or a load balancer that does not preserve client\naddresses. Defaults to `4096`.",
+          "type": "integer",
+          "format": "uint",
+          "default": 4096,
+          "minimum": 0
+        },
+        "deviceMessageBurst": {
+          "description": "Messages one device may send at once on its `Connect` stream; it then\ngets one more every `deviceMessageRefill`. A device over its budget is\ndisconnected. Defaults to `600`.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 600,
+          "minimum": 0
+        },
+        "deviceMessageRefill": {
+          "description": "Time for a device to get back one message. Defaults to `50ms`.",
+          "type": "string",
+          "default": "50ms"
+        },
+        "enrollmentBurst": {
+          "description": "Enrollments one client address may start at once; it then gets one more\nevery `enrollmentRefill`. Defaults to `60`.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 60,
+          "minimum": 0
+        },
+        "enrollmentInFlight": {
+          "description": "Enrollment requests in progress at once across all clients. Enrollment\ncalls the identity provider. Defaults to `64`.",
+          "type": "integer",
+          "format": "uint",
+          "default": 64,
+          "minimum": 0
+        },
+        "enrollmentRefill": {
+          "description": "Time for a client address to get back one enrollment. Defaults to `1s`.",
+          "type": "string",
+          "default": "1s"
+        },
+        "maxConnections": {
+          "description": "Open fleet connections allowed in total. At the limit, the connection\nidle the longest is closed to admit a new one; when none is idle, the\nnew one is closed. Defaults to `50000`.",
+          "type": "integer",
+          "format": "uint",
+          "default": 50000,
+          "minimum": 0
+        },
+        "maxMessageBytes": {
+          "description": "Largest request a device may send, in bytes. Defaults to `4194304`\n(4 MiB).",
+          "type": "integer",
+          "format": "uint",
+          "default": 4194304,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
     },
     "ControllerGatewayJwtConfig": {
       "description": "Settings for issuing short-lived LLM gateway JWTs.",

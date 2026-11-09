@@ -17,6 +17,7 @@ use std::{
     time::Duration,
 };
 
+use agentdesktop_core::config::ControllerFleetLimitsConfig;
 use agentdesktop_proto::fleet::fleet_agent_server::{FleetAgent, FleetAgentServer, SERVICE_NAME};
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, oneshot},
@@ -38,7 +39,7 @@ mod connections;
 pub use connections::{Connections, LimitedConnection, LimitedIncoming, TrackRequests};
 
 /// Limits applied to the fleet gRPC listener.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FleetLimits {
     /// Time a client has to finish the TLS handshake after connecting. Tonic sets
     /// no limit by default, so a client could hold a connection open forever by
@@ -94,13 +95,13 @@ pub struct FleetLimits {
     /// already signed in, and a refusal makes them start over.
     pub enrollment_completion_wait: Duration,
     /// Messages a device may send on its `Connect` streams: up to
-    /// `stream_message_burst` at once, refilled at one per
-    /// `stream_message_refill`. The budget belongs to the device, so
+    /// `device_message_burst` at once, refilled at one per
+    /// `device_message_refill`. The budget belongs to the device, so
     /// reconnecting does not reset it. Devices send a heartbeat every 30
     /// seconds, inventory periodically and one telemetry event per tool event,
     /// so this is far above normal use; a stream over budget is closed.
-    pub stream_message_burst: u32,
-    pub stream_message_refill: Duration,
+    pub device_message_burst: u32,
+    pub device_message_refill: Duration,
     /// How often a device may open a `Connect` stream: up to
     /// `stream_open_burst` at once, refilled at one per `stream_open_refill`.
     /// Each open checks the access token with the identity provider.
@@ -108,7 +109,8 @@ pub struct FleetLimits {
     pub stream_open_refill: Duration,
 }
 
-/// Production limits.
+/// Default limits. The controller configuration can change the
+/// deployment-dependent ones (see `configured`).
 pub const FLEET_LIMITS: FleetLimits = FleetLimits {
     tls_handshake: Duration::from_secs(10),
     request: Duration::from_secs(30),
@@ -127,13 +129,27 @@ pub const FLEET_LIMITS: FleetLimits = FleetLimits {
     enrollment_burst: 60,
     enrollment_refill: Duration::from_secs(1),
     enrollment_completion_wait: Duration::from_secs(10),
-    stream_message_burst: 600,
-    stream_message_refill: Duration::from_millis(50),
+    device_message_burst: 600,
+    device_message_refill: Duration::from_millis(50),
     stream_open_burst: 20,
     stream_open_refill: Duration::from_secs(60),
 };
 
 impl FleetLimits {
+    /// These limits, with the deployment-dependent ones from the controller
+    /// configuration.
+    pub fn configured(mut self, config: &ControllerFleetLimitsConfig) -> Self {
+        self.max_connections = config.max_connections;
+        self.connections_per_address = config.connections_per_address;
+        self.max_message_bytes = config.max_message_bytes;
+        self.enrollment_in_flight = config.enrollment_in_flight;
+        self.enrollment_burst = config.enrollment_burst;
+        self.enrollment_refill = config.enrollment_refill;
+        self.device_message_burst = config.device_message_burst;
+        self.device_message_refill = config.device_message_refill;
+        self
+    }
+
     /// Adds the handshake timeout to the fleet listener's TLS settings.
     pub fn tls(&self, config: ServerTlsConfig) -> ServerTlsConfig {
         config.timeout(self.tls_handshake)
@@ -414,8 +430,10 @@ struct DeviceState {
     opens: Bucket,
 }
 
-/// Device entries kept before idle ones (no open stream) are dropped. Only
-/// devices with a certificate from the device CA get an entry.
+/// Device entries kept before idle ones (no open stream) are dropped, or twice
+/// `max_connections` if that is more: each open stream holds a connection, so
+/// dropping idle entries always frees at least half the table. Only devices
+/// with a certificate from the device CA get an entry.
 const MAX_TRACKED_DEVICES: usize = 100_000;
 
 /// A registered `Connect` stream. `superseded` resolves when the same device
@@ -441,7 +459,8 @@ impl DeviceStreams {
             .devices
             .lock()
             .expect("device stream registry lock poisoned");
-        if devices.len() >= MAX_TRACKED_DEVICES && !devices.contains_key(device_id) {
+        let max_devices = MAX_TRACKED_DEVICES.max(self.limits.max_connections.saturating_mul(2));
+        if devices.len() >= max_devices && !devices.contains_key(device_id) {
             devices.retain(|_, device| device.current.is_some());
         }
         let now = Instant::now();
@@ -450,7 +469,7 @@ impl DeviceStreams {
             .or_insert_with(|| DeviceState {
                 current: None,
                 messages: Bucket {
-                    tokens: f64::from(self.limits.stream_message_burst),
+                    tokens: f64::from(self.limits.device_message_burst),
                     updated: now,
                 },
                 opens: Bucket {
@@ -516,8 +535,8 @@ impl DeviceStream {
             take_token(
                 &mut device.messages,
                 now,
-                limits.stream_message_refill,
-                f64::from(limits.stream_message_burst),
+                limits.device_message_refill,
+                f64::from(limits.device_message_burst),
             )
         })
     }

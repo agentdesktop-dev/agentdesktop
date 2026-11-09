@@ -22,6 +22,11 @@ allowInsecureDev: false
 # Optional short-lived JWT issuer for authenticated LLM gateways.
 gatewayJwt: {}
 
+# Limits on the device-facing fleet API, such as connectionsPerAddress or
+# maxMessageBytes. Unset fields keep the controller defaults; see
+# schema/controller-config.md.
+fleetLimits: {}
+
 # Daemon configuration distributed to enrolled devices. Leave empty to
 # disable managed configuration.
 daemonConfig: {}
