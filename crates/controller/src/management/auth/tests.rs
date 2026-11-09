@@ -217,12 +217,18 @@ async fn local_mode_keeps_ui_api_and_bootstrap_without_session_tables() {
             .status(),
         StatusCode::NO_CONTENT
     );
-    for action in ["/auth/logout", "/auth/activity"] {
+    assert_eq!(
+        request(app(&auth), "/auth/activity", Method::POST, HeaderMap::new())
+            .await
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    for (action, method) in [("/auth/login", Method::GET), ("/auth/logout", Method::POST)] {
         assert_eq!(
-            request(app(&auth), action, Method::POST, HeaderMap::new())
+            request(app(&auth), action, method, HeaderMap::new())
                 .await
                 .status(),
-            StatusCode::NO_CONTENT
+            StatusCode::NOT_FOUND
         );
     }
     let (sessions,): (i64,) = sqlx::query_as(
