@@ -473,6 +473,29 @@ async fn connections_over_the_per_address_cap_are_closed() {
     connections_over_cap(limits).await;
 }
 
+#[test]
+fn an_address_over_its_cap_does_not_evict_other_connections() {
+    use tokio::sync::oneshot::error::TryRecvError;
+
+    let mut limits = limits();
+    limits.max_connections = 2;
+    limits.connections_per_address = 1;
+    let connections = limits.connections();
+    let first_address = |port| SocketAddr::from(([192, 0, 2, 1], port));
+    let (_first, mut first_evicted) = connections
+        .register(first_address(1))
+        .expect("first connection");
+    let (_other, mut other_evicted) = connections
+        .register(SocketAddr::from(([192, 0, 2, 2], 1)))
+        .expect("a connection from another address");
+
+    // At the total cap, and over the first address's cap.
+    assert!(connections.register(first_address(2)).is_none());
+
+    assert_eq!(first_evicted.try_recv(), Err(TryRecvError::Empty));
+    assert_eq!(other_evicted.try_recv(), Err(TryRecvError::Empty));
+}
+
 #[tokio::test]
 async fn at_the_total_cap_the_longest_idle_connection_makes_room() {
     let mut limits = limits();

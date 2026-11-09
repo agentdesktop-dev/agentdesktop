@@ -80,7 +80,7 @@ struct State {
 }
 
 /// One connection's request activity.
-struct Activity {
+pub(super) struct Activity {
     in_flight: AtomicUsize,
     /// Advanced each time the connection becomes idle.
     idle_epoch: AtomicU64,
@@ -202,19 +202,35 @@ impl Connections {
 
     fn admit(&self, stream: TcpStream) -> Option<LimitedConnection> {
         let peer = stream.peer_addr().ok()?;
+        let (activity, evicted) = self.register(peer)?;
+        Some(LimitedConnection {
+            stream,
+            peer,
+            activity,
+            connections: self.clone(),
+            evicted: Some(evicted),
+            timer: Box::pin(tokio::time::sleep_until(
+                Instant::now() + self.shared.first_request,
+            )),
+            closed: false,
+        })
+    }
+
+    /// Registers a connection from `peer` as idle, or returns `None` when the
+    /// caps refuse it. The receiver resolves if the connection is evicted.
+    pub(super) fn register(
+        &self,
+        peer: SocketAddr,
+    ) -> Option<(Arc<Activity>, oneshot::Receiver<()>)> {
         let mut state = self.state();
-        if state.open.len() >= self.shared.max_connections && !state.evict_idle() {
-            if let Some(events) = TOTAL_CAP.event(Instant::now()) {
-                tracing::warn!(
-                    events,
-                    "closed new fleet connections at the connection limit with no connection idle"
-                );
-            }
-            return None;
-        }
+        // The per-address cap comes first, so an address over it cannot close
+        // another client's idle connection only to be refused itself.
         let address = address_key(peer.ip());
-        let count = state.per_address.entry(address).or_default();
-        if *count >= self.shared.connections_per_address {
+        if state
+            .per_address
+            .get(&address)
+            .is_some_and(|count| *count >= self.shared.connections_per_address)
+        {
             if let Some(events) = PER_ADDRESS_CAP.event(Instant::now()) {
                 tracing::warn!(
                     %address,
@@ -224,29 +240,28 @@ impl Connections {
             }
             return None;
         }
-        *count += 1;
-        let now = Instant::now();
+        if state.open.len() >= self.shared.max_connections && !state.evict_idle() {
+            if let Some(events) = TOTAL_CAP.event(Instant::now()) {
+                tracing::warn!(
+                    events,
+                    "closed new fleet connections at the connection limit with no connection idle"
+                );
+            }
+            return None;
+        }
+        *state.per_address.entry(address).or_default() += 1;
         let (evict, evicted) = oneshot::channel();
         let activity = Arc::new(Activity {
             in_flight: AtomicUsize::new(0),
             idle_epoch: AtomicU64::new(0),
             used: AtomicBool::new(false),
-            last_active: Mutex::new(now),
+            last_active: Mutex::new(Instant::now()),
             evict: Mutex::new(Some(evict)),
             waker: Mutex::new(None),
         });
         state.open.insert(peer, activity.clone());
         state.mark_idle(peer, 0);
-        drop(state);
-        Some(LimitedConnection {
-            stream,
-            peer,
-            activity,
-            connections: self.clone(),
-            evicted: Some(evicted),
-            timer: Box::pin(tokio::time::sleep_until(now + self.shared.first_request)),
-            closed: false,
-        })
+        Some((activity, evicted))
     }
 
     fn release(&self, peer: SocketAddr, activity: &Arc<Activity>) {
