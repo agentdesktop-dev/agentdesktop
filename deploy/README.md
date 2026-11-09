@@ -43,10 +43,12 @@ See `values.yaml` for all chart settings.
 The Service exposes only the TLS-protected fleet API. The controller limits
 connections and enrollment per client address. With the Kubernetes default
 external traffic policy, it may see node addresses instead of devices' own, and
-many devices then share one address's limits. Set
-`service.externalTrafficPolicy` to `Local` to keep devices' addresses when your
-load balancer sends traffic only to nodes that run the controller, or raise
-`fleetLimits.connectionsPerAddress`.
+many devices then share one address's connection limit and enrollment budget.
+Set `service.externalTrafficPolicy` to `Local` to keep devices' addresses when
+your load balancer sends traffic only to nodes that run the controller. With the
+default policy, or behind a load balancer that proxies connections, raise
+`fleetLimits.connectionsPerAddress`, and for large rollouts raise
+`fleetLimits.enrollmentBurst` or shorten `fleetLimits.enrollmentRefill`.
 
 To inspect the loopback-only management UI:
 

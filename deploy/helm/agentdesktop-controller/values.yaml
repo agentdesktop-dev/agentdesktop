@@ -45,11 +45,14 @@ service:
   port: 443
   # The controller limits connections and enrollment per client address. With
   # the Kubernetes default (Cluster), it may see node addresses instead of
-  # devices' own, so many devices share one address's limits. Set Local to keep
-  # devices' addresses, if your load balancer only sends traffic to nodes that
-  # run the controller (NodePort clients must connect to such a node).
-  # Otherwise raise fleetLimits.connectionsPerAddress. Applies only to
-  # LoadBalancer and NodePort services.
+  # devices' own, so many devices share one address's connection limit and
+  # enrollment budget. Set Local to keep devices' addresses, if your load
+  # balancer only sends traffic to nodes that run the controller (NodePort
+  # clients must connect to such a node). Local does not help behind a load
+  # balancer that proxies connections. Otherwise raise
+  # fleetLimits.connectionsPerAddress, and for large rollouts raise
+  # fleetLimits.enrollmentBurst or shorten fleetLimits.enrollmentRefill.
+  # Applies only to LoadBalancer and NodePort services.
   externalTrafficPolicy: ""
 
 resources: {}
