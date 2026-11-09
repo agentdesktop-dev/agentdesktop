@@ -10,7 +10,10 @@ use std::{
     io,
     net::{IpAddr, SocketAddr},
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     task::{Context, Poll},
     time::Duration,
 };
@@ -20,7 +23,7 @@ use futures_core::Stream;
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     net::TcpStream,
-    sync::{OwnedSemaphorePermit, Semaphore},
+    sync::{OwnedSemaphorePermit, Semaphore, oneshot},
     time::Instant,
 };
 use tonic::{
@@ -75,6 +78,13 @@ pub struct FleetLimits {
     /// many devices can share one address behind NAT.
     pub enrollment_burst: u32,
     pub enrollment_refill: Duration,
+    /// Messages a device may send on one `Connect` stream: up to
+    /// `stream_message_burst` at once, refilled at one per
+    /// `stream_message_refill`. Devices send a heartbeat every 30 seconds,
+    /// inventory periodically and one telemetry event per tool event, so this is
+    /// far above normal use; a stream over budget is closed.
+    pub stream_message_burst: u32,
+    pub stream_message_refill: Duration,
 }
 
 /// Production limits.
@@ -93,6 +103,8 @@ pub const FLEET_LIMITS: FleetLimits = FleetLimits {
     enrollment_in_flight: 64,
     enrollment_burst: 60,
     enrollment_refill: Duration::from_secs(1),
+    stream_message_burst: 600,
+    stream_message_refill: Duration::from_millis(50),
 };
 
 impl FleetLimits {
@@ -145,6 +157,18 @@ impl FleetLimits {
 
     pub fn enrollment(&self) -> EnrollmentLimiter {
         EnrollmentLimiter::new(self)
+    }
+
+    /// A fresh message budget for one `Connect` stream.
+    pub fn stream_messages(&self) -> MessageBudget {
+        MessageBudget {
+            bucket: Bucket {
+                tokens: f64::from(self.stream_message_burst),
+                updated: Instant::now(),
+            },
+            burst: f64::from(self.stream_message_burst),
+            refill: self.stream_message_refill,
+        }
     }
 }
 
@@ -397,13 +421,92 @@ impl EnrollmentLimiter {
             tokens: self.burst,
             updated: now,
         });
-        bucket.tokens = refilled(*bucket, now, self.refill, self.burst);
-        bucket.updated = now;
-        if bucket.tokens < 1.0 {
-            return false;
+        take_token(bucket, now, self.refill, self.burst)
+    }
+}
+
+/// Refills `bucket` for the time since its last use, then takes one token.
+fn take_token(bucket: &mut Bucket, now: Instant, refill: Duration, burst: f64) -> bool {
+    bucket.tokens = refilled(*bucket, now, refill, burst);
+    bucket.updated = now;
+    if bucket.tokens < 1.0 {
+        return false;
+    }
+    bucket.tokens -= 1.0;
+    true
+}
+
+/// Messages a device may send on one `Connect` stream.
+pub struct MessageBudget {
+    bucket: Bucket,
+    burst: f64,
+    refill: Duration,
+}
+
+impl MessageBudget {
+    /// Takes one message from the budget, or returns false when it is spent.
+    pub fn take(&mut self, now: Instant) -> bool {
+        take_token(&mut self.bucket, now, self.refill, self.burst)
+    }
+}
+
+/// Open `Connect` streams by device. A device has at most one: opening a new
+/// stream tells the device's previous stream to close. A device that reconnects
+/// (after sleep, for example) is never blocked by a stream the controller has
+/// not yet noticed is dead.
+#[derive(Clone, Default)]
+pub struct DeviceStreams {
+    open: Arc<Mutex<HashMap<String, Registration>>>,
+    next: Arc<AtomicU64>,
+}
+
+/// A device's current stream: its generation and the signal that replaces it.
+type Registration = (u64, oneshot::Sender<()>);
+
+/// A registered `Connect` stream. `superseded` resolves when the same device
+/// opens a newer stream; dropping this unregisters it.
+pub struct DeviceStream {
+    streams: DeviceStreams,
+    device_id: String,
+    generation: u64,
+    pub superseded: oneshot::Receiver<()>,
+}
+
+impl DeviceStreams {
+    pub fn open(&self, device_id: &str) -> DeviceStream {
+        let generation = self.next.fetch_add(1, Ordering::Relaxed);
+        let (replace, superseded) = oneshot::channel();
+        let previous = self
+            .open
+            .lock()
+            .expect("device stream registry lock poisoned")
+            .insert(device_id.to_owned(), (generation, replace));
+        if let Some((_, previous)) = previous {
+            let _ = previous.send(());
         }
-        bucket.tokens -= 1.0;
-        true
+        DeviceStream {
+            streams: self.clone(),
+            device_id: device_id.to_owned(),
+            generation,
+            superseded,
+        }
+    }
+}
+
+impl Drop for DeviceStream {
+    fn drop(&mut self) {
+        let mut open = self
+            .streams
+            .open
+            .lock()
+            .expect("device stream registry lock poisoned");
+        // A newer stream for the same device keeps its registration.
+        if open
+            .get(&self.device_id)
+            .is_some_and(|(generation, _)| *generation == self.generation)
+        {
+            open.remove(&self.device_id);
+        }
     }
 }
 

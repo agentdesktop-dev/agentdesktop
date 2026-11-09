@@ -22,7 +22,7 @@ use crate::{
     daemon_config::DaemonConfigStore,
     database::{Database, DevicePrincipal},
     device_ca::DeviceCertificateIssuer,
-    fleet_limits::{EnrollmentLimiter, FLEET_LIMITS},
+    fleet_limits::{DeviceStreams, EnrollmentLimiter, FLEET_LIMITS},
     gateway_jwt::GatewayJwtIssuer,
     oidc::{OidcPrincipal, OidcProvider},
 };
@@ -36,6 +36,7 @@ pub struct FleetAgentService {
     device_certificate_issuer: Option<DeviceCertificateIssuer>,
     usage_enabled: bool,
     enrollment: EnrollmentLimiter,
+    device_streams: DeviceStreams,
 }
 
 impl FleetAgentService {
@@ -54,6 +55,7 @@ impl FleetAgentService {
             device_certificate_issuer,
             usage_enabled: false,
             enrollment: FLEET_LIMITS.enrollment(),
+            device_streams: DeviceStreams::default(),
         }
     }
 
@@ -297,6 +299,8 @@ impl FleetAgent for FleetAgentService {
 
         let database = self.database.clone();
         let auth_sender = sender.clone();
+        let mut device_stream = self.device_streams.open(&authenticated_device_id);
+        let mut message_budget = FLEET_LIMITS.stream_messages();
         tokio::spawn(async move {
             let enrolled_principal = match database.device_principal(&authenticated_device_id).await
             {
@@ -333,8 +337,22 @@ impl FleetAgent for FleetAgentService {
                         }
                     }
                 }
+                _ = &mut device_stream.superseded => {
+                    info!(device_id = %authenticated_device_id, "closing stream replaced by a newer stream from the same device");
+                    let _ = auth_sender
+                        .send(Err(Status::aborted("replaced by a newer stream from this device")))
+                        .await;
+                    break;
+                }
                 message = inbound.message() => match message {
                     Ok(Some(message)) => {
+                        if !message_budget.take(time::Instant::now()) {
+                            warn!(device_id = %authenticated_device_id, "closing stream after the device exceeded its message rate");
+                            let _ = auth_sender
+                                .send(Err(Status::resource_exhausted("too many messages on this stream")))
+                                .await;
+                            break;
+                        }
                         if let Some(agent_message::Message::Hello(hello)) = &message.message
                             && hello.device_id != authenticated_device_id
                         {

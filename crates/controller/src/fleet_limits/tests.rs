@@ -507,3 +507,60 @@ mod enrollment {
         assert_eq!(limiter.peers.lock().unwrap().len(), 1);
     }
 }
+
+mod device_streams {
+    use tokio::{sync::oneshot::error::TryRecvError, time::Instant};
+
+    use super::super::{DeviceStreams, FLEET_LIMITS};
+    use super::Duration;
+
+    #[test]
+    fn a_newer_stream_from_the_same_device_replaces_the_older_one() {
+        let streams = DeviceStreams::default();
+        let mut older = streams.open("device-a");
+        let mut other_device = streams.open("device-b");
+
+        let mut newer = streams.open("device-a");
+
+        assert_eq!(older.superseded.try_recv(), Ok(()));
+        assert_eq!(other_device.superseded.try_recv(), Err(TryRecvError::Empty));
+        assert_eq!(newer.superseded.try_recv(), Err(TryRecvError::Empty));
+    }
+
+    #[test]
+    fn a_replaced_stream_closing_keeps_the_newer_registration() {
+        let streams = DeviceStreams::default();
+        let older = streams.open("device-a");
+        let mut newer = streams.open("device-a");
+
+        drop(older);
+        let _newest = streams.open("device-a");
+
+        // The newer stream was still registered, so the newest one replaced it.
+        assert_eq!(newer.superseded.try_recv(), Ok(()));
+    }
+
+    #[test]
+    fn a_closed_stream_is_unregistered() {
+        let streams = DeviceStreams::default();
+        drop(streams.open("device-a"));
+
+        assert!(streams.open.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_stream_gets_its_message_burst_then_the_refill_rate() {
+        let mut limits = FLEET_LIMITS;
+        limits.stream_message_burst = 3;
+        limits.stream_message_refill = Duration::from_secs(1);
+        let mut budget = limits.stream_messages();
+        let start = Instant::now();
+
+        for _ in 0..3 {
+            assert!(budget.take(start));
+        }
+        assert!(!budget.take(start), "burst exceeded");
+        assert!(budget.take(start + Duration::from_secs(1)));
+        assert!(!budget.take(start + Duration::from_secs(1)));
+    }
+}
