@@ -510,7 +510,8 @@ async fn a_tls_connection_that_never_makes_a_request_is_closed() {
 async fn a_tls_connection_idle_after_its_last_request_is_closed() {
     let pki = pki();
     let mut limits = limits();
-    limits.first_request = Duration::from_secs(5);
+    // Far past the test's bound, so only the idle close can end the connection.
+    limits.first_request = Duration::from_secs(60);
     limits.idle_connection = Duration::from_millis(200);
     let (address, connections) = serve_mtls(limits, &pki).await;
     let mut client = tls_client(address, &pki, true).await;
@@ -695,7 +696,8 @@ async fn a_connection_that_never_makes_a_request_is_closed() {
 #[tokio::test]
 async fn a_connection_idle_after_its_last_request_is_closed() {
     let mut limits = limits();
-    limits.first_request = Duration::from_secs(5);
+    // Far past the test's bound, so only the idle close can end the connection.
+    limits.first_request = Duration::from_secs(60);
     limits.idle_connection = Duration::from_millis(200);
     let (address, connections) = serve_tracked(
         limits,
@@ -722,7 +724,8 @@ async fn a_connection_idle_after_its_last_request_is_closed() {
 #[tokio::test]
 async fn a_response_the_client_never_accepts_does_not_keep_its_connection_busy() {
     let mut limits = limits();
-    limits.first_request = Duration::from_secs(5);
+    // Far past the test's bound, so only the idle close can end the connection.
+    limits.first_request = Duration::from_secs(60);
     limits.idle_connection = Duration::from_millis(200);
     let (address, connections) = serve_tracked(
         limits,
