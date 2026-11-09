@@ -69,7 +69,7 @@ pub trait Provider: Send + Sync {
     /// Verify credentials and return identity evidence, without deciding whether that
     /// identity may perform any particular operation. `Context::require` delegates
     /// those checks to `check`.
-    /// `None` means no authenticated identity; malformed/invalid credentials return 
+    /// `None` means no authenticated identity; malformed/invalid credentials return
     /// an error. Browser mode must reject API-only service credentials.
     async fn authenticate(
         &self,
