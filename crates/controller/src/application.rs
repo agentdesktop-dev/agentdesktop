@@ -110,9 +110,9 @@ pub async fn run(
         daemon_config,
         gateway_jwt_issuer,
         Some(device_certificate_issuer),
+        &limits,
     )
-    .with_usage_collection(usage_ingest.is_some())
-    .with_fleet_limits(&limits);
+    .with_usage_collection(usage_ingest.is_some());
 
     let certificate = std::fs::read(&tls.certificate)
         .with_context(|| format!("read TLS certificate from {}", tls.certificate.display()))?;

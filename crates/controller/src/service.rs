@@ -22,7 +22,7 @@ use crate::{
     daemon_config::DaemonConfigStore,
     database::{Database, DevicePrincipal},
     device_ca::DeviceCertificateIssuer,
-    fleet_limits::{DeviceStreams, EnrollmentLimiter, FLEET_LIMITS, FleetLimits, SessionBusy},
+    fleet_limits::{DeviceStreams, EnrollmentLimiter, FleetLimits, SessionBusy},
     gateway_jwt::GatewayJwtIssuer,
     oidc::{OidcPrincipal, OidcProvider},
 };
@@ -40,12 +40,15 @@ pub struct FleetAgentService {
 }
 
 impl FleetAgentService {
+    /// `limits` sets the enrollment and `Connect` limits; pass the configured
+    /// ones (`FLEET_LIMITS.configured(...)`), the same the fleet listener uses.
     pub fn new(
         oidc: Option<OidcProvider>,
         database: Database,
         daemon_config: DaemonConfigStore,
         gateway_jwt_issuer: Option<GatewayJwtIssuer>,
         device_certificate_issuer: Option<DeviceCertificateIssuer>,
+        limits: &FleetLimits,
     ) -> Self {
         Self {
             oidc,
@@ -54,16 +57,9 @@ impl FleetAgentService {
             gateway_jwt_issuer,
             device_certificate_issuer,
             usage_enabled: false,
-            enrollment: FLEET_LIMITS.enrollment(),
-            device_streams: FLEET_LIMITS.device_streams(),
+            enrollment: limits.enrollment(),
+            device_streams: limits.device_streams(),
         }
-    }
-
-    /// Replaces the default enrollment and `Connect` limits.
-    pub fn with_fleet_limits(mut self, limits: &FleetLimits) -> Self {
-        self.enrollment = limits.enrollment();
-        self.device_streams = limits.device_streams();
-        self
     }
 
     /// Tells devices that the controller collects gateway usage.
@@ -731,9 +727,14 @@ mod tests {
             enrollment_completion_wait: std::time::Duration::from_millis(10),
             ..FLEET_LIMITS
         };
-        let service =
-            FleetAgentService::new(None, database, DaemonConfigStore::new(None), None, None)
-                .with_fleet_limits(&full);
+        let service = FleetAgentService::new(
+            None,
+            database,
+            DaemonConfigStore::new(None),
+            None,
+            None,
+            &full,
+        );
 
         // Without the limiter these fail later, with "OIDC enrollment is disabled".
         let begin = service
@@ -764,8 +765,14 @@ mod tests {
             .enroll_device(device_id, "host", "issuer", "subject", None)
             .await
             .expect("enroll device");
-        let service =
-            FleetAgentService::new(None, database, DaemonConfigStore::new(None), None, None);
+        let service = FleetAgentService::new(
+            None,
+            database,
+            DaemonConfigStore::new(None),
+            None,
+            None,
+            &crate::fleet_limits::FLEET_LIMITS,
+        );
         let principal = |issuer: &str, subject: &str| OidcPrincipal {
             issuer: issuer.to_owned(),
             subject: subject.to_owned(),
@@ -818,8 +825,14 @@ mod tests {
             .enroll_device(device_id, "host", "", "subject", None)
             .await
             .expect("enroll legacy device");
-        let service =
-            FleetAgentService::new(None, database, DaemonConfigStore::new(None), None, None);
+        let service = FleetAgentService::new(
+            None,
+            database,
+            DaemonConfigStore::new(None),
+            None,
+            None,
+            &crate::fleet_limits::FLEET_LIMITS,
+        );
 
         let status = service
             .authenticate_device_certificate_identity(
