@@ -322,6 +322,69 @@ impl Database {
         Ok(())
     }
 
+    pub async fn enrollment_receipt(
+        &self,
+        device_id: &str,
+    ) -> anyhow::Result<Option<agentdesktop_proto::fleet::EnrollResponse>> {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT response_json FROM enrollment_receipts WHERE device_id = $1")
+                .bind(device_id)
+                .fetch_optional(&self.pool)
+                .await
+                .context("load device enrollment receipt")?;
+        row.map(|(json,)| decode_enrollment_receipt(&json))
+            .transpose()
+    }
+
+    /// Commits the device and its retry receipt together. Concurrent enrollments
+    /// for the same principal/key return the first committed certificate.
+    pub async fn finish_enrollment(
+        &self,
+        completed: &crate::oidc::CompletedEnrollment,
+        response: &agentdesktop_proto::fleet::EnrollResponse,
+    ) -> anyhow::Result<agentdesktop_proto::fleet::EnrollResponse> {
+        let idp_claims =
+            serde_json::to_string(&completed.idp_claims).context("encode verified IdP claims")?;
+        let receipt = serde_json::to_string(&(
+            &response.device_id,
+            &response.client_certificate_pem,
+            response.client_certificate_expires_at_unix_seconds,
+        ))
+        .context("encode device enrollment receipt")?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO devices
+                (id, hostname, created_at, last_seen_at, enrolled_by_issuer,
+                 enrolled_by_subject, idp_claims_json)
+             VALUES ($1, $2, $3, $3, $4, $5, $6)
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&response.device_id)
+        .bind(&completed.hostname)
+        .bind(unix_time_seconds())
+        .bind(&completed.issuer)
+        .bind(&completed.subject)
+        .bind(idp_claims)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO enrollment_receipts (device_id, response_json)
+             VALUES ($1, $2) ON CONFLICT (device_id) DO NOTHING",
+        )
+        .bind(&response.device_id)
+        .bind(receipt)
+        .execute(&mut *transaction)
+        .await?;
+        let (receipt,): (String,) =
+            sqlx::query_as("SELECT response_json FROM enrollment_receipts WHERE device_id = $1")
+                .bind(&response.device_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+        let response = decode_enrollment_receipt(&receipt)?;
+        transaction.commit().await?;
+        Ok(response)
+    }
+
     pub async fn device_principal(&self, device_id: &str) -> anyhow::Result<DevicePrincipal> {
         let (issuer, subject, idp_claims_json): (String, String, Option<String>) = sqlx::query_as(
             "SELECT enrolled_by_issuer, enrolled_by_subject, idp_claims_json
@@ -750,6 +813,19 @@ impl Database {
             .map(TelemetryEventRecord::try_from)
             .collect()
     }
+}
+
+fn decode_enrollment_receipt(
+    json: &str,
+) -> anyhow::Result<agentdesktop_proto::fleet::EnrollResponse> {
+    let (device_id, client_certificate_pem, client_certificate_expires_at_unix_seconds) =
+        serde_json::from_str::<(String, Vec<u8>, u64)>(json)
+            .context("decode device enrollment receipt")?;
+    Ok(agentdesktop_proto::fleet::EnrollResponse {
+        device_id,
+        client_certificate_pem,
+        client_certificate_expires_at_unix_seconds,
+    })
 }
 
 fn unix_time_seconds() -> i64 {

@@ -3,8 +3,8 @@ syntax = "proto3";
 package agentdesktop.fleet.v1;
 
 service FleetAgent {
-  rpc BeginEnrollment(BeginEnrollmentRequest) returns (BeginEnrollmentResponse);
-  rpc CompleteEnrollment(CompleteEnrollmentRequest) returns (EnrollResponse);
+  rpc GetLoginConfiguration(LoginConfigurationRequest) returns (LoginConfiguration);
+  rpc EnrollDevice(EnrollDeviceRequest) returns (EnrollResponse);
   rpc RenewDeviceCertificate(RenewDeviceCertificateRequest) returns (DeviceCertificateResponse);
   rpc GetLlmGatewayCredential(LlmGatewayCredentialRequest) returns (LlmGatewayCredentialResponse);
   rpc GetDeviceUsage(DeviceUsageRequest) returns (DeviceUsageResponse);
@@ -17,39 +17,24 @@ message EnrollResponse {
   uint64 client_certificate_expires_at_unix_seconds = 3;
 }
 
-message BeginEnrollmentRequest {
+// Read-only metadata; creates no login or enrollment attempt.
+message LoginConfigurationRequest {}
+
+message LoginConfiguration {
+  string issuer = 1;
+  string authorization_endpoint = 2;
+  string token_endpoint = 3;
+  string client_id = 4;
+  string redirect_uri = 5;
+  string device_authorization_endpoint = 6;
+  repeated string scopes = 7;
+}
+
+// Called only after user authentication; bearer access token is in metadata.
+message EnrollDeviceRequest {
   string hostname = 1;
-  string code_challenge = 2;
-  // Use the OAuth 2.0 Device Authorization Grant (RFC 8628) instead of a
-  // browser redirect, for hosts without a local browser. code_challenge is
-  // ignored when set.
-  bool device_authorization = 3;
-}
-
-message BeginEnrollmentResponse {
-  string enrollment_id = 1;
-  string authorization_url = 2;
-  string state = 3;
-  string redirect_uri = 4;
-  string token_endpoint = 5;
-  string client_id = 6;
-  // Set only for device authorization enrollments.
-  string device_code = 7;
-  string user_code = 8;
-  string verification_uri = 9;
-  string verification_uri_complete = 10;
-  uint64 interval_seconds = 11;
-  uint64 expires_in_seconds = 12;
-}
-
-message CompleteEnrollmentRequest {
-  string enrollment_id = 1;
-  // Deprecated: the daemon exchanges the authorization code directly.
-  string authorization_code = 2;
-  // Deprecated: the PKCE verifier is sent only to the identity provider.
-  string code_verifier = 3;
-  bytes certificate_signing_request_der = 4;
-  string id_token = 5;
+  bytes certificate_signing_request_der = 2;
+  string id_token = 3;
 }
 
 message RenewDeviceCertificateRequest {
