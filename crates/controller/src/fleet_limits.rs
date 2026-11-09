@@ -7,14 +7,19 @@
 use std::{
     collections::HashMap,
     convert::Infallible,
+    io,
     net::{IpAddr, SocketAddr},
+    pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll},
     time::Duration,
 };
 
 use agentdesktop_proto::fleet::fleet_agent_server::{FleetAgent, FleetAgentServer, SERVICE_NAME};
+use futures_core::Stream;
 use tokio::{
+    io::{AsyncRead, AsyncWrite, ReadBuf},
+    net::TcpStream,
     sync::{OwnedSemaphorePermit, Semaphore},
     time::Instant,
 };
@@ -22,7 +27,10 @@ use tonic::{
     Status,
     codegen::{Service, http},
     server::NamedService,
-    transport::{Server, ServerTlsConfig},
+    transport::{
+        Server, ServerTlsConfig,
+        server::{Connected, TcpConnectInfo, TcpIncoming},
+    },
 };
 
 /// Limits applied to the fleet gRPC listener.
@@ -42,6 +50,12 @@ pub struct FleetLimits {
     pub keepalive_timeout: Duration,
     /// TCP keepalive probe interval, for peers that vanish without closing.
     pub tcp_keepalive: Duration,
+    /// Open connections allowed in total and from one client address. A
+    /// connection over either cap is closed as soon as it is accepted. The
+    /// per-address cap is high because many devices can share an address behind
+    /// NAT, or appear to when a load balancer rewrites client addresses.
+    pub max_connections: usize,
+    pub connections_per_address: usize,
     /// Concurrent requests one connection may have in progress, and concurrent
     /// HTTP/2 streams it may open. Further requests wait, so one connection
     /// cannot occupy an unbounded share of the server.
@@ -70,6 +84,8 @@ pub const FLEET_LIMITS: FleetLimits = FleetLimits {
     keepalive_interval: Duration::from_secs(30),
     keepalive_timeout: Duration::from_secs(20),
     tcp_keepalive: Duration::from_secs(60),
+    max_connections: 50_000,
+    connections_per_address: 4_096,
     requests_per_connection: 32,
     streams_per_connection: 64,
     max_message_bytes: 4 * 1024 * 1024,
@@ -91,9 +107,27 @@ impl FleetLimits {
             .timeout(self.request)
             .http2_keepalive_interval(Some(self.keepalive_interval))
             .http2_keepalive_timeout(Some(self.keepalive_timeout))
-            .tcp_keepalive(Some(self.tcp_keepalive))
             .concurrency_limit_per_connection(self.requests_per_connection)
             .max_concurrent_streams(self.streams_per_connection)
+    }
+
+    /// Binds the fleet listener with TCP keepalive and the connection caps.
+    /// Serve with `Server::serve_with_incoming`.
+    pub fn incoming(&self, address: SocketAddr) -> io::Result<LimitedIncoming<TcpIncoming>> {
+        let incoming = TcpIncoming::bind(address)?
+            .with_nodelay(Some(true))
+            .with_keepalive(Some(self.tcp_keepalive));
+        Ok(self.limit_connections(incoming))
+    }
+
+    /// Applies the connection caps to accepted connections.
+    pub fn limit_connections<S>(&self, incoming: S) -> LimitedIncoming<S> {
+        LimitedIncoming {
+            incoming,
+            total: Arc::new(Semaphore::new(self.max_connections)),
+            per_address: Arc::default(),
+            per_address_limit: self.connections_per_address,
+        }
     }
 
     /// The fleet gRPC service with message size limits applied.
@@ -111,6 +145,148 @@ impl FleetLimits {
 
     pub fn enrollment(&self) -> EnrollmentLimiter {
         EnrollmentLimiter::new(self)
+    }
+}
+
+/// Accepted connections, closed on accept when over the connection caps.
+pub struct LimitedIncoming<S> {
+    incoming: S,
+    total: Arc<Semaphore>,
+    per_address: Arc<Mutex<HashMap<IpAddr, usize>>>,
+    per_address_limit: usize,
+}
+
+impl<S> LimitedIncoming<S> {
+    fn admit(&self, stream: TcpStream) -> Option<LimitedConnection> {
+        let Ok(total) = self.total.clone().try_acquire_owned() else {
+            tracing::debug!("fleet connection limit reached; closing connection");
+            return None;
+        };
+        let address = stream.peer_addr().ok().map(|peer| peer.ip());
+        let address = match address {
+            Some(address) => {
+                let mut counts = self
+                    .per_address
+                    .lock()
+                    .expect("connection limiter lock poisoned");
+                let count = counts.entry(address).or_default();
+                if *count >= self.per_address_limit {
+                    tracing::debug!(%address, "per-address fleet connection limit reached; closing connection");
+                    return None;
+                }
+                *count += 1;
+                Some(AddressSlot {
+                    counts: self.per_address.clone(),
+                    address,
+                })
+            }
+            None => None,
+        };
+        Some(LimitedConnection {
+            stream,
+            _total: total,
+            _address: address,
+        })
+    }
+}
+
+impl<S> Stream for LimitedIncoming<S>
+where
+    S: Stream<Item = io::Result<TcpStream>> + Unpin,
+{
+    type Item = io::Result<LimitedConnection>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            match Pin::new(&mut self.incoming).poll_next(context) {
+                Poll::Ready(Some(Ok(stream))) => {
+                    // Over a cap: dropping the stream closes it; wait for the next one.
+                    if let Some(connection) = self.admit(stream) {
+                        return Poll::Ready(Some(Ok(connection)));
+                    }
+                }
+                Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+/// Releases a client address's connection slot when its connection closes.
+struct AddressSlot {
+    counts: Arc<Mutex<HashMap<IpAddr, usize>>>,
+    address: IpAddr,
+}
+
+impl Drop for AddressSlot {
+    fn drop(&mut self) {
+        let mut counts = self
+            .counts
+            .lock()
+            .expect("connection limiter lock poisoned");
+        if let Some(count) = counts.get_mut(&self.address) {
+            *count -= 1;
+            if *count == 0 {
+                counts.remove(&self.address);
+            }
+        }
+    }
+}
+
+/// An accepted fleet connection holding its slots until it closes.
+pub struct LimitedConnection {
+    stream: TcpStream,
+    _total: OwnedSemaphorePermit,
+    _address: Option<AddressSlot>,
+}
+
+impl Connected for LimitedConnection {
+    // The plain TCP info keeps `Request::remote_addr` and `peer_certs` working.
+    type ConnectInfo = TcpConnectInfo;
+
+    fn connect_info(&self) -> Self::ConnectInfo {
+        self.stream.connect_info()
+    }
+}
+
+impl AsyncRead for LimitedConnection {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_read(context, buffer)
+    }
+}
+
+impl AsyncWrite for LimitedConnection {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(context, buffer)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffers: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write_vectored(context, buffers)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(context)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(context)
     }
 }
 

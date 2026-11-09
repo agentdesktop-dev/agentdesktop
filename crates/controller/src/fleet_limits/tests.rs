@@ -118,7 +118,7 @@ async fn serve(limits: FleetLimits, identity: Option<Identity>, service: Slow) -
             .unwrap();
     }
     let router = server.add_service(limits.fleet_service(service));
-    tokio::spawn(router.serve_with_incoming(TcpIncoming::from(listener)));
+    tokio::spawn(router.serve_with_incoming(limits.limit_connections(TcpIncoming::from(listener))));
     address
 }
 
@@ -337,6 +337,62 @@ async fn device_calls_keep_the_larger_message_limit() {
     .await
     .expect_err("an oversized device request was accepted");
     assert_eq!(over.code(), Code::OutOfRange, "{over}");
+}
+
+/// Whether the server keeps `stream` open for a while. An accepted connection
+/// receives the server's HTTP/2 SETTINGS and then waits for the client; a
+/// rejected one is closed (end of stream) right away.
+async fn stays_open(mut stream: TcpStream) -> bool {
+    let mut buffer = [0_u8; 1024];
+    let closed = time::timeout(Duration::from_millis(300), async {
+        loop {
+            match stream.read(&mut buffer).await {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+        }
+    })
+    .await;
+    closed.is_err()
+}
+
+async fn connections_over_cap(limits: FleetLimits) {
+    let address = serve(
+        limits,
+        None,
+        Slow {
+            delay: Duration::ZERO,
+        },
+    )
+    .await;
+    let first = TcpStream::connect(address).await.unwrap();
+    let second = TcpStream::connect(address).await.unwrap();
+
+    let third = TcpStream::connect(address).await.unwrap();
+    bounded(until_closed(third)).await;
+
+    // Closing a connection frees its slot.
+    drop(first);
+    time::sleep(Duration::from_millis(100)).await;
+    let replacement = TcpStream::connect(address).await.unwrap();
+    assert!(stays_open(replacement).await, "a freed slot was not reused");
+    drop(second);
+}
+
+#[tokio::test]
+async fn connections_over_the_per_address_cap_are_closed() {
+    let mut limits = limits();
+    limits.connections_per_address = 2;
+
+    connections_over_cap(limits).await;
+}
+
+#[tokio::test]
+async fn connections_over_the_total_cap_are_closed() {
+    let mut limits = limits();
+    limits.max_connections = 2;
+
+    connections_over_cap(limits).await;
 }
 
 mod enrollment {

@@ -144,7 +144,7 @@ pub async fn run(
         }
         server
             .add_routes(routes)
-            .serve(fleet_listen)
+            .serve_with_incoming(FLEET_LIMITS.incoming(fleet_listen)?)
             .await
             .context("serve fleet gRPC API")
     };
