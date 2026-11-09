@@ -10,7 +10,7 @@ use agentdesktop_proto::fleet::{
 };
 use futures_core::Stream;
 use tokio::{
-    io::AsyncReadExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::mpsc,
     time,
@@ -29,6 +29,8 @@ fn limits() -> FleetLimits {
     let mut limits = FLEET_LIMITS;
     limits.tls_handshake = Duration::from_millis(200);
     limits.request = Duration::from_millis(200);
+    limits.keepalive_interval = Duration::from_millis(100);
+    limits.keepalive_timeout = Duration::from_millis(100);
     limits
 }
 
@@ -196,4 +198,26 @@ async fn the_request_timeout_does_not_end_an_open_stream() {
             .unwrap_or_else(|error| panic!("stream ended at message {message}: {error}"));
         assert!(received.is_some(), "stream closed at message {message}");
     }
+}
+
+#[tokio::test]
+async fn a_connection_that_stops_answering_pings_is_closed() {
+    let address = serve(
+        limits(),
+        None,
+        Slow {
+            delay: Duration::ZERO,
+        },
+    )
+    .await;
+    let mut stream = TcpStream::connect(address).await.unwrap();
+
+    // Open an HTTP/2 connection (preface and an empty SETTINGS frame), then go
+    // silent: never acknowledge the server's SETTINGS or PINGs.
+    stream
+        .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00")
+        .await
+        .unwrap();
+
+    bounded(until_closed(stream)).await;
 }

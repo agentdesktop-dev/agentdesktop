@@ -19,12 +19,21 @@ pub struct FleetLimits {
     /// response is produced once the stream opens, so this does not end
     /// established streams such as `Connect`.
     pub request: Duration,
+    /// How often an HTTP/2 PING checks a connection, and how long an unanswered
+    /// PING waits before the connection is closed.
+    pub keepalive_interval: Duration,
+    pub keepalive_timeout: Duration,
+    /// TCP keepalive probe interval, for peers that vanish without closing.
+    pub tcp_keepalive: Duration,
 }
 
 /// Production limits.
 pub const FLEET_LIMITS: FleetLimits = FleetLimits {
     tls_handshake: Duration::from_secs(10),
     request: Duration::from_secs(30),
+    keepalive_interval: Duration::from_secs(30),
+    keepalive_timeout: Duration::from_secs(20),
+    tcp_keepalive: Duration::from_secs(60),
 };
 
 impl FleetLimits {
@@ -35,7 +44,11 @@ impl FleetLimits {
 
     /// A server builder with the fleet listener's limits applied.
     pub fn server(&self) -> Server {
-        Server::builder().timeout(self.request)
+        Server::builder()
+            .timeout(self.request)
+            .http2_keepalive_interval(Some(self.keepalive_interval))
+            .http2_keepalive_timeout(Some(self.keepalive_timeout))
+            .tcp_keepalive(Some(self.tcp_keepalive))
     }
 }
 
