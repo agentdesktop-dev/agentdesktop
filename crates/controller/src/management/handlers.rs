@@ -46,8 +46,8 @@ pub(super) async fn overview(
     auth: Context,
 ) -> Result<Json<Overview>, HandlerError> {
     auth.require(AccessRequest {
-        verb: Verb::Read,
-        resource_class: authorization::ADMIN,
+        verb: Verb::List,
+        resource_class: authorization::DEVICES,
         resource: None,
     })
     .await?;
@@ -80,8 +80,8 @@ pub(super) async fn devices(
     auth: Context,
 ) -> Result<Json<Vec<DeviceSummary>>, HandlerError> {
     auth.require(AccessRequest {
-        verb: Verb::Read,
-        resource_class: authorization::ADMIN,
+        verb: Verb::List,
+        resource_class: authorization::DEVICES,
         resource: None,
     })
     .await?;
@@ -95,7 +95,7 @@ pub(super) async fn device(
 ) -> Result<Json<DeviceDetail>, HandlerError> {
     auth.require(AccessRequest {
         verb: Verb::Read,
-        resource_class: authorization::ADMIN,
+        resource_class: authorization::DEVICES,
         resource: Some(&device_id),
     })
     .await?;
@@ -131,7 +131,7 @@ pub(super) async fn settings(
 ) -> Result<Json<Settings>, HandlerError> {
     auth.require(AccessRequest {
         verb: Verb::Read,
-        resource_class: authorization::ADMIN,
+        resource_class: authorization::SETTINGS,
         resource: None,
     })
     .await?;
@@ -145,7 +145,7 @@ pub(super) async fn usage_report(
 ) -> Result<Json<UsageReport>, HandlerError> {
     auth.require(AccessRequest {
         verb: Verb::Read,
-        resource_class: authorization::ADMIN,
+        resource_class: authorization::USAGE,
         resource: None,
     })
     .await?;
@@ -172,7 +172,7 @@ pub(super) async fn daemon_config(
 ) -> Result<Json<ActiveDaemonConfig>, HandlerError> {
     auth.require(AccessRequest {
         verb: Verb::Read,
-        resource_class: authorization::ADMIN,
+        resource_class: authorization::DAEMON_CONFIG,
         resource: None,
     })
     .await?;

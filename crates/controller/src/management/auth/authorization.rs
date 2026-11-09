@@ -45,15 +45,39 @@ impl AccessRequest<'_> {
     pub fn permission(&self) -> String {
         format!("{}.{}", self.resource_class, self.verb.as_str())
     }
+
+    /// Whether `admin.read`, the umbrella read permission, grants this operation:
+    /// every non-mutating operation in `OPERATIONS`, but no mutation and nothing
+    /// outside it (such as an extension's own reads).
+    pub fn covered_by_admin_read(&self) -> bool {
+        !self.verb.is_mutation()
+            && OPERATIONS
+                .iter()
+                .any(|&(verb, class)| verb == self.verb && class == self.resource_class)
+    }
 }
 
-/// Read access to fleet, configuration, settings and usage views.
+/// The management console. `admin.read` admits a user to it and is the umbrella read
+/// permission: it also grants every other read in `OPERATIONS`
+/// (see `AccessRequest::covered_by_admin_read`).
 pub const ADMIN: &str = "admin";
 pub const DEVICES: &str = "devices";
+pub const DAEMON_CONFIG: &str = "daemon-config";
+pub const SETTINGS: &str = "settings";
+pub const USAGE: &str = "usage";
 
 /// Every operation checked by the management handlers. Local access grants all of
 /// them; providers with their own permission catalogs can build on this list.
-pub const OPERATIONS: &[(Verb, &str)] = &[(Verb::Read, ADMIN), (Verb::Delete, DEVICES)];
+/// `admin.read` covers every read here, so a new read is granted to all its holders.
+pub const OPERATIONS: &[(Verb, &str)] = &[
+    (Verb::Read, ADMIN),
+    (Verb::List, DEVICES),
+    (Verb::Read, DEVICES),
+    (Verb::Delete, DEVICES),
+    (Verb::Read, DAEMON_CONFIG),
+    (Verb::Read, SETTINGS),
+    (Verb::Read, USAGE),
+];
 
 /// Permission names for `OPERATIONS`, as reported to the UI.
 pub fn permission_names() -> Vec<String> {

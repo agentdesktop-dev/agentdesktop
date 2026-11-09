@@ -201,7 +201,10 @@ async fn local_mode_keeps_ui_api_and_bootstrap_without_session_tables() {
     assert_eq!(info["mode"], "local");
     assert_eq!(info["authenticated"], true);
     assert_eq!(info["role"], "operator");
-    assert_eq!(info["permissions"], json!(["admin.read", "devices.delete"]));
+    assert_eq!(
+        info["permissions"],
+        json!(authorization::permission_names())
+    );
     assert_eq!(
         request(app(&auth), "/api/v1/test", Method::GET, HeaderMap::new())
             .await
@@ -353,6 +356,111 @@ async fn authenticated_configuration_is_rejected_without_a_provider() {
             .to_string()
             .contains("requires a compiled-in authentication provider")
     );
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn admin_read_covers_every_management_read_but_no_mutation() {
+    use authorization::Verb;
+
+    for (verb, resource_class, covered) in [
+        (Verb::Read, "admin", true),
+        (Verb::List, "devices", true),
+        (Verb::Read, "devices", true),
+        (Verb::Read, "daemon-config", true),
+        (Verb::Read, "settings", true),
+        (Verb::Read, "usage", true),
+        (Verb::Delete, "devices", false),
+        // Reads outside the catalog, such as an extension's policy, are not covered.
+        (Verb::Read, "rbac.policy", false),
+        (Verb::List, "settings", false),
+    ] {
+        let access = AccessRequest {
+            verb,
+            resource_class,
+            resource: Some("device-1"),
+        };
+        assert_eq!(
+            access.covered_by_admin_read(),
+            covered,
+            "{}",
+            access.permission()
+        );
+    }
+}
+
+/// Authenticates everyone and records each operation the handlers check.
+struct RecordingProvider(Arc<std::sync::Mutex<Vec<String>>>);
+
+#[async_trait]
+impl Provider for RecordingProvider {
+    fn routes(&self) -> Router {
+        Router::new()
+    }
+
+    async fn authenticate(
+        &self,
+        _headers: &HeaderMap,
+        _mode: RequestMode,
+    ) -> Result<Option<Principal>, Error> {
+        Ok(Some(Principal::local()))
+    }
+
+    async fn check(
+        &self,
+        _principal: &Principal,
+        _headers: &HeaderMap,
+        access: AccessRequest<'_>,
+    ) -> Result<(), Error> {
+        self.0.lock().unwrap().push(match access.resource {
+            Some(resource) => format!("{} {resource}", access.permission()),
+            None => access.permission(),
+        });
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn management_routes_check_precise_operations() {
+    let (database, path) = database().await;
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = super::super::router(
+        state(database),
+        None,
+        &authenticated_access(),
+        super::super::Extensions {
+            authentication: Some(Arc::new(RecordingProvider(calls.clone()))),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for (method, path, expected) in [
+        (Method::GET, "/api/v1/overview", "devices.list"),
+        (Method::GET, "/api/v1/devices", "devices.list"),
+        (
+            Method::GET,
+            "/api/v1/devices/device-1",
+            "devices.read device-1",
+        ),
+        (
+            Method::DELETE,
+            "/api/v1/devices/device-1",
+            "devices.delete device-1",
+        ),
+        (Method::GET, "/api/v1/daemon-config", "daemon-config.read"),
+        (Method::GET, "/api/v1/settings", "settings.read"),
+        (Method::GET, "/api/v1/usage", "usage.read"),
+        (Method::GET, "/devices", "admin.read"),
+    ] {
+        let mut headers = HeaderMap::new();
+        headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+        request(router.clone(), path, method.clone(), headers).await;
+        assert_eq!(
+            calls.lock().unwrap().drain(..).collect::<Vec<_>>(),
+            [expected],
+            "{method} {path}"
+        );
+    }
     std::fs::remove_file(path).unwrap();
 }
 
