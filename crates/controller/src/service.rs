@@ -317,15 +317,20 @@ impl FleetAgent for FleetAgentService {
                         break;
                     }
                     let daemon = daemon_updates.borrow_and_update().clone();
-                    if let Some(daemon) = daemon
-                        && auth_sender
-                            .send(Ok(ControllerMessage {
-                                message: Some(controller_message::Message::DaemonConfig(daemon)),
-                            }))
-                            .await
-                            .is_err()
-                    {
-                        break;
+                    if let Some(daemon) = daemon {
+                        // Sends in this loop never wait for room: a device that
+                        // stopped reading would hold the task, and the session,
+                        // forever.
+                        match auth_sender.try_send(Ok(ControllerMessage {
+                            message: Some(controller_message::Message::DaemonConfig(daemon)),
+                        })) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                warn!(device_id = %authenticated_device_id, "closing stream after the device stopped reading it");
+                                break;
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => break,
+                        }
                     }
                 }
                 _ = auth_interval.tick() => {
@@ -335,8 +340,7 @@ impl FleetAgent for FleetAgentService {
                         Ok(_) => {
                             warn!(device_id = %authenticated_device_id, "closing stream after OIDC principal changed");
                             let _ = auth_sender
-                                .send(Err(Status::permission_denied("OIDC principal changed")))
-                                .await;
+                                .try_send(Err(Status::permission_denied("OIDC principal changed")));
                             break;
                         }
                         Err(error) => {
@@ -346,7 +350,7 @@ impl FleetAgent for FleetAgentService {
                                 continue;
                             }
                             warn!(device_id = %authenticated_device_id, "closing stream after OIDC access token revalidation failed");
-                            let _ = auth_sender.send(Err(status)).await;
+                            let _ = auth_sender.try_send(Err(status));
                             break;
                         }
                     }
@@ -354,8 +358,7 @@ impl FleetAgent for FleetAgentService {
                 _ = &mut device_stream.superseded => {
                     info!(device_id = %authenticated_device_id, "closing stream replaced by a newer stream from the same device");
                     let _ = auth_sender
-                        .send(Err(Status::aborted("replaced by a newer stream from this device")))
-                        .await;
+                        .try_send(Err(Status::aborted("replaced by a newer stream from this device")));
                     break;
                 }
                 message = inbound.message() => match message {
@@ -363,8 +366,7 @@ impl FleetAgent for FleetAgentService {
                         if !device_stream.take_message(time::Instant::now()) {
                             warn!(device_id = %authenticated_device_id, "closing stream after the device exceeded its message rate");
                             let _ = auth_sender
-                                .send(Err(Status::resource_exhausted("too many messages on this stream")))
-                                .await;
+                                .try_send(Err(Status::resource_exhausted("too many messages on this stream")));
                             break;
                         }
                         if let Some(agent_message::Message::Hello(hello)) = &message.message
@@ -376,8 +378,7 @@ impl FleetAgent for FleetAgentService {
                                 "device certificate and hello identity do not match"
                             );
                             let _ = auth_sender
-                                .send(Err(Status::permission_denied("hello does not match the device certificate")))
-                                .await;
+                                .try_send(Err(Status::permission_denied("hello does not match the device certificate")));
                             break;
                         }
                         if let Err(err) =
