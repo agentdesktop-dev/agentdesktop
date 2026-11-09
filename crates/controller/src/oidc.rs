@@ -22,6 +22,11 @@ use url::Url;
 const ENROLLMENT_LIFETIME: Duration = Duration::from_secs(10 * 60);
 const MAX_PENDING_ENROLLMENTS: usize = 1024;
 const JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+/// Longest the controller waits for an identity provider request. Without a
+/// limit, an IdP that accepts the connection and never answers stalls whatever
+/// waits on it: an enrollment until the fleet request timeout cancels it, or a
+/// device's `Connect` stream at its periodic access-token check.
+const IDP_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const JWKS_REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
 const ENROLLMENT_SCOPE: &str = "openid profile email offline_access";
 // RFC 8628 section 3.2: clients poll every five seconds unless told otherwise.
@@ -153,7 +158,7 @@ impl OidcProvider {
         redirect_uri: String,
     ) -> anyhow::Result<Self> {
         let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
-        let http = reqwest::Client::new();
+        let http = idp_client(IDP_REQUEST_TIMEOUT)?;
         let discovery_url = format!(
             "{}/.well-known/openid-configuration",
             issuer.trim_end_matches('/')
@@ -490,6 +495,15 @@ impl JwksCache {
             .find(kid)
             .cloned()
     }
+}
+
+/// The HTTP client for identity provider requests, which gives up on any one
+/// request after `timeout`.
+fn idp_client(timeout: Duration) -> anyhow::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .context("build identity provider HTTP client")
 }
 
 async fn refresh_jwks(http: &reqwest::Client, uri: &Url) -> anyhow::Result<JwkSet> {
@@ -887,6 +901,43 @@ mod tests {
             provider.inner.pending.lock().await.is_empty(),
             "the cancelled request's reservation must be released"
         );
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn an_identity_provider_that_never_answers_times_out() {
+        // An IdP that accepts the connection and never answers.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind silent IdP listener");
+        let mut inner = Arc::into_inner(provider(None).inner).expect("sole owner");
+        inner.userinfo_endpoint = format!(
+            "http://{}/userinfo",
+            listener.local_addr().expect("silent IdP local addr")
+        )
+        .parse()
+        .expect("parse silent IdP URL");
+        inner.http = super::idp_client(Duration::from_millis(200)).expect("build IdP client");
+        let provider = OidcProvider {
+            inner: Arc::new(inner),
+        };
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            provider.authenticate_access_token("token"),
+        )
+        .await
+        .expect("the UserInfo request was not bounded")
+        .expect_err("the silent IdP answered");
+
+        // A request error without an HTTP status, which `Connect` treats as the
+        // IdP being unavailable and keeps the stream.
+        let request_error = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
+            .expect("a request error");
+        assert!(request_error.is_timeout(), "{error:#}");
+        assert!(request_error.status().is_none(), "{error:#}");
         drop(listener);
     }
 
