@@ -9,7 +9,6 @@ use crate::{
     service::FleetAgentService,
 };
 use agentdesktop_core::config::ControllerConfig;
-use agentdesktop_proto::fleet::fleet_agent_server::FleetAgentServer;
 use agentdesktop_usage::UsageIngest;
 use anyhow::Context;
 use tonic::{
@@ -139,7 +138,7 @@ pub async fn run(
     tracing::info!(listen = %fleet_listen, "fleet controller listening");
     let fleet = async move {
         let mut routes = Routes::from(gateway_jwt::routes(gateway_jwks))
-            .add_service(FleetAgentServer::new(service));
+            .add_service(FLEET_LIMITS.fleet_service(service));
         if let Some(usage_ingest) = usage_ingest {
             routes = routes.add_service(usage_ingest);
         }

@@ -4,9 +4,8 @@ use agentdesktop_proto::fleet::{
     AgentMessage, BeginEnrollmentRequest, BeginEnrollmentResponse, CompleteEnrollmentRequest,
     ControllerMessage, DeviceCertificateResponse, DeviceUsageRequest, DeviceUsageResponse,
     EnrollResponse, LlmGatewayCredentialRequest, LlmGatewayCredentialResponse,
-    RenewDeviceCertificateRequest,
-    fleet_agent_client::FleetAgentClient,
-    fleet_agent_server::{FleetAgent, FleetAgentServer},
+    RenewDeviceCertificateRequest, fleet_agent_client::FleetAgentClient,
+    fleet_agent_server::FleetAgent,
 };
 use futures_core::Stream;
 use tokio::{
@@ -118,7 +117,7 @@ async fn serve(limits: FleetLimits, identity: Option<Identity>, service: Slow) -
             .tls_config(limits.tls(ServerTlsConfig::new().identity(identity)))
             .unwrap();
     }
-    let router = server.add_service(FleetAgentServer::new(service));
+    let router = server.add_service(limits.fleet_service(service));
     tokio::spawn(router.serve_with_incoming(TcpIncoming::from(listener)));
     address
 }
@@ -274,4 +273,68 @@ async fn streams_beyond_the_per_connection_limit_wait() {
         elapsed >= Duration::from_millis(950),
         "ran concurrently: {elapsed:?}"
     );
+}
+
+fn small_messages() -> FleetLimits {
+    let mut limits = limits();
+    limits.max_message_bytes = 1024;
+    limits.enrollment_message_bytes = 128;
+    limits
+}
+
+#[tokio::test]
+async fn an_oversized_enrollment_request_is_rejected() {
+    let address = serve(
+        small_messages(),
+        None,
+        Slow {
+            delay: Duration::ZERO,
+        },
+    )
+    .await;
+
+    let error = bounded(
+        client(address)
+            .await
+            .begin_enrollment(BeginEnrollmentRequest {
+                hostname: "h".repeat(512),
+                ..Default::default()
+            }),
+    )
+    .await
+    .expect_err("an oversized enrollment request was accepted");
+
+    assert_eq!(error.code(), Code::OutOfRange, "{error}");
+}
+
+#[tokio::test]
+async fn device_calls_keep_the_larger_message_limit() {
+    let address = serve(
+        small_messages(),
+        None,
+        Slow {
+            delay: Duration::ZERO,
+        },
+    )
+    .await;
+    let mut client = client(address).await;
+
+    // Over the enrollment limit but within the device limit: reaches the handler.
+    let within = bounded(
+        client.renew_device_certificate(RenewDeviceCertificateRequest {
+            certificate_signing_request_der: vec![0; 512],
+        }),
+    )
+    .await
+    .expect_err("the test service rejects every renewal");
+    assert_eq!(within.code(), Code::Unimplemented, "{within}");
+
+    let over = bounded(
+        client.renew_device_certificate(RenewDeviceCertificateRequest {
+            certificate_signing_request_der: vec![0; 4096],
+        }),
+    )
+    .await
+    .expect_err("an oversized device request was accepted");
+    assert_eq!(over.code(), Code::OutOfRange, "{over}");
 }
