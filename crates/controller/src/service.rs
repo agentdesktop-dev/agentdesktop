@@ -278,27 +278,12 @@ impl FleetAgent for FleetAgentService {
                 .map_err(|_| Status::unavailable("stream closed"))?;
         }
 
-        let update_sender = sender.clone();
-        tokio::spawn(async move {
-            while daemon_updates.changed().await.is_ok() {
-                let daemon = daemon_updates.borrow().clone();
-                let Some(daemon) = daemon else {
-                    continue;
-                };
-                if update_sender
-                    .send(Ok(ControllerMessage {
-                        message: Some(controller_message::Message::DaemonConfig(daemon)),
-                    }))
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
-
+        // One task owns the response stream: it ends when the device's request
+        // stream ends, the device goes away, or the stream is closed for cause.
+        // Config pushes are forwarded from the same loop, so no other task keeps
+        // the response open.
         let database = self.database.clone();
-        let auth_sender = sender.clone();
+        let auth_sender = sender;
         let mut device_stream = self.device_streams.open(&authenticated_device_id);
         let mut message_budget = FLEET_LIMITS.stream_messages();
         tokio::spawn(async move {
@@ -314,6 +299,23 @@ impl FleetAgent for FleetAgentService {
             auth_interval.tick().await;
             loop {
                 tokio::select! {
+                _ = auth_sender.closed() => break,
+                changed = daemon_updates.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    let daemon = daemon_updates.borrow_and_update().clone();
+                    if let Some(daemon) = daemon
+                        && auth_sender
+                            .send(Ok(ControllerMessage {
+                                message: Some(controller_message::Message::DaemonConfig(daemon)),
+                            }))
+                            .await
+                            .is_err()
+                    {
+                        break;
+                    }
+                }
                 _ = auth_interval.tick() => {
                     let (oidc, access_token) = &oauth_revalidation;
                     match oidc.authenticate_access_token(access_token).await {
@@ -361,6 +363,9 @@ impl FleetAgent for FleetAgentService {
                                 claimed_device_id = %hello.device_id,
                                 "device certificate and hello identity do not match"
                             );
+                            let _ = auth_sender
+                                .send(Err(Status::permission_denied("hello does not match the device certificate")))
+                                .await;
                             break;
                         }
                         if let Err(err) =
