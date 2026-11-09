@@ -84,11 +84,15 @@ pub struct FleetLimits {
     /// once across all clients. Enrollment calls the identity provider, so this
     /// also bounds the load a flood can put on it.
     pub enrollment_in_flight: usize,
-    /// Per-client-address enrollment budget: up to `enrollment_burst` requests at
-    /// once, refilled at one request per `enrollment_refill`. Generous, because
-    /// many devices can share one address behind NAT.
+    /// Per-client-address `BeginEnrollment` budget: up to `enrollment_burst`
+    /// requests at once, refilled at one request per `enrollment_refill`.
+    /// Generous, because many devices can share one address behind NAT.
     pub enrollment_burst: u32,
     pub enrollment_refill: Duration,
+    /// How long `CompleteEnrollment` waits for an in-flight slot before it is
+    /// refused. It waits rather than failing at once because the user has
+    /// already signed in, and a refusal makes them start over.
+    pub enrollment_completion_wait: Duration,
     /// Messages a device may send on its `Connect` streams: up to
     /// `stream_message_burst` at once, refilled at one per
     /// `stream_message_refill`. The budget belongs to the device, so
@@ -122,6 +126,7 @@ pub const FLEET_LIMITS: FleetLimits = FleetLimits {
     enrollment_in_flight: 64,
     enrollment_burst: 60,
     enrollment_refill: Duration::from_secs(1),
+    enrollment_completion_wait: Duration::from_secs(10),
     stream_message_burst: 600,
     stream_message_refill: Duration::from_millis(50),
     stream_open_burst: 20,
@@ -267,6 +272,7 @@ pub struct EnrollmentLimiter {
     peers: Arc<Mutex<PeerBuckets>>,
     burst: f64,
     refill: Duration,
+    completion_wait: Duration,
 }
 
 /// Enrollment buckets by address, in two generations. When the current
@@ -315,10 +321,11 @@ impl EnrollmentLimiter {
             peers: Arc::default(),
             burst: f64::from(limits.enrollment_burst),
             refill: limits.enrollment_refill,
+            completion_wait: limits.enrollment_completion_wait,
         }
     }
 
-    /// Admits one enrollment request from `peer`, or rejects it with
+    /// Admits one `BeginEnrollment` from `peer`, or rejects it with
     /// `RESOURCE_EXHAUSTED`. Hold the returned permit until the request finishes.
     pub fn admit(&self, peer: Option<SocketAddr>) -> Result<OwnedSemaphorePermit, Status> {
         if let Some(peer) = peer
@@ -333,6 +340,24 @@ impl EnrollmentLimiter {
             tracing::warn!("enrollment concurrency limit reached");
             Status::resource_exhausted("too many enrollment requests in progress; retry later")
         })
+    }
+
+    /// Admits one `CompleteEnrollment`, waiting up to `enrollment_completion_wait`
+    /// for an in-flight slot. It does not spend the address's budget: completing
+    /// needs an enrollment that `BeginEnrollment` started (and paid for), and each
+    /// enrollment completes at most once, so an unknown one fails at a lookup.
+    pub async fn admit_completion(&self) -> Result<OwnedSemaphorePermit, Status> {
+        match tokio::time::timeout(self.completion_wait, self.in_flight.clone().acquire_owned())
+            .await
+        {
+            Ok(Ok(permit)) => Ok(permit),
+            _ => {
+                tracing::warn!("enrollment concurrency limit reached");
+                Err(Status::resource_exhausted(
+                    "too many enrollment requests in progress; retry later",
+                ))
+            }
+        }
     }
 
     fn take(&self, peer: IpAddr, now: Instant) -> bool {

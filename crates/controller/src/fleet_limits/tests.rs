@@ -713,6 +713,51 @@ mod enrollment {
     }
 
     #[tokio::test]
+    async fn completing_an_enrollment_does_not_spend_the_address_budget() {
+        let limiter = limits(64, 1).enrollment();
+        let address = Some(SocketAddr::new(peer(1), 4000));
+        let _begin = limiter.admit(address).expect("begin");
+
+        let _complete = limiter.admit_completion().await.expect("complete");
+    }
+
+    fn one_slot(completion_wait: Duration) -> FleetLimits {
+        FleetLimits {
+            enrollment_completion_wait: completion_wait,
+            ..limits(1, 60)
+        }
+    }
+
+    #[tokio::test]
+    async fn completing_an_enrollment_waits_for_a_slot() {
+        let limiter = one_slot(Duration::from_secs(5)).enrollment();
+        let begin = limiter.admit(None).expect("begin");
+        let waiting = tokio::spawn({
+            let limiter = limiter.clone();
+            async move { limiter.admit_completion().await.map(drop) }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!waiting.is_finished(), "completion did not wait");
+
+        drop(begin);
+
+        waiting
+            .await
+            .unwrap()
+            .expect("completion admitted once a slot freed");
+    }
+
+    #[tokio::test]
+    async fn completing_an_enrollment_gives_up_after_the_wait() {
+        let limiter = one_slot(Duration::from_millis(50)).enrollment();
+        let _begin = limiter.admit(None).expect("begin");
+
+        let error = limiter.admit_completion().await.expect_err("admitted");
+
+        assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+    }
+
+    #[tokio::test]
     async fn requests_without_a_peer_address_still_count_against_the_cap() {
         let limiter = limits(1, 60).enrollment();
 

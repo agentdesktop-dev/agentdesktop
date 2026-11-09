@@ -103,7 +103,7 @@ impl FleetAgent for FleetAgentService {
         &self,
         request: Request<CompleteEnrollmentRequest>,
     ) -> Result<Response<EnrollResponse>, Status> {
-        let _admitted = self.enrollment.admit(request.remote_addr())?;
+        let _admitted = self.enrollment.admit_completion().await?;
         let oidc = self
             .oidc
             .as_ref()
@@ -722,6 +722,7 @@ mod tests {
             .expect("connect database");
         let full = FleetLimits {
             enrollment_in_flight: 0,
+            enrollment_completion_wait: std::time::Duration::from_millis(10),
             ..FLEET_LIMITS
         };
         let service =
