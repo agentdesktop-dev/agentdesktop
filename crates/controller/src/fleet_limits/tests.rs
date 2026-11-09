@@ -221,3 +221,57 @@ async fn a_connection_that_stops_answering_pings_is_closed() {
 
     bounded(until_closed(stream)).await;
 }
+
+/// How long two concurrent half-second calls take on one connection.
+async fn two_calls_on_one_connection(limits: FleetLimits) -> Duration {
+    let delay = Duration::from_millis(500);
+    let address = serve(limits, None, Slow { delay }).await;
+    let mut client = client(address).await;
+    // One quick call first, so the HTTP/2 SETTINGS exchange (which carries the
+    // stream limit) has completed before the measured calls.
+    let _ = client.get_device_usage(DeviceUsageRequest::default()).await;
+    let (mut first, mut second) = (client.clone(), client);
+    let started = time::Instant::now();
+    let (a, b) = bounded(async {
+        tokio::join!(
+            first.begin_enrollment(BeginEnrollmentRequest::default()),
+            second.begin_enrollment(BeginEnrollmentRequest::default()),
+        )
+    })
+    .await;
+    a.unwrap();
+    b.unwrap();
+    started.elapsed()
+}
+
+fn one_at_a_time() -> FleetLimits {
+    let mut limits = limits();
+    limits.request = Duration::from_secs(5);
+    limits
+}
+
+#[tokio::test]
+async fn requests_beyond_the_per_connection_limit_wait() {
+    let mut limits = one_at_a_time();
+    limits.requests_per_connection = 1;
+
+    let elapsed = two_calls_on_one_connection(limits).await;
+
+    assert!(
+        elapsed >= Duration::from_millis(950),
+        "ran concurrently: {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn streams_beyond_the_per_connection_limit_wait() {
+    let mut limits = one_at_a_time();
+    limits.streams_per_connection = 1;
+
+    let elapsed = two_calls_on_one_connection(limits).await;
+
+    assert!(
+        elapsed >= Duration::from_millis(950),
+        "ran concurrently: {elapsed:?}"
+    );
+}

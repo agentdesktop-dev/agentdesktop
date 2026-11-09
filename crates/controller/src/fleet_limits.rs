@@ -25,6 +25,11 @@ pub struct FleetLimits {
     pub keepalive_timeout: Duration,
     /// TCP keepalive probe interval, for peers that vanish without closing.
     pub tcp_keepalive: Duration,
+    /// Concurrent requests one connection may have in progress, and concurrent
+    /// HTTP/2 streams it may open. Further requests wait, so one connection
+    /// cannot occupy an unbounded share of the server.
+    pub requests_per_connection: usize,
+    pub streams_per_connection: u32,
 }
 
 /// Production limits.
@@ -34,6 +39,8 @@ pub const FLEET_LIMITS: FleetLimits = FleetLimits {
     keepalive_interval: Duration::from_secs(30),
     keepalive_timeout: Duration::from_secs(20),
     tcp_keepalive: Duration::from_secs(60),
+    requests_per_connection: 32,
+    streams_per_connection: 64,
 };
 
 impl FleetLimits {
@@ -49,6 +56,8 @@ impl FleetLimits {
             .http2_keepalive_interval(Some(self.keepalive_interval))
             .http2_keepalive_timeout(Some(self.keepalive_timeout))
             .tcp_keepalive(Some(self.tcp_keepalive))
+            .concurrency_limit_per_connection(self.requests_per_connection)
+            .max_concurrent_streams(self.streams_per_connection)
     }
 }
 
