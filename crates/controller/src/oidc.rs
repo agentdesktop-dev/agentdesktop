@@ -32,6 +32,39 @@ pub struct OidcProvider {
     inner: Arc<Inner>,
 }
 
+/// A pending enrollment that [`OidcProvider::begin_device`] reserved before
+/// contacting the IdP. Dropping it releases the reservation: when the IdP call
+/// or its response fails, and when the request is cancelled while it waits (by
+/// the fleet request timeout or a client that disconnects). Already-removed
+/// (expired and pruned, or raced with a concurrent completion) is not an error.
+struct Reservation {
+    provider: Option<Arc<Inner>>,
+    enrollment_id: String,
+}
+
+impl Reservation {
+    /// Keeps the reservation, now that the device has its grant.
+    fn keep(mut self) {
+        self.provider = None;
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        let Some(provider) = self.provider.take() else {
+            return;
+        };
+        let enrollment_id = std::mem::take(&mut self.enrollment_id);
+        if let Ok(mut pending) = provider.pending.try_lock() {
+            pending.remove(&enrollment_id);
+        } else {
+            tokio::spawn(async move {
+                provider.pending.lock().await.remove(&enrollment_id);
+            });
+        }
+    }
+}
+
 struct Inner {
     issuer: String,
     client_id: String,
@@ -226,21 +259,20 @@ impl OidcProvider {
         // afterwards, on the insert. The reservation uses ENROLLMENT_LIFETIME as a
         // placeholder expiry — the real, possibly shorter, device lifetime isn't known
         // until the IdP responds — and is narrowed below once it is, or dropped
-        // entirely if the IdP call or the response fails.
+        // entirely if the IdP call or the response fails, or the request is
+        // cancelled while it waits.
         let enrollment_id = random_secret();
         self.insert_pending(enrollment_id.clone(), hostname, None, ENROLLMENT_LIFETIME)
             .await?;
+        let reservation = Reservation {
+            provider: Some(self.inner.clone()),
+            enrollment_id: enrollment_id.clone(),
+        };
 
-        match self.request_device_grant(&enrollment_id, endpoint).await {
-            Ok((response, lifetime)) => {
-                self.set_pending_expiry(&enrollment_id, lifetime).await;
-                Ok(response)
-            }
-            Err(error) => {
-                self.release_pending(&enrollment_id).await;
-                Err(error)
-            }
-        }
+        let (response, lifetime) = self.request_device_grant(&enrollment_id, endpoint).await?;
+        self.set_pending_expiry(&enrollment_id, lifetime).await;
+        reservation.keep();
+        Ok(response)
     }
 
     /// The IdP round-trip and response validation for [`begin_device`], split out so
@@ -298,13 +330,6 @@ impl OidcProvider {
             },
         );
         Ok(())
-    }
-
-    /// Drops a reservation [`insert_pending`] made, e.g. because the IdP request or
-    /// response validation that was supposed to fill it in failed. Already-removed
-    /// (expired and pruned, or raced with a concurrent completion) is not an error.
-    async fn release_pending(&self, enrollment_id: &str) {
-        self.inner.pending.lock().await.remove(enrollment_id);
     }
 
     /// Narrows a reservation's expiry to the real device-grant lifetime once the IdP
@@ -835,6 +860,34 @@ mod tests {
             "the reservation must be released, not left occupying a slot"
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn begin_device_releases_the_reservation_when_the_request_is_cancelled() {
+        // An IdP that accepts the connection and never answers.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind silent IdP listener");
+        let endpoint = format!(
+            "http://{}/device",
+            listener.local_addr().expect("silent IdP local addr")
+        )
+        .parse()
+        .expect("parse silent IdP URL");
+        let provider = provider(Some(endpoint));
+
+        let cancelled = tokio::time::timeout(
+            Duration::from_millis(200),
+            provider.begin_device("new-host".to_owned()),
+        )
+        .await;
+
+        assert!(cancelled.is_err(), "the silent IdP answered");
+        assert!(
+            provider.inner.pending.lock().await.is_empty(),
+            "the cancelled request's reservation must be released"
+        );
+        drop(listener);
     }
 
     #[tokio::test]
