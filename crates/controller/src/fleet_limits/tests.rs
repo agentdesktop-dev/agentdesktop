@@ -595,6 +595,50 @@ async fn a_connection_idle_after_its_last_request_is_closed() {
 }
 
 #[tokio::test]
+async fn a_response_the_client_never_accepts_does_not_keep_its_connection_busy() {
+    let mut limits = limits();
+    limits.first_request = Duration::from_secs(5);
+    limits.idle_connection = Duration::from_millis(200);
+    let (address, connections) = serve_tracked(
+        limits,
+        None,
+        Slow {
+            delay: Duration::ZERO,
+        },
+    )
+    .await;
+    // A client that grants no HTTP/2 flow-control window, so the server can
+    // never send it a response body. It still answers keepalive PINGs.
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+        .unwrap()
+        .initial_stream_window_size(0)
+        .connect()
+        .await
+        .unwrap();
+    let mut stalled = FleetAgentClient::new(channel);
+    let call = tokio::spawn(async move {
+        stalled
+            .begin_enrollment(BeginEnrollmentRequest::default())
+            .await
+    });
+    bounded(async {
+        while connections.open_count() == 0 {
+            time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+
+    bounded(async {
+        while connections.open_count() > 0 {
+            time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    let response = bounded(call).await.unwrap();
+    assert!(response.is_err(), "the stalled response was delivered");
+}
+
+#[tokio::test]
 async fn an_open_stream_keeps_its_connection_from_going_idle() {
     let mut limits = limits();
     limits.request = Duration::from_secs(5);

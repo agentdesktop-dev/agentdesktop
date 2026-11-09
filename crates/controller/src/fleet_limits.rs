@@ -232,6 +232,14 @@ fn is_enrollment(path: &str) -> bool {
         .is_some_and(|method| matches!(method, "/BeginEnrollment" | "/CompleteEnrollment"))
 }
 
+/// Whether `path` is the `Connect` stream, whose response lasts as long as the
+/// device's session.
+fn is_connect(path: &str) -> bool {
+    path.strip_prefix('/')
+        .and_then(|path| path.strip_prefix(SERVICE_NAME))
+        .is_some_and(|method| method == "/Connect")
+}
+
 /// Whether the TLS client presented a certificate signed by the device CA
 /// (the handshake rejects any other).
 fn has_device_certificate<B>(request: &http::Request<B>) -> bool {

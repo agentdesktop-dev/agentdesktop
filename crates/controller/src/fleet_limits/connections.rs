@@ -12,6 +12,11 @@
 //! an open `Connect` stream, is never idle. When the total cap is reached, the
 //! longest-idle connection is closed to make room instead of refusing the new
 //! one, so idle connections cannot crowd out devices that are using theirs.
+//!
+//! A request other than `Connect` is in progress only while its handler runs,
+//! not while its response is sent. Otherwise a client could keep a connection
+//! busy forever by granting no HTTP/2 flow-control window, so that the server
+//! can never send it the response body.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -42,7 +47,7 @@ use tonic::{
 };
 use tower_layer::Layer;
 
-use super::{FleetLimits, ThrottledWarning, address_key};
+use super::{FleetLimits, ThrottledWarning, address_key, is_connect};
 
 static TOTAL_CAP: ThrottledWarning = ThrottledWarning::new();
 static PER_ADDRESS_CAP: ThrottledWarning = ThrottledWarning::new();
@@ -444,8 +449,8 @@ impl AsyncWrite for LimitedConnection {
     }
 }
 
-/// Marks the connection busy until the request's response has been fully sent
-/// (for `Connect`, until the stream ends).
+/// Marks the connection busy while a request's handler runs, and for `Connect`
+/// until its stream ends.
 struct RequestGuard {
     connections: Connections,
     peer: SocketAddr,
@@ -523,18 +528,25 @@ where
 
     fn call(&mut self, request: http::Request<Body>) -> Self::Future {
         let guard = remote_addr(&request).and_then(|peer| self.connections.start_request(peer));
+        let session = is_connect(request.uri().path());
         let response = self.inner.call(request);
         Box::pin(async move {
             let response = response.await?;
-            Ok(match guard {
-                Some(guard) => response.map(|body| {
+            match guard {
+                // The stream is the device's session: keep the connection busy
+                // until it ends.
+                Some(guard) if session => Ok(response.map(|body| {
                     Body::new(TrackedBody {
                         inner: body,
                         _guard: guard,
                     })
-                }),
-                None => response,
-            })
+                })),
+                // Any other response is done once its handler returns.
+                guard => {
+                    drop(guard);
+                    Ok(response)
+                }
+            }
         })
     }
 }
