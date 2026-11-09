@@ -622,6 +622,18 @@ async fn an_open_stream_keeps_its_connection_from_going_idle() {
     }
 }
 
+#[test]
+fn a_repeated_warning_is_logged_once_per_interval_with_its_count() {
+    let warning = super::ThrottledWarning::new();
+    let start = tokio::time::Instant::now();
+
+    assert_eq!(warning.event(start), Some(1));
+    assert_eq!(warning.event(start + Duration::from_secs(1)), None);
+    assert_eq!(warning.event(start + Duration::from_secs(9)), None);
+    assert_eq!(warning.event(start + Duration::from_secs(10)), Some(3));
+    assert_eq!(warning.event(start + Duration::from_secs(11)), None);
+}
+
 mod enrollment {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 

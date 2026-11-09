@@ -331,15 +331,21 @@ impl EnrollmentLimiter {
         if let Some(peer) = peer
             && !self.take(peer.ip(), Instant::now())
         {
-            tracing::warn!(peer = %address_key(peer.ip()), "enrollment rate limit exceeded");
+            if let Some(events) = ENROLLMENT_RATE.event(Instant::now()) {
+                tracing::warn!(
+                    peer = %address_key(peer.ip()),
+                    events,
+                    "refused enrollment requests over the per-address rate limit"
+                );
+            }
             return Err(Status::resource_exhausted(
                 "too many enrollment requests from this address; retry later",
             ));
         }
-        self.in_flight.clone().try_acquire_owned().map_err(|_| {
-            tracing::warn!("enrollment concurrency limit reached");
-            Status::resource_exhausted("too many enrollment requests in progress; retry later")
-        })
+        self.in_flight
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| in_flight_refusal())
     }
 
     /// Admits one `CompleteEnrollment`, waiting up to `enrollment_completion_wait`
@@ -351,12 +357,7 @@ impl EnrollmentLimiter {
             .await
         {
             Ok(Ok(permit)) => Ok(permit),
-            _ => {
-                tracing::warn!("enrollment concurrency limit reached");
-                Err(Status::resource_exhausted(
-                    "too many enrollment requests in progress; retry later",
-                ))
-            }
+            _ => Err(in_flight_refusal()),
         }
     }
 
@@ -371,6 +372,16 @@ impl EnrollmentLimiter {
         );
         take_token(bucket, now, self.refill, self.burst)
     }
+}
+
+fn in_flight_refusal() -> Status {
+    if let Some(events) = ENROLLMENT_IN_FLIGHT.event(Instant::now()) {
+        tracing::warn!(
+            events,
+            "refused enrollment requests with every in-flight slot taken"
+        );
+    }
+    Status::resource_exhausted("too many enrollment requests in progress; retry later")
 }
 
 /// Refills `bucket` for the time since its last use, then takes one token.
@@ -466,7 +477,13 @@ impl DeviceStreams {
         if admitted {
             Ok(())
         } else {
-            tracing::warn!(device_id, "device opened Connect streams too often");
+            if let Some(events) = STREAM_OPENS.event(Instant::now()) {
+                tracing::warn!(
+                    device_id,
+                    events,
+                    "refused Connect streams from devices that open them too often"
+                );
+            }
             Err(Status::resource_exhausted(
                 "this device opened too many streams; retry later",
             ))
@@ -529,6 +546,50 @@ fn refilled(bucket: Bucket, now: Instant, refill: Duration, burst: f64) -> f64 {
     let elapsed = now.saturating_duration_since(bucket.updated);
     (bucket.tokens + elapsed.as_secs_f64() / refill.as_secs_f64()).min(burst)
 }
+
+/// A warning that fires once per refused request or connection. A flood would
+/// log a line per event, so this logs at most one per `WARNING_INTERVAL` and
+/// says how many events it stands for.
+pub(crate) struct ThrottledWarning {
+    state: Mutex<WarningState>,
+}
+
+struct WarningState {
+    last: Option<Instant>,
+    events: u64,
+}
+
+const WARNING_INTERVAL: Duration = Duration::from_secs(10);
+
+impl ThrottledWarning {
+    pub(crate) const fn new() -> Self {
+        Self {
+            state: Mutex::new(WarningState {
+                last: None,
+                events: 0,
+            }),
+        }
+    }
+
+    /// Counts one event. Returns the number of events since the last warning,
+    /// including this one, when it is time to log another.
+    pub(crate) fn event(&self, now: Instant) -> Option<u64> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.events += 1;
+        if state
+            .last
+            .is_some_and(|last| now.saturating_duration_since(last) < WARNING_INTERVAL)
+        {
+            return None;
+        }
+        state.last = Some(now);
+        Some(std::mem::take(&mut state.events))
+    }
+}
+
+static ENROLLMENT_RATE: ThrottledWarning = ThrottledWarning::new();
+static ENROLLMENT_IN_FLIGHT: ThrottledWarning = ThrottledWarning::new();
+static STREAM_OPENS: ThrottledWarning = ThrottledWarning::new();
 
 #[cfg(test)]
 mod tests;

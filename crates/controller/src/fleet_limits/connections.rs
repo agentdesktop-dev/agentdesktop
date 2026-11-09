@@ -42,7 +42,11 @@ use tonic::{
 };
 use tower_layer::Layer;
 
-use super::{FleetLimits, address_key};
+use super::{FleetLimits, ThrottledWarning, address_key};
+
+static TOTAL_CAP: ThrottledWarning = ThrottledWarning::new();
+static PER_ADDRESS_CAP: ThrottledWarning = ThrottledWarning::new();
+static EVICTIONS: ThrottledWarning = ThrottledWarning::new();
 
 /// Open fleet connections and their request activity, shared by the listener
 /// (which admits, times out and evicts connections) and the request layer (which
@@ -195,15 +199,24 @@ impl Connections {
         let peer = stream.peer_addr().ok()?;
         let mut state = self.state();
         if state.open.len() >= self.shared.max_connections && !state.evict_idle() {
-            tracing::debug!(
-                "fleet connection limit reached and no connection is idle; closing connection"
-            );
+            if let Some(events) = TOTAL_CAP.event(Instant::now()) {
+                tracing::warn!(
+                    events,
+                    "closed new fleet connections at the connection limit with no connection idle"
+                );
+            }
             return None;
         }
         let address = address_key(peer.ip());
         let count = state.per_address.entry(address).or_default();
         if *count >= self.shared.connections_per_address {
-            tracing::debug!(%address, "per-address fleet connection limit reached; closing connection");
+            if let Some(events) = PER_ADDRESS_CAP.event(Instant::now()) {
+                tracing::warn!(
+                    %address,
+                    events,
+                    "closed new fleet connections over the per-address connection limit"
+                );
+            }
             return None;
         }
         *count += 1;
@@ -323,7 +336,12 @@ impl LimitedConnection {
         {
             self.evicted = None;
             self.closed = true;
-            tracing::debug!(peer = %self.peer, "evicted idle fleet connection to make room");
+            if let Some(events) = EVICTIONS.event(Instant::now()) {
+                tracing::warn!(
+                    events,
+                    "closed idle fleet connections to make room at the connection limit"
+                );
+            }
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "idle fleet connection evicted",
