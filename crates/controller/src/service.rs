@@ -22,6 +22,7 @@ use crate::{
     daemon_config::DaemonConfigStore,
     database::{Database, DevicePrincipal},
     device_ca::DeviceCertificateIssuer,
+    fleet_limits::{EnrollmentLimiter, FLEET_LIMITS},
     gateway_jwt::GatewayJwtIssuer,
     oidc::{OidcPrincipal, OidcProvider},
 };
@@ -34,6 +35,7 @@ pub struct FleetAgentService {
     gateway_jwt_issuer: Option<GatewayJwtIssuer>,
     device_certificate_issuer: Option<DeviceCertificateIssuer>,
     usage_enabled: bool,
+    enrollment: EnrollmentLimiter,
 }
 
 impl FleetAgentService {
@@ -51,7 +53,14 @@ impl FleetAgentService {
             gateway_jwt_issuer,
             device_certificate_issuer,
             usage_enabled: false,
+            enrollment: FLEET_LIMITS.enrollment(),
         }
+    }
+
+    /// Replaces the enrollment admission limits (tests use small ones).
+    pub fn with_enrollment_limiter(mut self, enrollment: EnrollmentLimiter) -> Self {
+        self.enrollment = enrollment;
+        self
     }
 
     /// Tells devices that the controller collects gateway usage.
@@ -73,6 +82,7 @@ impl FleetAgent for FleetAgentService {
         &self,
         request: Request<BeginEnrollmentRequest>,
     ) -> Result<Response<BeginEnrollmentResponse>, Status> {
+        let _admitted = self.enrollment.admit(request.remote_addr())?;
         let oidc = self
             .oidc
             .as_ref()
@@ -91,6 +101,7 @@ impl FleetAgent for FleetAgentService {
         &self,
         request: Request<CompleteEnrollmentRequest>,
     ) -> Result<Response<EnrollResponse>, Status> {
+        let _admitted = self.enrollment.admit(request.remote_addr())?;
         let oidc = self
             .oidc
             .as_ref()
@@ -660,6 +671,45 @@ mod tests {
             &codex.programs,
             "claude-code"
         ));
+    }
+
+    #[tokio::test]
+    async fn enrollment_is_refused_before_any_work_when_the_limiter_is_full() {
+        use agentdesktop_proto::fleet::{
+            BeginEnrollmentRequest, CompleteEnrollmentRequest, fleet_agent_server::FleetAgent,
+        };
+        use tonic::{Code, Request};
+
+        use crate::fleet_limits::{FLEET_LIMITS, FleetLimits};
+
+        let path = std::env::temp_dir().join(format!(
+            "agentdesktop-enrollment-limit-{}-{}.db",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let database = Database::connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .await
+            .expect("connect database");
+        let full = FleetLimits {
+            enrollment_in_flight: 0,
+            ..FLEET_LIMITS
+        };
+        let service =
+            FleetAgentService::new(None, database, DaemonConfigStore::new(None), None, None)
+                .with_enrollment_limiter(full.enrollment());
+
+        // Without the limiter these fail later, with "OIDC enrollment is disabled".
+        let begin = service
+            .begin_enrollment(Request::new(BeginEnrollmentRequest::default()))
+            .await
+            .expect_err("begin admitted");
+        assert_eq!(begin.code(), Code::ResourceExhausted, "{begin}");
+        let complete = service
+            .complete_enrollment(Request::new(CompleteEnrollmentRequest::default()))
+            .await
+            .expect_err("complete admitted");
+        assert_eq!(complete.code(), Code::ResourceExhausted, "{complete}");
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

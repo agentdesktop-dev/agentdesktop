@@ -338,3 +338,116 @@ async fn device_calls_keep_the_larger_message_limit() {
     .expect_err("an oversized device request was accepted");
     assert_eq!(over.code(), Code::OutOfRange, "{over}");
 }
+
+mod enrollment {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    use tokio::time::Instant;
+
+    use super::super::{FLEET_LIMITS, FleetLimits, MAX_TRACKED_PEERS};
+    use super::Duration;
+
+    fn limits(in_flight: usize, burst: u32) -> FleetLimits {
+        FleetLimits {
+            enrollment_in_flight: in_flight,
+            enrollment_burst: burst,
+            enrollment_refill: Duration::from_secs(10),
+            ..FLEET_LIMITS
+        }
+    }
+
+    fn peer(last: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, last))
+    }
+
+    #[test]
+    fn a_peer_gets_its_burst_then_one_request_per_refill() {
+        let limiter = limits(64, 3).enrollment();
+        let start = Instant::now();
+
+        for _ in 0..3 {
+            assert!(limiter.take(peer(1), start));
+        }
+        assert!(!limiter.take(peer(1), start), "burst exceeded");
+        assert!(
+            !limiter.take(peer(1), start + Duration::from_secs(9)),
+            "refilled early"
+        );
+        assert!(limiter.take(peer(1), start + Duration::from_secs(10)));
+        assert!(!limiter.take(peer(1), start + Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn peers_have_separate_budgets() {
+        let limiter = limits(64, 1).enrollment();
+        let now = Instant::now();
+
+        assert!(limiter.take(peer(1), now));
+        assert!(!limiter.take(peer(1), now));
+        assert!(limiter.take(peer(2), now));
+    }
+
+    #[test]
+    fn a_full_bucket_is_never_overfilled() {
+        let limiter = limits(64, 2).enrollment();
+        let start = Instant::now();
+
+        assert!(limiter.take(peer(1), start));
+        // A long idle period refills only up to the burst.
+        let later = start + Duration::from_secs(3600);
+        assert!(limiter.take(peer(1), later));
+        assert!(limiter.take(peer(1), later));
+        assert!(!limiter.take(peer(1), later));
+    }
+
+    #[tokio::test]
+    async fn requests_in_progress_are_capped_until_one_finishes() {
+        let limiter = limits(2, 60).enrollment();
+        let address = |last| Some(SocketAddr::new(peer(last), 4000));
+
+        let first = limiter.admit(address(1)).expect("first request");
+        let _second = limiter.admit(address(2)).expect("second request");
+        let error = limiter
+            .admit(address(3))
+            .expect_err("third request admitted");
+        assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+
+        drop(first);
+        let _third = limiter
+            .admit(address(3))
+            .expect("admitted after one finished");
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_peer_is_rejected_with_resource_exhausted() {
+        let limiter = limits(64, 1).enrollment();
+        let address = Some(SocketAddr::new(peer(1), 4000));
+
+        let _first = limiter.admit(address).expect("first request");
+        let error = limiter.admit(address).expect_err("second request admitted");
+
+        assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+    }
+
+    #[tokio::test]
+    async fn requests_without_a_peer_address_still_count_against_the_cap() {
+        let limiter = limits(1, 60).enrollment();
+
+        let _first = limiter.admit(None).expect("first request");
+        assert!(limiter.admit(None).is_err());
+    }
+
+    #[test]
+    fn idle_peers_are_dropped_when_the_table_is_full() {
+        let limiter = limits(64, 1).enrollment();
+        let start = Instant::now();
+        for index in 0..MAX_TRACKED_PEERS {
+            let [a, b, c, d] = u32::try_from(index).unwrap().to_be_bytes();
+            assert!(limiter.take(IpAddr::V4(Ipv4Addr::new(10 | a, b, c, d)), start));
+        }
+
+        // Once every bucket has refilled, a new peer evicts the idle ones.
+        assert!(limiter.take(peer(1), start + Duration::from_secs(10)));
+        assert_eq!(limiter.peers.lock().unwrap().len(), 1);
+    }
+}
