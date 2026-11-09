@@ -122,7 +122,9 @@ async fn serve_tracked(
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let connections = limits.connections();
-    let mut server = limits.server(&connections);
+    // HTTP/1 is accepted as the controller does (`main.rs`), so connections go
+    // through hyper-util's protocol detection, as they do in production.
+    let mut server = limits.server(&connections).accept_http1(true);
     if let Some(tls) = tls {
         server = server.tls_config(limits.tls(tls)).unwrap();
     }
@@ -351,7 +353,7 @@ fn pki() -> Pki {
 }
 
 /// Serves with the production TLS shape: device CA, client certificate optional.
-async fn serve_mtls(limits: FleetLimits, pki: &Pki) -> SocketAddr {
+async fn serve_mtls(limits: FleetLimits, pki: &Pki) -> (SocketAddr, Connections) {
     let tls = ServerTlsConfig::new()
         .identity(pki.server.clone())
         .client_ca_root(pki.ca.clone())
@@ -364,7 +366,6 @@ async fn serve_mtls(limits: FleetLimits, pki: &Pki) -> SocketAddr {
         },
     )
     .await
-    .0
 }
 
 async fn tls_client(
@@ -397,7 +398,7 @@ fn renewal(bytes: usize) -> RenewDeviceCertificateRequest {
 #[tokio::test]
 async fn device_calls_keep_the_larger_message_limit() {
     let pki = pki();
-    let address = serve_mtls(small_messages(), &pki).await;
+    let (address, _) = serve_mtls(small_messages(), &pki).await;
     let mut client = tls_client(address, &pki, true).await;
 
     // Over the unauthenticated limit but within the device limit: reaches the handler.
@@ -415,7 +416,7 @@ async fn device_calls_keep_the_larger_message_limit() {
 #[tokio::test]
 async fn callers_without_a_device_certificate_get_the_small_limit_on_every_call() {
     let pki = pki();
-    let address = serve_mtls(small_messages(), &pki).await;
+    let (address, _) = serve_mtls(small_messages(), &pki).await;
     let mut client = tls_client(address, &pki, false).await;
 
     let error = bounded(client.renew_device_certificate(renewal(512)))
@@ -423,6 +424,107 @@ async fn callers_without_a_device_certificate_get_the_small_limit_on_every_call(
         .expect_err("a large request without a certificate reached the handler");
 
     assert_eq!(error.code(), Code::OutOfRange, "{error}");
+}
+
+#[tokio::test]
+async fn enrollment_gets_the_small_limit_even_with_a_device_certificate() {
+    let pki = pki();
+    let (address, _) = serve_mtls(small_messages(), &pki).await;
+    let mut client = tls_client(address, &pki, true).await;
+
+    // Over the unauthenticated limit but within the device limit.
+    let error = bounded(client.begin_enrollment(BeginEnrollmentRequest {
+        hostname: "h".repeat(512),
+        ..Default::default()
+    }))
+    .await
+    .expect_err("a large enrollment request reached the handler");
+
+    assert_eq!(error.code(), Code::OutOfRange, "{error}");
+}
+
+#[tokio::test]
+async fn a_tls_connection_that_never_makes_a_request_is_closed() {
+    use std::io::Read;
+
+    use rustls::pki_types::{CertificateDer, pem::PemObject};
+
+    let pki = pki();
+    let mut limits = limits();
+    limits.first_request = Duration::from_millis(300);
+    let (address, _) = serve_mtls(limits, &pki).await;
+    let ca = pki.ca.clone().into_inner();
+
+    // Finish the TLS handshake, then send nothing: not even the HTTP/2
+    // preface, so the server is still detecting the protocol.
+    let closed = tokio::task::spawn_blocking(move || {
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(CertificateDer::from_pem_slice(&ca).expect("parse device CA"))
+            .expect("trust device CA");
+        let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("TLS versions")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        let mut tls = rustls::ClientConnection::new(
+            std::sync::Arc::new(config),
+            "localhost".try_into().expect("server name"),
+        )
+        .expect("TLS client");
+        let mut socket = std::net::TcpStream::connect(address).expect("connect");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        while tls.is_handshaking() {
+            tls.complete_io(&mut socket).expect("TLS handshake");
+        }
+
+        let mut stream = rustls::Stream::new(&mut tls, &mut socket);
+        let mut buffer = [0_u8; 1024];
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) => return true,
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    return false;
+                }
+                Err(_) => return true,
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    assert!(closed, "the server kept a silent TLS connection open");
+}
+
+#[tokio::test]
+async fn a_tls_connection_idle_after_its_last_request_is_closed() {
+    let pki = pki();
+    let mut limits = limits();
+    limits.first_request = Duration::from_secs(5);
+    limits.idle_connection = Duration::from_millis(200);
+    let (address, connections) = serve_mtls(limits, &pki).await;
+    let mut client = tls_client(address, &pki, true).await;
+    bounded(client.begin_enrollment(BeginEnrollmentRequest::default()))
+        .await
+        .unwrap();
+    assert_eq!(connections.open_count(), 1);
+
+    bounded(async {
+        while connections.open_count() > 0 {
+            time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
 }
 
 /// Whether the server keeps `stream` open for a while. An accepted connection
