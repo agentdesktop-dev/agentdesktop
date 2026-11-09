@@ -14,9 +14,10 @@
 //! one, so idle connections cannot crowd out devices that are using theirs.
 //!
 //! A request other than `Connect` is in progress only while its handler runs,
-//! not while its response is sent. Otherwise a client could keep a connection
-//! busy forever by granting no HTTP/2 flow-control window, so that the server
-//! can never send it the response body.
+//! not while its response is sent, and a `Connect` stream only while its
+//! session lasts. Otherwise a client could keep a connection busy forever by
+//! granting no HTTP/2 flow-control window, so that the server can never send
+//! the response body and hyper never drops it.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -471,7 +472,7 @@ impl AsyncWrite for LimitedConnection {
 }
 
 /// Marks the connection busy while a request's handler runs, and for `Connect`
-/// until its stream ends.
+/// while its session lasts (see `SessionBusy`).
 struct RequestGuard {
     connections: Connections,
     peer: SocketAddr,
@@ -555,35 +556,92 @@ where
         self.inner.poll_ready(context)
     }
 
-    fn call(&mut self, request: http::Request<Body>) -> Self::Future {
+    fn call(&mut self, mut request: http::Request<Body>) -> Self::Future {
         let guard = remote_addr(&request).and_then(|peer| self.connections.start_request(peer));
-        let session = is_connect(request.uri().path());
+        // `Connect` is the device's session, so its connection stays busy past
+        // the handler: see `SessionBusy`. Any other request is done once its
+        // handler returns.
+        let (guard, session) = match guard {
+            Some(guard) if is_connect(request.uri().path()) => {
+                let session = SessionBusy::new(guard);
+                request.extensions_mut().insert(session.clone());
+                (None, Some(session))
+            }
+            guard => (guard, None),
+        };
         let response = self.inner.call(request);
         Box::pin(async move {
-            let response = response.await?;
-            match guard {
-                // The stream is the device's session: keep the connection busy
-                // until it ends.
-                Some(guard) if session => Ok(response.map(|body| {
+            let response = response.await;
+            drop(guard);
+            let response = response?;
+            Ok(match session {
+                Some(session) => response.map(|body| {
                     Body::new(TrackedBody {
                         inner: body,
-                        _guard: guard,
+                        _release: session.release_on_drop(),
                     })
-                })),
-                // Any other response is done once its handler returns.
-                guard => {
-                    drop(guard);
-                    Ok(response)
-                }
-            }
+                }),
+                None => response,
+            })
         })
     }
 }
 
-/// A response body that keeps its connection busy until it is dropped.
+/// Keeps a `Connect` stream's connection busy. The connection goes idle when
+/// the first release is dropped: the response body holds one, and the handler
+/// can claim another from the request extensions (`SessionBusy::of`) and hold
+/// it in the session's task. Without the handler's release, a client that
+/// grants no HTTP/2 flow-control window could end the session and still keep
+/// the connection busy, because hyper keeps a response body it cannot send.
+/// If every handle is dropped without a release, the connection goes idle too.
+#[derive(Clone)]
+pub struct SessionBusy {
+    guard: Arc<Mutex<Option<RequestGuard>>>,
+}
+
+impl SessionBusy {
+    fn new(guard: RequestGuard) -> Self {
+        Self {
+            guard: Arc::new(Mutex::new(Some(guard))),
+        }
+    }
+
+    /// The handle for `request`'s connection, when it is a tracked `Connect`.
+    pub fn of<T>(request: &tonic::Request<T>) -> Option<Self> {
+        request.extensions().get::<Self>().cloned()
+    }
+
+    /// Marks the connection idle when the returned value is dropped, unless
+    /// another release already has.
+    pub fn release_on_drop(&self) -> ReleaseOnDrop {
+        ReleaseOnDrop {
+            guard: self.guard.clone(),
+        }
+    }
+}
+
+/// Releases a `SessionBusy` when dropped.
+pub struct ReleaseOnDrop {
+    guard: Arc<Mutex<Option<RequestGuard>>>,
+}
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        // Taken out first, so the guard's own drop (which takes the registry
+        // lock) runs without this lock held.
+        let guard = self
+            .guard
+            .lock()
+            .expect("connection session lock poisoned")
+            .take();
+        drop(guard);
+    }
+}
+
+/// A `Connect` response body; dropping it releases its connection's session.
 struct TrackedBody {
     inner: Body,
-    _guard: RequestGuard,
+    _release: ReleaseOnDrop,
 }
 
 impl HttpBody for TrackedBody {

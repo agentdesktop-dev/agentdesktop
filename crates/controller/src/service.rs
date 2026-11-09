@@ -22,7 +22,7 @@ use crate::{
     daemon_config::DaemonConfigStore,
     database::{Database, DevicePrincipal},
     device_ca::DeviceCertificateIssuer,
-    fleet_limits::{DeviceStreams, EnrollmentLimiter, FLEET_LIMITS, FleetLimits},
+    fleet_limits::{DeviceStreams, EnrollmentLimiter, FLEET_LIMITS, FleetLimits, SessionBusy},
     gateway_jwt::GatewayJwtIssuer,
     oidc::{OidcPrincipal, OidcProvider},
 };
@@ -274,6 +274,9 @@ impl FleetAgent for FleetAgentService {
             bearer_credential(request.metadata())?.to_owned(),
         );
 
+        // The connection counts as busy while this session runs, and no longer:
+        // hyper may keep a response body that a device will not accept.
+        let session_busy = SessionBusy::of(&request).map(|busy| busy.release_on_drop());
         let mut inbound = request.into_inner();
         let (sender, receiver) = mpsc::channel(8);
         let mut daemon_updates = self.daemon_config.subscribe();
@@ -295,6 +298,7 @@ impl FleetAgent for FleetAgentService {
         let auth_sender = sender;
         let mut device_stream = self.device_streams.open(&authenticated_device_id);
         tokio::spawn(async move {
+            let _session_busy = session_busy;
             let enrolled_principal = match database.device_principal(&authenticated_device_id).await
             {
                 Ok(principal) => principal,

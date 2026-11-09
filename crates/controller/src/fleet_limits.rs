@@ -36,7 +36,9 @@ use tower_layer::{Identity, Stack};
 
 mod connections;
 
-pub use connections::{Connections, LimitedConnection, LimitedIncoming, TrackRequests};
+pub use connections::{
+    Connections, LimitedConnection, LimitedIncoming, ReleaseOnDrop, SessionBusy, TrackRequests,
+};
 
 /// Limits applied to the fleet gRPC listener.
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -41,7 +41,8 @@ async fn bounded<T>(call: impl std::future::Future<Output = T>) -> T {
 }
 
 /// A fleet service whose calls take `delay`; `Connect` sends a message after each
-/// `delay`, twice.
+/// `delay`, twice, then ends its session, holding the connection's session
+/// release as the controller's `Connect` does.
 #[derive(Clone)]
 struct Slow {
     delay: Duration,
@@ -91,11 +92,13 @@ impl FleetAgent for Slow {
 
     async fn connect(
         &self,
-        _: Request<Streaming<AgentMessage>>,
+        request: Request<Streaming<AgentMessage>>,
     ) -> Result<Response<Self::ConnectStream>, Status> {
+        let session = super::SessionBusy::of(&request).map(|busy| busy.release_on_drop());
         let (sender, receiver) = mpsc::channel(2);
         let delay = self.delay;
         tokio::spawn(async move {
+            let _session = session;
             for _ in 0..2 {
                 time::sleep(delay).await;
                 if sender.send(Ok(ControllerMessage::default())).await.is_err() {
@@ -764,6 +767,42 @@ async fn a_response_the_client_never_accepts_does_not_keep_its_connection_busy()
     .await;
     let response = bounded(call).await.unwrap();
     assert!(response.is_err(), "the stalled response was delivered");
+}
+
+#[tokio::test]
+async fn a_stalled_connect_response_frees_its_connection_when_the_session_ends() {
+    let mut limits = limits();
+    // Far past the test's bound, so only the idle close can end the connection.
+    limits.first_request = Duration::from_secs(60);
+    limits.idle_connection = Duration::from_millis(200);
+    let (address, connections) = serve_tracked(
+        limits,
+        None,
+        Slow {
+            delay: Duration::ZERO,
+        },
+    )
+    .await;
+    // A client that grants no flow-control window: the session's messages can
+    // never be sent, so hyper keeps the response body after the session ends.
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+        .unwrap()
+        .initial_stream_window_size(0)
+        .connect()
+        .await
+        .unwrap();
+    let (_outbound, receiver) = mpsc::channel::<AgentMessage>(1);
+    let _stream = bounded(FleetAgentClient::new(channel).connect(ReceiverStream::new(receiver)))
+        .await
+        .expect("open the stream");
+    assert_eq!(connections.open_count(), 1);
+
+    bounded(async {
+        while connections.open_count() > 0 {
+            time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
 }
 
 #[tokio::test]
