@@ -844,17 +844,36 @@ fn the_configuration_defaults_match_the_default_limits() {
 }
 
 #[test]
-fn configured_limits_replace_the_defaults() {
+fn configured_limits_replace_every_deployment_limit() {
     use agentdesktop_core::config::ControllerFleetLimitsConfig;
 
-    let limits = FLEET_LIMITS.configured(&ControllerFleetLimitsConfig {
-        connections_per_address: 20_000,
-        device_message_refill: Duration::from_millis(10),
-        ..ControllerFleetLimitsConfig::default()
-    });
+    // The literal names every setting, each with a value that is not its
+    // default, so a setting `configured` does not copy fails here.
+    let config = ControllerFleetLimitsConfig {
+        max_connections: 8,
+        connections_per_address: 7,
+        max_message_bytes: 6,
+        enrollment_in_flight: 5,
+        enrollment_burst: 4,
+        enrollment_refill: Duration::from_millis(3),
+        device_message_burst: 2,
+        device_message_refill: Duration::from_millis(1),
+    };
 
-    assert_eq!(limits.connections_per_address, 20_000);
-    assert_eq!(limits.device_message_refill, Duration::from_millis(10));
+    assert_eq!(
+        FLEET_LIMITS.configured(&config),
+        FleetLimits {
+            max_connections: 8,
+            connections_per_address: 7,
+            max_message_bytes: 6,
+            enrollment_in_flight: 5,
+            enrollment_burst: 4,
+            enrollment_refill: Duration::from_millis(3),
+            device_message_burst: 2,
+            device_message_refill: Duration::from_millis(1),
+            ..FLEET_LIMITS
+        }
+    );
 }
 
 #[test]
