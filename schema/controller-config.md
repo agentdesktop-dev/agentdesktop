@@ -34,4 +34,20 @@
 |`tls.clientCaKey`|string|PEM private key used to issue device certificates from `clientCaCertificate`.<br><br>Enrolled daemons generate their own private key and send a CSR.|
 |`tls.key`|string|Path to the PEM-encoded TLS private key.<br><br>Relative paths are resolved from the controller configuration directory.|
 |`usage`|object|Token and cost collection from agentgateway access logs.|
+|`usage.attributes`|object|Log record attribute names to read usage from, for a gateway other than agentgateway.|
+|`usage.attributes.billing`|string|`subscription` for subscription billing [`agentdesktop.billing`].|
+|`usage.attributes.cacheReadTokens`|string|Input tokens read from the prompt cache [`gen_ai.usage.cache_read.input_tokens`].|
+|`usage.attributes.cacheWriteTokens`|string|Input tokens written to the prompt cache [`gen_ai.usage.cache_creation.input_tokens`].|
+|`usage.attributes.client`|string|Tool that made the request [`agentdesktop.client`].|
+|`usage.attributes.cost`|string|Request cost in US dollars [`agw.ai.usage.cost.total`].|
+|`usage.attributes.device`|string|Enrolled device ID [`agentdesktop.device`].|
+|`usage.attributes.error`|string|Set when the request failed [`error`].|
+|`usage.attributes.inputTokens`|string|Input tokens [`gen_ai.usage.input_tokens`].|
+|`usage.attributes.outputTokens`|string|Output tokens [`gen_ai.usage.output_tokens`].|
+|`usage.attributes.provider`|string|LLM provider [`gen_ai.provider.name`].|
+|`usage.attributes.requestModel`|string|Requested model, used when no response model is set [`gen_ai.request.model`].|
+|`usage.attributes.responseModel`|string|Model that served the request [`gen_ai.response.model`].|
+|`usage.attributes.status`|string|HTTP response status code [`http.response.status_code`].|
+|`usage.attributes.subject`|string|User the request is attributed to [`agentdesktop.subject`, then `jwt.sub`].|
+|`usage.attributes.userAgent`|string|Caller's user agent, which names the tool when `client` is missing [`user_agent.original`].|
 |`usage.tokenFile`|string|Path to a file containing the bearer token agentgateway sends with each export. The token must be at least 32 characters.<br><br>Relative paths are resolved from the controller configuration directory.|

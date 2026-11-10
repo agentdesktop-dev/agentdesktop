@@ -33,6 +33,22 @@
 |`daemon.socket`|string|Local API Unix socket or Windows named pipe.|
 |`daemon.stateDir`|string|Persistent daemon state directory.|
 |`daemon.usage`|object|Usage collection without a controller, from a gateway on this machine.|
+|`daemon.usage.attributes`|object|Log record attribute names to read usage from, for a gateway other than agentgateway.|
+|`daemon.usage.attributes.billing`|string|`subscription` for subscription billing [`agentdesktop.billing`].|
+|`daemon.usage.attributes.cacheReadTokens`|string|Input tokens read from the prompt cache [`gen_ai.usage.cache_read.input_tokens`].|
+|`daemon.usage.attributes.cacheWriteTokens`|string|Input tokens written to the prompt cache [`gen_ai.usage.cache_creation.input_tokens`].|
+|`daemon.usage.attributes.client`|string|Tool that made the request [`agentdesktop.client`].|
+|`daemon.usage.attributes.cost`|string|Request cost in US dollars [`agw.ai.usage.cost.total`].|
+|`daemon.usage.attributes.device`|string|Enrolled device ID [`agentdesktop.device`].|
+|`daemon.usage.attributes.error`|string|Set when the request failed [`error`].|
+|`daemon.usage.attributes.inputTokens`|string|Input tokens [`gen_ai.usage.input_tokens`].|
+|`daemon.usage.attributes.outputTokens`|string|Output tokens [`gen_ai.usage.output_tokens`].|
+|`daemon.usage.attributes.provider`|string|LLM provider [`gen_ai.provider.name`].|
+|`daemon.usage.attributes.requestModel`|string|Requested model, used when no response model is set [`gen_ai.request.model`].|
+|`daemon.usage.attributes.responseModel`|string|Model that served the request [`gen_ai.response.model`].|
+|`daemon.usage.attributes.status`|string|HTTP response status code [`http.response.status_code`].|
+|`daemon.usage.attributes.subject`|string|User the request is attributed to [`agentdesktop.subject`, then `jwt.sub`].|
+|`daemon.usage.attributes.userAgent`|string|Caller's user agent, which names the tool when `client` is missing [`user_agent.original`].|
 |`daemon.usage.listen`|string|Loopback address that receives agentgateway's OTLP/gRPC export.|
 |`daemon.usage.tokenFile`|string|Path to a file containing the bearer token agentgateway sends with each export. The token must be at least 32 characters.|
 |`daemon.user`|boolean|Manage the current user’s tool settings instead of system settings.|

@@ -141,6 +141,9 @@ pub struct UsageStartupConfig {
     pub listen: SocketAddr,
     /// Path to a file containing the bearer token agentgateway sends with each export. The token must be at least 32 characters.
     pub token_file: PathBuf,
+    /// Log record attribute names to read usage from, for a gateway other than agentgateway.
+    #[serde(default, skip_serializing_if = "UsageAttributes::is_empty")]
+    pub attributes: UsageAttributes,
 }
 
 /// Local Claude Desktop paths.
@@ -631,6 +634,114 @@ pub struct ControllerUsageConfig {
     ///
     /// Relative paths are resolved from the controller configuration directory.
     pub token_file: PathBuf,
+    /// Log record attribute names to read usage from, for a gateway other than agentgateway.
+    #[serde(default, skip_serializing_if = "UsageAttributes::is_empty")]
+    pub attributes: UsageAttributes,
+}
+
+/// Names of the OTLP log record attributes that usage is read from.
+///
+/// Every key is optional; one left out keeps the name agentgateway uses, shown
+/// in brackets. A record without the `provider` attribute is not counted as an
+/// LLM request. `cost` must be a US dollar amount. Without a `device`
+/// attribute, a record is attributed to its `subject` only.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UsageAttributes {
+    /// LLM provider [`gen_ai.provider.name`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Requested model, used when no response model is set [`gen_ai.request.model`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_model: Option<String>,
+    /// Model that served the request [`gen_ai.response.model`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_model: Option<String>,
+    /// Input tokens [`gen_ai.usage.input_tokens`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<String>,
+    /// Output tokens [`gen_ai.usage.output_tokens`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<String>,
+    /// Input tokens read from the prompt cache [`gen_ai.usage.cache_read.input_tokens`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<String>,
+    /// Input tokens written to the prompt cache [`gen_ai.usage.cache_creation.input_tokens`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<String>,
+    /// Request cost in US dollars [`agw.ai.usage.cost.total`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<String>,
+    /// HTTP response status code [`http.response.status_code`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Set when the request failed [`error`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// User the request is attributed to [`agentdesktop.subject`, then `jwt.sub`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    /// Enrolled device ID [`agentdesktop.device`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    /// Tool that made the request [`agentdesktop.client`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
+    /// `subscription` for subscription billing [`agentdesktop.billing`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing: Option<String>,
+    /// Caller's user agent, which names the tool when `client` is missing [`user_agent.original`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
+}
+
+impl UsageAttributes {
+    /// Longest accepted attribute name.
+    const MAX_NAME_BYTES: usize = 256;
+
+    /// True when every attribute keeps its default name.
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// The configured names, keyed by their configuration field.
+    fn configured(&self) -> impl Iterator<Item = (&'static str, &str)> {
+        [
+            ("provider", &self.provider),
+            ("requestModel", &self.request_model),
+            ("responseModel", &self.response_model),
+            ("inputTokens", &self.input_tokens),
+            ("outputTokens", &self.output_tokens),
+            ("cacheReadTokens", &self.cache_read_tokens),
+            ("cacheWriteTokens", &self.cache_write_tokens),
+            ("cost", &self.cost),
+            ("status", &self.status),
+            ("error", &self.error),
+            ("subject", &self.subject),
+            ("device", &self.device),
+            ("client", &self.client),
+            ("billing", &self.billing),
+            ("userAgent", &self.user_agent),
+        ]
+        .into_iter()
+        .filter_map(|(field, name)| Some((field, name.as_deref()?)))
+    }
+
+    fn validate(&self, prefix: &str) -> anyhow::Result<()> {
+        for (field, name) in self.configured() {
+            if name.trim().is_empty()
+                || name.len() > Self::MAX_NAME_BYTES
+                || name.chars().any(char::is_control)
+            {
+                anyhow::bail!(
+                    "{prefix}.attributes.{field} must be a non-empty attribute name of at most {} bytes",
+                    Self::MAX_NAME_BYTES
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 /// TLS configuration for the fleet API and device certificate issuer.
@@ -1414,6 +1525,9 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
             anyhow::bail!("gatewayJwt.lifetime must be greater than zero");
         }
     }
+    if let Some(usage) = &config.usage {
+        usage.attributes.validate("usage")?;
+    }
     Ok(config)
 }
 
@@ -1524,6 +1638,7 @@ fn parse_local_daemon(contents: &str) -> anyhow::Result<DaemonConfig> {
         if !usage.listen.ip().is_loopback() {
             anyhow::bail!("daemon.usage.listen must be a loopback address");
         }
+        usage.attributes.validate("daemon.usage")?;
     }
     validate_daemon(
         config.llm_gateway.as_ref(),
@@ -2279,6 +2394,56 @@ usage:
             directory.join("secrets/usage-token")
         );
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn usage_attribute_names_are_optional_and_validated() {
+        let controller = |attributes: &str| {
+            parse_controller(&format!(
+                "tls: /etc/agentdesktop/tls\noidc:\n  issuer: https://idp.example.com\n  clientId: agentdesktop\nusage:\n  tokenFile: usage-token\n{attributes}"
+            ))
+        };
+        let defaults = controller("").expect("usage without attributes");
+        assert!(defaults.usage.unwrap().attributes.is_empty());
+
+        let mapped = controller(
+            "  attributes:\n    provider: gen_ai.system\n    cost: gen_ai.cost.total_cost\n    subject: metadata.user_api_key_user_id\n",
+        )
+        .expect("mapped attributes");
+        let attributes = mapped.usage.unwrap().attributes;
+        assert_eq!(attributes.provider.as_deref(), Some("gen_ai.system"));
+        assert_eq!(attributes.cost.as_deref(), Some("gen_ai.cost.total_cost"));
+        assert_eq!(
+            attributes.subject.as_deref(),
+            Some("metadata.user_api_key_user_id")
+        );
+        assert_eq!(attributes.device, None, "keys left out keep the default");
+
+        for (attributes, reason) in [
+            (
+                "  attributes:\n    model: gen_ai.request.model\n",
+                "unknown field",
+            ),
+            ("  attributes:\n    cost: \"\"\n", "usage.attributes.cost"),
+            (
+                "  attributes:\n    subject: \"a\\nb\"\n",
+                "usage.attributes.subject",
+            ),
+        ] {
+            let error = controller(attributes).expect_err(reason);
+            assert!(format!("{error:#}").contains(reason), "{error:#}");
+        }
+
+        let error = super::parse_local_daemon(
+            "daemon:\n  usage:\n    listen: 127.0.0.1:4319\n    tokenFile: usage-token\n    attributes:\n      provider: \" \"\n",
+        )
+        .expect_err("a blank daemon attribute name");
+        assert!(
+            error
+                .to_string()
+                .contains("daemon.usage.attributes.provider"),
+            "{error}"
+        );
     }
 
     #[test]

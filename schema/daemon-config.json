@@ -916,10 +916,126 @@
       },
       "additionalProperties": false
     },
+    "UsageAttributes": {
+      "description": "Names of the OTLP log record attributes that usage is read from.\n\nEvery key is optional; one left out keeps the name agentgateway uses, shown\nin brackets. A record without the `provider` attribute is not counted as an\nLLM request. `cost` must be a US dollar amount. Without a `device`\nattribute, a record is attributed to its `subject` only.",
+      "type": "object",
+      "properties": {
+        "billing": {
+          "description": "`subscription` for subscription billing [`agentdesktop.billing`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cacheReadTokens": {
+          "description": "Input tokens read from the prompt cache [`gen_ai.usage.cache_read.input_tokens`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cacheWriteTokens": {
+          "description": "Input tokens written to the prompt cache [`gen_ai.usage.cache_creation.input_tokens`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "client": {
+          "description": "Tool that made the request [`agentdesktop.client`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cost": {
+          "description": "Request cost in US dollars [`agw.ai.usage.cost.total`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "device": {
+          "description": "Enrolled device ID [`agentdesktop.device`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "description": "Set when the request failed [`error`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inputTokens": {
+          "description": "Input tokens [`gen_ai.usage.input_tokens`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outputTokens": {
+          "description": "Output tokens [`gen_ai.usage.output_tokens`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "description": "LLM provider [`gen_ai.provider.name`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestModel": {
+          "description": "Requested model, used when no response model is set [`gen_ai.request.model`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "responseModel": {
+          "description": "Model that served the request [`gen_ai.response.model`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "HTTP response status code [`http.response.status_code`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subject": {
+          "description": "User the request is attributed to [`agentdesktop.subject`, then `jwt.sub`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "userAgent": {
+          "description": "Caller's user agent, which names the tool when `client` is missing [`user_agent.original`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "UsageStartupConfig": {
       "description": "Token and cost collection for a daemon without a controller. agentgateway\non this machine exports its access logs (`frontendPolicies.accessLog.otlp`)\nto the daemon, which keeps this device's usage for the desktop app.",
       "type": "object",
       "properties": {
+        "attributes": {
+          "description": "Log record attribute names to read usage from, for a gateway other than agentgateway.",
+          "$ref": "#/$defs/UsageAttributes"
+        },
         "listen": {
           "description": "Loopback address that receives agentgateway's OTLP/gRPC export.",
           "type": "string"

@@ -1,8 +1,11 @@
-//! agentgateway access-log records received over OTLP/gRPC.
+//! Gateway access-log records received over OTLP/gRPC.
+//!
+//! The attribute names default to agentgateway's access-log record and can be
+//! changed in the configuration for any gateway that exports OTLP logs.
 
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
-use agentdesktop_core::config::valid_client_id;
+use agentdesktop_core::config::{UsageAttributes, valid_client_id};
 use agentdesktop_proto::otlp_logs::{
     AnyValue, ExportLogsPartialSuccess, ExportLogsServiceRequest, ExportLogsServiceResponse,
     LogRecord,
@@ -32,42 +35,95 @@ const MAX_COST_NANOS_PER_REQUEST: i64 = 1_000_000_000_000_000;
 /// A record stamped further ahead than this is counted when received.
 const MAX_CLOCK_SKEW: i64 = 5 * 60;
 
-// Attributes of agentgateway's access-log record.
-const PROVIDER: &str = "gen_ai.provider.name";
-const REQUEST_MODEL: &str = "gen_ai.request.model";
-const RESPONSE_MODEL: &str = "gen_ai.response.model";
-const INPUT_TOKENS: &str = "gen_ai.usage.input_tokens";
-const OUTPUT_TOKENS: &str = "gen_ai.usage.output_tokens";
-const CACHE_READ_TOKENS: &str = "gen_ai.usage.cache_read.input_tokens";
-const CACHE_WRITE_TOKENS: &str = "gen_ai.usage.cache_creation.input_tokens";
-const COST: &str = "agw.ai.usage.cost.total";
-const STATUS: &str = "http.response.status_code";
-const ERROR: &str = "error";
+/// agentgateway's OIDC subject, read when the configured subject is missing.
 const JWT_SUBJECT: &str = "jwt.sub";
-const USER_AGENT: &str = "user_agent.original";
-// Fields the agentgateway configuration adds from the controller JWT.
-const SUBJECT: &str = "agentdesktop.subject";
-const DEVICE: &str = "agentdesktop.device";
-const CLIENT: &str = "agentdesktop.client";
-const BILLING: &str = "agentdesktop.billing";
+
+/// Names of the attributes usage is read from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AttributeNames {
+    provider: String,
+    request_model: String,
+    response_model: String,
+    input_tokens: String,
+    output_tokens: String,
+    cache_read_tokens: String,
+    cache_write_tokens: String,
+    cost: String,
+    status: String,
+    error: String,
+    subject: String,
+    device: String,
+    client: String,
+    billing: String,
+    user_agent: String,
+}
+
+impl AttributeNames {
+    /// The configured names, with agentgateway's for any left out.
+    pub(crate) fn new(configured: &UsageAttributes) -> Self {
+        let name = |configured: &Option<String>, default: &str| {
+            configured.clone().unwrap_or_else(|| default.to_owned())
+        };
+        Self {
+            provider: name(&configured.provider, "gen_ai.provider.name"),
+            request_model: name(&configured.request_model, "gen_ai.request.model"),
+            response_model: name(&configured.response_model, "gen_ai.response.model"),
+            input_tokens: name(&configured.input_tokens, "gen_ai.usage.input_tokens"),
+            output_tokens: name(&configured.output_tokens, "gen_ai.usage.output_tokens"),
+            cache_read_tokens: name(
+                &configured.cache_read_tokens,
+                "gen_ai.usage.cache_read.input_tokens",
+            ),
+            cache_write_tokens: name(
+                &configured.cache_write_tokens,
+                "gen_ai.usage.cache_creation.input_tokens",
+            ),
+            cost: name(&configured.cost, "agw.ai.usage.cost.total"),
+            status: name(&configured.status, "http.response.status_code"),
+            error: name(&configured.error, "error"),
+            // The agentgateway configuration adds these from the controller JWT.
+            subject: name(&configured.subject, "agentdesktop.subject"),
+            device: name(&configured.device, "agentdesktop.device"),
+            client: name(&configured.client, "agentdesktop.client"),
+            billing: name(&configured.billing, "agentdesktop.billing"),
+            user_agent: name(&configured.user_agent, "user_agent.original"),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Default for AttributeNames {
+    fn default() -> Self {
+        Self::new(&UsageAttributes::default())
+    }
+}
 
 /// Tools recognized by their user agent when the credential does not name
 /// the tool, as with an OIDC token on a gateway without a controller.
 const USER_AGENT_TOOLS: [(&str, &str); 2] = [("claude-cli/", "claude-code"), ("codex_", "codex")];
 
-/// Receives agentgateway access logs and stores the usage of LLM requests.
+/// Receives gateway access logs and stores the usage of LLM requests.
 #[derive(Clone)]
 pub struct UsageIngest {
     pub(super) store: UsageStore,
+    pub(super) names: Arc<AttributeNames>,
 }
 
 impl UsageIngest {
-    /// The OTLP logs service, accepting only exports that carry `token`.
+    /// The OTLP logs service, accepting only exports that carry `token`, and
+    /// reading usage from the attributes named in `attributes`.
     pub fn service(
         store: UsageStore,
         token: &str,
+        attributes: &UsageAttributes,
     ) -> InterceptedService<LogsServiceServer<Self>, UsageTokenCheck> {
-        LogsServiceServer::with_interceptor(Self { store }, UsageTokenCheck::new(token))
+        LogsServiceServer::with_interceptor(
+            Self {
+                store,
+                names: Arc::new(AttributeNames::new(attributes)),
+            },
+            UsageTokenCheck::new(token),
+        )
     }
 }
 
@@ -88,7 +144,7 @@ impl LogsService for UsageIngest {
             .flat_map(|resource| &resource.scope_logs)
             .flat_map(|scope| &scope.log_records)
         {
-            match parse_record(record, now) {
+            match parse_record(record, &self.names, now) {
                 Ok(Some(usage)) => records.push(usage),
                 Ok(None) => {}
                 Err(error) => {
@@ -168,7 +224,11 @@ pub fn load_token(path: &Path) -> anyhow::Result<String> {
 
 /// Reads the usage of one access-log record. Requests that are not LLM calls
 /// are `Ok(None)`; malformed records are an error.
-fn parse_record(record: &LogRecord, now: i64) -> Result<Option<UsageRecord>, String> {
+fn parse_record(
+    record: &LogRecord,
+    names: &AttributeNames,
+    now: i64,
+) -> Result<Option<UsageRecord>, String> {
     let attributes: BTreeMap<&str, &Value> = record
         .attributes
         .iter()
@@ -183,31 +243,31 @@ fn parse_record(record: &LogRecord, now: i64) -> Result<Option<UsageRecord>, Str
         Some(Value::StringValue(text)) => Some(text.as_str()),
         _ => None,
     };
-    let Some(provider) = text(PROVIDER).filter(|provider| !provider.is_empty()) else {
+    let Some(provider) = text(&names.provider).filter(|provider| !provider.is_empty()) else {
         return Ok(None);
     };
-    let model = text(RESPONSE_MODEL)
+    let model = text(&names.response_model)
         .filter(|model| !model.is_empty())
-        .or_else(|| text(REQUEST_MODEL))
+        .or_else(|| text(&names.request_model))
         .unwrap_or_default();
-    let subject = text(SUBJECT)
+    let subject = text(&names.subject)
         .or_else(|| text(JWT_SUBJECT))
         .unwrap_or_default();
-    let device_id = text(DEVICE)
+    let device_id = text(&names.device)
         .and_then(|device| Uuid::parse_str(device).ok())
         .map(|device| device.to_string())
         .unwrap_or_default();
-    let client_id = text(CLIENT)
+    let client_id = text(&names.client)
         .filter(|client| valid_client_id(client))
         .or_else(|| {
-            let user_agent = text(USER_AGENT)?;
+            let user_agent = text(&names.user_agent)?;
             USER_AGENT_TOOLS
                 .iter()
                 .find(|(prefix, _)| user_agent.starts_with(prefix))
                 .map(|(_, tool)| *tool)
         })
         .unwrap_or_default();
-    let billing = if text(BILLING) == Some("subscription") {
+    let billing = if text(&names.billing) == Some("subscription") {
         Billing::Subscription
     } else {
         Billing::Api
@@ -220,24 +280,27 @@ fn parse_record(record: &LogRecord, now: i64) -> Result<Option<UsageRecord>, Str
                 format!("{key} must be an integer between 0 and {MAX_TOKENS_PER_REQUEST}")
             }),
     };
-    let input_tokens = count(INPUT_TOKENS)?;
-    let output_tokens = count(OUTPUT_TOKENS)?;
+    let input_tokens = count(&names.input_tokens)?;
+    let output_tokens = count(&names.output_tokens)?;
     let cost_nanos = attributes
-        .get(COST)
+        .get(names.cost.as_str())
         .map(|value| {
             cost_nanos(value)
                 .filter(|amount| *amount <= MAX_COST_NANOS_PER_REQUEST)
                 .ok_or_else(|| {
-                    format!("{COST} must be a dollar amount no greater than $1,000,000 per request")
+                    format!(
+                        "{} must be a dollar amount no greater than $1,000,000 per request",
+                        names.cost
+                    )
                 })
         })
         .transpose()?;
     let status = attributes
-        .get(STATUS)
+        .get(names.status.as_str())
         .and_then(|value| integer(value))
         .unwrap_or_default();
     let error = attributes
-        .get(ERROR)
+        .get(names.error.as_str())
         .is_some_and(|value| !matches!(value, Value::StringValue(text) if text.is_empty()));
     let occurred_at = occurred_at(record, now)?;
     Ok(Some(UsageRecord {
@@ -256,8 +319,8 @@ fn parse_record(record: &LogRecord, now: i64) -> Result<Option<UsageRecord>, Str
             errors: i64::from(error || status >= 400),
             input_tokens,
             output_tokens,
-            cache_read_tokens: count(CACHE_READ_TOKENS)?,
-            cache_write_tokens: count(CACHE_WRITE_TOKENS)?,
+            cache_read_tokens: count(&names.cache_read_tokens)?,
+            cache_write_tokens: count(&names.cache_write_tokens)?,
             cost_nanos: cost_nanos.unwrap_or_default(),
             // A failed request without tokens costs nothing; it is not unpriced.
             unpriced_requests: i64::from(
@@ -417,8 +480,11 @@ pub(super) mod tests {
     use agentdesktop_proto::otlp_logs::{AnyValue, KeyValue, LogRecord, any_value::Value};
     use tonic::{Code, Request, service::Interceptor};
 
+    use agentdesktop_core::config::UsageAttributes;
+
     use super::{
-        Billing, HOUR, MAX_TOKENS_PER_REQUEST, UsageTokenCheck, decimal_nanos, parse_record,
+        AttributeNames, Billing, HOUR, MAX_TOKENS_PER_REQUEST, UsageRecord, UsageTokenCheck,
+        decimal_nanos, parse_record,
     };
 
     pub(crate) const DEVICE_ID: &str = "7ca03414-bb20-4c80-98ef-7b0538b988ba";
@@ -473,9 +539,14 @@ pub(super) mod tests {
         record
     }
 
+    /// Reads a record with agentgateway's attribute names.
+    fn parse(record: &LogRecord, now: i64) -> Result<Option<UsageRecord>, String> {
+        parse_record(record, &AttributeNames::default(), now)
+    }
+
     #[test]
     fn reads_an_llm_request() {
-        let usage = parse_record(&llm_record(NOW, Vec::new()), NOW)
+        let usage = parse(&llm_record(NOW, Vec::new()), NOW)
             .unwrap()
             .expect("an LLM request");
         assert_eq!(usage.key.bucket_start, NOW.div_euclid(HOUR) * HOUR);
@@ -499,13 +570,72 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn configured_attribute_names_read_another_gateways_record() {
+        // Named as in the issue's LiteLLM example: the provider is in
+        // gen_ai.system, the cost in gen_ai.cost.total_cost, and the caller in
+        // a metadata attribute. There is no device.
+        let mut record = LogRecord {
+            observed_time_unix_nano: u64::try_from(NOW).unwrap() * 1_000_000_000,
+            attributes: vec![
+                attribute("gen_ai.system", text("anthropic")),
+                attribute("gen_ai.request.model", text("claude-sonnet-4-5")),
+                attribute("gen_ai.usage.input_tokens", Value::IntValue(1200)),
+                attribute("gen_ai.usage.output_tokens", Value::IntValue(300)),
+                attribute("gen_ai.cost.total_cost", Value::DoubleValue(0.0081)),
+                attribute("metadata.user_api_key_user_id", text("alice@example.com")),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            parse(&record, NOW),
+            Ok(None),
+            "agentgateway's names don't find the provider without a mapping"
+        );
+
+        // agentgateway's names are ignored once others are configured.
+        record.attributes.extend([
+            attribute("gen_ai.provider.name", text("ignored")),
+            attribute("agentdesktop.subject", text("ignored")),
+        ]);
+        let names = AttributeNames::new(&UsageAttributes {
+            provider: Some("gen_ai.system".to_owned()),
+            cost: Some("gen_ai.cost.total_cost".to_owned()),
+            subject: Some("metadata.user_api_key_user_id".to_owned()),
+            ..Default::default()
+        });
+        let usage = parse_record(&record, &names, NOW)
+            .unwrap()
+            .expect("an LLM request");
+        assert_eq!(usage.key.provider, "anthropic");
+        assert_eq!(usage.key.model, "claude-sonnet-4-5");
+        assert_eq!(usage.key.subject, "alice@example.com");
+        assert_eq!(usage.key.device_id, "", "attributed to the user only");
+        assert_eq!(usage.key.client_id, "");
+        assert_eq!(usage.measures.input_tokens, 1200);
+        assert_eq!(usage.measures.output_tokens, 300);
+        assert_eq!(usage.measures.cost_nanos, 8_100_000);
+        assert_eq!(usage.measures.unpriced_requests, 0);
+    }
+
+    #[test]
+    fn a_rejected_measure_names_the_configured_attribute() {
+        let names = AttributeNames::new(&UsageAttributes {
+            cost: Some("gen_ai.cost.total_cost".to_owned()),
+            ..Default::default()
+        });
+        let record = llm_record(NOW, vec![attribute("gen_ai.cost.total_cost", text("free"))]);
+        let error = parse_record(&record, &names, NOW).expect_err("invalid cost");
+        assert!(error.starts_with("gen_ai.cost.total_cost "), "{error}");
+    }
+
+    #[test]
     fn skips_requests_that_are_not_llm_calls() {
         let record = LogRecord {
             observed_time_unix_nano: 1,
             attributes: vec![attribute("http.response.status_code", Value::IntValue(200))],
             ..Default::default()
         };
-        assert_eq!(parse_record(&record, NOW), Ok(None));
+        assert_eq!(parse(&record, NOW), Ok(None));
     }
 
     #[test]
@@ -520,7 +650,7 @@ pub(super) mod tests {
         record
             .attributes
             .retain(|attribute| attribute.key != "agw.ai.usage.cost.total");
-        let usage = parse_record(&record, NOW).unwrap().unwrap();
+        let usage = parse(&record, NOW).unwrap().unwrap();
         assert_eq!(usage.key.billing, Billing::Subscription);
         assert_eq!(usage.measures.errors, 1);
         assert_eq!(usage.measures.unpriced_requests, 1);
@@ -528,7 +658,7 @@ pub(super) mod tests {
 
     #[test]
     fn unattributable_values_are_left_empty_and_bad_measures_rejected() {
-        let usage = parse_record(
+        let usage = parse(
             &llm_record(
                 NOW,
                 vec![
@@ -557,16 +687,13 @@ pub(super) mod tests {
             let mut record = llm_record(NOW, Vec::new());
             record.attributes.retain(|attribute| attribute.key != key);
             record.attributes.push(bad);
-            assert!(
-                parse_record(&record, NOW).is_err(),
-                "{key} must be rejected"
-            );
+            assert!(parse(&record, NOW).is_err(), "{key} must be rejected");
         }
     }
 
     #[test]
     fn invalid_labels_do_not_drop_usage_measures() {
-        let usage = parse_record(
+        let usage = parse(
             &llm_record(
                 NOW,
                 vec![
@@ -599,7 +726,7 @@ pub(super) mod tests {
             ),
             ("curl/8.7.1", ""),
         ] {
-            let usage = parse_record(&standalone_record(NOW, user_agent), NOW)
+            let usage = parse(&standalone_record(NOW, user_agent), NOW)
                 .unwrap()
                 .unwrap();
             assert_eq!(usage.key.client_id, tool, "{user_agent}");
@@ -607,7 +734,7 @@ pub(super) mod tests {
             assert_eq!(usage.key.device_id, "");
         }
 
-        let claimed = parse_record(
+        let claimed = parse(
             &llm_record(
                 NOW,
                 vec![attribute(
@@ -627,22 +754,20 @@ pub(super) mod tests {
 
     #[test]
     fn timestamps_are_clamped_to_now_and_retention() {
-        let future = parse_record(&llm_record(NOW + 3600, Vec::new()), NOW)
+        let future = parse(&llm_record(NOW + 3600, Vec::new()), NOW)
             .unwrap()
             .unwrap();
         assert_eq!(future.key.bucket_start, NOW.div_euclid(HOUR) * HOUR);
-        assert!(parse_record(&llm_record(NOW - 400 * 24 * HOUR, Vec::new()), NOW).is_err());
+        assert!(parse(&llm_record(NOW - 400 * 24 * HOUR, Vec::new()), NOW).is_err());
     }
 
     #[test]
     fn the_same_record_has_the_same_identifier() {
-        let first = parse_record(&llm_record(NOW, Vec::new()), NOW)
+        let first = parse(&llm_record(NOW, Vec::new()), NOW).unwrap().unwrap();
+        let again = parse(&llm_record(NOW, Vec::new()), NOW + 60)
             .unwrap()
             .unwrap();
-        let again = parse_record(&llm_record(NOW, Vec::new()), NOW + 60)
-            .unwrap()
-            .unwrap();
-        let later = parse_record(&llm_record(NOW + 1, Vec::new()), NOW + 60)
+        let later = parse(&llm_record(NOW + 1, Vec::new()), NOW + 60)
             .unwrap()
             .unwrap();
         assert_eq!(first.id, again.id);

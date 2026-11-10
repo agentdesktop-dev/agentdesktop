@@ -793,7 +793,7 @@ async fn start_usage(
     };
     let bound = listener.local_addr().unwrap_or(usage.listen);
     tracing::info!(address = %bound, "usage receiver listening");
-    let service = UsageIngest::service(store.clone(), &token);
+    let service = UsageIngest::service(store.clone(), &token, &usage.attributes);
     tokio::spawn(async move {
         if let Err(error) = tonic::transport::Server::builder()
             .add_service(service)
@@ -1758,6 +1758,7 @@ programs:
         let usage = config::UsageStartupConfig {
             listen: "127.0.0.1:0".parse().unwrap(),
             token_file,
+            attributes: Default::default(),
         };
         let (store, receiver) = super::start_usage(&usage, root.path()).await;
         assert!(receiver.bound, "{receiver:?}");
@@ -1861,6 +1862,7 @@ programs:
         let usage = config::UsageStartupConfig {
             listen: "127.0.0.1:0".parse().unwrap(),
             token_file: root.path().join("missing-token"),
+            attributes: Default::default(),
         };
         let (store, receiver) = super::start_usage(&usage, root.path()).await;
         assert!(store.is_some(), "the database still opened");

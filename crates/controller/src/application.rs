@@ -69,12 +69,14 @@ pub async fn run(
     let usage_token = config
         .usage
         .as_ref()
-        .map(|usage| agentdesktop_usage::load_token(&usage.token_file))
+        .map(|usage| {
+            agentdesktop_usage::load_token(&usage.token_file)
+                .map(|token| (token, &usage.attributes))
+        })
         .transpose()
         .context("initialize usage collection")?;
     let usage_ingest = usage_token
-        .as_deref()
-        .map(|token| UsageIngest::service(database.usage(), token));
+        .map(|(token, attributes)| UsageIngest::service(database.usage(), &token, attributes));
     if usage_ingest.is_some() {
         tracing::info!("usage collection enabled");
     }

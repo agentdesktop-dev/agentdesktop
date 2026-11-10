@@ -307,6 +307,7 @@ mod tests {
     ) -> Option<ExportLogsPartialSuccess> {
         let ingest = UsageIngest {
             store: store.clone(),
+            names: std::sync::Arc::new(crate::otlp::AttributeNames::default()),
         };
         ingest
             .export(Request::new(ExportLogsServiceRequest {

@@ -957,6 +957,46 @@ frontendPolicies:
 The desktop app then shows **Usage**. [`examples/standalone`](examples/standalone)
 runs this setup.
 
+### Other gateways
+
+Usage is read from named attributes of each OTLP log record. The names default
+to agentgateway's, so the configuration above needs no `attributes`. A gateway
+that exports OTLP logs over gRPC, with the bearer token, under other names can
+report usage once those names are mapped. The same `attributes` block works
+under `usage` in the controller and under `daemon.usage` in standalone mode:
+
+```yaml
+usage:
+  tokenFile: /etc/agentdesktop/usage-token
+  attributes:
+    provider: gen_ai.system
+    cost: gen_ai.cost.total_cost
+    subject: metadata.user_api_key_user_id
+```
+
+| Key | Default | Used for |
+| --- | --- | --- |
+| `provider` | `gen_ai.provider.name` | provider; a record without it is not counted |
+| `requestModel` | `gen_ai.request.model` | model, when no response model is set |
+| `responseModel` | `gen_ai.response.model` | model |
+| `inputTokens` | `gen_ai.usage.input_tokens` | input tokens |
+| `outputTokens` | `gen_ai.usage.output_tokens` | output tokens |
+| `cacheReadTokens` | `gen_ai.usage.cache_read.input_tokens` | cache read tokens |
+| `cacheWriteTokens` | `gen_ai.usage.cache_creation.input_tokens` | cache write tokens |
+| `cost` | `agw.ai.usage.cost.total` | cost, in US dollars |
+| `status` | `http.response.status_code` | errors (status 400 or above) |
+| `error` | `error` | errors (any non-empty value) |
+| `subject` | `agentdesktop.subject` | user; `jwt.sub` when it is missing |
+| `device` | `agentdesktop.device` | device; must be an enrolled device ID |
+| `client` | `agentdesktop.client` | tool |
+| `billing` | `agentdesktop.billing` | `subscription` for subscription billing |
+| `userAgent` | `user_agent.original` | tool, when `client` is missing |
+
+Keys left out keep their default. A gateway that cannot name the device, for
+example because devices authenticate to it with their own OIDC token rather
+than a controller JWT, still gets per-user, per-tool, and per-model usage; only
+the per-device view is empty. Only OTLP logs are received, not traces.
+
 ## Core capabilities
 
 - **AI tool discovery:** detect supported developer tools and their versions
