@@ -272,18 +272,52 @@ impl<T> Clone for FleetService<T> {
     }
 }
 
+/// How the fleet limits treat a `FleetAgent` method.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RpcClass {
+    /// Called before the device has a certificate. Its requests get the small
+    /// message limit whether or not a certificate is presented, and its handler
+    /// must take a permit from `EnrollmentLimiter` before any other work.
+    Enrollment,
+    /// Called with a device certificate: the device message limit. Without a
+    /// certificate it gets the small limit, and its handler rejects it.
+    Device,
+    /// The device's `Connect` stream. Its connection stays busy for as long as
+    /// the session lasts, not only while the handler runs (see `SessionBusy`).
+    Connect,
+}
+
+/// Every `FleetAgent` method in `fleet.proto`, with its class. A test fails
+/// when an RPC is missing here, so a new or renamed one cannot skip its limits.
+const RPC_CLASSES: &[(&str, RpcClass)] = &[
+    ("BeginEnrollment", RpcClass::Enrollment),
+    ("CompleteEnrollment", RpcClass::Enrollment),
+    ("RenewDeviceCertificate", RpcClass::Device),
+    ("GetLlmGatewayCredential", RpcClass::Device),
+    ("GetDeviceUsage", RpcClass::Device),
+    ("Connect", RpcClass::Connect),
+];
+
+/// The class of the `FleetAgent` method at `path`, or `None` for another path.
+fn rpc_class(path: &str) -> Option<RpcClass> {
+    let method = path
+        .strip_prefix('/')?
+        .strip_prefix(SERVICE_NAME)?
+        .strip_prefix('/')?;
+    RPC_CLASSES
+        .iter()
+        .find(|(name, _)| *name == method)
+        .map(|(_, class)| *class)
+}
+
 fn is_enrollment(path: &str) -> bool {
-    path.strip_prefix('/')
-        .and_then(|path| path.strip_prefix(SERVICE_NAME))
-        .is_some_and(|method| matches!(method, "/BeginEnrollment" | "/CompleteEnrollment"))
+    rpc_class(path) == Some(RpcClass::Enrollment)
 }
 
 /// Whether `path` is the `Connect` stream, whose response lasts as long as the
 /// device's session.
 fn is_connect(path: &str) -> bool {
-    path.strip_prefix('/')
-        .and_then(|path| path.strip_prefix(SERVICE_NAME))
-        .is_some_and(|method| method == "/Connect")
+    rpc_class(path) == Some(RpcClass::Connect)
 }
 
 /// Whether the TLS client presented a certificate signed by the device CA

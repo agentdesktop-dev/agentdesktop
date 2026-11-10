@@ -21,7 +21,7 @@ use tonic::{
     transport::{Identity, ServerTlsConfig},
 };
 
-use super::{Connections, FLEET_LIMITS, FleetLimits};
+use super::{Connections, FLEET_LIMITS, FleetLimits, RPC_CLASSES, rpc_class};
 
 /// Fails the test, instead of hanging it, when the server never ends the wait.
 async fn bounded<T>(call: impl std::future::Future<Output = T>) -> T {
@@ -871,6 +871,63 @@ fn configured_limits_replace_every_deployment_limit() {
             ..FLEET_LIMITS
         }
     );
+}
+
+/// The RPC names in `fleet.proto`'s `FleetAgent` service.
+fn fleet_rpcs(proto: &str) -> std::collections::BTreeSet<&str> {
+    let (_, service) = proto
+        .split_once("service FleetAgent {")
+        .expect("fleet.proto declares service FleetAgent");
+    let (service, _) = service
+        .split_once('}')
+        .expect("service FleetAgent is closed");
+    service
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("rpc "))
+        .map(|rpc| rpc.split_once('(').map_or(rpc, |(name, _)| name).trim())
+        .collect()
+}
+
+#[test]
+fn every_fleet_rpc_has_a_limit_class() {
+    let rpcs = fleet_rpcs(include_str!("../../../proto/proto/fleet.proto"));
+    let classified: std::collections::BTreeSet<&str> =
+        RPC_CLASSES.iter().map(|(name, _)| *name).collect();
+    assert_eq!(
+        classified.len(),
+        RPC_CLASSES.len(),
+        "RPC_CLASSES lists an RPC twice"
+    );
+
+    let unclassified: Vec<_> = rpcs.difference(&classified).collect();
+    let not_in_proto: Vec<_> = classified.difference(&rpcs).collect();
+    assert!(
+        unclassified.is_empty() && not_in_proto.is_empty(),
+        "every FleetAgent RPC needs a class in RPC_CLASSES (fleet_limits.rs), which sets its \
+         message limit and how long it keeps its connection busy; an Enrollment RPC's handler \
+         must also take an EnrollmentLimiter permit. Not classified: {unclassified:?}. \
+         Classified but not in fleet.proto: {not_in_proto:?}"
+    );
+}
+
+#[test]
+fn fleet_paths_are_classified_by_the_table() {
+    use agentdesktop_proto::fleet::fleet_agent_server::SERVICE_NAME;
+
+    for (name, class) in RPC_CLASSES {
+        assert_eq!(
+            rpc_class(&format!("/{SERVICE_NAME}/{name}")),
+            Some(*class),
+            "{name}"
+        );
+    }
+    assert_eq!(rpc_class(&format!("/{SERVICE_NAME}/Unknown")), None);
+    assert_eq!(rpc_class("/other.Service/BeginEnrollment"), None);
+    assert!(super::is_enrollment(&format!(
+        "/{SERVICE_NAME}/CompleteEnrollment"
+    )));
+    assert!(super::is_connect(&format!("/{SERVICE_NAME}/Connect")));
+    assert!(!super::is_enrollment(&format!("/{SERVICE_NAME}/Connect")));
 }
 
 #[test]
