@@ -112,6 +112,9 @@ async fn serve_tracked(
     tls: Option<ServerTlsConfig>,
     service: Slow,
 ) -> (SocketAddr, Connections) {
+    // As the controller does at startup, so TLS works whichever rustls
+    // backends the test build enables.
+    crate::install_rustls_provider();
     // The controller's own listener, so these tests exercise what it runs.
     let listener = limits
         .listener(SocketAddr::from(([127, 0, 0, 1], 0)), tls)
