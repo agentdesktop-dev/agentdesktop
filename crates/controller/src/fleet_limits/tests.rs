@@ -22,17 +22,6 @@ use tonic::{
 
 use super::{Connections, FLEET_LIMITS, FleetLimits};
 
-/// Limits small enough for tests to observe; anything a test does not exercise
-/// stays at the production value.
-fn limits() -> FleetLimits {
-    let mut limits = FLEET_LIMITS;
-    limits.tls_handshake = Duration::from_millis(200);
-    limits.request = Duration::from_millis(200);
-    limits.keepalive_interval = Duration::from_millis(100);
-    limits.keepalive_timeout = Duration::from_millis(100);
-    limits
-}
-
 /// Fails the test, instead of hanging it, when the server never ends the wait.
 async fn bounded<T>(call: impl std::future::Future<Output = T>) -> T {
     time::timeout(Duration::from_secs(5), call)
@@ -156,8 +145,12 @@ async fn until_closed(mut stream: TcpStream) {
 async fn a_client_that_never_finishes_the_tls_handshake_is_disconnected() {
     let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
     let identity = Identity::from_pem(certified.cert.pem(), certified.signing_key.serialize_pem());
+    let limits = FleetLimits {
+        tls_handshake: Duration::from_millis(200),
+        ..FLEET_LIMITS
+    };
     let address = serve(
-        limits(),
+        limits,
         Some(identity),
         Slow {
             delay: Duration::ZERO,
@@ -173,8 +166,12 @@ async fn a_client_that_never_finishes_the_tls_handshake_is_disconnected() {
 
 #[tokio::test]
 async fn a_request_that_runs_too_long_is_ended() {
+    let limits = FleetLimits {
+        request: Duration::from_millis(200),
+        ..FLEET_LIMITS
+    };
     let address = serve(
-        limits(),
+        limits,
         None,
         Slow {
             delay: Duration::from_secs(30),
@@ -195,9 +192,13 @@ async fn a_request_that_runs_too_long_is_ended() {
 
 #[tokio::test]
 async fn the_request_timeout_does_not_end_an_open_stream() {
+    let limits = FleetLimits {
+        request: Duration::from_millis(200),
+        ..FLEET_LIMITS
+    };
     // Each message arrives after more than the request timeout.
-    let delay = limits().request * 2;
-    let address = serve(limits(), None, Slow { delay }).await;
+    let delay = limits.request * 2;
+    let address = serve(limits, None, Slow { delay }).await;
     let (_outbound, receiver) = mpsc::channel::<AgentMessage>(1);
 
     let mut stream = bounded(client(address).await.connect(ReceiverStream::new(receiver)))
@@ -215,8 +216,13 @@ async fn the_request_timeout_does_not_end_an_open_stream() {
 
 #[tokio::test]
 async fn a_connection_that_stops_answering_pings_is_closed() {
+    let limits = FleetLimits {
+        keepalive_interval: Duration::from_millis(100),
+        keepalive_timeout: Duration::from_millis(100),
+        ..FLEET_LIMITS
+    };
     let address = serve(
-        limits(),
+        limits,
         None,
         Slow {
             delay: Duration::ZERO,
@@ -257,16 +263,12 @@ async fn two_calls_on_one_connection(limits: FleetLimits) -> Duration {
     started.elapsed()
 }
 
-fn one_at_a_time() -> FleetLimits {
-    let mut limits = limits();
-    limits.request = Duration::from_secs(5);
-    limits
-}
-
 #[tokio::test]
 async fn requests_beyond_the_per_connection_limit_wait() {
-    let mut limits = one_at_a_time();
-    limits.requests_per_connection = 1;
+    let limits = FleetLimits {
+        requests_per_connection: 1,
+        ..FLEET_LIMITS
+    };
 
     let elapsed = two_calls_on_one_connection(limits).await;
 
@@ -278,8 +280,10 @@ async fn requests_beyond_the_per_connection_limit_wait() {
 
 #[tokio::test]
 async fn streams_beyond_the_per_connection_limit_wait() {
-    let mut limits = one_at_a_time();
-    limits.streams_per_connection = 1;
+    let limits = FleetLimits {
+        streams_per_connection: 1,
+        ..FLEET_LIMITS
+    };
 
     let elapsed = two_calls_on_one_connection(limits).await;
 
@@ -290,10 +294,11 @@ async fn streams_beyond_the_per_connection_limit_wait() {
 }
 
 fn small_messages() -> FleetLimits {
-    let mut limits = limits();
-    limits.max_message_bytes = 1024;
-    limits.unauthenticated_message_bytes = 128;
-    limits
+    FleetLimits {
+        max_message_bytes: 1024,
+        unauthenticated_message_bytes: 128,
+        ..FLEET_LIMITS
+    }
 }
 
 #[tokio::test]
@@ -453,7 +458,7 @@ async fn a_tls_connection_that_never_makes_a_request_is_closed() {
     use rustls::pki_types::{CertificateDer, pem::PemObject};
 
     let pki = pki();
-    let mut limits = limits();
+    let mut limits = FLEET_LIMITS;
     limits.first_request = Duration::from_millis(300);
     let (address, _) = serve_mtls(limits, &pki).await;
     let ca = pki.ca.clone().into_inner();
@@ -512,7 +517,7 @@ async fn a_tls_connection_that_never_makes_a_request_is_closed() {
 #[tokio::test]
 async fn a_tls_connection_idle_after_its_last_request_is_closed() {
     let pki = pki();
-    let mut limits = limits();
+    let mut limits = FLEET_LIMITS;
     // Far past the test's bound, so only the idle close can end the connection.
     limits.first_request = Duration::from_secs(60);
     limits.idle_connection = Duration::from_millis(200);
@@ -573,7 +578,7 @@ async fn connections_over_cap(limits: FleetLimits) {
 
 #[tokio::test]
 async fn connections_over_the_per_address_cap_are_closed() {
-    let mut limits = limits();
+    let mut limits = FLEET_LIMITS;
     limits.connections_per_address = 2;
 
     connections_over_cap(limits).await;
@@ -583,7 +588,7 @@ async fn connections_over_the_per_address_cap_are_closed() {
 fn an_address_over_its_cap_does_not_evict_other_connections() {
     use tokio::sync::oneshot::error::TryRecvError;
 
-    let mut limits = limits();
+    let mut limits = FLEET_LIMITS;
     limits.max_connections = 2;
     limits.connections_per_address = 1;
     let connections = limits.connections();
@@ -604,7 +609,7 @@ fn an_address_over_its_cap_does_not_evict_other_connections() {
 
 #[tokio::test]
 async fn at_the_total_cap_the_longest_idle_connection_makes_room() {
-    let mut limits = limits();
+    let mut limits = FLEET_LIMITS;
     limits.max_connections = 2;
     let address = serve(
         limits,
@@ -628,9 +633,8 @@ async fn at_the_total_cap_the_longest_idle_connection_makes_room() {
 
 #[tokio::test]
 async fn at_the_total_cap_a_new_connection_is_closed_when_every_connection_is_busy() {
-    let mut limits = limits();
+    let mut limits = FLEET_LIMITS;
     limits.max_connections = 1;
-    limits.request = Duration::from_secs(5);
     let address = serve(
         limits,
         None,
@@ -654,7 +658,7 @@ async fn at_the_total_cap_a_new_connection_is_closed_when_every_connection_is_bu
 
 #[tokio::test]
 async fn a_connection_that_never_sends_anything_is_closed() {
-    let mut limits = limits();
+    let mut limits = FLEET_LIMITS;
     limits.first_request = Duration::from_millis(200);
     let address = serve(
         limits,
@@ -672,11 +676,8 @@ async fn a_connection_that_never_sends_anything_is_closed() {
 
 #[tokio::test]
 async fn a_connection_that_never_makes_a_request_is_closed() {
-    let mut limits = limits();
+    let mut limits = FLEET_LIMITS;
     limits.first_request = Duration::from_millis(200);
-    // Keepalive alone would also close this connection; keep it out of the way.
-    limits.keepalive_interval = Duration::from_secs(60);
-    limits.keepalive_timeout = Duration::from_secs(60);
     let address = serve(
         limits,
         None,
@@ -698,7 +699,7 @@ async fn a_connection_that_never_makes_a_request_is_closed() {
 
 #[tokio::test]
 async fn a_connection_idle_after_its_last_request_is_closed() {
-    let mut limits = limits();
+    let mut limits = FLEET_LIMITS;
     // Far past the test's bound, so only the idle close can end the connection.
     limits.first_request = Duration::from_secs(60);
     limits.idle_connection = Duration::from_millis(200);
@@ -726,7 +727,7 @@ async fn a_connection_idle_after_its_last_request_is_closed() {
 
 #[tokio::test]
 async fn a_response_the_client_never_accepts_does_not_keep_its_connection_busy() {
-    let mut limits = limits();
+    let mut limits = FLEET_LIMITS;
     // Far past the test's bound, so only the idle close can end the connection.
     limits.first_request = Duration::from_secs(60);
     limits.idle_connection = Duration::from_millis(200);
@@ -771,7 +772,7 @@ async fn a_response_the_client_never_accepts_does_not_keep_its_connection_busy()
 
 #[tokio::test]
 async fn a_stalled_connect_response_frees_its_connection_when_the_session_ends() {
-    let mut limits = limits();
+    let mut limits = FLEET_LIMITS;
     // Far past the test's bound, so only the idle close can end the connection.
     limits.first_request = Duration::from_secs(60);
     limits.idle_connection = Duration::from_millis(200);
@@ -807,8 +808,7 @@ async fn a_stalled_connect_response_frees_its_connection_when_the_session_ends()
 
 #[tokio::test]
 async fn an_open_stream_keeps_its_connection_from_going_idle() {
-    let mut limits = limits();
-    limits.request = Duration::from_secs(5);
+    let mut limits = FLEET_LIMITS;
     limits.idle_connection = Duration::from_millis(200);
     // Messages arrive further apart than the idle limit.
     let address = serve(
