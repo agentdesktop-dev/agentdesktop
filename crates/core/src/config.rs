@@ -604,17 +604,17 @@ pub struct ControllerFleetLimitsConfig {
     /// calls the identity provider. Defaults to `64`.
     #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub enrollment_in_flight: usize,
-    /// Enrollments one client address may start at once; it then gets one more
-    /// every `enrollmentRefill`. Defaults to `60`.
+    /// Enrollments one client address may start in a burst, after which it may
+    /// start one more every `enrollmentRefill`. Defaults to `60`.
     #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub enrollment_burst: u32,
     /// Time for a client address to get back one enrollment. Defaults to `1s`.
     #[serde(with = "humantime_serde")]
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub enrollment_refill: Duration,
-    /// Messages one device may send at once on its `Connect` stream; it then
-    /// gets one more every `deviceMessageRefill`. A device over its budget is
-    /// disconnected. Defaults to `600`.
+    /// Messages one device may send in a burst on its `Connect` stream, after
+    /// which it may send one more every `deviceMessageRefill`. A device over
+    /// its budget is disconnected. Defaults to `600`.
     #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub device_message_burst: u32,
     /// Time for a device to get back one message. Defaults to `50ms`.

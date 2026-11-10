@@ -90,7 +90,7 @@ pub struct FleetLimits {
     /// also bounds the load a flood can put on it.
     pub enrollment_in_flight: usize,
     /// Per-client-address `BeginEnrollment` budget: up to `enrollment_burst`
-    /// requests at once, refilled at one request per `enrollment_refill`.
+    /// requests in a burst, refilled at one request per `enrollment_refill`.
     /// Generous, because many devices can share one address behind NAT.
     pub enrollment_burst: u32,
     pub enrollment_refill: Duration,
@@ -99,7 +99,7 @@ pub struct FleetLimits {
     /// already signed in, and a refusal makes them start over.
     pub enrollment_completion_wait: Duration,
     /// Messages a device may send on its `Connect` streams: up to
-    /// `device_message_burst` at once, refilled at one per
+    /// `device_message_burst` in a burst, refilled at one per
     /// `device_message_refill`. The budget belongs to the device, so
     /// reconnecting does not reset it. Devices send a heartbeat every 30
     /// seconds, inventory periodically and one telemetry event per tool event,
@@ -107,7 +107,7 @@ pub struct FleetLimits {
     pub device_message_burst: u32,
     pub device_message_refill: Duration,
     /// How often a device may open a `Connect` stream: up to
-    /// `stream_open_burst` at once, refilled at one per `stream_open_refill`.
+    /// `stream_open_burst` in a burst, refilled at one per `stream_open_refill`.
     /// Each open checks the access token with the identity provider.
     pub stream_open_burst: u32,
     pub stream_open_refill: Duration,
