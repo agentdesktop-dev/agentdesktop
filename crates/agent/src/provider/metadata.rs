@@ -1,11 +1,14 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
-    io::{Read, Seek, SeekFrom},
+    io::{self, ErrorKind, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    sync::{Mutex, PoisonError},
+    time::SystemTime,
 };
 
 use agentdesktop_core::model::Skill;
+use memchr::memmem;
 use serde::Deserialize;
 
 struct PackageMetadata {
@@ -86,6 +89,201 @@ pub(super) fn version_after_component(executable: &Path, component: &str) -> Opt
         // Keep looking for the named install-layout component.
     }
     components.next()?.as_os_str().to_str().map(str::to_owned)
+}
+
+const MAX_WRAPPER_SCRIPT_SIZE: u64 = 4 * 1024;
+const MAX_WRAPPER_HOPS: usize = 4;
+
+/// Follows `makeWrapper`-style exec scripts (Nix's generated shebang shims: a
+/// script that only sets up the environment and `exec`s a sibling binary) to
+/// the real executable they wrap, without executing them.
+///
+/// A script whose `exec` target is a shell variable rather than a literal
+/// path (as in a hand-written launcher) is left unresolved, since the real
+/// target can only be determined by actually running the shell.
+pub(super) fn resolve_exec_wrapper(executable: &Path) -> PathBuf {
+    let mut current = executable.to_path_buf();
+    for _ in 0..MAX_WRAPPER_HOPS {
+        match exec_wrapper_target(&current) {
+            Some(target) if target.is_file() => current = target,
+            _ => break,
+        }
+    }
+    current
+}
+
+fn exec_wrapper_target(path: &Path) -> Option<PathBuf> {
+    let metadata = fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_WRAPPER_SCRIPT_SIZE {
+        return None;
+    }
+    let contents = fs::read_to_string(path).ok()?;
+    if !contents.starts_with("#!") {
+        return None;
+    }
+    // Only the last `exec` line counts.
+    let last_exec = contents
+        .lines()
+        .rev()
+        .find(|line| line.trim_start().starts_with("exec "))?;
+    exec_target_from_line(last_exec)
+}
+
+fn exec_target_from_line(line: &str) -> Option<PathBuf> {
+    let rest = line.trim().strip_prefix("exec ")?;
+    // `exec -a "$0"` or, with `--argv0`, `exec -a "<name>"`.
+    let rest = match rest.strip_prefix("-a ") {
+        Some(argv0) => quoted_word(argv0.trim_start())?.1,
+        None => rest,
+    };
+    let (target, _) = quoted_word(rest.trim_start())?;
+    let target = Path::new(target);
+    target.is_absolute().then(|| target.to_path_buf())
+}
+
+/// Leading double-quoted word and the remainder.
+fn quoted_word(text: &str) -> Option<(&str, &str)> {
+    text.strip_prefix('"')?.split_once('"')
+}
+
+const EMBEDDED_VERSION_MAX_LENGTH: usize = 64;
+
+/// Reads a version string embedded verbatim in a binary's bytes, directly after a
+/// literal `marker`, without executing it. The first `/`-separated segment that
+/// parses as a version wins.
+///
+/// Install-layout conventions (a `versions/` directory, an npm `package.json`, ...)
+/// vary by install method; the marker baked into the binary itself does not.
+///
+/// Results are cached per `marker` until the file's path, size or mtime changes.
+pub(super) fn embedded_version(
+    executable: &Path,
+    marker: &'static [u8],
+    max_binary_size: u64,
+) -> Option<String> {
+    let path = executable.canonicalize().ok()?;
+    let file = fs::File::open(&path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > max_binary_size {
+        return None;
+    }
+    // No mtime: same-size rewrites are undetectable, so never cache.
+    let stamp = metadata.modified().ok().map(|modified| FileStamp {
+        path,
+        len: metadata.len(),
+        modified,
+    });
+    cached_embedded_version(stamp, marker, || {
+        embedded_version_from_reader(file, marker, EMBEDDED_VERSION_CHUNK_SIZE)
+    })
+}
+
+fn cached_embedded_version(
+    stamp: Option<FileStamp>,
+    marker: &'static [u8],
+    scan: impl FnOnce() -> io::Result<Option<String>>,
+) -> Option<String> {
+    static CACHE: Mutex<EmbeddedVersionCache> = Mutex::new(BTreeMap::new());
+    if let Some(stamp) = &stamp {
+        let cached = CACHE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(marker)
+            .filter(|(cached, _)| cached == stamp)
+            .map(|(_, version)| version.clone());
+        if let Some(version) = cached {
+            return version;
+        }
+    }
+    // Read errors are not cached so the next refresh retries.
+    let version = scan().ok()?;
+    if let Some(stamp) = stamp {
+        CACHE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(marker, (stamp, version.clone()));
+    }
+    version
+}
+
+/// One entry per marker; an upgrade replaces it.
+type EmbeddedVersionCache = BTreeMap<&'static [u8], (FileStamp, Option<String>)>;
+
+#[derive(PartialEq)]
+struct FileStamp {
+    path: PathBuf,
+    len: u64,
+    modified: SystemTime,
+}
+
+const EMBEDDED_VERSION_CHUNK_SIZE: usize = 64 * 1024;
+
+fn embedded_version_from_reader(
+    mut reader: impl Read,
+    marker: &[u8],
+    chunk_size: usize,
+) -> io::Result<Option<String>> {
+    let chunk_size = chunk_size.max(1);
+    let retained_length = marker.len() + EMBEDDED_VERSION_MAX_LENGTH;
+    let mut chunk = vec![0; chunk_size];
+    let mut retained = Vec::new();
+
+    loop {
+        let read = match reader.read(&mut chunk) {
+            Ok(read) => read,
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        let finished = read == 0;
+        retained.extend_from_slice(&chunk[..read]);
+        if let Some(version) = find_embedded_version(&retained, marker, finished) {
+            return Ok(Some(version));
+        }
+        if finished {
+            return Ok(None);
+        }
+        if retained.len() > retained_length {
+            retained.drain(..retained.len() - retained_length);
+        }
+    }
+}
+
+fn find_embedded_version(bytes: &[u8], marker: &[u8], finished: bool) -> Option<String> {
+    for start in memmem::find_iter(bytes, marker) {
+        let value = &bytes[start + marker.len()..];
+        let length = value
+            .iter()
+            .take(EMBEDDED_VERSION_MAX_LENGTH)
+            .take_while(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+' | b'/')
+            })
+            .count();
+        if length == value.len() && !finished {
+            continue;
+        }
+        let Ok(token) = std::str::from_utf8(&value[..length]) else {
+            continue;
+        };
+        // e.g. `opencode/latest/2.0.15/cli`.
+        if let Some(version) = token
+            .split('/')
+            .find(|segment| valid_embedded_version(segment))
+        {
+            return Some(version.to_owned());
+        }
+    }
+    None
+}
+
+fn valid_embedded_version(version: &str) -> bool {
+    let core = version
+        .split_once(['-', '+'])
+        .map_or(version, |(core, _)| core);
+    let components: Vec<_> = core.split('.').collect();
+    components.len() == 3
+        && components.iter().all(|component| {
+            !component.is_empty() && component.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
 pub(super) fn json_package_version(path: &Path, expected_name: &str) -> Option<String> {
@@ -336,7 +534,289 @@ fn skill_front_matter(contents: &str) -> Option<BTreeMap<String, serde_json::Val
 
 #[cfg(test)]
 mod tests {
-    use super::skill_front_matter;
+    use std::{
+        fs::File,
+        io::{self, Cursor, Read},
+        path::PathBuf,
+        time::{Duration, SystemTime},
+    };
+
+    use super::{
+        FileStamp, MAX_WRAPPER_HOPS, cached_embedded_version, embedded_version,
+        embedded_version_from_reader, resolve_exec_wrapper, skill_front_matter,
+    };
+
+    fn scan(binary: &[u8], marker: &[u8]) -> Option<String> {
+        embedded_version_from_reader(Cursor::new(binary), marker, 7).unwrap()
+    }
+
+    #[test]
+    fn reads_embedded_version_across_chunk_boundaries() {
+        let binary = b"prefix --user-agent=opencode/1.18.11 --use-system-ca -- suffix";
+        assert_eq!(
+            scan(binary, b"user-agent=opencode/").as_deref(),
+            Some("1.18.11")
+        );
+    }
+
+    #[test]
+    fn reads_version_after_a_channel_segment() {
+        let binary =
+            b"--smol --user-agent=opencode/latest/2.0.15/cli --use-system-ca --no-warnings";
+        assert_eq!(
+            scan(binary, b"user-agent=opencode/").as_deref(),
+            Some("2.0.15")
+        );
+    }
+
+    #[test]
+    fn reads_preview_channel_versions() {
+        let binary = b"--user-agent=opencode/dev/0.0.0-dev-123/cli --use-system-ca";
+        assert_eq!(
+            scan(binary, b"user-agent=opencode/").as_deref(),
+            Some("0.0.0-dev-123")
+        );
+    }
+
+    #[test]
+    fn skips_marker_hits_that_are_not_versions() {
+        let binary = b"// Version: 1.2 // Version: abc // Version: 1.2.3.4 // Version: 2.1.319\n";
+        assert_eq!(scan(binary, b"// Version: ").as_deref(), Some("2.1.319"));
+    }
+
+    #[test]
+    fn accepts_prerelease_and_build_suffixes() {
+        let binary = b"// Version: 1.2.3-beta.1+build.7\n";
+        assert_eq!(
+            scan(binary, b"// Version: ").as_deref(),
+            Some("1.2.3-beta.1+build.7")
+        );
+    }
+
+    #[test]
+    fn returns_nothing_without_a_marker() {
+        assert_eq!(scan(b"no version information here", b"// Version: "), None);
+    }
+
+    #[test]
+    fn retries_interrupted_reads() {
+        struct InterruptedOnce {
+            inner: Cursor<&'static [u8]>,
+            interrupted: bool,
+        }
+        impl Read for InterruptedOnce {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if !self.interrupted {
+                    self.interrupted = true;
+                    return Err(io::Error::from(io::ErrorKind::Interrupted));
+                }
+                self.inner.read(buf)
+            }
+        }
+
+        let reader = InterruptedOnce {
+            inner: Cursor::new(b"// Version: 1.0.0\n"),
+            interrupted: false,
+        };
+        assert_eq!(
+            embedded_version_from_reader(reader, b"// Version: ", 7)
+                .unwrap()
+                .as_deref(),
+            Some("1.0.0")
+        );
+    }
+
+    #[test]
+    fn ignores_binaries_over_the_size_limit() {
+        const MARKER: &[u8] = b"size-limit-marker/";
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("tool");
+        std::fs::write(&binary, b"size-limit-marker/1.0.0").unwrap();
+
+        assert_eq!(embedded_version(&binary, MARKER, 4), None);
+        assert_eq!(
+            embedded_version(&binary, MARKER, u64::MAX).as_deref(),
+            Some("1.0.0")
+        );
+    }
+
+    #[test]
+    fn does_not_cache_a_failed_scan() {
+        const MARKER: &[u8] = b"failed-scan-marker/";
+        let stamp = || {
+            Some(FileStamp {
+                path: PathBuf::from("/tool"),
+                len: 1,
+                modified: SystemTime::UNIX_EPOCH,
+            })
+        };
+
+        assert_eq!(
+            cached_embedded_version(stamp(), MARKER, || Err(io::Error::other("disk"))),
+            None
+        );
+        // Same stamp rescans.
+        assert_eq!(
+            cached_embedded_version(stamp(), MARKER, || Ok(Some("1.0.0".to_owned()))).as_deref(),
+            Some("1.0.0")
+        );
+    }
+
+    #[test]
+    fn does_not_cache_without_a_stamp() {
+        const MARKER: &[u8] = b"no-stamp-marker/";
+        assert_eq!(
+            cached_embedded_version(None, MARKER, || Ok(Some("1.0.0".to_owned()))).as_deref(),
+            Some("1.0.0")
+        );
+        assert_eq!(
+            cached_embedded_version(None, MARKER, || Ok(Some("2.0.0".to_owned()))).as_deref(),
+            Some("2.0.0")
+        );
+    }
+
+    #[test]
+    fn follows_make_wrapper_style_exec_scripts() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join(".opencode-wrapped");
+        std::fs::write(&real, b"binary bytes").unwrap();
+        let wrapper = dir.path().join("opencode");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#! /nix/store/.../bash -e\nexec -a \"$0\" \"{}\"  \"$@\" \n",
+                real.display()
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(resolve_exec_wrapper(&wrapper), real);
+    }
+
+    #[test]
+    fn follows_make_wrapper_scripts_with_a_fixed_argv0() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join(".claude-wrapped");
+        std::fs::write(&real, b"binary bytes").unwrap();
+        let wrapper = dir.path().join("claude");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#! /nix/store/.../bash -e\nexport DISABLE_AUTOUPDATER='1'\nexec -a \"claude\" \"{}\"  \"$@\" \n",
+                real.display()
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(resolve_exec_wrapper(&wrapper), real);
+    }
+
+    #[test]
+    fn leaves_relative_exec_targets_unresolved() {
+        let dir = tempfile::tempdir().unwrap();
+        let wrapper = dir.path().join("opencode");
+        std::fs::write(&wrapper, b"#!/bin/sh\nexec \"Cargo.toml\" \"$@\"\n").unwrap();
+
+        assert_eq!(resolve_exec_wrapper(&wrapper), wrapper);
+    }
+
+    #[test]
+    fn caches_embedded_version_until_the_file_changes() {
+        const MARKER: &[u8] = b"cache-test-marker/";
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("tool");
+        let write = |version: &str, modified: SystemTime| {
+            std::fs::write(&binary, format!("head cache-test-marker/{version} tail")).unwrap();
+            File::options()
+                .write(true)
+                .open(&binary)
+                .unwrap()
+                .set_modified(modified)
+                .unwrap();
+        };
+        let first = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+
+        write("1.0.0", first);
+        assert_eq!(
+            embedded_version(&binary, MARKER, u64::MAX).as_deref(),
+            Some("1.0.0")
+        );
+
+        // Same size and mtime: cache hit.
+        write("2.0.0", first);
+        assert_eq!(
+            embedded_version(&binary, MARKER, u64::MAX).as_deref(),
+            Some("1.0.0")
+        );
+
+        write("2.0.0", first + Duration::from_secs(1));
+        assert_eq!(
+            embedded_version(&binary, MARKER, u64::MAX).as_deref(),
+            Some("2.0.0")
+        );
+    }
+
+    #[test]
+    fn leaves_variable_based_exec_targets_unresolved() {
+        let dir = tempfile::tempdir().unwrap();
+        let wrapper = dir.path().join("claude");
+        std::fs::write(
+            &wrapper,
+            b"#!/usr/bin/env bash\nexec \"$CLAUDE_BINARY\" \"$@\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(resolve_exec_wrapper(&wrapper), wrapper);
+    }
+
+    #[test]
+    fn only_the_last_exec_line_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::write(&real, b"binary bytes").unwrap();
+        let wrapper = dir.path().join("claude");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/usr/bin/env bash\nif [ -n \"$LEGACY\" ]; then\n  exec \"{}\" \"$@\"\nfi\nexec \"$CLAUDE_BINARY\" \"$@\"\n",
+                real.display()
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(resolve_exec_wrapper(&wrapper), wrapper);
+    }
+
+    #[test]
+    fn stops_following_wrappers_at_the_hop_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain: Vec<PathBuf> = (0..=MAX_WRAPPER_HOPS + 1)
+            .map(|index| dir.path().join(format!("hop-{index}")))
+            .collect();
+        for pair in chain.windows(2) {
+            std::fs::write(
+                &pair[0],
+                format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", pair[1].display()),
+            )
+            .unwrap();
+        }
+        std::fs::write(chain.last().unwrap(), b"binary bytes").unwrap();
+
+        assert_eq!(resolve_exec_wrapper(&chain[0]), chain[MAX_WRAPPER_HOPS]);
+    }
+
+    #[test]
+    fn a_wrapper_that_execs_itself_terminates() {
+        let dir = tempfile::tempdir().unwrap();
+        let wrapper = dir.path().join("loop");
+        std::fs::write(
+            &wrapper,
+            format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", wrapper.display()),
+        )
+        .unwrap();
+
+        assert_eq!(resolve_exec_wrapper(&wrapper), wrapper);
+    }
 
     #[test]
     fn reads_only_skill_front_matter() {
