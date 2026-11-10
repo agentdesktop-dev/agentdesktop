@@ -817,6 +817,47 @@ requires a controller build with a compiled-in authentication provider; the
 standard executable rejects it at startup. Device enrollment is configured separately.
 See the [controller configuration schema](schema/controller-config.md).
 
+### Management audit log
+
+The controller records every management mutation and every denied management
+request. Each record has the actor (credential kind, issuer, subject and, when
+the identity provider supplies them, email and name), the action (a permission
+name such as `devices.delete`), the target, the outcome, the time, and the
+request: method, path, peer address, `User-Agent`, and `X-Forwarded-For` as
+received. A mutation produces two records:
+
+- `action.attempted` is written before the handler acts. If it cannot be
+  written, the request fails with `503 audit_unavailable` and nothing changes.
+- `action.completed` carries the outcome and HTTP status.
+
+A mutating request that succeeds or fails with a server error without any
+permission check is recorded with outcome `unaudited`. Allowed reads are not
+recorded. Compiled-in authentication providers record their own sign-in,
+sign-out and reauthentication events through `management::audit::AuditLog`.
+
+Records are written to two places:
+
+- **Stdout**, one JSON object per line, synchronously and separately from
+  operational logs (`LOG_FORMAT` does not affect them). Route lines whose
+  `schema` is `agentdesktop.audit.v1` to your SIEM with the cluster's log
+  shipper.
+- **The `admin_audit_events` table**, shown on the controller's Audit page
+  (`GET /api/v1/audit?before=<seq>&limit=<n>`, permission `audit.read`). The
+  table is append-only: triggers reject `UPDATE` and `DELETE` (and `TRUNCATE` on
+  PostgreSQL), and the controller never prunes it.
+
+Each stdout line also carries `stream: { "id": ..., "seq": ... }`. Every
+controller process picks a random stream `id` at startup and numbers its lines
+1, 2, 3, ... in the order it writes them. A number is used up even when its line
+fails to write, so a gap within one stream means a line was lost on the way to
+the SIEM; alert on such gaps in the SIEM. A restart starts a new stream at 1.
+The record's own `seq` orders the Audit page and may have gaps, so it says
+nothing about missing events.
+
+Someone with database access can drop the triggers and edit the table, so treat
+the SIEM as the record of truth. On PostgreSQL, also revoke `UPDATE`, `DELETE`
+and `TRUNCATE` on `admin_audit_events` from roles that do not need them.
+
 ### Configuration status
 
 Each apply reports the outcome for every managed program, next to the

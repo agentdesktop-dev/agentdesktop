@@ -26,7 +26,11 @@ pub async fn run(
     extensions: management::Extensions,
 ) -> anyhow::Result<()> {
     // Fail before any network setup when the access mode has no provider.
-    management::auth(&config.admin_access, &extensions)?;
+    management::auth(
+        &config.admin_access,
+        &extensions,
+        management::audit::AuditLog::new(database.clone()),
+    )?;
     let tls = config.tls.files();
     let daemon_config = match &config.daemon_config {
         Some(daemon) => Some(daemon_config::load(&daemon.path, daemon.revision)?),

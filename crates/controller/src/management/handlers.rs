@@ -9,11 +9,12 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use tracing::info;
 
 use super::{
-    Settings, State as ManagementState,
+    Settings, State as ManagementState, audit,
     auth::{
         Context, Error,
         authorization::{self, AccessRequest, Verb},
@@ -185,6 +186,56 @@ pub(super) async fn daemon_config(
         })
         .transpose()?;
     Ok(Json(ActiveDaemonConfig { config }))
+}
+
+const AUDIT_PAGE_DEFAULT: i64 = 100;
+const AUDIT_PAGE_MAX: i64 = 200;
+
+#[derive(Deserialize)]
+pub(super) struct AuditQuery {
+    /// Return events with a smaller `seq` than this, for paging back in time.
+    before: Option<i64>,
+    limit: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub(super) struct AuditPage {
+    events: Vec<Map<String, Value>>,
+    /// Pass as `before` to fetch the next older page; absent on the last page.
+    next_before: Option<i64>,
+}
+
+pub(super) async fn audit_events(
+    State(state): State<ManagementState>,
+    auth: Context,
+    Query(query): Query<AuditQuery>,
+) -> Result<Json<AuditPage>, HandlerError> {
+    auth.require(AccessRequest {
+        verb: Verb::Read,
+        resource_class: authorization::AUDIT,
+        resource: None,
+    })
+    .await?;
+    let limit = query
+        .limit
+        .unwrap_or(AUDIT_PAGE_DEFAULT)
+        .clamp(1, AUDIT_PAGE_MAX);
+    let rows = state
+        .database
+        .list_audit_events(query.before, limit)
+        .await?;
+    let next_before = rows
+        .last()
+        .filter(|row| rows.len() as i64 == limit && row.seq > 1)
+        .map(|row| row.seq);
+    let events = rows
+        .iter()
+        .map(audit::published)
+        .collect::<anyhow::Result<_>>()?;
+    Ok(Json(AuditPage {
+        events,
+        next_before,
+    }))
 }
 
 fn unix_time_seconds() -> i64 {

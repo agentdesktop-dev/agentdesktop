@@ -178,3 +178,47 @@ export type DaemonConfigDocument = {
 export type ActiveDaemonConfig = {
   config: DaemonConfigDocument | null;
 };
+
+export type AuditOutcome =
+  | "authorized"
+  | "denied"
+  | "succeeded"
+  | "failed"
+  | "not_found"
+  | "unaudited";
+
+/** One `agentdesktop.audit.v1` event, as streamed to the SIEM. */
+export type AuditEvent = {
+  schema: string;
+  id: string;
+  seq: number;
+  time: string;
+  event: string;
+  actor: {
+    kind: "local" | "human" | "service";
+    issuer: string;
+    subject: string;
+    client_id?: string;
+    claims_verified_at: number;
+    email?: string;
+    name?: string;
+  };
+  action: string | null;
+  target: { class: string; id: string | null } | null;
+  outcome: AuditOutcome;
+  reason?: string;
+  status?: number;
+  request?: {
+    id: string;
+    method: string;
+    path: string;
+    peer?: string;
+    forwarded_for?: string;
+    user_agent?: string;
+  };
+};
+
+export type AuditPage = {
+  events: AuditEvent[];
+  next_before: number | null;
+};

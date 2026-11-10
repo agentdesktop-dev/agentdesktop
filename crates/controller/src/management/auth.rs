@@ -5,12 +5,18 @@
 //! The built-in provider grants loopback-only local access; a compiled-in provider
 //! can supply remote authentication and its own permission decisions.
 
-use std::sync::Arc;
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use async_trait::async_trait;
 use axum::{
     Extension, Json, Router,
-    extract::{FromRequestParts, Request, State},
+    extract::{ConnectInfo, FromRequestParts, Request, State},
     http::{HeaderMap, Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Redirect, Response},
@@ -18,6 +24,7 @@ use axum::{
 };
 use serde_json::json;
 
+use super::audit::{Actor, AuditEvent, AuditLog, EventKind, Outcome, RequestInfo, Target};
 use authentication::Principal;
 use authorization::AccessRequest;
 
@@ -104,6 +111,17 @@ pub struct Context {
     provider: Arc<dyn Provider>,
     principal: Arc<Principal>,
     headers: Arc<HeaderMap>,
+    audit: AuditLog,
+    request: Arc<RequestAudit>,
+}
+
+/// Per-request audit state shared by `Context::require` and the middleware.
+struct RequestAudit {
+    info: RequestInfo,
+    /// Mutations authorized (and recorded as attempted) during this request.
+    authorized: Mutex<Vec<(String, Target)>>,
+    /// Whether any mutation permission was checked, whatever the result.
+    mutation_checked: AtomicBool,
 }
 
 impl Context {
@@ -111,28 +129,87 @@ impl Context {
         &self.principal
     }
 
+    /// Audit sink, for extension handlers that record events of their own.
+    pub fn audit(&self) -> &AuditLog {
+        &self.audit
+    }
+
+    /// The audited request, to attach to extension-recorded events.
+    pub fn request_info(&self) -> &RequestInfo {
+        &self.request.info
+    }
+
     /// Called by trusted authentication middleware, never constructed from request JSON.
-    pub fn new(provider: Arc<dyn Provider>, principal: Arc<Principal>, headers: HeaderMap) -> Self {
+    pub fn new(
+        provider: Arc<dyn Provider>,
+        principal: Arc<Principal>,
+        headers: HeaderMap,
+        audit: AuditLog,
+        request: RequestInfo,
+    ) -> Self {
         Self {
             provider,
             principal,
             headers: Arc::new(headers),
+            audit,
+            request: Arc::new(RequestAudit {
+                info: request,
+                authorized: Mutex::default(),
+                mutation_checked: AtomicBool::new(false),
+            }),
         }
     }
 
     /// Check before reading protected data or mutating state. `resource` is a domain
     /// identifier (e.g. a parsed device ID), not an HTTP path. `None` denotes a
     /// collection/global operation.
+    ///
+    /// Denials are audited. An allowed mutation is audited as attempted before this
+    /// returns; if that record cannot be written the mutation is refused (503).
     pub async fn require(&self, access: AccessRequest<'_>) -> Result<(), Error> {
         let result = self
             .provider
             .check(&self.principal, &self.headers, access)
             .await;
-        if let Err(error) = &result {
-            tracing::warn!(subject = %self.principal.subject, issuer = %self.principal.issuer,
-                credential_kind = ?self.principal.kind, resource_class = access.resource_class,
-                verb = access.verb.as_str(), reason = error.1,
-                "admin permission check denied");
+        let mutation = access.verb.is_mutation();
+        if mutation {
+            self.request.mutation_checked.store(true, Ordering::Relaxed);
+        }
+        let event = |kind: EventKind, outcome| {
+            AuditEvent::new(kind, Actor::from(&*self.principal), outcome)
+                .action(access.permission())
+                .target(access.resource_class, access.resource)
+                .request(self.request.info.clone())
+        };
+        match &result {
+            Err(error) => {
+                let denied = event(EventKind::AuthorizationDenied, Outcome::Denied).reason(error.1);
+                if let Err(audit_error) = self.audit.record(denied).await {
+                    tracing::error!(error = format!("{audit_error:#}"), subject = %self.principal.subject,
+                        permission = access.permission(), reason = error.1,
+                        "failed to record admin authorization denial");
+                }
+            }
+            Ok(()) if mutation => {
+                if let Err(audit_error) = self
+                    .audit
+                    .record(event(EventKind::ActionAttempted, Outcome::Authorized))
+                    .await
+                {
+                    tracing::error!(error = format!("{audit_error:#}"), subject = %self.principal.subject,
+                        permission = access.permission(),
+                        "refusing admin action that could not be audited");
+                    return Err(Error(StatusCode::SERVICE_UNAVAILABLE, "audit_unavailable"));
+                }
+                self.request.authorized.lock().unwrap().push((
+                    access.permission(),
+                    Target {
+                        class: access.resource_class.to_owned(),
+                        id: access.resource.map(str::to_owned),
+                    },
+                ));
+            }
+            Ok(()) => {}
         }
         result
     }
@@ -157,11 +234,12 @@ impl<S: Send + Sync> FromRequestParts<S> for Context {
 /// Router-facing facade over the compiled-in authentication provider.
 pub struct Auth {
     provider: Arc<dyn Provider>,
+    audit: AuditLog,
 }
 
 impl Auth {
-    pub fn new(provider: Arc<dyn Provider>) -> Self {
-        Self { provider }
+    pub fn new(provider: Arc<dyn Provider>, audit: AuditLog) -> Self {
+        Self { provider, audit }
     }
 
     pub fn routes(&self) -> Router {
@@ -209,24 +287,93 @@ async fn authenticate_request(
     // queues on the database pool, which is shared with the fleet API, so device
     // traffic slows too. If that matters, give management its own small pool or a
     // limit no larger than its pool, rather than a global semaphore.
-    let context = Context::new(auth.provider, principal.clone(), request.headers().clone());
-    request.extensions_mut().insert(context);
-    let method = request.method().clone();
-    let path = request.uri().path().to_owned();
-    let response = next.run(request).await;
-    if !matches!(method, Method::GET | Method::HEAD | Method::OPTIONS) {
-        tracing::info!(
-            subject = %principal.subject,
-            issuer = %principal.issuer,
-            credential_kind = ?principal.kind,
-            claims_verified_at = principal.claims_verified_at,
-            %method,
-            target = %path,
-            status = response.status().as_u16(),
-            "admin action"
-        );
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(peer)| *peer);
+    let info = RequestInfo::new(request.method(), request.uri(), request.headers(), peer);
+    let context = Context::new(
+        auth.provider,
+        principal,
+        request.headers().clone(),
+        auth.audit,
+        info,
+    );
+    let safe = matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    );
+    request.extensions_mut().insert(context.clone());
+    if safe {
+        return next.run(request).await;
     }
-    response
+    // Mutating requests run to completion in their own task, so a timeout or client
+    // disconnect cannot drop the handler between the mutation and its completion
+    // record.
+    let task = tokio::spawn({
+        let context = context.clone();
+        async move {
+            let response = next.run(request).await;
+            record_completion(&context, response.status()).await;
+            response
+        }
+    });
+    match task.await {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::error!(%error, path = %context.request.info.path, "admin handler panicked");
+            record_completion(&context, StatusCode::INTERNAL_SERVER_ERROR).await;
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// Records the outcome of each mutation authorized during the request, or flags a
+/// mutating request that never checked a mutation permission. The mutation has
+/// already happened, so a failure to record is logged rather than returned.
+async fn record_completion(context: &Context, status: StatusCode) {
+    let authorized = std::mem::take(&mut *context.request.authorized.lock().unwrap());
+    let actor = || Actor::from(context.principal());
+    let mut completions = Vec::new();
+    if authorized.is_empty() {
+        // 4xx without a check: routing or extraction rejected the request (e.g. 405)
+        // before any handler logic ran.
+        if context.request.mutation_checked.load(Ordering::Relaxed) || status.is_client_error() {
+            return;
+        }
+        tracing::error!(method = %context.request.info.method, path = %context.request.info.path,
+            status = status.as_u16(),
+            "mutating admin request finished without a mutation permission check");
+        completions.push(AuditEvent::new(
+            EventKind::ActionCompleted,
+            actor(),
+            Outcome::Unaudited,
+        ));
+    } else {
+        let outcome = if status.is_success() || status.is_redirection() {
+            Outcome::Succeeded
+        } else if status == StatusCode::NOT_FOUND {
+            Outcome::NotFound
+        } else {
+            Outcome::Failed
+        };
+        for (action, target) in authorized {
+            let mut event =
+                AuditEvent::new(EventKind::ActionCompleted, actor(), outcome).action(action);
+            event.target = Some(target);
+            completions.push(event);
+        }
+    }
+    for event in completions {
+        let event = event
+            .status(status.as_u16())
+            .request(context.request.info.clone());
+        if let Err(error) = context.audit.record(event).await {
+            tracing::error!(error = format!("{error:#}"), subject = %context.principal.subject,
+                path = %context.request.info.path, status = status.as_u16(),
+                "failed to record admin action completion");
+        }
+    }
 }
 
 #[cfg(test)]

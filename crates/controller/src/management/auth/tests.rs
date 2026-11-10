@@ -1,6 +1,7 @@
 use super::providers::local::LocalAccess;
 use super::*;
 use crate::database::Database;
+use crate::management::audit::{AuditLog, RequestInfo};
 use crate::management::http::is_loopback_host;
 use agentdesktop_core::config::ControllerAdminAccess;
 use axum::{
@@ -70,6 +71,7 @@ fn authenticated_access() -> ControllerAdminAccess {
 }
 
 fn state(database: Database) -> super::super::State {
+    let (audit, _) = AuditLog::in_memory(database.clone());
     super::super::State::new(
         database,
         crate::daemon_config::DaemonConfigStore::new(None),
@@ -82,6 +84,44 @@ fn state(database: Database) -> super::super::State {
             usage_enabled: false,
         },
     )
+    .with_audit(audit)
+}
+
+/// Audit log on its own temporary database, streaming to memory.
+struct TestAudit {
+    log: AuditLog,
+    lines: Arc<std::sync::Mutex<Vec<String>>>,
+    path: std::path::PathBuf,
+}
+
+impl TestAudit {
+    async fn new() -> Self {
+        let (database, path) = database().await;
+        let (log, lines) = AuditLog::in_memory(database);
+        Self { log, lines, path }
+    }
+
+    fn events(&self) -> Vec<serde_json::Value> {
+        stream_events(&self.lines)
+    }
+}
+
+impl Drop for TestAudit {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn stream_events(lines: &std::sync::Mutex<Vec<String>>) -> Vec<serde_json::Value> {
+    lines
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|line| {
+            assert!(line.ends_with('\n'));
+            serde_json::from_str(line).unwrap()
+        })
+        .collect()
 }
 
 async fn database() -> (Database, std::path::PathBuf) {
@@ -113,7 +153,8 @@ async fn handlers_own_operations_and_axum_selects_the_matching_handler() {
         auth.require(access).await?;
         Ok(access.permission())
     }
-    let auth = Auth::new(Arc::new(LocalAccess));
+    let audit = TestAudit::new().await;
+    let auth = Auth::new(Arc::new(LocalAccess), audit.log.clone());
     let app = Router::new().route(
         "/device",
         auth.authenticate_api(get(read))
@@ -193,7 +234,8 @@ async fn request(app: Router, path: &str, method: Method, headers: HeaderMap) ->
 #[tokio::test]
 async fn local_mode_keeps_ui_api_and_bootstrap_without_session_tables() {
     let (database, path) = database().await;
-    let auth = Auth::new(Arc::new(LocalAccess));
+    let audit = TestAudit::new().await;
+    let auth = Auth::new(Arc::new(LocalAccess), audit.log.clone());
     let response = request(app(&auth), "/auth/session", Method::GET, HeaderMap::new()).await;
     assert_eq!(response.status(), StatusCode::OK);
     let info: serde_json::Value =
@@ -243,7 +285,8 @@ async fn local_mode_keeps_ui_api_and_bootstrap_without_session_tables() {
 
 #[tokio::test]
 async fn local_mode_rejects_rebinding_and_cross_site_mutations() {
-    let auth = Auth::new(Arc::new(LocalAccess));
+    let audit = TestAudit::new().await;
+    let auth = Auth::new(Arc::new(LocalAccess), audit.log.clone());
     // Every loopback address `adminListen` accepts in local mode, not just .1.
     for host in [
         "localhost:8080",
@@ -376,6 +419,7 @@ fn admin_read_covers_every_management_read_but_no_mutation() {
         (Verb::Read, "daemon-config", true),
         (Verb::Read, "settings", true),
         (Verb::Read, "usage", true),
+        (Verb::Read, "audit", true),
         (Verb::Delete, "devices", false),
         // Reads outside the catalog, such as an extension's policy, are not covered.
         (Verb::Read, "rbac.policy", false),
@@ -498,7 +542,8 @@ async fn middleware_supplies_context_and_handlers_own_authorization() {
     async fn without_context(_auth: Context) -> StatusCode {
         panic!("a handler without authenticated context must not execute");
     }
-    let auth = Auth::new(Arc::new(LocalAccess));
+    let audit = TestAudit::new().await;
+    let auth = Auth::new(Arc::new(LocalAccess), audit.log.clone());
     let authenticated = Router::new().route(
         "/new-api",
         auth.authenticate_api(get(
@@ -541,7 +586,14 @@ async fn middleware_supplies_context_and_handlers_own_authorization() {
 #[tokio::test]
 async fn request_context_shares_evidence_and_checks_borrowed_operation_and_resource() {
     let principal = Arc::new(Principal::local());
-    let context = Context::new(Arc::new(LocalAccess), principal.clone(), HeaderMap::new());
+    let audit = TestAudit::new().await;
+    let context = Context::new(
+        Arc::new(LocalAccess),
+        principal.clone(),
+        HeaderMap::new(),
+        audit.log.clone(),
+        RequestInfo::new(&Method::GET, &"/".parse().unwrap(), &HeaderMap::new(), None),
+    );
     let extracted = context.clone();
     assert!(Arc::ptr_eq(&context.principal, &extracted.principal));
     assert!(Arc::ptr_eq(&context.headers, &extracted.headers));
@@ -564,7 +616,8 @@ async fn request_context_shares_evidence_and_checks_borrowed_operation_and_resou
 
 #[tokio::test]
 async fn read_only_routes_explicitly_deny_writes() {
-    let auth = Auth::new(Arc::new(LocalAccess));
+    let audit = TestAudit::new().await;
+    let auth = Auth::new(Arc::new(LocalAccess), audit.log.clone());
     let router = Router::new().route(
         "/read-only",
         auth.authenticate_api(get(|| async { "data" })),
@@ -618,7 +671,9 @@ impl Provider for TokenProvider {
         _headers: &HeaderMap,
         access: AccessRequest<'_>,
     ) -> Result<(), Error> {
-        if access.verb.is_mutation() && principal.subject != "admin" {
+        if (access.verb.is_mutation() || access.resource_class == authorization::AUDIT)
+            && principal.subject != "admin"
+        {
             return Err(Error(StatusCode::FORBIDDEN, "forbidden"));
         }
         Ok(())
@@ -809,4 +864,321 @@ async fn direct_tls_transport_serves_the_authenticated_router_over_https_only() 
     server.abort();
     std::fs::remove_dir_all(directory).unwrap();
     std::fs::remove_file(path).unwrap();
+}
+
+fn audited_router(database: Database, audit: AuditLog) -> Router {
+    super::super::router(
+        state(database).with_audit(audit),
+        None,
+        &authenticated_access(),
+        super::super::Extensions {
+            authentication: Some(Arc::new(TokenProvider)),
+            assets: Some(|_| None),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+}
+
+async fn enrolled_database() -> (Database, std::path::PathBuf) {
+    let (database, path) = database().await;
+    database
+        .enroll_device("device-1", "host", "https://id.example", "owner", None)
+        .await
+        .unwrap();
+    (database, path)
+}
+
+async fn json_body(response: Response) -> serde_json::Value {
+    serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
+}
+
+#[tokio::test]
+async fn device_deletion_is_audited_with_actor_target_and_outcome() {
+    let (database, path) = enrolled_database().await;
+    let (audit, lines) = AuditLog::in_memory(database.clone());
+    let router = audited_router(database.clone(), audit);
+    let mut headers = bearer("admin");
+    headers.insert(header::USER_AGENT, HeaderValue::from_static("audit-test"));
+    let response = request(
+        router.clone(),
+        "/api/v1/devices/device-1",
+        Method::DELETE,
+        headers.clone(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(database.get_device("device-1").await.unwrap().is_none());
+
+    let events = stream_events(&lines);
+    let [attempted, completed] = &events[..] else {
+        panic!("expected attempted and completed events: {events:?}");
+    };
+    for event in [attempted, completed] {
+        assert_eq!(event["schema"], "agentdesktop.audit.v1");
+        assert_eq!(event["actor"]["kind"], "human");
+        assert_eq!(event["actor"]["issuer"], "https://id.example");
+        assert_eq!(event["actor"]["subject"], "admin");
+        assert_eq!(event["action"], "devices.delete");
+        assert_eq!(
+            event["target"],
+            json!({ "class": "devices", "id": "device-1" })
+        );
+        assert_eq!(event["request"]["method"], "DELETE");
+        assert_eq!(event["request"]["path"], "/api/v1/devices/device-1");
+        assert_eq!(event["request"]["user_agent"], "audit-test");
+        assert!(event["time"].as_str().unwrap().ends_with('Z'));
+    }
+    assert_eq!(attempted["request"]["id"], completed["request"]["id"]);
+    assert_eq!(attempted["event"], "action.attempted");
+    assert_eq!(attempted["outcome"], "authorized");
+    assert_eq!(completed["event"], "action.completed");
+    assert_eq!(completed["outcome"], "succeeded");
+    assert_eq!(completed["status"], 204);
+    // Streamed lines are numbered per stream, so the SIEM can spot a lost line.
+    assert_eq!(attempted["stream"]["seq"], 1);
+    assert_eq!(completed["stream"]["seq"], 2);
+    assert_eq!(attempted["stream"]["id"], completed["stream"]["id"]);
+    assert!(completed["seq"].as_i64().unwrap() > attempted["seq"].as_i64().unwrap());
+
+    let response = request(router, "/api/v1/devices/device-1", Method::DELETE, headers).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let events = stream_events(&lines);
+    let missing = events.last().unwrap();
+    assert_eq!(missing["outcome"], "not_found");
+    assert_eq!(missing["status"], 404);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn denials_are_audited_and_the_action_does_not_run() {
+    let (database, path) = enrolled_database().await;
+    let (audit, lines) = AuditLog::in_memory(database.clone());
+    let router = audited_router(database.clone(), audit);
+    let response = request(
+        router.clone(),
+        "/api/v1/devices/device-1",
+        Method::DELETE,
+        bearer("viewer"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(database.get_device("device-1").await.unwrap().is_some());
+    let response = request(router, "/api/v1/audit", Method::GET, bearer("viewer")).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let events = stream_events(&lines);
+    let [delete, read] = &events[..] else {
+        panic!("expected two denials: {events:?}");
+    };
+    for event in [delete, read] {
+        assert_eq!(event["event"], "authorization.denied");
+        assert_eq!(event["outcome"], "denied");
+        assert_eq!(event["reason"], "forbidden");
+        assert_eq!(event["actor"]["subject"], "viewer");
+    }
+    assert_eq!(delete["action"], "devices.delete");
+    assert_eq!(delete["target"]["id"], "device-1");
+    assert_eq!(read["action"], "audit.read");
+    assert_eq!(read["target"], json!({ "class": "audit", "id": null }));
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn mutations_fail_closed_when_the_audit_log_is_unavailable() {
+    let (database, path) = enrolled_database().await;
+    let router = audited_router(database.clone(), AuditLog::broken_stream(database.clone()));
+    let response = request(
+        router,
+        "/api/v1/devices/device-1",
+        Method::DELETE,
+        bearer("admin"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(json_body(response).await["error"], "audit_unavailable");
+    assert!(database.get_device("device-1").await.unwrap().is_some());
+
+    let (audit, lines) = AuditLog::in_memory(database.clone());
+    sqlx::raw_sql("DROP TABLE admin_audit_events")
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let response = request(
+        audited_router(database.clone(), audit),
+        "/api/v1/devices/device-1",
+        Method::DELETE,
+        bearer("admin"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(database.get_device("device-1").await.unwrap().is_some());
+    assert!(lines.lock().unwrap().is_empty());
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn mutations_without_a_permission_check_are_flagged() {
+    let audit = TestAudit::new().await;
+    let auth = Auth::new(Arc::new(LocalAccess), audit.log.clone());
+    let router = Router::new()
+        .route(
+            "/unchecked",
+            auth.authenticate_api(axum::routing::post(|| async { "changed" })),
+        )
+        .route(
+            "/read-only",
+            auth.authenticate_api(get(|| async { "data" })),
+        );
+    let response = request(router.clone(), "/unchecked", Method::POST, HeaderMap::new()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let events = audit.events();
+    let [unchecked] = &events[..] else {
+        panic!("expected one event: {events:?}");
+    };
+    assert_eq!(unchecked["event"], "action.completed");
+    assert_eq!(unchecked["outcome"], "unaudited");
+    assert_eq!(unchecked["action"], serde_json::Value::Null);
+    assert_eq!(unchecked["status"], 200);
+    assert_eq!(unchecked["actor"]["kind"], "local");
+    assert_eq!(unchecked["request"]["path"], "/unchecked");
+
+    let response = request(router, "/read-only", Method::POST, HeaderMap::new()).await;
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(audit.events().len(), 1);
+}
+
+#[tokio::test]
+async fn audit_api_pages_newest_first() {
+    let (database, path) = database().await;
+    let (audit, _) = AuditLog::in_memory(database.clone());
+    let router = audited_router(database.clone(), audit);
+    for device in ["a", "b", "c"] {
+        let response = request(
+            router.clone(),
+            &format!("/api/v1/devices/{device}"),
+            Method::DELETE,
+            bearer("admin"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+    let seqs = |page: &serde_json::Value| -> Vec<i64> {
+        page["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["seq"].as_i64().unwrap())
+            .collect()
+    };
+    let page = json_body(
+        request(
+            router.clone(),
+            "/api/v1/audit?limit=4",
+            Method::GET,
+            bearer("admin"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(seqs(&page), [6, 5, 4, 3]);
+    assert_eq!(page["next_before"], 3);
+    assert_eq!(page["events"][0]["target"]["id"], "c");
+    assert_eq!(page["events"][0]["schema"], "agentdesktop.audit.v1");
+    let page = json_body(
+        request(
+            router.clone(),
+            "/api/v1/audit?before=3&limit=4",
+            Method::GET,
+            bearer("admin"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(seqs(&page), [2, 1]);
+    assert_eq!(page["next_before"], serde_json::Value::Null);
+    // Allowed reads, including of the audit log itself, are not recorded.
+    let page =
+        json_body(request(router, "/api/v1/audit", Method::GET, bearer("admin")).await).await;
+    assert_eq!(seqs(&page), [6, 5, 4, 3, 2, 1]);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn served_requests_record_the_peer_address() {
+    let (database, path) = database().await;
+    let (audit, lines) = AuditLog::in_memory(database.clone());
+    let router = super::super::router(
+        state(database).with_audit(audit),
+        None,
+        &ControllerAdminAccess::Local,
+        super::super::Extensions::default(),
+    )
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(super::super::serve_router(
+        listener,
+        router,
+        ControllerAdminAccess::Local,
+    ));
+    let response = reqwest::Client::new()
+        .delete(format!("http://{address}/api/v1/devices/missing"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let events = stream_events(&lines);
+    assert_eq!(events.len(), 2);
+    for event in &events {
+        assert!(
+            event["request"]["peer"]
+                .as_str()
+                .unwrap()
+                .starts_with("127.0.0.1:"),
+            "{event}"
+        );
+        assert_eq!(event["actor"]["kind"], "local");
+    }
+    server.abort();
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn completion_is_recorded_when_the_client_goes_away() {
+    let audit = TestAudit::new().await;
+    let auth = Auth::new(Arc::new(LocalAccess), audit.log.clone());
+    let router = Router::new().route(
+        "/slow",
+        auth.authenticate_api(axum::routing::delete(|auth: Context| async move {
+            auth.require(AccessRequest {
+                verb: authorization::Verb::Delete,
+                resource_class: "devices",
+                resource: Some("device-1"),
+            })
+            .await?;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            Ok::<_, Error>(StatusCode::NO_CONTENT)
+        })),
+    );
+    let abandoned = tokio::time::timeout(
+        std::time::Duration::from_millis(30),
+        request(router, "/slow", Method::DELETE, HeaderMap::new()),
+    )
+    .await;
+    assert!(abandoned.is_err(), "the client must give up first");
+    for _ in 0..200 {
+        if audit.events().len() == 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let events = audit.events();
+    let [attempted, completed] = &events[..] else {
+        panic!("expected attempted and completed events: {events:?}");
+    };
+    assert_eq!(attempted["outcome"], "authorized");
+    assert_eq!(completed["outcome"], "succeeded");
+    assert_eq!(completed["status"], 204);
+    assert_eq!(completed["target"]["id"], "device-1");
 }

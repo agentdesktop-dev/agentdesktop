@@ -6,6 +6,7 @@ import {
 } from "@agentdesktop/ui";
 
 import type {
+  AuditEvent,
   ControllerSettings,
   DaemonConfigDocument,
   Device,
@@ -705,3 +706,81 @@ export const sandboxDaemonConfig: DaemonConfigDocument = {
     codex: {},
   },
 };
+
+const auditRequest = {
+  id: "5b0f3c1e-7a2d-4f53-9a1e-0c6c2f1b9d01",
+  method: "DELETE",
+  path: `/api/v1/devices/${linuxDevice.id}`,
+  peer: "10.0.4.17:51822",
+  user_agent: "Mozilla/5.0",
+};
+
+const operator = {
+  kind: "human" as const,
+  issuer: "https://login.example.com",
+  subject: "00u1operator",
+  claims_verified_at: now - 300,
+  email: "ops.lead@example.com",
+};
+
+export const auditEvents: AuditEvent[] = [
+  {
+    schema: "agentdesktop.audit.v1",
+    id: "e4",
+    seq: 4,
+    time: new Date((now - 60) * 1000).toISOString(),
+    event: "authorization.denied",
+    actor: {
+      kind: "human",
+      issuer: "https://login.example.com",
+      subject: "00u1viewer",
+      claims_verified_at: now - 900,
+      email: "sam.okafor@example.com",
+    },
+    action: "devices.delete",
+    target: { class: "devices", id: macDevice.id },
+    outcome: "denied",
+    reason: "forbidden",
+    request: {
+      ...auditRequest,
+      id: "8c7d2b4a-1f0e-4d6b-a3c5-9e8f7a6b5c4d",
+      path: `/api/v1/devices/${macDevice.id}`,
+    },
+  },
+  {
+    schema: "agentdesktop.audit.v1",
+    id: "e3",
+    seq: 3,
+    time: new Date((now - 3600) * 1000).toISOString(),
+    event: "action.completed",
+    actor: operator,
+    action: "devices.delete",
+    target: { class: "devices", id: linuxDevice.id },
+    outcome: "succeeded",
+    status: 204,
+    request: auditRequest,
+  },
+  {
+    schema: "agentdesktop.audit.v1",
+    id: "e2",
+    seq: 2,
+    time: new Date((now - 3601) * 1000).toISOString(),
+    event: "action.attempted",
+    actor: operator,
+    action: "devices.delete",
+    target: { class: "devices", id: linuxDevice.id },
+    outcome: "authorized",
+    request: auditRequest,
+  },
+  {
+    schema: "agentdesktop.audit.v1",
+    id: "e1",
+    seq: 1,
+    time: new Date((now - 7200) * 1000).toISOString(),
+    event: "auth.login",
+    actor: operator,
+    action: null,
+    target: null,
+    outcome: "succeeded",
+  },
+];

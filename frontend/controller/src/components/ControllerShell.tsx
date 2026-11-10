@@ -7,6 +7,7 @@ import {
   Gauge,
   Laptop,
   RefreshCw,
+  ScrollText,
   Settings,
   SlidersHorizontal,
 } from "lucide-react";
@@ -15,11 +16,22 @@ import type { ControllerExtension } from "../extensions";
 import { Link } from "../router";
 import type { AdminSession } from "../types";
 
-const navigation = [
+const navigation: Array<{
+  href: string;
+  label: string;
+  icon: typeof Gauge;
+  permission?: string;
+}> = [
   { href: "/", label: "Overview", icon: Gauge },
   { href: "/devices", label: "Devices", icon: Laptop },
   { href: "/usage", label: "Usage", icon: ChartColumn },
   { href: "/configuration", label: "Configuration", icon: SlidersHorizontal },
+  {
+    href: "/audit",
+    label: "Audit",
+    icon: ScrollText,
+    permission: "audit.read",
+  },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
@@ -41,7 +53,13 @@ export function ControllerShell({
   const { theme } = useTheme();
   const [loggingOut, setLoggingOut] = useState(false);
   const items = [
-    ...navigation,
+    // Sessions that do not report permissions keep the full navigation.
+    ...navigation.filter(
+      (item) =>
+        !item.permission ||
+        !session?.permissions ||
+        session.permissions.includes(item.permission),
+    ),
     ...extensions.map((extension) => ({
       href: extension.path,
       label: extension.label,
