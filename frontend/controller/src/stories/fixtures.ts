@@ -726,6 +726,29 @@ const operator = {
 export const auditEvents: AuditEvent[] = [
   {
     schema: "agentdesktop.audit.v1",
+    id: "e5",
+    seq: 5,
+    time: new Date((now - 30) * 1000).toISOString(),
+    event: "action.completed",
+    actor: {
+      kind: "human",
+      issuer: "https://login.example.com",
+      subject: "00u1developer",
+      claims_verified_at: now - 30,
+      email: "developer@example.com",
+    },
+    action: "devices.enroll",
+    target: { class: "devices", id: macDevice.id, name: macDevice.hostname },
+    outcome: "succeeded",
+    request: {
+      id: "2f6c1d3e-4b5a-4c7d-8e9f-0a1b2c3d4e5f",
+      method: "POST",
+      path: "/agentdesktop.fleet.v1.FleetAgent/CompleteEnrollment",
+      peer: "203.0.113.24:50412",
+    },
+  },
+  {
+    schema: "agentdesktop.audit.v1",
     id: "e4",
     seq: 4,
     time: new Date((now - 60) * 1000).toISOString(),

@@ -15,6 +15,7 @@
 //! `action.attempted` event before the handler acts and an `action.completed`
 //! event with its outcome). Compiled-in authentication providers record their own
 //! session events (sign-in, sign-out, reauthentication) with [`AuditLog::record`].
+//! The fleet API records device enrollment and certificate renewal.
 
 use std::{
     io::{self, Write},
@@ -47,7 +48,8 @@ pub enum EventKind {
     /// before `action.completed` is written. Only mutations produce it, and those
     /// are rare operator actions, so it adds one line per change.
     ActionAttempted,
-    /// The mutation's outcome and HTTP status, linked to its attempt by `request.id`.
+    /// The mutation's outcome (and HTTP status, for management requests), linked to
+    /// its attempt by `request.id`.
     ActionCompleted,
     /// Interactive sign-in. Recorded by providers, not by the controller.
     AuthLogin,
@@ -56,6 +58,14 @@ pub enum EventKind {
     /// authentication (`/auth/login?reauthenticate=true`). Silent session or token
     /// refreshes are not reauthentication and must not be recorded as such.
     AuthReauthenticate,
+    /// An enrollment was refused after the user's ID token was verified, for
+    /// example a nonce or token subject mismatch or an invalid certificate
+    /// request. Failures before that name nobody and are not recorded, because
+    /// anyone can cause them on the public fleet API.
+    DeviceEnrollmentDenied,
+    /// A device renewed its certificate. Written before the certificate is
+    /// returned; if it cannot be written, the renewal is refused (fail closed).
+    DeviceCertificateRenewed,
 }
 
 impl EventKind {
@@ -67,6 +77,8 @@ impl EventKind {
             Self::AuthLogin => "auth.login",
             Self::AuthLogout => "auth.logout",
             Self::AuthReauthenticate => "auth.reauthenticate",
+            Self::DeviceEnrollmentDenied => "device.enrollment_denied",
+            Self::DeviceCertificateRenewed => "device.certificate_renewed",
         }
     }
 }
@@ -158,12 +170,49 @@ impl From<&Principal> for Actor {
     }
 }
 
+impl Actor {
+    /// A person who signed in with the enrollment identity provider; `claims` are
+    /// the verified ID token claims.
+    pub fn oidc_user(
+        issuer: &str,
+        subject: &str,
+        claims: &std::collections::BTreeMap<String, Value>,
+    ) -> Self {
+        let claim = |name: &str| claims.get(name).and_then(Value::as_str).map(str::to_owned);
+        Self {
+            kind: "human",
+            issuer: issuer.to_owned(),
+            subject: subject.to_owned(),
+            client_id: None,
+            claims_verified_at: OffsetDateTime::now_utc().unix_timestamp(),
+            email: claim("email"),
+            name: claim("name"),
+        }
+    }
+
+    /// A device, identified by the certificate the controller's device CA issued it.
+    pub fn device(device_id: &str) -> Self {
+        Self {
+            kind: "device",
+            issuer: "device-ca".to_owned(),
+            subject: device_id.to_owned(),
+            client_id: None,
+            claims_verified_at: OffsetDateTime::now_utc().unix_timestamp(),
+            email: None,
+            name: None,
+        }
+    }
+}
+
 /// What was acted on: a policy resource class and, unless the operation applies to
 /// a collection, the concrete resource ID.
 #[derive(Clone, Debug, Serialize)]
 pub struct Target {
     pub class: String,
     pub id: Option<String>,
+    /// Display name, e.g. the hostname a device reports for itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// The HTTP request an event belongs to. `forwarded_for` is recorded as received
@@ -224,7 +273,8 @@ pub struct AuditEvent {
     pub event: EventKind,
     pub actor: Actor,
     pub outcome: Outcome,
-    /// Permission name, e.g. `devices.delete`.
+    /// The operation: for management requests, the permission it required (e.g.
+    /// `devices.delete`); for device enrollment, `devices.enroll`.
     pub action: Option<String>,
     pub target: Option<Target>,
     /// Stable error code explaining a denial or failure.
@@ -257,7 +307,16 @@ impl AuditEvent {
         self.target = Some(Target {
             class: class.into(),
             id: id.map(str::to_owned),
+            name: None,
         });
+        self
+    }
+
+    /// Sets the display name of the target set by [`AuditEvent::target`].
+    pub fn target_name(mut self, name: impl Into<String>) -> Self {
+        if let Some(target) = &mut self.target {
+            target.name = Some(name.into());
+        }
         self
     }
 

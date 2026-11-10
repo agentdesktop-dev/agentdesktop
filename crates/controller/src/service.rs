@@ -23,8 +23,18 @@ use crate::{
     database::{Database, DevicePrincipal},
     device_ca::DeviceCertificateIssuer,
     gateway_jwt::GatewayJwtIssuer,
-    oidc::{OidcPrincipal, OidcProvider},
+    management::{
+        audit::{Actor, AuditEvent, AuditLog, EventKind, Outcome, RequestInfo},
+        auth::authorization::DEVICES,
+    },
+    oidc::{CompletedEnrollment, OidcPrincipal, OidcProvider},
 };
+
+/// gRPC method paths, recorded as `request.path` in audit events.
+const COMPLETE_ENROLLMENT: &str = "/agentdesktop.fleet.v1.FleetAgent/CompleteEnrollment";
+const RENEW_DEVICE_CERTIFICATE: &str = "/agentdesktop.fleet.v1.FleetAgent/RenewDeviceCertificate";
+/// The `action` of enrollment's attempted and completed audit events.
+const ENROLL_DEVICE: &str = "devices.enroll";
 
 #[derive(Clone)]
 pub struct FleetAgentService {
@@ -34,6 +44,7 @@ pub struct FleetAgentService {
     gateway_jwt_issuer: Option<GatewayJwtIssuer>,
     device_certificate_issuer: Option<DeviceCertificateIssuer>,
     usage_enabled: bool,
+    audit: AuditLog,
 }
 
 impl FleetAgentService {
@@ -46,12 +57,19 @@ impl FleetAgentService {
     ) -> Self {
         Self {
             oidc,
+            audit: AuditLog::new(database.clone()),
             database,
             daemon_config,
             gateway_jwt_issuer,
             device_certificate_issuer,
             usage_enabled: false,
         }
+    }
+
+    #[cfg(test)]
+    fn with_audit(mut self, audit: AuditLog) -> Self {
+        self.audit = audit;
+        self
     }
 
     /// Tells devices that the controller collects gateway usage.
@@ -96,41 +114,35 @@ impl FleetAgent for FleetAgentService {
             .as_ref()
             .ok_or_else(|| Status::failed_precondition("OIDC enrollment is disabled"))?;
         let access_token = bearer_credential(request.metadata())?.to_owned();
+        let info = grpc_request_info(&request, COMPLETE_ENROLLMENT);
         let request = request.into_inner();
         let csr_der = request.certificate_signing_request_der.clone();
-        let completed = oidc
-            .complete(request, &access_token)
-            .await
-            .map_err(invalid_enrollment)?;
-        self.enroll_device(
-            &completed.hostname,
-            &completed.issuer,
-            &completed.subject,
-            Some(&completed.idp_claims),
-            &csr_der,
-        )
-        .await
+        let completed = match oidc.complete(request, &access_token).await {
+            Ok(completed) => completed,
+            Err(rejected) => {
+                if let Some(verified) = &rejected.verified {
+                    self.record_enrollment_denied(verified, rejected.reason, &info)
+                        .await;
+                }
+                return Err(invalid_enrollment(rejected.error));
+            }
+        };
+        self.enroll_device(&completed, &csr_der, info).await
     }
 
     async fn renew_device_certificate(
         &self,
         request: Request<RenewDeviceCertificateRequest>,
     ) -> Result<Response<DeviceCertificateResponse>, Status> {
+        let info = grpc_request_info(&request, RENEW_DEVICE_CERTIFICATE);
         let device_id = self.authenticate_device(&request).await?;
-        let issuer = self.device_certificate_issuer.as_ref().ok_or_else(|| {
-            Status::failed_precondition("device certificate issuance is disabled")
-        })?;
-        let issued = issuer
-            .issue(
-                &device_id,
-                &request.into_inner().certificate_signing_request_der,
-            )
-            .map_err(invalid_csr)?;
-        info!(device_id, "renewed device certificate");
-        Ok(Response::new(DeviceCertificateResponse {
-            client_certificate_pem: issued.chain_pem,
-            expires_at_unix_seconds: issued.expires_at_unix_seconds,
-        }))
+        self.renew_certificate(
+            &device_id,
+            &request.into_inner().certificate_signing_request_der,
+            info,
+        )
+        .await
+        .map(Response::new)
     }
 
     async fn get_llm_gateway_credential(
@@ -408,34 +420,81 @@ impl FleetAgentService {
 
     async fn enroll_device(
         &self,
-        hostname: &str,
-        enrolled_by_issuer: &str,
-        enrolled_by_subject: &str,
-        idp_claims: Option<&std::collections::BTreeMap<String, serde_json::Value>>,
+        completed: &CompletedEnrollment,
         csr_der: &[u8],
+        info: RequestInfo,
     ) -> Result<Response<EnrollResponse>, Status> {
         let device_id = Uuid::new_v4().to_string();
-        let issued_certificate = self
-            .device_certificate_issuer
-            .as_ref()
-            .ok_or_else(|| Status::failed_precondition("device certificate issuance is disabled"))?
-            .issue(&device_id, csr_der)
-            .map_err(invalid_csr)?;
-        self.database
-            .enroll_device(
-                &device_id,
-                hostname,
-                enrolled_by_issuer,
-                enrolled_by_subject,
-                idp_claims,
-            )
+        let issuer = self.device_certificate_issuer.as_ref().ok_or_else(|| {
+            Status::failed_precondition("device certificate issuance is disabled")
+        })?;
+        let issued_certificate = match issuer.issue(&device_id, csr_der) {
+            Ok(issued) => issued,
+            Err(error) => {
+                self.record_enrollment_denied(completed, "invalid_certificate_request", &info)
+                    .await;
+                return Err(invalid_csr(error));
+            }
+        };
+        let actor = Actor::oidc_user(&completed.issuer, &completed.subject, &completed.idp_claims);
+        let event = |kind, outcome| {
+            AuditEvent::new(kind, actor.clone(), outcome)
+                .action(ENROLL_DEVICE)
+                .target(DEVICES, Some(&device_id))
+                .target_name(&completed.hostname)
+                .request(info.clone())
+        };
+        // Nothing is admitted until the attempt is recorded (fail closed).
+        if let Err(error) = self
+            .audit
+            .record(event(EventKind::ActionAttempted, Outcome::Authorized))
             .await
-            .map_err(internal)?;
+        {
+            error!(error = format!("{error:#}"), %device_id,
+                "refusing device enrollment that could not be audited");
+            return Err(audit_unavailable());
+        }
+        // The insert and its completion record run in their own task, so a client
+        // that disconnects cannot drop the handler between them.
+        let stored = tokio::spawn({
+            let database = self.database.clone();
+            let audit = self.audit.clone();
+            let completed = completed.clone();
+            let device_id = device_id.clone();
+            let completion = event(EventKind::ActionCompleted, Outcome::Succeeded);
+            async move {
+                let stored = database
+                    .enroll_device(
+                        &device_id,
+                        &completed.hostname,
+                        &completed.issuer,
+                        &completed.subject,
+                        Some(&completed.idp_claims),
+                    )
+                    .await;
+                let completion = AuditEvent {
+                    outcome: if stored.is_ok() {
+                        Outcome::Succeeded
+                    } else {
+                        Outcome::Failed
+                    },
+                    ..completion
+                };
+                if let Err(error) = audit.record(completion).await {
+                    error!(error = format!("{error:#}"), %device_id,
+                        "failed to record device enrollment completion");
+                }
+                stored
+            }
+        })
+        .await
+        .map_err(|error| internal(error.into()))?;
+        stored.map_err(internal)?;
         info!(
             %device_id,
-            hostname,
-            enrolled_by_issuer,
-            enrolled_by_subject,
+            hostname = completed.hostname,
+            enrolled_by_issuer = completed.issuer,
+            enrolled_by_subject = completed.subject,
             "enrolled device"
         );
 
@@ -445,6 +504,79 @@ impl FleetAgentService {
             client_certificate_expires_at_unix_seconds: issued_certificate.expires_at_unix_seconds,
         }))
     }
+
+    /// Records a refused enrollment of a verified user. Best effort: the
+    /// enrollment is refused either way.
+    async fn record_enrollment_denied(
+        &self,
+        attempt: &CompletedEnrollment,
+        reason: &'static str,
+        info: &RequestInfo,
+    ) {
+        let denied = AuditEvent::new(
+            EventKind::DeviceEnrollmentDenied,
+            Actor::oidc_user(&attempt.issuer, &attempt.subject, &attempt.idp_claims),
+            Outcome::Denied,
+        )
+        .target(DEVICES, None)
+        .target_name(&attempt.hostname)
+        .reason(reason)
+        .request(info.clone());
+        if let Err(error) = self.audit.record(denied).await {
+            error!(
+                error = format!("{error:#}"),
+                subject = attempt.subject,
+                reason,
+                "failed to record denied device enrollment"
+            );
+        }
+    }
+
+    /// Issues a renewed certificate to an authenticated device, failing closed if
+    /// the renewal cannot be audited.
+    async fn renew_certificate(
+        &self,
+        device_id: &str,
+        csr_der: &[u8],
+        info: RequestInfo,
+    ) -> Result<DeviceCertificateResponse, Status> {
+        let issuer = self.device_certificate_issuer.as_ref().ok_or_else(|| {
+            Status::failed_precondition("device certificate issuance is disabled")
+        })?;
+        let issued = issuer.issue(device_id, csr_der).map_err(invalid_csr)?;
+        let renewed = AuditEvent::new(
+            EventKind::DeviceCertificateRenewed,
+            Actor::device(device_id),
+            Outcome::Succeeded,
+        )
+        .target(DEVICES, Some(device_id))
+        .request(info);
+        if let Err(error) = self.audit.record(renewed).await {
+            error!(
+                error = format!("{error:#}"),
+                device_id, "refusing certificate renewal that could not be audited"
+            );
+            return Err(audit_unavailable());
+        }
+        info!(device_id, "renewed device certificate");
+        Ok(DeviceCertificateResponse {
+            client_certificate_pem: issued.chain_pem,
+            expires_at_unix_seconds: issued.expires_at_unix_seconds,
+        })
+    }
+}
+
+fn grpc_request_info<T>(request: &Request<T>, path: &'static str) -> RequestInfo {
+    RequestInfo::new(
+        &axum::http::Method::POST,
+        &axum::http::Uri::from_static(path),
+        request.metadata().as_ref(),
+        request.remote_addr(),
+    )
+}
+
+fn audit_unavailable() -> Status {
+    Status::unavailable("audit_unavailable")
 }
 
 fn oidc_principals_match(authenticated: &OidcPrincipal, enrolled: &DevicePrincipal) -> bool {
@@ -626,9 +758,225 @@ mod tests {
     use tonic::Code;
 
     use super::{
-        FleetAgentService, device_id_from_certificate, subscription_is_configured_for_client,
+        COMPLETE_ENROLLMENT, FleetAgentService, RENEW_DEVICE_CERTIFICATE,
+        device_id_from_certificate, subscription_is_configured_for_client,
     };
-    use crate::{daemon_config::DaemonConfigStore, database::Database, oidc::OidcPrincipal};
+    use crate::{
+        daemon_config::DaemonConfigStore,
+        database::Database,
+        device_ca::DeviceCertificateIssuer,
+        management::audit::{AuditLog, RequestInfo},
+        oidc::{CompletedEnrollment, OidcPrincipal},
+    };
+
+    async fn audit_database(name: &str) -> Database {
+        let path = std::env::temp_dir().join(format!(
+            "agentdesktop-{name}-{}-{}.db",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        Database::connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .await
+            .expect("connect database")
+    }
+
+    fn certificate_issuer() -> DeviceCertificateIssuer {
+        use rcgen::{BasicConstraints, IsCa, KeyUsagePurpose};
+        let ca_key = KeyPair::generate().unwrap();
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::DigitalSignature,
+        ];
+        let ca = ca_params.self_signed(&ca_key).unwrap();
+        DeviceCertificateIssuer::from_pem(ca.pem(), &ca_key.serialize_pem()).unwrap()
+    }
+
+    fn certificate_request() -> Vec<u8> {
+        CertificateParams::new(vec!["ignored.example".to_owned()])
+            .unwrap()
+            .serialize_request(&KeyPair::generate().unwrap())
+            .unwrap()
+            .der()
+            .to_vec()
+    }
+
+    fn signed_in_user() -> CompletedEnrollment {
+        CompletedEnrollment {
+            hostname: "dev-mac".into(),
+            issuer: "https://id.example".into(),
+            subject: "user-1".into(),
+            idp_claims: [("email".to_owned(), "dev@example.com".into())].into(),
+        }
+    }
+
+    fn grpc_request(path: &'static str) -> RequestInfo {
+        RequestInfo::new(
+            &axum::http::Method::POST,
+            &axum::http::Uri::from_static(path),
+            &axum::http::HeaderMap::new(),
+            None,
+        )
+    }
+
+    fn audited_service(
+        database: &Database,
+    ) -> (
+        FleetAgentService,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        let (audit, lines) = AuditLog::in_memory(database.clone());
+        let service = FleetAgentService::new(
+            None,
+            database.clone(),
+            DaemonConfigStore::new(None),
+            None,
+            Some(certificate_issuer()),
+        )
+        .with_audit(audit);
+        (service, lines)
+    }
+
+    fn streamed(lines: &std::sync::Mutex<Vec<String>>) -> Vec<serde_json::Value> {
+        lines
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn enrollment_is_audited_with_the_signed_in_user_and_new_device() {
+        let database = audit_database("audit-enroll").await;
+        let (service, lines) = audited_service(&database);
+        let device_id = service
+            .enroll_device(
+                &signed_in_user(),
+                &certificate_request(),
+                grpc_request(COMPLETE_ENROLLMENT),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .device_id;
+        let events = streamed(&lines);
+        let [attempted, completed] = &events[..] else {
+            panic!("expected attempted and completed events: {events:?}");
+        };
+        assert_eq!(attempted["event"], "action.attempted");
+        assert_eq!(attempted["outcome"], "authorized");
+        assert_eq!(completed["event"], "action.completed");
+        assert_eq!(completed["outcome"], "succeeded");
+        assert_eq!(attempted["request"]["id"], completed["request"]["id"]);
+        for event in [attempted, completed] {
+            assert_eq!(event["action"], "devices.enroll");
+            assert_eq!(event["actor"]["kind"], "human");
+            assert_eq!(event["actor"]["issuer"], "https://id.example");
+            assert_eq!(event["actor"]["subject"], "user-1");
+            assert_eq!(event["actor"]["email"], "dev@example.com");
+            assert_eq!(
+                event["target"],
+                serde_json::json!({ "class": "devices", "id": device_id, "name": "dev-mac" })
+            );
+            assert_eq!(event["request"]["path"], COMPLETE_ENROLLMENT);
+        }
+        assert!(database.get_device(&device_id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn enrollment_fails_closed_when_it_cannot_be_audited() {
+        let database = audit_database("audit-enroll-closed").await;
+        let service = FleetAgentService::new(
+            None,
+            database.clone(),
+            DaemonConfigStore::new(None),
+            None,
+            Some(certificate_issuer()),
+        )
+        .with_audit(AuditLog::broken_stream(database.clone()));
+        let status = service
+            .enroll_device(
+                &signed_in_user(),
+                &certificate_request(),
+                grpc_request(COMPLETE_ENROLLMENT),
+            )
+            .await
+            .expect_err("an unaudited enrollment must be refused");
+        assert_eq!(status.code(), Code::Unavailable);
+        assert!(database.list_devices().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_rejected_certificate_request_is_audited_as_a_denied_enrollment() {
+        let database = audit_database("audit-enroll-denied").await;
+        let (service, lines) = audited_service(&database);
+        let status = service
+            .enroll_device(
+                &signed_in_user(),
+                b"not a certificate request",
+                grpc_request(COMPLETE_ENROLLMENT),
+            )
+            .await
+            .expect_err("an invalid certificate request must be refused");
+        assert_eq!(status.code(), Code::InvalidArgument);
+        let events = streamed(&lines);
+        let [denied] = &events[..] else {
+            panic!("expected one event: {events:?}");
+        };
+        assert_eq!(denied["event"], "device.enrollment_denied");
+        assert_eq!(denied["outcome"], "denied");
+        assert_eq!(denied["reason"], "invalid_certificate_request");
+        assert_eq!(denied["actor"]["subject"], "user-1");
+        assert_eq!(
+            denied["target"],
+            serde_json::json!({ "class": "devices", "id": null, "name": "dev-mac" })
+        );
+        assert!(database.list_devices().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn certificate_renewal_is_audited_with_the_device_as_actor() {
+        let database = audit_database("audit-renew").await;
+        let (service, lines) = audited_service(&database);
+        let device_id = "7ca03414-bb20-4c80-98ef-7b0538b988ba";
+        service
+            .renew_certificate(
+                device_id,
+                &certificate_request(),
+                grpc_request(RENEW_DEVICE_CERTIFICATE),
+            )
+            .await
+            .unwrap();
+        let events = streamed(&lines);
+        let [renewed] = &events[..] else {
+            panic!("expected one event: {events:?}");
+        };
+        assert_eq!(renewed["event"], "device.certificate_renewed");
+        assert_eq!(renewed["actor"]["kind"], "device");
+        assert_eq!(renewed["actor"]["subject"], device_id);
+        assert_eq!(renewed["target"]["id"], device_id);
+        assert_eq!(renewed["request"]["path"], RENEW_DEVICE_CERTIFICATE);
+
+        let unaudited = FleetAgentService::new(
+            None,
+            database.clone(),
+            DaemonConfigStore::new(None),
+            None,
+            Some(certificate_issuer()),
+        )
+        .with_audit(AuditLog::broken_stream(database.clone()));
+        let status = unaudited
+            .renew_certificate(
+                device_id,
+                &certificate_request(),
+                grpc_request(RENEW_DEVICE_CERTIFICATE),
+            )
+            .await
+            .expect_err("an unaudited renewal must be refused");
+        assert_eq!(status.code(), Code::Unavailable);
+    }
 
     #[test]
     fn subscription_billing_requires_server_configured_program_auth() {

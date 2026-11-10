@@ -29,6 +29,7 @@ export const Populated: Story = {
     await expect(canvas.getByText("Denied")).toBeVisible();
     await expect(canvas.getByText("sam.okafor@example.com")).toBeVisible();
     await expect(canvas.getByText("Signed in")).toBeVisible();
+    await expect(canvas.getByText("devices.enroll")).toBeVisible();
   },
 };
 

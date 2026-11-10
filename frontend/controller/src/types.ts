@@ -195,7 +195,7 @@ export type AuditEvent = {
   time: string;
   event: string;
   actor: {
-    kind: "local" | "human" | "service";
+    kind: "local" | "human" | "service" | "device";
     issuer: string;
     subject: string;
     client_id?: string;
@@ -204,7 +204,7 @@ export type AuditEvent = {
     name?: string;
   };
   action: string | null;
-  target: { class: string; id: string | null } | null;
+  target: { class: string; id: string | null; name?: string } | null;
   outcome: AuditOutcome;
   reason?: string;
   status?: number;

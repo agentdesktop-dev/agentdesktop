@@ -29,6 +29,8 @@ const eventLabels: Record<string, string> = {
   "auth.login": "Signed in",
   "auth.logout": "Signed out",
   "auth.reauthenticate": "Reauthenticated",
+  "device.enrollment_denied": "Enrollment denied",
+  "device.certificate_renewed": "Certificate renewed",
 };
 
 export function AuditView({
@@ -54,8 +56,8 @@ export function AuditView({
         <div>
           <h2>Audit log</h2>
           <p>
-            Every management change and denied request, newest first. The same
-            events are streamed to your SIEM.
+            Management changes, denied requests and device enrollments, newest
+            first. The same events are streamed to your SIEM.
           </p>
         </div>
       </section>
@@ -143,7 +145,9 @@ function AuditTable({ events }: { events: AuditEvent[] }) {
                   <td>
                     {event.target ? (
                       <div className="cell-stack">
-                        <strong>{event.target.id ?? "All"}</strong>
+                        <strong>
+                          {event.target.name ?? event.target.id ?? "All"}
+                        </strong>
                         <span>{event.target.class}</span>
                       </div>
                     ) : (
@@ -198,6 +202,8 @@ function AuditTable({ events }: { events: AuditEvent[] }) {
 
 function actorLabel(event: AuditEvent) {
   if (event.actor.kind === "local") return "Local access";
+  if (event.actor.kind === "device")
+    return `Device ${event.actor.subject.slice(0, 8)}`;
   return event.actor.email ?? event.actor.name ?? event.actor.subject;
 }
 

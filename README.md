@@ -835,6 +835,19 @@ permission check is recorded with outcome `unaudited`. Allowed reads are not
 recorded. Compiled-in authentication providers record their own sign-in,
 sign-out and reauthentication events through `management::audit::AuditLog`.
 
+The device-facing fleet API records:
+
+- `action.attempted` and `action.completed` with action `devices.enroll`: a
+  signed-in user enrolled a device. The actor is that user and the target is the
+  new device, with the hostname it reported. The device is admitted only after
+  the attempt is recorded; if it cannot be, the daemon gets `unavailable`.
+- `device.enrollment_denied`: an enrollment was refused after the user's ID
+  token was verified (nonce or token mismatch, rejected access token, invalid
+  certificate request). Earlier failures name nobody and are not recorded,
+  because anyone can cause them on the public fleet API.
+- `device.certificate_renewed`: a device renewed its certificate. The actor has
+  kind `device` and the device ID as subject. It fails closed like enrollment.
+
 Records are written to two places:
 
 - **Stdout**, one JSON object per line, synchronously and separately from
