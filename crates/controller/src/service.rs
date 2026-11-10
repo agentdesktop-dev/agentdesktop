@@ -40,8 +40,9 @@ pub struct FleetAgentService {
 }
 
 impl FleetAgentService {
-    /// `limits` sets the enrollment and `Connect` limits; pass the configured
-    /// ones (`FLEET_LIMITS.configured(...)`), the same the fleet listener uses.
+    /// `limits` sets the enrollment and `Connect` limits; pass the ones from
+    /// the controller configuration (`FleetLimits::from_config`), the same the
+    /// fleet listener uses.
     pub fn new(
         oidc: Option<OidcProvider>,
         database: Database,
@@ -712,7 +713,7 @@ mod tests {
         };
         use tonic::{Code, Request};
 
-        use crate::fleet_limits::{FLEET_LIMITS, FleetLimits};
+        use crate::fleet_limits::FleetLimits;
 
         let path = std::env::temp_dir().join(format!(
             "agentdesktop-enrollment-limit-{}-{}.db",
@@ -725,7 +726,7 @@ mod tests {
         let full = FleetLimits {
             enrollment_in_flight: 0,
             enrollment_completion_wait: std::time::Duration::from_millis(10),
-            ..FLEET_LIMITS
+            ..FleetLimits::from_config(&Default::default())
         };
         let service = FleetAgentService::new(
             None,
@@ -771,7 +772,7 @@ mod tests {
             DaemonConfigStore::new(None),
             None,
             None,
-            &crate::fleet_limits::FLEET_LIMITS,
+            &crate::fleet_limits::FleetLimits::from_config(&Default::default()),
         );
         let principal = |issuer: &str, subject: &str| OidcPrincipal {
             issuer: issuer.to_owned(),
@@ -831,7 +832,7 @@ mod tests {
             DaemonConfigStore::new(None),
             None,
             None,
-            &crate::fleet_limits::FLEET_LIMITS,
+            &crate::fleet_limits::FleetLimits::from_config(&Default::default()),
         );
 
         let status = service

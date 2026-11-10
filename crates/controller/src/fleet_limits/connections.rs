@@ -313,6 +313,13 @@ pub struct LimitedIncoming<S> {
     connections: Connections,
 }
 
+#[cfg(test)]
+impl<S> LimitedIncoming<S> {
+    pub(super) fn connections(&self) -> &Connections {
+        &self.connections
+    }
+}
+
 impl<S> Stream for LimitedIncoming<S>
 where
     S: Stream<Item = io::Result<TcpStream>> + Unpin,

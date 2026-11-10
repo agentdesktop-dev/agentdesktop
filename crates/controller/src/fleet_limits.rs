@@ -7,7 +7,6 @@
 use std::{
     collections::HashMap,
     convert::Infallible,
-    io,
     net::{IpAddr, Ipv6Addr, SocketAddr},
     sync::{
         Arc, Mutex,
@@ -19,6 +18,7 @@ use std::{
 
 use agentdesktop_core::config::ControllerFleetLimitsConfig;
 use agentdesktop_proto::fleet::fleet_agent_server::{FleetAgent, FleetAgentServer, SERVICE_NAME};
+use anyhow::Context as _;
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, oneshot},
     time::Instant,
@@ -27,6 +27,7 @@ use tonic::{
     Status,
     codegen::{Service, http},
     server::NamedService,
+    service::Routes,
     transport::{
         Server, ServerTlsConfig,
         server::{TcpConnectInfo, TcpIncoming, TlsConnectInfo},
@@ -36,9 +37,8 @@ use tower_layer::{Identity, Stack};
 
 mod connections;
 
-pub use connections::{
-    Connections, LimitedConnection, LimitedIncoming, ReleaseOnDrop, SessionBusy, TrackRequests,
-};
+use connections::{Connections, LimitedIncoming, TrackRequests};
+pub use connections::{ReleaseOnDrop, SessionBusy};
 
 /// Limits applied to the fleet gRPC listener.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -113,9 +113,9 @@ pub struct FleetLimits {
     pub stream_open_refill: Duration,
 }
 
-/// Default limits. The controller configuration can change the
-/// deployment-dependent ones (see `configured`).
-pub const FLEET_LIMITS: FleetLimits = FleetLimits {
+/// Default limits. The controller configuration replaces the
+/// deployment-dependent ones (see `FleetLimits::from_config`).
+const FLEET_LIMITS: FleetLimits = FleetLimits {
     tls_handshake: Duration::from_secs(10),
     request: Duration::from_secs(30),
     keepalive_interval: Duration::from_secs(30),
@@ -140,9 +140,13 @@ pub const FLEET_LIMITS: FleetLimits = FleetLimits {
 };
 
 impl FleetLimits {
-    /// These limits, with the deployment-dependent ones from the controller
-    /// configuration.
-    pub fn configured(mut self, config: &ControllerFleetLimitsConfig) -> Self {
+    /// The limits for a controller: the deployment-dependent ones from its
+    /// configuration, and the defaults for the rest.
+    pub fn from_config(config: &ControllerFleetLimitsConfig) -> Self {
+        FLEET_LIMITS.configured(config)
+    }
+
+    fn configured(mut self, config: &ControllerFleetLimitsConfig) -> Self {
         self.max_connections = config.max_connections;
         self.connections_per_address = config.connections_per_address;
         self.max_message_bytes = config.max_message_bytes;
@@ -154,43 +158,48 @@ impl FleetLimits {
         self
     }
 
-    /// Adds the handshake timeout to the fleet listener's TLS settings.
-    pub fn tls(&self, config: ServerTlsConfig) -> ServerTlsConfig {
-        config.timeout(self.tls_handshake)
-    }
-
-    /// The registry that admits fleet connections and tracks their activity.
-    /// Pass the same one to `server` and `incoming`.
-    pub fn connections(&self) -> Connections {
-        Connections::new(self)
-    }
-
-    /// A server builder with the fleet listener's limits applied.
-    pub fn server(&self, connections: &Connections) -> Server<Stack<TrackRequests, Identity>> {
-        Server::builder()
+    /// Binds the fleet listener on `address`, over TLS when `tls` is given,
+    /// with every connection and request limit applied. The listener serves
+    /// the fleet service with its message limits (`FleetListener::serve`).
+    pub fn listener(
+        &self,
+        address: SocketAddr,
+        tls: Option<ServerTlsConfig>,
+    ) -> anyhow::Result<FleetListener> {
+        // The listener and the request layer share one registry: the listener
+        // admits and closes connections, and the layer marks them busy.
+        let connections = Connections::new(self);
+        let mut server = Server::builder()
             .timeout(self.request)
             .http2_keepalive_interval(Some(self.keepalive_interval))
             .http2_keepalive_timeout(Some(self.keepalive_timeout))
             .concurrency_limit_per_connection(self.requests_per_connection)
             .max_concurrent_streams(self.streams_per_connection)
-            .layer(connections.track_requests())
-    }
-
-    /// Binds the fleet listener with TCP keepalive, admitting connections
-    /// through `connections`. Serve with `Server::serve_with_incoming`.
-    pub fn incoming(
-        &self,
-        address: SocketAddr,
-        connections: &Connections,
-    ) -> io::Result<LimitedIncoming<TcpIncoming>> {
-        let incoming = TcpIncoming::bind(address)?
+            // agentgateway fetches the gateway JWKS from this listener over HTTP/1.
+            .accept_http1(true)
+            .layer(connections.track_requests());
+        if let Some(tls) = tls {
+            server = server
+                .tls_config(tls.timeout(self.tls_handshake))
+                .context("configure fleet listener TLS")?;
+        }
+        let incoming = TcpIncoming::bind(address)
+            .with_context(|| format!("bind fleet listener on {address}"))?
             .with_nodelay(Some(true))
             .with_keepalive(Some(self.tcp_keepalive));
-        Ok(connections.incoming(incoming))
+        let local_address = incoming
+            .local_addr()
+            .context("read fleet listener address")?;
+        Ok(FleetListener {
+            limits: *self,
+            server,
+            incoming: connections.incoming(incoming),
+            local_address,
+        })
     }
 
     /// The fleet gRPC service with message size limits applied.
-    pub fn fleet_service<T: FleetAgent>(&self, service: T) -> FleetService<T> {
+    fn fleet_service<T: FleetAgent>(&self, service: T) -> FleetService<T> {
         let service = Arc::new(service);
         FleetService {
             unauthenticated: FleetAgentServer::from_arc(service.clone())
@@ -209,6 +218,40 @@ impl FleetLimits {
     /// Per-device `Connect` state: one stream per device, and its budgets.
     pub fn device_streams(&self) -> DeviceStreams {
         DeviceStreams::new(self)
+    }
+}
+
+/// The bound fleet listener, from `FleetLimits::listener`.
+pub struct FleetListener {
+    limits: FleetLimits,
+    server: Server<Stack<TrackRequests, Identity>>,
+    incoming: LimitedIncoming<TcpIncoming>,
+    local_address: SocketAddr,
+}
+
+impl FleetListener {
+    /// The address the listener is bound to.
+    pub fn local_address(&self) -> SocketAddr {
+        self.local_address
+    }
+
+    /// Serves `service`, with the fleet message limits, and the other `routes`
+    /// until the listener fails.
+    pub async fn serve<T: FleetAgent>(
+        self,
+        service: T,
+        routes: Routes,
+    ) -> Result<(), tonic::transport::Error> {
+        let mut server = self.server;
+        server
+            .add_routes(routes.add_service(self.limits.fleet_service(service)))
+            .serve_with_incoming(self.incoming)
+            .await
+    }
+
+    #[cfg(test)]
+    fn connections(&self) -> &Connections {
+        self.incoming.connections()
     }
 }
 

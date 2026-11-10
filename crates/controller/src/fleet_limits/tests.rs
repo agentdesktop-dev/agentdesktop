@@ -10,14 +10,15 @@ use agentdesktop_proto::fleet::{
 use futures_core::Stream;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     sync::mpsc,
     time,
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{
     Code, Request, Response, Status, Streaming,
-    transport::{Identity, ServerTlsConfig, server::TcpIncoming},
+    service::Routes,
+    transport::{Identity, ServerTlsConfig},
 };
 
 use super::{Connections, FLEET_LIMITS, FleetLimits};
@@ -111,17 +112,13 @@ async fn serve_tracked(
     tls: Option<ServerTlsConfig>,
     service: Slow,
 ) -> (SocketAddr, Connections) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let connections = limits.connections();
-    // HTTP/1 is accepted as the controller does (`main.rs`), so connections go
-    // through hyper-util's protocol detection, as they do in production.
-    let mut server = limits.server(&connections).accept_http1(true);
-    if let Some(tls) = tls {
-        server = server.tls_config(limits.tls(tls)).unwrap();
-    }
-    let router = server.add_service(limits.fleet_service(service));
-    tokio::spawn(router.serve_with_incoming(connections.incoming(TcpIncoming::from(listener))));
+    // The controller's own listener, so these tests exercise what it runs.
+    let listener = limits
+        .listener(SocketAddr::from(([127, 0, 0, 1], 0)), tls)
+        .unwrap();
+    let address = listener.local_address();
+    let connections = listener.connections().clone();
+    tokio::spawn(listener.serve(service, Routes::default()));
     (address, connections)
 }
 
@@ -591,7 +588,7 @@ fn an_address_over_its_cap_does_not_evict_other_connections() {
     let mut limits = FLEET_LIMITS;
     limits.max_connections = 2;
     limits.connections_per_address = 1;
-    let connections = limits.connections();
+    let connections = Connections::new(&limits);
     let first_address = |port| SocketAddr::from(([192, 0, 2, 1], port));
     let (_first, mut first_evicted) = connections
         .register(first_address(1))
