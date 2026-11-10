@@ -232,19 +232,19 @@ impl Connections {
             .get(&address)
             .is_some_and(|count| *count >= self.shared.connections_per_address)
         {
-            if let Some(events) = PER_ADDRESS_CAP.event(Instant::now()) {
+            if let Some(closed) = PER_ADDRESS_CAP.event(Instant::now()) {
                 tracing::warn!(
-                    %address,
-                    events,
+                    latest_address = %address,
+                    closed_since_last_warning = closed,
                     "closed new fleet connections over the per-address connection limit"
                 );
             }
             return None;
         }
         if state.open.len() >= self.shared.max_connections && !state.evict_idle() {
-            if let Some(events) = TOTAL_CAP.event(Instant::now()) {
+            if let Some(closed) = TOTAL_CAP.event(Instant::now()) {
                 tracing::warn!(
-                    events,
+                    closed_since_last_warning = closed,
                     "closed new fleet connections at the connection limit with no connection idle"
                 );
             }
@@ -363,9 +363,9 @@ impl LimitedConnection {
         {
             self.evicted = None;
             self.closed = true;
-            if let Some(events) = EVICTIONS.event(Instant::now()) {
+            if let Some(closed) = EVICTIONS.event(Instant::now()) {
                 tracing::warn!(
-                    events,
+                    closed_since_last_warning = closed,
                     "closed idle fleet connections to make room at the connection limit"
                 );
             }

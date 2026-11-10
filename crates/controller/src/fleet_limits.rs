@@ -358,10 +358,10 @@ impl EnrollmentLimiter {
         if let Some(peer) = peer
             && !self.take(peer.ip(), Instant::now())
         {
-            if let Some(events) = ENROLLMENT_RATE.event(Instant::now()) {
+            if let Some(refused) = ENROLLMENT_RATE.event(Instant::now()) {
                 tracing::warn!(
-                    peer = %address_key(peer.ip()),
-                    events,
+                    latest_address = %address_key(peer.ip()),
+                    refused_since_last_warning = refused,
                     "refused enrollment requests over the per-address rate limit"
                 );
             }
@@ -402,9 +402,9 @@ impl EnrollmentLimiter {
 }
 
 fn in_flight_refusal() -> Status {
-    if let Some(events) = ENROLLMENT_IN_FLIGHT.event(Instant::now()) {
+    if let Some(refused) = ENROLLMENT_IN_FLIGHT.event(Instant::now()) {
         tracing::warn!(
-            events,
+            refused_since_last_warning = refused,
             "refused enrollment requests with every in-flight slot taken"
         );
     }
@@ -507,10 +507,10 @@ impl DeviceStreams {
         if admitted {
             Ok(())
         } else {
-            if let Some(events) = STREAM_OPENS.event(Instant::now()) {
+            if let Some(refused) = STREAM_OPENS.event(Instant::now()) {
                 tracing::warn!(
-                    device_id,
-                    events,
+                    latest_device_id = device_id,
+                    refused_since_last_warning = refused,
                     "refused Connect streams from devices that open them too often"
                 );
             }
@@ -579,7 +579,10 @@ fn refilled(bucket: Bucket, now: Instant, refill: Duration, burst: f64) -> f64 {
 
 /// A warning that fires once per refused request or connection. A flood would
 /// log a line per event, so this logs at most one per `WARNING_INTERVAL` and
-/// says how many events it stands for.
+/// says how many events it stands for: every event since the last warning, from
+/// any client or device, reported with the first event after the interval
+/// (however much later that is). A warning that names a client or device names
+/// only the latest one.
 pub(crate) struct ThrottledWarning {
     state: Mutex<WarningState>,
 }
