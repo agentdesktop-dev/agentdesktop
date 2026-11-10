@@ -1,6 +1,11 @@
 The Agentdesktop fleet API is available through Service:
   {{ include "agentdesktop-controller.fullname" . }}:{{ .Values.service.port }}
 
+{{ if include "agentdesktop-controller.gatewayJwksEnabled" . -}}
+LLM gateways fetch the gateway JWKS from Service:
+  {{ ternary "https" "http" .Values.gatewayJwks.tls }}://{{ include "agentdesktop-controller.gatewayJwksServiceName" . }}.{{ .Release.Namespace }}.svc:{{ include "agentdesktop-controller.gatewayJwksServicePort" . }}/.well-known/jwks.json
+
+{{ end -}}
 The management UI binds to loopback and is not exposed by the Service. Open it
 with:
   kubectl port-forward deployment/{{ include "agentdesktop-controller.fullname" . }} 8080:8080

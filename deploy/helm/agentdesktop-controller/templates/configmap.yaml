@@ -18,7 +18,12 @@ data:
       redirectUri: {{ .Values.oidc.redirectUri | quote }}
     {{- with .Values.gatewayJwt }}
     gatewayJwt:
-{{ toYaml . | indent 6 }}
+{{ toYaml (ternary (omit . "jwksListener") . $.Values.gatewayJwks.enabled) | indent 6 }}
+      {{- if $.Values.gatewayJwks.enabled }}
+      jwksListener:
+        listen: 0.0.0.0:{{ $.Values.gatewayJwks.port }}
+        tls: {{ $.Values.gatewayJwks.tls }}
+      {{- end }}
     {{- end }}
     {{- with .Values.daemonConfig }}
     daemonConfig:

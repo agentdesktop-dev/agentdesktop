@@ -21,6 +21,9 @@
 |`fleetListen`|string|Address on which the device-facing gRPC fleet API listens.|
 |`gatewayJwt`|object|LLM gateway JWT signing settings.|
 |`gatewayJwt.issuer`|string|Issuer claim placed in generated JWTs.|
+|`gatewayJwt.jwksListener`|object|Listener that serves only `/.well-known/jwks.json`, which the fleet listener also serves.<br><br>LLM gateways need the JWKS to verify controller-issued JWTs. Point them here so a NetworkPolicy or firewall can allow them this port and block the management API, which can read the device inventory and delete devices. Gateways that export usage also need the fleet port.|
+|`gatewayJwt.jwksListener.listen`|string|Address on which the JWKS listener accepts connections.|
+|`gatewayJwt.jwksListener.tls`|boolean|Serve HTTPS with the controller certificate from `tls` instead of plain HTTP.|
 |`gatewayJwt.keyId`|string|Key identifier placed in generated JWT headers.|
 |`gatewayJwt.lifetime`|string|Lifetime of generated JWTs. Defaults to `5m`.|
 |`gatewayJwt.privateKey`|string|Path to the PEM-encoded RSA private signing key.<br><br>Relative paths are resolved from the controller configuration directory.|

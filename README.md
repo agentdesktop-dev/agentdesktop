@@ -697,7 +697,7 @@ routes:
       issuer: agentdesktop-controller
       audiences: [agentgateway]
       jwks:
-        url: https://<controller>/.well-known/jwks.json
+        url: https://<controller>/.well-known/jwks.json  # fleet listener or gatewayJwt.jwksListener
     urlRewrite:
       authority:
         full: api.business.githubcopilot.com
@@ -815,6 +815,13 @@ cross-site browser mutations and non-loopback `Host` headers. Reach it remotely
 through an SSH tunnel. Remote management (`adminAccess.mode: authenticated`)
 requires a controller build with a compiled-in authentication provider; the
 standard executable rejects it at startup. Device enrollment is configured separately.
+LLM gateways need the controller's JWKS (`/.well-known/jwks.json`) to verify
+the JWTs it issues. The management listener does not serve it. Gateways fetch
+it from the fleet listener, or from an optional `gatewayJwt.jwksListener` that
+serves nothing else. With the dedicated listener, a NetworkPolicy or firewall
+can allow the gateway that one port and block the management API, so a
+compromised gateway cannot read the device inventory or delete devices. A
+gateway that exports usage to the controller also needs the fleet port.
 See the [controller configuration schema](schema/controller-config.md).
 
 ### Configuration status

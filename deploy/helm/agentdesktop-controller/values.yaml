@@ -22,6 +22,23 @@ allowInsecureDev: false
 # Optional short-lived JWT issuer for authenticated LLM gateways.
 gatewayJwt: {}
 
+# Listener and Service that serve only the gateway JWKS (/.well-known/jwks.json).
+# Point LLM gateways at this Service so a NetworkPolicy can allow them this port
+# and nothing else on the controller (usage export also needs the fleet port).
+# The chart creates them when gatewayJwt or existingConfigSecret is set. With
+# existingConfigSecret, that configuration must set gatewayJwt.jwksListener to
+# listen on 0.0.0.0:<port>, with the same tls setting.
+gatewayJwks:
+  enabled: true
+  port: 8081
+  # Serve HTTPS with the controller certificate from tlsSecretName. The
+  # certificate must then include the JWKS Service name.
+  tls: false
+  service:
+    type: ClusterIP
+    # Defaults to 443 with tls, otherwise 80.
+    port: ""
+
 # Daemon configuration distributed to enrolled devices. Leave empty to
 # disable managed configuration.
 daemonConfig: {}
