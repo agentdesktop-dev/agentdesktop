@@ -388,22 +388,22 @@ impl LimitedConnection {
             }
         }
         loop {
-            let now = Instant::now();
-            let target = match self.activity.idle_deadline(&self.connections.shared) {
-                Some(deadline) if deadline <= now => {
-                    self.closed = true;
-                    tracing::debug!(peer = %self.peer, "closing idle fleet connection");
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "idle fleet connection closed",
-                    ));
-                }
-                Some(deadline) => deadline,
-                // Busy: check again after an idle period.
-                None => now + self.connections.shared.idle,
+            // Busy: no deadline. The guard of the last request to finish wakes
+            // this connection (through the waker registered above) when it
+            // goes idle.
+            let Some(deadline) = self.activity.idle_deadline(&self.connections.shared) else {
+                return Ok(());
             };
-            if self.timer.deadline() != target {
-                self.timer.as_mut().reset(target);
+            if deadline <= Instant::now() {
+                self.closed = true;
+                tracing::debug!(peer = %self.peer, "closing idle fleet connection");
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "idle fleet connection closed",
+                ));
+            }
+            if self.timer.deadline() != deadline {
+                self.timer.as_mut().reset(deadline);
             }
             if self.timer.as_mut().poll(context).is_pending() {
                 return Ok(());
