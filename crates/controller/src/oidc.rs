@@ -280,9 +280,9 @@ impl OidcProvider {
         Ok(response)
     }
 
-    /// The IdP round-trip and response validation for [`begin_device`], split out so
-    /// its error paths all flow through one `?`-propagating function and the caller
-    /// can release the reservation on any of them uniformly.
+    /// The IdP round-trip and response validation for [`begin_device`]. On any
+    /// error the caller's [`Reservation`] is dropped, which releases the pending
+    /// enrollment.
     async fn request_device_grant(
         &self,
         enrollment_id: &str,

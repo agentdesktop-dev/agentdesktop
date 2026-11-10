@@ -59,17 +59,18 @@ pub struct FleetLimits {
     /// for peers that vanish without closing.
     pub tcp_keepalive: Duration,
     /// Open connections allowed in total and from one client address (an IPv4
-    /// address or an IPv6 /64). A connection over either cap is closed as soon
-    /// as it is accepted. The
-    /// per-address cap is high because many devices can share an address behind
-    /// NAT, or appear to when a load balancer rewrites client addresses.
+    /// address or an IPv6 /64). A new connection over the per-address cap is
+    /// closed as soon as it is accepted. At the total cap, the longest-idle
+    /// connection is closed to admit a new one, and the new one is closed only
+    /// when no connection is idle. The per-address cap is high because many
+    /// devices can share an address behind NAT, or appear to when a load
+    /// balancer rewrites client addresses.
     pub max_connections: usize,
     pub connections_per_address: usize,
     /// Time a new connection has to make its first request, and time a
     /// connection may stay without any request in progress after its last one
     /// finished. A connection with a request in progress (including an open
-    /// `Connect` stream) is never idle. At the total cap, the longest-idle
-    /// connection is closed to admit a new one.
+    /// `Connect` stream) is never idle.
     pub first_request: Duration,
     pub idle_connection: Duration,
     /// Concurrent requests one connection may have in progress, and concurrent
@@ -355,6 +356,10 @@ impl EnrollmentLimiter {
     /// Admits one `BeginEnrollment` from `peer`, or rejects it with
     /// `RESOURCE_EXHAUSTED`. Hold the returned permit until the request finishes.
     pub fn admit(&self, peer: Option<SocketAddr>) -> Result<OwnedSemaphorePermit, Status> {
+        // The address's budget is spent before a slot is sought, so a request
+        // refused for want of a slot still counts against it. Otherwise, while
+        // a flood holds every slot, the flooding addresses would keep their
+        // whole budget and take the slots back the moment they free up.
         if let Some(peer) = peer
             && !self.take(peer.ip(), Instant::now())
         {
