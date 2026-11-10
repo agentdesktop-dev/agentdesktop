@@ -26,16 +26,19 @@ use crate::{
     http_listener::{HttpListener, HttpListenerLimits, HttpListenerTls},
 };
 
+pub mod audit;
 pub mod auth;
 mod handlers;
 pub mod http;
 
+use audit::AuditLog;
 use auth::{
     Auth,
     authorization::{self, AccessRequest, Verb},
 };
 use handlers::{
-    api_not_found, daemon_config, delete_device, device, devices, overview, settings, usage_report,
+    api_not_found, audit_events, daemon_config, delete_device, device, devices, overview, settings,
+    usage_report,
 };
 
 /// Embedded UI file lookup by path, e.g. `|path| Assets::get(path).map(|file| file.data)`.
@@ -65,6 +68,7 @@ pub struct State {
     database: Database,
     daemon_config: DaemonConfigStore,
     settings: Settings,
+    audit: AuditLog,
 }
 
 #[derive(Clone, Serialize)]
@@ -80,10 +84,17 @@ pub struct Settings {
 impl State {
     pub fn new(database: Database, daemon_config: DaemonConfigStore, settings: Settings) -> Self {
         Self {
+            audit: AuditLog::new(database.clone()),
             database,
             daemon_config,
             settings,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_audit(mut self, audit: AuditLog) -> Self {
+        self.audit = audit;
+        self
     }
 }
 
@@ -95,13 +106,18 @@ struct Assets;
 /// Local access always uses the built-in loopback provider; remote (authenticated)
 /// access requires a compiled-in provider. Mismatches fail at startup rather than
 /// running a provider under the other mode's HTTP policy.
-pub fn auth(access: &ControllerAdminAccess, extensions: &Extensions) -> anyhow::Result<Auth> {
+pub fn auth(
+    access: &ControllerAdminAccess,
+    extensions: &Extensions,
+    audit: AuditLog,
+) -> anyhow::Result<Auth> {
     match (access, &extensions.authentication) {
-        (ControllerAdminAccess::Local, None) => {
-            Ok(Auth::new(Arc::new(auth::providers::local::LocalAccess)))
-        }
+        (ControllerAdminAccess::Local, None) => Ok(Auth::new(
+            Arc::new(auth::providers::local::LocalAccess),
+            audit,
+        )),
         (ControllerAdminAccess::Authenticated(_), Some(provider)) => {
-            Ok(Auth::new(provider.clone()))
+            Ok(Auth::new(provider.clone(), audit))
         }
         (ControllerAdminAccess::Authenticated(_), None) => anyhow::bail!(
             "adminListener.access.mode authenticated requires a compiled-in authentication provider; this controller supports only local admin access"
@@ -161,7 +177,7 @@ pub fn router(
     access: &ControllerAdminAccess,
     extensions: Extensions,
 ) -> anyhow::Result<Router> {
-    let auth = auth(access, &extensions)?;
+    let auth = auth(access, &extensions, state.audit.clone())?;
     let policy = match access {
         ControllerAdminAccess::Local => http::Policy::Local,
         ControllerAdminAccess::Authenticated(admin) => http::Policy::Authenticated {
@@ -187,6 +203,7 @@ pub fn router(
         )
         .route("/api/v1/settings", api(get(settings)))
         .route("/api/v1/usage", api(get(usage_report)))
+        .route("/api/v1/audit", api(get(audit_events)))
         .route("/api", auth.authenticate_api(get(api_not_found)))
         .route("/api/{*path}", auth.authenticate_api(get(api_not_found)))
         .fallback(auth.authenticate_browser(get(

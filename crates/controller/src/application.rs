@@ -31,7 +31,11 @@ pub async fn run(
     // process-wide rustls provider.
     crate::install_rustls_provider();
     // Fail before any network setup when the access mode has no provider.
-    management::auth(&config.admin_listener.access, &extensions)?;
+    management::auth(
+        &config.admin_listener.access,
+        &extensions,
+        management::audit::AuditLog::new(database.clone()),
+    )?;
     // Out-of-range fleet limits fail here too, before any network setup.
     let limits = FleetLimits::from_config(&config.fleet_listener.limits)?;
     let tls = config.tls.files();
