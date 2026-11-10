@@ -206,6 +206,7 @@ impl Context {
                     Target {
                         class: access.resource_class.to_owned(),
                         id: access.resource.map(str::to_owned),
+                        name: None,
                     },
                 ));
             }

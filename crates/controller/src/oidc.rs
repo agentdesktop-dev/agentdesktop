@@ -53,12 +53,35 @@ struct JwksCache {
     refresh_cooldown: Duration,
 }
 
+#[derive(Clone, Debug)]
 pub struct CompletedEnrollment {
     pub hostname: String,
     pub credential: EnrollmentCredential,
 }
 
+/// Why [`OidcProvider::authenticate_enrollment`] refused an enrollment.
+#[derive(Debug)]
+pub struct EnrollmentRejected {
+    /// The sign-in, once its ID token was verified. `None` when the attempt failed
+    /// before that, so nobody verified can be named.
+    pub verified: Option<CompletedEnrollment>,
+    /// Stable code for the audit log.
+    pub reason: &'static str,
+    pub error: anyhow::Error,
+}
+
+impl From<anyhow::Error> for EnrollmentRejected {
+    fn from(error: anyhow::Error) -> Self {
+        Self {
+            verified: None,
+            reason: "invalid_enrollment",
+            error,
+        }
+    }
+}
+
 /// What a device enrolled with.
+#[derive(Clone, Debug)]
 pub enum EnrollmentCredential {
     User(EnrolledUser),
     Token(EnrollmentToken),
@@ -193,10 +216,10 @@ impl OidcProvider {
         id_token: &str,
         access_token: &str,
         device_key_nonce: &str,
-    ) -> anyhow::Result<CompletedEnrollment> {
+    ) -> Result<CompletedEnrollment, EnrollmentRejected> {
         validate_hostname(&hostname)?;
         if id_token.is_empty() || access_token.is_empty() {
-            bail!("ID token and access token are required");
+            return Err(anyhow::anyhow!("ID token and access token are required").into());
         }
         let header = decode_header(id_token).context("decode ID token header")?;
         let kid = header.kid.context("ID token has no key ID")?;
@@ -209,34 +232,65 @@ impl OidcProvider {
         let claims = decode::<IdTokenClaims>(id_token, &key, &validation)
             .context("validate OIDC ID token")?
             .claims;
+
+        let mut idp_claims = claims.additional;
+        idp_claims.insert("sub".to_owned(), claims.sub.clone().into());
+        // From here on the ID token is verified, so a refusal can name its user.
+        let verified = CompletedEnrollment {
+            hostname,
+            credential: EnrollmentCredential::User(EnrolledUser {
+                issuer: self.inner.issuer.clone(),
+                subject: claims.sub.clone(),
+                idp_claims: idp_claims.clone(),
+            }),
+        };
+        let reject = |reason, error| EnrollmentRejected {
+            verified: Some(verified.clone()),
+            reason,
+            error,
+        };
         // A browser sign-in carries the nonce the agent derived from the device
         // key, so only a sign-in made for this key can enroll it. The device
         // authorization grant has no nonce; tokens without one are accepted only
         // when the IdP offers that grant, as they were before.
         match claims.nonce.as_deref() {
             Some(nonce) if nonce == device_key_nonce => {}
-            Some(_) => bail!("ID token nonce is not bound to the enrolling device key"),
+            Some(_) => {
+                return Err(reject(
+                    "nonce_mismatch",
+                    anyhow::anyhow!("ID token nonce is not bound to the enrolling device key"),
+                ));
+            }
             None if self.inner.device_authorization_endpoint.is_some() => {}
-            None => bail!("ID token has no nonce bound to the enrolling device key"),
+            None => {
+                return Err(reject(
+                    "nonce_missing",
+                    anyhow::anyhow!("ID token has no nonce bound to the enrolling device key"),
+                ));
+            }
         }
-        let access_principal = self.authenticate_access_token(access_token).await?;
+        let access_principal = self
+            .authenticate_access_token(access_token)
+            .await
+            .map_err(|error| reject("access_token_rejected", error))?;
         if access_principal.subject != claims.sub {
-            bail!("access token and ID token subjects do not match");
+            return Err(reject(
+                "token_subject_mismatch",
+                anyhow::anyhow!("access token and ID token subjects do not match"),
+            ));
         }
 
-        let mut idp_claims = claims.additional;
-        idp_claims.insert("sub".to_owned(), claims.sub.clone().into());
         if let Some(nonce) = claims.nonce {
             idp_claims.insert("nonce".to_owned(), nonce.into());
         }
 
         Ok(CompletedEnrollment {
-            hostname,
             credential: EnrollmentCredential::User(EnrolledUser {
                 issuer: access_principal.issuer,
                 subject: access_principal.subject,
                 idp_claims,
             }),
+            ..verified
         })
     }
 
