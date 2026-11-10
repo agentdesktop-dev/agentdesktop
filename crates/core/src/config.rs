@@ -458,11 +458,10 @@ pub enum TelemetryEventName {
 pub struct ControllerConnectionConfig {
     /// HTTPS address of the controller's fleet API.
     pub address: String,
-    /// Path to a PEM-encoded CA certificate used to verify the controller.
-    ///
-    /// Omit this field to use the operating system's trusted certificate roots.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ca_certificate_path: Option<PathBuf>,
+    /// Path to the PEM-encoded CA certificate that signed the controller's fleet API
+    /// certificate. Required: the daemon trusts only this CA for the controller, not
+    /// the operating system's certificate roots.
+    pub ca_certificate_path: PathBuf,
     /// Interval between device heartbeats. Defaults to `30s`.
     #[serde(default = "default_heartbeat_interval", with = "humantime_serde")]
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
@@ -1491,10 +1490,13 @@ const MAX_RECONCILE_INTERVAL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 fn parse_local_daemon(contents: &str) -> anyhow::Result<DaemonConfig> {
     let config: DaemonConfig =
         crate::serdes::yamlviajson::from_str(contents).context("parse daemon configuration")?;
-    if let Some(controller) = &config.controller
-        && !controller.address.starts_with("https://")
-    {
-        anyhow::bail!("controller address must use HTTPS");
+    if let Some(controller) = &config.controller {
+        if !controller.address.starts_with("https://") {
+            anyhow::bail!("controller address must use HTTPS");
+        }
+        if controller.ca_certificate_path.as_os_str().is_empty() {
+            anyhow::bail!("controller.caCertificatePath cannot be empty");
+        }
     }
     if config.inventory_interval.is_zero() {
         anyhow::bail!("inventoryInterval must be greater than zero");
@@ -2050,6 +2052,7 @@ mod tests {
         let document = r#"
 controller:
   address: https://127.0.0.1:8443
+  caCertificatePath: controller-ca.pem
 llmGateway:
   url: http://127.0.0.1:8080
 programs: { claudeCode: { useLlmGateway: false } }
@@ -2171,7 +2174,7 @@ programs: { claudeCode: { useLlmGateway: false } }
                 "daemon.usage.listen must be a loopback address",
             ),
             (
-                "controller:\n  address: https://controller.example.com\ndaemon:\n  usage:\n    listen: 127.0.0.1:4319\n    tokenFile: usage-token\n",
+                "controller:\n  address: https://controller.example.com\n  caCertificatePath: controller-ca.pem\ndaemon:\n  usage:\n    listen: 127.0.0.1:4319\n    tokenFile: usage-token\n",
                 "daemon.usage is for a daemon without a controller",
             ),
         ] {
@@ -2185,14 +2188,37 @@ programs: { claudeCode: { useLlmGateway: false } }
         let plaintext = r#"
 controller:
   address: http://controller.example.com
+  caCertificatePath: controller-ca.pem
 "#;
-        assert!(parse_daemon(plaintext).is_err());
+        let error = parse_daemon(plaintext).expect_err("plaintext controller accepted");
+        assert!(error.to_string().contains("must use HTTPS"), "{error}");
 
         let valid = r#"
 controller:
   address: https://controller.example.com
+  caCertificatePath: controller-ca.pem
 "#;
         assert!(parse_daemon(valid).is_ok());
+    }
+
+    #[test]
+    fn daemon_controller_requires_a_ca_certificate_path() {
+        let missing = "controller:\n  address: https://controller.example.com\n";
+        let error = parse_daemon(missing).expect_err("controller without a CA accepted");
+        assert!(
+            format!("{error:#}").contains("caCertificatePath"),
+            "{error:#}"
+        );
+
+        let empty =
+            "controller:\n  address: https://controller.example.com\n  caCertificatePath: ''\n";
+        let error = parse_daemon(empty).expect_err("empty CA path accepted");
+        assert!(
+            error
+                .to_string()
+                .contains("controller.caCertificatePath cannot be empty"),
+            "{error}"
+        );
     }
 
     #[test]
