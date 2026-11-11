@@ -14,7 +14,7 @@ anyhow.workspace = true
 async-trait = "0.1"
 aws-lc-rs.workspace = true
 axum.workspace = true
-axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+axum-server = { version = "0.9", features = ["tls-rustls-no-provider"] }
 base64.workspace = true
 clap.workspace = true
 futures-core.workspace = true
