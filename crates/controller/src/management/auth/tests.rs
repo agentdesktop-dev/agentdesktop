@@ -1,7 +1,7 @@
 use super::providers::local::LocalAccess;
 use super::*;
+use crate::audit::{AuditLog, RequestInfo};
 use crate::database::Database;
-use crate::management::audit::{AuditLog, RequestInfo};
 use crate::management::http::is_loopback_host;
 use agentdesktop_core::config::ControllerAdminAccess;
 use axum::{

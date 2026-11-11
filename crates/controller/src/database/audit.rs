@@ -9,7 +9,7 @@
 //! `seq` orders events for the Audit page and its API. It is unique and
 //! increasing but may have gaps (PostgreSQL identity values are not reused after
 //! a failed insert), so it says nothing about missing events. Gap detection is
-//! the SIEM's job, using the stream counter in `management::audit`.
+//! the SIEM's job, using the stream counter in `crate::audit`.
 
 use anyhow::Context;
 

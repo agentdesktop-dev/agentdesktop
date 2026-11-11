@@ -26,12 +26,11 @@ use crate::{
     http_listener::{HttpListener, HttpListenerLimits, HttpListenerTls},
 };
 
-pub mod audit;
 pub mod auth;
 mod handlers;
 pub mod http;
 
-use audit::AuditLog;
+use crate::audit::AuditLog;
 use auth::{
     Auth,
     authorization::{self, AccessRequest, Verb},

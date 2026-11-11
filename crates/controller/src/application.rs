@@ -34,7 +34,7 @@ pub async fn run(
     management::auth(
         &config.admin_listener.access,
         &extensions,
-        management::audit::AuditLog::new(database.clone()),
+        crate::audit::AuditLog::new(database.clone()),
     )?;
     // Out-of-range fleet limits fail here too, before any network setup.
     let limits = FleetLimits::from_config(&config.fleet_listener.limits)?;
