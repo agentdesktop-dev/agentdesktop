@@ -1188,13 +1188,53 @@ mod device_streams {
         limits.configured.device_message_refill = Duration::from_secs(1);
         let stream = limits.device_streams().open("device-a");
         let start = Instant::now();
+        let second = Duration::from_secs(1);
 
-        for _ in 0..3 {
-            assert!(stream.take_message(start));
-        }
-        assert!(!stream.take_message(start), "burst exceeded");
-        assert!(stream.take_message(start + Duration::from_secs(1)));
-        assert!(!stream.take_message(start + Duration::from_secs(1)));
+        assert_eq!(stream.spend_message(start), None);
+        assert_eq!(stream.spend_message(start), None);
+        assert_eq!(
+            stream.spend_message(start),
+            Some(start + second),
+            "the burst is spent"
+        );
+        assert_eq!(
+            stream.spend_message(start + second),
+            Some(start + 2 * second),
+            "one message per refill"
+        );
+    }
+
+    #[test]
+    fn a_message_read_before_the_budget_refills_delays_the_next_one() {
+        let mut limits = FLEET_LIMITS;
+        limits.configured.device_message_burst = 1;
+        limits.configured.device_message_refill = Duration::from_secs(1);
+        let stream = limits.device_streams().open("device-a");
+        let start = Instant::now();
+
+        assert_eq!(
+            stream.spend_message(start),
+            Some(start + Duration::from_secs(1))
+        );
+
+        assert_eq!(
+            stream.spend_message(start),
+            Some(start + Duration::from_secs(2))
+        );
+    }
+
+    #[test]
+    fn an_absurdly_long_refill_caps_the_wait() {
+        let mut limits = FLEET_LIMITS;
+        limits.configured.device_message_burst = 1;
+        limits.configured.device_message_refill = Duration::MAX;
+        let stream = limits.device_streams().open("device-a");
+        let start = Instant::now();
+
+        assert_eq!(
+            stream.spend_message(start),
+            Some(start + super::super::LONGEST_WAIT)
+        );
     }
 
     #[test]
@@ -1205,13 +1245,16 @@ mod device_streams {
         let streams = limits.device_streams();
         let now = Instant::now();
         let first = streams.open("device-a");
-        assert!(first.take_message(now));
-        assert!(first.take_message(now));
+        assert_eq!(first.spend_message(now), None);
+        assert!(first.spend_message(now).is_some(), "the burst is spent");
         drop(first);
 
         let second = streams.open("device-a");
 
-        assert!(!second.take_message(now), "a new stream got a fresh budget");
+        assert!(
+            second.spend_message(now).is_some(),
+            "a new stream got a fresh budget"
+        );
     }
 
     #[test]

@@ -613,8 +613,9 @@ pub struct ControllerFleetLimitsConfig {
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub enrollment_refill: Duration,
     /// Messages one device may send in a burst on its `Connect` stream, after
-    /// which it may send one more every `deviceMessageRefill`. A device over
-    /// its budget is disconnected. Defaults to `600`.
+    /// which it may send one more every `deviceMessageRefill`. Once a device
+    /// has sent its burst, the controller reads its messages no faster than
+    /// that, and the device waits to send more. Defaults to `600`.
     #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub device_message_burst: u32,
     /// Time for a device to get back one message. Defaults to `50ms`.

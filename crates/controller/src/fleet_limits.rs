@@ -382,6 +382,9 @@ impl PeerBuckets {
     }
 }
 
+/// The longest `Bucket::spend` asks a caller to wait.
+const LONGEST_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// A token bucket: up to `burst` tokens, refilled at one per `refill`.
 #[derive(Clone, Copy)]
 struct Bucket {
@@ -406,6 +409,21 @@ impl Bucket {
         }
         self.tokens -= 1.0;
         true
+    }
+
+    /// Refills the bucket, then spends one token even when none is left (the
+    /// bucket goes into debt). Returns when the next token is available:
+    /// `None` when one is left now.
+    fn spend(&mut self, now: Instant, refill: Duration, burst: f64) -> Option<Instant> {
+        self.tokens = self.refilled(now, refill, burst) - 1.0;
+        self.updated = now;
+        if self.tokens >= 1.0 {
+            return None;
+        }
+        // Capped, so an absurdly long refill setting cannot overflow the instant.
+        let wait = Duration::try_from_secs_f64(refill.as_secs_f64() * (1.0 - self.tokens))
+            .map_or(LONGEST_WAIT, |wait| wait.min(LONGEST_WAIT));
+        Some(now + wait)
     }
 
     fn refilled(self, now: Instant, refill: Duration, burst: f64) -> f64 {
@@ -594,16 +612,29 @@ impl DeviceStreams {
 }
 
 impl DeviceStream {
-    /// Takes one message from the device's budget, or returns false when it is spent.
-    pub fn take_message(&self, now: Instant) -> bool {
+    /// Spends one message from the device's budget. Returns when the budget
+    /// allows the next one: `None` when it allows it now, or the instant it
+    /// has refilled enough. Do not read another message from the device
+    /// before then.
+    pub fn spend_message(&self, now: Instant) -> Option<Instant> {
         let limits = self.streams.limits;
-        self.streams.with_device(&self.device_id, |device| {
-            device.messages.take(
+        let next = self.streams.with_device(&self.device_id, |device| {
+            device.messages.spend(
                 now,
                 limits.configured.device_message_refill,
                 f64::from(limits.configured.device_message_burst),
             )
-        })
+        });
+        if next.is_some()
+            && let Some(throttled) = DEVICE_MESSAGES.event(now)
+        {
+            tracing::warn!(
+                latest_device_id = %self.device_id,
+                throttled_since_last_warning = throttled,
+                "slowed reading from devices that send messages faster than their budget"
+            );
+        }
+        next
     }
 }
 
@@ -626,7 +657,8 @@ impl Drop for DeviceStream {
     }
 }
 
-/// A warning that fires once per refused request or connection. A flood would
+/// A warning that fires once per refused or throttled request, connection or
+/// message. A flood would
 /// log a line per event, so this logs at most one per `WARNING_INTERVAL` and
 /// says how many events it stands for: every event since the last warning, from
 /// any client or device, reported with the first event after the interval
@@ -672,6 +704,7 @@ impl ThrottledWarning {
 static ENROLLMENT_RATE: ThrottledWarning = ThrottledWarning::new();
 static ENROLLMENT_IN_FLIGHT: ThrottledWarning = ThrottledWarning::new();
 static STREAM_OPENS: ThrottledWarning = ThrottledWarning::new();
+static DEVICE_MESSAGES: ThrottledWarning = ThrottledWarning::new();
 
 #[cfg(test)]
 mod tests;

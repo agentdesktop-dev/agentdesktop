@@ -306,6 +306,11 @@ impl FleetAgent for FleetAgentService {
             };
             let mut auth_interval = time::interval(std::time::Duration::from_secs(5 * 60));
             auth_interval.tick().await;
+            // Once the device has spent its message budget, its next message
+            // is not read until the budget refills. HTTP/2 flow control then
+            // makes the device wait to send, so a busy device is slowed down
+            // rather than disconnected, while the other branches keep running.
+            let mut next_read: Option<time::Instant> = None;
             loop {
                 tokio::select! {
                 _ = auth_sender.closed() => break,
@@ -358,14 +363,12 @@ impl FleetAgent for FleetAgentService {
                         .try_send(Err(Status::aborted("replaced by a newer stream from this device")));
                     break;
                 }
-                message = inbound.message() => match message {
+                _ = time::sleep_until(next_read.unwrap_or_else(time::Instant::now)), if next_read.is_some() => {
+                    next_read = None;
+                }
+                message = inbound.message(), if next_read.is_none() => match message {
                     Ok(Some(message)) => {
-                        if !device_stream.take_message(time::Instant::now()) {
-                            warn!(device_id = %authenticated_device_id, "closing stream after the device exceeded its message rate");
-                            let _ = auth_sender
-                                .try_send(Err(Status::resource_exhausted("too many messages on this stream")));
-                            break;
-                        }
+                        next_read = device_stream.spend_message(time::Instant::now());
                         if let Some(agent_message::Message::Hello(hello)) = &message.message
                             && hello.device_id != authenticated_device_id
                         {

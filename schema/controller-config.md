@@ -20,7 +20,7 @@
 |`databaseUrl`|string|SQLite or PostgreSQL URL used for controller state.|
 |`fleetLimits`|object|Limits on the device-facing fleet API that depend on the deployment.|
 |`fleetLimits.connectionsPerAddress`|integer|Open fleet connections allowed from one client address: an IPv4<br>address, or an IPv6 /64. Raise it when more devices share an address,<br>such as behind a NAT or a load balancer that does not preserve client<br>addresses. Defaults to `4096`.|
-|`fleetLimits.deviceMessageBurst`|integer|Messages one device may send in a burst on its `Connect` stream, after<br>which it may send one more every `deviceMessageRefill`. A device over<br>its budget is disconnected. Defaults to `600`.|
+|`fleetLimits.deviceMessageBurst`|integer|Messages one device may send in a burst on its `Connect` stream, after<br>which it may send one more every `deviceMessageRefill`. Once a device<br>has sent its burst, the controller reads its messages no faster than<br>that, and the device waits to send more. Defaults to `600`.|
 |`fleetLimits.deviceMessageRefill`|string|Time for a device to get back one message. Defaults to `50ms`.|
 |`fleetLimits.enrollmentBurst`|integer|Enrollments one client address may start in a burst, after which it may<br>start one more every `enrollmentRefill`. Defaults to `60`.|
 |`fleetLimits.enrollmentInFlight`|integer|Enrollment requests in progress at once across all clients. Enrollment<br>calls the identity provider. Defaults to `64`.|

@@ -217,7 +217,7 @@
           "minimum": 1
         },
         "deviceMessageBurst": {
-          "description": "Messages one device may send in a burst on its `Connect` stream, after\nwhich it may send one more every `deviceMessageRefill`. A device over\nits budget is disconnected. Defaults to `600`.",
+          "description": "Messages one device may send in a burst on its `Connect` stream, after\nwhich it may send one more every `deviceMessageRefill`. Once a device\nhas sent its burst, the controller reads its messages no faster than\nthat, and the device waits to send more. Defaults to `600`.",
           "type": "integer",
           "format": "uint32",
           "default": 600,
