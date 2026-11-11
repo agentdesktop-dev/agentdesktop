@@ -4,7 +4,7 @@
 |-|-|-|
 |`controller`|object|Controller connection settings. Omit this field to run without fleet management.|
 |`controller.address`|string|HTTPS address of the controller's fleet API.|
-|`controller.caCertificatePath`|string|Path to a PEM-encoded CA certificate used to verify the controller.<br><br>Omit this field to use the operating system's trusted certificate roots.|
+|`controller.caCertificatePath`|string|Path to the PEM-encoded CA certificate that signed the controller's fleet API<br>certificate. Required: the daemon trusts only this CA for the controller, not<br>the operating system's certificate roots.|
 |`controller.deviceAuthorization`|boolean|Enroll with the OAuth 2.0 Device Authorization Grant (RFC 8628) instead<br>of a browser redirect to a local callback.<br><br>Use this on hosts without a local browser, such as servers reached over<br>SSH. The daemon logs a verification URL and user code to approve from<br>any other device. The identity provider must support device<br>authorization for the controller's client.|
 |`controller.heartbeatInterval`|string|Interval between device heartbeats. Defaults to `30s`.|
 |`daemon`|object|Local daemon startup settings. Not accepted in controller-delivered policy.|
@@ -68,6 +68,7 @@
 |`programs.claudeDesktop.auth`|enum|Upstream authentication used by this agent.<br>Possible values: `subscription`.|
 |`programs.claudeDesktop.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
 |`programs.codex`|object|Codex managed configuration.|
+|`programs.codex.auth`|enum|Connect a ChatGPT subscription through Agentdesktop's OAuth credential helper.<br>Possible values: `subscription`.|
 |`programs.codex.managedConfig`|object|Arbitrary values written to Codex's organization-managed TOML configuration.<br><br>Use Codex's native snake_case configuration keys. TOML has no null value,<br>so null values cannot be reconciled.|
 |`programs.codex.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
 |`programs.copilot`|object|GitHub Copilot CLI managed configuration.|
@@ -81,6 +82,7 @@
 |`programs.grok.models`|object|Extra Grok `[model.<id>]` catalog entries, keyed by catalog ID.<br><br>Each value is an arbitrary Grok model object. Generated gateway<br>`base_url` and `auth_provider` values take precedence. When gateway<br>authentication is configured, `api_key` and `env_key` are removed from<br>these entries, including values supplied through `managedConfig`.<br>When this map is non-empty, `model` must name one of its keys.|
 |`programs.grok.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
 |`programs.openCode`|object|OpenCode managed configuration.|
+|`programs.openCode.api`|enum|OpenAI API dialect of the managed LLM gateway provider. Defaults to<br>`openai-responses`.<br>Possible values: `openai-responses`, `openai-completions`.|
 |`programs.openCode.managedConfig`|object|Arbitrary values written to OpenCode's system-managed configuration.|
 |`programs.openCode.model`|string|Model ID selected from `models` when using the LLM gateway.<br><br>This is required when a top-level `llmGateway` is configured.|
 |`programs.openCode.models`|object|Models exposed by the managed LLM gateway provider, keyed by model ID.<br><br>Each value is an arbitrary OpenCode model configuration object. At least<br>one model is required when a top-level `llmGateway` is configured.|

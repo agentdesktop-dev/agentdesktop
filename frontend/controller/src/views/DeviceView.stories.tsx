@@ -47,6 +47,25 @@ export const Healthy: Story = {
   },
 };
 
+export const ShowsWhoEnrolledTheDevice: Story = {
+  play: async ({ canvas }) => {
+    await expect(canvas.getByText("Enrolled by")).toBeVisible();
+    // The owner appears in the device information list.
+    await expect(
+      canvas.getAllByText("developer@example.com").length,
+    ).toBeGreaterThan(0);
+  },
+};
+
+export const OmitsEnrolledByWithoutAReadableName: Story = {
+  args: { device: { ...deviceDetail, enrolled_by_name: null } },
+  play: async ({ canvas }) => {
+    await expect(canvas.queryByText("Enrolled by")).not.toBeInTheDocument();
+    // Everything else on the page is unaffected.
+    await expect(canvas.getByText("Device information")).toBeVisible();
+  },
+};
+
 export const BrowsesDiscoveredCapabilities: Story = {
   play: async ({ canvas }) => {
     await userEvent.click(
@@ -145,6 +164,33 @@ export const DeleteFailed: Story = {
   args: {
     deleteError: "The controller could not remove this device.",
     deleteOpen: true,
+  },
+};
+
+export const ViewerCannotDelete: Story = {
+  args: { canDelete: false },
+  play: async ({ canvas }) => {
+    await expect(
+      canvas.queryByRole("button", { name: "Delete device" }),
+    ).not.toBeInTheDocument();
+  },
+};
+
+export const RecentAuthenticationRequired: Story = {
+  args: {
+    deleteOpen: true,
+    deleteError: "Sign in again before deleting this device.",
+    reauthenticate: true,
+  },
+  play: async ({ canvas }) => {
+    const dialog = within(canvas.getByRole("dialog"));
+    await expect(
+      dialog.getByRole("link", { name: "Sign in again" }),
+    ).toHaveAttribute("href", "/auth/login?reauthenticate=true");
+    await expect(
+      dialog.queryByRole("button", { name: "Delete device" }),
+    ).not.toBeInTheDocument();
+    await expect(canvas.getByRole("button", { name: "Cancel" })).toBeEnabled();
   },
 };
 

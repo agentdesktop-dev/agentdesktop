@@ -1,68 +1,31 @@
-use std::{net::SocketAddr, time::SystemTime};
-
-use anyhow::Context;
-use axum::{
-    Json, Router,
-    extract::{Path, Query, State},
-    http::{StatusCode, Uri, header},
-    response::{IntoResponse, Response},
-    routing::get,
-};
-use rust_embed::RustEmbed;
-use serde::Serialize;
-use tracing::info;
+use std::time::SystemTime;
 
 use agentdesktop_core::config::DaemonConfig;
 use agentdesktop_usage::{UsageError, UsageQuery, UsageReport};
+use anyhow::Context as _;
+use axum::{
+    Json,
+    extract::{Path, Query, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
+use serde::Serialize;
+use tracing::info;
 
+use super::{
+    Settings, State as ManagementState,
+    auth::{
+        Context, Error,
+        authorization::{self, AccessRequest, Verb},
+    },
+};
 use crate::{
-    daemon_config::DaemonConfigStore,
-    database::{Database, DeviceDetail, DeviceSummary},
-    gateway_jwt::{self, GatewayJwks},
+    database::{DeviceDetail, DeviceSummary},
     usage,
 };
 
-#[derive(Clone)]
-pub struct AdminState {
-    database: Database,
-    daemon_config: DaemonConfigStore,
-    settings: ControllerSettings,
-    /// `browserEgress.compliance.pacUrl` from the controller configuration.
-    expected_pac_url: Option<url::Url>,
-}
-
-#[derive(Clone, Serialize)]
-pub struct ControllerSettings {
-    pub fleet_listen: String,
-    pub admin_listen: String,
-    pub oidc_enabled: bool,
-    pub tls_enabled: bool,
-    pub gateway_jwt_enabled: bool,
-    pub usage_enabled: bool,
-}
-
-impl AdminState {
-    pub fn new(
-        database: Database,
-        daemon_config: DaemonConfigStore,
-        settings: ControllerSettings,
-        expected_pac_url: Option<url::Url>,
-    ) -> Self {
-        Self {
-            database,
-            daemon_config,
-            settings,
-            expected_pac_url,
-        }
-    }
-}
-
-#[derive(RustEmbed)]
-#[folder = "../../frontend/controller/dist/"]
-struct AdminAssets;
-
 #[derive(Serialize)]
-struct Overview {
+pub(super) struct Overview {
     total_devices: usize,
     online_devices: usize,
     offline_devices: usize,
@@ -89,33 +52,12 @@ struct BrowserPacOverview {
     versions: Vec<crate::browser_pac::PacVersion>,
 }
 
-pub async fn serve(
-    address: SocketAddr,
-    state: AdminState,
-    gateway_jwks: Option<GatewayJwks>,
-) -> anyhow::Result<()> {
-    let app = Router::new()
-        .route("/api/v1/overview", get(overview))
-        .route("/api/v1/devices", get(devices))
-        .route("/api/v1/daemon-config", get(daemon_config))
-        .route(
-            "/api/v1/devices/{device_id}",
-            get(device).delete(delete_device),
-        )
-        .route("/api/v1/settings", get(settings))
-        .route("/api/v1/usage", get(usage_report))
-        .fallback(get(asset))
-        .with_state(state)
-        .merge(gateway_jwt::routes(gateway_jwks));
-    let listener = tokio::net::TcpListener::bind(address).await?;
-    info!(listen = %address, "controller admin UI listening");
-    axum::serve(listener, app).await?;
-    Ok(())
-}
-
 /// Fills in each device's PAC value and compliance at read time, so a
 /// profile change shows without waiting for the next inventory.
-fn with_browser_pac(state: &AdminState, mut devices: Vec<DeviceSummary>) -> Vec<DeviceSummary> {
+fn with_browser_pac(
+    state: &ManagementState,
+    mut devices: Vec<DeviceSummary>,
+) -> Vec<DeviceSummary> {
     let expected = state.expected_pac_url.as_ref();
     for device in &mut devices {
         device.browser_pac = crate::browser_pac::with_identity(
@@ -126,7 +68,23 @@ fn with_browser_pac(state: &AdminState, mut devices: Vec<DeviceSummary>) -> Vec<
     devices
 }
 
-async fn overview(State(state): State<AdminState>) -> Result<Json<Overview>, AdminError> {
+pub(super) async fn api_not_found() -> impl IntoResponse {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({ "error": "not_found" })),
+    )
+}
+
+pub(super) async fn overview(
+    State(state): State<ManagementState>,
+    auth: Context,
+) -> Result<Json<Overview>, HandlerError> {
+    auth.require(AccessRequest {
+        verb: Verb::List,
+        resource_class: authorization::DEVICES,
+        resource: None,
+    })
+    .await?;
     let devices = with_browser_pac(&state, state.database.list_devices().await?);
     let mut browser_pac = BrowserPacOverview {
         expected_pac_url: state.expected_pac_url.clone().map(String::from),
@@ -176,22 +134,38 @@ async fn overview(State(state): State<AdminState>) -> Result<Json<Overview>, Adm
     }))
 }
 
-async fn devices(State(state): State<AdminState>) -> Result<Json<Vec<DeviceSummary>>, AdminError> {
+pub(super) async fn devices(
+    State(state): State<ManagementState>,
+    auth: Context,
+) -> Result<Json<Vec<DeviceSummary>>, HandlerError> {
+    auth.require(AccessRequest {
+        verb: Verb::List,
+        resource_class: authorization::DEVICES,
+        resource: None,
+    })
+    .await?;
     Ok(Json(with_browser_pac(
         &state,
         state.database.list_devices().await?,
     )))
 }
 
-async fn device(
-    State(state): State<AdminState>,
+pub(super) async fn device(
+    State(state): State<ManagementState>,
+    auth: Context,
     Path(device_id): Path<String>,
-) -> Result<Json<DeviceDetail>, AdminError> {
+) -> Result<Json<DeviceDetail>, HandlerError> {
+    auth.require(AccessRequest {
+        verb: Verb::Read,
+        resource_class: authorization::DEVICES,
+        resource: Some(&device_id),
+    })
+    .await?;
     let mut detail = state
         .database
         .get_device(&device_id)
         .await?
-        .ok_or(AdminError::NotFound)?;
+        .ok_or(HandlerError::NotFound)?;
     detail.device.browser_pac = crate::browser_pac::with_identity(
         crate::browser_pac::evaluate(&detail.device.browser_pacs, state.expected_pac_url.as_ref()),
         &detail.device.pac_fetches,
@@ -199,25 +173,48 @@ async fn device(
     Ok(Json(detail))
 }
 
-async fn delete_device(
-    State(state): State<AdminState>,
+pub(super) async fn delete_device(
+    State(state): State<ManagementState>,
+    auth: Context,
     Path(device_id): Path<String>,
-) -> Result<StatusCode, AdminError> {
+) -> Result<StatusCode, HandlerError> {
+    auth.require(AccessRequest {
+        verb: Verb::Delete,
+        resource_class: authorization::DEVICES,
+        resource: Some(&device_id),
+    })
+    .await?;
     if !state.database.delete_device(&device_id).await? {
-        return Err(AdminError::NotFound);
+        return Err(HandlerError::NotFound);
     }
     info!(%device_id, "deleted device from controller");
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn settings(State(state): State<AdminState>) -> Json<ControllerSettings> {
-    Json(state.settings)
+pub(super) async fn settings(
+    State(state): State<ManagementState>,
+    auth: Context,
+) -> Result<Json<Settings>, HandlerError> {
+    auth.require(AccessRequest {
+        verb: Verb::Read,
+        resource_class: authorization::SETTINGS,
+        resource: None,
+    })
+    .await?;
+    Ok(Json(state.settings))
 }
 
-async fn usage_report(
-    State(state): State<AdminState>,
+pub(super) async fn usage_report(
+    State(state): State<ManagementState>,
+    auth: Context,
     Query(query): Query<UsageQuery>,
-) -> Result<Json<UsageReport>, AdminError> {
+) -> Result<Json<UsageReport>, HandlerError> {
+    auth.require(AccessRequest {
+        verb: Verb::Read,
+        resource_class: authorization::USAGE,
+        resource: None,
+    })
+    .await?;
     let labels = usage::labels(&state.database).await?;
     Ok(Json(
         agentdesktop_usage::report(
@@ -231,13 +228,20 @@ async fn usage_report(
 }
 
 #[derive(Serialize)]
-struct ActiveDaemonConfig {
+pub(super) struct ActiveDaemonConfig {
     config: Option<DaemonConfig>,
 }
 
-async fn daemon_config(
-    State(state): State<AdminState>,
-) -> Result<Json<ActiveDaemonConfig>, AdminError> {
+pub(super) async fn daemon_config(
+    State(state): State<ManagementState>,
+    auth: Context,
+) -> Result<Json<ActiveDaemonConfig>, HandlerError> {
+    auth.require(AccessRequest {
+        verb: Verb::Read,
+        resource_class: authorization::DAEMON_CONFIG,
+        resource: None,
+    })
+    .await?;
     let config = state
         .daemon_config
         .current()
@@ -249,31 +253,6 @@ async fn daemon_config(
     Ok(Json(ActiveDaemonConfig { config }))
 }
 
-async fn asset(uri: Uri) -> Response {
-    let path = uri.path().trim_start_matches('/');
-    let path = if path.is_empty() { "index.html" } else { path };
-    let (path, file) = AdminAssets::get(path)
-        .map(|file| (path, file))
-        .or_else(|| AdminAssets::get("index.html").map(|file| ("index.html", file)))
-        .expect("embedded controller UI must contain index.html");
-    let content_type = mime_guess::from_path(path).first_or_octet_stream();
-    (
-        [
-            (header::CONTENT_TYPE, content_type.as_ref()),
-            (
-                header::CACHE_CONTROL,
-                if path == "index.html" {
-                    "no-cache"
-                } else {
-                    "public, max-age=31536000, immutable"
-                },
-            ),
-        ],
-        file.data,
-    )
-        .into_response()
-}
-
 fn unix_time_seconds() -> i64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -283,19 +262,25 @@ fn unix_time_seconds() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
-enum AdminError {
+pub(super) enum HandlerError {
+    Auth(Error),
     Internal(anyhow::Error),
     NotFound,
     BadRequest(&'static str),
 }
 
-impl From<anyhow::Error> for AdminError {
+impl From<Error> for HandlerError {
+    fn from(error: Error) -> Self {
+        Self::Auth(error)
+    }
+}
+impl From<anyhow::Error> for HandlerError {
     fn from(error: anyhow::Error) -> Self {
         Self::Internal(error)
     }
 }
 
-impl From<UsageError> for AdminError {
+impl From<UsageError> for HandlerError {
     fn from(error: UsageError) -> Self {
         match error {
             UsageError::InvalidQuery(message) => Self::BadRequest(message),
@@ -304,14 +289,27 @@ impl From<UsageError> for AdminError {
     }
 }
 
-impl IntoResponse for AdminError {
+impl IntoResponse for HandlerError {
     fn into_response(self) -> Response {
         match self {
-            Self::NotFound => (StatusCode::NOT_FOUND, "device not found").into_response(),
-            Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message).into_response(),
+            Self::Auth(error) => error.into_response(),
+            Self::NotFound => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "device not found" })),
+            )
+                .into_response(),
+            Self::BadRequest(message) => (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": message })),
+            )
+                .into_response(),
             Self::Internal(error) => {
                 tracing::error!(%error, "admin API operation failed");
-                (StatusCode::INTERNAL_SERVER_ERROR, "controller state error").into_response()
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": "controller state error" })),
+                )
+                    .into_response()
             }
         }
     }

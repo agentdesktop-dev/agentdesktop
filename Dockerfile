@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.26
 
-FROM docker.io/library/node:26.12.0-bookworm AS ui
+FROM docker.io/library/node:26.13.0-bookworm AS ui
 WORKDIR /app/frontend
 ENV CI=true
 COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
@@ -23,8 +23,8 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 COPY --from=ui /app/frontend/controller/dist frontend/controller/dist
 RUN --mount=type=cache,id=agentdesktop-target-${TARGETARCH},target=/app/target \
-    --mount=type=cache,id=agentdesktop-cargo-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=agentdesktop-cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=agentdesktop-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=agentdesktop-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     case "${BUILD_PROFILE}" in \
       release) cargo build --locked --release --package agentdesktop-controller ;; \
       debug) cargo build --locked --package agentdesktop-controller ;; \

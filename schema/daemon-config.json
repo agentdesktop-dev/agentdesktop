@@ -137,6 +137,17 @@
       "description": "Settings reconciled into Codex's organization-managed configuration.\n\nValues under `managedConfig` are written to Codex's `managed_config.toml`.\nWhen generated LLM-gateway settings overlap with those values,\nAgentdesktop's generated values take precedence.",
       "type": "object",
       "properties": {
+        "auth": {
+          "description": "Connect a ChatGPT subscription through Agentdesktop's OAuth credential helper.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProgramAuthentication"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "managedConfig": {
           "description": "Arbitrary values written to Codex's organization-managed TOML configuration.\n\nUse Codex's native snake_case configuration keys. TOML has no null value,\nso null values cannot be reconciled.",
           "type": "object",
@@ -158,11 +169,8 @@
           "type": "string"
         },
         "caCertificatePath": {
-          "description": "Path to a PEM-encoded CA certificate used to verify the controller.\n\nOmit this field to use the operating system's trusted certificate roots.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "description": "Path to the PEM-encoded CA certificate that signed the controller's fleet API\ncertificate. Required: the daemon trusts only this CA for the controller, not\nthe operating system's certificate roots.",
+          "type": "string"
         },
         "deviceAuthorization": {
           "description": "Enroll with the OAuth 2.0 Device Authorization Grant (RFC 8628) instead\nof a browser redirect to a local callback.\n\nUse this on hosts without a local browser, such as servers reached over\nSSH. The daemon logs a verification URL and user code to approve from\nany other device. The identity provider must support device\nauthorization for the controller's client.",
@@ -176,7 +184,8 @@
       },
       "additionalProperties": false,
       "required": [
-        "address"
+        "address",
+        "caCertificatePath"
       ]
     },
     "CopilotConfig": {
@@ -543,10 +552,36 @@
       },
       "additionalProperties": false
     },
+    "OpenCodeApi": {
+      "description": "OpenAI API dialect OpenCode uses for the managed LLM gateway provider.",
+      "oneOf": [
+        {
+          "description": "OpenAI Responses API (`/v1/responses`) through `@ai-sdk/openai`.",
+          "type": "string",
+          "const": "openai-responses"
+        },
+        {
+          "description": "OpenAI Chat Completions API (`/v1/chat/completions`) through\n`@ai-sdk/openai-compatible`, for OpenAI-compatible backends such as\nvLLM that do not accept replayed Responses input items.",
+          "type": "string",
+          "const": "openai-completions"
+        }
+      ]
+    },
     "OpenCodeConfig": {
       "description": "Settings reconciled into OpenCode's system-managed configuration.\n\nValues under `managedConfig` are written to OpenCode's managed JSONC file.\nWhen generated LLM gateway settings overlap with those values,\nAgentdesktop's generated values take precedence.",
       "type": "object",
       "properties": {
+        "api": {
+          "description": "OpenAI API dialect of the managed LLM gateway provider. Defaults to\n`openai-responses`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OpenCodeApi"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "managedConfig": {
           "description": "Arbitrary values written to OpenCode's system-managed configuration.",
           "type": "object",

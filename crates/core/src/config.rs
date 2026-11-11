@@ -458,11 +458,10 @@ pub enum TelemetryEventName {
 pub struct ControllerConnectionConfig {
     /// HTTPS address of the controller's fleet API.
     pub address: String,
-    /// Path to a PEM-encoded CA certificate used to verify the controller.
-    ///
-    /// Omit this field to use the operating system's trusted certificate roots.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ca_certificate_path: Option<PathBuf>,
+    /// Path to the PEM-encoded CA certificate that signed the controller's fleet API
+    /// certificate. Required: the daemon trusts only this CA for the controller, not
+    /// the operating system's certificate roots.
+    pub ca_certificate_path: PathBuf,
     /// Interval between device heartbeats. Defaults to `30s`.
     #[serde(default = "default_heartbeat_interval", with = "humantime_serde")]
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
@@ -487,10 +486,13 @@ pub struct ControllerConfig {
     #[serde(default = "default_fleet_listen")]
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub fleet_listen: SocketAddr,
-    /// Loopback address on which the controller management UI listens.
+    /// Address on which the controller management UI listens. Local mode requires loopback.
     #[serde(default = "default_admin_listen")]
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub admin_listen: SocketAddr,
+    /// Management authentication, separate from device enrollment. Defaults to local-only access.
+    #[serde(default)]
+    pub admin_access: ControllerAdminAccess,
     /// SQLite or PostgreSQL URL used for controller state.
     #[serde(default = "default_controller_database_url")]
     pub database_url: String,
@@ -542,6 +544,58 @@ pub struct BrowserEgressCompliance {
     /// The PAC URL browser policy is expected to set (exact match).
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub pac_url: Url,
+}
+
+/// Authentication and exposure policy for the management API and UI.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "mode", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ControllerAdminAccess {
+    /// Unauthenticated access restricted to an IPv4 or IPv6 loopback listener.
+    #[default]
+    Local,
+    /// Remote management through a compiled-in authentication extension. The standard
+    /// controller has no such extension and rejects this mode at startup.
+    Authenticated(Box<ControllerAdminAuthenticated>),
+}
+
+/// Exposure settings shared by every management authentication extension.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerAdminAuthenticated {
+    /// Exact external HTTPS origin, without a path other than `/`.
+    pub public_url: String,
+    /// How HTTPS reaches the management listener.
+    pub transport: ControllerAdminTransport,
+    /// Settings owned and validated by the compiled-in authentication extension.
+    /// Relative paths inside it are resolved from the controller configuration directory.
+    pub provider: serde_json::Map<String, serde_json::Value>,
+    /// Directory containing the loaded configuration file; empty for parsed documents.
+    #[serde(skip)]
+    pub config_directory: PathBuf,
+}
+
+impl ControllerAdminAuthenticated {
+    /// Resolves an extension-owned relative path against the configuration directory.
+    pub fn resolve_path(&self, path: &Path) -> PathBuf {
+        self.config_directory.join(path)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "mode", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ControllerAdminTransport {
+    /// HTTPS terminates at a trusted proxy; the plaintext listener must not be public.
+    Proxy,
+    /// The management listener terminates TLS directly.
+    Tls {
+        /// PEM certificate chain. Relative paths are resolved from the configuration directory.
+        certificate: PathBuf,
+        /// PEM private key. Relative paths are resolved from the configuration directory.
+        key: PathBuf,
+    },
 }
 
 /// OpenID Connect settings used for interactive device enrollment.
@@ -762,6 +816,25 @@ pub struct ProgramsConfig {
 }
 
 impl ProgramsConfig {
+    pub fn subscription_auth(&self, client_id: &str) -> Option<SubscriptionAuth> {
+        let (auth, mechanism) = match client_id {
+            "claude-code" => (
+                self.claude_code.as_ref()?.auth.as_ref(),
+                SubscriptionAuth::CredentialHelper,
+            ),
+            "claude-desktop" => (
+                self.claude_desktop.as_ref()?.auth.as_ref(),
+                SubscriptionAuth::CredentialHelper,
+            ),
+            "codex" => (
+                self.codex.as_ref()?.auth.as_ref(),
+                SubscriptionAuth::CredentialHelper,
+            ),
+            _ => return None,
+        };
+        (auth == Some(&ProgramAuthentication::Subscription)).then_some(mechanism)
+    }
+
     fn is_empty(&self) -> bool {
         self.claude_code.is_none()
             && self.claude_desktop.is_none()
@@ -772,6 +845,12 @@ impl ProgramsConfig {
             && self.vscode.is_none()
             && self.pi.is_none()
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubscriptionAuth {
+    CredentialHelper,
+    ClientPassthrough,
 }
 
 /// Settings reconciled into Claude Code's managed configuration.
@@ -824,6 +903,9 @@ pub struct CodexConfig {
     /// Whether this program uses the top-level LLM gateway.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub use_llm_gateway: bool,
+    /// Connect a ChatGPT subscription through Agentdesktop's OAuth credential helper.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<ProgramAuthentication>,
     /// Arbitrary values written to Codex's organization-managed TOML configuration.
     ///
     /// Use Codex's native snake_case configuration keys. TOML has no null value,
@@ -855,9 +937,27 @@ pub struct OpenCodeConfig {
     /// one model is required when a top-level `llmGateway` is configured.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub models: BTreeMap<String, serde_json::Value>,
+    /// OpenAI API dialect of the managed LLM gateway provider. Defaults to
+    /// `openai-responses`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<OpenCodeApi>,
     /// Arbitrary values written to OpenCode's system-managed configuration.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub managed_config: BTreeMap<String, serde_json::Value>,
+}
+
+/// OpenAI API dialect OpenCode uses for the managed LLM gateway provider.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum OpenCodeApi {
+    /// OpenAI Responses API (`/v1/responses`) through `@ai-sdk/openai`.
+    #[default]
+    OpenaiResponses,
+    /// OpenAI Chat Completions API (`/v1/chat/completions`) through
+    /// `@ai-sdk/openai-compatible`, for OpenAI-compatible backends such as
+    /// vLLM that do not accept replayed Responses input items.
+    OpenaiCompletions,
 }
 
 /// Settings reconciled into Grok Build's organization-managed configuration.
@@ -1281,6 +1381,13 @@ pub fn load_controller(path: &Path) -> anyhow::Result<ControllerConfig> {
     if let Some(usage) = &mut config.usage {
         resolve_relative(&mut usage.token_file, directory);
     }
+    if let ControllerAdminAccess::Authenticated(admin) = &mut config.admin_access {
+        admin.config_directory = directory.to_path_buf();
+        if let ControllerAdminTransport::Tls { certificate, key } = &mut admin.transport {
+            resolve_relative(certificate, directory);
+            resolve_relative(key, directory);
+        }
+    }
     match &mut config.tls {
         ControllerTlsConfig::Directory(path) => resolve_relative(path, directory),
         ControllerTlsConfig::Files(tls) => {
@@ -1297,8 +1404,12 @@ pub fn load_controller(path: &Path) -> anyhow::Result<ControllerConfig> {
 pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
     let config: ControllerConfig =
         crate::serdes::yamlviajson::from_str(contents).context("parse controller configuration")?;
-    if !config.admin_listen.ip().is_loopback() {
-        anyhow::bail!("adminListen must use a loopback address");
+    match &config.admin_access {
+        ControllerAdminAccess::Local if !config.admin_listen.ip().is_loopback() => {
+            anyhow::bail!("adminListen must use a loopback address in local adminAccess mode");
+        }
+        ControllerAdminAccess::Local => {}
+        ControllerAdminAccess::Authenticated(admin) => validate_admin_authenticated(admin)?,
     }
     let oidc = &config.oidc;
     if oidc.client_id.trim().is_empty() {
@@ -1341,6 +1452,58 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
     Ok(config)
 }
 
+fn validate_admin_authenticated(admin: &ControllerAdminAuthenticated) -> anyhow::Result<()> {
+    let public = validate_admin_https_url(&admin.public_url, "adminAccess.publicUrl")?;
+    if public.path() != "/"
+        || admin.public_url.split_once("://").is_some_and(|(_, rest)| {
+            rest.split_once('/')
+                .is_some_and(|(_, path)| !path.is_empty())
+        })
+    {
+        anyhow::bail!("adminAccess.publicUrl must be an HTTPS origin without a path");
+    }
+    if let ControllerAdminTransport::Tls { certificate, key } = &admin.transport {
+        require_admin_path(certificate, "adminAccess.transport.certificate")?;
+        require_admin_path(key, "adminAccess.transport.key")?;
+    }
+    Ok(())
+}
+
+fn validate_admin_https_url(value: &str, field: &str) -> anyhow::Result<Url> {
+    let url = Url::parse(value).with_context(|| format!("parse {field} URL"))?;
+    if value
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+        || !value.starts_with("https://")
+        || value.contains('\\')
+        || url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || value.split("://").nth(1).is_some_and(|rest| {
+            rest.split('/')
+                .next()
+                .is_some_and(|authority| authority.contains('@'))
+        })
+    {
+        anyhow::bail!("{field} must use HTTPS without userinfo, query, or fragment");
+    }
+    Ok(url)
+}
+
+fn require_admin_text(value: &str, field: &str) -> anyhow::Result<()> {
+    if value.trim().is_empty() {
+        anyhow::bail!("{field} cannot be empty");
+    }
+    Ok(())
+}
+
+fn require_admin_path(value: &Path, field: &str) -> anyhow::Result<()> {
+    require_admin_text(&value.to_string_lossy(), field)
+}
+
 fn resolve_relative(path: &mut PathBuf, directory: &Path) {
     if path.is_relative() {
         *path = directory.join(&*path);
@@ -1362,10 +1525,13 @@ const MAX_RECONCILE_INTERVAL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 fn parse_local_daemon(contents: &str) -> anyhow::Result<DaemonConfig> {
     let config: DaemonConfig =
         crate::serdes::yamlviajson::from_str(contents).context("parse daemon configuration")?;
-    if let Some(controller) = &config.controller
-        && !controller.address.starts_with("https://")
-    {
-        anyhow::bail!("controller address must use HTTPS");
+    if let Some(controller) = &config.controller {
+        if !controller.address.starts_with("https://") {
+            anyhow::bail!("controller address must use HTTPS");
+        }
+        if controller.ca_certificate_path.as_os_str().is_empty() {
+            anyhow::bail!("controller.caCertificatePath cannot be empty");
+        }
     }
     if config.inventory_interval.is_zero() {
         anyhow::bail!("inventoryInterval must be greater than zero");
@@ -1575,6 +1741,16 @@ fn validate_daemon(
                     .as_ref()
                     .is_some_and(|program| program.use_llm_gateway),
             ),
+            (
+                "codex",
+                programs.codex.as_ref().is_some_and(|program| {
+                    program.auth == Some(ProgramAuthentication::Subscription)
+                }),
+                programs
+                    .codex
+                    .as_ref()
+                    .is_some_and(|program| program.use_llm_gateway),
+            ),
         ]
     {
         if subscription && (!uses_gateway || llm_gateway.is_none()) {
@@ -1706,6 +1882,167 @@ mod tests {
         DaemonConfig, LlmGatewayAuthentication, load_controller, parse_controller, parse_daemon,
     };
 
+    fn admin_document() -> serde_json::Value {
+        serde_json::json!({
+            "oidc": {"issuer": "https://enrollment.example", "clientId": "devices"},
+            "tls": "fleet-tls",
+            "adminListen": "0.0.0.0:8080",
+            "adminAccess": {
+                "mode": "authenticated",
+                "publicUrl": "https://admin.example",
+                "transport": {"mode": "proxy"},
+                "provider": {
+                    "oidc": {"issuer": "https://identity.example", "clientSecretFile": "admin-secret"}
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn admin_local_default_is_loopback_only_including_ipv6() {
+        let mut document = admin_document();
+        document.as_object_mut().unwrap().remove("adminAccess");
+        document.as_object_mut().unwrap().remove("adminListen");
+        let config = parse_controller(&document.to_string()).unwrap();
+        assert!(matches!(
+            config.admin_access,
+            super::ControllerAdminAccess::Local
+        ));
+        assert_eq!(config.admin_listen, "127.0.0.1:8080".parse().unwrap());
+        for listen in ["127.0.0.1:8080", "127.12.34.56:8080", "[::1]:8080"] {
+            document["adminListen"] = listen.into();
+            assert!(parse_controller(&document.to_string()).is_ok(), "{listen}");
+        }
+        for listen in [
+            "0.0.0.0:8080",
+            "[::]:8080",
+            "192.0.2.1:8080",
+            "[::ffff:127.0.0.1]:8080",
+        ] {
+            document["adminListen"] = listen.into();
+            assert!(parse_controller(&document.to_string()).is_err(), "{listen}");
+        }
+    }
+
+    #[test]
+    fn admin_authenticated_keeps_provider_settings_opaque() {
+        let config = parse_controller(&admin_document().to_string()).unwrap();
+        let super::ControllerAdminAccess::Authenticated(admin) = &config.admin_access else {
+            panic!("expected authenticated");
+        };
+        assert_eq!(
+            admin.provider["oidc"]["clientSecretFile"],
+            serde_json::json!("admin-secret")
+        );
+        let serialized = serde_json::to_value(&config).unwrap();
+        assert_eq!(serialized["adminAccess"]["mode"], "authenticated");
+        assert_eq!(
+            serialized["adminAccess"]["publicUrl"],
+            "https://admin.example"
+        );
+        assert!(serialized["adminAccess"].get("configDirectory").is_none());
+        assert_eq!(
+            serialized["adminAccess"]["provider"],
+            admin_document()["adminAccess"]["provider"]
+        );
+        parse_controller(&serialized.to_string()).unwrap();
+    }
+
+    #[test]
+    fn admin_authenticated_rejects_unsafe_exposure_even_in_dev_mode() {
+        use serde_json::json;
+        let cases = [
+            ("/adminAccess/publicUrl", json!("http://admin.example")),
+            (
+                "/adminAccess/publicUrl",
+                json!("https://admin.example/path"),
+            ),
+            (
+                "/adminAccess/publicUrl",
+                json!("https://admin.example/a/.."),
+            ),
+            (
+                "/adminAccess/publicUrl",
+                json!("https://admin.example/?a=1"),
+            ),
+            (
+                "/adminAccess/publicUrl",
+                json!("https://admin.example/#fragment"),
+            ),
+            ("/adminAccess/publicUrl", json!("https://@admin.example")),
+            (
+                "/adminAccess/publicUrl",
+                json!("https://user@admin.example"),
+            ),
+            ("/adminAccess/publicUrl", json!("https://admin.exa\nmple")),
+            (
+                "/adminAccess/transport",
+                json!({"mode":"tls", "certificate":"", "key":"key.pem"}),
+            ),
+            (
+                "/adminAccess/transport",
+                json!({"mode":"tls", "certificate":"cert.pem", "key":""}),
+            ),
+            ("/adminAccess/transport", json!({"mode":"plaintext"})),
+            ("/adminAccess/provider", json!("settings")),
+            ("/adminAccess/provider", json!(["settings"])),
+            ("/adminAccess/configDirectory", json!("/etc")),
+            ("/adminAccess/unknownSetting", json!(true)),
+        ];
+        for (pointer, value) in cases {
+            let mut document = admin_document();
+            document["allowInsecureDev"] = true.into();
+            let (parent, key) = pointer.rsplit_once('/').unwrap();
+            document.pointer_mut(parent).unwrap()[key] = value.clone();
+            assert!(
+                parse_controller(&document.to_string()).is_err(),
+                "accepted invalid {pointer}={value}"
+            );
+        }
+        for field in ["publicUrl", "transport", "provider"] {
+            let mut document = admin_document();
+            document["adminAccess"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(parse_controller(&document.to_string()).is_err(), "{field}");
+        }
+    }
+
+    #[test]
+    fn admin_paths_resolve_from_config_directory() {
+        let directory = std::env::current_dir()
+            .unwrap()
+            .join(format!(".admin-config-test-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let mut document = admin_document();
+        document["adminAccess"]["transport"] = serde_json::json!({
+            "mode":"tls", "certificate":"admin-cert.pem", "key":"admin-key.pem"
+        });
+        let path = directory.join("controller.yaml");
+        std::fs::write(&path, document.to_string()).unwrap();
+        let result = load_controller(&path);
+        std::fs::remove_dir_all(&directory).unwrap();
+        let super::ControllerAdminAccess::Authenticated(admin) = result.unwrap().admin_access
+        else {
+            panic!("expected authenticated");
+        };
+        assert_eq!(admin.config_directory, directory);
+        assert_eq!(
+            admin.resolve_path(std::path::Path::new("admin-secret")),
+            directory.join("admin-secret")
+        );
+        assert_eq!(
+            admin.resolve_path(std::path::Path::new("/run/secrets/admin")),
+            std::path::Path::new("/run/secrets/admin")
+        );
+        let super::ControllerAdminTransport::Tls { certificate, key } = admin.transport else {
+            panic!("expected tls");
+        };
+        assert_eq!(certificate, directory.join("admin-cert.pem"));
+        assert_eq!(key, directory.join("admin-key.pem"));
+    }
+
     #[test]
     fn startup_settings_are_local_only_and_reject_unknown_fields() {
         let yaml = "daemon:\n  user: true\n  stateDir: /tmp/device\n  socket: /tmp/device.sock\n";
@@ -1750,6 +2087,7 @@ mod tests {
         let document = r#"
 controller:
   address: https://127.0.0.1:8443
+  caCertificatePath: controller-ca.pem
 llmGateway:
   url: http://127.0.0.1:8080
 programs: { claudeCode: { useLlmGateway: false } }
@@ -1871,7 +2209,7 @@ programs: { claudeCode: { useLlmGateway: false } }
                 "daemon.usage.listen must be a loopback address",
             ),
             (
-                "controller:\n  address: https://controller.example.com\ndaemon:\n  usage:\n    listen: 127.0.0.1:4319\n    tokenFile: usage-token\n",
+                "controller:\n  address: https://controller.example.com\n  caCertificatePath: controller-ca.pem\ndaemon:\n  usage:\n    listen: 127.0.0.1:4319\n    tokenFile: usage-token\n",
                 "daemon.usage is for a daemon without a controller",
             ),
         ] {
@@ -1885,12 +2223,15 @@ programs: { claudeCode: { useLlmGateway: false } }
         let plaintext = r#"
 controller:
   address: http://controller.example.com
+  caCertificatePath: controller-ca.pem
 "#;
-        assert!(parse_daemon(plaintext).is_err());
+        let error = parse_daemon(plaintext).expect_err("plaintext controller accepted");
+        assert!(error.to_string().contains("must use HTTPS"), "{error}");
 
         let valid = r#"
 controller:
   address: https://controller.example.com
+  caCertificatePath: controller-ca.pem
 "#;
         assert!(parse_daemon(valid).is_ok());
     }
@@ -1928,6 +2269,26 @@ controller:
         );
         // Daemons never see it: the pushed daemon configuration has no such key.
         assert!(parse_daemon("browserEgress: {}\n").is_err());
+    }
+
+    #[test]
+    fn daemon_controller_requires_a_ca_certificate_path() {
+        let missing = "controller:\n  address: https://controller.example.com\n";
+        let error = parse_daemon(missing).expect_err("controller without a CA accepted");
+        assert!(
+            format!("{error:#}").contains("caCertificatePath"),
+            "{error:#}"
+        );
+
+        let empty =
+            "controller:\n  address: https://controller.example.com\n  caCertificatePath: ''\n";
+        let error = parse_daemon(empty).expect_err("empty CA path accepted");
+        assert!(
+            error
+                .to_string()
+                .contains("controller.caCertificatePath cannot be empty"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -2002,6 +2363,10 @@ usage:
             "../../../examples/claude-subscription/config.yaml"
         ))
         .expect("Claude subscription user configuration example");
+        super::parse_local_daemon(include_str!(
+            "../../../examples/codex-subscription/config.yaml"
+        ))
+        .expect("Codex subscription user configuration example");
         let standalone =
             super::parse_local_daemon(include_str!("../../../examples/standalone/config.yaml"))
                 .expect("standalone daemon configuration example");
@@ -2098,6 +2463,74 @@ programs:
                 .to_string()
                 .contains("deviceAuthorization")
         );
+    }
+
+    #[test]
+    fn subscription_auth_uses_helpers_for_claude_and_codex() {
+        let config = parse_daemon(
+            "llmGateway:\n  url: https://gateway.example.com\n  proxyUrl: https://gateway.example.com/subscription\n  authentication:\n    type: controllerJwt\n    audience: gateway\n    allowedClientIds: [claude-code, claude-desktop, codex]\nprograms:\n  claudeCode:\n    auth: subscription\n  claudeDesktop: {}\n  codex:\n    auth: subscription\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.programs.subscription_auth("claude-code"),
+            Some(super::SubscriptionAuth::CredentialHelper)
+        );
+        assert_eq!(
+            config.programs.subscription_auth("codex"),
+            Some(super::SubscriptionAuth::CredentialHelper)
+        );
+        for client_id in ["claude-desktop", "copilot-cli", "opencode", "unknown"] {
+            assert_eq!(config.programs.subscription_auth(client_id), None);
+        }
+        assert_eq!(
+            super::ProgramsConfig::default().subscription_auth("codex"),
+            None
+        );
+    }
+
+    #[test]
+    fn codex_subscription_requires_an_authenticated_gateway_without_a_proxy() {
+        let valid = r#"
+llmGateway:
+  url: https://gateway.example.com
+  proxyUrl: https://gateway.example.com/codex
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
+    allowedClientIds: [codex]
+programs:
+  codex:
+    auth: subscription
+"#;
+        let config = parse_daemon(valid).expect("valid Codex subscription configuration");
+        parse_daemon(&valid.replace("  proxyUrl: https://gateway.example.com/codex\n", ""))
+            .expect("Codex helper does not require proxyUrl");
+        assert_eq!(
+            config.programs.codex.unwrap().auth,
+            Some(super::ProgramAuthentication::Subscription)
+        );
+        for (yaml, message) in [
+            (
+                "programs:\n  codex:\n    auth: subscription\n".to_owned(),
+                "use an LLM gateway",
+            ),
+            (
+                valid.replace("    auth: subscription", "    auth: subscription\n    useLlmGateway: false"),
+                "use an LLM gateway",
+            ),
+            (
+                valid.replace(
+                    "  authentication:\n    type: controllerJwt\n    audience: agentgateway\n    allowedClientIds: [codex]\n",
+                    "",
+                ),
+                "gateway authentication",
+            ),
+        ] {
+            assert!(
+                parse_daemon(&yaml).unwrap_err().to_string().contains(message),
+                "expected {message} for {yaml}"
+            );
+        }
     }
 
     #[test]

@@ -55,6 +55,30 @@ const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
 const CREDENTIAL_CALL_TIMEOUT: Duration = Duration::from_secs(15);
 /// Bound on the controller connection and call when reading device usage.
 const USAGE_CALL_TIMEOUT: Duration = Duration::from_secs(15);
+/// Bounds on talking to the controller. Without them a half-open connection
+/// never fails: a Mac that goes back to sleep during a short dark wake loses
+/// the controller's reset, and the daemon waits on that connection forever
+/// instead of reconnecting.
+#[derive(Clone, Copy, Debug)]
+struct ControllerTimeouts {
+    /// Opening a connection: TCP connect plus the TLS and HTTP/2 handshakes.
+    /// Tonic's own connect timeout covers only the TCP connect.
+    connect: Duration,
+    /// The controller answering a new stream. It answers as soon as it has
+    /// authenticated the device.
+    stream_open: Duration,
+    /// How often an HTTP/2 PING checks a connection with an open stream, and
+    /// how long an unanswered PING waits before the connection is closed.
+    keepalive_interval: Duration,
+    keepalive_timeout: Duration,
+}
+
+const CONTROLLER_TIMEOUTS: ControllerTimeouts = ControllerTimeouts {
+    connect: Duration::from_secs(20),
+    stream_open: Duration::from_secs(30),
+    keepalive_interval: Duration::from_secs(30),
+    keepalive_timeout: Duration::from_secs(20),
+};
 
 pub struct LogoutRequest {
     pub completion: oneshot::Sender<Result<(), String>>,
@@ -745,11 +769,7 @@ async fn connect(
     let mut request = Request::new(ReceiverStream::new(receiver));
     authenticate_request(identity, &mut request)?;
 
-    let mut inbound = client
-        .connect(request)
-        .await
-        .context("open controller stream")?
-        .into_inner();
+    let mut inbound = open_stream(&mut client, request, CONTROLLER_TIMEOUTS.stream_open).await?;
 
     send(
         &sender,
@@ -1207,35 +1227,74 @@ async fn send(
         .context("controller stream closed")
 }
 
+/// Opens the device stream, giving up when the controller does not answer in
+/// time.
+async fn open_stream(
+    client: &mut FleetAgentClient<Channel>,
+    request: Request<ReceiverStream<AgentMessage>>,
+    timeout: Duration,
+) -> anyhow::Result<tonic::Streaming<proto::ControllerMessage>> {
+    match time::timeout(timeout, client.connect(request)).await {
+        Ok(response) => Ok(response.context("open controller stream")?.into_inner()),
+        Err(_) => bail!("open controller stream: the controller did not answer within {timeout:?}"),
+    }
+}
+
 pub(crate) async fn client(
     controller: &ControllerConnectionConfig,
     identity: Option<&Identity>,
 ) -> anyhow::Result<FleetAgentClient<Channel>> {
+    client_with(controller, identity, CONTROLLER_TIMEOUTS).await
+}
+
+async fn client_with(
+    controller: &ControllerConnectionConfig,
+    identity: Option<&Identity>,
+    timeouts: ControllerTimeouts,
+) -> anyhow::Result<FleetAgentClient<Channel>> {
     let mut endpoint = Endpoint::from_shared(controller.address.clone())
-        .with_context(|| format!("parse controller address {}", controller.address))?;
-    let mut tls_config = ClientTlsConfig::new();
-    let mut custom_tls = false;
-    if let Some(path) = &controller.ca_certificate_path {
-        let pem = std::fs::read(path)
-            .with_context(|| format!("read controller CA certificate from {}", path.display()))?;
-        tls_config = tls_config.ca_certificate(Certificate::from_pem(pem));
-        custom_tls = true;
-    }
+        .with_context(|| format!("parse controller address {}", controller.address))?
+        .connect_timeout(timeouts.connect)
+        .http2_keep_alive_interval(timeouts.keepalive_interval)
+        .keep_alive_timeout(timeouts.keepalive_timeout);
+    let mut tls_config =
+        ClientTlsConfig::new().ca_certificate(controller_ca(&controller.ca_certificate_path)?);
     if let Some(identity) = identity {
         tls_config = tls_config.identity(TlsIdentity::from_pem(
             &identity.client_certificate_pem,
             &identity.client_private_key_pem,
         ));
-        custom_tls = true;
     }
-    if custom_tls {
-        endpoint = endpoint.tls_config(tls_config)?;
-    }
-    let channel = endpoint
-        .connect()
-        .await
-        .with_context(|| format!("connect to controller at {}", controller.address))?;
+    endpoint = endpoint.tls_config(tls_config)?;
+    let channel = match time::timeout(timeouts.connect, endpoint.connect()).await {
+        Ok(channel) => {
+            channel.with_context(|| format!("connect to controller at {}", controller.address))?
+        }
+        Err(_) => bail!(
+            "connect to controller at {}: no connection within {:?}",
+            controller.address,
+            timeouts.connect
+        ),
+    };
     Ok(FleetAgentClient::new(channel))
+}
+
+/// Reads the CA that the controller's certificate must chain to. The daemon trusts
+/// only this CA for the controller, so a missing or malformed file is reported here
+/// rather than as an opaque TLS handshake failure.
+fn controller_ca(path: &Path) -> anyhow::Result<Certificate> {
+    use rustls::pki_types::{CertificateDer, pem::PemObject};
+
+    let pem = std::fs::read(path)
+        .with_context(|| format!("read controller CA certificate from {}", path.display()))?;
+    let certificates = CertificateDer::pem_slice_iter(&pem).collect::<Result<Vec<_>, _>>();
+    if !certificates.is_ok_and(|certificates| !certificates.is_empty()) {
+        bail!(
+            "controller.caCertificatePath {} does not contain a PEM certificate",
+            path.display()
+        );
+    }
+    Ok(Certificate::from_pem(pem))
 }
 
 fn authenticate_request<T>(identity: &Identity, request: &mut Request<T>) -> anyhow::Result<()> {
@@ -1366,12 +1425,16 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        ControllerConnectionState, MAX_RETRY_DELAY, enroll_with_retry, is_oauth_refresh_rejected,
-        is_transient_refresh_failure, is_unauthenticated, next_inventory, next_retry_delay,
-        normalize_hostname,
+        ControllerConnectionState, ControllerTimeouts, MAX_RETRY_DELAY, client_with,
+        enroll_with_retry, is_oauth_refresh_rejected, is_transient_refresh_failure,
+        is_unauthenticated, next_inventory, next_retry_delay, normalize_hostname, open_stream,
     };
     use crate::enrollment::EnrollmentState;
-    use agentdesktop_core::model::{ControllerConnectionError, Discovery as AgentDiscovery};
+    use agentdesktop_core::{
+        config::ControllerConnectionConfig,
+        model::{ControllerConnectionError, Discovery as AgentDiscovery},
+    };
+    use agentdesktop_proto::fleet::AgentMessage;
     use tokio::{sync::watch, time};
 
     fn empty_inventory() -> AgentDiscovery {
@@ -1902,5 +1965,169 @@ mod tests {
         // Parses (its apply may still fail later): replaced.
         let _ = super::replace_current_config(&current, &pushed(4, "programs:\n  grok: {}\n"));
         assert_eq!(receiver.borrow().as_ref().and_then(|c| c.revision), Some(4));
+    }
+
+    /// A peer that accepts connections and then never reads or writes, like a
+    /// controller whose reset was lost while the computer slept.
+    async fn silent_peer() -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((connection, _)) = listener.accept().await {
+                held.push(connection);
+            }
+        });
+        address
+    }
+
+    /// A controller connection whose CA file holds `ca_pem`. The directory guard
+    /// keeps the file alive for the test.
+    fn controller_with_ca(
+        address: String,
+        ca_pem: &str,
+    ) -> (tempfile::TempDir, ControllerConnectionConfig) {
+        let directory = tempfile::tempdir().unwrap();
+        let ca_certificate_path = directory.path().join("ca.pem");
+        std::fs::write(&ca_certificate_path, ca_pem).unwrap();
+        let controller = ControllerConnectionConfig {
+            address,
+            ca_certificate_path,
+            heartbeat_interval: Duration::from_secs(30),
+            device_authorization: false,
+        };
+        (directory, controller)
+    }
+
+    /// A controller connection with a valid (self-signed) CA file.
+    fn controller_at(address: String) -> (tempfile::TempDir, ControllerConnectionConfig) {
+        let ca = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        controller_with_ca(address, &ca.cert.pem())
+    }
+
+    fn short_timeouts() -> ControllerTimeouts {
+        ControllerTimeouts {
+            connect: Duration::from_millis(200),
+            stream_open: Duration::from_millis(200),
+            keepalive_interval: Duration::from_secs(60),
+            keepalive_timeout: Duration::from_secs(60),
+        }
+    }
+
+    /// Fails the test, instead of hanging it, when a call is not bounded.
+    async fn bounded<T>(call: impl std::future::Future<Output = T>) -> T {
+        time::timeout(Duration::from_secs(10), call)
+            .await
+            .expect("the call was not bounded")
+    }
+
+    fn open_request() -> (
+        mpsc::Sender<AgentMessage>,
+        tonic::Request<tokio_stream::wrappers::ReceiverStream<AgentMessage>>,
+    ) {
+        let (sender, receiver) = mpsc::channel(1);
+        (
+            sender,
+            tonic::Request::new(tokio_stream::wrappers::ReceiverStream::new(receiver)),
+        )
+    }
+
+    #[tokio::test]
+    async fn connecting_gives_up_when_the_tls_handshake_never_finishes() {
+        let (_ca, controller) = controller_at(format!("https://{}", silent_peer().await));
+
+        let error = bounded(client_with(&controller, None, short_timeouts()))
+            .await
+            .expect_err("connecting to a silent peer succeeded");
+
+        assert!(
+            format!("{error:#}").contains("no connection within"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn opening_the_stream_gives_up_when_the_controller_never_answers() {
+        let (_ca, controller) = controller_at(format!("http://{}", silent_peer().await));
+        let mut client = bounded(client_with(&controller, None, short_timeouts()))
+            .await
+            .unwrap();
+        let (_sender, request) = open_request();
+
+        let error = bounded(open_stream(
+            &mut client,
+            request,
+            Duration::from_millis(200),
+        ))
+        .await
+        .expect_err("opening a stream to a silent peer succeeded");
+
+        assert!(
+            format!("{error:#}").contains("did not answer within"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn keepalive_closes_a_connection_whose_peer_stopped_answering() {
+        let (_ca, controller) = controller_at(format!("http://{}", silent_peer().await));
+        let timeouts = ControllerTimeouts {
+            keepalive_interval: Duration::from_millis(100),
+            keepalive_timeout: Duration::from_millis(100),
+            ..short_timeouts()
+        };
+        let mut client = bounded(client_with(&controller, None, timeouts))
+            .await
+            .unwrap();
+        let (_sender, request) = open_request();
+
+        // The stream timeout is far beyond the test's bound, so only the
+        // unanswered keepalive PING can end the wait.
+        let error = bounded(open_stream(&mut client, request, Duration::from_secs(3600)))
+            .await
+            .expect_err("a stream to a silent peer opened");
+
+        assert!(
+            !format!("{error:#}").contains("did not answer within"),
+            "the stream timeout fired instead of the keepalive: {error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_controller_ca_file_is_reported_with_its_path() {
+        let (directory, mut controller) = controller_at("https://controller.example".to_owned());
+        controller.ca_certificate_path = directory.path().join("missing.pem");
+
+        let error = client_with(&controller, None, short_timeouts())
+            .await
+            .expect_err("a missing CA file was accepted");
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("read controller CA certificate from")
+                && message.contains("missing.pem"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_controller_ca_file_without_a_pem_certificate_is_rejected() {
+        for contents in [
+            "",
+            "not a certificate",
+            "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n",
+        ] {
+            let (_ca, controller) =
+                controller_with_ca("https://controller.example".to_owned(), contents);
+
+            let error = client_with(&controller, None, short_timeouts())
+                .await
+                .expect_err("a CA file without a certificate was accepted");
+
+            assert!(
+                format!("{error:#}").contains("does not contain a PEM certificate"),
+                "unexpected error for {contents:?}: {error:#}"
+            );
+        }
     }
 }

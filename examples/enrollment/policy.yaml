@@ -1,0 +1,9 @@
+# yaml-language-server: $schema=../../schema/daemon-config.json
+# Nothing listens at the gateway URL. The policy only lets enrolled devices
+# request controller-signed gateway credentials.
+llmGateway:
+  url: http://127.0.0.1:4000
+  authentication:
+    type: controllerJwt
+    audience: agentgateway
+    allowedClientIds: [agentdesktop, claude-code]

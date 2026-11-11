@@ -1,7 +1,9 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, ensure};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::common::{Container, Gateway, TOKEN};
@@ -12,6 +14,94 @@ const USER_SETTINGS: &str = "/home/tester/.codex/config.toml";
 const COMPANY_SETTINGS: &str = "/etc/codex/config.toml";
 const VERSION: &str = "0.153.4";
 const PROMPT: &str = "Return the provider integration response.";
+
+#[tokio::test]
+async fn managed_chatgpt_subscription_lifecycle() -> anyhow::Result<()> {
+    Container::run(
+        "codex",
+        "crates/agent/src/provider/codex/testdata/Dockerfile",
+        async |container| {
+            let gateway = Gateway::start().await?;
+            let state_dir = "/home/tester/.local/state/codex-subscription";
+            let socket = format!("{state_dir}/agentdesktop.sock");
+            let issuer = "https://codex-fixture.example/";
+            let client_id = "codex-fixture";
+            let account = URL_SAFE_NO_PAD.encode(Sha256::digest(format!("{issuer}\0{client_id}")));
+            let entry = Sha256::digest(format!("dev.agentdesktop.gateway-oidc\0{account}"));
+            let entry = entry.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+            container.write(
+                &format!("{state_dir}/secrets/{entry}"),
+                &json!({
+                    "accessToken": TOKEN,
+                    "refreshToken": null,
+                    "expiresAtUnixSeconds": 4_000_000_000u64,
+                    "tokenEndpoint": "https://codex-fixture.example/token",
+                }).to_string(),
+            ).await?;
+            let entry = Sha256::digest(b"dev.agentdesktop.openai-subscription\0codex");
+            let entry = entry.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+            container.write(
+                &format!("{state_dir}/secrets/{entry}"),
+                &json!({
+                    "accessToken": "codex-subscription-fixture",
+                    "refreshToken": "fixture-refresh-token",
+                    "accountId": "fixture-account",
+                    "expiresAtUnixSeconds": 4_000_000_000u64,
+                }).to_string(),
+            ).await?;
+            container.exec(&["mkdir", "-p", "/home/tester/.codex"]).await?;
+            container.exec(&["chown", "-R", "tester:tester", state_dir, "/home/tester/.codex"]).await?;
+            container.exec(&["chmod", "700", state_dir, &format!("{state_dir}/secrets")]).await?;
+            container.write(CONFIG, &json!({
+                "daemon": {
+                    "user": true,
+                    "stateDir": state_dir,
+                },
+                "llmGateway": {
+                    "url": format!("{}backend-api/codex", gateway.url),
+                    "authentication": { "type": "oidc", "issuer": issuer, "clientId": client_id },
+                },
+                "programs": { "codex": {
+                    "auth": "subscription",
+                    "managedConfig": {
+                        "model": "gpt-5.4",
+                        "cli_auth_credentials_store": "file",
+                        "model_providers": { "agentdesktop": { "request_max_retries": 0, "stream_max_retries": 0 } },
+                    },
+                } },
+            }).to_string()).await?;
+            container.start_process("subscription-daemon", &[
+                "runuser", "--preserve-environment", "-u", "tester", "--",
+                "agentdesktop", "daemon", "--user", "--config", CONFIG,
+            ]).await?;
+            container.wait_ready(&["agentdesktop", "--socket", &socket, "status"]).await?;
+            let managed = container.read(USER_SETTINGS).await?;
+            let parsed: toml::Value = toml::from_str(&managed)?;
+            let provider = &parsed["model_providers"]["agentdesktop"];
+            ensure!(provider["requires_openai_auth"].as_bool() == Some(false), "Codex must use Agentdesktop OAuth instead of native ChatGPT login");
+            ensure!(provider["auth"]["command"].as_str() == Some("/usr/local/bin/agentdesktop"), "Agentdesktop subscription helper missing");
+            container.exec(&["test", "!", "-e", "/home/tester/.codex/auth.json"]).await?;
+            let output = container.exec_as("tester", &[
+                "env", "HTTP_PROXY=http://127.0.0.1:9", "HTTPS_PROXY=http://127.0.0.1:9", "NO_PROXY=127.0.0.1,localhost",
+                "codex", "exec", "--skip-git-repo-check", "--ephemeral", "--json", PROMPT,
+            ], Duration::from_secs(90)).await?;
+            ensure!(output.contains("provider-integration-ok"), "native Codex subscription request failed: {output}");
+            ensure!(gateway.requests().iter().any(|request| {
+                request["path"] == "/backend-api/codex/responses"
+                    && request["authorization"] == format!("Bearer agentdesktop:codex-subscription-fixture:{TOKEN}:fixture-account")
+                    && request["llmToken"].is_null()
+                    && request["pairing"].is_null()
+                    && request["body"]["input"].to_string().contains(PROMPT)
+            }), "Codex subscription headers did not reach the mock gateway correctly");
+            container.stop_process("subscription-daemon").await?;
+            container.write(CONFIG, &json!({"daemon": {"user": true, "stateDir": state_dir}, "programs": {}}).to_string()).await?;
+            container.exec_as("tester", &["agentdesktop", "daemon", "--user", "--config", CONFIG, "--once"], Duration::from_secs(15)).await?;
+            container.exec(&["test", "!", "-e", USER_SETTINGS]).await?;
+            container.exec(&["test", "!", "-e", "/home/tester/.codex/auth.json"]).await?;
+            Ok(())
+        },
+    ).await
+}
 
 #[tokio::test]
 async fn managed_gateway_lifecycle() -> anyhow::Result<()> {

@@ -1,4 +1,4 @@
-pub mod anthropic_oauth;
+pub use subscription_oauth::anthropic as anthropic_oauth;
 pub mod api;
 mod browser_pac;
 pub mod cli;
@@ -10,6 +10,7 @@ pub mod identity;
 mod inventory_watch;
 mod llm_proxy;
 pub mod oidc;
+use subscription_oauth::openai as openai_oauth;
 mod program_choice;
 pub mod provider;
 pub mod reconcile;
@@ -17,6 +18,7 @@ pub mod remote;
 pub mod secret_store;
 pub mod secure_fs;
 pub mod subscription;
+mod subscription_oauth;
 mod tick;
 
 #[cfg(windows)]

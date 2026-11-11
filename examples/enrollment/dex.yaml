@@ -1,0 +1,30 @@
+issuer: http://dex:5556/dex
+
+storage:
+  type: memory
+
+web:
+  http: 0.0.0.0:5556
+
+oauth2:
+  skipApprovalScreen: true
+
+staticClients:
+- id: agentdesktop-lab
+  name: Agentdesktop
+  public: true
+  redirectURIs:
+  - http://127.0.0.1:51327/callback
+  # Dex requires this for the device authorization grant.
+  - /device/callback
+
+enablePasswordDB: true
+staticPasswords:
+- email: admin@example.com
+  username: admin
+  userID: local-admin
+  hash: $2y$10$cA5xff5AaaAoxB8VZjwXUeXZIlH8V0sLf/JkIBXHip6gnQsyKJiHW
+- email: user@example.com
+  username: user
+  userID: local-user
+  hash: $2y$10$cA5xff5AaaAoxB8VZjwXUeXZIlH8V0sLf/JkIBXHip6gnQsyKJiHW

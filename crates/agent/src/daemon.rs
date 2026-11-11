@@ -828,10 +828,7 @@ fn describe_daemon(
         .as_ref()
         .map(|controller| DaemonControllerInfo {
             address: controller_address_for_display(&controller.address),
-            ca_certificate_path: controller
-                .ca_certificate_path
-                .as_ref()
-                .map(|path| path_for_display(path)),
+            ca_certificate_path: Some(path_for_display(&controller.ca_certificate_path)),
             heartbeat_interval: controller.heartbeat_interval,
         });
     DaemonInfo {
@@ -979,20 +976,21 @@ async fn refresh_inventory_with<F, Fut>(
 }
 
 /// Only programs managed in this mode can request subscription sign-in.
-fn uses_subscription(config: &agentdesktop_core::config::DaemonConfig, user: bool) -> bool {
-    use agentdesktop_core::config::ProgramAuthentication;
-
-    config
-        .programs
-        .claude_code
-        .as_ref()
-        .is_some_and(|program| program.auth == Some(ProgramAuthentication::Subscription))
-        || (!user
-            && config
-                .programs
-                .claude_desktop
-                .as_ref()
-                .is_some_and(|program| program.auth == Some(ProgramAuthentication::Subscription)))
+fn subscription_clients(
+    config: &agentdesktop_core::config::DaemonConfig,
+    user: bool,
+) -> Vec<&'static str> {
+    ["claude-code", "claude-desktop", "codex"]
+        .into_iter()
+        .filter(|client_id| {
+            config.programs.subscription_auth(client_id)
+                == Some(agentdesktop_core::config::SubscriptionAuth::CredentialHelper)
+        })
+        .filter(|client_id| {
+            *client_id != "claude-desktop"
+                || (!user && config.programs.subscription_auth("claude-code").is_none())
+        })
+        .collect()
 }
 
 fn start_gateway_authentication(
@@ -1007,7 +1005,8 @@ fn start_gateway_authentication(
     };
     let authentication = gateway.authentication.clone();
     let github = gateway.github_oauth.clone().filter(|_| proxy_enabled);
-    let subscription = uses_subscription(config, user);
+    let subscription_clients = subscription_clients(config, user);
+    let subscription = !subscription_clients.is_empty();
     if authentication.is_none() && !subscription {
         return;
     }
@@ -1064,15 +1063,16 @@ fn start_gateway_authentication(
                 continue_in_browser = acquired.interactive && subscription;
                 tracing::info!(%issuer, "LLM gateway OIDC authentication ready");
             }
-            if subscription {
-                tracing::info!("starting Anthropic subscription authentication");
-                crate::anthropic_oauth::credential(
+            for (index, client_id) in subscription_clients.into_iter().enumerate() {
+                tracing::info!(client_id, "starting provider subscription authentication");
+                crate::subscription::credential(
                     &state_dir,
                     callback_listen,
-                    !continue_in_browser,
+                    continue_in_browser && index == 0,
+                    client_id,
                 )
                 .await?;
-                tracing::info!("Anthropic subscription authentication ready");
+                tracing::info!(client_id, "provider subscription authentication ready");
             }
             if let Some(github) = github {
                 // source: request has no credential of its own to acquire; the
@@ -1714,25 +1714,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn daemon_information_preserves_an_empty_ca_path_without_failing_startup() {
-        let config = parse_daemon(
-            "controller:\n  address: https://controller.example.com\n  caCertificatePath: ''\n",
-        )
-        .unwrap();
-        let info = describe_daemon(
-            &config,
-            Path::new("config.yaml"),
-            Path::new("state"),
-            false,
-            None,
-        );
-        assert_eq!(
-            info.controller.unwrap().ca_certificate_path.as_deref(),
-            Some("")
-        );
-    }
-
     #[tokio::test]
     async fn daemon_information_api_is_read_only_and_reports_the_loaded_local_snapshot() {
         let root = tempfile::tempdir().unwrap();
@@ -1771,12 +1752,12 @@ programs:
         // local settings actually used by the running connection worker.
         std::fs::write(
             &config_path,
-            "controller:\n  address: https://edited.example.com\n",
+            "controller:\n  address: https://edited.example.com\n  caCertificatePath: edited-ca.pem\n",
         )
         .unwrap();
         std::fs::write(
             root.path().join("remote-config.yaml"),
-            "controller:\n  address: https://remote.example.com\ninventoryInterval: 3m\n",
+            "controller:\n  address: https://remote.example.com\n  caCertificatePath: remote-ca.pem\ninventoryInterval: 3m\n",
         )
         .unwrap();
         let (_, inventory) = watch::channel(Arc::new(discovery(&[])));
@@ -2144,13 +2125,25 @@ programs:
         let mut config = parse_daemon(
             "llmGateway:\n  url: https://gateway.example.com\n  authentication:\n    type: oidc\n    issuer: https://login.example.com\n    clientId: agentdesktop\nprograms:\n  pi:\n    model: selected\n  claudeDesktop:\n    auth: subscription\n"
         ).unwrap();
-        assert!(!super::uses_subscription(&config, true));
-        assert!(super::uses_subscription(&config, false));
+        assert!(super::subscription_clients(&config, true).is_empty());
+        assert_eq!(
+            super::subscription_clients(&config, false),
+            ["claude-desktop"]
+        );
 
         config.programs.claude_code =
             Some(serde_json::from_value(serde_json::json!({ "auth": "subscription" })).unwrap());
-        assert!(super::uses_subscription(&config, true));
-        assert!(super::uses_subscription(&config, false));
+        assert_eq!(super::subscription_clients(&config, true), ["claude-code"]);
+        assert_eq!(super::subscription_clients(&config, false), ["claude-code"]);
+
+        config.programs.codex =
+            Some(serde_json::from_value(serde_json::json!({ "auth": "subscription" })).unwrap());
+        for user in [false, true] {
+            assert_eq!(
+                super::subscription_clients(&config, user),
+                ["claude-code", "codex"]
+            );
+        }
     }
 
     #[test]
@@ -2319,6 +2312,7 @@ programs:
             r#"
 controller:
   address: https://controller.example.com
+  caCertificatePath: controller-ca.pem
 "#,
         )
         .expect("valid managed configuration");

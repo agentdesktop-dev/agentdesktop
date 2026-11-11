@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./styles.css": "./src/styles.css"
+  },
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1421",
     "build": "tsc -b && vite build",
@@ -15,24 +19,24 @@
   },
   "dependencies": {
     "@agentdesktop/ui": "workspace:*",
-    "lucide-react": "^1.59.0",
+    "lucide-react": "^1.67.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.15",
-    "@storybook/addon-a11y": "^10.6.2",
-    "@storybook/addon-vitest": "^10.6.2",
-    "@storybook/react-vite": "^10.6.2",
-    "@types/node": "^26.6.5",
+    "@biomejs/biome": "^2.6.4",
+    "@storybook/addon-a11y": "^10.6.5",
+    "@storybook/addon-vitest": "^10.6.5",
+    "@storybook/react-vite": "^10.6.5",
+    "@types/node": "^26.6.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
-    "@vitejs/plugin-react": "^6.1.2",
-    "@vitest/browser-playwright": "^5.0.5",
+    "@vitejs/plugin-react": "^6.2.1",
+    "@vitest/browser-playwright": "^5.1.0",
     "playwright": "^1.64.1",
-    "storybook": "^10.6.2",
+    "storybook": "^10.6.5",
     "typescript": "^7.0.2",
-    "vite": "^8.3.4",
-    "vitest": "^5.0.5"
+    "vite": "^8.3.5",
+    "vitest": "^5.1.0"
   }
 }

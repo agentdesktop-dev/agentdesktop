@@ -71,6 +71,31 @@ export const CopilotFailOpen: Story = {
   },
 };
 
+export const CodexSubscription: Story = {
+  args: {
+    initialConfig: {
+      llmGateway: {
+        url: "https://gateway.example.com/chatgpt",
+        authentication: { type: "controllerJwt", audience: "agentgateway" },
+      },
+      programs: { codex: { auth: "subscription" } },
+    },
+  },
+  play: async ({ canvas, canvasElement }) => {
+    await expect(
+      canvas.queryByRole("checkbox", {
+        name: /Fail open without the local proxy/,
+      }),
+    ).toBeNull();
+    const output = canvasElement.querySelector(".output-card code");
+    await expect(output?.textContent).toContain('auth: "subscription"');
+    await expect(output).not.toHaveTextContent("whenProxyUnavailable");
+    await expect(output).toHaveTextContent(
+      "https://gateway.example.com/chatgpt",
+    );
+  },
+};
+
 export const ActiveProgramSelection: Story = {
   args: { initialConfig: programSelectionDaemonConfig },
   play: async ({ canvas, canvasElement }) => {

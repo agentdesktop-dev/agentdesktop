@@ -3,6 +3,9 @@
 set -euo pipefail
 
 key_dir=/tmp/agentdesktop-keys
+# Names the controller is reached at. Override to add names, for example
+# CONTROLLER_SAN=DNS:controller,DNS:localhost,IP:127.0.0.1.
+controller_san="${CONTROLLER_SAN:-DNS:localhost,IP:127.0.0.1}"
 key_files=(
   controller.pem
   controller-key.pem
@@ -74,12 +77,12 @@ prompt = no
 CN = localhost
 EOF
 
-cat > "${work_dir}/controller.ext" <<'EOF'
+cat > "${work_dir}/controller.ext" <<EOF
 [v3_server]
 basicConstraints = critical,CA:FALSE
 keyUsage = critical,digitalSignature,keyEncipherment
 extendedKeyUsage = serverAuth
-subjectAltName = DNS:localhost,IP:127.0.0.1
+subjectAltName = ${controller_san}
 subjectKeyIdentifier = hash
 authorityKeyIdentifier = keyid,issuer
 EOF

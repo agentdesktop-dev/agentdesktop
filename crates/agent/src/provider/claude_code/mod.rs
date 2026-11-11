@@ -142,6 +142,7 @@ mod tests {
         let context = ReconcileContext {
             llm_proxy: None,
             merge_user_settings: false,
+            user_mode: false,
             credential_helper: PathBuf::from(r"C:\Program Files\Agent Desktop\agentdesktop.exe"),
             socket: PathBuf::from(r"\\.\pipe\agentdesktop"),
         };

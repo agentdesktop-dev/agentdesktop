@@ -5,6 +5,16 @@ import type {
   UsageTotals,
 } from "@agentdesktop/ui";
 
+export type AdminSession = {
+  mode: "local" | "authenticated";
+  authenticated: boolean;
+  role: "viewer" | "operator" | null;
+  subject: string | null;
+  assurance: string | null;
+  recent_auth_required: boolean;
+  permissions?: string[];
+};
+
 export type Device = {
   id: string;
   hostname: string;
@@ -15,6 +25,8 @@ export type Device = {
   last_seen_at: number | null;
   enrolled_by_issuer: string;
   enrolled_by_subject: string;
+  /** Readable name of the user who enrolled the device, when the IdP gave one. */
+  enrolled_by_name?: string | null;
   config_revision: number | null;
   config_state: number | null;
   config_error: string | null;

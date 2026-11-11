@@ -4,8 +4,15 @@
   "description": "Startup configuration for the Agentdesktop fleet controller.",
   "type": "object",
   "properties": {
+    "adminAccess": {
+      "description": "Management authentication, separate from device enrollment. Defaults to local-only access.",
+      "$ref": "#/$defs/ControllerAdminAccess",
+      "default": {
+        "mode": "local"
+      }
+    },
     "adminListen": {
-      "description": "Loopback address on which the controller management UI listens.",
+      "description": "Address on which the controller management UI listens. Local mode requires loopback.",
       "type": "string",
       "default": "127.0.0.1:8080"
     },
@@ -95,6 +102,97 @@
       "additionalProperties": false,
       "required": [
         "pacUrl"
+      ]
+    },
+    "ControllerAdminAccess": {
+      "description": "Authentication and exposure policy for the management API and UI.",
+      "oneOf": [
+        {
+          "description": "Unauthenticated access restricted to an IPv4 or IPv6 loopback listener.",
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "local"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mode"
+          ]
+        },
+        {
+          "description": "Remote management through a compiled-in authentication extension. The standard\ncontroller has no such extension and rejects this mode at startup.",
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "authenticated"
+            },
+            "provider": {
+              "description": "Settings owned and validated by the compiled-in authentication extension.\nRelative paths inside it are resolved from the controller configuration directory.",
+              "type": "object",
+              "additionalProperties": true
+            },
+            "publicUrl": {
+              "description": "Exact external HTTPS origin, without a path other than `/`.",
+              "type": "string"
+            },
+            "transport": {
+              "description": "How HTTPS reaches the management listener.",
+              "$ref": "#/$defs/ControllerAdminTransport"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "publicUrl",
+            "transport",
+            "provider"
+          ]
+        }
+      ]
+    },
+    "ControllerAdminTransport": {
+      "oneOf": [
+        {
+          "description": "HTTPS terminates at a trusted proxy; the plaintext listener must not be public.",
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "proxy"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mode"
+          ]
+        },
+        {
+          "description": "The management listener terminates TLS directly.",
+          "type": "object",
+          "properties": {
+            "certificate": {
+              "description": "PEM certificate chain. Relative paths are resolved from the configuration directory.",
+              "type": "string"
+            },
+            "key": {
+              "description": "PEM private key. Relative paths are resolved from the configuration directory.",
+              "type": "string"
+            },
+            "mode": {
+              "type": "string",
+              "const": "tls"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "certificate",
+            "key"
+          ]
+        }
       ]
     },
     "ControllerBrowserEgressConfig": {

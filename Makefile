@@ -1,7 +1,7 @@
 IMAGE ?= agentdesktop-controller:dev
 BUILD_PROFILE ?= release
 
-.PHONY: build install test check lint frontend frontend-check desktop desktop-check format gen generate-schema docker clean
+.PHONY: build install test check lint frontend frontend-check desktop desktop-check format gen generate-schema docker e2e-enrollment clean
 
 build: frontend
 	cargo build --workspace
@@ -49,6 +49,9 @@ generate-schema:
 
 docker:
 	docker build --build-arg BUILD_PROFILE=$(BUILD_PROFILE) --tag $(IMAGE) .
+
+e2e-enrollment:
+	BUILD_PROFILE=$(BUILD_PROFILE) examples/enrollment/e2e.sh
 
 clean:
 	cargo clean
