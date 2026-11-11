@@ -73,11 +73,14 @@ pub struct FleetLimits {
     /// `Connect` stream) is never idle.
     pub first_request: Duration,
     pub idle_connection: Duration,
-    /// Concurrent requests one connection may have in progress, and concurrent
-    /// HTTP/2 streams it may open. Further requests wait, so one connection
-    /// cannot occupy an unbounded share of the server.
-    pub requests_per_connection: usize,
-    pub streams_per_connection: u32,
+    /// HTTP/2 streams one connection may have open at once
+    /// (`SETTINGS_MAX_CONCURRENT_STREAMS`). The client waits for one to close
+    /// before opening another, so one connection cannot occupy an unbounded
+    /// share of the server. Streams count until they close, not only while
+    /// their handler runs, so this also bounds open `Connect` streams and
+    /// responses the client does not read. hyper defaults to 200, but tonic
+    /// passes `None` when this is not set, which removes the limit.
+    pub concurrent_streams_per_connection: u32,
     /// Streams the server may reset over a connection's lifetime because the
     /// client broke the HTTP/2 protocol on them. Past this, the connection is
     /// closed with `ENHANCE_YOUR_CALM`. A client can otherwise provoke resets
@@ -132,8 +135,7 @@ const FLEET_LIMITS: FleetLimits = FleetLimits {
     connections_per_address: 4_096,
     first_request: Duration::from_secs(20),
     idle_connection: Duration::from_secs(120),
-    requests_per_connection: 32,
-    streams_per_connection: 64,
+    concurrent_streams_per_connection: 64,
     error_resets_per_connection: 1024,
     max_message_bytes: 4 * 1024 * 1024,
     unauthenticated_message_bytes: 64 * 1024,
@@ -181,8 +183,7 @@ impl FleetLimits {
             .timeout(self.request)
             .http2_keepalive_interval(Some(self.keepalive_interval))
             .http2_keepalive_timeout(Some(self.keepalive_timeout))
-            .concurrency_limit_per_connection(self.requests_per_connection)
-            .max_concurrent_streams(self.streams_per_connection)
+            .max_concurrent_streams(self.concurrent_streams_per_connection)
             .http2_max_local_error_reset_streams(Some(self.error_resets_per_connection))
             // agentgateway fetches the gateway JWKS from this listener over HTTP/1.
             .accept_http1(true)

@@ -313,24 +313,9 @@ async fn two_calls_on_one_connection(limits: FleetLimits) -> Duration {
 }
 
 #[tokio::test]
-async fn requests_beyond_the_per_connection_limit_wait() {
-    let limits = FleetLimits {
-        requests_per_connection: 1,
-        ..FLEET_LIMITS
-    };
-
-    let elapsed = two_calls_on_one_connection(limits).await;
-
-    assert!(
-        elapsed >= Duration::from_millis(950),
-        "ran concurrently: {elapsed:?}"
-    );
-}
-
-#[tokio::test]
 async fn streams_beyond_the_per_connection_limit_wait() {
     let limits = FleetLimits {
-        streams_per_connection: 1,
+        concurrent_streams_per_connection: 1,
         ..FLEET_LIMITS
     };
 
