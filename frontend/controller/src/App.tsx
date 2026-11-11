@@ -1,9 +1,12 @@
 import type { UsageDimension } from "@agentdesktop/ui";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { useApi } from "./api";
+import { ApiError, AuthProvider, useAuth } from "./auth";
 import { ControllerShell } from "./components/ControllerShell";
+import { SessionScreen } from "./components/SessionScreen";
 import { ErrorState, NotFound, PageSkeleton } from "./components/ViewStates";
+import type { ControllerExtension } from "./extensions";
 import { navigate, usePath } from "./router";
 import type {
   ActiveDaemonConfig,
@@ -22,17 +25,80 @@ import { OverviewView } from "./views/OverviewView";
 import { SettingsView } from "./views/SettingsView";
 import { UsageView } from "./views/UsageView";
 
-export function App() {
+export function App({
+  extensions = [],
+}: {
+  extensions?: ControllerExtension[];
+}) {
+  return (
+    <AuthProvider>
+      <AuthenticatedApp extensions={extensions} />
+    </AuthProvider>
+  );
+}
+
+function AuthenticatedApp({
+  extensions,
+}: {
+  extensions: ControllerExtension[];
+}) {
   const path = usePath();
+  const auth = useAuth();
+
+  if (auth.loading || auth.error || !auth.session?.authenticated) {
+    return (
+      <SessionScreen
+        loading={auth.loading}
+        error={auth.error}
+        onRetry={auth.retry}
+      />
+    );
+  }
 
   return (
-    <ControllerShell path={path} onRefresh={() => window.location.reload()}>
-      <ControllerRoute path={path} />
+    <ControllerShell
+      path={path}
+      session={auth.session}
+      onLogout={auth.logout}
+      onRefresh={() => window.location.reload()}
+      extensions={extensions.filter((extension) =>
+        auth.session?.permissions?.includes(extension.permission),
+      )}
+    >
+      {auth.notice && (
+        <div className="auth-notice" role="alert">
+          <span>{auth.notice}</span>
+          <button
+            type="button"
+            className="button secondary"
+            onClick={auth.clearNotice}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+      <ControllerRoute path={path} extensions={extensions} />
     </ControllerShell>
   );
 }
 
-function ControllerRoute({ path }: { path: string }) {
+function ControllerRoute({
+  path,
+  extensions,
+}: {
+  path: string;
+  extensions: ControllerExtension[];
+}) {
+  const { session } = useAuth();
+  const extension = extensions.find((extension) => extension.path === path);
+  if (extension) {
+    if (!session?.permissions?.includes(extension.permission)) {
+      return (
+        <ErrorState message="You do not have permission to access this page." />
+      );
+    }
+    return <extension.component />;
+  }
   if (path === "/") return <OverviewPage />;
   if (path === "/devices") return <DevicesPage />;
   if (path.startsWith("/devices/")) {
@@ -65,6 +131,7 @@ function DevicesPage() {
 }
 
 function DevicePage({ id }: { id: string }) {
+  const { request, session } = useAuth();
   const query = useApi<DeviceDetail>(
     `/api/v1/devices/${encodeURIComponent(id)}`,
   );
@@ -79,20 +146,37 @@ function DevicePage({ id }: { id: string }) {
   const [showDelete, setShowDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [reauthenticate, setReauthenticate] = useState(false);
+  const deletion = useRef<AbortController | null>(null);
+
+  useEffect(() => () => deletion.current?.abort(), []);
 
   async function deleteDevice() {
+    if (deletion.current) return;
+    const controller = new AbortController();
+    deletion.current = controller;
     setDeleting(true);
     setDeleteError(null);
+    setReauthenticate(false);
     try {
-      const response = await fetch(
-        `/api/v1/devices/${encodeURIComponent(id)}`,
-        { method: "DELETE" },
-      );
-      if (!response.ok) throw new Error(await response.text());
-      navigate("/devices");
+      await request(`/api/v1/devices/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        signal: controller.signal,
+      });
+      if (!controller.signal.aborted) navigate("/devices");
     } catch (error) {
+      if (
+        controller.signal.aborted ||
+        (error instanceof Error && error.name === "AbortError")
+      )
+        return;
       setDeleteError(error instanceof Error ? error.message : "Delete failed");
+      setReauthenticate(
+        error instanceof ApiError && error.code === "reauthentication_required",
+      );
       setDeleting(false);
+    } finally {
+      if (deletion.current === controller) deletion.current = null;
     }
   }
 
@@ -100,7 +184,13 @@ function DevicePage({ id }: { id: string }) {
   if (query.error || !query.data) return <ErrorState message={query.error} />;
   return (
     <DeviceView
+      canDelete={
+        session?.permissions
+          ? session.permissions.includes("devices.delete")
+          : session?.role === "operator"
+      }
       deleteError={deleteError}
+      reauthenticate={reauthenticate}
       deleteOpen={showDelete}
       deleting={deleting}
       device={query.data}
@@ -108,6 +198,7 @@ function DevicePage({ id }: { id: string }) {
         if (!deleting) {
           setShowDelete(false);
           setDeleteError(null);
+          setReauthenticate(false);
         }
       }}
       onDeleteConfirm={deleteDevice}
@@ -205,9 +296,11 @@ function ConfigurationPage() {
 }
 
 function SettingsPage() {
+  const { session } = useAuth();
   const query = useApi<ControllerSettings>("/api/v1/settings");
   return (
     <SettingsView
+      authMode={session?.mode}
       data={query.data}
       loading={query.loading}
       error={query.error}

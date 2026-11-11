@@ -2,7 +2,17 @@
 
 |Field|Type|Description|
 |-|-|-|
-|`adminListen`|string|Loopback address on which the controller management UI listens.|
+|`adminAccess`|object|Management authentication, separate from device enrollment. Defaults to local-only access.|
+|`adminAccess.mode`|enum|Unauthenticated access restricted to an IPv4 or IPv6 loopback listener.<br>Possible values: `local`.|
+|`adminAccess.mode`|enum|Possible values: `authenticated`.|
+|`adminAccess.provider`|object|Settings owned and validated by the compiled-in authentication extension.<br>Relative paths inside it are resolved from the controller configuration directory.|
+|`adminAccess.publicUrl`|string|Exact external HTTPS origin, without a path other than `/`.|
+|`adminAccess.transport`|object|How HTTPS reaches the management listener.|
+|`adminAccess.transport.mode`|enum|HTTPS terminates at a trusted proxy; the plaintext listener must not be public.<br>Possible values: `proxy`.|
+|`adminAccess.transport.certificate`|string|PEM certificate chain. Relative paths are resolved from the configuration directory.|
+|`adminAccess.transport.key`|string|PEM private key. Relative paths are resolved from the configuration directory.|
+|`adminAccess.transport.mode`|enum|Possible values: `tls`.|
+|`adminListen`|string|Address on which the controller management UI listens. Local mode requires loopback.|
 |`allowInsecureDev`|boolean|Permit a non-HTTPS OIDC issuer for isolated local development.<br><br>This escape hatch is only appropriate for isolated local development.|
 |`daemonConfig`|object|Daemon configuration distributed to enrolled devices.|
 |`daemonConfig.path`|string|Path to the watched YAML configuration distributed to enrolled devices.<br><br>Relative paths are resolved from the controller configuration directory.<br>Valid file changes are published to connected devices automatically.|

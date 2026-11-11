@@ -11,8 +11,10 @@ agentdesktop-core.workspace = true
 agentdesktop-proto.workspace = true
 agentdesktop-usage.workspace = true
 anyhow.workspace = true
+async-trait = "0.1"
 aws-lc-rs.workspace = true
 axum.workspace = true
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 base64.workspace = true
 clap.workspace = true
 futures-core.workspace = true
@@ -25,6 +27,7 @@ rand.workspace = true
 rcgen.workspace = true
 reqwest.workspace = true
 rust-embed = "8"
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -37,3 +40,7 @@ time.workspace = true
 url.workspace = true
 uuid.workspace = true
 x509-parser.workspace = true
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util.workspace = true

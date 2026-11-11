@@ -827,7 +827,10 @@ async fn pairing_is_checked_before_configuration_is_read() {
             "llmGateway: [not: an: object",
         )
         .unwrap();
-        let config = parse_daemon("controller:\n  address: https://127.0.0.1:1\n").unwrap();
+        let config = parse_daemon(
+            "controller:\n  address: https://127.0.0.1:1\n  caCertificatePath: ca.pem\n",
+        )
+        .unwrap();
         let (_, discovery) = watch::channel(Arc::new(Discovery {
             agents: vec![],
             model_runtimes: vec![],
