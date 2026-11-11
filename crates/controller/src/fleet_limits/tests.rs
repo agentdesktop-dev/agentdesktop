@@ -328,11 +328,12 @@ async fn streams_beyond_the_per_connection_limit_wait() {
 }
 
 fn small_messages() -> FleetLimits {
-    FleetLimits {
-        max_message_bytes: 1024,
+    let mut limits = FleetLimits {
         unauthenticated_message_bytes: 128,
         ..FLEET_LIMITS
-    }
+    };
+    limits.configured.max_message_bytes = 1024;
+    limits
 }
 
 #[tokio::test]
@@ -613,7 +614,7 @@ async fn connections_over_cap(limits: FleetLimits) {
 #[tokio::test]
 async fn connections_over_the_per_address_cap_are_closed() {
     let mut limits = FLEET_LIMITS;
-    limits.connections_per_address = 2;
+    limits.configured.connections_per_address = 2;
 
     connections_over_cap(limits).await;
 }
@@ -623,8 +624,8 @@ fn an_address_over_its_cap_does_not_evict_other_connections() {
     use tokio::sync::oneshot::error::TryRecvError;
 
     let mut limits = FLEET_LIMITS;
-    limits.max_connections = 2;
-    limits.connections_per_address = 1;
+    limits.configured.max_connections = 2;
+    limits.configured.connections_per_address = 1;
     let connections = Connections::new(&limits);
     let first_address = |port| SocketAddr::from(([192, 0, 2, 1], port));
     let (_first, mut first_evicted) = connections
@@ -644,7 +645,7 @@ fn an_address_over_its_cap_does_not_evict_other_connections() {
 #[tokio::test]
 async fn at_the_total_cap_the_longest_idle_connection_makes_room() {
     let mut limits = FLEET_LIMITS;
-    limits.max_connections = 2;
+    limits.configured.max_connections = 2;
     let address = serve(
         limits,
         None,
@@ -668,7 +669,7 @@ async fn at_the_total_cap_the_longest_idle_connection_makes_room() {
 #[tokio::test]
 async fn at_the_total_cap_a_new_connection_is_closed_when_every_connection_is_busy() {
     let mut limits = FLEET_LIMITS;
-    limits.max_connections = 1;
+    limits.configured.max_connections = 1;
     let address = serve(
         limits,
         None,
@@ -867,49 +868,6 @@ async fn an_open_stream_keeps_its_connection_from_going_idle() {
     }
 }
 
-#[test]
-fn the_configuration_defaults_match_the_default_limits() {
-    use agentdesktop_core::config::ControllerFleetLimitsConfig;
-
-    assert_eq!(
-        FLEET_LIMITS.configured(&ControllerFleetLimitsConfig::default()),
-        FLEET_LIMITS
-    );
-}
-
-#[test]
-fn configured_limits_replace_every_deployment_limit() {
-    use agentdesktop_core::config::ControllerFleetLimitsConfig;
-
-    // The literal names every setting, each with a value that is not its
-    // default, so a setting `configured` does not copy fails here.
-    let config = ControllerFleetLimitsConfig {
-        max_connections: 8,
-        connections_per_address: 7,
-        max_message_bytes: 6,
-        enrollment_in_flight: 5,
-        enrollment_burst: 4,
-        enrollment_refill: Duration::from_millis(3),
-        device_message_burst: 2,
-        device_message_refill: Duration::from_millis(1),
-    };
-
-    assert_eq!(
-        FLEET_LIMITS.configured(&config),
-        FleetLimits {
-            max_connections: 8,
-            connections_per_address: 7,
-            max_message_bytes: 6,
-            enrollment_in_flight: 5,
-            enrollment_burst: 4,
-            enrollment_refill: Duration::from_millis(3),
-            device_message_burst: 2,
-            device_message_refill: Duration::from_millis(1),
-            ..FLEET_LIMITS
-        }
-    );
-}
-
 /// The RPC names in `fleet.proto`'s `FleetAgent` service.
 fn fleet_rpcs(proto: &str) -> std::collections::BTreeSet<&str> {
     let (_, service) = proto
@@ -988,12 +946,11 @@ mod enrollment {
     use super::Duration;
 
     fn limits(in_flight: usize, burst: u32) -> FleetLimits {
-        FleetLimits {
-            enrollment_in_flight: in_flight,
-            enrollment_burst: burst,
-            enrollment_refill: Duration::from_secs(10),
-            ..FLEET_LIMITS
-        }
+        let mut limits = FLEET_LIMITS;
+        limits.configured.enrollment_in_flight = in_flight;
+        limits.configured.enrollment_burst = burst;
+        limits.configured.enrollment_refill = Duration::from_secs(10);
+        limits
     }
 
     fn peer(last: u8) -> IpAddr {
@@ -1227,8 +1184,8 @@ mod device_streams {
     #[test]
     fn a_device_gets_its_message_burst_then_the_refill_rate() {
         let mut limits = FLEET_LIMITS;
-        limits.device_message_burst = 3;
-        limits.device_message_refill = Duration::from_secs(1);
+        limits.configured.device_message_burst = 3;
+        limits.configured.device_message_refill = Duration::from_secs(1);
         let stream = limits.device_streams().open("device-a");
         let start = Instant::now();
 
@@ -1243,8 +1200,8 @@ mod device_streams {
     #[test]
     fn reconnecting_does_not_reset_the_message_budget() {
         let mut limits = FLEET_LIMITS;
-        limits.device_message_burst = 2;
-        limits.device_message_refill = Duration::from_secs(3600);
+        limits.configured.device_message_burst = 2;
+        limits.configured.device_message_refill = Duration::from_secs(3600);
         let streams = limits.device_streams();
         let now = Instant::now();
         let first = streams.open("device-a");

@@ -43,6 +43,9 @@ pub use connections::{ReleaseOnDrop, SessionBusy};
 /// Limits applied to the fleet gRPC listener.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FleetLimits {
+    /// The limits that depend on the deployment, set by the controller
+    /// configuration (`fleetLimits`), where each is documented.
+    pub configured: ControllerFleetLimitsConfig,
     /// Time a client has to finish the TLS handshake after connecting. Tonic sets
     /// no limit by default, so a client could hold a connection open forever by
     /// never sending its ClientHello.
@@ -58,15 +61,6 @@ pub struct FleetLimits {
     /// How long a connection may be silent before TCP keepalive probes start,
     /// for peers that vanish without closing.
     pub tcp_keepalive: Duration,
-    /// Open connections allowed in total and from one client address (an IPv4
-    /// address or an IPv6 /64). A new connection over the per-address cap is
-    /// closed as soon as it is accepted. At the total cap, the longest-idle
-    /// connection is closed to admit a new one, and the new one is closed only
-    /// when no connection is idle. The per-address cap is high because many
-    /// devices can share an address behind NAT, or appear to when a load
-    /// balancer rewrites client addresses.
-    pub max_connections: usize,
-    pub connections_per_address: usize,
     /// Time a new connection has to make its first request, and time a
     /// connection may stay without any request in progress after its last one
     /// finished. A connection with a request in progress (including an open
@@ -88,34 +82,15 @@ pub struct FleetLimits {
     /// streams themselves ("MadeYouReset"). h2 and hyper default to 1024, but
     /// tonic passes `None` when this is not set, which removes the limit.
     pub error_resets_per_connection: usize,
-    /// Largest encoded message an enrolled device's calls may send or receive.
-    pub max_message_bytes: usize,
     /// Largest request from a caller without a device certificate: enrollment,
     /// which runs before a device has one, and any other call made without one
     /// (rejected by its handler, but only after the request has been decoded).
     /// Enrollment requests are small (a hostname and a CSR).
     pub unauthenticated_message_bytes: usize,
-    /// Enrollment requests (`BeginEnrollment`, `CompleteEnrollment`) running at
-    /// once across all clients. Enrollment calls the identity provider, so this
-    /// also bounds the load a flood can put on it.
-    pub enrollment_in_flight: usize,
-    /// Per-client-address `BeginEnrollment` budget: up to `enrollment_burst`
-    /// requests in a burst, refilled at one request per `enrollment_refill`.
-    /// Generous, because many devices can share one address behind NAT.
-    pub enrollment_burst: u32,
-    pub enrollment_refill: Duration,
     /// How long `CompleteEnrollment` waits for an in-flight slot before it is
     /// refused. It waits rather than failing at once because the user has
     /// already signed in, and a refusal makes them start over.
     pub enrollment_completion_wait: Duration,
-    /// Messages a device may send on its `Connect` streams: up to
-    /// `device_message_burst` in a burst, refilled at one per
-    /// `device_message_refill`. The budget belongs to the device, so
-    /// reconnecting does not reset it. Devices send a heartbeat every 30
-    /// seconds, inventory periodically and one telemetry event per tool event,
-    /// so this is far above normal use; a stream over budget is closed.
-    pub device_message_burst: u32,
-    pub device_message_refill: Duration,
     /// How often a device may open a `Connect` stream: up to
     /// `stream_open_burst` in a burst, refilled at one per `stream_open_refill`.
     /// Each open checks the access token with the identity provider.
@@ -123,28 +98,21 @@ pub struct FleetLimits {
     pub stream_open_refill: Duration,
 }
 
-/// Default limits. The controller configuration replaces the
-/// deployment-dependent ones (see `FleetLimits::from_config`).
+/// Default limits. The controller configuration replaces `configured` (see
+/// `FleetLimits::from_config`).
 const FLEET_LIMITS: FleetLimits = FleetLimits {
+    configured: ControllerFleetLimitsConfig::DEFAULT,
     tls_handshake: Duration::from_secs(10),
     request: Duration::from_secs(30),
     keepalive_interval: Duration::from_secs(30),
     keepalive_timeout: Duration::from_secs(20),
     tcp_keepalive: Duration::from_secs(60),
-    max_connections: 50_000,
-    connections_per_address: 4_096,
     first_request: Duration::from_secs(20),
     idle_connection: Duration::from_secs(120),
     concurrent_streams_per_connection: 64,
     error_resets_per_connection: 1024,
-    max_message_bytes: 4 * 1024 * 1024,
     unauthenticated_message_bytes: 64 * 1024,
-    enrollment_in_flight: 64,
-    enrollment_burst: 60,
-    enrollment_refill: Duration::from_secs(1),
     enrollment_completion_wait: Duration::from_secs(10),
-    device_message_burst: 600,
-    device_message_refill: Duration::from_millis(50),
     stream_open_burst: 20,
     stream_open_refill: Duration::from_secs(60),
 };
@@ -153,19 +121,10 @@ impl FleetLimits {
     /// The limits for a controller: the deployment-dependent ones from its
     /// configuration, and the defaults for the rest.
     pub fn from_config(config: &ControllerFleetLimitsConfig) -> Self {
-        FLEET_LIMITS.configured(config)
-    }
-
-    fn configured(mut self, config: &ControllerFleetLimitsConfig) -> Self {
-        self.max_connections = config.max_connections;
-        self.connections_per_address = config.connections_per_address;
-        self.max_message_bytes = config.max_message_bytes;
-        self.enrollment_in_flight = config.enrollment_in_flight;
-        self.enrollment_burst = config.enrollment_burst;
-        self.enrollment_refill = config.enrollment_refill;
-        self.device_message_burst = config.device_message_burst;
-        self.device_message_refill = config.device_message_refill;
-        self
+        Self {
+            configured: *config,
+            ..FLEET_LIMITS
+        }
     }
 
     /// Binds the fleet listener on `address`, over TLS when `tls` is given,
@@ -214,10 +173,10 @@ impl FleetLimits {
         FleetService {
             unauthenticated: FleetAgentServer::from_arc(service.clone())
                 .max_decoding_message_size(self.unauthenticated_message_bytes)
-                .max_encoding_message_size(self.max_message_bytes),
+                .max_encoding_message_size(self.configured.max_message_bytes),
             devices: FleetAgentServer::from_arc(service)
-                .max_decoding_message_size(self.max_message_bytes)
-                .max_encoding_message_size(self.max_message_bytes),
+                .max_decoding_message_size(self.configured.max_message_bytes)
+                .max_encoding_message_size(self.configured.max_message_bytes),
         }
     }
 
@@ -458,10 +417,10 @@ impl Bucket {
 impl EnrollmentLimiter {
     fn new(limits: &FleetLimits) -> Self {
         Self {
-            in_flight: Arc::new(Semaphore::new(limits.enrollment_in_flight)),
+            in_flight: Arc::new(Semaphore::new(limits.configured.enrollment_in_flight)),
             peers: Arc::default(),
-            burst: f64::from(limits.enrollment_burst),
-            refill: limits.enrollment_refill,
+            burst: f64::from(limits.configured.enrollment_burst),
+            refill: limits.configured.enrollment_refill,
             completion_wait: limits.enrollment_completion_wait,
         }
     }
@@ -572,7 +531,8 @@ impl DeviceStreams {
             .devices
             .lock()
             .expect("device stream registry lock poisoned");
-        let max_devices = MAX_TRACKED_DEVICES.max(self.limits.max_connections.saturating_mul(2));
+        let max_devices =
+            MAX_TRACKED_DEVICES.max(self.limits.configured.max_connections.saturating_mul(2));
         if devices.len() >= max_devices && !devices.contains_key(device_id) {
             devices.retain(|_, device| device.current.is_some());
         }
@@ -581,7 +541,7 @@ impl DeviceStreams {
             .entry(device_id.to_owned())
             .or_insert_with(|| DeviceState {
                 current: None,
-                messages: Bucket::full(f64::from(self.limits.device_message_burst), now),
+                messages: Bucket::full(f64::from(self.limits.configured.device_message_burst), now),
                 opens: Bucket::full(f64::from(self.limits.stream_open_burst), now),
             });
         f(device)
@@ -640,8 +600,8 @@ impl DeviceStream {
         self.streams.with_device(&self.device_id, |device| {
             device.messages.take(
                 now,
-                limits.device_message_refill,
-                f64::from(limits.device_message_burst),
+                limits.configured.device_message_refill,
+                f64::from(limits.configured.device_message_burst),
             )
         })
     }

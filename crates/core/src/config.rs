@@ -578,7 +578,7 @@ pub enum ControllerAdminTransport {
 /// Limits on the device-facing fleet API that depend on the deployment: how
 /// many devices connect, how many share one client address, and how much they
 /// send. Unset fields keep their defaults.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct ControllerFleetLimitsConfig {
@@ -623,18 +623,23 @@ pub struct ControllerFleetLimitsConfig {
     pub device_message_refill: Duration,
 }
 
+impl ControllerFleetLimitsConfig {
+    /// The defaults, usable in constants.
+    pub const DEFAULT: Self = Self {
+        max_connections: 50_000,
+        connections_per_address: 4_096,
+        max_message_bytes: 4 * 1024 * 1024,
+        enrollment_in_flight: 64,
+        enrollment_burst: 60,
+        enrollment_refill: Duration::from_secs(1),
+        device_message_burst: 600,
+        device_message_refill: Duration::from_millis(50),
+    };
+}
+
 impl Default for ControllerFleetLimitsConfig {
     fn default() -> Self {
-        Self {
-            max_connections: 50_000,
-            connections_per_address: 4_096,
-            max_message_bytes: 4 * 1024 * 1024,
-            enrollment_in_flight: 64,
-            enrollment_burst: 60,
-            enrollment_refill: Duration::from_secs(1),
-            device_message_burst: 600,
-            device_message_refill: Duration::from_millis(50),
-        }
+        Self::DEFAULT
     }
 }
 

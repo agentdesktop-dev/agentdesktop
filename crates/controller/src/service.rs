@@ -723,11 +723,11 @@ mod tests {
         let database = Database::connect(&format!("sqlite://{}?mode=rwc", path.display()))
             .await
             .expect("connect database");
-        let full = FleetLimits {
-            enrollment_in_flight: 0,
+        let mut full = FleetLimits {
             enrollment_completion_wait: std::time::Duration::from_millis(10),
             ..FleetLimits::from_config(&Default::default())
         };
+        full.configured.enrollment_in_flight = 0;
         let service = FleetAgentService::new(
             None,
             database,

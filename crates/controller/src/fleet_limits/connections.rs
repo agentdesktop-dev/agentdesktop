@@ -170,8 +170,8 @@ impl Connections {
     pub(super) fn new(limits: &FleetLimits) -> Self {
         Self {
             shared: Arc::new(Shared {
-                max_connections: limits.max_connections,
-                connections_per_address: limits.connections_per_address,
+                max_connections: limits.configured.max_connections,
+                connections_per_address: limits.configured.connections_per_address,
                 first_request: limits.first_request,
                 idle: limits.idle_connection,
                 state: Mutex::default(),
