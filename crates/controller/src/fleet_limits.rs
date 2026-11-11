@@ -268,7 +268,7 @@ impl FleetListener {
 /// The fleet gRPC service, with a smaller request limit for enrollment and for
 /// callers without a device certificate. Tonic sets message limits per service,
 /// so those requests go to their own instance of the generated server.
-pub struct FleetService<T> {
+struct FleetService<T> {
     unauthenticated: FleetAgentServer<T>,
     devices: FleetAgentServer<T>,
 }
