@@ -423,10 +423,36 @@ impl PeerBuckets {
     }
 }
 
+/// A token bucket: up to `burst` tokens, refilled at one per `refill`.
 #[derive(Clone, Copy)]
 struct Bucket {
     tokens: f64,
     updated: Instant,
+}
+
+impl Bucket {
+    fn full(burst: f64, now: Instant) -> Self {
+        Self {
+            tokens: burst,
+            updated: now,
+        }
+    }
+
+    /// Refills the bucket for the time since its last use, then takes one token.
+    fn take(&mut self, now: Instant, refill: Duration, burst: f64) -> bool {
+        self.tokens = self.refilled(now, refill, burst);
+        self.updated = now;
+        if self.tokens < 1.0 {
+            return false;
+        }
+        self.tokens -= 1.0;
+        true
+    }
+
+    fn refilled(self, now: Instant, refill: Duration, burst: f64) -> f64 {
+        let elapsed = now.saturating_duration_since(self.updated);
+        (self.tokens + elapsed.as_secs_f64() / refill.as_secs_f64()).min(burst)
+    }
 }
 
 impl EnrollmentLimiter {
@@ -482,14 +508,9 @@ impl EnrollmentLimiter {
 
     fn take(&self, peer: IpAddr, now: Instant) -> bool {
         let mut peers = self.peers.lock().expect("enrollment limiter lock poisoned");
-        let bucket = peers.bucket(
-            address_key(peer),
-            Bucket {
-                tokens: self.burst,
-                updated: now,
-            },
-        );
-        take_token(bucket, now, self.refill, self.burst)
+        peers
+            .bucket(address_key(peer), Bucket::full(self.burst, now))
+            .take(now, self.refill, self.burst)
     }
 }
 
@@ -501,17 +522,6 @@ fn in_flight_refusal() -> Status {
         );
     }
     Status::resource_exhausted("too many enrollment requests in progress; retry later")
-}
-
-/// Refills `bucket` for the time since its last use, then takes one token.
-fn take_token(bucket: &mut Bucket, now: Instant, refill: Duration, burst: f64) -> bool {
-    bucket.tokens = refilled(*bucket, now, refill, burst);
-    bucket.updated = now;
-    if bucket.tokens < 1.0 {
-        return false;
-    }
-    bucket.tokens -= 1.0;
-    true
 }
 
 /// `Connect` state by device. A device has at most one open stream: opening a
@@ -571,14 +581,8 @@ impl DeviceStreams {
             .entry(device_id.to_owned())
             .or_insert_with(|| DeviceState {
                 current: None,
-                messages: Bucket {
-                    tokens: f64::from(self.limits.device_message_burst),
-                    updated: now,
-                },
-                opens: Bucket {
-                    tokens: f64::from(self.limits.stream_open_burst),
-                    updated: now,
-                },
+                messages: Bucket::full(f64::from(self.limits.device_message_burst), now),
+                opens: Bucket::full(f64::from(self.limits.stream_open_burst), now),
             });
         f(device)
     }
@@ -589,8 +593,7 @@ impl DeviceStreams {
     pub fn admit_open(&self, device_id: &str) -> Result<(), Status> {
         let limits = self.limits;
         let admitted = self.with_device(device_id, |device| {
-            take_token(
-                &mut device.opens,
+            device.opens.take(
                 Instant::now(),
                 limits.stream_open_refill,
                 f64::from(limits.stream_open_burst),
@@ -635,8 +638,7 @@ impl DeviceStream {
     pub fn take_message(&self, now: Instant) -> bool {
         let limits = self.streams.limits;
         self.streams.with_device(&self.device_id, |device| {
-            take_token(
-                &mut device.messages,
+            device.messages.take(
                 now,
                 limits.device_message_refill,
                 f64::from(limits.device_message_burst),
@@ -662,11 +664,6 @@ impl Drop for DeviceStream {
             device.current = None;
         }
     }
-}
-
-fn refilled(bucket: Bucket, now: Instant, refill: Duration, burst: f64) -> f64 {
-    let elapsed = now.saturating_duration_since(bucket.updated);
-    (bucket.tokens + elapsed.as_secs_f64() / refill.as_secs_f64()).min(burst)
 }
 
 /// A warning that fires once per refused request or connection. A flood would
