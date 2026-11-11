@@ -18,6 +18,18 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
 {{- end }}
 
+{{- define "agentdesktop-controller.gatewayJwksEnabled" -}}
+{{- if and .Values.gatewayJwks.enabled (or .Values.gatewayJwt .Values.existingConfigSecret) }}true{{- end }}
+{{- end }}
+
+{{- define "agentdesktop-controller.gatewayJwksServiceName" -}}
+{{- printf "%s-jwks" (include "agentdesktop-controller.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "agentdesktop-controller.gatewayJwksServicePort" -}}
+{{- .Values.gatewayJwks.service.port | default (ternary 443 80 .Values.gatewayJwks.tls) }}
+{{- end }}
+
 {{- define "agentdesktop-controller.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "agentdesktop-controller.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}

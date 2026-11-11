@@ -191,6 +191,25 @@
         "path"
       ]
     },
+    "ControllerGatewayJwksListener": {
+      "description": "Dedicated listener for the LLM gateway JWKS.",
+      "type": "object",
+      "properties": {
+        "listen": {
+          "description": "Address on which the JWKS listener accepts connections.",
+          "type": "string"
+        },
+        "tls": {
+          "description": "Serve HTTPS with the controller certificate from `tls` instead of plain HTTP.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "listen"
+      ]
+    },
     "ControllerGatewayJwtConfig": {
       "description": "Settings for issuing short-lived LLM gateway JWTs.",
       "type": "object",
@@ -199,6 +218,17 @@
           "description": "Issuer claim placed in generated JWTs.",
           "type": "string",
           "default": "agentdesktop-controller"
+        },
+        "jwksListener": {
+          "description": "Listener that serves only `/.well-known/jwks.json`, which the fleet listener also serves.\n\nLLM gateways need the JWKS to verify controller-issued JWTs. Point them here so a NetworkPolicy or firewall can allow them this port and block the management API, which can read the device inventory and delete devices. Gateways that export usage also need the fleet port.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ControllerGatewayJwksListener"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "keyId": {
           "description": "Key identifier placed in generated JWT headers.",

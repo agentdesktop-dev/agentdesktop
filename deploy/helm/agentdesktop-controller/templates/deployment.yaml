@@ -39,6 +39,11 @@ spec:
         - name: admin
           containerPort: 8080
           protocol: TCP
+        {{- if include "agentdesktop-controller.gatewayJwksEnabled" . }}
+        - name: jwks
+          containerPort: {{ .Values.gatewayJwks.port }}
+          protocol: TCP
+        {{- end }}
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

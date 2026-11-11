@@ -1,0 +1,17 @@
+{{- if include "agentdesktop-controller.gatewayJwksEnabled" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "agentdesktop-controller.gatewayJwksServiceName" . }}
+  labels:
+    {{- include "agentdesktop-controller.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.gatewayJwks.service.type }}
+  selector:
+    {{- include "agentdesktop-controller.selectorLabels" . | nindent 4 }}
+  ports:
+  - name: {{ ternary "https" "http" .Values.gatewayJwks.tls }}
+    port: {{ include "agentdesktop-controller.gatewayJwksServicePort" . }}
+    targetPort: jwks
+    protocol: TCP
+{{- end }}

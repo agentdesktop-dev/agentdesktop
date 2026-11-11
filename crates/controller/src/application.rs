@@ -65,7 +65,18 @@ pub async fn run(
         tracing::info!("LLM gateway JWT issuance enabled");
     }
     let gateway_jwks = gateway_jwt_issuer.as_ref().map(GatewayJwtIssuer::jwks);
-    let admin_gateway_jwks = gateway_jwks.clone();
+    let jwks_listener = config
+        .gateway_jwt
+        .as_ref()
+        .and_then(|gateway| gateway.jwks_listener.as_ref())
+        .zip(gateway_jwks.clone())
+        .map(|(listener, jwks)| {
+            let tls = listener.tls.then(|| gateway_jwt::JwksTls {
+                certificate: tls.certificate.clone(),
+                key: tls.key.clone(),
+            });
+            gateway_jwt::serve(listener.listen, jwks, tls)
+        });
     let usage_token = config
         .usage
         .as_ref()
@@ -145,13 +156,13 @@ pub async fn run(
             .await
             .context("serve fleet gRPC API")
     };
-    let admin = management::serve(
-        admin_listen,
-        admin_state,
-        admin_gateway_jwks,
-        config.admin_access,
-        extensions,
-    );
-    tokio::try_join!(fleet, admin)?;
+    let admin = management::serve(admin_listen, admin_state, config.admin_access, extensions);
+    let jwks = async move {
+        match jwks_listener {
+            Some(serve) => serve.await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::try_join!(fleet, admin, jwks)?;
     Ok(())
 }

@@ -191,6 +191,28 @@ async fn request(app: Router, path: &str, method: Method, headers: HeaderMap) ->
 }
 
 #[tokio::test]
+async fn management_router_does_not_publish_the_gateway_jwks() {
+    let (database, path) = database().await;
+    let router = super::super::router(
+        state(database),
+        &ControllerAdminAccess::Local,
+        super::super::Extensions::default(),
+    )
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(header::HOST, "127.0.0.1:8080".parse().unwrap());
+    let response = request(router, "/.well-known/jwks.json", Method::GET, headers).await;
+    assert_ne!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/jwk-set+json")
+    );
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
 async fn local_mode_keeps_ui_api_and_bootstrap_without_session_tables() {
     let (database, path) = database().await;
     let auth = Auth::new(Arc::new(LocalAccess));
@@ -348,7 +370,6 @@ async fn authenticated_configuration_is_rejected_without_a_provider() {
     let error = match super::super::serve(
         "127.0.0.1:0".parse().unwrap(),
         state(database),
-        None,
         authenticated_access(),
         super::super::Extensions::default(),
     )
@@ -432,7 +453,6 @@ async fn management_routes_check_precise_operations() {
     let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
     let router = super::super::router(
         state(database),
-        None,
         &authenticated_access(),
         super::super::Extensions {
             authentication: Some(Arc::new(RecordingProvider(calls.clone()))),
@@ -475,7 +495,6 @@ async fn local_configuration_is_rejected_with_a_provider() {
     let (database, path) = database().await;
     let error = match super::super::router(
         state(database),
-        None,
         &ControllerAdminAccess::Local,
         super::super::Extensions {
             authentication: Some(Arc::new(TokenProvider)),
@@ -639,7 +658,6 @@ async fn extension_providers_authenticate_and_authorize_the_management_router() 
     let (database, path) = database().await;
     let router = super::super::router(
         state(database),
-        None,
         &authenticated_access(),
         super::super::Extensions {
             authentication: Some(Arc::new(TokenProvider)),
@@ -757,7 +775,6 @@ async fn direct_tls_transport_serves_the_authenticated_router_over_https_only() 
     let access = ControllerAdminAccess::Authenticated(admin);
     let router = super::super::router(
         state(database),
-        None,
         &access,
         super::super::Extensions {
             authentication: Some(Arc::new(TokenProvider)),

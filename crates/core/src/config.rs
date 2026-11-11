@@ -619,6 +619,24 @@ pub struct ControllerGatewayJwtConfig {
     #[serde(default = "default_gateway_jwt_lifetime", with = "humantime_serde")]
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub lifetime: Duration,
+    /// Listener that serves only `/.well-known/jwks.json`, which the fleet listener also serves.
+    ///
+    /// LLM gateways need the JWKS to verify controller-issued JWTs. Point them here so a NetworkPolicy or firewall can allow them this port and block the management API, which can read the device inventory and delete devices. Gateways that export usage also need the fleet port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks_listener: Option<ControllerGatewayJwksListener>,
+}
+
+/// Dedicated listener for the LLM gateway JWKS.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerGatewayJwksListener {
+    /// Address on which the JWKS listener accepts connections.
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub listen: SocketAddr,
+    /// Serve HTTPS with the controller certificate from `tls` instead of plain HTTP.
+    #[serde(default)]
+    pub tls: bool,
 }
 
 /// Collection of LLM token and cost records that agentgateway exports to the
@@ -1412,6 +1430,15 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
         }
         if gateway.lifetime.is_zero() {
             anyhow::bail!("gatewayJwt.lifetime must be greater than zero");
+        }
+        if let Some(jwks) = &gateway.jwks_listener
+            && [config.fleet_listen, config.admin_listen]
+                .iter()
+                .any(|other| other.port() == jwks.listen.port())
+        {
+            anyhow::bail!(
+                "gatewayJwt.jwksListener.listen must use a port other than fleetListen and adminListen"
+            );
         }
     }
     Ok(config)
@@ -2245,6 +2272,48 @@ oidc:
         assert_eq!(
             controller.tls.files().certificate,
             std::path::PathBuf::from("/etc/agentdesktop/tls/controller.pem")
+        );
+    }
+
+    #[test]
+    fn controller_gateway_jwks_listener_is_optional_and_separate_from_other_listeners() {
+        let base = r#"
+tls: /etc/agentdesktop/tls
+oidc:
+  issuer: https://idp.example.com
+  clientId: agentdesktop
+gatewayJwt:
+  privateKey: /gateway-jwt-key.pem
+"#;
+        let controller = parse_controller(base).expect("gateway JWT without JWKS listener");
+        assert!(controller.gateway_jwt.unwrap().jwks_listener.is_none());
+
+        let controller = parse_controller(&format!(
+            "{base}  jwksListener:\n    listen: 0.0.0.0:8081\n"
+        ))
+        .expect("plain HTTP JWKS listener");
+        let listener = controller.gateway_jwt.unwrap().jwks_listener.unwrap();
+        assert_eq!(listener.listen, "0.0.0.0:8081".parse().unwrap());
+        assert!(!listener.tls);
+
+        let controller = parse_controller(&format!(
+            "{base}  jwksListener:\n    listen: 127.0.0.1:8444\n    tls: true\n"
+        ))
+        .expect("HTTPS JWKS listener");
+        assert!(controller.gateway_jwt.unwrap().jwks_listener.unwrap().tls);
+
+        for listen in ["0.0.0.0:8443", "127.0.0.1:8080"] {
+            assert!(
+                parse_controller(&format!("{base}  jwksListener:\n    listen: {listen}\n"))
+                    .is_err(),
+                "{listen}"
+            );
+        }
+        assert!(
+            parse_controller(&format!(
+                "{base}  jwksListener:\n    listen: 127.0.0.1:8081\n    path: /jwks\n"
+            ))
+            .is_err()
         );
     }
 

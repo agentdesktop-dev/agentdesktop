@@ -340,7 +340,9 @@ managed tools obtain short-lived gateway credentials through the daemon:
 4. The daemon caches the JWT for at most 60 seconds per client ID, never
    within 30 seconds of its expiry, and never across logout or re-enrollment.
 5. The gateway verifies the JWT with the controller's public keys, served at
-   `/.well-known/jwks.json`.
+   `/.well-known/jwks.json` on the fleet listener and, when configured, on the
+   dedicated `gatewayJwt.jwksListener` (plain HTTP, or HTTPS with the
+   controller certificate). The management listener does not serve them.
 
 With `authentication.type: oidc`, the controller is not involved. The daemon
 signs the user in to the gateway's own OIDC client, using the browser or

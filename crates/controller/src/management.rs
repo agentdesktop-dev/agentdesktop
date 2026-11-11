@@ -2,7 +2,7 @@
 //! Handler authorization is explicit; authentication and policy implementations are
 //! supplied through `auth`, independently of the fleet enrollment API.
 
-use std::{borrow::Cow, net::SocketAddr, path::Path, sync::Arc};
+use std::{borrow::Cow, net::SocketAddr, sync::Arc};
 
 use anyhow::Context as _;
 use axum::{
@@ -17,11 +17,7 @@ use tracing::info;
 
 use agentdesktop_core::config::{ControllerAdminAccess, ControllerAdminTransport};
 
-use crate::{
-    daemon_config::DaemonConfigStore,
-    database::Database,
-    gateway_jwt::{self, GatewayJwks},
-};
+use crate::{daemon_config::DaemonConfigStore, database::Database};
 
 pub mod auth;
 mod handlers;
@@ -45,7 +41,7 @@ pub struct Extensions {
     /// Required for authenticated access, and rejected for local access, which always
     /// uses the built-in loopback provider.
     pub authentication: Option<Arc<dyn auth::Provider>>,
-    /// Extension-owned APIs, protected separately from public auth/JWKS routes.
+    /// Extension-owned APIs, protected separately from public auth routes.
     pub routes: Vec<ProtectedRoutes>,
     /// Optional complete UI bundle that replaces the built-in one, e.g. to add pages.
     pub assets: Option<AssetLookup>,
@@ -112,11 +108,10 @@ pub fn auth(access: &ControllerAdminAccess, extensions: &Extensions) -> anyhow::
 pub async fn serve(
     address: SocketAddr,
     state: State,
-    gateway_jwks: Option<GatewayJwks>,
     access: ControllerAdminAccess,
     extensions: Extensions,
 ) -> anyhow::Result<()> {
-    let app = router(state, gateway_jwks, &access, extensions)?;
+    let app = router(state, &access, extensions)?;
     let listener = tokio::net::TcpListener::bind(address).await?;
     serve_router(listener, app, access).await
 }
@@ -130,10 +125,9 @@ pub async fn serve_router(
     if let ControllerAdminAccess::Authenticated(config) = &access
         && let ControllerAdminTransport::Tls { certificate, key } = &config.transport
     {
-        let tls = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(admin_tls_config(
-            certificate,
-            key,
-        )?));
+        let tls = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(
+            agentdesktop_core::tls::server_config(certificate, key, "admin")?,
+        ));
         info!(listen = %address, "controller authenticated admin HTTPS listening");
         axum_server::from_tcp_rustls(listener.into_std()?, tls)?
             .serve(app.into_make_service())
@@ -146,37 +140,11 @@ pub async fn serve_router(
     Ok(())
 }
 
-/// Admin TLS identity with an explicit crypto provider, so the listener does not
-/// depend on which rustls backends the final binary happens to enable.
-fn admin_tls_config(certificate: &Path, key: &Path) -> anyhow::Result<rustls::ServerConfig> {
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
-    let certificates = CertificateDer::pem_file_iter(certificate)
-        .and_then(Iterator::collect::<Result<Vec<_>, _>>)
-        .with_context(|| format!("read admin TLS certificate {}", certificate.display()))?;
-    anyhow::ensure!(
-        !certificates.is_empty(),
-        "admin TLS certificate {} contains no certificates",
-        certificate.display()
-    );
-    let key = PrivateKeyDer::from_pem_file(key)
-        .with_context(|| format!("read admin TLS key {}", key.display()))?;
-    let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()?
-    .with_no_client_auth()
-    .with_single_cert(certificates, key)
-    .context("load admin TLS identity")?;
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-    Ok(config)
-}
-
-/// Compose authenticated APIs/UI and deliberately public auth/JWKS endpoints.
+/// Compose authenticated APIs/UI and deliberately public auth endpoints.
 /// The provider and HTTP safeguards both derive from `access`, so they cannot disagree.
 /// Permissions are checked by handlers; providers must not infer them from paths.
 pub fn router(
     state: State,
-    gateway_jwks: Option<GatewayJwks>,
     access: &ControllerAdminAccess,
     extensions: Extensions,
 ) -> anyhow::Result<Router> {
@@ -224,9 +192,7 @@ pub fn router(
     for routes in extensions.routes {
         app = app.route(routes.path, auth.authenticate_api(routes.methods));
     }
-    // Private routes default to no-store; public JWKS keeps its own caching. Common
-    // HTTP safeguards still wrap all routes.
-    Ok(policy.apply(http::private_routes(app).merge(gateway_jwt::routes(gateway_jwks))))
+    Ok(policy.apply(http::private_routes(app)))
 }
 
 fn asset(assets: AssetLookup, uri: &Uri) -> Response {
