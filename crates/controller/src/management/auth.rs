@@ -24,8 +24,8 @@ use axum::{
 };
 use serde_json::json;
 
-use super::audit::{Actor, AuditEvent, AuditLog, EventKind, Outcome, RequestInfo, Target};
-use authentication::Principal;
+use crate::audit::{Actor, AuditEvent, AuditLog, EventKind, Outcome, RequestInfo, Target};
+use authentication::{Principal, PrincipalKind};
 use authorization::AccessRequest;
 
 pub mod authentication;
@@ -373,6 +373,32 @@ async fn record_completion(context: &Context, status: StatusCode) {
             tracing::error!(error = format!("{error:#}"), subject = %context.principal.subject,
                 path = %context.request.info.path, status = status.as_u16(),
                 "failed to record admin action completion");
+        }
+    }
+}
+
+impl From<&Principal> for Actor {
+    fn from(principal: &Principal) -> Self {
+        let claim = |name: &str| {
+            principal
+                .claims
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        };
+        let (kind, client_id) = match &principal.kind {
+            PrincipalKind::Local => ("local", None),
+            PrincipalKind::Human => ("human", None),
+            PrincipalKind::Service { client_id } => ("service", Some(client_id.clone())),
+        };
+        Self {
+            kind,
+            issuer: principal.issuer.clone(),
+            subject: principal.subject.clone(),
+            client_id,
+            claims_verified_at: principal.claims_verified_at,
+            email: claim("email"),
+            name: claim("name"),
         }
     }
 }

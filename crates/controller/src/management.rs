@@ -23,12 +23,11 @@ use crate::{
     gateway_jwt::{self, GatewayJwks},
 };
 
-pub mod audit;
 pub mod auth;
 mod handlers;
 pub mod http;
 
-use audit::AuditLog;
+use crate::audit::AuditLog;
 use auth::{
     Auth,
     authorization::{self, AccessRequest, Verb},

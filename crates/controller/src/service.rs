@@ -19,14 +19,12 @@ use agentdesktop_core::config::{LlmGatewayAuthentication, ProgramsConfig};
 use agentdesktop_usage::UsageError;
 
 use crate::{
+    audit::{Actor, AuditEvent, AuditLog, EventKind, Outcome, RequestInfo},
     daemon_config::DaemonConfigStore,
     database::{Database, DevicePrincipal},
     device_ca::DeviceCertificateIssuer,
     gateway_jwt::GatewayJwtIssuer,
-    management::{
-        audit::{Actor, AuditEvent, AuditLog, EventKind, Outcome, RequestInfo},
-        auth::authorization::DEVICES,
-    },
+    management::auth::authorization::DEVICES,
     oidc::{CompletedEnrollment, OidcPrincipal, OidcProvider},
 };
 
@@ -762,10 +760,10 @@ mod tests {
         device_id_from_certificate, subscription_is_configured_for_client,
     };
     use crate::{
+        audit::{AuditLog, RequestInfo},
         daemon_config::DaemonConfigStore,
         database::Database,
         device_ca::DeviceCertificateIssuer,
-        management::audit::{AuditLog, RequestInfo},
         oidc::{CompletedEnrollment, OidcPrincipal},
     };
 

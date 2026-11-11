@@ -833,7 +833,7 @@ received. A mutation produces two records:
 A mutating request that succeeds or fails with a server error without any
 permission check is recorded with outcome `unaudited`. Allowed reads are not
 recorded. Compiled-in authentication providers record their own sign-in,
-sign-out and reauthentication events through `management::audit::AuditLog`.
+sign-out and reauthentication events through `audit::AuditLog`.
 
 The device-facing fleet API records:
 

@@ -29,7 +29,7 @@ pub async fn run(
     management::auth(
         &config.admin_access,
         &extensions,
-        management::audit::AuditLog::new(database.clone()),
+        crate::audit::AuditLog::new(database.clone()),
     )?;
     let tls = config.tls.files();
     let daemon_config = match &config.daemon_config {

@@ -1,4 +1,4 @@
-//! Management audit log.
+//! Controller audit log, shared by the management API and the fleet API.
 //!
 //! Each event is appended to the append-only `admin_audit_events` table and then
 //! written as one JSON line to stdout, where the deployment's log shipper forwards
@@ -28,7 +28,6 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-use super::auth::authentication::{Principal, PrincipalKind};
 use crate::database::{
     Database,
     audit::{AuditColumns, AuditRow},
@@ -125,7 +124,8 @@ impl Serialize for Outcome {
 
 /// Who acted, from verified credential evidence only.
 ///
-/// This is the audit schema's view of a [`Principal`], not a copy of it. It keeps
+/// This is the audit schema's view of a
+/// [`Principal`](crate::management::auth::authentication::Principal), not a copy of it. It keeps
 /// a stable field layout for SIEM parsers, independent of internal refactors
 /// (`Principal` is not `Serialize`). It also keeps only the identifying claims
 /// (email, name) rather than the full verified claim snapshot, which would put
@@ -142,32 +142,6 @@ pub struct Actor {
     pub email: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-}
-
-impl From<&Principal> for Actor {
-    fn from(principal: &Principal) -> Self {
-        let claim = |name: &str| {
-            principal
-                .claims
-                .get(name)
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        };
-        let (kind, client_id) = match &principal.kind {
-            PrincipalKind::Local => ("local", None),
-            PrincipalKind::Human => ("human", None),
-            PrincipalKind::Service { client_id } => ("service", Some(client_id.clone())),
-        };
-        Self {
-            kind,
-            issuer: principal.issuer.clone(),
-            subject: principal.subject.clone(),
-            client_id,
-            claims_verified_at: principal.claims_verified_at,
-            email: claim("email"),
-            name: claim("name"),
-        }
-    }
 }
 
 impl Actor {

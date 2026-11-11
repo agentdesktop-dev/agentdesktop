@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 use tracing::info;
 
 use super::{
-    Settings, State as ManagementState, audit,
+    Settings, State as ManagementState,
     auth::{
         Context, Error,
         authorization::{self, AccessRequest, Verb},
@@ -230,7 +230,7 @@ pub(super) async fn audit_events(
         .map(|row| row.seq);
     let events = rows
         .iter()
-        .map(audit::published)
+        .map(crate::audit::published)
         .collect::<anyhow::Result<_>>()?;
     Ok(Json(AuditPage {
         events,
