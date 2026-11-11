@@ -241,6 +241,55 @@ async fn a_connection_that_stops_answering_pings_is_closed() {
     bounded(until_closed(stream)).await;
 }
 
+/// The error code of the GOAWAY the server sends, or `None` if it closes the
+/// connection without one.
+async fn goaway_code(mut stream: TcpStream) -> Option<u32> {
+    loop {
+        let mut header = [0_u8; 9];
+        stream.read_exact(&mut header).await.ok()?;
+        let length = u32::from_be_bytes([0, header[0], header[1], header[2]]) as usize;
+        let mut payload = vec![0_u8; length];
+        stream.read_exact(&mut payload).await.ok()?;
+        // GOAWAY: last stream ID, then the error code.
+        if header[3] == 0x7 {
+            return Some(u32::from_be_bytes(payload[4..8].try_into().unwrap()));
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_client_that_provokes_too_many_stream_resets_is_disconnected() {
+    let limits = FleetLimits {
+        error_resets_per_connection: 1,
+        ..FLEET_LIMITS
+    };
+    let address = serve(
+        limits,
+        None,
+        Slow {
+            delay: Duration::ZERO,
+        },
+    )
+    .await;
+    let mut stream = TcpStream::connect(address).await.unwrap();
+
+    // The preface and an empty SETTINGS frame, then two PRIORITY frames that
+    // make streams 1 and 3 depend on themselves. Each is a stream error, so the
+    // server resets the stream.
+    let mut frames =
+        b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00".to_vec();
+    for stream_id in [1_u32, 3] {
+        frames.extend_from_slice(&[0, 0, 5, 0x2, 0]);
+        frames.extend_from_slice(&stream_id.to_be_bytes());
+        frames.extend_from_slice(&stream_id.to_be_bytes());
+        frames.push(0);
+    }
+    stream.write_all(&frames).await.unwrap();
+
+    // ENHANCE_YOUR_CALM
+    assert_eq!(bounded(goaway_code(stream)).await, Some(0xb));
+}
+
 /// How long two concurrent half-second calls take on one connection.
 async fn two_calls_on_one_connection(limits: FleetLimits) -> Duration {
     let delay = Duration::from_millis(500);

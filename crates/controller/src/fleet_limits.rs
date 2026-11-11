@@ -78,6 +78,13 @@ pub struct FleetLimits {
     /// cannot occupy an unbounded share of the server.
     pub requests_per_connection: usize,
     pub streams_per_connection: u32,
+    /// Streams the server may reset over a connection's lifetime because the
+    /// client broke the HTTP/2 protocol on them. Past this, the connection is
+    /// closed with `ENHANCE_YOUR_CALM`. A client can otherwise provoke resets
+    /// without end, which bypasses the protection against clients resetting
+    /// streams themselves ("MadeYouReset"). h2 and hyper default to 1024, but
+    /// tonic passes `None` when this is not set, which removes the limit.
+    pub error_resets_per_connection: usize,
     /// Largest encoded message an enrolled device's calls may send or receive.
     pub max_message_bytes: usize,
     /// Largest request from a caller without a device certificate: enrollment,
@@ -127,6 +134,7 @@ const FLEET_LIMITS: FleetLimits = FleetLimits {
     idle_connection: Duration::from_secs(120),
     requests_per_connection: 32,
     streams_per_connection: 64,
+    error_resets_per_connection: 1024,
     max_message_bytes: 4 * 1024 * 1024,
     unauthenticated_message_bytes: 64 * 1024,
     enrollment_in_flight: 64,
@@ -175,6 +183,7 @@ impl FleetLimits {
             .http2_keepalive_timeout(Some(self.keepalive_timeout))
             .concurrency_limit_per_connection(self.requests_per_connection)
             .max_concurrent_streams(self.streams_per_connection)
+            .http2_max_local_error_reset_streams(Some(self.error_resets_per_connection))
             // agentgateway fetches the gateway JWKS from this listener over HTTP/1.
             .accept_http1(true)
             .layer(connections.track_requests());
