@@ -2812,7 +2812,7 @@ async fn a_missing_native_install_answers_400() {
 #[tokio::test(start_paused = true)]
 async fn an_unreadable_applied_configuration_answers_500() {
     let h = Harness::start(Setup {
-        config: "controller:\n  address: https://controller.example.com\n",
+        config: "controller:\n  address: https://controller.example.com\n  caCertificatePath: controller-ca.pem\n",
         remote_config: Some("llmGateway: [this is not a gateway"),
         credentials_must_not_be_reached: true,
         ..Setup::default()
@@ -2830,7 +2830,7 @@ async fn the_configuration_is_read_before_the_program_is_resolved() {
     // configuration, so the handler reads the configuration first and a
     // config read failure (500) precedes a native not-found (400).
     let h = Harness::start(Setup {
-        config: "controller:\n  address: https://controller.example.com\n",
+        config: "controller:\n  address: https://controller.example.com\n  caCertificatePath: controller-ca.pem\n",
         remote_config: Some("llmGateway: [this is not a gateway"),
         claude_installed: false,
         ..Setup::default()

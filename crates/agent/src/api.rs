@@ -1159,6 +1159,7 @@ llmGateway:
             r#"
 controller:
   address: https://controller.example.com
+  caCertificatePath: controller-ca.pem
 "#,
         )
         .unwrap();
@@ -1199,6 +1200,7 @@ containment:
             r#"
 controller:
   address: https://controller.example.com
+  caCertificatePath: controller-ca.pem
 containment:
   programs:
     claudeCode:
@@ -1244,6 +1246,7 @@ llmGateway:
             r#"
 controller:
   address: https://controller.example.com
+  caCertificatePath: controller-ca.pem
 llmGateway:
   url: http://127.0.0.1:4001
   authentication:
