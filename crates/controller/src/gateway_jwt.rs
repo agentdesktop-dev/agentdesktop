@@ -73,9 +73,11 @@ pub async fn serve_listener(
     let app = routes(Some(jwks)).layer(middleware::from_fn(safeguard_request));
     match tls {
         Some(tls) => {
-            let config = RustlsConfig::from_pem_file(&tls.certificate, &tls.key)
-                .await
-                .context("load gateway JWKS TLS identity")?;
+            let config = RustlsConfig::from_config(Arc::new(crate::management::tls_server_config(
+                &tls.certificate,
+                &tls.key,
+                "gateway JWKS",
+            )?));
             tracing::info!(listen = %address, tls = true, "gateway JWKS listening");
             axum_server::from_tcp_rustls(listener.into_std()?, config)?
                 .serve(app.into_make_service())

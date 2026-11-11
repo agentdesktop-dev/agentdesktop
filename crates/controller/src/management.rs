@@ -125,9 +125,10 @@ pub async fn serve_router(
     if let ControllerAdminAccess::Authenticated(config) = &access
         && let ControllerAdminTransport::Tls { certificate, key } = &config.transport
     {
-        let tls = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(admin_tls_config(
+        let tls = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls_server_config(
             certificate,
             key,
+            "admin",
         )?));
         info!(listen = %address, "controller authenticated admin HTTPS listening");
         axum_server::from_tcp_rustls(listener.into_std()?, tls)?
@@ -141,27 +142,31 @@ pub async fn serve_router(
     Ok(())
 }
 
-/// Admin TLS identity with an explicit crypto provider, so the listener does not
-/// depend on which rustls backends the final binary happens to enable.
-fn admin_tls_config(certificate: &Path, key: &Path) -> anyhow::Result<rustls::ServerConfig> {
+/// Server TLS identity with an explicit crypto provider, so a listener does not depend on
+/// which rustls backends the final binary happens to enable. `purpose` labels errors.
+pub(crate) fn tls_server_config(
+    certificate: &Path,
+    key: &Path,
+    purpose: &str,
+) -> anyhow::Result<rustls::ServerConfig> {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
     let certificates = CertificateDer::pem_file_iter(certificate)
         .and_then(Iterator::collect::<Result<Vec<_>, _>>)
-        .with_context(|| format!("read admin TLS certificate {}", certificate.display()))?;
+        .with_context(|| format!("read {purpose} TLS certificate {}", certificate.display()))?;
     anyhow::ensure!(
         !certificates.is_empty(),
-        "admin TLS certificate {} contains no certificates",
+        "{purpose} TLS certificate {} contains no certificates",
         certificate.display()
     );
     let key = PrivateKeyDer::from_pem_file(key)
-        .with_context(|| format!("read admin TLS key {}", key.display()))?;
+        .with_context(|| format!("read {purpose} TLS key {}", key.display()))?;
     let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::aws_lc_rs::default_provider(),
     ))
     .with_safe_default_protocol_versions()?
     .with_no_client_auth()
     .with_single_cert(certificates, key)
-    .context("load admin TLS identity")?;
+    .with_context(|| format!("load {purpose} TLS identity"))?;
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Ok(config)
 }
