@@ -233,10 +233,7 @@ async fn a_connection_that_stops_answering_pings_is_closed() {
 
     // Open an HTTP/2 connection (preface and an empty SETTINGS frame), then go
     // silent: never acknowledge the server's SETTINGS or PINGs.
-    stream
-        .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00")
-        .await
-        .unwrap();
+    stream.write_all(PREFACE).await.unwrap();
 
     bounded(until_closed(stream)).await;
 }
@@ -276,8 +273,7 @@ async fn a_client_that_provokes_too_many_stream_resets_is_disconnected() {
     // The preface and an empty SETTINGS frame, then two PRIORITY frames that
     // make streams 1 and 3 depend on themselves. Each is a stream error, so the
     // server resets the stream.
-    let mut frames =
-        b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00".to_vec();
+    let mut frames = PREFACE.to_vec();
     for stream_id in [1_u32, 3] {
         frames.extend_from_slice(&[0, 0, 5, 0x2, 0]);
         frames.extend_from_slice(&stream_id.to_be_bytes());
@@ -724,10 +720,7 @@ async fn a_connection_that_never_makes_a_request_is_closed() {
     let mut stream = TcpStream::connect(address).await.unwrap();
 
     // A valid HTTP/2 preface and SETTINGS frame, then no request.
-    stream
-        .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00")
-        .await
-        .unwrap();
+    stream.write_all(PREFACE).await.unwrap();
 
     bounded(until_closed(stream)).await;
 }
@@ -866,6 +859,95 @@ async fn an_open_stream_keeps_its_connection_from_going_idle() {
             .unwrap_or_else(|error| panic!("stream ended at message {message}: {error}"));
         assert!(received.is_some(), "stream closed at message {message}");
     }
+}
+
+/// The HTTP/2 client preface and an empty SETTINGS frame.
+const PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00";
+
+/// An HTTP/2 PING frame: length 8, type 6, no flags, stream 0, then its payload.
+const PING: &[u8] = &[0, 0, 8, 6, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8];
+
+/// Batches of PINGs sent before a flood gives up on the server stalling.
+const FLOOD_BATCHES: usize = 1000;
+
+/// Sends the HTTP/2 preface, then PINGs without reading the server's replies,
+/// until a write stalls or fails. The unread replies fill the server's send
+/// buffer, and HTTP/2 stops reading until it can write them.
+async fn flood_pings(stream: &mut TcpStream) {
+    stream.write_all(PREFACE).await.unwrap();
+    let pings = PING.repeat(4096);
+    for _ in 0..FLOOD_BATCHES {
+        match time::timeout(Duration::from_millis(500), stream.write_all(&pings)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) | Err(_) => return,
+        }
+    }
+    panic!("the server read every PING without stalling or closing the connection");
+}
+
+/// Connects with a small receive buffer, so the server's unread replies fill
+/// its send buffer quickly.
+async fn connect_small_window(address: SocketAddr) -> TcpStream {
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.set_recv_buffer_size(4096).unwrap();
+    socket.connect(address).await.unwrap()
+}
+
+/// Waits until at most `count` connections are open.
+async fn until_open_at_most(connections: &Connections, count: usize) {
+    while connections.open_count() > count {
+        time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_connection_that_floods_pings_without_reading_is_closed() {
+    let mut limits = FLEET_LIMITS;
+    // Long enough that the server has stopped reading when it passes.
+    limits.first_request = Duration::from_secs(2);
+    let (address, connections) = serve_tracked(
+        limits,
+        None,
+        Slow {
+            delay: Duration::ZERO,
+        },
+    )
+    .await;
+    let mut stream = connect_small_window(address).await;
+
+    flood_pings(&mut stream).await;
+
+    bounded(until_open_at_most(&connections, 0)).await;
+}
+
+#[tokio::test]
+async fn an_evicted_connection_that_floods_pings_is_closed() {
+    let mut limits = FLEET_LIMITS;
+    limits.configured.max_connections = 1;
+    // Far past the test's bound, so only eviction can end the flooding connection.
+    limits.first_request = Duration::from_secs(60);
+    let (address, connections) = serve_tracked(
+        limits,
+        None,
+        Slow {
+            delay: Duration::ZERO,
+        },
+    )
+    .await;
+    let mut flooder = connect_small_window(address).await;
+    flood_pings(&mut flooder).await;
+
+    // At the cap, the new connection evicts the flooder, which has made no
+    // request. The server answers its preface once it is admitted.
+    let mut newcomer = TcpStream::connect(address).await.unwrap();
+    newcomer.write_all(PREFACE).await.unwrap();
+    let mut settings = [0_u8; 9];
+    bounded(newcomer.read_exact(&mut settings))
+        .await
+        .expect("the new connection was refused");
+
+    bounded(until_open_at_most(&connections, 1)).await;
+    assert!(stays_open(newcomer).await, "the new connection was closed");
 }
 
 /// The RPC names in `fleet.proto`'s `FleetAgent` service.

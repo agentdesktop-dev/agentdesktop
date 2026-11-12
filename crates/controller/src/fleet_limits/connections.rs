@@ -344,7 +344,9 @@ where
 }
 
 /// An accepted fleet connection. It holds its slots until it closes, and fails
-/// its next read once it is evicted or has been idle too long.
+/// its next read, write or flush once it is evicted or has been idle too long.
+/// Writes are checked too because a client that never reads fills the server's
+/// send buffer, and HTTP/2 then stops reading until it can write.
 pub struct LimitedConnection {
     stream: TcpStream,
     peer: SocketAddr,
@@ -454,6 +456,9 @@ impl AsyncWrite for LimitedConnection {
         context: &mut Context<'_>,
         buffer: &[u8],
     ) -> Poll<io::Result<usize>> {
+        if let Err(error) = self.check_open(context) {
+            return Poll::Ready(Err(error));
+        }
         Pin::new(&mut self.stream).poll_write(context, buffer)
     }
 
@@ -462,6 +467,9 @@ impl AsyncWrite for LimitedConnection {
         context: &mut Context<'_>,
         buffers: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
+        if let Err(error) = self.check_open(context) {
+            return Poll::Ready(Err(error));
+        }
         Pin::new(&mut self.stream).poll_write_vectored(context, buffers)
     }
 
@@ -470,9 +478,13 @@ impl AsyncWrite for LimitedConnection {
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if let Err(error) = self.check_open(context) {
+            return Poll::Ready(Err(error));
+        }
         Pin::new(&mut self.stream).poll_flush(context)
     }
 
+    // Unchecked, so a connection being closed can still shut down cleanly.
     fn poll_shutdown(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.stream).poll_shutdown(context)
     }
