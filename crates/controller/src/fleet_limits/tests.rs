@@ -110,7 +110,7 @@ async fn serve(limits: FleetLimits, identity: Option<Identity>, service: Slow) -
 async fn serve_tracked(
     limits: FleetLimits,
     tls: Option<ServerTlsConfig>,
-    service: Slow,
+    service: impl FleetAgent,
 ) -> (SocketAddr, Connections) {
     // As the controller does at startup, so TLS works whichever rustls
     // backends the test build enables.
@@ -357,7 +357,11 @@ async fn an_oversized_enrollment_request_is_rejected() {
     assert_eq!(error.code(), Code::OutOfRange, "{error}");
 }
 
-/// A device CA with a server certificate for `localhost` and a device certificate.
+/// The device that `Pki`'s device certificate identifies.
+const DEVICE_ID: &str = "7ca03414-bb20-4c80-98ef-7b0538b988ba";
+
+/// A device CA with a server certificate for `localhost` and a certificate for
+/// the device `DEVICE_ID`, which the controller issues.
 struct Pki {
     ca: tonic::transport::Certificate,
     server: Identity,
@@ -387,7 +391,7 @@ fn pki() -> Pki {
     Pki {
         ca: tonic::transport::Certificate::from_pem(ca.pem()),
         server: leaf("localhost"),
-        device: leaf("device"),
+        device: leaf(&format!("{DEVICE_ID}.device.agentdesktop.invalid")),
     }
 }
 
@@ -407,7 +411,7 @@ async fn serve_mtls(limits: FleetLimits, pki: &Pki) -> (SocketAddr, Connections)
 async fn serve_mtls_with(
     limits: FleetLimits,
     pki: &Pki,
-    service: Slow,
+    service: impl FleetAgent,
 ) -> (SocketAddr, Connections) {
     let tls = ServerTlsConfig::new()
         .identity(pki.server.clone())
@@ -1516,5 +1520,342 @@ mod device_streams {
         streams
             .admit_open("device-b")
             .expect("another device is unaffected");
+    }
+}
+
+/// The controller's own fleet service behind the fleet limits, with its
+/// identity provider on a local port.
+mod fleet_service {
+    use std::{
+        net::SocketAddr,
+        path::PathBuf,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::Duration,
+    };
+
+    use agentdesktop_proto::fleet::{
+        AgentMessage, BeginEnrollmentRequest, CompleteEnrollmentRequest, DaemonConfig,
+        fleet_agent_server::FleetAgent,
+    };
+    use axum::{
+        http::{StatusCode, Uri},
+        response::{IntoResponse, Response},
+    };
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use serde_json::json;
+    use tokio::{sync::mpsc, time};
+    use tokio_stream::wrappers::ReceiverStream;
+    use tonic::{Code, Request, Status};
+
+    use super::{
+        super::{Connections, FLEET_LIMITS, FleetLimits},
+        DEVICE_ID, Pki, bounded, pki, serve_mtls_with, tls_client, until_open_at_most,
+    };
+    use crate::{
+        daemon_config::DaemonConfigStore, database::Database, oidc::OidcProvider,
+        service::FleetAgentService,
+    };
+
+    /// The user the identity provider signs in, who enrolled `DEVICE_ID`.
+    const SUBJECT: &str = "user";
+
+    /// The `authorization` header a device sends. The identity provider
+    /// accepts any access token.
+    const AUTHORIZATION: &str = "Bearer access-token";
+
+    /// One enrollment slot, which `CompleteEnrollment` waits for only briefly.
+    const ONE_ENROLLMENT_SLOT: FleetLimits = {
+        let mut limits = FLEET_LIMITS;
+        limits.configured.enrollment_in_flight = 1;
+        limits.enrollment_completion_wait = Duration::from_millis(50);
+        limits
+    };
+
+    /// An identity provider on a local port. It answers discovery, its key set
+    /// and UserInfo (for `SUBJECT`) until `stall` is called; from then on it
+    /// holds every request without answering.
+    struct IdentityProvider {
+        issuer: String,
+        stalled: Arc<AtomicBool>,
+        /// The path of each request held since `stall`.
+        held: mpsc::UnboundedReceiver<String>,
+    }
+
+    impl IdentityProvider {
+        async fn start() -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let issuer = format!("http://{}", listener.local_addr().unwrap());
+            let stalled = Arc::new(AtomicBool::new(false));
+            let (hold, held) = mpsc::unbounded_channel();
+            let endpoints = Endpoints {
+                issuer: issuer.clone(),
+                stalled: stalled.clone(),
+                hold,
+            };
+            let app = axum::Router::new().fallback(move |uri: Uri| endpoints.clone().answer(uri));
+            tokio::spawn(async move { axum::serve(listener, app).await });
+            Self {
+                issuer,
+                stalled,
+                held,
+            }
+        }
+
+        /// The controller's client of this provider, built as at startup.
+        async fn client(&self) -> OidcProvider {
+            OidcProvider::discover(
+                self.issuer.clone(),
+                "fleet".to_owned(),
+                "http://127.0.0.1/callback".to_owned(),
+            )
+            .await
+            .unwrap()
+        }
+
+        /// From now on, holds every request without answering.
+        fn stall(&self) {
+            self.stalled.store(true, Ordering::SeqCst);
+        }
+
+        /// Waits until a request is held, and returns its path.
+        async fn held_request(&mut self) -> String {
+            bounded(self.held.recv())
+                .await
+                .expect("the identity provider stopped")
+        }
+    }
+
+    /// The identity provider's server.
+    #[derive(Clone)]
+    struct Endpoints {
+        issuer: String,
+        stalled: Arc<AtomicBool>,
+        hold: mpsc::UnboundedSender<String>,
+    }
+
+    impl Endpoints {
+        async fn answer(self, uri: Uri) -> Response {
+            if self.stalled.load(Ordering::SeqCst) {
+                let _ = self.hold.send(uri.path().to_owned());
+                return std::future::pending().await;
+            }
+            let issuer = &self.issuer;
+            let body = match uri.path() {
+                "/.well-known/openid-configuration" => json!({
+                    "issuer": issuer,
+                    "authorization_endpoint": format!("{issuer}/authorize"),
+                    "token_endpoint": format!("{issuer}/token"),
+                    "userinfo_endpoint": format!("{issuer}/userinfo"),
+                    "jwks_uri": format!("{issuer}/keys"),
+                    "device_authorization_endpoint": format!("{issuer}/device"),
+                }),
+                "/keys" => json!({ "keys": [{ "kty": "oct", "kid": "current", "k": "a2V5" }] }),
+                "/userinfo" => json!({ "sub": SUBJECT }),
+                _ => return StatusCode::NOT_FOUND.into_response(),
+            };
+            axum::Json(body).into_response()
+        }
+    }
+
+    /// The controller's fleet service, signing users in with an
+    /// `IdentityProvider`, with `DEVICE_ID` enrolled and a daemon configuration
+    /// to send it.
+    struct Controller {
+        limits: FleetLimits,
+        service: FleetAgentService,
+        idp: IdentityProvider,
+        database: PathBuf,
+    }
+
+    impl Controller {
+        async fn start(limits: FleetLimits) -> Self {
+            let idp = IdentityProvider::start().await;
+            let database = std::env::temp_dir().join(format!(
+                "agentdesktop-fleet-service-{}-{}.db",
+                std::process::id(),
+                rand::random::<u64>()
+            ));
+            let devices = Database::connect(&format!("sqlite://{}?mode=rwc", database.display()))
+                .await
+                .unwrap();
+            devices
+                .enroll_device(DEVICE_ID, "host", &idp.issuer, SUBJECT, None)
+                .await
+                .unwrap();
+            let config = DaemonConfig {
+                revision: 1,
+                yaml: b"{}".to_vec(),
+                sha256: Vec::new(),
+            };
+            let service = FleetAgentService::new(
+                Some(idp.client().await),
+                devices,
+                DaemonConfigStore::new(Some(config)),
+                None,
+                None,
+                &limits,
+            );
+            Self {
+                limits,
+                service,
+                idp,
+                database,
+            }
+        }
+
+        /// Serves the fleet service on the fleet listener, over TLS with
+        /// `pki`'s device CA.
+        async fn serve(&self, pki: &Pki) -> (SocketAddr, Connections) {
+            serve_mtls_with(self.limits, pki, self.service.clone()).await
+        }
+
+        fn enrollment(&self) -> Enrollment {
+            Enrollment(self.service.clone())
+        }
+    }
+
+    impl Drop for Controller {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.database);
+        }
+    }
+
+    /// Calls a fleet service's enrollment handlers.
+    #[derive(Clone)]
+    struct Enrollment(FleetAgentService);
+
+    impl Enrollment {
+        /// Begins a browser enrollment, which needs nothing from the identity
+        /// provider, and returns its ID.
+        async fn begin(self) -> Result<String, Status> {
+            let request = BeginEnrollmentRequest {
+                hostname: "host".to_owned(),
+                code_challenge: "c".repeat(43),
+                device_authorization: false,
+            };
+            let response = self.0.begin_enrollment(Request::new(request)).await?;
+            Ok(response.into_inner().enrollment_id)
+        }
+
+        /// Begins an enrollment with the device grant, which asks the identity
+        /// provider for a device code.
+        async fn begin_with_device_grant(self) -> Result<String, Status> {
+            let request = BeginEnrollmentRequest {
+                hostname: "host".to_owned(),
+                code_challenge: String::new(),
+                device_authorization: true,
+            };
+            let response = self.0.begin_enrollment(Request::new(request)).await?;
+            Ok(response.into_inner().enrollment_id)
+        }
+
+        /// Completes `enrollment_id` with an ID token signed by a key the
+        /// controller has not seen, so it asks the identity provider for its
+        /// keys again before anything else.
+        async fn complete(self, enrollment_id: String) -> Result<(), Status> {
+            let header = json!({ "alg": "RS256", "kid": "rotated" }).to_string();
+            let mut request = Request::new(CompleteEnrollmentRequest {
+                enrollment_id,
+                id_token: format!("{}.e30.c2ln", URL_SAFE_NO_PAD.encode(header)),
+                ..Default::default()
+            });
+            request
+                .metadata_mut()
+                .insert("authorization", AUTHORIZATION.parse().unwrap());
+            self.0.complete_enrollment(request).await.map(drop)
+        }
+
+        /// Asserts that every slot is taken: neither handler is admitted.
+        async fn assert_full(self) {
+            let begun = self.clone().begin().await.expect_err("an enrollment began");
+            assert_eq!(begun.code(), Code::ResourceExhausted, "{begun}");
+            let completed = self
+                .complete(String::new())
+                .await
+                .expect_err("an enrollment completed");
+            assert_eq!(completed.code(), Code::ResourceExhausted, "{completed}");
+        }
+    }
+
+    /// A device's `Connect` session keeps its connection busy for as long as
+    /// it lasts, through quiet spells longer than the idle limit, and frees it
+    /// when it ends.
+    #[tokio::test]
+    async fn a_device_session_keeps_its_connection_busy_until_it_ends() {
+        let mut limits = FLEET_LIMITS;
+        limits.idle_connection = Duration::from_millis(200);
+        let controller = Controller::start(limits).await;
+        let pki = pki();
+        let (address, connections) = controller.serve(&pki).await;
+
+        let (outbound, receiver) = mpsc::channel::<AgentMessage>(1);
+        let mut request = Request::new(ReceiverStream::new(receiver));
+        request
+            .metadata_mut()
+            .insert("authorization", AUTHORIZATION.parse().unwrap());
+        let mut session = bounded(tls_client(address, &pki, true).await.connect(request))
+            .await
+            .expect("open the session")
+            .into_inner();
+        let config = bounded(session.message())
+            .await
+            .expect("receive the configuration");
+        assert!(
+            config.is_some(),
+            "the session ended before its configuration"
+        );
+
+        // Nothing is sent either way for several idle limits.
+        let quiet = time::timeout(5 * limits.idle_connection, session.message()).await;
+        assert!(quiet.is_err(), "the quiet session ended: {quiet:?}");
+        assert_eq!(connections.open_count(), 1);
+
+        // The device ends the session, so its connection goes idle and closes.
+        drop(outbound);
+        bounded(until_open_at_most(&connections, 0)).await;
+    }
+
+    /// `BeginEnrollment` holds its in-flight slot while it waits on the
+    /// identity provider, and frees it when it ends.
+    #[tokio::test]
+    async fn a_beginning_enrollment_holds_its_slot_while_it_runs() {
+        let mut controller = Controller::start(ONE_ENROLLMENT_SLOT).await;
+        controller.idp.stall();
+        let running = tokio::spawn(controller.enrollment().begin_with_device_grant());
+        assert_eq!(controller.idp.held_request().await, "/device");
+
+        controller.enrollment().assert_full().await;
+
+        running.abort();
+        let _ = running.await;
+        controller
+            .enrollment()
+            .begin()
+            .await
+            .expect("the slot was not freed");
+    }
+
+    /// `CompleteEnrollment` holds its in-flight slot while it waits on the
+    /// identity provider, and frees it when it ends.
+    #[tokio::test]
+    async fn a_completing_enrollment_holds_its_slot_while_it_runs() {
+        let mut controller = Controller::start(ONE_ENROLLMENT_SLOT).await;
+        let enrollment_id = controller.enrollment().begin().await.unwrap();
+        controller.idp.stall();
+        let running = tokio::spawn(controller.enrollment().complete(enrollment_id));
+        assert_eq!(controller.idp.held_request().await, "/keys");
+
+        controller.enrollment().assert_full().await;
+
+        running.abort();
+        let _ = running.await;
+        controller
+            .enrollment()
+            .begin()
+            .await
+            .expect("the slot was not freed");
     }
 }
