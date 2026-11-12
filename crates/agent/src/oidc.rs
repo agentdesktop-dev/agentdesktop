@@ -285,21 +285,6 @@ pub(crate) struct TokenResponse {
     pub(crate) token_type: String,
 }
 
-/// Whether the daemon may open the sign-in page in a browser itself.
-///
-/// A system service (LaunchDaemon, Windows service, systemd) runs outside any
-/// user session, so the desktop app opens the URL published on
-/// `/v1/enrollment` instead. Trying from the service is not harmless: on macOS
-/// `open` run by the root daemon still reaches the console session, but it
-/// starts Safari (root has no default browser) on the daemon's landing page
-/// rather than the user's browser, and on Linux `xdg-open` has no display.
-/// The daemon opens the browser only when it runs in the user's session:
-/// `--user` mode, or started from a terminal (for example
-/// `sudo agentdesktop daemon` during development).
-pub(crate) fn opens_browser(user_mode: bool, attached_to_terminal: bool) -> bool {
-    user_mode || attached_to_terminal
-}
-
 pub async fn enroll(
     controller: &ControllerConnectionConfig,
     enrollment: &EnrollmentState,
@@ -974,19 +959,9 @@ mod tests {
 
     use super::{
         AuthorizationPage, DevicePoll, TokenResponse, apply_refreshed_tokens,
-        classify_device_token_error, continue_subscription_page, opens_browser, poll_device_token,
+        classify_device_token_error, continue_subscription_page, poll_device_token,
     };
     use crate::identity::{Identity, OAuthCredentials};
-
-    // A LaunchDaemon, Windows service, or systemd unit has neither a user
-    // session nor a terminal: the desktop app opens the sign-in URL instead.
-    #[test]
-    fn only_a_daemon_in_the_user_session_opens_a_browser() {
-        assert!(!opens_browser(false, false));
-        assert!(opens_browser(true, false));
-        assert!(opens_browser(false, true));
-        assert!(opens_browser(true, true));
-    }
 
     // The poll interval is provider-controlled and grows on every slow_down, so it can
     // exceed what is left of expires_in. Sleeping the whole interval kept the task, and

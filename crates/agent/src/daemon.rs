@@ -1,6 +1,5 @@
 use std::{
     future::Future,
-    io::IsTerminal,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -39,7 +38,7 @@ use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use crate::windows_security::SecurityDescriptor;
 use crate::{
     api, enrollment::EnrollmentState, gateway_oidc, inventory_watch::InventoryWatch, llm_proxy,
-    oidc, reconcile, remote, secure_fs,
+    reconcile, remote, secure_fs,
 };
 
 #[cfg(unix)]
@@ -610,9 +609,8 @@ where
         let remote_discovery = inventory.clone();
         let state_dir = args.state_dir.clone();
         let oidc_callback_listen = args.oidc_callback_listen;
-        // A system service has no user session to open a browser in; the
-        // desktop app opens the sign-in URL there (see oidc::opens_browser).
-        let open_browser = oidc::opens_browser(args.user, std::io::stdin().is_terminal());
+        // A system-mode daemon is root: its browser would not be the user's.
+        let open_browser = args.user;
         let remote_enrollment = enrollment.clone();
         tokio::spawn(remote::run(
             controller,
