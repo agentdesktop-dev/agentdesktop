@@ -618,7 +618,7 @@
           ]
         },
         "plugin": {
-          "description": "Credential plugin path.",
+          "description": "Credential plugin path (OpenCode 1 plugin file). The OpenCode 2 plugin\nis written next to it as a directory: `<dir>/<name>/index.js`.",
           "type": [
             "string",
             "null"
