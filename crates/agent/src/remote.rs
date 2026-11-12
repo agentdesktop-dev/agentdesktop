@@ -195,6 +195,7 @@ pub async fn run(
     mut discovered: watch::Receiver<Arc<AgentDiscovery>>,
     state_dir: PathBuf,
     oidc_callback_listen: Option<SocketAddr>,
+    open_browser: bool,
     reconciler: Reconciler,
     enrollment: EnrollmentState,
     controller_status: ControllerConnectionState,
@@ -218,6 +219,7 @@ pub async fn run(
             &mut discovered,
             &state_dir,
             oidc_callback_listen,
+            open_browser,
             &reconciler,
             &enrollment,
             &controller_status,
@@ -315,6 +317,7 @@ async fn run_session(
     discovered: &mut watch::Receiver<Arc<AgentDiscovery>>,
     state_dir: &Path,
     oidc_callback_listen: Option<SocketAddr>,
+    open_browser: bool,
     reconciler: &Reconciler,
     enrollment: &EnrollmentState,
     controller_status: &ControllerConnectionState,
@@ -349,7 +352,7 @@ async fn run_session(
                     enrollment,
                     logout,
                     INITIAL_RETRY_DELAY,
-                    || oidc::enroll(controller, enrollment, oidc_callback_listen),
+                    || oidc::enroll(controller, enrollment, oidc_callback_listen, open_browser),
                 )
                 .await;
                 identity::save(&identity_path, &identity)?;

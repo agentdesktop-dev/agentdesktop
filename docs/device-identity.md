@@ -72,13 +72,13 @@ sequenceDiagram
         Controller-->>Daemon: enrollment_id, authorization_url, state, redirect_uri, token_endpoint, client_id
         Daemon->>Daemon: Listen on loopback redirect_uri (default 127.0.0.1:51327)
         Daemon->>Daemon: Publish authorization_url on GET /v1/enrollment and wait up to 10 min
-        alt Daemon runs as a system service (normal install)
-            Note over Daemon: Cannot open a browser. It runs outside any user session.
+        alt Daemon runs in system mode (normal install)
+            Note over Daemon: Does not open a browser. It runs as root, outside the user's session.
             User->>App: Sign in
             App->>Daemon: GET /v1/enrollment
             Daemon-->>App: authorization_url
             App->>Browser: Open authorization_url
-        else Daemon runs in the user's session (sudo, user mode, development)
+        else Daemon runs in user mode (--user, development)
             Daemon->>Browser: Open the local sign-in page
             User->>Browser: Continue to sign in
         end
@@ -217,15 +217,16 @@ native app (RFC 8252):
    (default `http://127.0.0.1:51327/callback`) and publishes the
    authorization URL on `/v1/enrollment`. How the browser gets there depends
    on how the daemon runs:
-   - **As a system service** (the normal install: LaunchDaemon, Windows
-     service, systemd), the daemon runs outside any user session and cannot
-     open a browser. Its attempt to do so fails and is only logged. The user
-     clicks sign-in in the desktop app, which reads the URL from
-     `/v1/enrollment` and opens it in the user's browser. The browser goes
-     straight to the IdP.
-   - **In the user's session** (`sudo` from a terminal, `--user` mode,
-     development), the daemon opens the browser on its own landing page, and
-     **Continue to sign in** redirects to the IdP.
+   - **In system mode** (the normal install: LaunchDaemon, Windows service,
+     systemd; also `sudo agentdesktop daemon` from a terminal), the daemon
+     runs as root and does not open a browser. Such an attempt would not
+     simply fail: on macOS, `open` run by root starts Safari on the daemon's
+     landing page instead of the user's browser. The user clicks sign-in in
+     the desktop app, which reads the URL from `/v1/enrollment` and opens it
+     in the user's browser. The browser goes straight to the IdP.
+   - **In user mode** (`--user`, development), the daemon opens the browser
+     on its own landing page, and **Continue to sign in** redirects to the
+     IdP.
 
    `agentdesktop enrollment` prints the same URL.
 5. After the user authenticates, the IdP redirects to the loopback callback.

@@ -609,12 +609,15 @@ where
         let remote_discovery = inventory.clone();
         let state_dir = args.state_dir.clone();
         let oidc_callback_listen = args.oidc_callback_listen;
+        // A system-mode daemon is root: its browser would not be the user's.
+        let open_browser = args.user;
         let remote_enrollment = enrollment.clone();
         tokio::spawn(remote::run(
             controller,
             remote_discovery,
             state_dir,
             oidc_callback_listen,
+            open_browser,
             reconciler,
             remote_enrollment,
             controller_status.clone(),
