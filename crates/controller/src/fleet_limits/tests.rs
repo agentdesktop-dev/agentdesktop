@@ -393,13 +393,9 @@ fn pki() -> Pki {
 
 /// Serves with the production TLS shape: device CA, client certificate optional.
 async fn serve_mtls(limits: FleetLimits, pki: &Pki) -> (SocketAddr, Connections) {
-    let tls = ServerTlsConfig::new()
-        .identity(pki.server.clone())
-        .client_ca_root(pki.ca.clone())
-        .client_auth_optional(true);
-    serve_tracked(
+    serve_mtls_with(
         limits,
-        Some(tls),
+        pki,
         Slow {
             delay: Duration::ZERO,
         },
@@ -407,25 +403,39 @@ async fn serve_mtls(limits: FleetLimits, pki: &Pki) -> (SocketAddr, Connections)
     .await
 }
 
-async fn tls_client(
-    address: SocketAddr,
+/// Like `serve_mtls`, serving `service`.
+async fn serve_mtls_with(
+    limits: FleetLimits,
     pki: &Pki,
-    device: bool,
-) -> FleetAgentClient<tonic::transport::Channel> {
+    service: Slow,
+) -> (SocketAddr, Connections) {
+    let tls = ServerTlsConfig::new()
+        .identity(pki.server.clone())
+        .client_ca_root(pki.ca.clone())
+        .client_auth_optional(true);
+    serve_tracked(limits, Some(tls), service).await
+}
+
+/// A TLS endpoint for `address`, presenting the device certificate when `device`.
+fn tls_endpoint(address: SocketAddr, pki: &Pki, device: bool) -> tonic::transport::Endpoint {
     let mut tls = tonic::transport::ClientTlsConfig::new()
         .ca_certificate(pki.ca.clone())
         .domain_name("localhost");
     if device {
         tls = tls.identity(pki.device.clone());
     }
-    let channel = tonic::transport::Endpoint::from_shared(format!("https://{address}"))
+    tonic::transport::Endpoint::from_shared(format!("https://{address}"))
         .unwrap()
         .tls_config(tls)
         .unwrap()
-        .connect()
-        .await
-        .unwrap();
-    FleetAgentClient::new(channel)
+}
+
+async fn tls_client(
+    address: SocketAddr,
+    pki: &Pki,
+    device: bool,
+) -> FleetAgentClient<tonic::transport::Channel> {
+    FleetAgentClient::new(tls_endpoint(address, pki, device).connect().await.unwrap())
 }
 
 fn renewal(bytes: usize) -> RenewDeviceCertificateRequest {
@@ -584,7 +594,10 @@ async fn stays_open(mut stream: TcpStream) -> bool {
     closed.is_err()
 }
 
-async fn connections_over_cap(limits: FleetLimits) {
+#[tokio::test]
+async fn at_the_per_address_cap_the_addresses_longest_idle_connection_makes_room() {
+    let mut limits = FLEET_LIMITS;
+    limits.configured.connections_per_address = 2;
     let address = serve(
         limits,
         None,
@@ -593,30 +606,50 @@ async fn connections_over_cap(limits: FleetLimits) {
         },
     )
     .await;
-    let first = TcpStream::connect(address).await.unwrap();
-    let second = TcpStream::connect(address).await.unwrap();
+    let oldest = TcpStream::connect(address).await.unwrap();
+    time::sleep(Duration::from_millis(50)).await;
+    let newer = TcpStream::connect(address).await.unwrap();
+    time::sleep(Duration::from_millis(50)).await;
 
-    let third = TcpStream::connect(address).await.unwrap();
-    bounded(until_closed(third)).await;
+    let newest = TcpStream::connect(address).await.unwrap();
 
-    // Closing a connection frees its slot.
-    drop(first);
-    time::sleep(Duration::from_millis(100)).await;
-    let replacement = TcpStream::connect(address).await.unwrap();
-    assert!(stays_open(replacement).await, "a freed slot was not reused");
-    drop(second);
+    bounded(until_closed(oldest)).await;
+    assert!(stays_open(newest).await, "the new connection was refused");
+    drop(newer);
 }
 
 #[tokio::test]
-async fn connections_over_the_per_address_cap_are_closed() {
+async fn at_the_per_address_cap_a_new_connection_is_closed_when_every_connection_is_busy() {
+    let pki = pki();
     let mut limits = FLEET_LIMITS;
-    limits.configured.connections_per_address = 2;
+    limits.configured.connections_per_address = 1;
+    let (address, _) = serve_mtls_with(
+        limits,
+        &pki,
+        Slow {
+            delay: Duration::from_millis(500),
+        },
+    )
+    .await;
+    let (_outbound, receiver) = mpsc::channel::<AgentMessage>(1);
+    let mut stream = bounded(
+        tls_client(address, &pki, true)
+            .await
+            .connect(ReceiverStream::new(receiver)),
+    )
+    .await
+    .expect("open the stream")
+    .into_inner();
 
-    connections_over_cap(limits).await;
+    let newcomer = TcpStream::connect(address).await.unwrap();
+    bounded(until_closed(newcomer)).await;
+
+    // The busy connection was kept.
+    assert!(bounded(stream.message()).await.unwrap().is_some());
 }
 
 #[test]
-fn an_address_over_its_cap_does_not_evict_other_connections() {
+fn at_its_cap_an_address_evicts_only_its_own_idle_connections() {
     use tokio::sync::oneshot::error::TryRecvError;
 
     let mut limits = FLEET_LIMITS;
@@ -627,15 +660,68 @@ fn an_address_over_its_cap_does_not_evict_other_connections() {
     let (_first, mut first_evicted) = connections
         .register(first_address(1))
         .expect("first connection");
+    let other = SocketAddr::from(([192, 0, 2, 2], 1));
     let (_other, mut other_evicted) = connections
-        .register(SocketAddr::from(([192, 0, 2, 2], 1)))
+        .register(other)
         .expect("a connection from another address");
 
-    // At the total cap, and over the first address's cap.
-    assert!(connections.register(first_address(2)).is_none());
-
-    assert_eq!(first_evicted.try_recv(), Err(TryRecvError::Empty));
+    // At the total cap and at the first address's cap: the first address's
+    // own connection makes room, though the other one has been idle as long.
+    assert!(connections.register(first_address(2)).is_some());
+    assert_eq!(first_evicted.try_recv(), Ok(()));
     assert_eq!(other_evicted.try_recv(), Err(TryRecvError::Empty));
+
+    // A busy connection is never evicted, so its address is refused.
+    let _busy = connections
+        .start_request(other, true)
+        .expect("busy request");
+    assert!(
+        connections
+            .register(SocketAddr::from(([192, 0, 2, 2], 2)))
+            .is_none()
+    );
+    assert_eq!(other_evicted.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[test]
+fn a_connection_made_idle_by_its_last_request_is_evictable_at_its_address_cap() {
+    use tokio::sync::oneshot::error::TryRecvError;
+
+    let mut limits = FLEET_LIMITS;
+    limits.configured.connections_per_address = 1;
+    let connections = Connections::new(&limits);
+    let peer = |port| SocketAddr::from(([192, 0, 2, 1], port));
+    let (_first, mut first_evicted) = connections.register(peer(1)).expect("first connection");
+    let busy = connections
+        .start_request(peer(1), true)
+        .expect("busy request");
+    assert!(connections.register(peer(2)).is_none());
+
+    // The request's end queues the connection as idle again.
+    drop(busy);
+    assert_eq!(first_evicted.try_recv(), Err(TryRecvError::Empty));
+    assert!(connections.register(peer(3)).is_some());
+    assert_eq!(first_evicted.try_recv(), Ok(()));
+}
+
+#[test]
+fn a_request_without_a_device_certificate_does_not_keep_its_connection_from_eviction() {
+    let mut limits = FLEET_LIMITS;
+    limits.configured.max_connections = 1;
+    let connections = Connections::new(&limits);
+    let (_anonymous, mut evicted) = connections
+        .register(SocketAddr::from(([192, 0, 2, 1], 1)))
+        .expect("first connection");
+    let _request = connections
+        .start_request(SocketAddr::from(([192, 0, 2, 1], 1)), false)
+        .expect("anonymous request");
+
+    assert!(
+        connections
+            .register(SocketAddr::from(([192, 0, 2, 2], 1)))
+            .is_some()
+    );
+    assert_eq!(evicted.try_recv(), Ok(()));
 }
 
 #[tokio::test]
@@ -664,21 +750,26 @@ async fn at_the_total_cap_the_longest_idle_connection_makes_room() {
 
 #[tokio::test]
 async fn at_the_total_cap_a_new_connection_is_closed_when_every_connection_is_busy() {
+    let pki = pki();
     let mut limits = FLEET_LIMITS;
     limits.configured.max_connections = 1;
-    let address = serve(
+    let (address, _) = serve_mtls_with(
         limits,
-        None,
+        &pki,
         Slow {
             delay: Duration::from_millis(500),
         },
     )
     .await;
     let (_outbound, receiver) = mpsc::channel::<AgentMessage>(1);
-    let mut stream = bounded(client(address).await.connect(ReceiverStream::new(receiver)))
-        .await
-        .expect("open the stream")
-        .into_inner();
+    let mut stream = bounded(
+        tls_client(address, &pki, true)
+            .await
+            .connect(ReceiverStream::new(receiver)),
+    )
+    .await
+    .expect("open the stream")
+    .into_inner();
 
     let newcomer = TcpStream::connect(address).await.unwrap();
     bounded(until_closed(newcomer)).await;
@@ -755,22 +846,15 @@ async fn a_connection_idle_after_its_last_request_is_closed() {
 
 #[tokio::test]
 async fn a_response_the_client_never_accepts_does_not_keep_its_connection_busy() {
+    let pki = pki();
     let mut limits = FLEET_LIMITS;
     // Far past the test's bound, so only the idle close can end the connection.
     limits.first_request = Duration::from_secs(60);
     limits.idle_connection = Duration::from_millis(200);
-    let (address, connections) = serve_tracked(
-        limits,
-        None,
-        Slow {
-            delay: Duration::ZERO,
-        },
-    )
-    .await;
-    // A client that grants no HTTP/2 flow-control window, so the server can
+    let (address, connections) = serve_mtls(limits, &pki).await;
+    // A device that grants no HTTP/2 flow-control window, so the server can
     // never send it a response body. It still answers keepalive PINGs.
-    let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
-        .unwrap()
+    let channel = tls_endpoint(address, &pki, true)
         .initial_stream_window_size(0)
         .connect()
         .await
@@ -800,22 +884,15 @@ async fn a_response_the_client_never_accepts_does_not_keep_its_connection_busy()
 
 #[tokio::test]
 async fn a_stalled_connect_response_frees_its_connection_when_the_session_ends() {
+    let pki = pki();
     let mut limits = FLEET_LIMITS;
     // Far past the test's bound, so only the idle close can end the connection.
     limits.first_request = Duration::from_secs(60);
     limits.idle_connection = Duration::from_millis(200);
-    let (address, connections) = serve_tracked(
-        limits,
-        None,
-        Slow {
-            delay: Duration::ZERO,
-        },
-    )
-    .await;
-    // A client that grants no flow-control window: the session's messages can
+    let (address, connections) = serve_mtls(limits, &pki).await;
+    // A device that grants no flow-control window: the session's messages can
     // never be sent, so hyper keeps the response body after the session ends.
-    let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
-        .unwrap()
+    let channel = tls_endpoint(address, &pki, true)
         .initial_stream_window_size(0)
         .connect()
         .await
@@ -836,22 +913,27 @@ async fn a_stalled_connect_response_frees_its_connection_when_the_session_ends()
 
 #[tokio::test]
 async fn an_open_stream_keeps_its_connection_from_going_idle() {
+    let pki = pki();
     let mut limits = FLEET_LIMITS;
     limits.idle_connection = Duration::from_millis(200);
     // Messages arrive further apart than the idle limit.
-    let address = serve(
+    let (address, _) = serve_mtls_with(
         limits,
-        None,
+        &pki,
         Slow {
             delay: Duration::from_millis(500),
         },
     )
     .await;
     let (_outbound, receiver) = mpsc::channel::<AgentMessage>(1);
-    let mut stream = bounded(client(address).await.connect(ReceiverStream::new(receiver)))
-        .await
-        .expect("open the stream")
-        .into_inner();
+    let mut stream = bounded(
+        tls_client(address, &pki, true)
+            .await
+            .connect(ReceiverStream::new(receiver)),
+    )
+    .await
+    .expect("open the stream")
+    .into_inner();
 
     for message in 0..2 {
         let received = bounded(stream.message())
@@ -859,6 +941,85 @@ async fn an_open_stream_keeps_its_connection_from_going_idle() {
             .unwrap_or_else(|error| panic!("stream ended at message {message}: {error}"));
         assert!(received.is_some(), "stream closed at message {message}");
     }
+}
+
+/// A HEADERS frame opening a gRPC request for the fleet `method` on
+/// `stream_id`. With `end_stream` the request ends with an empty body; without
+/// it, the server waits for a body that this client never sends.
+fn grpc_request_headers(stream_id: u32, method: &str, end_stream: bool) -> Vec<u8> {
+    use agentdesktop_proto::fleet::fleet_agent_server::SERVICE_NAME;
+
+    let path = format!("/{SERVICE_NAME}/{method}");
+    assert!(path.len() < 127, "the path needs a one-byte HPACK length");
+    // HPACK: `:method: POST` and `:scheme: http` from the static table, then
+    // `:path`, `content-type` and `te` as literals without indexing.
+    let mut block = vec![0x83, 0x86, 0x04, path.len() as u8];
+    block.extend_from_slice(path.as_bytes());
+    block.extend_from_slice(&[0x0f, 0x10, 16]);
+    block.extend_from_slice(b"application/grpc");
+    block.extend_from_slice(&[0x00, 2]);
+    block.extend_from_slice(b"te");
+    block.push(8);
+    block.extend_from_slice(b"trailers");
+
+    let mut frame = (block.len() as u32).to_be_bytes()[1..].to_vec();
+    // Type HEADERS; flags END_HEADERS, plus END_STREAM.
+    frame.extend_from_slice(&[0x1, if end_stream { 0x5 } else { 0x4 }]);
+    frame.extend_from_slice(&stream_id.to_be_bytes());
+    frame.extend_from_slice(&block);
+    frame
+}
+
+/// Reads frames from `stream` until a HEADERS frame arrives on `stream_id`.
+async fn until_response_headers(stream: &mut TcpStream, stream_id: u32) {
+    loop {
+        let mut header = [0_u8; 9];
+        stream.read_exact(&mut header).await.unwrap();
+        let length = u32::from_be_bytes([0, header[0], header[1], header[2]]);
+        let mut payload = vec![0_u8; length as usize];
+        stream.read_exact(&mut payload).await.unwrap();
+        let frame_stream =
+            u32::from_be_bytes([header[5], header[6], header[7], header[8]]) & 0x7fff_ffff;
+        if header[3] == 0x1 && frame_stream == stream_id {
+            return;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_request_without_a_body_does_not_keep_its_connection_from_eviction() {
+    let mut limits = FLEET_LIMITS;
+    limits.configured.max_connections = 1;
+    // Far past the test's bound, so only eviction can close the connection.
+    limits.first_request = Duration::from_secs(60);
+    let address = serve(
+        limits,
+        None,
+        Slow {
+            delay: Duration::ZERO,
+        },
+    )
+    .await;
+    let mut anonymous = TcpStream::connect(address).await.unwrap();
+    anonymous.write_all(PREFACE).await.unwrap();
+    // A request whose body never comes: tonic waits for it until the request
+    // timeout, before any handler runs.
+    anonymous
+        .write_all(&grpc_request_headers(1, "BeginEnrollment", false))
+        .await
+        .unwrap();
+    // A request that ends at once. Its response shows the server has started
+    // both.
+    anonymous
+        .write_all(&grpc_request_headers(3, "BeginEnrollment", true))
+        .await
+        .unwrap();
+    bounded(until_response_headers(&mut anonymous, 3)).await;
+
+    let newcomer = TcpStream::connect(address).await.unwrap();
+
+    bounded(until_closed(anonymous)).await;
+    assert!(stays_open(newcomer).await, "the new connection was refused");
 }
 
 /// The HTTP/2 client preface and an empty SETTINGS frame.

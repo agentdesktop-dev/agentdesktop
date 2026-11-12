@@ -19,13 +19,13 @@
 |`daemonConfig.revision`|integer|Monotonically increasing revision assigned to the daemon configuration.|
 |`databaseUrl`|string|SQLite or PostgreSQL URL used for controller state.|
 |`fleetLimits`|object|Limits on the device-facing fleet API that depend on the deployment.|
-|`fleetLimits.connectionsPerAddress`|integer|Open fleet connections allowed from one client address: an IPv4<br>address, or an IPv6 /64. Raise it when more devices share an address,<br>such as behind a NAT or a load balancer that does not preserve client<br>addresses. Defaults to `4096`.|
+|`fleetLimits.connectionsPerAddress`|integer|Open fleet connections allowed from one client address: an IPv4<br>address, or an IPv6 /64. At the limit, that address's connection idle<br>the longest is closed to admit a new one; when none is idle, the new one<br>is closed. Raise it when more devices share an address, such as behind a<br>NAT or a load balancer that does not preserve client addresses. Defaults<br>to `4096`.|
 |`fleetLimits.deviceMessageBurst`|integer|Messages one device may send in a burst on its `Connect` stream, after<br>which it may send one more every `deviceMessageRefill`. Once a device<br>has sent its burst, the controller reads its messages no faster than<br>that, and the device waits to send more. Defaults to `600`.|
 |`fleetLimits.deviceMessageRefill`|string|Time for a device to get back one message. Defaults to `50ms`.|
 |`fleetLimits.enrollmentBurst`|integer|Enrollments one client address may start in a burst, after which it may<br>start one more every `enrollmentRefill`. Defaults to `60`.|
 |`fleetLimits.enrollmentInFlight`|integer|Enrollment requests in progress at once across all clients. Enrollment<br>calls the identity provider. Defaults to `64`.|
 |`fleetLimits.enrollmentRefill`|string|Time for a client address to get back one enrollment. Defaults to `1s`.|
-|`fleetLimits.maxConnections`|integer|Open fleet connections allowed in total. At the limit, the connection<br>idle the longest is closed to admit a new one; when none is idle, the<br>new one is closed. Defaults to `50000`.|
+|`fleetLimits.maxConnections`|integer|Open fleet connections allowed in total. At the limit, the connection<br>idle the longest is closed to admit a new one; when none is idle, the<br>new one is closed. A connection is idle unless a client with a device<br>certificate has a request or `Connect` stream open on it. Defaults to<br>`50000`.|
 |`fleetLimits.maxMessageBytes`|integer|Largest message, in bytes, that a device and the controller may send<br>each other. Requests from clients without a device certificate, such as<br>enrollment, stay limited to 64 KiB. Devices accept at most 4 MiB, so<br>raising this only raises what devices may send. Defaults to `4194304`<br>(4 MiB).|
 |`fleetListen`|string|Address on which the device-facing gRPC fleet API listens.|
 |`gatewayJwt`|object|LLM gateway JWT signing settings.|

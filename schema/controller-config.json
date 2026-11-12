@@ -210,7 +210,7 @@
       "type": "object",
       "properties": {
         "connectionsPerAddress": {
-          "description": "Open fleet connections allowed from one client address: an IPv4\naddress, or an IPv6 /64. Raise it when more devices share an address,\nsuch as behind a NAT or a load balancer that does not preserve client\naddresses. Defaults to `4096`.",
+          "description": "Open fleet connections allowed from one client address: an IPv4\naddress, or an IPv6 /64. At the limit, that address's connection idle\nthe longest is closed to admit a new one; when none is idle, the new one\nis closed. Raise it when more devices share an address, such as behind a\nNAT or a load balancer that does not preserve client addresses. Defaults\nto `4096`.",
           "type": "integer",
           "format": "uint",
           "default": 4096,
@@ -248,7 +248,7 @@
           "default": "1s"
         },
         "maxConnections": {
-          "description": "Open fleet connections allowed in total. At the limit, the connection\nidle the longest is closed to admit a new one; when none is idle, the\nnew one is closed. Defaults to `50000`.",
+          "description": "Open fleet connections allowed in total. At the limit, the connection\nidle the longest is closed to admit a new one; when none is idle, the\nnew one is closed. A connection is idle unless a client with a device\ncertificate has a request or `Connect` stream open on it. Defaults to\n`50000`.",
           "type": "integer",
           "format": "uint",
           "default": 50000,

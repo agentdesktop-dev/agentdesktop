@@ -8,16 +8,25 @@
 //!
 //! So each connection's request activity is tracked. A connection is closed if
 //! it makes no request soon after it is accepted, or stays idle too long after
-//! its last request finishes. A connection with a request in progress, including
-//! an open `Connect` stream, is never idle. When the total cap is reached, the
-//! longest-idle connection is closed to make room instead of refusing the new
-//! one, so idle connections cannot crowd out devices that are using theirs.
+//! its last request finishes. A connection with a device's request in progress,
+//! including an open `Connect` stream, is busy: never idle. When a cap is
+//! reached, the longest-idle connection is closed to make room instead of
+//! refusing the new one: at the total cap any connection, and at the
+//! per-address cap one from the same address. So idle connections cannot crowd
+//! out devices that are using theirs.
 //!
-//! A request other than `Connect` is in progress only while its handler runs,
-//! not while its response is sent, and a `Connect` stream only while its
-//! session lasts. Otherwise a client could keep a connection busy forever by
-//! granting no HTTP/2 flow-control window, so that the server can never send
-//! the response body and hyper never drops it.
+//! Only a request from a caller with a device certificate makes its connection
+//! busy. Anyone can open a request and never send its body, and tonic waits for
+//! the body before the handler runs, so an anonymous request would otherwise
+//! hold its connection busy until the request timeout, and the next one after
+//! it. An anonymous request still counts as activity, and its connection stays
+//! subject to the caps, deadlines and request timeout, but it can be evicted.
+//!
+//! A device's request other than `Connect` is in progress only while its
+//! handler runs, not while its response is sent, and a `Connect` stream only
+//! while its session lasts. Otherwise a client could keep a connection busy
+//! forever by granting no HTTP/2 flow-control window, so that the server can
+//! never send the response body and hyper never drops it.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -48,7 +57,7 @@ use tonic::{
 };
 use tower_layer::Layer;
 
-use super::{FleetLimits, ThrottledWarning, address_key, is_connect};
+use super::{FleetLimits, ThrottledWarning, address_key, has_device_certificate, is_connect};
 
 static TOTAL_CAP: ThrottledWarning = ThrottledWarning::new();
 static PER_ADDRESS_CAP: ThrottledWarning = ThrottledWarning::new();
@@ -74,10 +83,58 @@ struct Shared {
 struct State {
     open: HashMap<SocketAddr, Arc<Activity>>,
     /// Open connections by `address_key`.
-    per_address: HashMap<IpAddr, usize>,
-    /// Connections in the order they became idle. An entry is stale once its
-    /// connection makes a request or closes; `Activity::idle_epoch` tells.
-    idle: VecDeque<(SocketAddr, u64)>,
+    per_address: HashMap<IpAddr, Address>,
+    /// Connections in the order they became idle.
+    idle: IdleQueue,
+}
+
+/// One address key's open connections.
+#[derive(Default)]
+struct Address {
+    count: usize,
+    /// This address's connections in the order they became idle.
+    idle: IdleQueue,
+}
+
+/// Connections in the order they became idle. An entry is stale once its
+/// connection starts a device request or closes; `Activity::idle_epoch` tells.
+#[derive(Default)]
+struct IdleQueue(VecDeque<(SocketAddr, u64)>);
+
+impl IdleQueue {
+    /// Queues `peer`, dropping stale entries once they dominate, so the queue
+    /// stays bounded by its `open` connections. Each address has a queue, so
+    /// the slack is small.
+    fn push(
+        &mut self,
+        peer: SocketAddr,
+        epoch: u64,
+        open: usize,
+        connections: &HashMap<SocketAddr, Arc<Activity>>,
+    ) {
+        self.0.push_back((peer, epoch));
+        if self.0.len() > 2 * open + 8 {
+            self.0.retain(|(peer, epoch)| {
+                connections
+                    .get(peer)
+                    .is_some_and(|activity| activity.is_idle_at(*epoch))
+            });
+        }
+    }
+
+    /// Closes the longest-idle connection in the queue. Returns false when
+    /// none is idle.
+    fn evict(&mut self, connections: &HashMap<SocketAddr, Arc<Activity>>) -> bool {
+        while let Some((peer, epoch)) = self.0.pop_front() {
+            if connections
+                .get(&peer)
+                .is_some_and(|activity| activity.is_idle_at(epoch) && activity.evict())
+            {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 /// One connection's request activity.
@@ -122,46 +179,46 @@ impl Activity {
                 + allowed,
         )
     }
+
+    /// Whether the connection is idle and has been since it was queued at `epoch`.
+    fn is_idle_at(&self, epoch: u64) -> bool {
+        self.in_flight.load(Ordering::Acquire) == 0
+            && self.idle_epoch.load(Ordering::Acquire) == epoch
+    }
+
+    /// Tells the connection to close. Returns false if it already was told.
+    fn evict(&self) -> bool {
+        self.evict
+            .lock()
+            .expect("connection eviction lock poisoned")
+            .take()
+            .is_some_and(|evict| {
+                let _ = evict.send(());
+                true
+            })
+    }
 }
 
 impl State {
     /// Closes the longest-idle connection. Returns false when every open
-    /// connection has a request in progress.
+    /// connection has a device request in progress.
     fn evict_idle(&mut self) -> bool {
-        while let Some((peer, epoch)) = self.idle.pop_front() {
-            let Some(activity) = self.open.get(&peer) else {
-                continue;
-            };
-            if activity.in_flight.load(Ordering::Acquire) > 0
-                || activity.idle_epoch.load(Ordering::Acquire) != epoch
-            {
-                continue;
-            }
-            if let Some(evict) = activity
-                .evict
-                .lock()
-                .expect("connection eviction lock poisoned")
-                .take()
-            {
-                let _ = evict.send(());
-                return true;
-            }
-        }
-        false
+        self.idle.evict(&self.open)
+    }
+
+    /// Closes `address`'s longest-idle connection. Returns false when each of
+    /// its connections has a device request in progress.
+    fn evict_idle_from(&mut self, address: IpAddr) -> bool {
+        self.per_address
+            .get_mut(&address)
+            .is_some_and(|connections| connections.idle.evict(&self.open))
     }
 
     fn mark_idle(&mut self, peer: SocketAddr, epoch: u64) {
-        self.idle.push_back((peer, epoch));
-        // Drop stale entries once they dominate, so the queue stays bounded by
-        // the number of open connections.
-        if self.idle.len() > 2 * self.open.len() + 64 {
-            let open = &self.open;
-            self.idle.retain(|(peer, epoch)| {
-                open.get(peer).is_some_and(|activity| {
-                    activity.in_flight.load(Ordering::Acquire) == 0
-                        && activity.idle_epoch.load(Ordering::Acquire) == *epoch
-                })
-            });
+        let open = self.open.len();
+        self.idle.push(peer, epoch, open, &self.open);
+        if let Some(address) = self.per_address.get_mut(&address_key(peer.ip())) {
+            address.idle.push(peer, epoch, address.count, &self.open);
         }
     }
 }
@@ -194,7 +251,8 @@ impl Connections {
         }
     }
 
-    /// A layer that marks a connection busy while a request (or stream) is open.
+    /// A layer that records each request on its connection, and marks the
+    /// connection busy while a device's request (or stream) is open.
     pub fn track_requests(&self) -> TrackRequests {
         TrackRequests {
             connections: self.clone(),
@@ -224,24 +282,26 @@ impl Connections {
         peer: SocketAddr,
     ) -> Option<(Arc<Activity>, oneshot::Receiver<()>)> {
         let mut state = self.state();
-        // The per-address cap comes first, so an address over it cannot close
-        // another client's idle connection only to be refused itself.
         let address = address_key(peer.ip());
-        if state
+        let at_address_cap = state
             .per_address
             .get(&address)
-            .is_some_and(|count| *count >= self.shared.connections_per_address)
-        {
-            if let Some(closed) = PER_ADDRESS_CAP.event(Instant::now()) {
-                tracing::warn!(
-                    latest_address = %address,
-                    closed_since_last_warning = closed,
-                    "closed new fleet connections over the per-address connection limit"
-                );
+            .is_some_and(|connections| connections.count >= self.shared.connections_per_address);
+        if at_address_cap {
+            // Room comes from the address's own connections only, so a client
+            // at its cap never closes another client's connection. The one it
+            // replaces frees a slot under the total cap too.
+            if !state.evict_idle_from(address) {
+                if let Some(closed) = PER_ADDRESS_CAP.event(Instant::now()) {
+                    tracing::warn!(
+                        latest_address = %address,
+                        closed_since_last_warning = closed,
+                        "closed new fleet connections at the per-address connection limit with no connection from the address idle"
+                    );
+                }
+                return None;
             }
-            return None;
-        }
-        if state.open.len() >= self.shared.max_connections && !state.evict_idle() {
+        } else if state.open.len() >= self.shared.max_connections && !state.evict_idle() {
             if let Some(closed) = TOTAL_CAP.event(Instant::now()) {
                 tracing::warn!(
                     closed_since_last_warning = closed,
@@ -250,7 +310,7 @@ impl Connections {
             }
             return None;
         }
-        *state.per_address.entry(address).or_default() += 1;
+        state.per_address.entry(address).or_default().count += 1;
         let (evict, evicted) = oneshot::channel();
         let activity = Arc::new(Activity {
             in_flight: AtomicUsize::new(0),
@@ -275,21 +335,25 @@ impl Connections {
             state.open.remove(&peer);
         }
         let address = address_key(peer.ip());
-        if let Some(count) = state.per_address.get_mut(&address) {
-            *count -= 1;
-            if *count == 0 {
+        if let Some(connections) = state.per_address.get_mut(&address) {
+            connections.count -= 1;
+            if connections.count == 0 {
                 state.per_address.remove(&address);
             }
         }
     }
 
-    fn start_request(&self, peer: SocketAddr) -> Option<RequestGuard> {
-        // Counted under the registry lock, which `evict_idle` holds, so a
-        // connection is never evicted once its request has started.
+    /// Records a request on `peer`'s connection; a `busy` one keeps the
+    /// connection from going idle until the returned guard is dropped.
+    pub(super) fn start_request(&self, peer: SocketAddr, busy: bool) -> Option<RequestGuard> {
+        // Counted under the registry lock, which eviction holds, so a
+        // connection is never evicted once its busy request has started.
         let activity = {
             let state = self.state();
             let activity = state.open.get(&peer)?.clone();
-            activity.in_flight.fetch_add(1, Ordering::AcqRel);
+            if busy {
+                activity.in_flight.fetch_add(1, Ordering::AcqRel);
+            }
             activity
         };
         activity.used.store(true, Ordering::Release);
@@ -298,6 +362,7 @@ impl Connections {
             connections: self.clone(),
             peer,
             activity,
+            busy,
         })
     }
 
@@ -490,18 +555,23 @@ impl AsyncWrite for LimitedConnection {
     }
 }
 
-/// Marks the connection busy while a request's handler runs, and for `Connect`
-/// while its session lasts (see `SessionBusy`).
-struct RequestGuard {
+/// A request in progress. A device's request marks its connection busy while
+/// its handler runs, and for `Connect` while its session lasts (see
+/// `SessionBusy`); any request counts as activity when it starts and ends.
+pub(super) struct RequestGuard {
     connections: Connections,
     peer: SocketAddr,
     activity: Arc<Activity>,
+    busy: bool,
 }
 
 impl Drop for RequestGuard {
     fn drop(&mut self) {
         self.activity.touch();
-        // Under the registry lock, like `start_request`, so `evict_idle` never
+        if !self.busy {
+            return;
+        }
+        // Under the registry lock, like `start_request`, so eviction never
         // sees the connection idle before it is queued with its new epoch.
         let idle = {
             let mut state = self.connections.state();
@@ -576,12 +646,15 @@ where
     }
 
     fn call(&mut self, mut request: http::Request<Body>) -> Self::Future {
-        let guard = remote_addr(&request).and_then(|peer| self.connections.start_request(peer));
+        // Only a device's request makes its connection busy; see the module docs.
+        let busy = has_device_certificate(&request);
+        let guard =
+            remote_addr(&request).and_then(|peer| self.connections.start_request(peer, busy));
         // `Connect` is the device's session, so its connection stays busy past
         // the handler: see `SessionBusy`. Any other request is done once its
         // handler returns.
         let (guard, session) = match guard {
-            Some(guard) if is_connect(request.uri().path()) => {
+            Some(guard) if guard.busy && is_connect(request.uri().path()) => {
                 let session = SessionBusy::new(guard);
                 request.extensions_mut().insert(session.clone());
                 (None, Some(session))
