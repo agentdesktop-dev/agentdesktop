@@ -49,6 +49,17 @@ use crate::{
 static OAUTH_REFRESH_MUTEX: Mutex<()> = Mutex::const_new(());
 const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+
+/// Retry a rejected access token once with refreshed credentials. Reset only
+/// after the controller authenticates a stream, so a revoked device does not
+/// enter an endless refresh loop.
+#[derive(Default, PartialEq, Eq)]
+enum ControllerAuthRecovery {
+    #[default]
+    Ready,
+    RefreshRequired,
+    Refreshed,
+}
 /// Bound on the controller connection and call when fetching an LLM gateway
 /// credential, so a controller that accepts and then stalls cannot hold the
 /// caller (or a detached fetch) open indefinitely.
@@ -349,9 +360,11 @@ async fn run_session(
         };
 
         let mut delay = INITIAL_RETRY_DELAY;
+        let mut auth_recovery = ControllerAuthRecovery::Ready;
         loop {
+            let force_refresh = auth_recovery == ControllerAuthRecovery::RefreshRequired;
             let refresh_result = tokio::select! {
-                result = refresh_oauth_if_needed(&mut identity, &identity_path) => result,
+                result = refresh_oauth(&mut identity, &identity_path, force_refresh) => result,
                 Some(request) = logout.recv() => {
                     if complete_logout(request, &identity_path, &identity, enrollment, controller_status, &channels.current).await {
                         break;
@@ -360,7 +373,11 @@ async fn run_session(
                 }
             };
             match refresh_result {
-                Ok(()) => {}
+                Ok(()) => {
+                    if force_refresh {
+                        auth_recovery = ControllerAuthRecovery::Refreshed;
+                    }
+                }
                 Err(error) if is_oauth_refresh_rejected(&error) => {
                     let error_chain = format!("{error:#}");
                     identity::delete(&identity_path, &identity.device_id)?;
@@ -429,6 +446,7 @@ async fn run_session(
                     telemetry,
                     controller_status,
                     channels,
+                    &mut auth_recovery,
                 ) => Some(result),
                 Some(request) = logout.recv() => {
                     if complete_logout(request, &identity_path, &identity, enrollment, controller_status, &channels.current).await {
@@ -448,6 +466,15 @@ async fn run_session(
                 }
                 Err(error) if is_unauthenticated(&error) => {
                     let error_chain = format!("{error:#}");
+                    if auth_recovery != ControllerAuthRecovery::Refreshed {
+                        auth_recovery = ControllerAuthRecovery::RefreshRequired;
+                        controller_status.mark_disconnected(None).await;
+                        warn!(
+                            error = %error_chain,
+                            "controller rejected access token; refreshing OIDC credentials before retrying"
+                        );
+                        continue;
+                    }
                     identity::delete(&identity_path, &identity.device_id)?;
                     enrollment.set("starting").await;
                     controller_status
@@ -626,7 +653,7 @@ pub async fn llm_gateway_credential(
     let mut identity =
         identity::load(&state_dir.join("identity.json"))?.context("device is not enrolled")?;
     let identity_path = state_dir.join("identity.json");
-    refresh_oauth_if_needed(&mut identity, &identity_path).await?;
+    refresh_oauth(&mut identity, &identity_path, false).await?;
     // The refresh above is not cut off (its result is saved); the controller
     // connection and call are bounded together.
     let call = async {
@@ -667,7 +694,7 @@ pub async fn device_usage(
 ) -> anyhow::Result<DeviceUsage> {
     let identity_path = state_dir.join("identity.json");
     let mut identity = identity::load(&identity_path)?.context("device is not enrolled")?;
-    refresh_oauth_if_needed(&mut identity, &identity_path).await?;
+    refresh_oauth(&mut identity, &identity_path, false).await?;
     let call = async {
         let mut client = client(controller, Some(&identity)).await?;
         let mut request = Request::new(DeviceUsageRequest {
@@ -753,6 +780,7 @@ async fn connect(
     telemetry: &mut mpsc::Receiver<ModelTelemetryEvent>,
     controller_status: &ControllerConnectionState,
     channels: &mut ConfigChannels,
+    auth_recovery: &mut ControllerAuthRecovery,
 ) -> anyhow::Result<()> {
     let mut client = client(controller, Some(identity)).await?;
     // Tick outcomes produced before this stream are not sent on it; the
@@ -770,6 +798,9 @@ async fn connect(
     authenticate_request(identity, &mut request)?;
 
     let mut inbound = open_stream(&mut client, request, CONTROLLER_TIMEOUTS.stream_open).await?;
+    // Opening the stream succeeded only after the controller authenticated it.
+    // A later token expiry gets its own silent-refresh attempt.
+    *auth_recovery = ControllerAuthRecovery::Ready;
 
     send(
         &sender,
@@ -1319,17 +1350,19 @@ async fn renew_device_certificate(
     })
 }
 
-async fn refresh_oauth_if_needed(
+async fn refresh_oauth(
     identity: &mut Identity,
     identity_path: &Path,
+    force: bool,
 ) -> anyhow::Result<()> {
     let oauth = &identity.oauth;
-    if oauth.expires_at_unix_seconds <= unix_time_seconds().saturating_add(120) {
+    if force || oauth.expires_at_unix_seconds <= unix_time_seconds().saturating_add(120) {
         let _guard = OAUTH_REFRESH_MUTEX.lock().await;
         match identity::load(identity_path) {
             Ok(Some(stored))
                 if stored.oauth.expires_at_unix_seconds
-                    > unix_time_seconds().saturating_add(120) =>
+                    > unix_time_seconds().saturating_add(120)
+                    && (!force || stored.oauth.access_token != identity.oauth.access_token) =>
             {
                 *identity = stored;
                 return Ok(());
@@ -1692,7 +1725,7 @@ mod tests {
     }
     // --- Per-program configuration status -----------------------------------
 
-    fn test_reconciler(root: &std::path::Path) -> crate::reconcile::Reconciler {
+    pub(super) fn test_reconciler(root: &std::path::Path) -> crate::reconcile::Reconciler {
         crate::reconcile::Reconciler::new(
             true,
             root.join("claude/settings.json"),
@@ -2102,3 +2135,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "remote/auth_recovery_tests.rs"]
+mod auth_recovery_tests;
