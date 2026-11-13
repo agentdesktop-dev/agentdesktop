@@ -22,6 +22,11 @@ allowInsecureDev: false
 # Optional short-lived JWT issuer for authenticated LLM gateways.
 gatewayJwt: {}
 
+# Limits on the device-facing fleet API, such as connectionsPerAddress or
+# maxMessageBytes. Unset fields keep the controller defaults; see
+# schema/controller-config.md.
+fleetLimits: {}
+
 # Daemon configuration distributed to enrolled devices. Leave empty to
 # disable managed configuration.
 daemonConfig: {}
@@ -38,6 +43,17 @@ tlsSecretName: agentdesktop-controller-tls
 service:
   type: LoadBalancer
   port: 443
+  # The controller limits connections and enrollment per client address. With
+  # the Kubernetes default (Cluster), it may see node addresses instead of
+  # devices' own, so many devices share one address's connection limit and
+  # enrollment budget. Set Local to keep devices' addresses, if your load
+  # balancer only sends traffic to nodes that run the controller (NodePort
+  # clients must connect to such a node). Local does not help behind a load
+  # balancer that proxies connections. Otherwise raise
+  # fleetLimits.connectionsPerAddress, and for large rollouts raise
+  # fleetLimits.enrollmentBurst or shorten fleetLimits.enrollmentRefill.
+  # Applies only to LoadBalancer and NodePort services.
+  externalTrafficPolicy: ""
 
 resources: {}
 

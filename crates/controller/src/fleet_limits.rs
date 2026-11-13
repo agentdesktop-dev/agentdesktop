@@ -1,0 +1,710 @@
+//! Bounds on the device-facing fleet API.
+//!
+//! The fleet listener has to be reachable by every enrolled device, and client
+//! certificates are optional on it because enrollment runs before a device has
+//! one. These limits keep a client from holding resources on it indefinitely.
+
+use std::{
+    collections::HashMap,
+    convert::Infallible,
+    net::{IpAddr, Ipv6Addr, SocketAddr},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    task::{Context, Poll},
+    time::Duration,
+};
+
+use agentdesktop_core::config::ControllerFleetLimitsConfig;
+use agentdesktop_proto::fleet::fleet_agent_server::{FleetAgent, FleetAgentServer, SERVICE_NAME};
+use anyhow::Context as _;
+use tokio::{
+    sync::{OwnedSemaphorePermit, Semaphore, oneshot},
+    time::Instant,
+};
+use tonic::{
+    Status,
+    codegen::{Service, http},
+    server::NamedService,
+    service::Routes,
+    transport::{
+        Server, ServerTlsConfig,
+        server::{TcpConnectInfo, TcpIncoming, TlsConnectInfo},
+    },
+};
+use tower_layer::{Identity, Stack};
+
+mod connections;
+
+use connections::{Connections, LimitedIncoming, TrackRequests};
+pub use connections::{ReleaseOnDrop, SessionBusy};
+
+/// Limits applied to the fleet gRPC listener.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FleetLimits {
+    /// The limits that depend on the deployment, set by the controller
+    /// configuration (`fleetLimits`), where each is documented.
+    pub configured: ControllerFleetLimitsConfig,
+    /// Time a client has to finish the TLS handshake after connecting. Tonic sets
+    /// no limit by default, so a client could hold a connection open forever by
+    /// never sending its ClientHello.
+    pub tls_handshake: Duration,
+    /// Time a request handler has to produce its response. A streaming RPC's
+    /// response is produced once the stream opens, so this does not end
+    /// established streams such as `Connect`.
+    pub request: Duration,
+    /// How often an HTTP/2 PING checks a connection, and how long an unanswered
+    /// PING waits before the connection is closed.
+    pub keepalive_interval: Duration,
+    pub keepalive_timeout: Duration,
+    /// How long a connection may be silent before TCP keepalive probes start,
+    /// for peers that vanish without closing.
+    pub tcp_keepalive: Duration,
+    /// Time a new connection has to make its first request, and time a
+    /// connection may stay without any request in progress after its last one
+    /// finished. A connection with a request in progress (including an open
+    /// `Connect` stream) is never idle.
+    pub first_request: Duration,
+    pub idle_connection: Duration,
+    /// HTTP/2 streams one connection may have open at once
+    /// (`SETTINGS_MAX_CONCURRENT_STREAMS`). The client waits for one to close
+    /// before opening another, so one connection cannot occupy an unbounded
+    /// share of the server. Streams count until they close, not only while
+    /// their handler runs, so this also bounds open `Connect` streams and
+    /// responses the client does not read. hyper defaults to 200, but tonic
+    /// passes `None` when this is not set, which removes the limit.
+    pub concurrent_streams_per_connection: u32,
+    /// Streams the server may reset over a connection's lifetime because the
+    /// client broke the HTTP/2 protocol on them. Past this, the connection is
+    /// closed with `ENHANCE_YOUR_CALM`. A client can otherwise provoke resets
+    /// without end, which bypasses the protection against clients resetting
+    /// streams themselves ("MadeYouReset"). h2 and hyper default to 1024, but
+    /// tonic passes `None` when this is not set, which removes the limit.
+    pub error_resets_per_connection: usize,
+    /// Largest request from a caller without a device certificate: enrollment,
+    /// which runs before a device has one, and any other call made without one
+    /// (rejected by its handler, but only after the request has been decoded).
+    /// Enrollment requests are small (a hostname and a CSR).
+    pub unauthenticated_message_bytes: usize,
+    /// How long `CompleteEnrollment` waits for an in-flight slot before it is
+    /// refused. It waits rather than failing at once because the user has
+    /// already signed in, and a refusal makes them start over.
+    pub enrollment_completion_wait: Duration,
+    /// How often a device may open a `Connect` stream: up to
+    /// `stream_open_burst` in a burst, refilled at one per `stream_open_refill`.
+    /// Each open checks the access token with the identity provider.
+    pub stream_open_burst: u32,
+    pub stream_open_refill: Duration,
+}
+
+/// Default limits. The controller configuration replaces `configured` (see
+/// `FleetLimits::from_config`).
+const FLEET_LIMITS: FleetLimits = FleetLimits {
+    configured: ControllerFleetLimitsConfig::DEFAULT,
+    tls_handshake: Duration::from_secs(10),
+    request: Duration::from_secs(30),
+    keepalive_interval: Duration::from_secs(30),
+    keepalive_timeout: Duration::from_secs(20),
+    tcp_keepalive: Duration::from_secs(60),
+    first_request: Duration::from_secs(20),
+    idle_connection: Duration::from_secs(120),
+    concurrent_streams_per_connection: 64,
+    error_resets_per_connection: 1024,
+    unauthenticated_message_bytes: 64 * 1024,
+    enrollment_completion_wait: Duration::from_secs(10),
+    stream_open_burst: 20,
+    stream_open_refill: Duration::from_secs(60),
+};
+
+impl FleetLimits {
+    /// The limits for a controller: the deployment-dependent ones from its
+    /// configuration, and the defaults for the rest.
+    pub fn from_config(config: &ControllerFleetLimitsConfig) -> Self {
+        Self {
+            configured: *config,
+            ..FLEET_LIMITS
+        }
+    }
+
+    /// Binds the fleet listener on `address`, over TLS when `tls` is given,
+    /// with every connection and request limit applied. The listener serves
+    /// the fleet service with its message limits (`FleetListener::serve`).
+    pub fn listener(
+        &self,
+        address: SocketAddr,
+        tls: Option<ServerTlsConfig>,
+    ) -> anyhow::Result<FleetListener> {
+        // The listener and the request layer share one registry: the listener
+        // admits and closes connections, and the layer marks them busy.
+        let connections = Connections::new(self);
+        let mut server = Server::builder()
+            .timeout(self.request)
+            .http2_keepalive_interval(Some(self.keepalive_interval))
+            .http2_keepalive_timeout(Some(self.keepalive_timeout))
+            .max_concurrent_streams(self.concurrent_streams_per_connection)
+            .http2_max_local_error_reset_streams(Some(self.error_resets_per_connection))
+            // agentgateway fetches the gateway JWKS from this listener over HTTP/1.
+            .accept_http1(true)
+            .layer(connections.track_requests());
+        if let Some(tls) = tls {
+            server = server
+                .tls_config(tls.timeout(self.tls_handshake))
+                .context("configure fleet listener TLS")?;
+        }
+        let incoming = TcpIncoming::bind(address)
+            .with_context(|| format!("bind fleet listener on {address}"))?
+            .with_nodelay(Some(true))
+            .with_keepalive(Some(self.tcp_keepalive));
+        let local_address = incoming
+            .local_addr()
+            .context("read fleet listener address")?;
+        Ok(FleetListener {
+            limits: *self,
+            server,
+            incoming: connections.incoming(incoming),
+            local_address,
+        })
+    }
+
+    /// The fleet gRPC service with message size limits applied.
+    fn fleet_service<T: FleetAgent>(&self, service: T) -> FleetService<T> {
+        let service = Arc::new(service);
+        FleetService {
+            unauthenticated: FleetAgentServer::from_arc(service.clone())
+                .max_decoding_message_size(self.unauthenticated_message_bytes)
+                .max_encoding_message_size(self.configured.max_message_bytes),
+            devices: FleetAgentServer::from_arc(service)
+                .max_decoding_message_size(self.configured.max_message_bytes)
+                .max_encoding_message_size(self.configured.max_message_bytes),
+        }
+    }
+
+    pub fn enrollment(&self) -> EnrollmentLimiter {
+        EnrollmentLimiter::new(self)
+    }
+
+    /// Per-device `Connect` state: one stream per device, and its budgets.
+    pub fn device_streams(&self) -> DeviceStreams {
+        DeviceStreams::new(self)
+    }
+}
+
+/// The bound fleet listener, from `FleetLimits::listener`.
+pub struct FleetListener {
+    limits: FleetLimits,
+    server: Server<Stack<TrackRequests, Identity>>,
+    incoming: LimitedIncoming<TcpIncoming>,
+    local_address: SocketAddr,
+}
+
+impl FleetListener {
+    /// The address the listener is bound to.
+    pub fn local_address(&self) -> SocketAddr {
+        self.local_address
+    }
+
+    /// Serves `service`, with the fleet message limits, and the other `routes`
+    /// until the listener fails.
+    pub async fn serve<T: FleetAgent>(
+        self,
+        service: T,
+        routes: Routes,
+    ) -> Result<(), tonic::transport::Error> {
+        let mut server = self.server;
+        server
+            .add_routes(routes.add_service(self.limits.fleet_service(service)))
+            .serve_with_incoming(self.incoming)
+            .await
+    }
+
+    #[cfg(test)]
+    fn connections(&self) -> &Connections {
+        self.incoming.connections()
+    }
+}
+
+/// The fleet gRPC service, with a smaller request limit for enrollment and for
+/// callers without a device certificate. Tonic sets message limits per service,
+/// so those requests go to their own instance of the generated server.
+struct FleetService<T> {
+    unauthenticated: FleetAgentServer<T>,
+    devices: FleetAgentServer<T>,
+}
+
+impl<T> Clone for FleetService<T> {
+    fn clone(&self) -> Self {
+        Self {
+            unauthenticated: self.unauthenticated.clone(),
+            devices: self.devices.clone(),
+        }
+    }
+}
+
+/// How the fleet limits treat a `FleetAgent` method.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RpcClass {
+    /// Called before the device has a certificate. Its requests get the small
+    /// message limit whether or not a certificate is presented, and its handler
+    /// must take a permit from `EnrollmentLimiter` before any other work.
+    Enrollment,
+    /// Called with a device certificate: the device message limit. Without a
+    /// certificate it gets the small limit, and its handler rejects it.
+    Device,
+    /// The device's `Connect` stream. Its connection stays busy for as long as
+    /// the session lasts, not only while the handler runs (see `SessionBusy`).
+    Connect,
+}
+
+/// Every `FleetAgent` method in `fleet.proto`, with its class. A test fails
+/// when an RPC is missing here, so a new or renamed one cannot skip its limits.
+const RPC_CLASSES: &[(&str, RpcClass)] = &[
+    ("BeginEnrollment", RpcClass::Enrollment),
+    ("CompleteEnrollment", RpcClass::Enrollment),
+    ("RenewDeviceCertificate", RpcClass::Device),
+    ("GetLlmGatewayCredential", RpcClass::Device),
+    ("GetDeviceUsage", RpcClass::Device),
+    ("Connect", RpcClass::Connect),
+];
+
+/// The class of the `FleetAgent` method at `path`, or `None` for another path.
+fn rpc_class(path: &str) -> Option<RpcClass> {
+    let method = path
+        .strip_prefix('/')?
+        .strip_prefix(SERVICE_NAME)?
+        .strip_prefix('/')?;
+    RPC_CLASSES
+        .iter()
+        .find(|(name, _)| *name == method)
+        .map(|(_, class)| *class)
+}
+
+fn is_enrollment(path: &str) -> bool {
+    rpc_class(path) == Some(RpcClass::Enrollment)
+}
+
+/// Whether `path` is the `Connect` stream, whose response lasts as long as the
+/// device's session.
+fn is_connect(path: &str) -> bool {
+    rpc_class(path) == Some(RpcClass::Connect)
+}
+
+/// Whether the TLS client presented a certificate signed by the device CA
+/// (the handshake rejects any other).
+fn has_device_certificate<B>(request: &http::Request<B>) -> bool {
+    request
+        .extensions()
+        .get::<TlsConnectInfo<TcpConnectInfo>>()
+        .and_then(TlsConnectInfo::peer_certs)
+        .is_some_and(|certificates| !certificates.is_empty())
+}
+
+impl<T, B> Service<http::Request<B>> for FleetService<T>
+where
+    FleetAgentServer<T>: Service<http::Request<B>, Error = Infallible>,
+{
+    type Response = <FleetAgentServer<T> as Service<http::Request<B>>>::Response;
+    type Error = Infallible;
+    type Future = <FleetAgentServer<T> as Service<http::Request<B>>>::Future;
+
+    fn poll_ready(&mut self, context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        match self.unauthenticated.poll_ready(context) {
+            Poll::Ready(Ok(())) => self.devices.poll_ready(context),
+            other => other,
+        }
+    }
+
+    fn call(&mut self, request: http::Request<B>) -> Self::Future {
+        if is_enrollment(request.uri().path()) || !has_device_certificate(&request) {
+            self.unauthenticated.call(request)
+        } else {
+            self.devices.call(request)
+        }
+    }
+}
+
+impl<T> NamedService for FleetService<T> {
+    const NAME: &'static str = SERVICE_NAME;
+}
+
+/// The address a per-address limit counts against: an IPv4 address, or the /64
+/// network of an IPv6 one, since one IPv6 host usually controls a whole /64.
+pub(crate) fn address_key(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V4(_) => address,
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(Ipv6Addr::from(u128::from(v6) & (u128::MAX << 64))),
+        },
+    }
+}
+
+/// Admission control for the unauthenticated enrollment RPCs.
+#[derive(Clone)]
+pub struct EnrollmentLimiter {
+    in_flight: Arc<Semaphore>,
+    peers: Arc<Mutex<PeerBuckets>>,
+    burst: f64,
+    refill: Duration,
+    completion_wait: Duration,
+}
+
+/// Enrollment buckets by address, in two generations. When the current
+/// generation fills up it becomes the previous one, and the old previous one is
+/// dropped; a peer found in the previous generation moves back to the current
+/// one. Active peers keep their buckets, and the table never holds more than
+/// two generations.
+#[derive(Default)]
+struct PeerBuckets {
+    current: HashMap<IpAddr, Bucket>,
+    previous: HashMap<IpAddr, Bucket>,
+}
+
+const PEERS_PER_GENERATION: usize = 10_000;
+
+impl PeerBuckets {
+    fn bucket(&mut self, peer: IpAddr, fresh: Bucket) -> &mut Bucket {
+        if !self.current.contains_key(&peer) {
+            let bucket = self.previous.remove(&peer).unwrap_or(fresh);
+            if self.current.len() >= PEERS_PER_GENERATION {
+                self.previous = std::mem::take(&mut self.current);
+            }
+            self.current.insert(peer, bucket);
+        }
+        self.current
+            .get_mut(&peer)
+            .expect("bucket was just inserted")
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.current.len() + self.previous.len()
+    }
+}
+
+/// The longest `Bucket::spend` asks a caller to wait.
+const LONGEST_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// A token bucket: up to `burst` tokens, refilled at one per `refill`.
+#[derive(Clone, Copy)]
+struct Bucket {
+    tokens: f64,
+    updated: Instant,
+}
+
+impl Bucket {
+    fn full(burst: f64, now: Instant) -> Self {
+        Self {
+            tokens: burst,
+            updated: now,
+        }
+    }
+
+    /// Refills the bucket for the time since its last use, then takes one token.
+    fn take(&mut self, now: Instant, refill: Duration, burst: f64) -> bool {
+        self.tokens = self.refilled(now, refill, burst);
+        self.updated = now;
+        if self.tokens < 1.0 {
+            return false;
+        }
+        self.tokens -= 1.0;
+        true
+    }
+
+    /// Refills the bucket, then spends one token even when none is left (the
+    /// bucket goes into debt). Returns when the next token is available:
+    /// `None` when one is left now.
+    fn spend(&mut self, now: Instant, refill: Duration, burst: f64) -> Option<Instant> {
+        self.tokens = self.refilled(now, refill, burst) - 1.0;
+        self.updated = now;
+        if self.tokens >= 1.0 {
+            return None;
+        }
+        // Capped, so an absurdly long refill setting cannot overflow the instant.
+        let wait = Duration::try_from_secs_f64(refill.as_secs_f64() * (1.0 - self.tokens))
+            .map_or(LONGEST_WAIT, |wait| wait.min(LONGEST_WAIT));
+        Some(now + wait)
+    }
+
+    fn refilled(self, now: Instant, refill: Duration, burst: f64) -> f64 {
+        let elapsed = now.saturating_duration_since(self.updated);
+        (self.tokens + elapsed.as_secs_f64() / refill.as_secs_f64()).min(burst)
+    }
+}
+
+impl EnrollmentLimiter {
+    fn new(limits: &FleetLimits) -> Self {
+        Self {
+            in_flight: Arc::new(Semaphore::new(limits.configured.enrollment_in_flight)),
+            peers: Arc::default(),
+            burst: f64::from(limits.configured.enrollment_burst),
+            refill: limits.configured.enrollment_refill,
+            completion_wait: limits.enrollment_completion_wait,
+        }
+    }
+
+    /// Admits one `BeginEnrollment` from `peer`, or rejects it with
+    /// `RESOURCE_EXHAUSTED`. Hold the returned permit until the request finishes.
+    pub fn admit(&self, peer: Option<SocketAddr>) -> Result<OwnedSemaphorePermit, Status> {
+        // The address's budget is spent before a slot is sought, so a request
+        // refused for want of a slot still counts against it. Otherwise, while
+        // a flood holds every slot, the flooding addresses would keep their
+        // whole budget and take the slots back the moment they free up.
+        if let Some(peer) = peer
+            && !self.take(peer.ip(), Instant::now())
+        {
+            if let Some(refused) = ENROLLMENT_RATE.event(Instant::now()) {
+                tracing::warn!(
+                    latest_address = %address_key(peer.ip()),
+                    refused_since_last_warning = refused,
+                    "refused enrollment requests over the per-address rate limit"
+                );
+            }
+            return Err(Status::resource_exhausted(
+                "too many enrollment requests from this address; retry later",
+            ));
+        }
+        self.in_flight
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| in_flight_refusal())
+    }
+
+    /// Admits one `CompleteEnrollment`, waiting up to `enrollment_completion_wait`
+    /// for an in-flight slot. It does not spend the address's budget: completing
+    /// needs an enrollment that `BeginEnrollment` started (and paid for), and each
+    /// enrollment completes at most once, so an unknown one fails at a lookup.
+    pub async fn admit_completion(&self) -> Result<OwnedSemaphorePermit, Status> {
+        match tokio::time::timeout(self.completion_wait, self.in_flight.clone().acquire_owned())
+            .await
+        {
+            Ok(Ok(permit)) => Ok(permit),
+            _ => Err(in_flight_refusal()),
+        }
+    }
+
+    fn take(&self, peer: IpAddr, now: Instant) -> bool {
+        let mut peers = self.peers.lock().expect("enrollment limiter lock poisoned");
+        peers
+            .bucket(address_key(peer), Bucket::full(self.burst, now))
+            .take(now, self.refill, self.burst)
+    }
+}
+
+fn in_flight_refusal() -> Status {
+    if let Some(refused) = ENROLLMENT_IN_FLIGHT.event(Instant::now()) {
+        tracing::warn!(
+            refused_since_last_warning = refused,
+            "refused enrollment requests with every in-flight slot taken"
+        );
+    }
+    Status::resource_exhausted("too many enrollment requests in progress; retry later")
+}
+
+/// `Connect` state by device. A device has at most one open stream: opening a
+/// new stream tells the device's previous one to close, so a device that
+/// reconnects (after sleep, for example) is never blocked by a stream the
+/// controller has not yet noticed is dead. The device's message budget and its
+/// budget for opening streams live here too, so reconnecting does not reset them.
+#[derive(Clone)]
+pub struct DeviceStreams {
+    devices: Arc<Mutex<HashMap<String, DeviceState>>>,
+    next: Arc<AtomicU64>,
+    limits: FleetLimits,
+}
+
+struct DeviceState {
+    /// The open stream's generation and the signal that replaces it.
+    current: Option<(u64, oneshot::Sender<()>)>,
+    messages: Bucket,
+    opens: Bucket,
+}
+
+/// Device entries kept before idle ones (no open stream) are dropped, or twice
+/// `max_connections` if that is more: each open stream holds a connection, so
+/// dropping idle entries always frees at least half the table. Only devices
+/// with a certificate from the device CA get an entry.
+const MAX_TRACKED_DEVICES: usize = 100_000;
+
+/// A registered `Connect` stream. `superseded` resolves when the same device
+/// opens a newer stream; dropping this unregisters it.
+pub struct DeviceStream {
+    streams: DeviceStreams,
+    device_id: String,
+    generation: u64,
+    pub superseded: oneshot::Receiver<()>,
+}
+
+impl DeviceStreams {
+    pub fn new(limits: &FleetLimits) -> Self {
+        Self {
+            devices: Arc::default(),
+            next: Arc::default(),
+            limits: *limits,
+        }
+    }
+
+    fn with_device<T>(&self, device_id: &str, f: impl FnOnce(&mut DeviceState) -> T) -> T {
+        let mut devices = self
+            .devices
+            .lock()
+            .expect("device stream registry lock poisoned");
+        let max_devices =
+            MAX_TRACKED_DEVICES.max(self.limits.configured.max_connections.saturating_mul(2));
+        if devices.len() >= max_devices && !devices.contains_key(device_id) {
+            devices.retain(|_, device| device.current.is_some());
+        }
+        let now = Instant::now();
+        let device = devices
+            .entry(device_id.to_owned())
+            .or_insert_with(|| DeviceState {
+                current: None,
+                messages: Bucket::full(f64::from(self.limits.configured.device_message_burst), now),
+                opens: Bucket::full(f64::from(self.limits.stream_open_burst), now),
+            });
+        f(device)
+    }
+
+    /// Admits one more `Connect` from `device_id`, or rejects it with
+    /// `RESOURCE_EXHAUSTED` when the device opens streams too often. Call this
+    /// before any per-stream work, such as checking the access token.
+    pub fn admit_open(&self, device_id: &str) -> Result<(), Status> {
+        let limits = self.limits;
+        let admitted = self.with_device(device_id, |device| {
+            device.opens.take(
+                Instant::now(),
+                limits.stream_open_refill,
+                f64::from(limits.stream_open_burst),
+            )
+        });
+        if admitted {
+            Ok(())
+        } else {
+            if let Some(refused) = STREAM_OPENS.event(Instant::now()) {
+                tracing::warn!(
+                    latest_device_id = device_id,
+                    refused_since_last_warning = refused,
+                    "refused Connect streams from devices that open them too often"
+                );
+            }
+            Err(Status::resource_exhausted(
+                "this device opened too many streams; retry later",
+            ))
+        }
+    }
+
+    pub fn open(&self, device_id: &str) -> DeviceStream {
+        let generation = self.next.fetch_add(1, Ordering::Relaxed);
+        let (replace, superseded) = oneshot::channel();
+        let previous = self.with_device(device_id, |device| {
+            device.current.replace((generation, replace))
+        });
+        if let Some((_, previous)) = previous {
+            let _ = previous.send(());
+        }
+        DeviceStream {
+            streams: self.clone(),
+            device_id: device_id.to_owned(),
+            generation,
+            superseded,
+        }
+    }
+}
+
+impl DeviceStream {
+    /// Spends one message from the device's budget. Returns when the budget
+    /// allows the next one: `None` when it allows it now, or the instant it
+    /// has refilled enough. Do not read another message from the device
+    /// before then.
+    pub fn spend_message(&self, now: Instant) -> Option<Instant> {
+        let limits = self.streams.limits;
+        let next = self.streams.with_device(&self.device_id, |device| {
+            device.messages.spend(
+                now,
+                limits.configured.device_message_refill,
+                f64::from(limits.configured.device_message_burst),
+            )
+        });
+        if next.is_some()
+            && let Some(throttled) = DEVICE_MESSAGES.event(now)
+        {
+            tracing::warn!(
+                latest_device_id = %self.device_id,
+                throttled_since_last_warning = throttled,
+                "slowed reading from devices that send messages faster than their budget"
+            );
+        }
+        next
+    }
+}
+
+impl Drop for DeviceStream {
+    fn drop(&mut self) {
+        let mut devices = self
+            .streams
+            .devices
+            .lock()
+            .expect("device stream registry lock poisoned");
+        // A newer stream for the same device keeps its registration.
+        if let Some(device) = devices.get_mut(&self.device_id)
+            && device
+                .current
+                .as_ref()
+                .is_some_and(|(generation, _)| *generation == self.generation)
+        {
+            device.current = None;
+        }
+    }
+}
+
+/// A warning that fires once per refused or throttled request, connection or
+/// message. A flood would
+/// log a line per event, so this logs at most one per `WARNING_INTERVAL` and
+/// says how many events it stands for: every event since the last warning, from
+/// any client or device, reported with the first event after the interval
+/// (however much later that is). A warning that names a client or device names
+/// only the latest one.
+pub(crate) struct ThrottledWarning {
+    state: Mutex<WarningState>,
+}
+
+struct WarningState {
+    last: Option<Instant>,
+    events: u64,
+}
+
+const WARNING_INTERVAL: Duration = Duration::from_secs(10);
+
+impl ThrottledWarning {
+    pub(crate) const fn new() -> Self {
+        Self {
+            state: Mutex::new(WarningState {
+                last: None,
+                events: 0,
+            }),
+        }
+    }
+
+    /// Counts one event. Returns the number of events since the last warning,
+    /// including this one, when it is time to log another.
+    pub(crate) fn event(&self, now: Instant) -> Option<u64> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.events += 1;
+        if state
+            .last
+            .is_some_and(|last| now.saturating_duration_since(last) < WARNING_INTERVAL)
+        {
+            return None;
+        }
+        state.last = Some(now);
+        Some(std::mem::take(&mut state.events))
+    }
+}
+
+static ENROLLMENT_RATE: ThrottledWarning = ThrottledWarning::new();
+static ENROLLMENT_IN_FLIGHT: ThrottledWarning = ThrottledWarning::new();
+static STREAM_OPENS: ThrottledWarning = ThrottledWarning::new();
+static DEVICE_MESSAGES: ThrottledWarning = ThrottledWarning::new();
+
+#[cfg(test)]
+mod tests;

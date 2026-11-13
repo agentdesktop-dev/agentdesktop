@@ -37,6 +37,20 @@
       "type": "string",
       "default": "sqlite://agentdesktop-controller.db?mode=rwc"
     },
+    "fleetLimits": {
+      "description": "Limits on the device-facing fleet API that depend on the deployment.",
+      "$ref": "#/$defs/ControllerFleetLimitsConfig",
+      "default": {
+        "connectionsPerAddress": 4096,
+        "deviceMessageBurst": 600,
+        "deviceMessageRefill": "50ms",
+        "enrollmentBurst": 60,
+        "enrollmentInFlight": 64,
+        "enrollmentRefill": "1s",
+        "maxConnections": 50000,
+        "maxMessageBytes": 4194304
+      }
+    },
     "fleetListen": {
       "description": "Address on which the device-facing gRPC fleet API listens.",
       "type": "string",
@@ -190,6 +204,65 @@
       "required": [
         "path"
       ]
+    },
+    "ControllerFleetLimitsConfig": {
+      "description": "Limits on the device-facing fleet API that depend on the deployment: how\nmany devices connect, how many share one client address, and how much they\nsend. Unset fields keep their defaults.",
+      "type": "object",
+      "properties": {
+        "connectionsPerAddress": {
+          "description": "Open fleet connections allowed from one client address: an IPv4\naddress, or an IPv6 /64. At the limit, that address's connection idle\nthe longest is closed to admit a new one; when none is idle, the new one\nis closed. Raise it when more devices share an address, such as behind a\nNAT or a load balancer that does not preserve client addresses. Defaults\nto `4096`.",
+          "type": "integer",
+          "format": "uint",
+          "default": 4096,
+          "minimum": 1
+        },
+        "deviceMessageBurst": {
+          "description": "Messages one device may send in a burst on its `Connect` stream, after\nwhich it may send one more every `deviceMessageRefill`. Once a device\nhas sent its burst, the controller reads its messages no faster than\nthat, and the device waits to send more. Defaults to `600`.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 600,
+          "minimum": 1
+        },
+        "deviceMessageRefill": {
+          "description": "Time for a device to get back one message. Defaults to `50ms`.",
+          "type": "string",
+          "default": "50ms"
+        },
+        "enrollmentBurst": {
+          "description": "Enrollments one client address may start in a burst, after which it may\nstart one more every `enrollmentRefill`. Defaults to `60`.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 60,
+          "minimum": 1
+        },
+        "enrollmentInFlight": {
+          "description": "Enrollment requests in progress at once across all clients. Enrollment\ncalls the identity provider. Defaults to `64`.",
+          "type": "integer",
+          "format": "uint",
+          "default": 64,
+          "minimum": 1
+        },
+        "enrollmentRefill": {
+          "description": "Time for a client address to get back one enrollment. Defaults to `1s`.",
+          "type": "string",
+          "default": "1s"
+        },
+        "maxConnections": {
+          "description": "Open fleet connections allowed in total. At the limit, the connection\nidle the longest is closed to admit a new one; when none is idle, the\nnew one is closed. A connection is idle unless a client with a device\ncertificate has a request or `Connect` stream open on it. Defaults to\n`50000`.",
+          "type": "integer",
+          "format": "uint",
+          "default": 50000,
+          "minimum": 1
+        },
+        "maxMessageBytes": {
+          "description": "Largest message, in bytes, that a device and the controller may send\neach other. Requests from clients without a device certificate, such as\nenrollment, stay limited to 64 KiB. Devices accept at most 4 MiB, so\nraising this only raises what devices may send. Defaults to `4194304`\n(4 MiB).",
+          "type": "integer",
+          "format": "uint",
+          "default": 4194304,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
     },
     "ControllerGatewayJwtConfig": {
       "description": "Settings for issuing short-lived LLM gateway JWTs.",
