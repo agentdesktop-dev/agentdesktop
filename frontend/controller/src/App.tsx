@@ -10,6 +10,7 @@ import type { ControllerExtension } from "./extensions";
 import { navigate, usePath } from "./router";
 import type {
   ActiveDaemonConfig,
+  AuditPage as AuditPageData,
   ControllerSettings,
   Device,
   DeviceDetail,
@@ -18,6 +19,7 @@ import type {
   UsageReport,
 } from "./types";
 import { type UsageFilters, usageDimensions } from "./usage";
+import { AuditView } from "./views/AuditView";
 import { ConfigurationView } from "./views/ConfigurationView";
 import { DevicesView } from "./views/DevicesView";
 import { DeviceView } from "./views/DeviceView";
@@ -108,6 +110,7 @@ function ControllerRoute({
   }
   if (path === "/configuration") return <ConfigurationPage />;
   if (path === "/usage") return <UsagePage />;
+  if (path === "/audit") return <AuditPage />;
   if (path === "/settings") return <SettingsPage />;
   return <NotFound />;
 }
@@ -286,6 +289,47 @@ function UsagePage() {
       }
       range={range}
       report={query.data}
+    />
+  );
+}
+
+function AuditPage() {
+  const { request } = useAuth();
+  const first = useApi<AuditPageData>("/api/v1/audit");
+  const [older, setOlder] = useState<AuditPageData | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
+  const nextBefore = older ? older.next_before : first.data?.next_before;
+
+  async function loadMore() {
+    if (nextBefore == null || loadingMore) return;
+    setLoadingMore(true);
+    setLoadMoreError(null);
+    try {
+      const response = await request(`/api/v1/audit?before=${nextBefore}`);
+      const page = (await response.json()) as AuditPageData;
+      setOlder((current) => ({
+        events: [...(current?.events ?? []), ...page.events],
+        next_before: page.next_before,
+      }));
+    } catch (error) {
+      setLoadMoreError(
+        error instanceof Error ? error.message : "Could not load older events",
+      );
+    } finally {
+      setLoadingMore(false);
+    }
+  }
+
+  return (
+    <AuditView
+      events={[...(first.data?.events ?? []), ...(older?.events ?? [])]}
+      error={first.error}
+      loading={first.loading}
+      hasMore={nextBefore != null}
+      loadingMore={loadingMore}
+      loadMoreError={loadMoreError}
+      onLoadMore={loadMore}
     />
   );
 }

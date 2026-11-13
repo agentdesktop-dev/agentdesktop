@@ -1,5 +1,9 @@
 use anyhow::Context;
-use sqlx::{AnyPool, any::AnyPoolOptions};
+use sqlx::{
+    AnyPool,
+    any::AnyPoolOptions,
+    migrate::{Migration, Migrator},
+};
 use std::{collections::BTreeMap, path::PathBuf};
 
 use agentdesktop_core::model::{LocalModel, McpServer, ModelRuntime, Skill};
@@ -8,6 +12,8 @@ use agentdesktop_proto::fleet::{
 };
 use agentdesktop_usage::UsageStore;
 use serde::Serialize;
+
+pub mod audit;
 
 #[derive(Clone)]
 pub struct Database {
@@ -267,15 +273,42 @@ pub(crate) fn readable_name(idp_claims: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Every file in `migrations/`. Most run on every database; see [`migrator`].
+static MIGRATIONS: Migrator = sqlx::migrate!();
+
+/// Database-specific migration files end in `_sqlite` or `_postgres` (e.g.
+/// `0005_admin_audit_sqlite.sql` and `0005_admin_audit_postgres.sql`, with the same
+/// version) and run only on that database. All other files run on both.
+fn migrator(url: &str) -> anyhow::Result<Migrator> {
+    let backend = if url.starts_with("postgres") {
+        "postgres"
+    } else if url.starts_with("sqlite") {
+        "sqlite"
+    } else {
+        anyhow::bail!("unsupported database URL; expected sqlite: or postgres:");
+    };
+    let applies = |migration: &&Migration| match ["sqlite", "postgres"]
+        .into_iter()
+        .find(|only| migration.description.ends_with(&format!(" {only}")))
+    {
+        Some(only) => only == backend,
+        None => true,
+    };
+    Ok(Migrator::with_migrations(
+        MIGRATIONS.iter().filter(applies).cloned().collect(),
+    ))
+}
+
 impl Database {
     pub async fn connect(url: &str) -> anyhow::Result<Self> {
+        let migrator = migrator(url)?;
         sqlx::any::install_default_drivers();
         let pool = AnyPoolOptions::new()
             .max_connections(10)
             .connect(url)
             .await
             .with_context(|| format!("connect to database {url}"))?;
-        sqlx::migrate!()
+        migrator
             .run(&pool)
             .await
             .context("run database migrations")?;
@@ -764,6 +797,37 @@ fn unix_time_seconds() -> i64 {
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeMap, path::PathBuf};
+
+    #[test]
+    fn each_database_runs_shared_and_its_own_migrations_once_per_version() {
+        for (url, own, other) in [
+            (
+                "sqlite://controller.db",
+                "admin audit sqlite",
+                "admin audit postgres",
+            ),
+            (
+                "postgres://localhost/controller",
+                "admin audit postgres",
+                "admin audit sqlite",
+            ),
+        ] {
+            let migrator = super::migrator(url).unwrap();
+            let descriptions: Vec<_> = migrator.iter().map(|m| m.description.as_ref()).collect();
+            assert!(descriptions.contains(&"controller"), "{url}");
+            assert!(descriptions.contains(&own), "{url}");
+            assert!(!descriptions.contains(&other), "{url}");
+            let mut versions: Vec<_> = migrator.iter().map(|m| m.version).collect();
+            let count = versions.len();
+            versions.dedup();
+            assert_eq!(
+                versions.len(),
+                count,
+                "{url} has two migrations with one version"
+            );
+        }
+        assert!(super::migrator("mysql://localhost/controller").is_err());
+    }
 
     use agentdesktop_proto::fleet::{
         ConfigState, ConfigStatus, Discovery, Inventory, LocalModel, McpServer, ModelRuntime,

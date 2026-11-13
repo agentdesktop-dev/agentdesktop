@@ -61,11 +61,33 @@ struct PendingEnrollment {
     expires_at: Instant,
 }
 
+#[derive(Clone, Debug)]
 pub struct CompletedEnrollment {
     pub hostname: String,
     pub issuer: String,
     pub subject: String,
     pub idp_claims: BTreeMap<String, serde_json::Value>,
+}
+
+/// Why [`OidcProvider::complete`] refused an enrollment.
+#[derive(Debug)]
+pub struct EnrollmentRejected {
+    /// The sign-in, once its ID token was verified. `None` when the attempt failed
+    /// before that, so nobody verified can be named.
+    pub verified: Option<CompletedEnrollment>,
+    /// Stable code for the audit log.
+    pub reason: &'static str,
+    pub error: anyhow::Error,
+}
+
+impl From<anyhow::Error> for EnrollmentRejected {
+    fn from(error: anyhow::Error) -> Self {
+        Self {
+            verified: None,
+            reason: "invalid_enrollment",
+            error,
+        }
+    }
 }
 
 /// Stable identity authenticated by one OIDC provider.
@@ -320,7 +342,7 @@ impl OidcProvider {
         &self,
         request: CompleteEnrollmentRequest,
         access_token: &str,
-    ) -> anyhow::Result<CompletedEnrollment> {
+    ) -> Result<CompletedEnrollment, EnrollmentRejected> {
         let pending = self
             .inner
             .pending
@@ -329,10 +351,10 @@ impl OidcProvider {
             .remove(&request.enrollment_id)
             .context("unknown or already completed enrollment")?;
         if pending.expires_at <= Instant::now() {
-            bail!("enrollment expired");
+            return Err(anyhow::anyhow!("enrollment expired").into());
         }
         if request.id_token.is_empty() || access_token.is_empty() {
-            bail!("ID token and access token are required");
+            return Err(anyhow::anyhow!("ID token and access token are required").into());
         }
         let header = decode_header(&request.id_token).context("decode ID token header")?;
         let kid = header.kid.context("ID token has no key ID")?;
@@ -345,27 +367,48 @@ impl OidcProvider {
         let claims = decode::<IdTokenClaims>(&request.id_token, &key, &validation)
             .context("validate OIDC ID token")?
             .claims;
-        if let Some(expected) = &pending.nonce
-            && claims.nonce.as_ref() != Some(expected)
-        {
-            bail!("OIDC nonce mismatch");
-        }
-        let access_principal = self.authenticate_access_token(access_token).await?;
-        if access_principal.subject != claims.sub {
-            bail!("access token and ID token subjects do not match");
-        }
 
         let mut idp_claims = claims.additional;
         idp_claims.insert("sub".to_owned(), claims.sub.clone().into());
+        let verified = CompletedEnrollment {
+            hostname: pending.hostname,
+            issuer: self.inner.issuer.clone(),
+            subject: claims.sub.clone(),
+            idp_claims: idp_claims.clone(),
+        };
+        let reject = |reason, error| EnrollmentRejected {
+            verified: Some(verified.clone()),
+            reason,
+            error,
+        };
+        if let Some(expected) = &pending.nonce
+            && claims.nonce.as_ref() != Some(expected)
+        {
+            return Err(reject(
+                "nonce_mismatch",
+                anyhow::anyhow!("OIDC nonce mismatch"),
+            ));
+        }
+        let access_principal = self
+            .authenticate_access_token(access_token)
+            .await
+            .map_err(|error| reject("access_token_rejected", error))?;
+        if access_principal.subject != claims.sub {
+            return Err(reject(
+                "token_subject_mismatch",
+                anyhow::anyhow!("access token and ID token subjects do not match"),
+            ));
+        }
+
         if let Some(nonce) = claims.nonce {
             idp_claims.insert("nonce".to_owned(), nonce.into());
         }
 
         Ok(CompletedEnrollment {
-            hostname: pending.hostname,
             issuer: access_principal.issuer,
             subject: access_principal.subject,
             idp_claims,
+            ..verified
         })
     }
 
