@@ -1,6 +1,6 @@
-# syntax=docker/dockerfile:1.26
+# syntax=docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
 
-FROM docker.io/library/node:26.13.0-bookworm AS ui
+FROM docker.io/library/node:26.13.0-bookworm@sha256:a546d3f8acd2af4382668a7e6acd3bc4418e6a27478373e3246f8162f5181509 AS ui
 WORKDIR /app/frontend
 ENV CI=true
 COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
@@ -15,7 +15,7 @@ COPY images/ /app/images/
 RUN --mount=type=cache,id=agentdesktop-pnpm,target=/pnpm/store \
     pnpm --filter @agentdesktop/controller-web build
 
-FROM docker.io/library/rust:1.99.1-trixie AS builder
+FROM docker.io/library/rust:1.99.1-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07 AS builder
 ARG TARGETARCH
 ARG BUILD_PROFILE=release
 WORKDIR /app
@@ -32,6 +32,6 @@ RUN --mount=type=cache,id=agentdesktop-target-${TARGETARCH},target=/app/target \
     esac && \
     cp "target/${BUILD_PROFILE}/agentdesktop-controller" /agentdesktop-controller
 
-FROM cgr.dev/chainguard/glibc-dynamic:latest
+FROM cgr.dev/chainguard/glibc-dynamic:latest@sha256:4cefd4ace94c0293037ee782aadbf9f6f4f7efac0d4eab699ddcf8223983c1e2
 COPY --from=builder /agentdesktop-controller /agentdesktop-controller
 ENTRYPOINT ["/agentdesktop-controller"]
