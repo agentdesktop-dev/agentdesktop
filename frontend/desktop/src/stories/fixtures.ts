@@ -41,6 +41,40 @@ export const usageReceiverDaemonInfo: DaemonInfo = {
   usageReceiver: { listen: "127.0.0.1:4319", bound: true },
 };
 
+export const containmentDaemonInfo: DaemonInfo = {
+  ...standaloneDaemonInfo,
+  containment: {
+    executor: "C:\\Program Files\\mxc\\wxc-exec.exe",
+    engine: "mxc",
+    available: false,
+    error: "executor not found: C:\\Program Files\\mxc\\wxc-exec.exe",
+    managedSettingsSource: null,
+    managedHooksLocked: false,
+    managedMcpLocked: false,
+  },
+};
+
+export const wrapPostureDaemonInfo: DaemonInfo = {
+  ...standaloneDaemonInfo,
+  containment: {
+    executor: "C:\\Program Files\\mxc\\wxc-exec.exe",
+    engine: "mxc",
+    available: true,
+    managedSettingsSource: "file",
+    managedHooksLocked: true,
+    managedMcpLocked: true,
+    programs: {
+      "claude-code": {
+        mode: "wrap",
+        executable: "C:\\Program Files\\Anthropic\\ClaudeCode\\claude.exe",
+        aliasesPresent: true,
+        violations: 1,
+        lastViolationUnixSeconds: 1761731200,
+      },
+    },
+  },
+};
+
 export const usageReceiverOffDaemonInfo: DaemonInfo = {
   ...standaloneDaemonInfo,
   usageReceiver: {

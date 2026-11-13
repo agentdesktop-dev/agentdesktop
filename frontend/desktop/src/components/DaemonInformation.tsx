@@ -105,6 +105,14 @@ export function DaemonInformation({
         : `${info.usageReceiver.listen} (off${info.usageReceiver.error ? `: ${info.usageReceiver.error}` : ""})`,
     ]);
   }
+  if (info?.containment) {
+    fields.push([
+      "Sandboxed launch",
+      info.containment.available
+        ? `${info.containment.executor} (available)`
+        : `${info.containment.executor} (unavailable${info.containment.error ? `: ${info.containment.error}` : ""})`,
+    ]);
+  }
 
   return (
     <section className="daemon-information" aria-labelledby={headingId}>

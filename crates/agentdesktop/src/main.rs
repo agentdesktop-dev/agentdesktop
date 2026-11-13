@@ -759,6 +759,12 @@ fn prepare_desktop_process() {
 fn prepare_desktop_process() {}
 
 fn main() -> anyhow::Result<()> {
+    // Inside a sandboxed launch, git starts this executable as the
+    // interpreter of its per-launch ssh launcher script; that call only runs
+    // ssh (Windows only, never a CLI command line).
+    if let Some(code) = agentdesktop_agent::launch::git_ssh::run_if_invoked() {
+        std::process::exit(code);
+    }
     let args = Args::parse();
     match args.command {
         Some(command) => run_command(command, args.socket),
