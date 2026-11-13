@@ -41,6 +41,55 @@ service:
 
 resources: {}
 
+# Restrict the controller pod's traffic with a Kubernetes NetworkPolicy. Off by
+# default so existing installs keep working; enforcement needs a CNI that
+# implements NetworkPolicy. Peer lists use standard NetworkPolicyPeer entries
+# (podSelector, namespaceSelector, ipBlock).
+networkPolicy:
+  enabled: false
+  ingress:
+    fleet:
+      # Sources allowed to reach the fleet port (gRPC API, gateway JWKS and
+      # usage ingest). Empty allows any source, which devices need.
+      from: []
+    admin:
+      # Sources allowed to reach the management port. The generated config
+      # binds it to loopback, so this matters only when existingConfigSecret
+      # sets a non-loopback adminListen. Empty denies all ingress to it.
+      # Defaults to pods in the release namespace.
+      from:
+      - podSelector: {}
+  egress:
+    # DNS (UDP and TCP 53). Empty `to` allows port 53 to any destination,
+    # e.g. for NodeLocal DNSCache.
+    dns:
+      to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+        podSelector:
+          matchLabels:
+            k8s-app: kube-dns
+    # PostgreSQL. With an empty `to` no database rule is rendered, so the
+    # traffic must be allowed by another policy; otherwise the controller
+    # fails at startup.
+    database:
+      to: []
+      ports:
+      - port: 5432
+        protocol: TCP
+    # OIDC issuer (discovery and JWKS), contacted at startup. NetworkPolicy
+    # cannot match hostnames: for an external IdP, list its egress CIDRs as
+    # ipBlock peers, or leave `to` empty (no rule rendered) and allow the IdP
+    # with an FQDN-aware policy from your CNI, such as Cilium's toFQDNs.
+    idp:
+      to: []
+      ports:
+      - port: 443
+        protocol: TCP
+    # Additional NetworkPolicyEgressRule entries ({to, ports}), e.g. a KMS.
+    extra: []
+
 nodeSelector: {}
 tolerations: []
 affinity: {}
