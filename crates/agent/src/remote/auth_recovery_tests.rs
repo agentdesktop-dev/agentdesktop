@@ -207,6 +207,7 @@ impl Fixture {
                 &mut discovered,
                 &state_dir,
                 None,
+                false,
                 &reconciler,
                 &EnrollmentState::new(true),
                 &ControllerConnectionState::new(),
