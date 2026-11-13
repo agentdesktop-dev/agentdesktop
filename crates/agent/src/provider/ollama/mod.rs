@@ -21,6 +21,8 @@ impl Provider for Ollama {
         Discovery {
             agents: Vec::new(),
             model_runtimes: discovery::discover().await.into_iter().collect(),
+            browser_pacs: Vec::new(),
+            pac_fetches: Vec::new(),
         }
     }
 }

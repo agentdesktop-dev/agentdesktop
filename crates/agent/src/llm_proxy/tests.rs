@@ -87,7 +87,7 @@ async fn streams_opaque_requests_with_current_credentials() {
                 "refreshToken": null, "refreshExpiresAt": 0,
             }).to_string()).unwrap();
             let config = parse_daemon(&format!("llmGateway:\n  url: http://{address}/gateway\n  githubOAuth:\n    clientId: github-test\n  authentication:\n    type: oidc\n    issuer: https://issuer.example/\n    clientId: proxy-test\n")).unwrap();
-            let (_, discovery) = watch::channel(Arc::new(Discovery { agents: vec![], model_runtimes: vec![] }));
+            let (_, discovery) = watch::channel(Arc::new(Discovery { agents: vec![], model_runtimes: vec![], browser_pacs: vec![], pac_fetches: vec![] }));
             let state = AppState {
                 controller_status: None,
                 config,
@@ -814,6 +814,8 @@ async fn pairing_is_checked_before_configuration_is_read() {
         let (_, discovery) = watch::channel(Arc::new(Discovery {
             agents: vec![],
             model_runtimes: vec![],
+            browser_pacs: Vec::new(),
+            pac_fetches: Vec::new(),
         }));
         let state = AppState {
             controller_status: None,
@@ -1195,6 +1197,8 @@ async fn controller_jwt_state(
     let (_, discovery) = watch::channel(Arc::new(Discovery {
         agents: vec![],
         model_runtimes: vec![],
+        browser_pacs: Vec::new(),
+        pac_fetches: Vec::new(),
     }));
     let state = AppState {
         controller_status: None,
@@ -1271,6 +1275,8 @@ async fn request_source_state(address: std::net::SocketAddr) -> (tempfile::TempD
     let (_, discovery) = watch::channel(Arc::new(Discovery {
         agents: vec![],
         model_runtimes: vec![],
+        browser_pacs: Vec::new(),
+        pac_fetches: Vec::new(),
     }));
     let state = AppState {
         controller_status: None,
@@ -1341,6 +1347,8 @@ async fn capi_controller_jwt_state(
     let (_, discovery) = watch::channel(Arc::new(Discovery {
         agents: vec![],
         model_runtimes: vec![],
+        browser_pacs: Vec::new(),
+        pac_fetches: Vec::new(),
     }));
     let state = AppState {
         controller_status: None,

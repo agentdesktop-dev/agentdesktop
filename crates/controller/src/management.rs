@@ -62,6 +62,8 @@ pub struct State {
     database: Database,
     daemon_config: DaemonConfigStore,
     settings: Settings,
+    /// `browserEgress.compliance.pacUrl` from the controller configuration.
+    expected_pac_url: Option<url::Url>,
 }
 
 #[derive(Clone, Serialize)]
@@ -80,7 +82,14 @@ impl State {
             database,
             daemon_config,
             settings,
+            expected_pac_url: None,
         }
+    }
+
+    /// Sets the PAC URL the browser PAC compliance check compares devices with.
+    pub fn with_expected_pac_url(mut self, expected_pac_url: Option<url::Url>) -> Self {
+        self.expected_pac_url = expected_pac_url;
+        self
     }
 }
 

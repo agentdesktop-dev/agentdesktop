@@ -32,6 +32,40 @@ pub(super) struct Overview {
     config_failures: usize,
     active_revision: Option<u64>,
     recent_devices: Vec<DeviceSummary>,
+    browser_pac: BrowserPacOverview,
+}
+
+/// Device counts by browser PAC value, and by compliance state when the
+/// fleet configuration has a compliance profile.
+#[derive(Serialize, Default)]
+struct BrowserPacOverview {
+    found: usize,
+    absent: usize,
+    differs: usize,
+    not_reported: usize,
+    /// `None` without a compliance profile.
+    expected_pac_url: Option<String>,
+    compliant: usize,
+    not_compliant: usize,
+    /// Devices that found a PAC, grouped by URL and SHA-256 of what they
+    /// fetched: more than one group per URL means devices get different PACs.
+    versions: Vec<crate::browser_pac::PacVersion>,
+}
+
+/// Fills in each device's PAC value and compliance at read time, so a
+/// profile change shows without waiting for the next inventory.
+fn with_browser_pac(
+    state: &ManagementState,
+    mut devices: Vec<DeviceSummary>,
+) -> Vec<DeviceSummary> {
+    let expected = state.expected_pac_url.as_ref();
+    for device in &mut devices {
+        device.browser_pac = crate::browser_pac::with_identity(
+            crate::browser_pac::evaluate(&device.browser_pacs, expected),
+            &device.pac_fetches,
+        );
+    }
+    devices
 }
 
 pub(super) async fn api_not_found() -> impl IntoResponse {
@@ -51,7 +85,31 @@ pub(super) async fn overview(
         resource: None,
     })
     .await?;
-    let devices = state.database.list_devices().await?;
+    let devices = with_browser_pac(&state, state.database.list_devices().await?);
+    let mut browser_pac = BrowserPacOverview {
+        expected_pac_url: state.expected_pac_url.clone().map(String::from),
+        ..BrowserPacOverview::default()
+    };
+    browser_pac.versions =
+        crate::browser_pac::pac_versions(devices.iter().map(|device| &device.browser_pac));
+    for device in &devices {
+        match device.browser_pac.state {
+            "found" => browser_pac.found += 1,
+            "absent" => browser_pac.absent += 1,
+            "differs" => browser_pac.differs += 1,
+            _ => browser_pac.not_reported += 1,
+        }
+        match device
+            .browser_pac
+            .compliance
+            .as_ref()
+            .map(|compliance| compliance.state)
+        {
+            Some("compliant") => browser_pac.compliant += 1,
+            Some("not_compliant") => browser_pac.not_compliant += 1,
+            _ => {}
+        }
+    }
     let now = unix_time_seconds();
     let online_devices = devices
         .iter()
@@ -72,6 +130,7 @@ pub(super) async fn overview(
         config_failures,
         active_revision: state.daemon_config.current().map(|config| config.revision),
         recent_devices: devices.into_iter().take(5).collect(),
+        browser_pac,
     }))
 }
 
@@ -85,7 +144,10 @@ pub(super) async fn devices(
         resource: None,
     })
     .await?;
-    Ok(Json(state.database.list_devices().await?))
+    Ok(Json(with_browser_pac(
+        &state,
+        state.database.list_devices().await?,
+    )))
 }
 
 pub(super) async fn device(
@@ -99,12 +161,16 @@ pub(super) async fn device(
         resource: Some(&device_id),
     })
     .await?;
-    state
+    let mut detail = state
         .database
         .get_device(&device_id)
         .await?
-        .map(Json)
-        .ok_or(HandlerError::NotFound)
+        .ok_or(HandlerError::NotFound)?;
+    detail.device.browser_pac = crate::browser_pac::with_identity(
+        crate::browser_pac::evaluate(&detail.device.browser_pacs, state.expected_pac_url.as_ref()),
+        &detail.device.pac_fetches,
+    );
+    Ok(Json(detail))
 }
 
 pub(super) async fn delete_device(

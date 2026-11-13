@@ -27,6 +27,8 @@ const DEBOUNCE: Duration = Duration::from_millis(250);
 pub(crate) struct InventoryWatch {
     debouncer: Debouncer<notify::RecommendedWatcher, RecommendedCache>,
     watched: BTreeMap<PathBuf, RecursiveMode>,
+    /// Browser policy directories, watched whatever the inventory holds.
+    policy_directories: fn() -> Vec<PathBuf>,
 }
 
 impl InventoryWatch {
@@ -58,9 +60,17 @@ impl InventoryWatch {
             Self {
                 debouncer,
                 watched: BTreeMap::new(),
+                policy_directories: crate::browser_pac::policy_directories,
             },
             receiver,
         ))
+    }
+
+    /// Uses `directories` instead of the browser policy directories.
+    #[cfg(test)]
+    pub(crate) fn with_policy_directories(mut self, directories: fn() -> Vec<PathBuf>) -> Self {
+        self.policy_directories = directories;
+        self
     }
 
     /// Points the watch at the directories behind `discovery`.
@@ -68,7 +78,7 @@ impl InventoryWatch {
     /// Called again after every published snapshot, so a tool that gains or
     /// loses configuration files is followed without restarting the daemon.
     pub(crate) fn sync(&mut self, discovery: &Discovery) {
-        let wanted = source_directories(discovery);
+        let wanted = source_directories(discovery, (self.policy_directories)());
         let stale: Vec<_> = self
             .watched
             .iter()
@@ -114,7 +124,10 @@ impl InventoryWatch {
 /// already discovered, both register. Executables are deliberately not
 /// watched: an upgrade changes a version rather than a configuration, and
 /// install directories are noisy enough to make every scan a wasted one.
-fn source_directories(discovery: &Discovery) -> BTreeMap<PathBuf, RecursiveMode> {
+fn source_directories(
+    discovery: &Discovery,
+    policy_directories: Vec<PathBuf>,
+) -> BTreeMap<PathBuf, RecursiveMode> {
     let mut directories = BTreeMap::new();
     for agent in &discovery.agents {
         for server in &agent.mcp_servers {
@@ -135,6 +148,12 @@ fn source_directories(discovery: &Discovery) -> BTreeMap<PathBuf, RecursiveMode>
                 }
             }
         }
+    }
+    // Browser policy directories that exist, so an MDM push of a PAC policy
+    // shows up without waiting for the interval. Watched whether or not the
+    // current inventory has a PAC: the first push is the change that matters.
+    for directory in policy_directories {
+        insert(&mut directories, directory, RecursiveMode::NonRecursive);
     }
     directories
 }
@@ -200,6 +219,8 @@ mod tests {
                 skills,
             }],
             model_runtimes: Vec::new(),
+            browser_pacs: Vec::new(),
+            pac_fetches: Vec::new(),
         }
     }
 
@@ -227,7 +248,8 @@ mod tests {
         let config = root.join("mcp.json");
         fs::write(&config, "{}").unwrap();
 
-        let directories = source_directories(&inventory(vec![server(&config)], Vec::new()));
+        let directories =
+            source_directories(&inventory(vec![server(&config)], Vec::new()), Vec::new());
 
         assert_eq!(directories.get(&root), Some(&RecursiveMode::NonRecursive));
         // The executable's directory is deliberately not watched.
@@ -247,7 +269,8 @@ mod tests {
         let file = nested.join("SKILL.md");
         fs::write(&file, "---\nname: review-agent\n---\n").unwrap();
 
-        let directories = source_directories(&inventory(Vec::new(), vec![skill(&file)]));
+        let directories =
+            source_directories(&inventory(Vec::new(), vec![skill(&file)]), Vec::new());
 
         assert_eq!(directories.get(&skills), Some(&RecursiveMode::Recursive));
         assert!(
@@ -263,7 +286,8 @@ mod tests {
         let file = root.join("SKILL.md");
         fs::write(&file, "---\nname: loose\n---\n").unwrap();
 
-        let directories = source_directories(&inventory(Vec::new(), vec![skill(&file)]));
+        let directories =
+            source_directories(&inventory(Vec::new(), vec![skill(&file)]), Vec::new());
 
         assert_eq!(directories.get(&root), Some(&RecursiveMode::NonRecursive));
         let _ = fs::remove_dir_all(&root);
@@ -271,10 +295,13 @@ mod tests {
 
     #[test]
     fn ignores_sources_whose_directory_is_gone() {
-        let directories = source_directories(&inventory(
-            vec![server(Path::new("/nonexistent-agentdesktop/mcp.json"))],
+        let directories = source_directories(
+            &inventory(
+                vec![server(Path::new("/nonexistent-agentdesktop/mcp.json"))],
+                Vec::new(),
+            ),
             Vec::new(),
-        ));
+        );
         assert!(directories.is_empty());
     }
 
@@ -289,6 +316,7 @@ mod tests {
         fs::write(second.join("mcp.json"), "{}").unwrap();
 
         let (mut watch, _changes) = InventoryWatch::new().expect("create watcher");
+        watch.policy_directories = Vec::new;
 
         watch.sync(&inventory(
             vec![server(&first.join("mcp.json"))],
@@ -320,6 +348,7 @@ mod tests {
         fs::write(&config, "{}").unwrap();
 
         let (mut watch, mut changes) = InventoryWatch::new().expect("create watcher");
+        watch.policy_directories = Vec::new;
         watch.sync(&inventory(vec![server(&config)], Vec::new()));
 
         fs::write(&config, r#"{"mcpServers":{}}"#).unwrap();
@@ -341,6 +370,7 @@ mod tests {
         fs::write(&config, "{}").unwrap();
 
         let (mut watch, mut changes) = InventoryWatch::new().expect("create watcher");
+        watch.policy_directories = Vec::new;
         watch.sync(&inventory(vec![server(&config)], Vec::new()));
 
         for index in 0..25 {
