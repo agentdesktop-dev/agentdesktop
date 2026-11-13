@@ -11,12 +11,18 @@ use serde_json::Value;
 
 use crate::provider::metadata;
 
+const VERSION_MARKER: &[u8] = b"// Version: ";
+const MAX_BINARY_SIZE: u64 = 512 * 1024 * 1024;
+
 /// `settings_path` is the managed settings file the reconciler writes, so a
 /// `daemon.claudeCode.config` override is inventoried from the same place.
 pub(super) fn discover(settings_path: &Path) -> Option<Agent> {
     let executable = metadata::find_executable("claude", executable_candidates())?;
+    let version_source = metadata::resolve_exec_wrapper(&executable);
     Some(Agent {
-        version: metadata::version_after_component(&executable, "versions"),
+        version: metadata::version_after_component(&version_source, "versions").or_else(|| {
+            metadata::embedded_version(&version_source, VERSION_MARKER, MAX_BINARY_SIZE)
+        }),
         executable,
         kind: ClaudeCode::ID.to_owned(),
         mcp_servers: discover_mcp_servers(settings_path),
