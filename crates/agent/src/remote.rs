@@ -22,7 +22,7 @@ use tonic::{
 use tracing::{debug, info, warn};
 
 use agentdesktop_core::{
-    config::{self, ControllerConnectionConfig},
+    config::{self, ControllerConnectionConfig, ControllerLimits},
     model::{
         ControllerConnectionError, ControllerConnectionStatus, DeviceUsage,
         Discovery as AgentDiscovery, TelemetryEvent as ModelTelemetryEvent, TelemetryEventKind,
@@ -104,12 +104,16 @@ pub struct Requests {
     /// Outcomes of re-applying the current configuration: reconcile ticks,
     /// and program choice changes made through the local API.
     pub(crate) tick_statuses: Option<watch::Receiver<Option<TickStatus>>>,
+    /// `daemon.controllerLimits` from the local configuration file.
+    pub(crate) limits: ControllerLimits,
 }
 
-/// The configuration channels shared with the reconcile tick.
+/// The configuration channels shared with the reconcile tick, and the local
+/// limits every pushed configuration is checked against.
 struct ConfigChannels {
     current: watch::Sender<Option<CurrentConfig>>,
     tick_statuses: Option<watch::Receiver<Option<TickStatus>>>,
+    limits: ControllerLimits,
 }
 
 /// Tracks whether the daemon's connection to the controller is currently
@@ -206,10 +210,12 @@ pub async fn run(
         mut logout,
         current,
         tick_statuses,
+        limits,
     } = requests;
     let mut channels = ConfigChannels {
         current,
         tick_statuses,
+        limits,
     };
     let mut delay = INITIAL_RETRY_DELAY;
     loop {
@@ -902,7 +908,8 @@ async fn connect(
                         "received daemon configuration"
                     );
                     stream_revision = Some(config.revision);
-                    let parsed = replace_current_config(&channels.current, &config);
+                    let parsed =
+                        replace_current_config(&channels.current, &config, &channels.limits);
                     let parsed_ok = parsed.is_ok();
                     let status = apply_parsed(state_dir, &config, parsed, reconciler);
                     // A parsed configuration whose apply failed is the current
@@ -963,9 +970,10 @@ fn telemetry_to_proto(event: ModelTelemetryEvent) -> TelemetryEvent {
 fn apply_daemon_config(
     state_dir: &Path,
     config: agentdesktop_proto::fleet::DaemonConfig,
+    limits: &ControllerLimits,
     reconciler: &Reconciler,
 ) -> ConfigStatus {
-    let parsed = parse_pushed_config(&config);
+    let parsed = parse_pushed_config(&config, limits);
     apply_parsed(state_dir, &config, parsed, reconciler)
 }
 
@@ -1202,12 +1210,14 @@ async fn next_tick_status(
 
 /// Makes a pushed configuration the current one for the reconcile tick if it
 /// parses, whether or not its apply then succeeds; a push that does not
-/// parse leaves the current configuration as it is.
+/// parse, or is outside the local limits, leaves the current configuration as
+/// it is.
 fn replace_current_config(
     current: &watch::Sender<Option<CurrentConfig>>,
     config: &agentdesktop_proto::fleet::DaemonConfig,
+    limits: &ControllerLimits,
 ) -> anyhow::Result<agentdesktop_core::config::DaemonConfig> {
-    let parsed = parse_pushed_config(config)?;
+    let parsed = parse_pushed_config(config, limits)?;
     current.send_replace(Some(CurrentConfig {
         revision: Some(config.revision),
         config: Arc::new(parsed.clone()),
@@ -1215,9 +1225,10 @@ fn replace_current_config(
     Ok(parsed)
 }
 
-/// Hash, UTF-8 and parse checks of a pushed configuration.
+/// Hash, UTF-8, parse and local limit checks of a pushed configuration.
 fn parse_pushed_config(
     config: &agentdesktop_proto::fleet::DaemonConfig,
+    limits: &ControllerLimits,
 ) -> anyhow::Result<agentdesktop_core::config::DaemonConfig> {
     let actual_hash = Sha256::digest(&config.yaml);
     if actual_hash.as_slice() != config.sha256 {
@@ -1228,7 +1239,11 @@ fn parse_pushed_config(
         "verified daemon configuration hash"
     );
     let yaml = std::str::from_utf8(&config.yaml).context("configuration is not UTF-8")?;
-    config::parse_daemon(yaml)
+    let parsed = config::parse_daemon(yaml)?;
+    limits
+        .check(&parsed)
+        .context("configuration is outside the local limits")?;
+    Ok(parsed)
 }
 
 /// Resolves with the next inventory snapshot, and never resolves once the
@@ -1790,7 +1805,8 @@ mod tests {
             sha256: vec![0u8; 32],
         };
 
-        let status = super::apply_daemon_config(&state_dir, config, &reconciler);
+        let status =
+            super::apply_daemon_config(&state_dir, config, &Default::default(), &reconciler);
 
         assert_eq!(
             status.state,
@@ -1987,19 +2003,71 @@ mod tests {
             sha256: Sha256::digest(yaml.as_bytes()).to_vec(),
         };
         let (current, receiver) = tokio::sync::watch::channel(None);
-        let _ = super::replace_current_config(&current, &pushed(1, "programs: {}\n"));
+        let _ = super::replace_current_config(
+            &current,
+            &pushed(1, "programs: {}\n"),
+            &Default::default(),
+        );
         assert_eq!(receiver.borrow().as_ref().and_then(|c| c.revision), Some(1));
         // Does not parse (unknown key): the current configuration stays.
-        let _ = super::replace_current_config(&current, &pushed(2, "notAKey: 1\n"));
+        let _ = super::replace_current_config(
+            &current,
+            &pushed(2, "notAKey: 1\n"),
+            &Default::default(),
+        );
         assert_eq!(receiver.borrow().as_ref().and_then(|c| c.revision), Some(1));
         // Wrong hash: stays.
         let mut tampered = pushed(3, "programs: {}\n");
         tampered.sha256 = vec![0; 32];
-        let _ = super::replace_current_config(&current, &tampered);
+        let _ = super::replace_current_config(&current, &tampered, &Default::default());
         assert_eq!(receiver.borrow().as_ref().and_then(|c| c.revision), Some(1));
         // Parses (its apply may still fail later): replaced.
-        let _ = super::replace_current_config(&current, &pushed(4, "programs:\n  grok: {}\n"));
+        let _ = super::replace_current_config(
+            &current,
+            &pushed(4, "programs:\n  grok: {}\n"),
+            &Default::default(),
+        );
         assert_eq!(receiver.borrow().as_ref().and_then(|c| c.revision), Some(4));
+    }
+
+    #[test]
+    fn a_push_outside_the_local_limits_is_rejected_reported_and_not_saved() {
+        use sha2::{Digest, Sha256};
+        let state_dir = std::env::temp_dir().join(format!(
+            "agentdesktop-remote-limits-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let reconciler = test_reconciler(&state_dir);
+        let limits: super::ControllerLimits = serde_json::from_value(serde_json::json!({
+            "allowedGatewayOrigins": ["https://gateway.example.com"],
+        }))
+        .unwrap();
+        let yaml = b"llmGateway:\n  url: https://evil.example/v1\n";
+        let config = agentdesktop_proto::fleet::DaemonConfig {
+            revision: 3,
+            yaml: yaml.to_vec(),
+            sha256: Sha256::digest(yaml).to_vec(),
+        };
+
+        let (current, receiver) = tokio::sync::watch::channel(None);
+        assert!(super::replace_current_config(&current, &config, &limits).is_err());
+        assert!(receiver.borrow().is_none());
+
+        let status = super::apply_daemon_config(&state_dir, config, &limits, &reconciler);
+        assert_eq!(
+            status.state,
+            agentdesktop_proto::fleet::ConfigState::Failed as i32
+        );
+        assert!(
+            status.error.contains(
+                "llmGateway.url origin https://evil.example is not in daemon.controllerLimits.allowedGatewayOrigins"
+            ),
+            "{}",
+            status.error
+        );
+        assert!(!state_dir.join("remote-config.yaml").exists());
+        let _ = std::fs::remove_dir_all(&state_dir);
     }
 
     /// A peer that accepts connections and then never reads or writes, like a

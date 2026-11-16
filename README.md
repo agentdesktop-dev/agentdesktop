@@ -797,6 +797,29 @@ program again and turning it back on restores the user's choice. A daemon that
 predates `programSelection` rejects a configuration that contains it: upgrade
 devices before setting it in the configuration the controller pushes.
 
+## Limit the controller's gateway origins (opt-in)
+
+By default a controller-managed device applies whatever LLM gateway the
+controller pushes. To keep prompts on gateways you approve even if the
+controller is compromised, list the allowed origins in the local
+configuration file, which the controller cannot change:
+
+```yaml
+daemon:
+  controllerLimits:
+    allowedGatewayOrigins:
+      - https://gateway.example.com
+      - https://login.example.com   # the OIDC issuer, with authentication.type: oidc
+```
+
+The origins of `llmGateway.url`, `llmGateway.proxyUrl` and the OIDC `issuer`
+must each be in the list. Paths may change freely. A pushed configuration
+outside the list is rejected and reported as failed, and the device keeps the
+last configuration it accepted. A saved configuration outside the list is
+discarded at the next daemon start. The check does not cover URLs in programs'
+free-form settings, such as Claude Code `env`. See the
+[control-plane threat model](docs/threat-model.md).
+
 ## Start locally, grow into a fleet
 
 Agentdesktop uses the same daemon and tool-native configuration model at every

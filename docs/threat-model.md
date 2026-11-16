@@ -2,9 +2,9 @@
 
 This document states what Agentdesktop protects against when the control
 plane, meaning the controller and the people who administer it, is itself
-malicious or compromised. It sets the goals that any mitigation must meet. It
-does not describe a mitigation: the design for local limits on
-controller-delivered configuration is still open.
+malicious or compromised. It sets the goals that any mitigation must meet.
+Most of the design for local limits on controller-delivered configuration is
+still open. [Status](#status) lists what exists today.
 
 For how devices enroll and authenticate to the controller, see
 [Device identity and enrollment](device-identity.md).
@@ -122,8 +122,9 @@ lets an ordinary prompt injection run commands.
 
 The configuration sends data to a destination the attacker reads. Examples:
 
-- `llmGateway.url` or `proxyUrl`. This field is typed and controller-settable,
-  and the daemon checks only its form (scheme, host, no credentials). A
+- `llmGateway.url` or `proxyUrl`. This field is typed and controller-settable.
+  Unless the local policy pins its origin, the daemon checks only its form
+  (scheme, host, no credentials). A
   redirected gateway receives every prompt, which carries source code, and the
   credentials sent with it: gateway JWTs, gateway OIDC tokens, and provider
   subscription tokens. It is the largest exfiltration channel.
@@ -176,8 +177,10 @@ writes.
    sandbox. The written settings keep the locally required level.
 3. **Gateway origin pin (optional).** If the local policy lists allowed
    gateway origins, every endpoint that a managed tool sends prompts or
-   telemetry to is in that list. This includes `llmGateway.url`, `proxyUrl`,
-   per-tool base URLs, environment overrides, and OpenTelemetry endpoints.
+   telemetry to is in that list, and so is the OIDC issuer that users sign in
+   to. This includes `llmGateway.url`, `proxyUrl`,
+   `llmGateway.authentication.issuer`, per-tool base URLs, environment
+   overrides, and OpenTelemetry endpoints.
    Test: push each of these with an outside origin. None is written. The pin
    is by origin, not by full URL, so the controller can still change paths,
    `proxyUrl`, and authentication within an allowed origin.
@@ -195,6 +198,25 @@ writes.
 Goal 3 is meaningful only together with goals 1 and 2 and the closing of the
 pass-through redirect channels in tier 3. A pinned `llmGateway.url` does not
 help if Claude Code `env` can still set `ANTHROPIC_BASE_URL`.
+
+## Status
+
+The local policy is `daemon.controllerLimits` in the local configuration file
+(see the [daemon configuration reference](../schema/daemon-config.md)). A
+pushed configuration outside it is rejected as a whole: the last accepted
+configuration stays in effect, the rejected one is not saved, and the reason
+is reported in `ConfigStatus`. At startup, a saved configuration outside the
+policy is deleted and the local configuration is applied in its place, which
+removes the tool settings written from it.
+
+| Goal | Status |
+| --- | --- |
+| 1. No code execution | Not started. |
+| 2. No lowered guardrails | Not started. |
+| 3. Gateway origin pin | Partial. `allowedGatewayOrigins` checks `llmGateway.url`, `proxyUrl`, and the OIDC issuer. Base URLs and endpoints in programs' free-form settings are not checked. |
+| 4. Local policy is out of reach | Holds. |
+| 5. Limits apply to the cached configuration | Holds for the checks that exist. |
+| 6. Refusals are visible | Holds for the checks that exist. |
 
 ## Out of scope
 

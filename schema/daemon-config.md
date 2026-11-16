@@ -16,6 +16,8 @@
 |`daemon.claudeDesktop.credentialHelper`|string|Credential helper path.|
 |`daemon.codex`|object|Codex paths.|
 |`daemon.codex.config`|string|Configuration file.|
+|`daemon.controllerLimits`|object|Local limits on the configuration a controller pushes. A pushed<br>configuration outside them is rejected as a whole, and the last accepted<br>one stays in effect. See `docs/threat-model.md`.|
+|`daemon.controllerLimits.allowedGatewayOrigins`|[]string|Origins (`https://host[:port]`) the controller may point the LLM gateway<br>at. The origins of `llmGateway.url`, `llmGateway.proxyUrl` and, with<br>`oidc` authentication, `llmGateway.authentication.issuer` must each be<br>in this list; their paths may change freely. Omit to allow any origin;<br>an empty list allows no gateway.<br><br>This does not cover URLs in programs' free-form settings, such as<br>Claude Code `env.ANTHROPIC_BASE_URL` or a base URL in a Codex<br>`managedConfig`.|
 |`daemon.copilot`|object|GitHub Copilot CLI paths (`config` = the `providers.json` to manage;<br>defaults to `COPILOT_PROVIDERS_CONFIG`, `$COPILOT_HOME/providers.json`,<br>then `~/.copilot/providers.json`).|
 |`daemon.copilot.config`|string|Configuration file.|
 |`daemon.grok`|object|Grok Build paths.|
