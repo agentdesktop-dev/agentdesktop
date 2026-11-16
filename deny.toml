@@ -13,7 +13,6 @@ yanked = "deny"
 ignore = [
     { id = "RUSTSEC-2026-0459", reason = "libsqlite3-sys 0.37 via sqlx-sqlite 0.9.0 (latest), which caps it <0.38; we open only our own DB files. Drop once sqlx allows >=0.39." },
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error is unmaintained; build-time only, via Tauri's gtk-rs 0.18 Linux stack, with no maintained alternative upstream." },
-    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml is unmaintained; pulled in by serde_yaml, pending migration to a maintained YAML crate." },
     { id = "RUSTSEC-2026-0370", reason = "zvariant is unmaintained (merged into zbus 6); via zbus 5 in the Linux keyring store, pending upstream move to zbus 6." },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names is unmaintained (merged into zbus 6); via zbus 5 in the Linux keyring store, pending upstream move to zbus 6." },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive is unmaintained (merged into zbus 6); via zbus 5 in the Linux keyring store, pending upstream move to zbus 6." },
