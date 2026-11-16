@@ -1018,6 +1018,8 @@ In controller-managed mode, the daemon generates its private device key on the
 workstation and sends only a certificate signing request to the controller.
 After enrollment, protected controller operations require the device
 certificate and a valid token for the user who enrolled it.
+The [control-plane threat model](docs/threat-model.md) states what devices
+should be protected from when the controller itself is compromised.
 
 When a supported tool requests gateway access, the controller can issue a
 short-lived JWT containing the user, device ID, allowed client label, audience,
