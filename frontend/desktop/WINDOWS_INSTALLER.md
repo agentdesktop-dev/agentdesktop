@@ -222,7 +222,6 @@ The MSI removes the service and tray application. It intentionally preserves the
 machine configuration so upgrades and reinstalls do not overwrite tenant
 settings.
 
-
 ## Production signing
 
 The release workflow signs the standalone Windows binaries with Azure Artifact

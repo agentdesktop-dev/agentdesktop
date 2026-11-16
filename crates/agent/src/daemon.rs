@@ -609,12 +609,15 @@ where
         let remote_discovery = inventory.clone();
         let state_dir = args.state_dir.clone();
         let oidc_callback_listen = args.oidc_callback_listen;
+        // A system-mode daemon is root: its browser would not be the user's.
+        let open_browser = args.user;
         let remote_enrollment = enrollment.clone();
         tokio::spawn(remote::run(
             controller,
             remote_discovery,
             state_dir,
             oidc_callback_listen,
+            open_browser,
             reconciler,
             remote_enrollment,
             controller_status.clone(),
@@ -828,10 +831,7 @@ fn describe_daemon(
         .as_ref()
         .map(|controller| DaemonControllerInfo {
             address: controller_address_for_display(&controller.address),
-            ca_certificate_path: controller
-                .ca_certificate_path
-                .as_ref()
-                .map(|path| path_for_display(path)),
+            ca_certificate_path: Some(path_for_display(&controller.ca_certificate_path)),
             heartbeat_interval: controller.heartbeat_interval,
         });
     DaemonInfo {
@@ -1637,25 +1637,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn daemon_information_preserves_an_empty_ca_path_without_failing_startup() {
-        let config = parse_daemon(
-            "controller:\n  address: https://controller.example.com\n  caCertificatePath: ''\n",
-        )
-        .unwrap();
-        let info = describe_daemon(
-            &config,
-            Path::new("config.yaml"),
-            Path::new("state"),
-            false,
-            None,
-        );
-        assert_eq!(
-            info.controller.unwrap().ca_certificate_path.as_deref(),
-            Some("")
-        );
-    }
-
     #[tokio::test]
     async fn daemon_information_api_is_read_only_and_reports_the_loaded_local_snapshot() {
         let root = tempfile::tempdir().unwrap();
@@ -1694,12 +1675,12 @@ programs:
         // local settings actually used by the running connection worker.
         std::fs::write(
             &config_path,
-            "controller:\n  address: https://edited.example.com\n",
+            "controller:\n  address: https://edited.example.com\n  caCertificatePath: edited-ca.pem\n",
         )
         .unwrap();
         std::fs::write(
             root.path().join("remote-config.yaml"),
-            "controller:\n  address: https://remote.example.com\ninventoryInterval: 3m\n",
+            "controller:\n  address: https://remote.example.com\n  caCertificatePath: remote-ca.pem\ninventoryInterval: 3m\n",
         )
         .unwrap();
         let (_, inventory) = watch::channel(Arc::new(discovery(&[])));
@@ -2254,6 +2235,7 @@ programs:
             r#"
 controller:
   address: https://controller.example.com
+  caCertificatePath: controller-ca.pem
 "#,
         )
         .expect("valid managed configuration");

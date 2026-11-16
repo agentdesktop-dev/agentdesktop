@@ -289,6 +289,7 @@ pub async fn enroll(
     controller: &ControllerConnectionConfig,
     enrollment: &EnrollmentState,
     callback_listen: Option<SocketAddr>,
+    open_browser: bool,
 ) -> anyhow::Result<Identity> {
     if controller.device_authorization {
         return enroll_with_device_authorization(controller, enrollment).await;
@@ -315,6 +316,7 @@ pub async fn enroll(
         &redirect_uri,
         std::mem::take(&mut begin.state),
         callback_listen,
+        open_browser,
     )
     .await?;
     enrollment.set("enrolling").await;
@@ -631,6 +633,7 @@ pub(crate) async fn wait_for_authorization_code(
     redirect_uri: &Url,
     expected_state: String,
     callback_listen: Option<SocketAddr>,
+    open_browser: bool,
 ) -> anyhow::Result<String> {
     wait_for_authorization_code_with_page(
         authorization_url,
@@ -641,7 +644,7 @@ pub(crate) async fn wait_for_authorization_code(
             subscription_available: false,
             github_available: false,
         },
-        true,
+        open_browser,
     )
     .await?
     .context("required authorization was skipped")

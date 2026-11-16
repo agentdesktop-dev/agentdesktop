@@ -49,6 +49,17 @@ use crate::{
 static OAUTH_REFRESH_MUTEX: Mutex<()> = Mutex::const_new(());
 const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+
+/// Retry a rejected access token once with refreshed credentials. Reset only
+/// after the controller authenticates a stream, so a revoked device does not
+/// enter an endless refresh loop.
+#[derive(Default, PartialEq, Eq)]
+enum ControllerAuthRecovery {
+    #[default]
+    Ready,
+    RefreshRequired,
+    Refreshed,
+}
 /// Bound on the controller connection and call when fetching an LLM gateway
 /// credential, so a controller that accepts and then stalls cannot hold the
 /// caller (or a detached fetch) open indefinitely.
@@ -184,6 +195,7 @@ pub async fn run(
     mut discovered: watch::Receiver<Arc<AgentDiscovery>>,
     state_dir: PathBuf,
     oidc_callback_listen: Option<SocketAddr>,
+    open_browser: bool,
     reconciler: Reconciler,
     enrollment: EnrollmentState,
     controller_status: ControllerConnectionState,
@@ -207,6 +219,7 @@ pub async fn run(
             &mut discovered,
             &state_dir,
             oidc_callback_listen,
+            open_browser,
             &reconciler,
             &enrollment,
             &controller_status,
@@ -304,6 +317,7 @@ async fn run_session(
     discovered: &mut watch::Receiver<Arc<AgentDiscovery>>,
     state_dir: &Path,
     oidc_callback_listen: Option<SocketAddr>,
+    open_browser: bool,
     reconciler: &Reconciler,
     enrollment: &EnrollmentState,
     controller_status: &ControllerConnectionState,
@@ -338,7 +352,7 @@ async fn run_session(
                     enrollment,
                     logout,
                     INITIAL_RETRY_DELAY,
-                    || oidc::enroll(controller, enrollment, oidc_callback_listen),
+                    || oidc::enroll(controller, enrollment, oidc_callback_listen, open_browser),
                 )
                 .await;
                 identity::save(&identity_path, &identity)?;
@@ -349,9 +363,11 @@ async fn run_session(
         };
 
         let mut delay = INITIAL_RETRY_DELAY;
+        let mut auth_recovery = ControllerAuthRecovery::Ready;
         loop {
+            let force_refresh = auth_recovery == ControllerAuthRecovery::RefreshRequired;
             let refresh_result = tokio::select! {
-                result = refresh_oauth_if_needed(&mut identity, &identity_path) => result,
+                result = refresh_oauth(&mut identity, &identity_path, force_refresh) => result,
                 Some(request) = logout.recv() => {
                     if complete_logout(request, &identity_path, &identity, enrollment, controller_status, &channels.current).await {
                         break;
@@ -360,7 +376,11 @@ async fn run_session(
                 }
             };
             match refresh_result {
-                Ok(()) => {}
+                Ok(()) => {
+                    if force_refresh {
+                        auth_recovery = ControllerAuthRecovery::Refreshed;
+                    }
+                }
                 Err(error) if is_oauth_refresh_rejected(&error) => {
                     let error_chain = format!("{error:#}");
                     identity::delete(&identity_path, &identity.device_id)?;
@@ -429,6 +449,7 @@ async fn run_session(
                     telemetry,
                     controller_status,
                     channels,
+                    &mut auth_recovery,
                 ) => Some(result),
                 Some(request) = logout.recv() => {
                     if complete_logout(request, &identity_path, &identity, enrollment, controller_status, &channels.current).await {
@@ -448,6 +469,15 @@ async fn run_session(
                 }
                 Err(error) if is_unauthenticated(&error) => {
                     let error_chain = format!("{error:#}");
+                    if auth_recovery != ControllerAuthRecovery::Refreshed {
+                        auth_recovery = ControllerAuthRecovery::RefreshRequired;
+                        controller_status.mark_disconnected(None).await;
+                        warn!(
+                            error = %error_chain,
+                            "controller rejected access token; refreshing OIDC credentials before retrying"
+                        );
+                        continue;
+                    }
                     identity::delete(&identity_path, &identity.device_id)?;
                     enrollment.set("starting").await;
                     controller_status
@@ -626,7 +656,7 @@ pub async fn llm_gateway_credential(
     let mut identity =
         identity::load(&state_dir.join("identity.json"))?.context("device is not enrolled")?;
     let identity_path = state_dir.join("identity.json");
-    refresh_oauth_if_needed(&mut identity, &identity_path).await?;
+    refresh_oauth(&mut identity, &identity_path, false).await?;
     // The refresh above is not cut off (its result is saved); the controller
     // connection and call are bounded together.
     let call = async {
@@ -667,7 +697,7 @@ pub async fn device_usage(
 ) -> anyhow::Result<DeviceUsage> {
     let identity_path = state_dir.join("identity.json");
     let mut identity = identity::load(&identity_path)?.context("device is not enrolled")?;
-    refresh_oauth_if_needed(&mut identity, &identity_path).await?;
+    refresh_oauth(&mut identity, &identity_path, false).await?;
     let call = async {
         let mut client = client(controller, Some(&identity)).await?;
         let mut request = Request::new(DeviceUsageRequest {
@@ -753,6 +783,7 @@ async fn connect(
     telemetry: &mut mpsc::Receiver<ModelTelemetryEvent>,
     controller_status: &ControllerConnectionState,
     channels: &mut ConfigChannels,
+    auth_recovery: &mut ControllerAuthRecovery,
 ) -> anyhow::Result<()> {
     let mut client = client(controller, Some(identity)).await?;
     // Tick outcomes produced before this stream are not sent on it; the
@@ -770,6 +801,9 @@ async fn connect(
     authenticate_request(identity, &mut request)?;
 
     let mut inbound = open_stream(&mut client, request, CONTROLLER_TIMEOUTS.stream_open).await?;
+    // Opening the stream succeeded only after the controller authenticated it.
+    // A later token expiry gets its own silent-refresh attempt.
+    *auth_recovery = ControllerAuthRecovery::Ready;
 
     send(
         &sender,
@@ -1230,24 +1264,15 @@ async fn client_with(
         .connect_timeout(timeouts.connect)
         .http2_keep_alive_interval(timeouts.keepalive_interval)
         .keep_alive_timeout(timeouts.keepalive_timeout);
-    let mut tls_config = ClientTlsConfig::new();
-    let mut custom_tls = false;
-    if let Some(path) = &controller.ca_certificate_path {
-        let pem = std::fs::read(path)
-            .with_context(|| format!("read controller CA certificate from {}", path.display()))?;
-        tls_config = tls_config.ca_certificate(Certificate::from_pem(pem));
-        custom_tls = true;
-    }
+    let mut tls_config =
+        ClientTlsConfig::new().ca_certificate(controller_ca(&controller.ca_certificate_path)?);
     if let Some(identity) = identity {
         tls_config = tls_config.identity(TlsIdentity::from_pem(
             &identity.client_certificate_pem,
             &identity.client_private_key_pem,
         ));
-        custom_tls = true;
     }
-    if custom_tls {
-        endpoint = endpoint.tls_config(tls_config)?;
-    }
+    endpoint = endpoint.tls_config(tls_config)?;
     let channel = match time::timeout(timeouts.connect, endpoint.connect()).await {
         Ok(channel) => {
             channel.with_context(|| format!("connect to controller at {}", controller.address))?
@@ -1259,6 +1284,24 @@ async fn client_with(
         ),
     };
     Ok(FleetAgentClient::new(channel))
+}
+
+/// Reads the CA that the controller's certificate must chain to. The daemon trusts
+/// only this CA for the controller, so a missing or malformed file is reported here
+/// rather than as an opaque TLS handshake failure.
+fn controller_ca(path: &Path) -> anyhow::Result<Certificate> {
+    use rustls::pki_types::{CertificateDer, pem::PemObject};
+
+    let pem = std::fs::read(path)
+        .with_context(|| format!("read controller CA certificate from {}", path.display()))?;
+    let certificates = CertificateDer::pem_slice_iter(&pem).collect::<Result<Vec<_>, _>>();
+    if !certificates.is_ok_and(|certificates| !certificates.is_empty()) {
+        bail!(
+            "controller.caCertificatePath {} does not contain a PEM certificate",
+            path.display()
+        );
+    }
+    Ok(Certificate::from_pem(pem))
 }
 
 fn authenticate_request<T>(identity: &Identity, request: &mut Request<T>) -> anyhow::Result<()> {
@@ -1310,17 +1353,19 @@ async fn renew_device_certificate(
     })
 }
 
-async fn refresh_oauth_if_needed(
+async fn refresh_oauth(
     identity: &mut Identity,
     identity_path: &Path,
+    force: bool,
 ) -> anyhow::Result<()> {
     let oauth = &identity.oauth;
-    if oauth.expires_at_unix_seconds <= unix_time_seconds().saturating_add(120) {
+    if force || oauth.expires_at_unix_seconds <= unix_time_seconds().saturating_add(120) {
         let _guard = OAUTH_REFRESH_MUTEX.lock().await;
         match identity::load(identity_path) {
             Ok(Some(stored))
                 if stored.oauth.expires_at_unix_seconds
-                    > unix_time_seconds().saturating_add(120) =>
+                    > unix_time_seconds().saturating_add(120)
+                    && (!force || stored.oauth.access_token != identity.oauth.access_token) =>
             {
                 *identity = stored;
                 return Ok(());
@@ -1683,7 +1728,7 @@ mod tests {
     }
     // --- Per-program configuration status -----------------------------------
 
-    fn test_reconciler(root: &std::path::Path) -> crate::reconcile::Reconciler {
+    pub(super) fn test_reconciler(root: &std::path::Path) -> crate::reconcile::Reconciler {
         crate::reconcile::Reconciler::new(
             true,
             root.join("claude/settings.json"),
@@ -1943,16 +1988,28 @@ mod tests {
         address
     }
 
-    fn controller_at(
+    /// A controller connection whose CA file holds `ca_pem`. The directory guard
+    /// keeps the file alive for the test.
+    fn controller_with_ca(
         address: String,
-        ca_certificate_path: Option<&std::path::Path>,
-    ) -> ControllerConnectionConfig {
-        ControllerConnectionConfig {
+        ca_pem: &str,
+    ) -> (tempfile::TempDir, ControllerConnectionConfig) {
+        let directory = tempfile::tempdir().unwrap();
+        let ca_certificate_path = directory.path().join("ca.pem");
+        std::fs::write(&ca_certificate_path, ca_pem).unwrap();
+        let controller = ControllerConnectionConfig {
             address,
-            ca_certificate_path: ca_certificate_path.map(std::path::Path::to_path_buf),
+            ca_certificate_path,
             heartbeat_interval: Duration::from_secs(30),
             device_authorization: false,
-        }
+        };
+        (directory, controller)
+    }
+
+    /// A controller connection with a valid (self-signed) CA file.
+    fn controller_at(address: String) -> (tempfile::TempDir, ControllerConnectionConfig) {
+        let ca = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        controller_with_ca(address, &ca.cert.pem())
     }
 
     fn short_timeouts() -> ControllerTimeouts {
@@ -1984,11 +2041,7 @@ mod tests {
 
     #[tokio::test]
     async fn connecting_gives_up_when_the_tls_handshake_never_finishes() {
-        let ca = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
-        let directory = tempfile::tempdir().unwrap();
-        let ca_path = directory.path().join("ca.pem");
-        std::fs::write(&ca_path, ca.cert.pem()).unwrap();
-        let controller = controller_at(format!("https://{}", silent_peer().await), Some(&ca_path));
+        let (_ca, controller) = controller_at(format!("https://{}", silent_peer().await));
 
         let error = bounded(client_with(&controller, None, short_timeouts()))
             .await
@@ -2002,7 +2055,7 @@ mod tests {
 
     #[tokio::test]
     async fn opening_the_stream_gives_up_when_the_controller_never_answers() {
-        let controller = controller_at(format!("http://{}", silent_peer().await), None);
+        let (_ca, controller) = controller_at(format!("http://{}", silent_peer().await));
         let mut client = bounded(client_with(&controller, None, short_timeouts()))
             .await
             .unwrap();
@@ -2024,7 +2077,7 @@ mod tests {
 
     #[tokio::test]
     async fn keepalive_closes_a_connection_whose_peer_stopped_answering() {
-        let controller = controller_at(format!("http://{}", silent_peer().await), None);
+        let (_ca, controller) = controller_at(format!("http://{}", silent_peer().await));
         let timeouts = ControllerTimeouts {
             keepalive_interval: Duration::from_millis(100),
             keepalive_timeout: Duration::from_millis(100),
@@ -2046,4 +2099,46 @@ mod tests {
             "the stream timeout fired instead of the keepalive: {error:#}"
         );
     }
+
+    #[tokio::test]
+    async fn a_missing_controller_ca_file_is_reported_with_its_path() {
+        let (directory, mut controller) = controller_at("https://controller.example".to_owned());
+        controller.ca_certificate_path = directory.path().join("missing.pem");
+
+        let error = client_with(&controller, None, short_timeouts())
+            .await
+            .expect_err("a missing CA file was accepted");
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("read controller CA certificate from")
+                && message.contains("missing.pem"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_controller_ca_file_without_a_pem_certificate_is_rejected() {
+        for contents in [
+            "",
+            "not a certificate",
+            "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n",
+        ] {
+            let (_ca, controller) =
+                controller_with_ca("https://controller.example".to_owned(), contents);
+
+            let error = client_with(&controller, None, short_timeouts())
+                .await
+                .expect_err("a CA file without a certificate was accepted");
+
+            assert!(
+                format!("{error:#}").contains("does not contain a PEM certificate"),
+                "unexpected error for {contents:?}: {error:#}"
+            );
+        }
+    }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "remote/auth_recovery_tests.rs"]
+mod auth_recovery_tests;

@@ -129,12 +129,14 @@ exist, so MDM may provision it before or after installing the package.
 ```yaml
 controller:
   address: https://agentdesktop.example.com
+  caCertificatePath: /etc/agentdesktop/controller-ca.pem
   heartbeatInterval: 30s
 ```
 
-When the controller uses a private CA, deploy its PEM certificate separately
-and set `controller.caCertificatePath` to that protected machine path. Restart
-the daemon after changing its local configuration:
+`controller.caCertificatePath` is required. Deploy the PEM certificate of the
+CA that signed the controller's fleet API certificate to a root-owned path, and
+point this field at it; the daemon trusts only that CA for the controller.
+Restart the daemon after changing its local configuration:
 
 ```sh
 sudo launchctl kickstart -k system/dev.agentdesktop.daemon
