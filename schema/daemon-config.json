@@ -188,6 +188,23 @@
         "caCertificatePath"
       ]
     },
+    "ControllerLimits": {
+      "description": "Local limits on controller-delivered configuration (`daemon.controllerLimits`).\n\nOnly accepted in the local configuration file, so the controller cannot\nchange or relax them.",
+      "type": "object",
+      "properties": {
+        "allowedGatewayOrigins": {
+          "description": "Origins (`https://host[:port]`) the controller may point the LLM gateway\nat. The origins of `llmGateway.url`, `llmGateway.proxyUrl` and, with\n`oidc` authentication, `llmGateway.authentication.issuer` must each be\nin this list; their paths may change freely. Omit to allow any origin;\nan empty list allows no gateway.\n\nThis does not cover URLs in programs' free-form settings, such as\nClaude Code `env.ANTHROPIC_BASE_URL` or a base URL in a Codex\n`managedConfig`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "CopilotConfig": {
       "description": "Settings reconciled into GitHub Copilot CLI's `providers.json`.\n\n`providers.json` is merged, never owned outright: the CLI has no\nmanaged-settings equivalent for providers, and users may have their own\nBYOK entries. See `provider::copilot::reconcile` in the agent crate for\nhow this is turned into the merged document. User mode only: the file\nlives in the user's Copilot directory, so system daemons skip it with an\ninactive reason.",
       "type": "object",
@@ -258,6 +275,17 @@
           "description": "Codex paths.",
           "$ref": "#/$defs/ToolConfigPath",
           "default": {}
+        },
+        "controllerLimits": {
+          "description": "Local limits on the configuration a controller pushes. A pushed\nconfiguration outside them is rejected as a whole, and the last accepted\none stays in effect. See `docs/threat-model.md`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ControllerLimits"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "copilot": {
           "description": "GitHub Copilot CLI paths (`config` = the `providers.json` to manage;\ndefaults to `COPILOT_PROVIDERS_CONFIG`, `$COPILOT_HOME/providers.json`,\nthen `~/.copilot/providers.json`).",
