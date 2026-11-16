@@ -1044,6 +1044,8 @@ the user's tokens. There is no separate manual enrollment step, pre-login
 enrollment ticket, or pending-enrollment reservation on the controller.
 After enrollment, protected controller operations require the device
 certificate and a valid token for the user who enrolled it.
+The [control-plane threat model](docs/threat-model.md) states what devices
+should be protected from when the controller itself is compromised.
 
 Browser sign-in uses PKCE and `state`, and its OIDC `nonce` is the SHA-256 of
 the device public key. The controller validates the ID token and bearer access
