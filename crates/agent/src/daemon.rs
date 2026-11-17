@@ -338,66 +338,38 @@ impl DaemonArgs {
     }
 }
 
-/// `daemon.controllerLimits` from the local configuration file; no limits
-/// when unset.
-fn controller_limits(local: &config::DaemonConfig) -> config::ControllerLimits {
-    local
-        .daemon
-        .as_ref()
-        .and_then(|daemon| daemon.controller_limits.clone())
-        .unwrap_or_default()
-}
-
 /// The configuration a controller-managed daemon applies at startup: the last
 /// accepted controller configuration, or the local one when none was saved.
 ///
 /// A saved configuration outside the local limits (accepted before they were
-/// installed or tightened) is deleted, and the local configuration is applied
-/// even when it is empty, so the tool settings written from the discarded one
-/// are removed.
+/// installed or tightened) is kept on disk, so it comes back once the limits
+/// allow it again, but the local configuration is applied in its place, even
+/// when it is empty, so the tool settings written from it are removed.
 fn restore_controller_config(
-    cached_remote_path: &Path,
+    state_dir: &Path,
     local: &config::DaemonConfig,
 ) -> anyhow::Result<Option<config::DaemonConfig>> {
-    let contents = match std::fs::read_to_string(cached_remote_path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((!local.is_empty()).then(|| local.clone()));
-        }
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "read cached controller configuration from {}",
-                    cached_remote_path.display()
-                )
-            });
-        }
-    };
-    let cached = config::parse_daemon(&contents).with_context(|| {
-        format!(
-            "parse cached controller configuration from {}",
-            cached_remote_path.display()
-        )
-    })?;
-    if let Err(error) = controller_limits(local).check(&cached) {
-        tracing::warn!(
-            path = %cached_remote_path.display(),
-            error = %format!("{error:#}"),
-            "discarding the cached controller configuration: it is outside the local limits"
-        );
-        std::fs::remove_file(cached_remote_path).with_context(|| {
-            format!(
-                "remove cached controller configuration {}",
-                cached_remote_path.display()
-            )
-        })?;
-        return Ok(Some(local.clone()));
-    }
-    tracing::info!(
-        path = %cached_remote_path.display(),
-        "restoring last accepted controller configuration"
-    );
-    Ok(Some(cached))
+    let path = state_dir.join(remote::SAVED_CONFIG_FILE);
+    Ok(
+        match remote::load_saved_config(state_dir, &local.controller_limits())? {
+            remote::SavedConfig::Missing => (!local.is_empty()).then(|| local.clone()),
+            remote::SavedConfig::Rejected(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %format!("{error:#}"),
+                    "not applying the cached controller configuration: it is outside the local limits; applying the local configuration"
+                );
+                Some(local.clone())
+            }
+            remote::SavedConfig::Accepted(saved) => {
+                tracing::info!(
+                    path = %path.display(),
+                    "restoring last accepted controller configuration"
+                );
+                Some(*saved)
+            }
+        },
+    )
 }
 
 fn home_directory() -> anyhow::Result<PathBuf> {
@@ -579,9 +551,8 @@ where
     let enrollment = EnrollmentState::new(config.controller.is_some());
     let controller_status = remote::ControllerConnectionState::new();
     let local_config = config.clone();
-    let cached_remote_path = args.state_dir.join("remote-config.yaml");
     let initial_config = if config.controller.is_some() {
-        restore_controller_config(&cached_remote_path, &local_config)?
+        restore_controller_config(&args.state_dir, &local_config)?
     } else {
         Some(local_config)
     };
@@ -664,7 +635,7 @@ where
                 logout: logout_receiver,
                 current: remote_current_config,
                 tick_statuses: Some(tick_status_receiver),
-                limits: controller_limits(&config),
+                limits: config.controller_limits(),
             },
         ));
     }
@@ -2581,40 +2552,39 @@ programs:
     }
 
     #[test]
-    fn a_cached_controller_configuration_outside_the_local_limits_is_discarded() {
+    fn a_cached_controller_configuration_outside_the_local_limits_is_kept_but_not_applied() {
         let root = tempfile::tempdir().unwrap();
-        let local_path = root.path().join("config.yaml");
-        std::fs::write(
-            &local_path,
-            "daemon:\n  controllerLimits:\n    allowedGatewayOrigins: [https://gateway.example.com]\ncontroller:\n  address: https://controller.example.com\n  caCertificatePath: ca.pem\n",
-        )
-        .unwrap();
-        let local = agentdesktop_core::config::load_daemon(&local_path).unwrap();
-        let cached = root.path().join("remote-config.yaml");
-
-        std::fs::write(
-            &cached,
-            "llmGateway:\n  url: https://gateway.example.com/v1\n",
-        )
-        .unwrap();
-        let restored = super::restore_controller_config(&cached, &local)
-            .unwrap()
-            .expect("the cached configuration is restored");
-        assert_eq!(
-            restored.llm_gateway.unwrap().url.as_str(),
-            "https://gateway.example.com/v1"
+        let controller =
+            "controller:\n  address: https://controller.example.com\n  caCertificatePath: ca.pem\n";
+        let local = |limits: &str| {
+            let path = root.path().join("config.yaml");
+            std::fs::write(&path, format!("{limits}{controller}")).unwrap();
+            agentdesktop_core::config::load_daemon(&path).unwrap()
+        };
+        let limited = local(
+            "daemon:\n  controllerLimits:\n    allowedGatewayOrigins: [https://gateway.example.com]\n",
         );
-
+        let cached = root.path().join("remote-config.yaml");
         std::fs::write(
             &cached,
-            "llmGateway:\n  url: https://evil.example/v1\nprograms:\n  claudeCode: {}\n",
+            "llmGateway:\n  url: https://other.example/v1\nprograms:\n  claudeCode: {}\n",
         )
         .unwrap();
-        let restored = super::restore_controller_config(&cached, &local)
+
+        let restored = super::restore_controller_config(root.path(), &limited)
             .unwrap()
             .expect("the local configuration is applied, even though it is empty");
         assert!(restored.llm_gateway.is_none());
         assert!(restored.programs.claude_code.is_none());
-        assert!(!cached.exists());
+        assert!(cached.exists(), "the cached configuration is kept");
+
+        // The limits are reverted: the cached configuration comes back.
+        let restored = super::restore_controller_config(root.path(), &local(""))
+            .unwrap()
+            .expect("the cached configuration is restored");
+        assert_eq!(
+            restored.llm_gateway.unwrap().url.as_str(),
+            "https://other.example/v1"
+        );
     }
 }

@@ -363,12 +363,13 @@ pub(crate) fn load_effective_config(
     if config.controller.is_none() {
         return Ok(config.clone());
     }
-    let path = state_dir.join("remote-config.yaml");
-    match std::fs::read_to_string(&path) {
-        Ok(contents) => agentdesktop_core::config::parse_daemon(&contents)
-            .map_err(|error| error.context("parse applied remote configuration")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(config.clone()),
-        Err(error) => Err(error.into()),
+    // A saved configuration outside the local limits is not the one in
+    // effect: startup applied the local configuration instead.
+    match crate::remote::load_saved_config(state_dir, &config.controller_limits())? {
+        crate::remote::SavedConfig::Accepted(saved) => Ok(*saved),
+        crate::remote::SavedConfig::Missing | crate::remote::SavedConfig::Rejected(_) => {
+            Ok(config.clone())
+        }
     }
 }
 
@@ -995,6 +996,27 @@ llmGateway:
             "https://gateway.example.com/"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_remote_configuration_outside_the_local_limits_is_not_effective() {
+        let root = tempfile::tempdir().unwrap();
+        let local_path = root.path().join("config.yaml");
+        fs::write(
+            &local_path,
+            "daemon:\n  controllerLimits:\n    allowedGatewayOrigins: [https://gateway.example.com]\ncontroller:\n  address: https://controller.example.com\n  caCertificatePath: controller-ca.pem\n",
+        )
+        .unwrap();
+        let local = agentdesktop_core::config::load_daemon(&local_path).unwrap();
+        fs::write(
+            root.path().join("remote-config.yaml"),
+            "llmGateway:\n  url: https://other.example.com\n",
+        )
+        .unwrap();
+
+        let effective = load_effective_config(&local, root.path()).unwrap();
+
+        assert!(effective.llm_gateway.is_none());
     }
 
     #[test]
