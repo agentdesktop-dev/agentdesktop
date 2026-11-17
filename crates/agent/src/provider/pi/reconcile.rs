@@ -23,6 +23,7 @@ const MODELS_OPTIONS: json_merge::MergeOptions = json_merge::MergeOptions {
     // Pi accepts comments and trailing commas in models.json.
     format: json_merge::JsonFormat::Jsonc,
     replace_paths: &[],
+    retain_on_removal: &[],
 };
 
 pub(super) fn plan(

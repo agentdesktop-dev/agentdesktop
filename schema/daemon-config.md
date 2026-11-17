@@ -22,6 +22,8 @@
 |`daemon.llmProxy`|object|Local loopback LLM proxy.|
 |`daemon.llmProxy.clientId`|string|Credential policy client ID used by the proxy. Defaults to `vscode`.|
 |`daemon.llmProxy.listen`|string|Loopback address to listen on. Unset disables the proxy. Rejected in system mode.|
+|`daemon.muse`|object|Muse Code paths.|
+|`daemon.muse.settings`|string|Settings file. Defaults to `$XDG_CONFIG_HOME/muse/settings.json`, then<br>`~/.config/muse/settings.json`.|
 |`daemon.oidcCallbackListen`|string|Override the OIDC callback bind address.|
 |`daemon.openCode`|object|OpenCode paths.|
 |`daemon.openCode.config`|string|Configuration file.|
@@ -81,6 +83,10 @@
 |`programs.grok.model`|string|Catalog ID and API model used when pointing Grok at the LLM gateway.<br><br>This is required when a top-level `llmGateway` is configured. If `models`<br>is empty, agentdesktop creates a catalog entry with this ID.|
 |`programs.grok.models`|object|Extra Grok `[model.<id>]` catalog entries, keyed by catalog ID.<br><br>Each value is an arbitrary Grok model object. Generated gateway<br>`base_url` and `auth_provider` values take precedence. When gateway<br>authentication is configured, `api_key` and `env_key` are removed from<br>these entries, including values supplied through `managedConfig`.<br>When this map is non-empty, `model` must name one of its keys.|
 |`programs.grok.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
+|`programs.muse`|object|Muse Code managed configuration.<br><br>Managed in user mode (`--user`); system daemons skip it with an inactive reason.|
+|`programs.muse.managedConfig`|object|Arbitrary values merged into Muse Code's `settings.json`.<br><br>Use Muse Code's native snake_case setting keys. Generated values take<br>precedence, and `schema_version` cannot be set here.|
+|`programs.muse.model`|string|Default model ID saved as Muse Code's `model` setting.<br><br>Optional: when unset, Muse Code keeps the user's saved model or the<br>default from the model catalog served through the gateway.|
+|`programs.muse.useLlmGateway`|boolean|Whether this program uses the top-level LLM gateway.|
 |`programs.openCode`|object|OpenCode managed configuration.|
 |`programs.openCode.api`|enum|OpenAI API dialect of the managed LLM gateway provider. Defaults to<br>`openai-responses`.<br>Possible values: `openai-responses`, `openai-completions`.|
 |`programs.openCode.managedConfig`|object|Arbitrary values written to OpenCode's system-managed configuration.|

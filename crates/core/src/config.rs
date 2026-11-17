@@ -98,6 +98,9 @@ pub struct DaemonStartupConfig {
     /// Pi paths.
     #[serde(default)]
     pub pi: PiStartupConfig,
+    /// Muse Code paths.
+    #[serde(default)]
+    pub muse: MuseStartupConfig,
     /// Local loopback LLM proxy.
     #[serde(default)]
     pub llm_proxy: LlmProxyStartupConfig,
@@ -210,6 +213,17 @@ pub struct PiStartupConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<PathBuf>,
     /// Settings file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<PathBuf>,
+}
+
+/// Local Muse Code paths.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MuseStartupConfig {
+    /// Settings file. Defaults to `$XDG_CONFIG_HOME/muse/settings.json`, then
+    /// `~/.config/muse/settings.json`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<PathBuf>,
 }
@@ -787,6 +801,11 @@ pub struct ProgramsConfig {
     /// Managed in user mode (`--user`); system daemons skip it with an inactive reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pi: Option<PiConfig>,
+    /// Muse Code managed configuration.
+    ///
+    /// Managed in user mode (`--user`); system daemons skip it with an inactive reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muse: Option<MuseConfig>,
 }
 
 impl ProgramsConfig {
@@ -818,6 +837,7 @@ impl ProgramsConfig {
             && self.copilot.is_none()
             && self.vscode.is_none()
             && self.pi.is_none()
+            && self.muse.is_none()
     }
 }
 
@@ -1321,6 +1341,35 @@ pub struct PiConfig {
     pub managed_config: BTreeMap<String, serde_json::Value>,
 }
 
+/// Settings reconciled into Muse Code's user `settings.json`.
+///
+/// With an LLM gateway, agentdesktop owns the whole `endpoint_transport`
+/// object: the gateway URL and, when the gateway authenticates callers, a
+/// `bearer_command` that runs the agentdesktop credential helper. The user's
+/// own `endpoint_transport` is restored on cleanup. Muse Code reads these
+/// settings only from the user's file under `$XDG_CONFIG_HOME/muse` (or
+/// `~/.config/muse`), so management requires `--user`. System daemons skip it.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MuseConfig {
+    /// Whether this program uses the top-level LLM gateway.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub use_llm_gateway: bool,
+    /// Default model ID saved as Muse Code's `model` setting.
+    ///
+    /// Optional: when unset, Muse Code keeps the user's saved model or the
+    /// default from the model catalog served through the gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Arbitrary values merged into Muse Code's `settings.json`.
+    ///
+    /// Use Muse Code's native snake_case setting keys. Generated values take
+    /// precedence, and `schema_version` cannot be set here.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub managed_config: BTreeMap<String, serde_json::Value>,
+}
+
 /// Upstream authentication selected by a managed agent.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1567,6 +1616,9 @@ fn validate_daemon(
         }
         if programs.pi.is_some() {
             anyhow::bail!("sandbox is not supported for Pi");
+        }
+        if programs.muse.is_some() {
+            anyhow::bail!("sandbox is not supported for Muse Code");
         }
     }
     if let Some(gateway) = llm_gateway {
@@ -1816,6 +1868,20 @@ fn validate_daemon(
         }
         if !pi.models.is_empty() && !pi.models.contains_key(model) {
             anyhow::bail!("Pi model {model} is not declared in models");
+        }
+    }
+    if let Some(muse) = &programs.muse {
+        if muse.managed_config.contains_key("schema_version") {
+            anyhow::bail!(
+                "programs.muse.managedConfig.schema_version is set by agentdesktop and cannot be overridden"
+            );
+        }
+        if muse
+            .model
+            .as_deref()
+            .is_some_and(|model| model.trim().is_empty())
+        {
+            anyhow::bail!("Muse Code model cannot be empty");
         }
     }
     Ok(())
@@ -2693,6 +2759,59 @@ programs:
     }
 
     #[test]
+    fn muse_startup_path_is_local_only() {
+        let yaml = "daemon:\n  muse:\n    settings: custom/muse-settings.json\n";
+        let config = super::parse_local_daemon(yaml).expect("local Muse Code path is supported");
+        let value = serde_json::to_value(config).unwrap();
+        assert_eq!(
+            value["daemon"]["muse"]["settings"],
+            "custom/muse-settings.json"
+        );
+        assert!(
+            parse_daemon(yaml)
+                .unwrap_err()
+                .to_string()
+                .contains("only allowed in the local")
+        );
+        assert!(super::parse_local_daemon("daemon: { muse: { model: wrong } }").is_err());
+    }
+
+    #[test]
+    fn muse_parses_gateway_settings_without_a_model() {
+        let daemon = parse_daemon(
+            r#"
+llmGateway:
+  url: https://gateway.example.com
+programs:
+  muse:
+    managedConfig:
+      reasoning_effort: high
+"#,
+        )
+        .expect("valid Muse Code configuration");
+        let muse = daemon.programs.muse.expect("Muse Code program");
+        assert!(muse.use_llm_gateway);
+        assert_eq!(muse.model, None);
+        assert_eq!(muse.managed_config["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn muse_rejects_reserved_and_empty_values() {
+        let error =
+            parse_daemon("programs:\n  muse:\n    managedConfig:\n      schema_version: 2\n")
+                .expect_err("schema_version is reserved");
+        assert!(error.to_string().contains("schema_version"));
+
+        let error = parse_daemon("programs:\n  muse:\n    model: \"  \"\n")
+            .expect_err("empty Muse Code model should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("Muse Code model cannot be empty")
+        );
+    }
+
+    #[test]
     fn pi_parses_gateway_catalog_settings() {
         let daemon = parse_daemon(
             r#"
@@ -2778,7 +2897,7 @@ programs:
     #[test]
     fn accepts_mixed_user_and_system_programs() {
         parse_daemon(
-            "programs:\n  pi: {}\n  claudeDesktop: {}\n  grok: {}\n  copilot: {}\n  vscode: {}",
+            "programs:\n  pi: {}\n  muse: {}\n  claudeDesktop: {}\n  grok: {}\n  copilot: {}\n  vscode: {}",
         )
         .expect("each daemon manages the programs supported in its mode");
     }

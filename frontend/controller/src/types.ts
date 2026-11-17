@@ -137,7 +137,8 @@ export type AgentKind =
   | "grok"
   | "copilot"
   | "vscode"
-  | "pi";
+  | "pi"
+  | "muse";
 
 export type AgentDraft = {
   kind: AgentKind;

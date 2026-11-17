@@ -7,8 +7,8 @@ mode cannot manage are skipped and reported as **inactive**, with a reason in
 configuration status and dry-run output. Supported programs continue applying.
 Skipped programs' files and ownership metadata are left untouched, even when
 those programs are removed from the policy. Cleanup runs in the mode that manages
-the program. Claude Desktop and Grok Build require system mode; Pi, Copilot CLI,
-and VS Code require user mode.
+the program. Claude Desktop and Grok Build require system mode; Pi, Muse Code,
+Copilot CLI, and VS Code require user mode.
 
 VS Code managed configuration (Copilot Chat custom models in the user's
 `chatLanguageModels.json`, or the Copilot Chat API override in the user's
@@ -67,20 +67,48 @@ through the git repository root.
 Host-specific Cursor/Claude
 files are not scanned until the adapter imports them into a Pi-owned file.
 
+Muse Code stores configuration in `$XDG_CONFIG_HOME/muse` (or `~/.config/muse`).
+Management requires `--user`; system daemons skip `programs.muse` because
+Muse Code reads `endpoint_transport` credentials only from the user's
+`settings.json`. In user mode, authenticated gateway configuration also
+requires a running daemon and rejects `--once`.
+User mode merges `programs.muse.managedConfig` and `model` into
+`settings.json`. With an LLM gateway, the daemon owns the whole
+`endpoint_transport` object: `base_url` is the gateway URL ending in `/v1`,
+and `auth: "command"` with a `bearer_command` runs the agentdesktop
+credential helper (an argument list, not a shell command), or `auth: "none"`
+when the gateway has no authentication. The user's own `endpoint_transport`
+is restored on cleanup. Muse Code fetches its model catalog from
+`/muse-code/models` at the gateway's origin, whatever path `base_url` has, so
+the gateway must route that path as well as the model API.
+Muse Code rejects a `settings.json` without `schema_version`, so a file the
+daemon creates carries `schema_version: 1`, and cleanup keeps the member when
+the user added settings to that file. A file with any other schema version is
+reported as a conflict and left untouched. On Unix the file is written with
+owner-only permissions (`0600`), since it can hold literal MCP headers and
+environment values; dry runs report the action and path without its contents.
+MCP inventory reads `mcpServers` from the user `settings.json` and from
+`.mcp.json` in the working directory and its ancestors. Skill inventory reads
+`<config root>/skills`, the user's `~/.agents/skills`, `~/.claude/skills`, and
+`~/.codex/skills` (Muse Code loads other agents' user skills), and the working
+directory's `.agents/skills` and `.claude/skills` through its ancestors.
+Bundled and plugin skills are not inventoried. The version comes from the
+launcher's `.muse-version` file, without running the launcher.
+
 ✅ Implemented · ◯ Not implemented · — Not applicable
 
-| Feature | [Claude Code](claude_code/) | [Claude Desktop](claude_desktop/) | [Codex](codex/) | [OpenCode](opencode/) | [VS Code](vscode/) | [Ollama](ollama/) | [Cursor](cursor/) | [Grok Build](grok/) | [GitHub Copilot CLI](copilot/) | [Pi](pi/) |
-| --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Installation and version discovery | ✅ | ✅ | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | ✅ |
-| Local model discovery | — | — | — | — | — | ✅ | — | — | — | — |
-| MCP server discovery | ✅ | ✅ | ✅ | ◯ | ✅ | — | ✅ | ✅ | — | ✅ |
-| Skill discovery | ✅ | ◯ | ✅ | ◯ | ✅ | — | ✅ | ✅ | — | ✅ |
-| Managed configuration | ✅ | ✅ | ✅ | ✅ | ✅ | ◯ | ◯ | ✅ | ✅ | ✅ |
-| LLM gateway routing | ✅ | ✅ | ✅ | ✅ | ✅ | — | ◯ | ✅ | ✅ | ✅ |
-| Gateway credentials | ✅ | ✅ | ✅ | ✅ | ✅ | — | ◯ | ✅ | ✅ | ✅ |
-| Sandbox configuration | ✅ | ◯ | ✅ | ◯ | ◯ | — | ◯ | ◯ | ◯ | ◯ |
-| Tool-use telemetry | ✅ | ◯ | ◯ | ◯ | ◯ | — | ◯ | ◯ | ◯ | ◯ |
-| Session-start telemetry | ✅ | ◯ | ◯ | ◯ | ◯ | — | ◯ | ◯ | ◯ | ◯ |
+| Feature | [Claude Code](claude_code/) | [Claude Desktop](claude_desktop/) | [Codex](codex/) | [OpenCode](opencode/) | [VS Code](vscode/) | [Ollama](ollama/) | [Cursor](cursor/) | [Grok Build](grok/) | [GitHub Copilot CLI](copilot/) | [Pi](pi/) | [Muse Code](muse/) |
+| --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| Installation and version discovery | ✅ | ✅ | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Local model discovery | — | — | — | — | — | ✅ | — | — | — | — | — |
+| MCP server discovery | ✅ | ✅ | ✅ | ◯ | ✅ | — | ✅ | ✅ | — | ✅ | ✅ |
+| Skill discovery | ✅ | ◯ | ✅ | ◯ | ✅ | — | ✅ | ✅ | — | ✅ | ✅ |
+| Managed configuration | ✅ | ✅ | ✅ | ✅ | ✅ | ◯ | ◯ | ✅ | ✅ | ✅ | ✅ |
+| LLM gateway routing | ✅ | ✅ | ✅ | ✅ | ✅ | — | ◯ | ✅ | ✅ | ✅ | ✅ |
+| Gateway credentials | ✅ | ✅ | ✅ | ✅ | ✅ | — | ◯ | ✅ | ✅ | ✅ | ✅ |
+| Sandbox configuration | ✅ | ◯ | ✅ | ◯ | ◯ | — | ◯ | ◯ | ◯ | ◯ | ◯ |
+| Tool-use telemetry | ✅ | ◯ | ◯ | ◯ | ◯ | — | ◯ | ◯ | ◯ | ◯ | ◯ |
+| Session-start telemetry | ✅ | ◯ | ◯ | ◯ | ◯ | — | ◯ | ◯ | ◯ | ◯ | ◯ |
 
 - ◯ describes a gap in agentdesktop; it does not mean the upstream provider
   cannot support the feature.

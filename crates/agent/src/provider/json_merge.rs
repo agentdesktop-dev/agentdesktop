@@ -76,6 +76,11 @@ pub(super) struct MergeOptions {
     /// JSON pointers to values managed as a whole, rather than merged
     /// additively; removal restores the user's original value.
     pub(super) replace_paths: &'static [&'static str],
+    /// Top-level keys the merge may add that stay when removal leaves other
+    /// content in the file, for a file its program rejects without them (a
+    /// required schema version). They still go when the file created by the
+    /// merge is removed.
+    pub(super) retain_on_removal: &'static [&'static str],
 }
 
 impl Default for MergeOptions {
@@ -86,6 +91,7 @@ impl Default for MergeOptions {
             redact_diff: false,
             format: JsonFormat::Json,
             replace_paths: &[],
+            retain_on_removal: &[],
         }
     }
 }
@@ -335,6 +341,15 @@ pub(super) fn plan_remove_with(
     }
     let empty = settings.as_object().is_some_and(serde_json::Map::is_empty)
         || settings.as_array().is_some_and(Vec::is_empty);
+    if !empty && let Some(object) = settings.as_object_mut() {
+        for key in options.retain_on_removal {
+            if !object.contains_key(*key)
+                && let Some(value) = state.after.get(*key)
+            {
+                object.insert((*key).to_owned(), value.clone());
+            }
+        }
+    }
     let proposed = if state.created && empty {
         None
     } else {

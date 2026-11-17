@@ -634,6 +634,12 @@ const configurableAgents: Array<{
     placeholder: "model: claude-sonnet-4-5",
     initialSettings: "model: claude-sonnet-4-5",
   },
+  {
+    kind: "muse",
+    label: "Muse Code",
+    iconKind: "muse",
+    placeholder: "managedConfig:\n  reasoning_effort: high",
+  },
 ];
 
 const sandboxUnsupportedAgents = new Set<AgentKind>([
@@ -643,6 +649,7 @@ const sandboxUnsupportedAgents = new Set<AgentKind>([
   "copilot",
   "vscode",
   "pi",
+  "muse",
 ]);
 
 function daemonConfigYaml(options: {
@@ -676,7 +683,7 @@ function daemonConfigYaml(options: {
         "  authentication:",
         "    type: controllerJwt",
         `    audience: ${yamlString(options.audience)}`,
-        "    allowedClientIds: [claude-code, claude-desktop, codex, opencode, grok, copilot-cli, vscode-copilot, pi]",
+        "    allowedClientIds: [claude-code, claude-desktop, codex, opencode, grok, copilot-cli, vscode-copilot, pi, muse]",
       );
     }
     lines.push("");
