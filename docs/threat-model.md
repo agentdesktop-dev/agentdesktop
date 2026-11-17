@@ -204,10 +204,13 @@ help if Claude Code `env` can still set `ANTHROPIC_BASE_URL`.
 The local policy is `daemon.controllerLimits` in the local configuration file
 (see the [daemon configuration reference](../schema/daemon-config.md)). A
 pushed configuration outside it is rejected as a whole: the last accepted
-configuration stays in effect, the rejected one is not saved, and the reason
-is reported in `ConfigStatus`. At startup, a saved configuration outside the
-policy is deleted and the local configuration is applied in its place, which
-removes the tool settings written from it.
+configuration stays in effect, the rejected one is not saved, and the device
+reports it to the controller in `ConfigStatus` with the state `rejected` and
+the reason. At startup, a saved configuration outside the policy is not
+applied: the local configuration is applied in its place, which removes the
+tool settings written from it. The saved file is kept, so reverting the policy
+restores it. Whether this fails closed or keeps the existing tool settings may
+become configurable later.
 
 | Goal | Status |
 | --- | --- |

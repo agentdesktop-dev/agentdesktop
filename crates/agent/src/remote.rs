@@ -987,17 +987,73 @@ fn apply_parsed(
     // list is empty when the configuration was not applied at all (hash or
     // parse error), and holds the apply's outcomes otherwise, also when a
     // later step (persisting the configuration) failed.
-    config_status(
+    let rejected = result.as_ref().is_err_and(|error| {
+        error
+            .downcast_ref::<config::OutsideControllerLimits>()
+            .is_some()
+    });
+    let mut status = config_status(
         config.revision,
         programs,
         result.map_err(|error| format!("{error:#}")),
-    )
+    );
+    if rejected {
+        status.set_state(ConfigState::Rejected);
+    }
+    status
 }
+
+/// The controller configuration saved as the one to restore at startup.
+pub(crate) enum SavedConfig {
+    /// Nothing was saved.
+    Missing,
+    /// Saved, but outside the local limits. The file is kept, so the
+    /// configuration comes back once the limits allow it again.
+    Rejected(anyhow::Error),
+    Accepted(Box<agentdesktop_core::config::DaemonConfig>),
+}
+
+/// Reads the saved controller configuration and checks it against the local
+/// limits.
+pub(crate) fn load_saved_config(
+    state_dir: &Path,
+    limits: &ControllerLimits,
+) -> anyhow::Result<SavedConfig> {
+    let path = state_dir.join(SAVED_CONFIG_FILE);
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(SavedConfig::Missing);
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "read cached controller configuration from {}",
+                    path.display()
+                )
+            });
+        }
+    };
+    let saved = config::parse_daemon(&contents).with_context(|| {
+        format!(
+            "parse cached controller configuration from {}",
+            path.display()
+        )
+    })?;
+    Ok(match limits.check(&saved) {
+        Ok(()) => SavedConfig::Accepted(Box::new(saved)),
+        Err(error) => SavedConfig::Rejected(error),
+    })
+}
+
+/// The file in the state directory that holds the saved controller
+/// configuration.
+pub(crate) const SAVED_CONFIG_FILE: &str = "remote-config.yaml";
 
 /// Saves the controller's configuration as the one to restore at startup.
 fn persist_config(state_dir: &Path, yaml: &[u8], revision: u64) -> anyhow::Result<()> {
     secure_fs::ensure_private_dir(state_dir)?;
-    let path = state_dir.join("remote-config.yaml");
+    let path = state_dir.join(SAVED_CONFIG_FILE);
     secure_fs::atomic_write(&path, yaml, 0o600)?;
     info!(revision, path = %path.display(), "persisted daemon configuration");
     Ok(())
@@ -2003,7 +2059,7 @@ mod tests {
     }
 
     #[test]
-    fn a_push_outside_the_local_limits_is_rejected_reported_and_not_saved() {
+    fn a_push_outside_the_local_limits_is_reported_as_rejected_and_not_saved() {
         use sha2::{Digest, Sha256};
         let state_dir = std::env::temp_dir().join(format!(
             "agentdesktop-remote-limits-{}-{}",
@@ -2029,7 +2085,7 @@ mod tests {
         let status = super::apply_daemon_config(&state_dir, config, &limits, &reconciler);
         assert_eq!(
             status.state,
-            agentdesktop_proto::fleet::ConfigState::Failed as i32
+            agentdesktop_proto::fleet::ConfigState::Rejected as i32
         );
         assert!(
             status.error.contains(

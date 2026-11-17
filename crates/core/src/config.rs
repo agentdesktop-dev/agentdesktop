@@ -115,8 +115,11 @@ pub struct DaemonStartupConfig {
     #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
     pub reconcile_interval: Option<Duration>,
     /// Local limits on the configuration a controller pushes. A pushed
-    /// configuration outside them is rejected as a whole, and the last accepted
-    /// one stays in effect. See `docs/threat-model.md`.
+    /// configuration outside them is rejected as a whole, reported to the
+    /// controller as `rejected`, and the last accepted one stays in effect. A
+    /// saved controller configuration outside them is kept on disk but not
+    /// applied at startup: the local configuration is applied instead. Read at
+    /// startup only. See `docs/threat-model.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub controller_limits: Option<ControllerLimits>,
 }
@@ -162,7 +165,8 @@ impl ControllerLimits {
         Ok(())
     }
 
-    /// Checks a controller-delivered configuration against these limits.
+    /// Checks a controller-delivered configuration against these limits. A
+    /// violation is an [`OutsideControllerLimits`] error.
     pub fn check(&self, config: &DaemonConfig) -> anyhow::Result<()> {
         let (Some(allowed), Some(gateway)) = (&self.allowed_gateway_origins, &config.llm_gateway)
         else {
@@ -177,15 +181,29 @@ impl ControllerLimits {
         }
         for (field, url) in urls {
             if !allowed.iter().any(|origin| origin.origin() == url.origin()) {
-                anyhow::bail!(
+                return Err(OutsideControllerLimits(format!(
                     "{field} origin {} is not in daemon.controllerLimits.allowedGatewayOrigins",
                     url.origin().ascii_serialization()
-                );
+                ))
+                .into());
             }
         }
         Ok(())
     }
 }
+
+/// A controller-delivered configuration that `daemon.controllerLimits`
+/// refuses, as opposed to one that is invalid.
+#[derive(Debug)]
+pub struct OutsideControllerLimits(String);
+
+impl std::fmt::Display for OutsideControllerLimits {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for OutsideControllerLimits {}
 
 /// Local loopback LLM proxy settings. User mode only: the proxy hands out the
 /// current user's gateway credential, so a system daemon never runs one.
@@ -1613,6 +1631,14 @@ fn parse_local_daemon(contents: &str) -> anyhow::Result<DaemonConfig> {
 }
 
 impl DaemonConfig {
+    /// `daemon.controllerLimits`, or no limits when unset.
+    pub fn controller_limits(&self) -> ControllerLimits {
+        self.daemon
+            .as_ref()
+            .and_then(|daemon| daemon.controller_limits.clone())
+            .unwrap_or_default()
+    }
+
     /// Returns whether this configuration manages no gateway or developer tools.
     pub fn is_empty(&self) -> bool {
         self.llm_gateway.is_none()

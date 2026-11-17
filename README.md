@@ -814,10 +814,17 @@ daemon:
 
 The origins of `llmGateway.url`, `llmGateway.proxyUrl` and the OIDC `issuer`
 must each be in the list. Paths may change freely. A pushed configuration
-outside the list is rejected and reported as failed, and the device keeps the
-last configuration it accepted. A saved configuration outside the list is
-discarded at the next daemon start. The check does not cover URLs in programs'
-free-form settings, such as Claude Code `env`. See the
+outside the list is not applied: the device keeps the last configuration it
+accepted and reports the push as **Rejected**, with the reason, on the
+controller's device page (an older controller shows it as not reported).
+
+The list is read when the daemon starts. If the saved controller configuration
+is outside a newly installed list, the daemon applies the local configuration
+instead, which removes the tool settings it wrote, and reports **Rejected**
+once the controller pushes the same configuration again. The saved
+configuration stays on disk, so reverting the list and restarting the daemon
+restores it. The check does not cover URLs in programs' free-form settings,
+such as Claude Code `env`. See the
 [control-plane threat model](docs/threat-model.md).
 
 ## Start locally, grow into a fleet

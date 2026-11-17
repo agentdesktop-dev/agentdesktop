@@ -1,6 +1,7 @@
 use std::time::SystemTime;
 
 use agentdesktop_core::config::DaemonConfig;
+use agentdesktop_proto::fleet::ConfigState;
 use agentdesktop_usage::{UsageError, UsageQuery, UsageReport};
 use anyhow::Context as _;
 use axum::{
@@ -63,7 +64,12 @@ pub(super) async fn overview(
         .count();
     let config_failures = devices
         .iter()
-        .filter(|device| device.config_state == Some(2))
+        .filter(|device| {
+            device.config_state.is_some_and(|state| {
+                state == i64::from(ConfigState::Failed as i32)
+                    || state == i64::from(ConfigState::Rejected as i32)
+            })
+        })
         .count();
     Ok(Json(Overview {
         total_devices: devices.len(),
