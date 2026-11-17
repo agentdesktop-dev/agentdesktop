@@ -1185,7 +1185,9 @@ mod enrollment {
 
     use tokio::time::Instant;
 
-    use super::super::{FLEET_LIMITS, FleetLimits, PEERS_PER_GENERATION, address_key};
+    use super::super::{
+        EnrollmentLimiter, FLEET_LIMITS, FleetLimits, PEERS_PER_GENERATION, address_key,
+    };
     use super::Duration;
 
     fn limits(in_flight: usize, burst: u32) -> FleetLimits {
@@ -1202,7 +1204,7 @@ mod enrollment {
 
     #[test]
     fn a_peer_gets_its_burst_then_one_request_per_refill() {
-        let limiter = limits(64, 3).enrollment();
+        let limiter = EnrollmentLimiter::new(&limits(64, 3));
         let start = Instant::now();
 
         for _ in 0..3 {
@@ -1219,7 +1221,7 @@ mod enrollment {
 
     #[test]
     fn peers_have_separate_budgets() {
-        let limiter = limits(64, 1).enrollment();
+        let limiter = EnrollmentLimiter::new(&limits(64, 1));
         let now = Instant::now();
 
         assert!(limiter.take(peer(1), now));
@@ -1229,7 +1231,7 @@ mod enrollment {
 
     #[test]
     fn a_full_bucket_is_never_overfilled() {
-        let limiter = limits(64, 2).enrollment();
+        let limiter = EnrollmentLimiter::new(&limits(64, 2));
         let start = Instant::now();
 
         assert!(limiter.take(peer(1), start));
@@ -1242,7 +1244,7 @@ mod enrollment {
 
     #[tokio::test]
     async fn requests_in_progress_are_capped_until_one_finishes() {
-        let limiter = limits(2, 60).enrollment();
+        let limiter = EnrollmentLimiter::new(&limits(2, 60));
         let address = |last| Some(SocketAddr::new(peer(last), 4000));
 
         let first = limiter.admit(address(1)).expect("first request");
@@ -1260,7 +1262,7 @@ mod enrollment {
 
     #[tokio::test]
     async fn a_rate_limited_peer_is_rejected_with_resource_exhausted() {
-        let limiter = limits(64, 1).enrollment();
+        let limiter = EnrollmentLimiter::new(&limits(64, 1));
         let address = Some(SocketAddr::new(peer(1), 4000));
 
         let _first = limiter.admit(address).expect("first request");
@@ -1271,7 +1273,7 @@ mod enrollment {
 
     #[tokio::test]
     async fn enrolling_spends_the_address_budget() {
-        let limiter = limits(64, 1).enrollment();
+        let limiter = EnrollmentLimiter::new(&limits(64, 1));
         let address = Some(SocketAddr::new(peer(1), 4000));
         let _configuration = limiter.admit(address).expect("login configuration");
 
@@ -1292,7 +1294,7 @@ mod enrollment {
 
     #[tokio::test]
     async fn enrolling_waits_for_a_slot() {
-        let limiter = one_slot(Duration::from_secs(5)).enrollment();
+        let limiter = EnrollmentLimiter::new(&one_slot(Duration::from_secs(5)));
         let other = limiter.admit(None).expect("other request");
         let waiting = tokio::spawn({
             let limiter = limiter.clone();
@@ -1311,7 +1313,7 @@ mod enrollment {
 
     #[tokio::test]
     async fn enrolling_gives_up_after_the_wait() {
-        let limiter = one_slot(Duration::from_millis(50)).enrollment();
+        let limiter = EnrollmentLimiter::new(&one_slot(Duration::from_millis(50)));
         let _other = limiter.admit(None).expect("other request");
 
         let error = limiter.admit_enrollment(None).await.expect_err("admitted");
@@ -1321,7 +1323,7 @@ mod enrollment {
 
     #[tokio::test]
     async fn requests_without_a_peer_address_still_count_against_the_cap() {
-        let limiter = limits(1, 60).enrollment();
+        let limiter = EnrollmentLimiter::new(&limits(1, 60));
 
         let _first = limiter.admit(None).expect("first request");
         assert!(limiter.admit(None).is_err());
@@ -1334,7 +1336,7 @@ mod enrollment {
 
     #[test]
     fn the_peer_table_stays_bounded_while_addresses_keep_changing() {
-        let limiter = limits(64, 1).enrollment();
+        let limiter = EnrollmentLimiter::new(&limits(64, 1));
         let now = Instant::now();
 
         for index in 0..5 * PEERS_PER_GENERATION {
@@ -1346,7 +1348,7 @@ mod enrollment {
 
     #[test]
     fn a_peer_seen_recently_keeps_its_spent_budget_when_the_table_turns_over() {
-        let limiter = limits(64, 1).enrollment();
+        let limiter = EnrollmentLimiter::new(&limits(64, 1));
         let now = Instant::now();
         assert!(limiter.take(peer(1), now));
 
@@ -1364,7 +1366,7 @@ mod enrollment {
 
     #[test]
     fn addresses_in_one_ipv6_64_share_a_budget() {
-        let limiter = limits(64, 1).enrollment();
+        let limiter = EnrollmentLimiter::new(&limits(64, 1));
         let now = Instant::now();
 
         assert!(limiter.take(v6("2001:db8:1:2::1"), now));
@@ -1382,38 +1384,47 @@ mod enrollment {
 
 mod device_streams {
     use tokio::{sync::oneshot::error::TryRecvError, time::Instant};
+    use tonic::Status;
 
-    use super::super::{DeviceStreams, FLEET_LIMITS};
+    use super::super::{DeviceStreams, FLEET_LIMITS, FleetLimits};
     use super::Duration;
 
     fn streams() -> DeviceStreams {
-        FLEET_LIMITS.device_streams()
+        DeviceStreams::new(&FLEET_LIMITS)
+    }
+
+    /// Limits that give each device `burst` messages, refilled at one per `refill`.
+    fn message_budget(burst: u32, refill: Duration) -> FleetLimits {
+        let mut limits = FLEET_LIMITS;
+        limits.configured.device_message_burst = burst;
+        limits.configured.device_message_refill = refill;
+        limits
     }
 
     #[test]
     fn a_newer_stream_from_the_same_device_replaces_the_older_one() {
         let streams = streams();
-        let mut older = streams.open("device-a");
-        let mut other_device = streams.open("device-b");
+        let (_older, mut older_superseded) = streams.open("device-a");
+        let (_other_device, mut other_device_superseded) = streams.open("device-b");
 
-        let mut newer = streams.open("device-a");
+        let (_newer, mut newer_superseded) = streams.open("device-a");
 
-        assert_eq!(older.superseded.try_recv(), Ok(()));
-        assert_eq!(other_device.superseded.try_recv(), Err(TryRecvError::Empty));
-        assert_eq!(newer.superseded.try_recv(), Err(TryRecvError::Empty));
+        assert_eq!(older_superseded.try_recv(), Ok(()));
+        assert_eq!(other_device_superseded.try_recv(), Err(TryRecvError::Empty));
+        assert_eq!(newer_superseded.try_recv(), Err(TryRecvError::Empty));
     }
 
     #[test]
     fn a_replaced_stream_closing_keeps_the_newer_registration() {
         let streams = streams();
-        let older = streams.open("device-a");
-        let mut newer = streams.open("device-a");
+        let (older, _) = streams.open("device-a");
+        let (_newer, mut newer_superseded) = streams.open("device-a");
 
         drop(older);
         let _newest = streams.open("device-a");
 
         // The newer stream was still registered, so the newest one replaced it.
-        assert_eq!(newer.superseded.try_recv(), Ok(()));
+        assert_eq!(newer_superseded.try_recv(), Ok(()));
     }
 
     #[test]
@@ -1431,10 +1442,8 @@ mod device_streams {
 
     #[test]
     fn a_device_gets_its_message_burst_then_the_refill_rate() {
-        let mut limits = FLEET_LIMITS;
-        limits.configured.device_message_burst = 3;
-        limits.configured.device_message_refill = Duration::from_secs(1);
-        let stream = limits.device_streams().open("device-a");
+        let streams = DeviceStreams::new(&message_budget(3, Duration::from_secs(1)));
+        let (stream, _) = streams.open("device-a");
         let start = Instant::now();
         let second = Duration::from_secs(1);
 
@@ -1454,10 +1463,8 @@ mod device_streams {
 
     #[test]
     fn a_message_read_before_the_budget_refills_delays_the_next_one() {
-        let mut limits = FLEET_LIMITS;
-        limits.configured.device_message_burst = 1;
-        limits.configured.device_message_refill = Duration::from_secs(1);
-        let stream = limits.device_streams().open("device-a");
+        let streams = DeviceStreams::new(&message_budget(1, Duration::from_secs(1)));
+        let (stream, _) = streams.open("device-a");
         let start = Instant::now();
 
         assert_eq!(
@@ -1473,10 +1480,8 @@ mod device_streams {
 
     #[test]
     fn an_absurdly_long_refill_caps_the_wait() {
-        let mut limits = FLEET_LIMITS;
-        limits.configured.device_message_burst = 1;
-        limits.configured.device_message_refill = Duration::MAX;
-        let stream = limits.device_streams().open("device-a");
+        let streams = DeviceStreams::new(&message_budget(1, Duration::MAX));
+        let (stream, _) = streams.open("device-a");
         let start = Instant::now();
 
         assert_eq!(
@@ -1487,17 +1492,14 @@ mod device_streams {
 
     #[test]
     fn reconnecting_does_not_reset_the_message_budget() {
-        let mut limits = FLEET_LIMITS;
-        limits.configured.device_message_burst = 2;
-        limits.configured.device_message_refill = Duration::from_secs(3600);
-        let streams = limits.device_streams();
+        let streams = DeviceStreams::new(&message_budget(2, Duration::from_secs(3600)));
         let now = Instant::now();
-        let first = streams.open("device-a");
+        let (first, _) = streams.open("device-a");
         assert_eq!(first.spend_message(now), None);
         assert!(first.spend_message(now).is_some(), "the burst is spent");
         drop(first);
 
-        let second = streams.open("device-a");
+        let (second, _) = streams.open("device-a");
 
         assert!(
             second.spend_message(now).is_some(),
@@ -1505,11 +1507,41 @@ mod device_streams {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn messages_past_the_burst_are_read_at_the_refill_rate() {
+        let streams = DeviceStreams::new(&message_budget(2, Duration::from_secs(1)));
+        let (stream, _) = streams.open("device-a");
+        let mut inbound = tokio_stream::iter([1, 2, 3, 4].map(Ok::<_, Status>));
+        let start = Instant::now();
+
+        for (message, read_after) in [(1, 0), (2, 0), (3, 1), (4, 2)] {
+            let read = stream.next_message(&mut inbound).await;
+            assert_eq!(read.unwrap().unwrap(), message);
+            assert_eq!(start.elapsed().as_secs(), read_after, "message {message}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn waiting_for_a_message_does_not_spend_the_budget() {
+        let streams = DeviceStreams::new(&message_budget(1, Duration::from_secs(3600)));
+        let (stream, _) = streams.open("device-a");
+        let mut silent = tokio_stream::pending::<Result<(), Status>>();
+        let waited =
+            tokio::time::timeout(Duration::from_secs(1), stream.next_message(&mut silent)).await;
+        assert!(waited.is_err(), "read a message from a silent device");
+
+        let start = Instant::now();
+        let mut inbound = tokio_stream::iter([Ok::<_, Status>(())]);
+        stream.next_message(&mut inbound).await.unwrap().unwrap();
+
+        assert_eq!(start.elapsed(), Duration::ZERO, "the wait spent the budget");
+    }
+
     #[test]
     fn a_device_that_opens_streams_too_often_is_refused() {
         let mut limits = FLEET_LIMITS;
         limits.stream_open_burst = 2;
-        let streams = limits.device_streams();
+        let streams = DeviceStreams::new(&limits);
 
         streams.admit_open("device-a").expect("first open");
         streams.admit_open("device-a").expect("second open");

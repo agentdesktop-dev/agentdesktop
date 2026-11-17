@@ -59,8 +59,8 @@ impl FleetAgentService {
             gateway_jwt_issuer,
             device_certificate_issuer,
             usage_enabled: false,
-            enrollment: limits.enrollment(),
-            device_streams: limits.device_streams(),
+            enrollment: EnrollmentLimiter::new(limits),
+            device_streams: DeviceStreams::new(limits),
         }
     }
 
@@ -295,7 +295,7 @@ impl FleetAgent for FleetAgentService {
         // the response open.
         let database = self.database.clone();
         let auth_sender = sender;
-        let mut device_stream = self.device_streams.open(&authenticated_device_id);
+        let (device_stream, mut superseded) = self.device_streams.open(&authenticated_device_id);
         tokio::spawn(async move {
             let _session_busy = session_busy;
             let enrolled_principal = match database.device_principal(&authenticated_device_id).await
@@ -308,11 +308,6 @@ impl FleetAgent for FleetAgentService {
             };
             let mut auth_interval = time::interval(std::time::Duration::from_secs(5 * 60));
             auth_interval.tick().await;
-            // Once the device has spent its message budget, its next message
-            // is not read until the budget refills. HTTP/2 flow control then
-            // makes the device wait to send, so a busy device is slowed down
-            // rather than disconnected, while the other branches keep running.
-            let mut next_read: Option<time::Instant> = None;
             loop {
                 tokio::select! {
                 _ = auth_sender.closed() => break,
@@ -359,18 +354,16 @@ impl FleetAgent for FleetAgentService {
                         }
                     }
                 }
-                _ = &mut device_stream.superseded => {
+                _ = &mut superseded => {
                     info!(device_id = %authenticated_device_id, "closing stream replaced by a newer stream from the same device");
                     let _ = auth_sender
                         .try_send(Err(Status::aborted("replaced by a newer stream from this device")));
                     break;
                 }
-                _ = time::sleep_until(next_read.unwrap_or_else(time::Instant::now)), if next_read.is_some() => {
-                    next_read = None;
-                }
-                message = inbound.message(), if next_read.is_none() => match message {
-                    Ok(Some(message)) => {
-                        next_read = device_stream.spend_message(time::Instant::now());
+                // Waits while the device is over its message budget; the other
+                // branches keep running.
+                message = device_stream.next_message(&mut inbound) => match message {
+                    Some(Ok(message)) => {
                         if let Some(agent_message::Message::Hello(hello)) = &message.message
                             && hello.device_id != authenticated_device_id
                         {
@@ -394,8 +387,8 @@ impl FleetAgent for FleetAgentService {
                             break;
                         }
                     }
-                    Ok(None) => break,
-                    Err(err) => {
+                    None => break,
+                    Some(Err(err)) => {
                         warn!(error = %err, device_id = %authenticated_device_id, "device stream failed");
                         break;
                     }

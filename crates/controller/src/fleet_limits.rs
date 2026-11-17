@@ -19,10 +19,12 @@ use std::{
 use agentdesktop_core::config::ControllerFleetLimitsConfig;
 use agentdesktop_proto::fleet::fleet_agent_server::{FleetAgent, FleetAgentServer, SERVICE_NAME};
 use anyhow::Context as _;
+use futures_core::Stream;
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, oneshot},
     time::Instant,
 };
+use tokio_stream::StreamExt as _;
 use tonic::{
     Status,
     codegen::{Service, http},
@@ -178,15 +180,6 @@ impl FleetLimits {
                 .max_decoding_message_size(self.configured.max_message_bytes)
                 .max_encoding_message_size(self.configured.max_message_bytes),
         }
-    }
-
-    pub fn enrollment(&self) -> EnrollmentLimiter {
-        EnrollmentLimiter::new(self)
-    }
-
-    /// Per-device `Connect` state: one stream per device, and its budgets.
-    pub fn device_streams(&self) -> DeviceStreams {
-        DeviceStreams::new(self)
     }
 }
 
@@ -344,7 +337,9 @@ pub(crate) fn address_key(address: IpAddr) -> IpAddr {
 pub struct EnrollmentLimiter {
     in_flight: Arc<Semaphore>,
     peers: Arc<Mutex<PeerBuckets>>,
-    burst: f64,
+    /// Each address's budget: `burst` enrollment requests, refilled at one per
+    /// `refill`.
+    burst: u32,
     refill: Duration,
     completion_wait: Duration,
 }
@@ -382,27 +377,32 @@ impl PeerBuckets {
     }
 }
 
-/// The longest `Bucket::spend` asks a caller to wait.
+/// The longest a `Bucket` asks a caller to wait for its next token.
 const LONGEST_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// A token bucket: up to `burst` tokens, refilled at one per `refill`.
 #[derive(Clone, Copy)]
 struct Bucket {
+    burst: f64,
+    refill: Duration,
     tokens: f64,
     updated: Instant,
 }
 
 impl Bucket {
-    fn full(burst: f64, now: Instant) -> Self {
+    fn full(burst: u32, refill: Duration, now: Instant) -> Self {
+        let burst = f64::from(burst);
         Self {
+            burst,
+            refill,
             tokens: burst,
             updated: now,
         }
     }
 
     /// Refills the bucket for the time since its last use, then takes one token.
-    fn take(&mut self, now: Instant, refill: Duration, burst: f64) -> bool {
-        self.tokens = self.refilled(now, refill, burst);
+    fn take(&mut self, now: Instant) -> bool {
+        self.tokens = self.refilled(now);
         self.updated = now;
         if self.tokens < 1.0 {
             return false;
@@ -414,30 +414,36 @@ impl Bucket {
     /// Refills the bucket, then spends one token even when none is left (the
     /// bucket goes into debt). Returns when the next token is available:
     /// `None` when one is left now.
-    fn spend(&mut self, now: Instant, refill: Duration, burst: f64) -> Option<Instant> {
-        self.tokens = self.refilled(now, refill, burst) - 1.0;
+    fn spend(&mut self, now: Instant) -> Option<Instant> {
+        self.tokens = self.refilled(now) - 1.0;
         self.updated = now;
-        if self.tokens >= 1.0 {
+        self.next_token(now)
+    }
+
+    /// When the bucket next holds a whole token: `None` when it does now.
+    fn next_token(&self, now: Instant) -> Option<Instant> {
+        let tokens = self.refilled(now);
+        if tokens >= 1.0 {
             return None;
         }
         // Capped, so an absurdly long refill setting cannot overflow the instant.
-        let wait = Duration::try_from_secs_f64(refill.as_secs_f64() * (1.0 - self.tokens))
+        let wait = Duration::try_from_secs_f64(self.refill.as_secs_f64() * (1.0 - tokens))
             .map_or(LONGEST_WAIT, |wait| wait.min(LONGEST_WAIT));
         Some(now + wait)
     }
 
-    fn refilled(self, now: Instant, refill: Duration, burst: f64) -> f64 {
+    fn refilled(&self, now: Instant) -> f64 {
         let elapsed = now.saturating_duration_since(self.updated);
-        (self.tokens + elapsed.as_secs_f64() / refill.as_secs_f64()).min(burst)
+        (self.tokens + elapsed.as_secs_f64() / self.refill.as_secs_f64()).min(self.burst)
     }
 }
 
 impl EnrollmentLimiter {
-    fn new(limits: &FleetLimits) -> Self {
+    pub fn new(limits: &FleetLimits) -> Self {
         Self {
             in_flight: Arc::new(Semaphore::new(limits.configured.enrollment_in_flight)),
             peers: Arc::default(),
-            burst: f64::from(limits.configured.enrollment_burst),
+            burst: limits.configured.enrollment_burst,
             refill: limits.configured.enrollment_refill,
             completion_wait: limits.enrollment_completion_wait,
         }
@@ -497,8 +503,11 @@ impl EnrollmentLimiter {
     fn take(&self, peer: IpAddr, now: Instant) -> bool {
         let mut peers = self.peers.lock().expect("enrollment limiter lock poisoned");
         peers
-            .bucket(address_key(peer), Bucket::full(self.burst, now))
-            .take(now, self.refill, self.burst)
+            .bucket(
+                address_key(peer),
+                Bucket::full(self.burst, self.refill, now),
+            )
+            .take(now)
     }
 }
 
@@ -527,8 +536,25 @@ pub struct DeviceStreams {
 struct DeviceState {
     /// The open stream's generation and the signal that replaces it.
     current: Option<(u64, oneshot::Sender<()>)>,
-    messages: Bucket,
+    /// Shared with the device's open stream, which spends it per message
+    /// without taking the registry lock.
+    messages: Arc<Mutex<Bucket>>,
     opens: Bucket,
+}
+
+impl DeviceState {
+    fn new(limits: &FleetLimits, now: Instant) -> Self {
+        let configured = &limits.configured;
+        Self {
+            current: None,
+            messages: Arc::new(Mutex::new(Bucket::full(
+                configured.device_message_burst,
+                configured.device_message_refill,
+                now,
+            ))),
+            opens: Bucket::full(limits.stream_open_burst, limits.stream_open_refill, now),
+        }
+    }
 }
 
 /// Device entries kept before idle ones (no open stream) are dropped, or twice
@@ -537,13 +563,13 @@ struct DeviceState {
 /// with a certificate from the device CA get an entry.
 const MAX_TRACKED_DEVICES: usize = 100_000;
 
-/// A registered `Connect` stream. `superseded` resolves when the same device
-/// opens a newer stream; dropping this unregisters it.
+/// A registered `Connect` stream, which reads the device's messages within its
+/// budget. Dropping it unregisters it.
 pub struct DeviceStream {
     streams: DeviceStreams,
     device_id: String,
     generation: u64,
-    pub superseded: oneshot::Receiver<()>,
+    messages: Arc<Mutex<Bucket>>,
 }
 
 impl DeviceStreams {
@@ -565,14 +591,9 @@ impl DeviceStreams {
         if devices.len() >= max_devices && !devices.contains_key(device_id) {
             devices.retain(|_, device| device.current.is_some());
         }
-        let now = Instant::now();
         let device = devices
             .entry(device_id.to_owned())
-            .or_insert_with(|| DeviceState {
-                current: None,
-                messages: Bucket::full(f64::from(self.limits.configured.device_message_burst), now),
-                opens: Bucket::full(f64::from(self.limits.stream_open_burst), now),
-            });
+            .or_insert_with(|| DeviceState::new(&self.limits, Instant::now()));
         f(device)
     }
 
@@ -580,14 +601,7 @@ impl DeviceStreams {
     /// `RESOURCE_EXHAUSTED` when the device opens streams too often. Call this
     /// before any per-stream work, such as checking the access token.
     pub fn admit_open(&self, device_id: &str) -> Result<(), Status> {
-        let limits = self.limits;
-        let admitted = self.with_device(device_id, |device| {
-            device.opens.take(
-                Instant::now(),
-                limits.stream_open_refill,
-                f64::from(limits.stream_open_burst),
-            )
-        });
+        let admitted = self.with_device(device_id, |device| device.opens.take(Instant::now()));
         if admitted {
             Ok(())
         } else {
@@ -604,38 +618,63 @@ impl DeviceStreams {
         }
     }
 
-    pub fn open(&self, device_id: &str) -> DeviceStream {
+    /// Registers a new `Connect` stream from `device_id` and tells the
+    /// device's previous stream, if any, to close. The receiver resolves when
+    /// the device opens a newer stream.
+    pub fn open(&self, device_id: &str) -> (DeviceStream, oneshot::Receiver<()>) {
         let generation = self.next.fetch_add(1, Ordering::Relaxed);
         let (replace, superseded) = oneshot::channel();
-        let previous = self.with_device(device_id, |device| {
-            device.current.replace((generation, replace))
+        let (previous, messages) = self.with_device(device_id, |device| {
+            (
+                device.current.replace((generation, replace)),
+                device.messages.clone(),
+            )
         });
         if let Some((_, previous)) = previous {
             let _ = previous.send(());
         }
-        DeviceStream {
+        let stream = DeviceStream {
             streams: self.clone(),
             device_id: device_id.to_owned(),
             generation,
-            superseded,
-        }
+            messages,
+        };
+        (stream, superseded)
     }
 }
 
 impl DeviceStream {
+    /// Reads the device's next message from `inbound` once the device's
+    /// message budget allows it. A device that has spent its budget is not
+    /// read from until the budget refills; HTTP/2 flow control then makes it
+    /// wait to send, so a busy device is slowed down rather than disconnected.
+    ///
+    /// Cancel-safe: a message is spent from the budget only when one is read.
+    pub async fn next_message<T>(
+        &self,
+        inbound: &mut (impl Stream<Item = Result<T, Status>> + Unpin),
+    ) -> Option<Result<T, Status>> {
+        let ready = self.bucket().next_token(Instant::now());
+        if let Some(ready) = ready {
+            tokio::time::sleep_until(ready).await;
+        }
+        let message = inbound.next().await;
+        if let Some(Ok(_)) = message {
+            self.spend_message(Instant::now());
+        }
+        message
+    }
+
+    fn bucket(&self) -> std::sync::MutexGuard<'_, Bucket> {
+        self.messages
+            .lock()
+            .expect("device message budget lock poisoned")
+    }
+
     /// Spends one message from the device's budget. Returns when the budget
-    /// allows the next one: `None` when it allows it now, or the instant it
-    /// has refilled enough. Do not read another message from the device
-    /// before then.
-    pub fn spend_message(&self, now: Instant) -> Option<Instant> {
-        let limits = self.streams.limits;
-        let next = self.streams.with_device(&self.device_id, |device| {
-            device.messages.spend(
-                now,
-                limits.configured.device_message_refill,
-                f64::from(limits.configured.device_message_burst),
-            )
-        });
+    /// allows the next one: `None` when it allows it now.
+    fn spend_message(&self, now: Instant) -> Option<Instant> {
+        let next = self.bucket().spend(now);
         if next.is_some()
             && let Some(throttled) = DEVICE_MESSAGES.event(now)
         {
