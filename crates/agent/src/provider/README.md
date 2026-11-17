@@ -76,8 +76,10 @@ User mode merges `programs.muse.managedConfig` and `model` into
 `settings.json`. With an LLM gateway, the daemon owns the whole
 `endpoint_transport` object: `base_url` is the gateway URL ending in `/v1`,
 and `auth: "command"` with a `bearer_command` runs the agentdesktop
-credential helper (an argument list, not a shell command), or `auth: "none"`
-when the gateway has no authentication. The user's own `endpoint_transport`
+credential helper (an argument list, not a shell command) and
+`bearer_refresh_secs: 120`, or `auth: "none"` when the gateway has no
+authentication. Without the refresh interval Muse Code keeps a credential
+until the gateway rejects it and only then runs the command again. The user's own `endpoint_transport`
 is restored on cleanup. Muse Code fetches its model catalog from
 `/muse-code/models` at the gateway's origin, whatever path `base_url` has, so
 the gateway must route that path as well as the model API.

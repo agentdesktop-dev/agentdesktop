@@ -20,3 +20,6 @@ mod grok;
 
 #[path = "../src/provider/copilot/integration_tests.rs"]
 mod copilot;
+
+#[path = "../src/provider/muse/integration_tests.rs"]
+mod muse;

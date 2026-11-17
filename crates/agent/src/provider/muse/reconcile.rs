@@ -18,6 +18,12 @@ const DESCRIPTION: &str = "settings";
 const SCHEMA_VERSION: u64 = 1;
 const SCHEMA_VERSION_KEY: &str = "schema_version";
 const ENDPOINT_TRANSPORT: &str = "endpoint_transport";
+/// How often Muse Code runs `bearer_command` again. Without it Muse Code keeps
+/// a credential until the gateway rejects it with 401 and only then fetches a
+/// new one. Controller-issued credentials live five minutes and the daemon
+/// may serve one from its cache for up to a minute, so two minutes stays
+/// inside that lifetime.
+const BEARER_REFRESH_SECS: u64 = 120;
 /// `settings.json` may hold literal MCP headers and environment values: a
 /// file we write is owner-only, and the dry-run report shows the action and
 /// path only.
@@ -136,6 +142,7 @@ fn managed_settings(
                     "--client-id",
                     Muse::ID,
                 ],
+                "bearer_refresh_secs": BEARER_REFRESH_SECS,
             })
         } else {
             json!({
@@ -210,6 +217,7 @@ mod tests {
                         "--client-id",
                         "muse",
                     ],
+                    "bearer_refresh_secs": 120,
                 },
             })
         );
@@ -279,6 +287,7 @@ mod tests {
                     "--client-id",
                     "muse",
                 ],
+                "bearer_refresh_secs": 120,
                 "ca_bundle": "/etc/ssl/corp.pem",
             })
         );
