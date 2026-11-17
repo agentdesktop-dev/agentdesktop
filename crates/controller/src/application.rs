@@ -2,18 +2,18 @@ use crate::{
     daemon_config::{self, DaemonConfigStore},
     database::Database,
     device_ca::DeviceCertificateIssuer,
+    fleet_limits::FleetLimits,
     gateway_jwt::{self, GatewayJwtIssuer},
     management::{self, Settings, State},
     oidc::OidcProvider,
     service::FleetAgentService,
 };
 use agentdesktop_core::config::ControllerConfig;
-use agentdesktop_proto::fleet::fleet_agent_server::FleetAgentServer;
 use agentdesktop_usage::UsageIngest;
 use anyhow::Context;
 use tonic::{
     service::Routes,
-    transport::{Certificate, Identity, Server, ServerTlsConfig},
+    transport::{Certificate, Identity, ServerTlsConfig},
 };
 
 /// Runs fleet and management listeners with application-owned extensions.
@@ -25,6 +25,9 @@ pub async fn run(
     database: Database,
     extensions: management::Extensions,
 ) -> anyhow::Result<()> {
+    // Before any TLS configuration is built: the fleet listener's uses the
+    // process-wide rustls provider.
+    crate::install_rustls_provider();
     // Fail before any network setup when the access mode has no provider.
     management::auth(&config.admin_access, &extensions)?;
     let tls = config.tls.files();
@@ -103,12 +106,14 @@ pub async fn run(
     let device_certificate_issuer = DeviceCertificateIssuer::from_pem(ca_certificate, &ca_key)
         .context("initialize device certificate issuer")?;
     tracing::info!("device certificate issuance enabled");
+    let limits = FleetLimits::from_config(&config.fleet_limits);
     let service = FleetAgentService::new(
         Some(oidc),
         database,
         daemon_config,
         gateway_jwt_issuer,
         Some(device_certificate_issuer),
+        &limits,
     )
     .with_usage_collection(usage_ingest.is_some());
 
@@ -126,22 +131,18 @@ pub async fn run(
         .identity(Identity::from_pem(certificate, key))
         .client_ca_root(Certificate::from_pem(client_ca))
         .client_auth_optional(true);
-    let mut server = Server::builder()
-        .accept_http1(true)
-        .tls_config(tls_config)?;
-
     let fleet_listen = config.fleet_listen;
+    let fleet_listener = limits.listener(fleet_listen, Some(tls_config))?;
+
     let admin_listen = config.admin_listen;
     tracing::info!(listen = %fleet_listen, "fleet controller listening");
     let fleet = async move {
-        let mut routes = Routes::from(gateway_jwt::routes(gateway_jwks))
-            .add_service(FleetAgentServer::new(service));
+        let mut routes = Routes::from(gateway_jwt::routes(gateway_jwks));
         if let Some(usage_ingest) = usage_ingest {
             routes = routes.add_service(usage_ingest);
         }
-        server
-            .add_routes(routes)
-            .serve(fleet_listen)
+        fleet_listener
+            .serve(service, routes)
             .await
             .context("serve fleet gRPC API")
     };

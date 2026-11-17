@@ -40,8 +40,17 @@ Secret containing the complete controller configuration under the key
 `controller.yaml`, then set `existingConfigSecret` to its name.
 See `values.yaml` for all chart settings.
 
-The Service exposes only the TLS-protected fleet API. To inspect the
-loopback-only management UI:
+The Service exposes only the TLS-protected fleet API. The controller limits
+connections and enrollment per client address. With the Kubernetes default
+external traffic policy, it may see node addresses instead of devices' own, and
+many devices then share one address's connection limit and enrollment budget.
+Set `service.externalTrafficPolicy` to `Local` to keep devices' addresses when
+your load balancer sends traffic only to nodes that run the controller. With the
+default policy, or behind a load balancer that proxies connections, raise
+`fleetLimits.connectionsPerAddress`, and for large rollouts raise
+`fleetLimits.enrollmentBurst` or shorten `fleetLimits.enrollmentRefill`.
+
+To inspect the loopback-only management UI:
 
 ```console
 kubectl port-forward deployment/agentdesktop 8080:8080

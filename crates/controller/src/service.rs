@@ -22,6 +22,7 @@ use crate::{
     daemon_config::DaemonConfigStore,
     database::{Database, DevicePrincipal},
     device_ca::DeviceCertificateIssuer,
+    fleet_limits::{DeviceStreams, EnrollmentLimiter, FleetLimits, SessionBusy},
     gateway_jwt::GatewayJwtIssuer,
     oidc::{OidcPrincipal, OidcProvider},
 };
@@ -34,15 +35,21 @@ pub struct FleetAgentService {
     gateway_jwt_issuer: Option<GatewayJwtIssuer>,
     device_certificate_issuer: Option<DeviceCertificateIssuer>,
     usage_enabled: bool,
+    enrollment: EnrollmentLimiter,
+    device_streams: DeviceStreams,
 }
 
 impl FleetAgentService {
+    /// `limits` sets the enrollment and `Connect` limits; pass the ones from
+    /// the controller configuration (`FleetLimits::from_config`), the same the
+    /// fleet listener uses.
     pub fn new(
         oidc: Option<OidcProvider>,
         database: Database,
         daemon_config: DaemonConfigStore,
         gateway_jwt_issuer: Option<GatewayJwtIssuer>,
         device_certificate_issuer: Option<DeviceCertificateIssuer>,
+        limits: &FleetLimits,
     ) -> Self {
         Self {
             oidc,
@@ -51,6 +58,8 @@ impl FleetAgentService {
             gateway_jwt_issuer,
             device_certificate_issuer,
             usage_enabled: false,
+            enrollment: limits.enrollment(),
+            device_streams: limits.device_streams(),
         }
     }
 
@@ -73,6 +82,7 @@ impl FleetAgent for FleetAgentService {
         &self,
         request: Request<BeginEnrollmentRequest>,
     ) -> Result<Response<BeginEnrollmentResponse>, Status> {
+        let _admitted = self.enrollment.admit(request.remote_addr())?;
         let oidc = self
             .oidc
             .as_ref()
@@ -91,6 +101,7 @@ impl FleetAgent for FleetAgentService {
         &self,
         request: Request<CompleteEnrollmentRequest>,
     ) -> Result<Response<EnrollResponse>, Status> {
+        let _admitted = self.enrollment.admit_completion().await?;
         let oidc = self
             .oidc
             .as_ref()
@@ -244,7 +255,15 @@ impl FleetAgent for FleetAgentService {
         &self,
         request: Request<tonic::Streaming<AgentMessage>>,
     ) -> Result<Response<Self::ConnectStream>, Status> {
-        let authenticated_device_id = self.authenticate_device(&request).await?;
+        // Rate-limit opens per device before checking the access token, which
+        // calls the identity provider.
+        let certificate_device_id = peer_certificate_device_id(&request)?;
+        if let Some(device_id) = &certificate_device_id {
+            self.device_streams.admit_open(device_id)?;
+        }
+        let authenticated_device_id = self
+            .authenticate_device_identity(certificate_device_id.as_deref(), request.metadata())
+            .await?;
         let oauth_revalidation = (
             self.oidc.clone().ok_or_else(|| {
                 Status::failed_precondition("OIDC access-token validation is disabled")
@@ -252,6 +271,9 @@ impl FleetAgent for FleetAgentService {
             bearer_credential(request.metadata())?.to_owned(),
         );
 
+        // The connection counts as busy while this session runs, and no longer:
+        // hyper may keep a response body that a device will not accept.
+        let session_busy = SessionBusy::of(&request).map(|busy| busy.release_on_drop());
         let mut inbound = request.into_inner();
         let (sender, receiver) = mpsc::channel(8);
         let mut daemon_updates = self.daemon_config.subscribe();
@@ -265,28 +287,15 @@ impl FleetAgent for FleetAgentService {
                 .map_err(|_| Status::unavailable("stream closed"))?;
         }
 
-        let update_sender = sender.clone();
-        tokio::spawn(async move {
-            while daemon_updates.changed().await.is_ok() {
-                let daemon = daemon_updates.borrow().clone();
-                let Some(daemon) = daemon else {
-                    continue;
-                };
-                if update_sender
-                    .send(Ok(ControllerMessage {
-                        message: Some(controller_message::Message::DaemonConfig(daemon)),
-                    }))
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
-
+        // One task owns the response stream: it ends when the device's request
+        // stream ends, the device goes away, or the stream is closed for cause.
+        // Config pushes are forwarded from the same loop, so no other task keeps
+        // the response open.
         let database = self.database.clone();
-        let auth_sender = sender.clone();
+        let auth_sender = sender;
+        let mut device_stream = self.device_streams.open(&authenticated_device_id);
         tokio::spawn(async move {
+            let _session_busy = session_busy;
             let enrolled_principal = match database.device_principal(&authenticated_device_id).await
             {
                 Ok(principal) => principal,
@@ -297,8 +306,35 @@ impl FleetAgent for FleetAgentService {
             };
             let mut auth_interval = time::interval(std::time::Duration::from_secs(5 * 60));
             auth_interval.tick().await;
+            // Once the device has spent its message budget, its next message
+            // is not read until the budget refills. HTTP/2 flow control then
+            // makes the device wait to send, so a busy device is slowed down
+            // rather than disconnected, while the other branches keep running.
+            let mut next_read: Option<time::Instant> = None;
             loop {
                 tokio::select! {
+                _ = auth_sender.closed() => break,
+                changed = daemon_updates.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    let daemon = daemon_updates.borrow_and_update().clone();
+                    if let Some(daemon) = daemon {
+                        // Sends in this loop never wait for room: a device that
+                        // stopped reading would hold the task, and the session,
+                        // forever.
+                        match auth_sender.try_send(Ok(ControllerMessage {
+                            message: Some(controller_message::Message::DaemonConfig(daemon)),
+                        })) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                warn!(device_id = %authenticated_device_id, "closing stream after the device stopped reading it");
+                                break;
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => break,
+                        }
+                    }
+                }
                 _ = auth_interval.tick() => {
                     let (oidc, access_token) = &oauth_revalidation;
                     match oidc.authenticate_access_token(access_token).await {
@@ -306,8 +342,7 @@ impl FleetAgent for FleetAgentService {
                         Ok(_) => {
                             warn!(device_id = %authenticated_device_id, "closing stream after OIDC principal changed");
                             let _ = auth_sender
-                                .send(Err(Status::permission_denied("OIDC principal changed")))
-                                .await;
+                                .try_send(Err(Status::permission_denied("OIDC principal changed")));
                             break;
                         }
                         Err(error) => {
@@ -317,13 +352,23 @@ impl FleetAgent for FleetAgentService {
                                 continue;
                             }
                             warn!(device_id = %authenticated_device_id, "closing stream after OIDC access token revalidation failed");
-                            let _ = auth_sender.send(Err(status)).await;
+                            let _ = auth_sender.try_send(Err(status));
                             break;
                         }
                     }
                 }
-                message = inbound.message() => match message {
+                _ = &mut device_stream.superseded => {
+                    info!(device_id = %authenticated_device_id, "closing stream replaced by a newer stream from the same device");
+                    let _ = auth_sender
+                        .try_send(Err(Status::aborted("replaced by a newer stream from this device")));
+                    break;
+                }
+                _ = time::sleep_until(next_read.unwrap_or_else(time::Instant::now)), if next_read.is_some() => {
+                    next_read = None;
+                }
+                message = inbound.message(), if next_read.is_none() => match message {
                     Ok(Some(message)) => {
+                        next_read = device_stream.spend_message(time::Instant::now());
                         if let Some(agent_message::Message::Hello(hello)) = &message.message
                             && hello.device_id != authenticated_device_id
                         {
@@ -332,6 +377,8 @@ impl FleetAgent for FleetAgentService {
                                 claimed_device_id = %hello.device_id,
                                 "device certificate and hello identity do not match"
                             );
+                            let _ = auth_sender
+                                .try_send(Err(Status::permission_denied("hello does not match the device certificate")));
                             break;
                         }
                         if let Err(err) =
@@ -663,6 +710,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn enrollment_is_refused_before_any_work_when_the_limiter_is_full() {
+        use agentdesktop_proto::fleet::{
+            BeginEnrollmentRequest, CompleteEnrollmentRequest, fleet_agent_server::FleetAgent,
+        };
+        use tonic::{Code, Request};
+
+        use crate::fleet_limits::FleetLimits;
+
+        let path = std::env::temp_dir().join(format!(
+            "agentdesktop-enrollment-limit-{}-{}.db",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let database = Database::connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .await
+            .expect("connect database");
+        let mut full = FleetLimits {
+            enrollment_completion_wait: std::time::Duration::from_millis(10),
+            ..FleetLimits::from_config(&Default::default())
+        };
+        full.configured.enrollment_in_flight = 0;
+        let service = FleetAgentService::new(
+            None,
+            database,
+            DaemonConfigStore::new(None),
+            None,
+            None,
+            &full,
+        );
+
+        // Without the limiter these fail later, with "OIDC enrollment is disabled".
+        let begin = service
+            .begin_enrollment(Request::new(BeginEnrollmentRequest::default()))
+            .await
+            .expect_err("begin admitted");
+        assert_eq!(begin.code(), Code::ResourceExhausted, "{begin}");
+        let complete = service
+            .complete_enrollment(Request::new(CompleteEnrollmentRequest::default()))
+            .await
+            .expect_err("complete admitted");
+        assert_eq!(complete.code(), Code::ResourceExhausted, "{complete}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
     async fn device_authentication_binds_oidc_issuer_and_subject() {
         let device_id = "7ca03414-bb20-4c80-98ef-7b0538b988ba";
         let path = std::env::temp_dir().join(format!(
@@ -677,8 +769,14 @@ mod tests {
             .enroll_device(device_id, "host", "issuer", "subject", None)
             .await
             .expect("enroll device");
-        let service =
-            FleetAgentService::new(None, database, DaemonConfigStore::new(None), None, None);
+        let service = FleetAgentService::new(
+            None,
+            database,
+            DaemonConfigStore::new(None),
+            None,
+            None,
+            &crate::fleet_limits::FleetLimits::from_config(&Default::default()),
+        );
         let principal = |issuer: &str, subject: &str| OidcPrincipal {
             issuer: issuer.to_owned(),
             subject: subject.to_owned(),
@@ -731,8 +829,14 @@ mod tests {
             .enroll_device(device_id, "host", "", "subject", None)
             .await
             .expect("enroll legacy device");
-        let service =
-            FleetAgentService::new(None, database, DaemonConfigStore::new(None), None, None);
+        let service = FleetAgentService::new(
+            None,
+            database,
+            DaemonConfigStore::new(None),
+            None,
+            None,
+            &crate::fleet_limits::FleetLimits::from_config(&Default::default()),
+        );
 
         let status = service
             .authenticate_device_certificate_identity(
