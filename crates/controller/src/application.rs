@@ -25,7 +25,7 @@ pub async fn run(
     database: Database,
     extensions: management::Extensions,
 ) -> anyhow::Result<()> {
-    // Before any TLS configuration is built: the fleet listener's uses the
+    // Before any TLS configuration is built: the fleet listener uses the
     // process-wide rustls provider.
     crate::install_rustls_provider();
     // Fail before any network setup when the access mode has no provider.

@@ -246,6 +246,7 @@ enum RpcClass {
     Device,
     /// The device's `Connect` stream. Its connection stays busy for as long as
     /// the session lasts, not only while the handler runs (see `SessionBusy`).
+    /// Every RPC whose response is a stream needs this class, and only those.
     Connect,
 }
 
@@ -707,10 +708,10 @@ impl Drop for DeviceStream {
     }
 }
 
-/// A warning that fires once per refused or throttled request, connection or
-/// message. A flood would
-/// log a line per event, so this logs at most one per `WARNING_INTERVAL` and
-/// says how many events it stands for: every event since the last warning, from
+/// A warning for an event that can repeat at a high rate, such as a refused
+/// request, connection or message, where a line per event would flood the
+/// log. It logs at most one line per `WARNING_INTERVAL` and says how many
+/// events it stands for: every event since the last warning, from
 /// any client or device, reported with the first event after the interval
 /// (however much later that is). A warning that names a client or device names
 /// only the latest one.

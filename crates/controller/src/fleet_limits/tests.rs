@@ -21,7 +21,7 @@ use tonic::{
     transport::{Identity, ServerTlsConfig},
 };
 
-use super::{Connections, FLEET_LIMITS, FleetLimits, RPC_CLASSES, rpc_class};
+use super::{Connections, FLEET_LIMITS, FleetLimits, RPC_CLASSES, RpcClass, rpc_class};
 
 /// Fails the test, instead of hanging it, when the server never ends the wait.
 async fn bounded<T>(call: impl std::future::Future<Output = T>) -> T {
@@ -1167,8 +1167,9 @@ async fn an_evicted_connection_that_floods_pings_is_closed() {
     assert!(stays_open(newcomer).await, "the new connection was closed");
 }
 
-/// The RPC names in `fleet.proto`'s `FleetAgent` service.
-fn fleet_rpcs(proto: &str) -> std::collections::BTreeSet<&str> {
+/// The RPCs in `fleet.proto`'s `FleetAgent` service, by name, with whether
+/// each one's response is a stream.
+fn fleet_rpcs(proto: &str) -> std::collections::BTreeMap<&str, bool> {
     let (_, service) = proto
         .split_once("service FleetAgent {")
         .expect("fleet.proto declares service FleetAgent");
@@ -1178,7 +1179,16 @@ fn fleet_rpcs(proto: &str) -> std::collections::BTreeSet<&str> {
     service
         .lines()
         .filter_map(|line| line.trim().strip_prefix("rpc "))
-        .map(|rpc| rpc.split_once('(').map_or(rpc, |(name, _)| name).trim())
+        .map(|rpc| {
+            let (name, signature) = rpc.split_once('(').unwrap_or((rpc, ""));
+            let streams_response = signature
+                .split_once("returns")
+                .is_some_and(|(_, response)| {
+                    let response = response.trim_start().trim_start_matches('(');
+                    response.trim_start().starts_with("stream ")
+                });
+            (name.trim(), streams_response)
+        })
         .collect()
 }
 
@@ -1193,14 +1203,30 @@ fn every_fleet_rpc_has_a_limit_class() {
         "RPC_CLASSES lists an RPC twice"
     );
 
-    let unclassified: Vec<_> = rpcs.difference(&classified).collect();
-    let not_in_proto: Vec<_> = classified.difference(&rpcs).collect();
+    let in_proto: std::collections::BTreeSet<&str> = rpcs.keys().copied().collect();
+    let unclassified: Vec<_> = in_proto.difference(&classified).collect();
+    let not_in_proto: Vec<_> = classified.difference(&in_proto).collect();
     assert!(
         unclassified.is_empty() && not_in_proto.is_empty(),
         "every FleetAgent RPC needs a class in RPC_CLASSES (fleet_limits.rs), which sets its \
          message limit and how long it keeps its connection busy; an Enrollment RPC's handler \
          must also take an EnrollmentLimiter permit. Not classified: {unclassified:?}. \
          Classified but not in fleet.proto: {not_in_proto:?}"
+    );
+
+    let misclassified: Vec<_> = RPC_CLASSES
+        .iter()
+        .filter(|(name, class)| rpcs[name] != (*class == RpcClass::Connect))
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        misclassified.is_empty(),
+        "an RPC whose response is a stream must be classed Connect, and no other RPC may be: \
+         only a Connect RPC keeps its connection busy after its handler returns, so a stream \
+         classed otherwise can be closed as idle while it is open, and a unary RPC classed \
+         Connect stays busy while its client leaves the response unread. A Connect RPC's \
+         handler must also hold SessionBusy::of's release for the session. Misclassified: \
+         {misclassified:?}"
     );
 }
 

@@ -23,7 +23,7 @@ use crate::{
     daemon_config::DaemonConfigStore,
     database::{Database, DevicePrincipal},
     device_ca::DeviceCertificateIssuer,
-    fleet_limits::{DeviceStreams, EnrollmentLimiter, FleetLimits, SessionBusy},
+    fleet_limits::{DeviceStreams, EnrollmentLimiter, FleetLimits, SessionBusy, ThrottledWarning},
     gateway_jwt::GatewayJwtIssuer,
     oidc::{OidcPrincipal, OidcProvider},
 };
@@ -343,12 +343,16 @@ impl FleetAgent for FleetAgentService {
                             break;
                         }
                         Err(error) => {
-                            let status = invalid_access_token(error);
+                            let status = access_token_status(&error);
                             if status.code() == tonic::Code::Unavailable {
-                                warn!(device_id = %authenticated_device_id, "OIDC unavailable during stream revalidation; retaining connection");
+                                // Every open stream rechecks, so an outage
+                                // would otherwise log a line per stream.
+                                if let Some(retained) = RECHECK_UNAVAILABLE.event(time::Instant::now()) {
+                                    warn!(latest_error = %error, latest_device_id = %authenticated_device_id, retained_since_last_warning = retained, "OIDC unavailable during stream revalidation; retaining streams");
+                                }
                                 continue;
                             }
-                            warn!(device_id = %authenticated_device_id, "closing stream after OIDC access token revalidation failed");
+                            warn!(%error, device_id = %authenticated_device_id, "closing stream after OIDC access token revalidation failed");
                             let _ = auth_sender.try_send(Err(status));
                             break;
                         }
@@ -666,9 +670,20 @@ fn invalid_csr(err: anyhow::Error) -> Status {
     Status::invalid_argument("invalid certificate signing request")
 }
 
+/// Stream rechecks that kept a stream open because the identity provider was
+/// unavailable.
+static RECHECK_UNAVAILABLE: ThrottledWarning = ThrottledWarning::new();
+
 fn invalid_access_token(err: anyhow::Error) -> Status {
     warn!(error = %err, "OIDC access token rejected");
-    if identity_provider_unavailable(&err) {
+    access_token_status(&err)
+}
+
+/// The status for an access token that could not be checked: `UNAVAILABLE`
+/// when the identity provider could not be used, `UNAUTHENTICATED`
+/// otherwise.
+fn access_token_status(err: &anyhow::Error) -> Status {
+    if identity_provider_unavailable(err) {
         return Status::unavailable("OIDC access-token validation is unavailable");
     }
     Status::unauthenticated("OIDC access token rejected")
