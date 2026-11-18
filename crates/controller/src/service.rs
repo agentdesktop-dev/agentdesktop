@@ -748,7 +748,8 @@ mod tests {
             DaemonConfigStore::new(None),
             None,
             Some(issuer.clone()),
-            &crate::fleet_limits::FleetLimits::from_config(&Default::default()),
+            &crate::fleet_limits::FleetLimits::from_config(&Default::default())
+                .expect("default limits"),
         );
         for _ in 0..1100 {
             service
@@ -872,7 +873,8 @@ mod tests {
             DaemonConfigStore::new(None),
             None,
             Some(issuer),
-            &crate::fleet_limits::FleetLimits::from_config(&Default::default()),
+            &crate::fleet_limits::FleetLimits::from_config(&Default::default())
+                .expect("default limits"),
         );
         assert_eq!(
             restarted
@@ -998,7 +1000,7 @@ mod tests {
             .expect("connect database");
         let mut full = FleetLimits {
             enrollment_completion_wait: std::time::Duration::from_millis(10),
-            ..FleetLimits::from_config(&Default::default())
+            ..FleetLimits::from_config(&Default::default()).expect("default limits")
         };
         full.configured.enrollment_in_flight = 0;
         let service = FleetAgentService::new(
@@ -1049,7 +1051,8 @@ mod tests {
             DaemonConfigStore::new(None),
             None,
             None,
-            &crate::fleet_limits::FleetLimits::from_config(&Default::default()),
+            &crate::fleet_limits::FleetLimits::from_config(&Default::default())
+                .expect("default limits"),
         );
         let principal = |issuer: &str, subject: &str| OidcPrincipal {
             issuer: issuer.to_owned(),
@@ -1109,7 +1112,8 @@ mod tests {
             DaemonConfigStore::new(None),
             None,
             None,
-            &crate::fleet_limits::FleetLimits::from_config(&Default::default()),
+            &crate::fleet_limits::FleetLimits::from_config(&Default::default())
+                .expect("default limits"),
         );
 
         let status = service

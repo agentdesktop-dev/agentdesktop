@@ -121,12 +121,19 @@ const FLEET_LIMITS: FleetLimits = FleetLimits {
 
 impl FleetLimits {
     /// The limits for a controller: the deployment-dependent ones from its
-    /// configuration, and the defaults for the rest.
-    pub fn from_config(config: &ControllerFleetLimitsConfig) -> Self {
-        Self {
+    /// configuration, and the defaults for the rest. Fails when a configured
+    /// limit is out of range.
+    pub fn from_config(config: &ControllerFleetLimitsConfig) -> anyhow::Result<Self> {
+        config.validate()?;
+        anyhow::ensure!(
+            config.enrollment_in_flight <= Semaphore::MAX_PERMITS,
+            "fleetLimits.enrollmentInFlight must be at most {}",
+            Semaphore::MAX_PERMITS
+        );
+        Ok(Self {
             configured: *config,
             ..FLEET_LIMITS
-        }
+        })
     }
 
     /// Binds the fleet listener on `address`, over TLS when `tls` is given,

@@ -1262,6 +1262,37 @@ fn a_repeated_warning_is_logged_once_per_interval_with_its_count() {
     assert_eq!(warning.event(start + Duration::from_secs(11)), None);
 }
 
+#[test]
+fn limits_out_of_range_are_refused_where_they_are_built() {
+    use agentdesktop_core::config::ControllerFleetLimitsConfig;
+    use tokio::sync::Semaphore;
+
+    let zero_refill = ControllerFleetLimitsConfig {
+        device_message_refill: Duration::ZERO,
+        ..ControllerFleetLimitsConfig::DEFAULT
+    };
+    let error = FleetLimits::from_config(&zero_refill).expect_err("zero refill");
+    assert!(
+        error
+            .to_string()
+            .contains("fleetLimits.deviceMessageRefill"),
+        "{error}"
+    );
+
+    // Above this, building the enrollment limiter's semaphore would panic.
+    let in_flight = |enrollment_in_flight| ControllerFleetLimitsConfig {
+        enrollment_in_flight,
+        ..ControllerFleetLimitsConfig::DEFAULT
+    };
+    FleetLimits::from_config(&in_flight(Semaphore::MAX_PERMITS)).expect("most slots");
+    let error = FleetLimits::from_config(&in_flight(Semaphore::MAX_PERMITS + 1))
+        .expect_err("more slots than a semaphore holds");
+    assert!(
+        error.to_string().contains("fleetLimits.enrollmentInFlight"),
+        "{error}"
+    );
+}
+
 mod enrollment {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 

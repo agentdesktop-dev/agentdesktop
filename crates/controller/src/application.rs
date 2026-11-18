@@ -30,6 +30,8 @@ pub async fn run(
     crate::install_rustls_provider();
     // Fail before any network setup when the access mode has no provider.
     management::auth(&config.admin_access, &extensions)?;
+    // Out-of-range fleet limits fail here too, before any network setup.
+    let limits = FleetLimits::from_config(&config.fleet_limits)?;
     let tls = config.tls.files();
     let daemon_config = match &config.daemon_config {
         Some(daemon) => Some(daemon_config::load(&daemon.path, daemon.revision)?),
@@ -106,7 +108,6 @@ pub async fn run(
     let device_certificate_issuer = DeviceCertificateIssuer::from_pem(ca_certificate, &ca_key)
         .context("initialize device certificate issuer")?;
     tracing::info!("device certificate issuance enabled");
-    let limits = FleetLimits::from_config(&config.fleet_limits);
     let service = FleetAgentService::new(
         Some(oidc),
         database,

@@ -644,6 +644,26 @@ impl ControllerFleetLimitsConfig {
         device_message_burst: 600,
         device_message_refill: Duration::from_millis(50),
     };
+
+    /// Fails when a limit is zero. A zero count would refuse everything, and a
+    /// zero refill would turn its rate limit off.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for (field, zero) in [
+            ("maxConnections", self.max_connections == 0),
+            ("connectionsPerAddress", self.connections_per_address == 0),
+            ("maxMessageBytes", self.max_message_bytes == 0),
+            ("enrollmentInFlight", self.enrollment_in_flight == 0),
+            ("enrollmentBurst", self.enrollment_burst == 0),
+            ("enrollmentRefill", self.enrollment_refill.is_zero()),
+            ("deviceMessageBurst", self.device_message_burst == 0),
+            ("deviceMessageRefill", self.device_message_refill.is_zero()),
+        ] {
+            if zero {
+                anyhow::bail!("fleetLimits.{field} must be greater than zero");
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for ControllerFleetLimitsConfig {
@@ -1495,24 +1515,7 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
             anyhow::bail!("gatewayJwt.lifetime must be greater than zero");
         }
     }
-    let limits = &config.fleet_limits;
-    for (field, zero) in [
-        ("maxConnections", limits.max_connections == 0),
-        ("connectionsPerAddress", limits.connections_per_address == 0),
-        ("maxMessageBytes", limits.max_message_bytes == 0),
-        ("enrollmentInFlight", limits.enrollment_in_flight == 0),
-        ("enrollmentBurst", limits.enrollment_burst == 0),
-        ("enrollmentRefill", limits.enrollment_refill.is_zero()),
-        ("deviceMessageBurst", limits.device_message_burst == 0),
-        (
-            "deviceMessageRefill",
-            limits.device_message_refill.is_zero(),
-        ),
-    ] {
-        if zero {
-            anyhow::bail!("fleetLimits.{field} must be greater than zero");
-        }
-    }
+    config.fleet_limits.validate()?;
     Ok(config)
 }
 
@@ -2716,13 +2719,33 @@ oidc:
             configured.max_connections, 50_000,
             "unset fields keep defaults"
         );
+    }
 
-        let error = parse_controller(&format!("{base}fleetLimits:\n  enrollmentRefill: 0s\n"))
-            .expect_err("zero refill");
-        assert!(
-            error.to_string().contains("fleetLimits.enrollmentRefill"),
-            "{error}"
-        );
+    #[test]
+    fn controller_fleet_limits_reject_zero() {
+        let base = r#"
+tls: /etc/agentdesktop/tls
+oidc:
+  issuer: https://idp.example.com
+  clientId: agentdesktop
+"#;
+        for (field, zero) in [
+            ("maxConnections", "0"),
+            ("connectionsPerAddress", "0"),
+            ("maxMessageBytes", "0"),
+            ("enrollmentInFlight", "0"),
+            ("enrollmentBurst", "0"),
+            ("enrollmentRefill", "0s"),
+            ("deviceMessageBurst", "0"),
+            ("deviceMessageRefill", "0s"),
+        ] {
+            let error = parse_controller(&format!("{base}fleetLimits:\n  {field}: {zero}\n"))
+                .expect_err(field);
+            assert!(
+                error.to_string().contains(&format!("fleetLimits.{field} ")),
+                "{field}: {error}"
+            );
+        }
     }
 
     #[test]
