@@ -473,7 +473,8 @@ pub struct ControllerConnectionConfig {
     /// Use this on hosts without a local browser, such as servers reached over
     /// SSH. The daemon logs a verification URL and user code to approve from
     /// any other device. The identity provider must support device
-    /// authorization for the controller's client.
+    /// authorization for the controller's client. The daemon must be able to
+    /// reach the IdP's device-authorization and token endpoints directly.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub device_authorization: bool,
 }
@@ -608,11 +609,14 @@ pub struct ControllerFleetLimitsConfig {
     /// calls the identity provider. Defaults to `64`.
     #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub enrollment_in_flight: usize,
-    /// Enrollments one client address may start in a burst, after which it may
-    /// start one more every `enrollmentRefill`. Defaults to `60`.
+    /// Enrollment requests one client address may make in a burst, after which
+    /// it may make one more every `enrollmentRefill`. Each device sign-in makes
+    /// at least two: one to read the login configuration and one to enroll.
+    /// Defaults to `60`.
     #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub enrollment_burst: u32,
-    /// Time for a client address to get back one enrollment. Defaults to `1s`.
+    /// Time for a client address to get back one enrollment request. Defaults
+    /// to `1s`.
     #[serde(with = "humantime_serde")]
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub enrollment_refill: Duration,

@@ -1014,10 +1014,35 @@ locally and can request credentials for an LLM gateway through the daemon.
 
 ![Agentdesktop controller, workstation daemon, and LLM gateway architecture](images/overview.png)
 
-In controller-managed mode, the daemon generates its private device key on the
-workstation and sends only a certificate signing request to the controller.
+In controller-managed mode, the daemon starts user sign-in automatically using
+read-only login configuration from the controller. It generates its private
+device key on the workstation, authenticates directly with the identity
+provider, then automatically enrolls with a certificate signing request and
+the user's tokens. There is no separate manual enrollment step, pre-login
+enrollment ticket, or pending-enrollment reservation on the controller.
 After enrollment, protected controller operations require the device
 certificate and a valid token for the user who enrolled it.
+
+Browser sign-in uses PKCE and `state`, and its OIDC `nonce` is the SHA-256 of
+the device public key. The controller validates the ID token and bearer access
+token, binds enrollment to their verified user identity, and requires the
+nonce to match the key in the CSR, so tokens from a refresh grant or from a
+sign-in for another key cannot enroll a device. Headless device authorization
+retains the verification URL/code experience; the daemon now contacts the
+IdP's device-authorization endpoint directly, as well as its token endpoint.
+That grant carries no nonce, so the controller accepts tokens without one only
+when the IdP supports device authorization.
+
+Enrollment retries reuse the same CSR. The controller atomically stores a
+public-certificate receipt with the device, so the same user/CSR recovers the
+original result across concurrent requests or controller restarts. Receipts
+are removed with their device. Losing an unsaved device key in a daemon crash
+does not resume that enrollment.
+
+**Upgrade compatibility:** upgrade the controller and agents together.
+`GetLoginConfiguration` and `EnrollDevice` replace the old two-step enrollment
+RPCs; there is no legacy fallback. Existing enrolled-device connection,
+refresh, and renewal behavior is unchanged.
 
 When a supported tool requests gateway access, the controller can issue a
 short-lived JWT containing the user, device ID, allowed client label, audience,

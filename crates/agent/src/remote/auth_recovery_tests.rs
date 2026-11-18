@@ -26,19 +26,16 @@ struct Controller {
 
 #[tonic::async_trait]
 impl FleetAgent for Controller {
-    async fn begin_enrollment(
+    async fn get_login_configuration(
         &self,
-        _: Request<BeginEnrollmentRequest>,
-    ) -> Reply<BeginEnrollmentResponse> {
+        _: Request<LoginConfigurationRequest>,
+    ) -> Reply<LoginConfiguration> {
         let _ = self.events.send(Event::EnrollmentRequested);
         Err(tonic::Status::unavailable(
             "interactive enrollment is not part of this test",
         ))
     }
-    async fn complete_enrollment(
-        &self,
-        _: Request<CompleteEnrollmentRequest>,
-    ) -> Reply<EnrollResponse> {
+    async fn enroll_device(&self, _: Request<EnrollDeviceRequest>) -> Reply<EnrollResponse> {
         Err(tonic::Status::unimplemented("not used"))
     }
     async fn renew_device_certificate(

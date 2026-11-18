@@ -229,7 +229,7 @@
           "default": "50ms"
         },
         "enrollmentBurst": {
-          "description": "Enrollments one client address may start in a burst, after which it may\nstart one more every `enrollmentRefill`. Defaults to `60`.",
+          "description": "Enrollment requests one client address may make in a burst, after which\nit may make one more every `enrollmentRefill`. Each device sign-in makes\nat least two: one to read the login configuration and one to enroll.\nDefaults to `60`.",
           "type": "integer",
           "format": "uint32",
           "default": 60,
@@ -243,7 +243,7 @@
           "minimum": 1
         },
         "enrollmentRefill": {
-          "description": "Time for a client address to get back one enrollment. Defaults to `1s`.",
+          "description": "Time for a client address to get back one enrollment request. Defaults\nto `1s`.",
           "type": "string",
           "default": "1s"
         },
