@@ -39,8 +39,7 @@ use tower_layer::{Identity, Stack};
 
 mod connections;
 
-use connections::{Connections, LimitedIncoming, TrackRequests};
-pub use connections::{ReleaseOnDrop, SessionBusy};
+use connections::{Connections, LimitedIncoming, ReleaseOnDrop, SessionBusy, TrackRequests};
 
 /// Limits applied to the fleet gRPC listener.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -571,15 +570,6 @@ impl DeviceState {
 /// with a certificate from the device CA get an entry.
 const MAX_TRACKED_DEVICES: usize = 100_000;
 
-/// A registered `Connect` stream, which reads the device's messages within its
-/// budget. Dropping it unregisters it.
-pub struct DeviceStream {
-    streams: DeviceStreams,
-    device_id: String,
-    generation: u64,
-    messages: Arc<Mutex<Bucket>>,
-}
-
 impl DeviceStreams {
     pub fn new(limits: &FleetLimits) -> Self {
         Self {
@@ -607,11 +597,15 @@ impl DeviceStreams {
 
     /// Admits one more `Connect` from `device_id`, or rejects it with
     /// `RESOURCE_EXHAUSTED` when the device opens streams too often. Call this
-    /// before any per-stream work, such as checking the access token.
-    pub fn admit_open(&self, device_id: &str) -> Result<(), Status> {
+    /// before any per-stream work, such as checking the access token. A stream
+    /// opens only with the returned permit.
+    pub fn admit_open(&self, device_id: &str) -> Result<StreamPermit, Status> {
         let admitted = self.with_device(device_id, |device| device.opens.take(Instant::now()));
         if admitted {
-            Ok(())
+            Ok(StreamPermit {
+                streams: self.clone(),
+                device_id: device_id.to_owned(),
+            })
         } else {
             if let Some(refused) = STREAM_OPENS.event(Instant::now()) {
                 tracing::warn!(
@@ -625,14 +619,23 @@ impl DeviceStreams {
             ))
         }
     }
+}
 
-    /// Registers a new `Connect` stream from `device_id` and tells the
-    /// device's previous stream, if any, to close. The receiver resolves when
-    /// the device opens a newer stream.
-    pub fn open(&self, device_id: &str) -> (DeviceStream, oneshot::Receiver<()>) {
-        let generation = self.next.fetch_add(1, Ordering::Relaxed);
+/// Permission to open one `Connect` stream for a device, from
+/// `DeviceStreams::admit_open`.
+pub struct StreamPermit {
+    streams: DeviceStreams,
+    device_id: String,
+}
+
+impl StreamPermit {
+    /// Opens the device's stream for its `Connect` request, and tells the
+    /// device's previous stream, if any, to close.
+    pub fn open<S>(self, request: tonic::Request<S>) -> DeviceStream<S> {
+        let busy = SessionBusy::release_for(&request);
+        let generation = self.streams.next.fetch_add(1, Ordering::Relaxed);
         let (replace, superseded) = oneshot::channel();
-        let (previous, messages) = self.with_device(device_id, |device| {
+        let (previous, messages) = self.streams.with_device(&self.device_id, |device| {
             (
                 device.current.replace((generation, replace)),
                 device.messages.clone(),
@@ -641,38 +644,101 @@ impl DeviceStreams {
         if let Some((_, previous)) = previous {
             let _ = previous.send(());
         }
-        let stream = DeviceStream {
-            streams: self.clone(),
-            device_id: device_id.to_owned(),
-            generation,
-            messages,
-        };
-        (stream, superseded)
+        DeviceStream {
+            inbound: request.into_inner(),
+            superseded: Some(superseded),
+            registration: Registration {
+                streams: self.streams,
+                device_id: self.device_id,
+                generation,
+                messages,
+            },
+            _busy: busy,
+        }
     }
 }
 
-impl DeviceStream {
-    /// Reads the device's next message from `inbound` once the device's
-    /// message budget allows it. A device that has spent its budget is not
-    /// read from until the budget refills; HTTP/2 flow control then makes it
-    /// wait to send, so a busy device is slowed down rather than disconnected.
+/// A device's open `Connect` stream, from `StreamPermit::open`. It reads the
+/// device's messages within the device's budget. It holds the stream's
+/// registration, until a newer stream from the device replaces it, and the
+/// connection's busy release when the request has one (see `SessionBusy`).
+/// Dropping it gives up both.
+pub struct DeviceStream<S> {
+    inbound: S,
+    /// Resolves when the device opens a newer stream; `None` once it has.
+    superseded: Option<oneshot::Receiver<()>>,
+    registration: Registration,
+    _busy: Option<ReleaseOnDrop>,
+}
+
+/// What a device's stream yields next.
+#[derive(Debug)]
+pub enum StreamEvent<T> {
+    /// A message from the device, read within its budget.
+    Message(T),
+    /// The device opened a newer stream, so this one should close.
+    Superseded,
+    /// The device closed its request stream.
+    Ended,
+    /// The device's request stream failed.
+    Failed(Status),
+}
+
+impl<S> DeviceStream<S> {
+    /// Waits for the device's next message, or for a newer stream from the
+    /// device to replace this one. A device that has spent its message budget
+    /// is not read from until the budget refills; HTTP/2 flow control then
+    /// makes it wait to send, so a busy device is slowed down rather than
+    /// disconnected.
     ///
     /// Cancel-safe: a message is spent from the budget only when one is read.
-    pub async fn next_message<T>(
-        &self,
-        inbound: &mut (impl Stream<Item = Result<T, Status>> + Unpin),
-    ) -> Option<Result<T, Status>> {
-        let ready = self.bucket().next_token(Instant::now());
-        if let Some(ready) = ready {
-            tokio::time::sleep_until(ready).await;
+    pub async fn next<T>(&mut self) -> StreamEvent<T>
+    where
+        S: Stream<Item = Result<T, Status>> + Unpin,
+    {
+        let Self {
+            inbound,
+            superseded,
+            registration,
+            ..
+        } = self;
+        let Some(replaced) = superseded else {
+            return StreamEvent::Superseded;
+        };
+        let read = async {
+            let ready = registration.bucket().next_token(Instant::now());
+            if let Some(ready) = ready {
+                tokio::time::sleep_until(ready).await;
+            }
+            inbound.next().await
+        };
+        tokio::select! {
+            _ = replaced => {
+                *superseded = None;
+                StreamEvent::Superseded
+            }
+            message = read => match message {
+                Some(Ok(message)) => {
+                    registration.spend_message(Instant::now());
+                    StreamEvent::Message(message)
+                }
+                Some(Err(status)) => StreamEvent::Failed(status),
+                None => StreamEvent::Ended,
+            },
         }
-        let message = inbound.next().await;
-        if let Some(Ok(_)) = message {
-            self.spend_message(Instant::now());
-        }
-        message
     }
+}
 
+/// A stream's place as its device's registered stream, with the device's
+/// message budget. Dropping it unregisters the stream.
+struct Registration {
+    streams: DeviceStreams,
+    device_id: String,
+    generation: u64,
+    messages: Arc<Mutex<Bucket>>,
+}
+
+impl Registration {
     fn bucket(&self) -> std::sync::MutexGuard<'_, Bucket> {
         self.messages
             .lock()
@@ -696,7 +762,7 @@ impl DeviceStream {
     }
 }
 
-impl Drop for DeviceStream {
+impl Drop for Registration {
     fn drop(&mut self) {
         let mut devices = self
             .streams

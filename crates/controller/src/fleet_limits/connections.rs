@@ -695,13 +695,14 @@ where
 
 /// Keeps a `Connect` stream's connection busy. The connection goes idle when
 /// the first release is dropped: the response body holds one, and the handler
-/// can claim another from the request extensions (`SessionBusy::of`) and hold
-/// it in the session's task. Without the handler's release, a client that
-/// grants no HTTP/2 flow-control window could end the session and still keep
-/// the connection busy, because hyper keeps a response body it cannot send.
-/// If every handle is dropped without a release, the connection goes idle too.
+/// claims another from the request (`SessionBusy::release_for`) and holds it
+/// for the session, as `DeviceStream` does. Without the handler's release, a
+/// client that grants no HTTP/2 flow-control window could end the session and
+/// still keep the connection busy, because hyper keeps a response body it
+/// cannot send. If every handle is dropped without a release, the connection
+/// goes idle too.
 #[derive(Clone)]
-pub struct SessionBusy {
+pub(super) struct SessionBusy {
     guard: Arc<Mutex<Option<RequestGuard>>>,
 }
 
@@ -712,14 +713,18 @@ impl SessionBusy {
         }
     }
 
-    /// The handle for `request`'s connection, when it is a tracked `Connect`.
-    pub fn of<T>(request: &tonic::Request<T>) -> Option<Self> {
-        request.extensions().get::<Self>().cloned()
+    /// A release for `request`'s session, when the request is a tracked
+    /// `Connect`.
+    pub(super) fn release_for<T>(request: &tonic::Request<T>) -> Option<ReleaseOnDrop> {
+        request
+            .extensions()
+            .get::<Self>()
+            .map(Self::release_on_drop)
     }
 
     /// Marks the connection idle when the returned value is dropped, unless
     /// another release already has.
-    pub fn release_on_drop(&self) -> ReleaseOnDrop {
+    fn release_on_drop(&self) -> ReleaseOnDrop {
         ReleaseOnDrop {
             guard: self.guard.clone(),
         }
@@ -727,7 +732,7 @@ impl SessionBusy {
 }
 
 /// Releases a `SessionBusy` when dropped.
-pub struct ReleaseOnDrop {
+pub(super) struct ReleaseOnDrop {
     guard: Arc<Mutex<Option<RequestGuard>>>,
 }
 

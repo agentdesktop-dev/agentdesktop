@@ -1,15 +1,18 @@
-use std::pin::Pin;
+use std::{ops::ControlFlow, pin::Pin, time::Duration};
 
 use agentdesktop_proto::fleet::{
-    AgentMessage, ConfigStatus, ControllerMessage, DeviceCertificateResponse, DeviceUsageRequest,
-    DeviceUsageResponse, EnrollDeviceRequest, EnrollResponse, LlmGatewayCredentialRequest,
-    LlmGatewayCredentialResponse, LoginConfiguration, LoginConfigurationRequest,
-    RenewDeviceCertificateRequest, agent_message, controller_message,
+    AgentMessage, ConfigStatus, ControllerMessage, DaemonConfig, DeviceCertificateResponse,
+    DeviceUsageRequest, DeviceUsageResponse, EnrollDeviceRequest, EnrollResponse,
+    LlmGatewayCredentialRequest, LlmGatewayCredentialResponse, LoginConfiguration,
+    LoginConfigurationRequest, RenewDeviceCertificateRequest, agent_message, controller_message,
     fleet_agent_server::FleetAgent,
 };
 use futures_core::Stream;
 use sha2::{Digest, Sha256};
-use tokio::{sync::mpsc, time};
+use tokio::{
+    sync::{mpsc, watch},
+    time,
+};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, info, warn};
@@ -23,7 +26,9 @@ use crate::{
     daemon_config::DaemonConfigStore,
     database::{Database, DevicePrincipal},
     device_ca::DeviceCertificateIssuer,
-    fleet_limits::{DeviceStreams, EnrollmentLimiter, FleetLimits, SessionBusy, ThrottledWarning},
+    fleet_limits::{
+        DeviceStream, DeviceStreams, EnrollmentLimiter, FleetLimits, StreamEvent, ThrottledWarning,
+    },
     gateway_jwt::GatewayJwtIssuer,
     oidc::{OidcPrincipal, OidcProvider},
 };
@@ -257,169 +262,203 @@ impl FleetAgent for FleetAgentService {
         &self,
         request: Request<tonic::Streaming<AgentMessage>>,
     ) -> Result<Response<Self::ConnectStream>, Status> {
+        let device_id = peer_certificate_device_id(&request)?;
         // Rate-limit opens per device before checking the access token, which
         // calls the identity provider.
-        let certificate_device_id = peer_certificate_device_id(&request)?;
-        if let Some(device_id) = &certificate_device_id {
-            self.device_streams.admit_open(device_id)?;
-        }
-        let authenticated_device_id = self
-            .authenticate_device_identity(certificate_device_id.as_deref(), request.metadata())
-            .await?;
-        let oauth_revalidation = (
-            self.oidc.clone().ok_or_else(|| {
-                Status::failed_precondition("OIDC access-token validation is disabled")
-            })?,
-            bearer_credential(request.metadata())?.to_owned(),
-        );
+        let permit = self.device_streams.admit_open(&device_id)?;
+        let access_token = bearer_credential(request.metadata())?.to_owned();
+        let oidc = self
+            .authenticate_device_identity(&device_id, &access_token)
+            .await?
+            .clone();
+        let (responses, receiver) = mpsc::channel(8);
+        let session = ConnectSession {
+            device_id,
+            daemon_updates: self.daemon_config.subscribe(),
+            stream: permit.open(request),
+            responses,
+            database: self.database.clone(),
+            oidc,
+            access_token,
+        };
+        tokio::spawn(session.run());
+        Ok(Response::new(Box::pin(ReceiverStream::new(receiver))))
+    }
+}
 
-        // The connection counts as busy while this session runs, and no longer:
-        // hyper may keep a response body that a device will not accept.
-        let session_busy = SessionBusy::of(&request).map(|busy| busy.release_on_drop());
-        let mut inbound = request.into_inner();
-        let (sender, receiver) = mpsc::channel(8);
-        let mut daemon_updates = self.daemon_config.subscribe();
-        let daemon_config = daemon_updates.borrow().clone();
-        if let Some(daemon_config) = daemon_config {
-            sender
-                .send(Ok(ControllerMessage {
-                    message: Some(controller_message::Message::DaemonConfig(daemon_config)),
-                }))
-                .await
-                .map_err(|_| Status::unavailable("stream closed"))?;
-        }
+/// How often an open `Connect` stream checks its access token again.
+const ACCESS_TOKEN_RECHECK: Duration = Duration::from_secs(5 * 60);
 
-        // One task owns the response stream: it ends when the device's request
-        // stream ends, the device goes away, or the stream is closed for cause.
-        // Config pushes are forwarded from the same loop, so no other task keeps
-        // the response open.
-        let database = self.database.clone();
-        let auth_sender = sender;
-        let (device_stream, mut superseded) = self.device_streams.open(&authenticated_device_id);
-        tokio::spawn(async move {
-            let _session_busy = session_busy;
-            let enrolled_principal = match database.device_principal(&authenticated_device_id).await
-            {
-                Ok(principal) => principal,
-                Err(error) => {
-                    error!(%error, device_id = %authenticated_device_id, "failed to load stream identity");
-                    return;
-                }
-            };
-            let mut auth_interval = time::interval(std::time::Duration::from_secs(5 * 60));
-            auth_interval.tick().await;
-            loop {
-                tokio::select! {
-                _ = auth_sender.closed() => break,
-                changed = daemon_updates.changed() => {
-                    if changed.is_err() {
-                        break;
-                    }
-                    let daemon = daemon_updates.borrow_and_update().clone();
-                    if let Some(daemon) = daemon {
-                        // Sends in this loop never wait for room: a device that
-                        // stopped reading would hold the task, and the session,
-                        // forever.
-                        match auth_sender.try_send(Ok(ControllerMessage {
-                            message: Some(controller_message::Message::DaemonConfig(daemon)),
-                        })) {
-                            Ok(()) => {}
-                            Err(mpsc::error::TrySendError::Full(_)) => {
-                                warn!(device_id = %authenticated_device_id, "closing stream after the device stopped reading it");
-                                break;
-                            }
-                            Err(mpsc::error::TrySendError::Closed(_)) => break,
-                        }
-                    }
-                }
-                _ = auth_interval.tick() => {
-                    let (oidc, access_token) = &oauth_revalidation;
-                    match oidc.authenticate_access_token(access_token).await {
-                        Ok(principal) if oidc_principals_match(&principal, &enrolled_principal) => {}
-                        Ok(_) => {
-                            warn!(device_id = %authenticated_device_id, "closing stream after OIDC principal changed");
-                            let _ = auth_sender
-                                .try_send(Err(Status::permission_denied("OIDC principal changed")));
-                            break;
-                        }
-                        Err(error) => {
-                            let status = access_token_status(&error);
-                            if status.code() == tonic::Code::Unavailable {
-                                // Every open stream rechecks, so an outage
-                                // would otherwise log a line per stream.
-                                if let Some(retained) = RECHECK_UNAVAILABLE.event(time::Instant::now()) {
-                                    warn!(latest_error = %error, latest_device_id = %authenticated_device_id, retained_since_last_warning = retained, "OIDC unavailable during stream revalidation; retaining streams");
-                                }
-                                continue;
-                            }
-                            warn!(%error, device_id = %authenticated_device_id, "closing stream after OIDC access token revalidation failed");
-                            let _ = auth_sender.try_send(Err(status));
-                            break;
-                        }
-                    }
-                }
-                _ = &mut superseded => {
-                    info!(device_id = %authenticated_device_id, "closing stream replaced by a newer stream from the same device");
-                    let _ = auth_sender
-                        .try_send(Err(Status::aborted("replaced by a newer stream from this device")));
-                    break;
-                }
+/// A device's `Connect` session, run by its own task. The task owns the
+/// response stream: it ends when the device's request stream ends, the device
+/// goes away, or the session closes the stream for cause. Configuration is
+/// sent from the same task, so no other task keeps the response open.
+struct ConnectSession {
+    device_id: String,
+    stream: DeviceStream<tonic::Streaming<AgentMessage>>,
+    responses: mpsc::Sender<Result<ControllerMessage, Status>>,
+    daemon_updates: watch::Receiver<Option<DaemonConfig>>,
+    database: Database,
+    oidc: OidcProvider,
+    /// The access token the stream opened with.
+    access_token: String,
+}
+
+impl ConnectSession {
+    async fn run(mut self) {
+        // Marked seen, so a change made since the subscription is sent once.
+        let current = self.daemon_updates.borrow_and_update().clone();
+        if let Some(config) = current
+            && self.send_config(config).is_break()
+        {
+            return;
+        }
+        let enrolled = match self.database.device_principal(&self.device_id).await {
+            Ok(principal) => principal,
+            Err(error) => {
+                error!(%error, device_id = %self.device_id, "failed to load stream identity");
+                return;
+            }
+        };
+        let mut recheck = time::interval(ACCESS_TOKEN_RECHECK);
+        recheck.tick().await;
+        loop {
+            let next = tokio::select! {
+                _ = self.responses.closed() => ControlFlow::Break(()),
+                changed = self.daemon_updates.changed() => match changed {
+                    Ok(()) => self.forward_config(),
+                    Err(_) => ControlFlow::Break(()),
+                },
+                _ = recheck.tick() => self.recheck_access_token(&enrolled).await,
                 // Waits while the device is over its message budget; the other
                 // branches keep running.
-                message = device_stream.next_message(&mut inbound) => match message {
-                    Some(Ok(message)) => {
-                        if let Some(agent_message::Message::Hello(hello)) = &message.message
-                            && hello.device_id != authenticated_device_id
-                        {
-                            warn!(
-                                authenticated_device_id,
-                                claimed_device_id = %hello.device_id,
-                                "device certificate and hello identity do not match"
-                            );
-                            let _ = auth_sender
-                                .try_send(Err(Status::permission_denied("hello does not match the device certificate")));
-                            break;
-                        }
-                        if let Err(err) =
-                            handle_agent_message(&database, &authenticated_device_id, message).await
-                        {
-                            error!(
-                                error = %err,
-                                device_id = %authenticated_device_id,
-                                "failed to store device state"
-                            );
-                            break;
-                        }
-                    }
-                    None => break,
-                    Some(Err(err)) => {
-                        warn!(error = %err, device_id = %authenticated_device_id, "device stream failed");
-                        break;
-                    }
-                },
-                }
+                event = self.stream.next() => self.receive(event).await,
+            };
+            if next.is_break() {
+                break;
             }
-        });
+        }
+    }
 
-        Ok(Response::new(Box::pin(ReceiverStream::new(receiver))))
+    /// Sends the device the configuration that just changed.
+    fn forward_config(&mut self) -> ControlFlow<()> {
+        let config = self.daemon_updates.borrow_and_update().clone();
+        match config {
+            Some(config) => self.send_config(config),
+            None => ControlFlow::Continue(()),
+        }
+    }
+
+    /// Sends `config` to the device without waiting for room: a device that
+    /// stopped reading would hold the session forever.
+    fn send_config(&self, config: DaemonConfig) -> ControlFlow<()> {
+        let message = ControllerMessage {
+            message: Some(controller_message::Message::DaemonConfig(config)),
+        };
+        match self.responses.try_send(Ok(message)) {
+            Ok(()) => ControlFlow::Continue(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                warn!(device_id = %self.device_id, "closing stream after the device stopped reading it");
+                ControlFlow::Break(())
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => ControlFlow::Break(()),
+        }
+    }
+
+    /// Checks the stream's access token again, and closes the stream unless it
+    /// still identifies the user who enrolled the device. The stream stays open
+    /// while the identity provider is unavailable.
+    async fn recheck_access_token(&self, enrolled: &DevicePrincipal) -> ControlFlow<()> {
+        match self
+            .oidc
+            .authenticate_access_token(&self.access_token)
+            .await
+        {
+            Ok(principal) if oidc_principals_match(&principal, enrolled) => {
+                ControlFlow::Continue(())
+            }
+            Ok(_) => {
+                warn!(device_id = %self.device_id, "closing stream after OIDC principal changed");
+                self.close(Status::permission_denied("OIDC principal changed"))
+            }
+            Err(error) => {
+                let status = access_token_status(&error);
+                if status.code() == tonic::Code::Unavailable {
+                    // Every open stream rechecks, so an outage would otherwise
+                    // log a line per stream.
+                    if let Some(retained) = RECHECK_UNAVAILABLE.event(time::Instant::now()) {
+                        warn!(latest_error = %error, latest_device_id = %self.device_id, retained_since_last_warning = retained, "OIDC unavailable during stream revalidation; retaining streams");
+                    }
+                    return ControlFlow::Continue(());
+                }
+                warn!(%error, device_id = %self.device_id, "closing stream after OIDC access token revalidation failed");
+                self.close(status)
+            }
+        }
+    }
+
+    async fn receive(&self, event: StreamEvent<AgentMessage>) -> ControlFlow<()> {
+        match event {
+            StreamEvent::Message(message) => self.store(message).await,
+            StreamEvent::Superseded => {
+                info!(device_id = %self.device_id, "closing stream replaced by a newer stream from the same device");
+                self.close(Status::aborted(
+                    "replaced by a newer stream from this device",
+                ))
+            }
+            StreamEvent::Ended => ControlFlow::Break(()),
+            StreamEvent::Failed(error) => {
+                warn!(%error, device_id = %self.device_id, "device stream failed");
+                ControlFlow::Break(())
+            }
+        }
+    }
+
+    /// Stores a message from the device. A hello must name the device that
+    /// the certificate identifies.
+    async fn store(&self, message: AgentMessage) -> ControlFlow<()> {
+        if let Some(agent_message::Message::Hello(hello)) = &message.message
+            && hello.device_id != self.device_id
+        {
+            warn!(
+                authenticated_device_id = self.device_id.as_str(),
+                claimed_device_id = %hello.device_id,
+                "device certificate and hello identity do not match"
+            );
+            return self.close(Status::permission_denied(
+                "hello does not match the device certificate",
+            ));
+        }
+        if let Err(error) = handle_agent_message(&self.database, &self.device_id, message).await {
+            error!(%error, device_id = %self.device_id, "failed to store device state");
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// Ends the stream with `status`, dropped if the device is not reading.
+    fn close(&self, status: Status) -> ControlFlow<()> {
+        let _ = self.responses.try_send(Err(status));
+        ControlFlow::Break(())
     }
 }
 
 impl FleetAgentService {
     async fn authenticate_device<T>(&self, request: &Request<T>) -> Result<String, Status> {
-        let certificate_device_id = peer_certificate_device_id(request)?;
-        self.authenticate_device_identity(certificate_device_id.as_deref(), request.metadata())
-            .await
+        let device_id = peer_certificate_device_id(request)?;
+        let access_token = bearer_credential(request.metadata())?;
+        self.authenticate_device_identity(&device_id, access_token)
+            .await?;
+        Ok(device_id)
     }
 
+    /// Checks that `access_token` identifies the user who enrolled
+    /// `device_id`, and returns the identity provider that checked it.
     async fn authenticate_device_identity(
         &self,
-        certificate_device_id: Option<&str>,
-        metadata: &tonic::metadata::MetadataMap,
-    ) -> Result<String, Status> {
-        let device_id = certificate_device_id
-            .ok_or_else(|| Status::unauthenticated("missing device certificate"))?;
-        let access_token = bearer_credential(metadata)?;
+        device_id: &str,
+        access_token: &str,
+    ) -> Result<&OidcProvider, Status> {
         let oidc = self.oidc.as_ref().ok_or_else(|| {
             Status::failed_precondition("OIDC access-token validation is disabled")
         })?;
@@ -428,14 +467,15 @@ impl FleetAgentService {
             .await
             .map_err(invalid_access_token)?;
         self.authenticate_device_certificate_identity(device_id, &access_principal)
-            .await
+            .await?;
+        Ok(oidc)
     }
 
     async fn authenticate_device_certificate_identity(
         &self,
         device_id: &str,
         access_principal: &OidcPrincipal,
-    ) -> Result<String, Status> {
+    ) -> Result<(), Status> {
         let principal = self
             .database
             .device_principal(device_id)
@@ -449,7 +489,7 @@ impl FleetAgentService {
                 "access token principal does not match enrolled device user",
             ));
         }
-        Ok(device_id.to_owned())
+        Ok(())
     }
 
     async fn issue_enrolled_device(
@@ -516,14 +556,14 @@ fn oidc_principals_match(authenticated: &OidcPrincipal, enrolled: &DevicePrincip
         && authenticated.subject == enrolled.subject
 }
 
-fn peer_certificate_device_id<T>(request: &Request<T>) -> Result<Option<String>, Status> {
-    let Some(certificates) = request.peer_certs() else {
-        return Ok(None);
-    };
+fn peer_certificate_device_id<T>(request: &Request<T>) -> Result<String, Status> {
+    let certificates = request
+        .peer_certs()
+        .ok_or_else(|| Status::unauthenticated("missing device certificate"))?;
     let certificate = certificates
         .first()
         .ok_or_else(|| Status::unauthenticated("missing device certificate"))?;
-    device_id_from_certificate(certificate.as_ref()).map(Some)
+    device_id_from_certificate(certificate.as_ref())
 }
 
 fn device_id_from_certificate(certificate_der: &[u8]) -> Result<String, Status> {
@@ -1058,16 +1098,10 @@ mod tests {
             issuer: issuer.to_owned(),
             subject: subject.to_owned(),
         };
-        assert_eq!(
-            service
-                .authenticate_device_certificate_identity(
-                    device_id,
-                    &principal("issuer", "subject"),
-                )
-                .await
-                .unwrap(),
-            device_id
-        );
+        service
+            .authenticate_device_certificate_identity(device_id, &principal("issuer", "subject"))
+            .await
+            .expect("the enrolled principal is accepted");
 
         for mismatched in [
             principal("issuer", "other-subject"),
