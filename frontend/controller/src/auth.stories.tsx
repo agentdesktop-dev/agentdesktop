@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { useState } from "react";
-import { expect, spyOn, userEvent } from "storybook/test";
+import { act, useState } from "react";
+import { expect, spyOn, userEvent, waitFor } from "storybook/test";
 
 import { ApiError, AuthProvider, useAuth } from "./auth";
 import { ControllerShell } from "./components/ControllerShell";
@@ -316,5 +316,163 @@ export const SessionProviderUnavailable: Story = {
         "The identity provider is unavailable. Try again shortly.",
       ),
     ).toBeVisible();
+  },
+};
+
+function LifecycleHarness() {
+  const auth = useAuth();
+  const [result, setResult] = useState("");
+
+  return (
+    <main>
+      <output data-testid="session">{JSON.stringify(auth.session)}</output>
+      <output data-testid="loading">{String(auth.loading)}</output>
+      <output data-testid="error">{auth.error ?? "none"}</output>
+      <output data-testid="notice">{auth.notice ?? "none"}</output>
+      <output data-testid="result">{result}</output>
+      <button type="button" onClick={auth.retry}>
+        Retry session
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          void auth.request("/api/v1/devices").then(
+            () => setResult("Loaded"),
+            (reason: unknown) =>
+              setResult(reason instanceof Error ? reason.name : "failed"),
+          );
+        }}
+      >
+        Load devices
+      </button>
+      <button type="button" onClick={() => void auth.logout()}>
+        Sign out
+      </button>
+    </main>
+  );
+}
+
+function deferredResponse() {
+  let resolve!: (response: Response) => void;
+  const promise = new Promise<Response>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+function mockAuthenticatedSession() {
+  const mock = mockSession(authenticatedSession);
+  return () => mock.mockRestore();
+}
+
+export const ExpiryDuringSessionCheck: Story = {
+  render: () => <LifecycleHarness />,
+  beforeEach: mockAuthenticatedSession,
+  play: async ({ canvas }) => {
+    await waitFor(() =>
+      expect(canvas.getByTestId("session")).toHaveTextContent(
+        '"authenticated":true',
+      ),
+    );
+    const read = deferredResponse();
+    const check = deferredResponse();
+    spyOn(globalThis, "fetch")
+      .mockImplementationOnce(() => read.promise)
+      .mockImplementationOnce(() => check.promise);
+
+    await userEvent.click(canvas.getByRole("button", { name: "Load devices" }));
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Retry session" }),
+    );
+    await expect(canvas.getByTestId("loading")).toHaveTextContent("true");
+
+    await act(async () => {
+      read.resolve(
+        Response.json({ error: "unauthenticated" }, { status: 401 }),
+      );
+    });
+    await expect(canvas.getByTestId("loading")).toHaveTextContent("false");
+    await expect(canvas.getByTestId("session")).toHaveTextContent(
+      '"authenticated":false',
+    );
+    await expect(canvas.getByTestId("session")).toHaveTextContent(
+      '"role":null',
+    );
+    await expect(canvas.getByTestId("session")).toHaveTextContent(
+      '"permissions":[]',
+    );
+
+    await act(async () => {
+      check.resolve(Response.json(authenticatedSession));
+    });
+    await expect(canvas.getByTestId("session")).toHaveTextContent(
+      '"authenticated":false',
+    );
+    await expect(canvas.getByTestId("notice")).toHaveTextContent("none");
+  },
+};
+
+export const NewestSessionCheckWins: Story = {
+  render: () => <LifecycleHarness />,
+  beforeEach: mockAuthenticatedSession,
+  play: async ({ canvas }) => {
+    await waitFor(() =>
+      expect(canvas.getByTestId("session")).toHaveTextContent(
+        '"authenticated":true',
+      ),
+    );
+    const older = deferredResponse();
+    const newer = deferredResponse();
+    spyOn(globalThis, "fetch")
+      .mockImplementationOnce(() => older.promise)
+      .mockImplementationOnce(() => newer.promise);
+
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Retry session" }),
+    );
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Retry session" }),
+    );
+    await act(async () => {
+      newer.resolve(
+        Response.json({ error: "unauthenticated" }, { status: 401 }),
+      );
+    });
+    await expect(canvas.getByTestId("loading")).toHaveTextContent("false");
+    await act(async () => {
+      older.resolve(Response.json(authenticatedSession));
+    });
+    await expect(canvas.getByTestId("session")).toHaveTextContent(
+      '"authenticated":false',
+    );
+    await expect(canvas.getByTestId("error")).toHaveTextContent("none");
+  },
+};
+
+export const LogoutInvalidatesPendingRequest: Story = {
+  render: () => <LifecycleHarness />,
+  beforeEach: mockAuthenticatedSession,
+  play: async ({ canvas }) => {
+    await waitFor(() =>
+      expect(canvas.getByTestId("session")).toHaveTextContent(
+        '"authenticated":true',
+      ),
+    );
+    const read = deferredResponse();
+    spyOn(globalThis, "fetch").mockImplementationOnce(() => read.promise);
+    await userEvent.click(canvas.getByRole("button", { name: "Load devices" }));
+    await userEvent.click(canvas.getByRole("button", { name: "Sign out" }));
+    await waitFor(() =>
+      expect(canvas.getByTestId("session")).toHaveTextContent(
+        '"authenticated":false',
+      ),
+    );
+
+    await act(async () => {
+      read.resolve(Response.json({ error: "forbidden" }, { status: 403 }));
+    });
+    await expect(canvas.getByTestId("result")).toHaveTextContent("AbortError");
+    await expect(canvas.getByTestId("notice")).toHaveTextContent("none");
+    await expect(canvas.getByTestId("loading")).toHaveTextContent("false");
   },
 };
