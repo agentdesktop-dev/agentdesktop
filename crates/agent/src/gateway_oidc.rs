@@ -564,7 +564,7 @@ async fn discover(issuer: &Url, allow_insecure: bool) -> anyhow::Result<Provider
     Ok(metadata)
 }
 
-fn authorization_url(
+pub(crate) fn authorization_url(
     mut endpoint: Url,
     client_id: &str,
     redirect_uri: &Url,

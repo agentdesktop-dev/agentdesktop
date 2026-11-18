@@ -322,18 +322,17 @@ async fn browser_login(
     let (verifier, challenge) = pkce();
     let state = random_secret();
     let redirect_uri = Url::parse(&config.redirect_uri).context("parse OIDC redirect URI")?;
-    let mut authorization_url =
-        Url::parse(&config.authorization_endpoint).context("parse OIDC authorization endpoint")?;
+    let mut authorization_url = gateway_oidc::authorization_url(
+        Url::parse(&config.authorization_endpoint).context("parse OIDC authorization endpoint")?,
+        &config.client_id,
+        &redirect_uri,
+        &config.scopes,
+        &state,
+        &challenge,
+    );
     authorization_url
         .query_pairs_mut()
-        .append_pair("response_type", "code")
-        .append_pair("scope", &config.scopes.join(" "))
-        .append_pair("client_id", &config.client_id)
-        .append_pair("redirect_uri", &config.redirect_uri)
-        .append_pair("state", &state)
-        .append_pair("nonce", nonce)
-        .append_pair("code_challenge", &challenge)
-        .append_pair("code_challenge_method", "S256");
+        .append_pair("nonce", nonce);
     enrollment
         .awaiting_authentication(authorization_url.to_string())
         .await;
@@ -348,7 +347,7 @@ async fn browser_login(
     let tokens = exchange_authorization_code(
         &config.token_endpoint,
         &config.client_id,
-        &config.redirect_uri,
+        redirect_uri.as_str(),
         &authorization_code,
         &verifier,
     )
