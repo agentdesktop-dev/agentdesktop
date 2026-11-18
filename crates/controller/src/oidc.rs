@@ -178,7 +178,7 @@ impl OidcProvider {
         {
             bail!("invalid enrollment hostname");
         }
-        if id_token.is_empty() || id_token.len() > 64 * 1024 || access_token.is_empty() {
+        if id_token.is_empty() || access_token.is_empty() {
             bail!("ID token and access token are required");
         }
         let header = decode_header(id_token).context("decode ID token header")?;

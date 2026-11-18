@@ -609,11 +609,14 @@ pub struct ControllerFleetLimitsConfig {
     /// calls the identity provider. Defaults to `64`.
     #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub enrollment_in_flight: usize,
-    /// Enrollments one client address may start in a burst, after which it may
-    /// start one more every `enrollmentRefill`. Defaults to `60`.
+    /// Enrollment requests one client address may make in a burst, after which
+    /// it may make one more every `enrollmentRefill`. Each device sign-in makes
+    /// at least two: one to read the login configuration and one to enroll.
+    /// Defaults to `60`.
     #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub enrollment_burst: u32,
-    /// Time for a client address to get back one enrollment. Defaults to `1s`.
+    /// Time for a client address to get back one enrollment request. Defaults
+    /// to `1s`.
     #[serde(with = "humantime_serde")]
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub enrollment_refill: Duration,

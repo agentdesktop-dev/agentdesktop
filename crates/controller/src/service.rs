@@ -105,13 +105,6 @@ impl FleetAgent for FleetAgentService {
             .ok_or_else(|| Status::failed_precondition("OIDC enrollment is disabled"))?;
         let access_token = bearer_credential(request.metadata())?.to_owned();
         let request = request.into_inner();
-        if request.certificate_signing_request_der.is_empty()
-            || request.certificate_signing_request_der.len() > 16 * 1024
-        {
-            return Err(Status::invalid_argument(
-                "invalid certificate signing request size",
-            ));
-        }
         let csr_der = request.certificate_signing_request_der.clone();
         // Parsing verifies the CSR signature, which proves the caller holds the key
         // that the ID token's nonce must be bound to.
