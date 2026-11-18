@@ -47,6 +47,10 @@ Key properties:
   creates a device only when it is given valid tokens for a user. The daemon
   generates `state`, `nonce`, and the PKCE values, builds the authorization
   URL, and checks the callback; the controller validates the tokens.
+- A browser sign-in is bound to the device key: the `nonce` is a hash of the
+  key's public key, and the controller requires the ID token to carry the
+  hash of the key in the CSR. Tokens from another sign-in, or from a refresh
+  grant, cannot enroll a device.
 
 ## Sequence
 
@@ -69,8 +73,9 @@ sequenceDiagram
     Daemon->>Controller: GetLoginConfiguration over server-auth TLS
     Controller-->>Daemon: issuer, endpoints, client_id, redirect_uri, scopes
     Note over Controller: Read-only. No enrollment state is stored.
+    Daemon->>Daemon: Generate device key pair and CSR (kept local until sign-in completes)
     alt Browser flow (default)
-        Daemon->>Daemon: Generate PKCE verifier and S256 challenge, state, nonce. Build authorization_url
+        Daemon->>Daemon: Generate PKCE verifier and S256 challenge, state. nonce = SHA-256 of device public key. Build authorization_url
         Daemon->>Daemon: Listen on loopback redirect_uri (default 127.0.0.1:51327)
         Daemon->>Daemon: Publish authorization_url on GET /v1/enrollment and wait up to 10 min
         alt Daemon runs in system mode (normal install)
@@ -103,10 +108,11 @@ sequenceDiagram
         Daemon->>IdP: Token request (device_code grant)
         IdP-->>Daemon: access_token, id_token, refresh_token
     end
-    Daemon->>Daemon: Generate device key pair and CSR
     Daemon->>Controller: EnrollDevice(hostname, CSR, id_token) with Bearer access_token
+    Controller->>Controller: Verify CSR signature
     Controller->>IdP: Fetch JWKS if the ID token key ID is unknown
     Controller->>Controller: Verify ID token signature, iss, aud, exp, and sub
+    Controller->>Controller: Require nonce equal to the hash of the CSR public key (no nonce only if the IdP offers device authorization)
     Controller->>IdP: UserInfo with access_token
     IdP-->>Controller: sub
     Controller->>Controller: Require UserInfo sub equal to ID token sub
@@ -209,8 +215,11 @@ native app (RFC 8252):
    document. The daemon has no client certificate yet, so this call uses
    server-authenticated TLS only. The call is read-only: the controller stores
    nothing.
-2. The daemon generates a PKCE verifier and challenge, `state`, and `nonce`,
-   and builds the authorization URL.
+2. The daemon generates the device key pair and a CSR for it. The key stays
+   on the workstation, and nothing is sent to the controller yet. The daemon
+   also generates a PKCE verifier and challenge and `state`, sets `nonce` to
+   the base64url SHA-256 of the key's DER SubjectPublicKeyInfo, and builds the
+   authorization URL.
 3. The daemon serves a small HTTP server on the loopback `redirect_uri`
    (default `http://127.0.0.1:51327/callback`) and publishes the
    authorization URL on `/v1/enrollment`. How the browser gets there depends
@@ -230,10 +239,9 @@ native app (RFC 8252):
 4. After the user authenticates, the IdP redirects to the loopback callback.
    The daemon rejects the callback unless `state` matches, then exchanges the
    code and PKCE verifier at the IdP token endpoint, and requires the ID
-   token's `nonce` to match the one it generated. The callback times out
-   after 10 minutes.
-5. Only now does the daemon generate the device key pair and a CSR for it.
-   `EnrollDevice` sends the hostname, the CSR, and the ID token, with the
+   token's `nonce` to match the one it sent. The callback times out after 10
+   minutes.
+5. `EnrollDevice` sends the hostname, the CSR, and the ID token, with the
    access token as a bearer credential.
 
 ### Device authorization flow
@@ -251,33 +259,44 @@ daemon's controller connection. The IdP must advertise a
 3. The daemon polls the IdP token endpoint at the returned interval, adding
    5 seconds on each `slow_down`, until it receives tokens or the code
    expires.
-4. The daemon generates the device key and CSR and calls `EnrollDevice` as
-   in the browser flow. There is no nonce to check, because the device grant
-   does not carry one.
+4. The daemon calls `EnrollDevice` as in the browser flow. RFC 8628 has no
+   nonce, so these tokens are not bound to the device key. The controller
+   accepts tokens without a nonce only when the IdP advertises a device
+   authorization endpoint.
 
 ### Controller validation
 
 On `EnrollDevice` the controller:
 
-1. Verifies the ID token signature against the IdP's JWKS. An unknown key ID
+1. Verifies the CSR signature, which proves the caller holds the device key.
+2. Verifies the ID token signature against the IdP's JWKS. An unknown key ID
    triggers one JWKS refresh, rate limited to once every 30 seconds.
-2. Validates `iss`, `aud` (the configured client ID), `exp`, and `sub`. Any
-   valid tokens for the configured client authorize enrollment; the
-   controller does not require a sign-in that it started.
-3. Calls the IdP's UserInfo endpoint with the access token and requires its
+3. Validates `iss`, `aud` (the configured client ID), `exp`, and `sub`, and
+   requires `nonce` to equal the base64url SHA-256 of the CSR's
+   SubjectPublicKeyInfo. This ties the sign-in to the key without the
+   controller storing anything: a token from a refresh grant (which should
+   carry no nonce, or else the original one) or from a sign-in for another
+   key is rejected. A token without a nonce is accepted only when the IdP
+   advertises device authorization, because that grant cannot carry one.
+4. Calls the IdP's UserInfo endpoint with the access token and requires its
    `sub` to equal the ID token's `sub`. This binds the access token, which the
    daemon will present on every later call, to the validated ID token.
-4. Derives the device UUID from the issuer, subject, and CSR. If a device
+5. Derives the device UUID from the issuer, subject, and CSR. If a device
    with that ID was already enrolled, it returns the stored result, so a
    daemon that lost the response and retries with the same CSR gets the same
    device and certificate, including after a controller restart.
-5. Otherwise signs the CSR with the device CA. The certificate is valid for
+6. Otherwise signs the CSR with the device CA. The certificate is valid for
    30 days, allows only client authentication, and carries the device ID in
    its SAN.
-6. Stores the device with its hostname, the IdP issuer and subject, and the
+7. Stores the device with its hostname, the IdP issuer and subject, and the
    ID token's claims, together with an enrollment receipt (the response, with
    the public certificate only) in one transaction. The receipt is deleted
    with the device. The claims are later copied into gateway credentials.
+
+When the IdP cannot be reached or fails (a UserInfo or JWKS request that does
+not end in 401 or 403, or a JWKS refresh held back by the rate limit), the
+controller returns `UNAVAILABLE`. The daemon retries with the same CSR and
+tokens until the access token expires, so the user does not sign in again.
 
 ### Local storage
 

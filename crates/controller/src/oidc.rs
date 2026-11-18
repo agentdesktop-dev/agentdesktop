@@ -58,6 +58,19 @@ pub struct CompletedEnrollment {
     pub idp_claims: BTreeMap<String, serde_json::Value>,
 }
 
+/// The identity provider could not be used to check a credential, so the
+/// credential was neither accepted nor rejected. The caller may retry.
+#[derive(Debug)]
+pub struct IdentityProviderUnavailable(pub(crate) &'static str);
+
+impl std::fmt::Display for IdentityProviderUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl std::error::Error for IdentityProviderUnavailable {}
+
 /// Stable identity authenticated by one OIDC provider.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OidcPrincipal {
@@ -150,11 +163,14 @@ impl OidcProvider {
         }
     }
 
+    /// Authenticates the user enrolling a device. `device_key_nonce` is
+    /// [`agentdesktop_proto::enrollment_nonce`] of the key in the verified CSR.
     pub async fn authenticate_enrollment(
         &self,
         hostname: String,
         id_token: &str,
         access_token: &str,
+        device_key_nonce: &str,
     ) -> anyhow::Result<CompletedEnrollment> {
         if hostname.trim().is_empty()
             || hostname.len() > 255
@@ -176,6 +192,16 @@ impl OidcProvider {
         let claims = decode::<IdTokenClaims>(id_token, &key, &validation)
             .context("validate OIDC ID token")?
             .claims;
+        // A browser sign-in carries the nonce the agent derived from the device
+        // key, so only a sign-in made for this key can enroll it. The device
+        // authorization grant has no nonce; tokens without one are accepted only
+        // when the IdP offers that grant, as they were before.
+        match claims.nonce.as_deref() {
+            Some(nonce) if nonce == device_key_nonce => {}
+            Some(_) => bail!("ID token nonce is not bound to the enrolling device key"),
+            None if self.inner.device_authorization_endpoint.is_some() => {}
+            None => bail!("ID token has no nonce bound to the enrolling device key"),
+        }
         let access_principal = self.authenticate_access_token(access_token).await?;
         if access_principal.subject != claims.sub {
             bail!("access token and ID token subjects do not match");
@@ -266,7 +292,9 @@ impl JwksCache {
                     retry_after_seconds = (self.refresh_cooldown - elapsed).as_secs(),
                     "OIDC JWKS refresh suppressed by cooldown"
                 );
-                bail!("ID token refers to an unknown key; OIDC JWKS refresh is rate limited");
+                bail!(IdentityProviderUnavailable(
+                    "ID token refers to an unknown key; OIDC JWKS refresh is rate limited"
+                ));
             }
         }
 
@@ -417,16 +445,26 @@ pub(crate) mod tests {
         .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        // `flaky` is a valid token for user-1 whose first UserInfo call fails.
+        let flaky_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let app = axum::Router::new().route(
             "/userinfo",
-            axum::routing::get(|headers: axum::http::HeaderMap| async move {
-                match headers
-                    .get("authorization")
-                    .and_then(|value| value.to_str().ok())
-                {
-                    Some("Bearer access-token") => Ok(axum::Json(json!({"sub": "user-1"}))),
-                    Some("Bearer other-user") => Ok(axum::Json(json!({"sub": "user-2"}))),
-                    _ => Err(axum::http::StatusCode::UNAUTHORIZED),
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let flaky_failed = flaky_failed.clone();
+                async move {
+                    match headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                    {
+                        Some("Bearer flaky") if !flaky_failed.swap(true, Ordering::SeqCst) => {
+                            Err(axum::http::StatusCode::SERVICE_UNAVAILABLE)
+                        }
+                        Some("Bearer access-token" | "Bearer flaky") => {
+                            Ok(axum::Json(json!({"sub": "user-1"})))
+                        }
+                        Some("Bearer other-user") => Ok(axum::Json(json!({"sub": "user-2"}))),
+                        _ => Err(axum::http::StatusCode::UNAUTHORIZED),
+                    }
                 }
             }),
         );
@@ -448,9 +486,9 @@ pub(crate) mod tests {
         jsonwebtoken::encode(&header, claims, key).unwrap()
     }
 
-    pub(crate) fn user_claims() -> serde_json::Value {
+    pub(crate) fn user_claims(nonce: &str) -> serde_json::Value {
         json!({
-            "iss": "https://idp.example", "aud": "client", "sub": "user-1",
+            "iss": "https://idp.example", "aud": "client", "sub": "user-1", "nonce": nonce,
             "exp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 600,
         })
     }
@@ -461,8 +499,9 @@ pub(crate) mod tests {
         let completed = provider
             .authenticate_enrollment(
                 "host".to_owned(),
-                &id_token(&key, &user_claims()),
+                &id_token(&key, &user_claims("key-nonce")),
                 "access-token",
+                "key-nonce",
             )
             .await
             .unwrap();
@@ -476,7 +515,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn enrollment_rejects_invalid_tokens_and_subject_mismatch() {
         let (provider, key, server) = authenticated_provider().await;
-        let original = user_claims();
+        let original = user_claims("key-nonce");
         for (field, value) in [
             ("iss", json!("https://other.example")),
             ("aud", json!("another-client")),
@@ -491,6 +530,7 @@ pub(crate) mod tests {
                         "host".to_owned(),
                         &id_token(&key, &claims),
                         "access-token",
+                        "key-nonce",
                     )
                     .await
                     .is_err(),
@@ -507,7 +547,7 @@ pub(crate) mod tests {
         ] {
             assert!(
                 provider
-                    .authenticate_enrollment("host".to_owned(), id_token, access_token)
+                    .authenticate_enrollment("host".to_owned(), id_token, access_token, "key-nonce")
                     .await
                     .is_err()
             );
@@ -521,7 +561,53 @@ pub(crate) mod tests {
                     "host".to_owned(),
                     std::str::from_utf8(&tampered).unwrap(),
                     "access-token",
+                    "key-nonce",
                 )
+                .await
+                .is_err()
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn enrollment_requires_a_sign_in_bound_to_the_device_key() {
+        let (mut provider, key, server) = authenticated_provider().await;
+        let enroll = |provider: OidcProvider, claims: serde_json::Value| {
+            let token = id_token(&key, &claims);
+            async move {
+                provider
+                    .authenticate_enrollment("host".to_owned(), &token, "access-token", "key-nonce")
+                    .await
+            }
+        };
+        let mut unbound = user_claims("key-nonce");
+        unbound.as_object_mut().unwrap().remove("nonce");
+
+        assert!(
+            enroll(provider.clone(), user_claims("key-nonce"))
+                .await
+                .is_ok()
+        );
+        assert!(
+            enroll(provider.clone(), user_claims("other-key-nonce"))
+                .await
+                .is_err(),
+            "a sign-in made for another key must not enroll this one"
+        );
+        assert!(
+            enroll(provider.clone(), unbound.clone()).await.is_err(),
+            "without device authorization, a token without a nonce (such as a refreshed one) must not enroll"
+        );
+
+        Arc::get_mut(&mut provider.inner)
+            .unwrap()
+            .device_authorization_endpoint = Some("https://idp.example/device".parse().unwrap());
+        assert!(
+            enroll(provider.clone(), unbound).await.is_ok(),
+            "device authorization tokens carry no nonce"
+        );
+        assert!(
+            enroll(provider, user_claims("other-key-nonce"))
                 .await
                 .is_err()
         );

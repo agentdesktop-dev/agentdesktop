@@ -16,7 +16,8 @@ use axum::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::Rng;
 use rcgen::{
-    CertificateParams, CertificateSigningRequest, ExtendedKeyUsagePurpose, KeyPair, KeyUsagePurpose,
+    CertificateParams, CertificateSigningRequest, ExtendedKeyUsagePurpose, KeyPair,
+    KeyUsagePurpose, PublicKeyData as _,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -298,13 +299,16 @@ pub async fn enroll(
         .await
         .context("get controller login configuration (controller and agent must support the same enrollment protocol)")?
         .into_inner();
+    // The key exists only locally until sign-in completes; its hash is the
+    // browser nonce, which ties the sign-in to this key for the controller.
+    let (device_key, csr) = device_csr()?;
     let tokens = if controller.device_authorization {
         device_authorization_login(&config, enrollment).await?
     } else {
-        browser_login(&config, enrollment, callback_listen, open_browser).await?
+        let nonce = agentdesktop_proto::enrollment_nonce(&device_key.subject_public_key_info());
+        browser_login(&config, enrollment, callback_listen, open_browser, &nonce).await?
     };
     enrollment.set("enrolling").await;
-    let (device_key, csr) = device_csr()?;
     complete_enrollment(&mut client, config, &device_key, &csr, tokens).await
 }
 
@@ -313,10 +317,10 @@ async fn browser_login(
     enrollment: &EnrollmentState,
     callback_listen: Option<SocketAddr>,
     open_browser: bool,
+    nonce: &str,
 ) -> anyhow::Result<TokenResponse> {
     let (verifier, challenge) = pkce();
     let state = random_secret();
-    let nonce = random_secret();
     let redirect_uri = Url::parse(&config.redirect_uri).context("parse OIDC redirect URI")?;
     let mut authorization_url =
         Url::parse(&config.authorization_endpoint).context("parse OIDC authorization endpoint")?;
@@ -327,7 +331,7 @@ async fn browser_login(
         .append_pair("client_id", &config.client_id)
         .append_pair("redirect_uri", &config.redirect_uri)
         .append_pair("state", &state)
-        .append_pair("nonce", &nonce)
+        .append_pair("nonce", nonce)
         .append_pair("code_challenge", &challenge)
         .append_pair("code_challenge_method", "S256");
     enrollment
@@ -354,7 +358,7 @@ async fn browser_login(
             .id_token
             .as_deref()
             .context("OIDC token response did not contain an ID token")?,
-        &nonce,
+        nonce,
     )?;
     Ok(tokens)
 }
@@ -396,8 +400,9 @@ async fn device_authorization_login(
 }
 
 fn validate_login_nonce(id_token: &str, expected: &str) -> anyhow::Result<()> {
-    // The controller verifies the signature/issuer/audience of this same token.
-    // Here the agent binds the token-endpoint response to its own browser login.
+    // The controller verifies this same token's signature, issuer, audience and
+    // nonce. Checking the nonce here too rejects a mismatched token response
+    // before the agent sends it anywhere.
     #[derive(Deserialize)]
     struct Nonce {
         nonce: String,
@@ -1262,6 +1267,25 @@ mod tests {
                 assert_eq!(identity.oauth.access_token, "access-token");
                 assert_eq!(requests.lock().await.len(), 2);
                 assert_eq!(enrollment.get().await.status, "enrolling");
+                let request = requests.lock().await[0].clone();
+                let csr = rcgen::CertificateSigningRequestParams::from_der(
+                    &request.certificate_signing_request_der.as_slice().into(),
+                )
+                .unwrap();
+                let claims: serde_json::Value = serde_json::from_slice(
+                    &super::URL_SAFE_NO_PAD
+                        .decode(request.id_token.split('.').nth(1).unwrap())
+                        .unwrap(),
+                )
+                .unwrap();
+                let key_nonce = agentdesktop_proto::enrollment_nonce(
+                    &rcgen::PublicKeyData::subject_public_key_info(&csr.public_key),
+                );
+                assert_eq!(
+                    claims["nonce"].as_str(),
+                    (!headless).then_some(key_nonce.as_str()),
+                    "a browser sign-in must be bound to the enrolled device key"
+                );
             } else {
                 assert!(result.is_err());
                 assert!(requests.lock().await.is_empty());

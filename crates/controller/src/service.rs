@@ -113,8 +113,20 @@ impl FleetAgent for FleetAgentService {
             ));
         }
         let csr_der = request.certificate_signing_request_der.clone();
+        // Parsing verifies the CSR signature, which proves the caller holds the key
+        // that the ID token's nonce must be bound to.
+        let csr = rcgen::CertificateSigningRequestParams::from_der(&csr_der.as_slice().into())
+            .map_err(|error| invalid_csr(error.into()))?;
+        let device_key_nonce = agentdesktop_proto::enrollment_nonce(
+            &rcgen::PublicKeyData::subject_public_key_info(&csr.public_key),
+        );
         let completed = oidc
-            .authenticate_enrollment(request.hostname, &request.id_token, &access_token)
+            .authenticate_enrollment(
+                request.hostname,
+                &request.id_token,
+                &access_token,
+                &device_key_nonce,
+            )
             .await
             .map_err(invalid_enrollment)?;
         self.issue_enrolled_device(&completed, &csr_der).await
@@ -455,8 +467,6 @@ impl FleetAgentService {
         completed: &crate::oidc::CompletedEnrollment,
         csr_der: &[u8],
     ) -> Result<Response<EnrollResponse>, Status> {
-        rcgen::CertificateSigningRequestParams::from_der(&csr_der.into())
-            .map_err(|error| invalid_csr(error.into()))?;
         let device_id = enrollment_device_id(&completed.issuer, &completed.subject, csr_der);
         if let Some(response) = self
             .database
@@ -658,6 +668,10 @@ fn internal(err: anyhow::Error) -> Status {
 
 fn invalid_enrollment(err: anyhow::Error) -> Status {
     warn!(error = %err, "OIDC enrollment failed");
+    if identity_provider_unavailable(&err) {
+        // The agent retries this with the same sign-in instead of starting over.
+        return Status::unavailable("OIDC identity provider is unavailable");
+    }
     Status::unauthenticated("OIDC enrollment failed")
 }
 
@@ -668,18 +682,29 @@ fn invalid_csr(err: anyhow::Error) -> Status {
 
 fn invalid_access_token(err: anyhow::Error) -> Status {
     warn!(error = %err, "OIDC access token rejected");
-    let request_error = err
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<reqwest::Error>());
-    if let Some(request_error) = request_error {
-        return match request_error.status() {
-            Some(reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN) => {
-                Status::unauthenticated("OIDC access token rejected")
-            }
-            _ => Status::unavailable("OIDC access-token validation is unavailable"),
-        };
+    if identity_provider_unavailable(&err) {
+        return Status::unavailable("OIDC access-token validation is unavailable");
     }
     Status::unauthenticated("OIDC access token rejected")
+}
+
+/// Whether `err` means the identity provider could not be used, rather than that
+/// it rejected the credential: any failed request other than 401 or 403.
+fn identity_provider_unavailable(err: &anyhow::Error) -> bool {
+    if err
+        .chain()
+        .any(|cause| cause.is::<crate::oidc::IdentityProviderUnavailable>())
+    {
+        return true;
+    }
+    err.chain()
+        .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        .is_some_and(|error| {
+            !matches!(
+                error.status(),
+                Some(reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN)
+            )
+        })
 }
 
 #[cfg(test)]
@@ -751,18 +776,24 @@ mod tests {
             .unwrap()
             .serialize_request(&device_key)
             .unwrap();
+        let key_nonce = |key: &KeyPair| {
+            agentdesktop_proto::enrollment_nonce(&rcgen::PublicKeyData::subject_public_key_info(
+                key,
+            ))
+        };
         let body = EnrollDeviceRequest {
             hostname: "workstation".to_owned(),
             certificate_signing_request_der: csr.der().as_ref().to_vec(),
-            id_token: id_token(&signing_key, &user_claims()),
+            id_token: id_token(&signing_key, &user_claims(&key_nonce(&device_key))),
         };
-        let request = |body: EnrollDeviceRequest| {
+        let request_with = |token: &str, body: EnrollDeviceRequest| {
             let mut request = tonic::Request::new(body);
             request
                 .metadata_mut()
-                .insert("authorization", "Bearer access-token".parse().unwrap());
+                .insert("authorization", format!("Bearer {token}").parse().unwrap());
             request
         };
+        let request = |body: EnrollDeviceRequest| request_with("access-token", body);
         assert_eq!(
             service
                 .enroll_device(tonic::Request::new(body.clone()))
@@ -791,9 +822,29 @@ mod tests {
                 .code(),
             Code::InvalidArgument
         );
+        let mut other_key_sign_in = body.clone();
+        other_key_sign_in.id_token = id_token(&signing_key, &user_claims("other-key-nonce"));
+        assert_eq!(
+            service
+                .enroll_device(request(other_key_sign_in))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::Unauthenticated,
+            "a sign-in bound to another key must not enroll this one"
+        );
+        assert_eq!(
+            service
+                .enroll_device(request_with("flaky", body.clone()))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::Unavailable,
+            "an IdP failure must be retryable instead of sending the user back to sign-in"
+        );
         assert_eq!(counts().await, (0, 0));
         let response = service
-            .enroll_device(request(body.clone()))
+            .enroll_device(request_with("flaky", body.clone()))
             .await
             .unwrap()
             .into_inner();
@@ -838,6 +889,7 @@ mod tests {
             .serialize_request(&other_key)
             .unwrap();
         other_body.certificate_signing_request_der = other_csr.der().as_ref().to_vec();
+        other_body.id_token = id_token(&signing_key, &user_claims(&key_nonce(&other_key)));
         let mut tasks = tokio::task::JoinSet::new();
         for _ in 0..4 {
             let service = service.clone();
@@ -866,6 +918,19 @@ mod tests {
         assert_eq!(counts().await, (1, 1));
         idp.abort();
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn jwks_refresh_cooldown_is_retryable() {
+        let error = anyhow::Error::new(crate::oidc::IdentityProviderUnavailable(
+            "OIDC JWKS refresh is rate limited",
+        ))
+        .context("validate enrollment");
+        assert_eq!(super::invalid_enrollment(error).code(), Code::Unavailable);
+        assert_eq!(
+            super::invalid_enrollment(anyhow::anyhow!("OIDC nonce mismatch")).code(),
+            Code::Unauthenticated
+        );
     }
 
     #[test]

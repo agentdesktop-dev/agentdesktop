@@ -31,6 +31,8 @@ message LoginConfiguration {
 }
 
 // Called only after user authentication; bearer access token is in metadata.
+// For a browser sign-in, the ID token's nonce must be the base64url SHA-256 of
+// the CSR's SubjectPublicKeyInfo (agentdesktop_proto::enrollment_nonce).
 message EnrollDeviceRequest {
   string hostname = 1;
   bytes certificate_signing_request_der = 2;

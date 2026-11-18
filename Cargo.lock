@@ -176,8 +176,10 @@ dependencies = [
 name = "agentdesktop-proto"
 version = "0.1.1"
 dependencies = [
+ "base64 0.23.1",
  "prost",
  "protox",
+ "sha2 0.11.1",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
