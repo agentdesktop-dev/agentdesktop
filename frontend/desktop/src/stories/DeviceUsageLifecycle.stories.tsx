@@ -1,6 +1,6 @@
-import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
+import { useState } from "react";
 import { expect, userEvent, waitFor, within } from "storybook/test";
 
 import { useDeviceUsage } from "../useDeviceUsage";
@@ -29,11 +29,18 @@ function DeviceUsageHarness() {
       <p data-testid="range">{range}</p>
       <p data-testid="usage">{usage ? "present" : "empty"}</p>
       <p data-testid="error">{error ?? "none"}</p>
-      <button onClick={() => setRange(range === "7d" ? "30d" : "7d")}>
+      <button
+        type="button"
+        onClick={() => setRange(range === "7d" ? "30d" : "7d")}
+      >
         Change range
       </button>
-      <button onClick={() => void reload()}>Reload</button>
-      <button onClick={() => setActive(false)}>Deactivate</button>
+      <button type="button" onClick={() => void reload()}>
+        Reload
+      </button>
+      <button type="button" onClick={() => setActive(false)}>
+        Deactivate
+      </button>
     </main>
   );
 }
