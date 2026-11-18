@@ -724,6 +724,62 @@ fn a_request_without_a_device_certificate_does_not_keep_its_connection_from_evic
     assert_eq!(evicted.try_recv(), Ok(()));
 }
 
+#[test]
+fn at_either_cap_the_longest_idle_connection_is_evicted_not_the_oldest() {
+    use tokio::sync::oneshot::error::TryRecvError;
+
+    let mut total_cap = FLEET_LIMITS;
+    total_cap.configured.max_connections = 2;
+    let mut address_cap = FLEET_LIMITS;
+    address_cap.configured.connections_per_address = 2;
+    for limits in [total_cap, address_cap] {
+        let connections = Connections::new(&limits);
+        let peer = |port| SocketAddr::from(([192, 0, 2, 1], port));
+        let (_oldest, mut oldest_evicted) = connections.register(peer(1)).expect("oldest");
+        let (_newer, mut newer_evicted) = connections.register(peer(2)).expect("newer");
+        // The oldest connection's request ends after the newer one went idle.
+        drop(
+            connections
+                .start_request(peer(1), true)
+                .expect("busy request"),
+        );
+
+        assert!(connections.register(peer(3)).is_some());
+        assert_eq!(newer_evicted.try_recv(), Ok(()));
+        assert_eq!(oldest_evicted.try_recv(), Err(TryRecvError::Empty));
+    }
+}
+
+#[test]
+fn a_request_on_an_evicted_connection_is_not_counted() {
+    let mut limits = FLEET_LIMITS;
+    limits.configured.max_connections = 1;
+    let connections = Connections::new(&limits);
+    let peer = |last| SocketAddr::from(([192, 0, 2, last], 1));
+    let (_first, mut first_evicted) = connections.register(peer(1)).expect("first connection");
+    assert!(connections.register(peer(2)).is_some());
+    assert_eq!(first_evicted.try_recv(), Ok(()));
+
+    // The evicted connection fails its next read or write.
+    assert!(connections.start_request(peer(1), true).is_none());
+}
+
+#[test]
+fn the_idle_maps_hold_only_idle_connections() {
+    let connections = Connections::new(&FLEET_LIMITS);
+    let peer = |port| SocketAddr::from(([192, 0, 2, 1], port));
+    let _first = connections.register(peer(1)).expect("first connection");
+    let _second = connections.register(peer(2)).expect("second connection");
+
+    for _ in 0..100 {
+        drop(connections.start_request(peer(1), true).expect("request"));
+    }
+    assert_eq!(connections.idle_entries(), (2, 2));
+
+    let _busy = connections.start_request(peer(2), true).expect("request");
+    assert_eq!(connections.idle_entries(), (1, 1));
+}
+
 #[tokio::test]
 async fn at_the_total_cap_the_longest_idle_connection_makes_room() {
     let mut limits = FLEET_LIMITS;
