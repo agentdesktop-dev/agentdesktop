@@ -142,10 +142,11 @@ pub async fn serve_router(
         },
         ControllerAdminAccess::Local => None,
     };
-    info!(
-        authenticated = matches!(access, ControllerAdminAccess::Authenticated(_)),
-        "controller management access"
-    );
+    let mode = match access {
+        ControllerAdminAccess::Local => "local",
+        ControllerAdminAccess::Authenticated(_) => "authenticated",
+    };
+    info!(mode, "admin listener access mode");
     let limits = HttpListenerLimits::new(limits.max_connections, limits.connections_per_address);
     HttpListener::from_std("admin", listener, tls, limits)?
         .serve(app)
