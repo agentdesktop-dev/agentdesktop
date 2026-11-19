@@ -59,7 +59,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_json_path_to_error = "0.1"
 serde-transcode = "1.1"
-serde_yaml = "0.9"
+serde-saphyr = { version = "2.1", default-features = false, features = ["deserialize", "serialize"] }
 sha2 = "0.11"
 similar = "3.2"
 sqlx = { version = "0.9", default-features = false, features = ["any", "macros", "migrate", "runtime-tokio", "sqlite"] }

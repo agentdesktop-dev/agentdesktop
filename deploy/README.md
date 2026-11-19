@@ -66,3 +66,45 @@ To inspect the loopback-only management UI:
 ```console
 kubectl port-forward deployment/agentdesktop 8080:8080
 ```
+
+## Network policy
+
+Set `networkPolicy.enabled=true` to restrict the controller pod with a
+Kubernetes NetworkPolicy. It is off by default, and enforcement requires a CNI
+that implements NetworkPolicy.
+
+When it is enabled:
+
+- Ingress to the fleet port (gRPC API, gateway JWKS, usage ingest) is allowed
+  from `networkPolicy.ingress.fleet.from`. The default empty list allows any source.
+- Ingress to the management port is allowed only from
+  `networkPolicy.ingress.admin.from`, by default pods in the release namespace.
+  The generated configuration binds it to loopback anyway.
+- Egress is limited to DNS (`networkPolicy.egress.dns`, kube-dns by default),
+  the database (`networkPolicy.egress.database`), the OIDC issuer
+  (`networkPolicy.egress.idp`), and any rules in `networkPolicy.egress.extra`,
+  such as a KMS endpoint.
+
+Each `to` list takes standard NetworkPolicy peers. For example, with
+PostgreSQL in the same namespace and an external IdP:
+
+```yaml
+networkPolicy:
+  enabled: true
+  egress:
+    database:
+      to:
+      - podSelector:
+          matchLabels:
+            app: postgres
+    idp:
+      to:
+      - ipBlock:
+          cidr: 203.0.113.0/24
+```
+
+NetworkPolicy cannot match hostnames. An IdP outside the cluster therefore
+needs either its egress CIDRs as `ipBlock` peers, or an empty `idp.to` plus an
+FQDN-aware policy from your CNI, such as Cilium's `toFQDNs`, that allows it.
+When `database.to` or `idp.to` is empty, no rule is rendered for that
+destination. The controller fails at startup if it cannot reach either one.
