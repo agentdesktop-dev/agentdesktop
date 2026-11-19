@@ -38,9 +38,62 @@ pub mod yamlviajson {
     }
 }
 
+/// Serde helpers for `std::time::Duration` in a humantime-compatible format,
+/// such as `90s`, `1h 30m` or `30days`. Days and weeks count as 24 hours and
+/// 7 days; months and years are rejected because their length varies.
+pub mod duration {
+    use serde::{Deserialize, Deserializer, Serializer, de};
+    use std::time::Duration;
+
+    pub fn parse(value: &str) -> Result<Duration, jiff::Error> {
+        let span: jiff::Span = value.parse()?;
+        let duration = span.to_duration(jiff::SpanRelativeTo::days_are_24_hours())?;
+        Duration::try_from(duration)
+    }
+
+    pub fn format(duration: &Duration) -> String {
+        // humantime designators keep the output readable by older daemons.
+        jiff::fmt::friendly::SpanPrinter::new()
+            .designator(jiff::fmt::friendly::Designator::HumanTime)
+            .unsigned_duration_to_string(duration)
+    }
+
+    pub fn serialize<S: Serializer>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&format(duration))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        parse(&value).map_err(de::Error::custom)
+    }
+
+    pub mod option {
+        use serde::{Deserialize, Deserializer, Serializer};
+        use std::time::Duration;
+
+        pub fn serialize<S: Serializer>(
+            duration: &Option<Duration>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            match duration {
+                Some(duration) => super::serialize(duration, serializer),
+                None => serializer.serialize_none(),
+            }
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Option<Duration>, D::Error> {
+            Option::<String>::deserialize(deserializer)?
+                .map(|value| super::parse(&value).map_err(serde::de::Error::custom))
+                .transpose()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::yamlviajson;
+    use super::{duration, yamlviajson};
     use serde_json::{Value, json};
 
     #[test]
@@ -81,5 +134,34 @@ mod tests {
         let original = json!({"enabled": "yes", "count": "123", "pair": "a: b", "nested": {"list": [1, "two"]}});
         let yaml = yamlviajson::to_string(&original).unwrap();
         assert_eq!(yamlviajson::from_str::<Value>(&yaml).unwrap(), original);
+    }
+
+    #[test]
+    fn durations_accept_humantime_units_and_reject_calendar_units() {
+        use std::time::Duration;
+        assert_eq!(duration::parse("50ms").unwrap(), Duration::from_millis(50));
+        assert_eq!(
+            duration::parse("1h 30m").unwrap(),
+            Duration::from_secs(5400)
+        );
+        assert_eq!(
+            duration::parse("30days").unwrap(),
+            Duration::from_secs(30 * 86400)
+        );
+        assert_eq!(
+            duration::parse("1w").unwrap(),
+            Duration::from_secs(7 * 86400)
+        );
+        assert!(duration::parse("1month").is_err());
+        assert!(duration::parse("1year").is_err());
+        assert!(duration::parse("-5s").is_err());
+    }
+
+    #[test]
+    fn durations_format_in_humantime_style() {
+        use std::time::Duration;
+        assert_eq!(duration::format(&Duration::from_secs(90)), "1m 30s");
+        assert_eq!(duration::format(&Duration::from_millis(50)), "50ms");
+        assert_eq!(duration::format(&Duration::ZERO), "0s");
     }
 }

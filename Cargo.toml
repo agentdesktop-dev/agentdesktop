@@ -32,7 +32,7 @@ clap = { version = "4", features = ["derive"] }
 futures-core = "0.3"
 http-body = "1"
 http-body-util = "0.1"
-humantime-serde = "1"
+jiff = { version = "1", default-features = false, features = ["std"] }
 hostname = "0.4"
 hyper = { version = "1", features = ["client", "http1", "server"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "native-tokio", "aws-lc-rs"] }
