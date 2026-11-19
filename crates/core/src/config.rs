@@ -1624,16 +1624,32 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
         if gateway.lifetime.is_zero() {
             anyhow::bail!("gatewayJwt.lifetime must be greater than zero");
         }
-        let gateway = &config.gateway_listener;
-        for (field, other) in [
-            ("fleetListener.listen", config.fleet_listener.listen),
-            ("adminListener.listen", config.admin_listener.listen),
-        ] {
-            if other.port() == gateway.listen.port() {
+    }
+    // Each listener needs its own port. The gateway listener starts only with gatewayJwt.
+    let mut listeners = vec![
+        (
+            "fleetListener.listen",
+            config.fleet_listener.listen,
+            default_fleet_listen(),
+        ),
+        (
+            "adminListener.listen",
+            config.admin_listener.listen,
+            default_admin_listen(),
+        ),
+    ];
+    if config.gateway_jwt.is_some() {
+        listeners.push((
+            "gatewayListener.listen",
+            config.gateway_listener.listen,
+            default_gateway_listen(),
+        ));
+    }
+    for (index, (field, address, default)) in listeners.iter().enumerate() {
+        for (other_field, other, other_default) in &listeners[index + 1..] {
+            if address.port() == other.port() {
                 anyhow::bail!(
-                    "gatewayListener.listen ({}, default {}) uses the same port as {field} ({other}); set gatewayListener.listen to another port",
-                    gateway.listen,
-                    default_gateway_listen()
+                    "{field} ({address}, default {default}) and {other_field} ({other}, default {other_default}) use the same port; each listener needs its own port"
                 );
             }
         }
@@ -2585,6 +2601,17 @@ gatewayJwt:
             base.replace("gatewayJwt:\n  privateKey: /gateway-jwt-key.pem\n", "")
         ))
         .expect("no gateway listener without gatewayJwt");
+        // The fleet and management listeners are always checked against each other.
+        let without_gateway = base.replace("gatewayJwt:\n  privateKey: /gateway-jwt-key.pem\n", "");
+        let error = parse_controller(&format!(
+            "{without_gateway}fleetListener:\n  listen: 127.0.0.1:8080\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("fleetListener.listen") && error.contains("adminListener.listen"),
+            "{error}"
+        );
         assert!(parse_controller(&format!("{base}gatewayListener:\n  path: /jwks\n")).is_err());
     }
 
