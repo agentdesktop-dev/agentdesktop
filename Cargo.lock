@@ -60,6 +60,7 @@ dependencies = [
  "glob",
  "hostname",
  "http-body-util",
+ "humantime",
  "hyper",
  "hyper-rustls",
  "hyper-util",
@@ -107,8 +108,10 @@ dependencies = [
  "hyper-util",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
