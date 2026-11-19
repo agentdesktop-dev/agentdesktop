@@ -6,6 +6,9 @@ metadata:
     {{- include "agentdesktop-controller.labels" . | nindent 4 }}
 spec:
   type: {{ .Values.service.type }}
+  {{- if and .Values.service.externalTrafficPolicy (has .Values.service.type (list "LoadBalancer" "NodePort")) }}
+  externalTrafficPolicy: {{ .Values.service.externalTrafficPolicy }}
+  {{- end }}
   selector:
     {{- include "agentdesktop-controller.selectorLabels" . | nindent 4 }}
   ports:

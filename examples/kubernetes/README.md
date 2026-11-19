@@ -150,11 +150,12 @@ model to Anthropic using the API key stored in the Kubernetes Secret.
 For each request, Claude Code's Agentdesktop credential helper obtains a
 short-lived JWT from the controller. Agentgateway requires the
 `agentdesktop-controller` issuer and `agentgateway` audience, and validates the
-signature against `https://agentdesktop.agentdesktop.svc.cluster.local/.well-known/jwks.json`
-on the controller's existing port 443 Service. A backend policy supplies the
-development CA for that TLS connection. Agentgateway access logs include the
-authenticated `llm.client` and `user` JWT attributes. The Anthropic API key is
-never distributed to the workstation.
+signature against
+`https://agentdesktop-gateway.agentdesktop.svc.cluster.local/.well-known/jwks.json`,
+the chart's gateway Service, which serves nothing else. A backend policy
+supplies the development CA for that TLS connection. Agentgateway access logs
+include the authenticated `llm.client` and `user` JWT attributes. The Anthropic
+API key is never distributed to the workstation.
 
 ## Clean up
 
