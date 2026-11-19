@@ -394,7 +394,7 @@ impl Connections {
     }
 
     #[cfg(test)]
-    pub(super) fn open_count(&self) -> usize {
+    pub(crate) fn open_count(&self) -> usize {
         self.state().open.len()
     }
 }

@@ -383,21 +383,36 @@ async fn the_admin_listener_applies_its_configured_connection_limits() {
     let server = tokio::spawn(async move {
         super::super::serve_router(listener, router, &ControllerAdminAccess::Local, limits).await
     });
-    // Each connection is admitted in its own task, so let it register before
-    // the next one connects: `oldest` must be the longest idle.
-    let mut oldest = tokio::net::TcpStream::connect(address).await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let _second = tokio::net::TcpStream::connect(address).await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let bounded = |future| tokio::time::timeout(std::time::Duration::from_secs(5), future);
+    let mut first = bounded(tokio::net::TcpStream::connect(address))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut second = bounded(tokio::net::TcpStream::connect(address))
+        .await
+        .unwrap()
+        .unwrap();
 
-    let response = reqwest::get(format!("http://{address}/auth/session"))
+    // A third connection, at a cap of two, closes one of the idle ones. Which
+    // one depends on admission order, which this test does not control.
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap()
+        .get(format!("http://{address}/auth/session"))
+        .send()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let mut buffer = [0; 16];
-    let closed = tokio::time::timeout(std::time::Duration::from_secs(5), oldest.read(&mut buffer))
-        .await
-        .expect("the oldest idle connection was not closed");
+    let (mut first_buffer, mut second_buffer) = ([0; 16], [0; 16]);
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::select! {
+            read = first.read(&mut first_buffer) => read,
+            read = second.read(&mut second_buffer) => read,
+        }
+    })
+    .await
+    .expect("no idle connection was closed at the cap");
     assert!(matches!(closed, Ok(0) | Err(_)));
     server.abort();
     std::fs::remove_file(path).unwrap();

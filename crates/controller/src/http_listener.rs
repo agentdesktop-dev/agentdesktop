@@ -74,6 +74,7 @@ pub struct HttpListener {
     listener: std::net::TcpListener,
     tls: Option<RustlsConfig>,
     limits: HttpListenerLimits,
+    connections: Connections,
 }
 
 impl HttpListener {
@@ -107,6 +108,7 @@ impl HttpListener {
             listener,
             tls,
             limits,
+            connections: Connections::new(limits.connections, name),
         })
     }
 
@@ -117,6 +119,12 @@ impl HttpListener {
             .with_context(|| format!("read {} listener address", self.name))
     }
 
+    /// The listener's connection registry.
+    #[cfg(test)]
+    pub(crate) fn connections(&self) -> &Connections {
+        &self.connections
+    }
+
     /// Serves `router` until the listener fails.
     pub async fn serve(self, router: Router) -> anyhow::Result<()> {
         let name = self.name;
@@ -125,7 +133,7 @@ impl HttpListener {
             tls = self.tls.is_some(),
             "{name} listener listening"
         );
-        let connections = Connections::new(self.limits.connections, name);
+        let connections = self.connections;
         let app = router
             .layer(middleware::from_fn_with_state(
                 connections.clone(),
@@ -202,26 +210,52 @@ mod tests {
     };
 
     use super::{HttpListener, HttpListenerLimits, HttpListenerTls};
+    use crate::fleet_limits::Connections;
 
     const LIMITS: HttpListenerLimits = HttpListenerLimits::new(1024, 64);
 
+    /// Fails the test, instead of hanging it, when `future` takes over 5 s.
+    async fn bounded<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(5), future)
+            .await
+            .expect("timed out")
+    }
+
+    fn client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap()
+    }
+
     /// Serves a one-route app on a loopback listener.
-    fn serve(limits: HttpListenerLimits, tls: Option<HttpListenerTls<'_>>) -> SocketAddr {
+    fn serve(
+        limits: HttpListenerLimits,
+        tls: Option<HttpListenerTls<'_>>,
+    ) -> (SocketAddr, Connections) {
         let listener =
             HttpListener::bind("test", SocketAddr::from(([127, 0, 0, 1], 0)), tls, limits).unwrap();
         let address = listener.local_address().unwrap();
+        let connections = listener.connections().clone();
         tokio::spawn(listener.serve(Router::new().route("/", get(|| async { "ok" }))));
-        address
+        (address, connections)
     }
 
-    /// Waits until the server closes `stream`, failing the test after 5 s.
+    /// Waits until the listener has admitted `count` connections.
+    async fn until_open(connections: &Connections, count: usize) {
+        bounded(async {
+            while connections.open_count() < count {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+    }
+
+    /// Waits until the server closes `stream`.
     async fn until_closed(mut stream: TcpStream) {
         let mut buffer = [0; 1024];
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while matches!(stream.read(&mut buffer).await, Ok(read) if read > 0) {}
-        })
-        .await
-        .expect("the listener did not close the connection");
+        bounded(async { while matches!(stream.read(&mut buffer).await, Ok(read) if read > 0) {} })
+            .await;
     }
 
     #[tokio::test]
@@ -238,7 +272,7 @@ mod tests {
         let key = directory.join("controller-key.pem");
         std::fs::write(&certificate, cert.pem()).unwrap();
         std::fs::write(&key, signing_key.serialize_pem()).unwrap();
-        let address = serve(
+        let (address, _) = serve(
             LIMITS,
             Some(HttpListenerTls {
                 certificate: &certificate,
@@ -246,7 +280,7 @@ mod tests {
             }),
         );
 
-        let client = |builder: reqwest::ClientBuilder| {
+        let tls_client = |builder: reqwest::ClientBuilder| {
             builder
                 .add_root_certificate(
                     reqwest::Certificate::from_pem(cert.pem().as_bytes()).unwrap(),
@@ -256,9 +290,12 @@ mod tests {
                 .unwrap()
         };
         for (client, version) in [
-            (client(reqwest::Client::builder()), reqwest::Version::HTTP_2),
             (
-                client(reqwest::Client::builder().http1_only()),
+                tls_client(reqwest::Client::builder()),
+                reqwest::Version::HTTP_2,
+            ),
+            (
+                tls_client(reqwest::Client::builder().http1_only()),
                 reqwest::Version::HTTP_11,
             ),
         ] {
@@ -271,7 +308,9 @@ mod tests {
             assert_eq!(response.text().await.unwrap(), "ok");
         }
         assert!(
-            reqwest::get(format!("http://{address}/"))
+            client()
+                .get(format!("http://{address}/"))
+                .send()
                 .await
                 .map_or(true, |response| !response.status().is_success()),
             "plaintext must not reach the TLS listener"
@@ -283,9 +322,9 @@ mod tests {
     async fn a_connection_that_never_makes_a_request_is_closed() {
         let mut limits = LIMITS;
         limits.connections.first_request = Duration::from_millis(200);
-        let address = serve(limits, None);
+        let (address, _) = serve(limits, None);
 
-        until_closed(TcpStream::connect(address).await.unwrap()).await;
+        until_closed(bounded(TcpStream::connect(address)).await.unwrap()).await;
     }
 
     #[tokio::test]
@@ -294,15 +333,14 @@ mod tests {
         // Far past the test's bound, so only the idle close can end the connection.
         limits.connections.first_request = Duration::from_secs(60);
         limits.connections.idle = Duration::from_millis(200);
-        let address = serve(limits, None);
-        let mut stream = TcpStream::connect(address).await.unwrap();
+        let (address, _) = serve(limits, None);
+        let mut stream = bounded(TcpStream::connect(address)).await.unwrap();
 
-        stream
-            .write_all(b"GET / HTTP/1.1\r\nHost: listener\r\n\r\n")
+        bounded(stream.write_all(b"GET / HTTP/1.1\r\nHost: listener\r\n\r\n"))
             .await
             .unwrap();
         let mut status = [0; 12];
-        stream.read_exact(&mut status).await.unwrap();
+        bounded(stream.read_exact(&mut status)).await.unwrap();
         assert_eq!(&status, b"HTTP/1.1 200");
 
         until_closed(stream).await;
@@ -313,15 +351,19 @@ mod tests {
         let mut limits = LIMITS;
         limits.connections.first_request = Duration::from_secs(60);
         limits.connections.connections_per_address = 2;
-        let address = serve(limits, None);
-        // Each connection is admitted in its own task, so let it register before
-        // the next one connects: `oldest` must be the longest idle.
-        let oldest = TcpStream::connect(address).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let _second = TcpStream::connect(address).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (address, connections) = serve(limits, None);
+        // Each connection is admitted in its own task, so wait for it to register
+        // before the next one connects: `oldest` must be the longest idle.
+        let oldest = bounded(TcpStream::connect(address)).await.unwrap();
+        until_open(&connections, 1).await;
+        let _second = bounded(TcpStream::connect(address)).await.unwrap();
+        until_open(&connections, 2).await;
 
-        let response = reqwest::get(format!("http://{address}/")).await.unwrap();
+        let response = client()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(response.text().await.unwrap(), "ok");
         until_closed(oldest).await;
     }
