@@ -160,7 +160,9 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "humantime-serde",
+ "rcgen",
  "reqwest",
+ "rustls",
  "schemars 1.2.3",
  "serde",
  "serde-transcode",

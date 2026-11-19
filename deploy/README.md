@@ -37,18 +37,29 @@ helm install agentdesktop deploy/helm/agentdesktop-controller \
 
 For production, avoid placing database credentials in Helm values. Create a
 Secret containing the complete controller configuration under the key
-`controller.yaml`, then set `existingConfigSecret` to its name.
+`controller.yaml`, then set `existingConfigSecret` to its name. The chart then
+does not render the configuration, so it must set the listen addresses the
+Services need: `fleetListener.listen: 0.0.0.0:8443`, and with `gatewayJwt`,
+`gatewayListener.listen: 0.0.0.0:8444` (with `gatewayListener.tls` matching the
+chart's value). The controller defaults both to loopback.
 See `values.yaml` for all chart settings.
 
-The Service exposes only the TLS-protected fleet API. The controller limits
-connections and enrollment per client address. With the Kubernetes default
-external traffic policy, it may see node addresses instead of devices' own, and
-many devices then share one address's connection limit and enrollment budget.
-Set `service.externalTrafficPolicy` to `Local` to keep devices' addresses when
-your load balancer sends traffic only to nodes that run the controller. With the
-default policy, or behind a load balancer that proxies connections, raise
-`fleetLimits.connectionsPerAddress`, and for large rollouts raise
-`fleetLimits.enrollmentBurst` or shorten `fleetLimits.enrollmentRefill`.
+The `<release>` Service exposes only the TLS-protected fleet API. With
+`gatewayJwt`, the chart adds a `<release>-gateway` ClusterIP Service for LLM
+gateways, which serves only the gateway JWKS; point gateways' JWKS URL at it.
+Set `gatewayListener.tls: true` unless the network between gateways and the
+controller is trusted, and include the Service name in the controller
+certificate.
+
+The controller limits connections and enrollment per client address. With the
+Kubernetes default external traffic policy, it may see node addresses instead of
+devices' own, and many devices then share one address's connection limit and
+enrollment budget. Set `service.externalTrafficPolicy` to `Local` to keep
+devices' addresses when your load balancer sends traffic only to nodes that run
+the controller. With the default policy, or behind a load balancer that proxies
+connections, raise `fleetListener.limits.connectionsPerAddress`, and for large
+rollouts raise `fleetListener.limits.enrollmentBurst` or shorten
+`fleetListener.limits.enrollmentRefill`.
 
 To inspect the loopback-only management UI:
 

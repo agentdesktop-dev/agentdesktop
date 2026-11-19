@@ -39,7 +39,7 @@ openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
   -keyout "${work_dir}/controller-key.pem" \
   -out "${work_dir}/controller.csr" \
   -subj /CN=agentdesktop \
-  -addext "subjectAltName=DNS:agentdesktop,DNS:agentdesktop.${namespace},DNS:agentdesktop.${namespace}.svc,DNS:agentdesktop.${namespace}.svc.cluster.local" \
+  -addext "subjectAltName=DNS:agentdesktop,DNS:agentdesktop.${namespace},DNS:agentdesktop.${namespace}.svc,DNS:agentdesktop.${namespace}.svc.cluster.local,DNS:agentdesktop-gateway,DNS:agentdesktop-gateway.${namespace},DNS:agentdesktop-gateway.${namespace}.svc,DNS:agentdesktop-gateway.${namespace}.svc.cluster.local" \
   -addext extendedKeyUsage=serverAuth
 
 openssl x509 -req -in "${work_dir}/controller.csr" \

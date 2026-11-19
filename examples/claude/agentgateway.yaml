@@ -43,7 +43,8 @@ llm:
       issuer: agentdesktop-controller
       audiences: [agentgateway]
       jwks:
-        url: http://127.0.0.1:8080/.well-known/jwks.json
+        # The controller's gatewayListener (default 127.0.0.1:8444).
+        url: http://127.0.0.1:8444/.well-known/jwks.json
   models:
   - name: "*"
     provider: anthropic

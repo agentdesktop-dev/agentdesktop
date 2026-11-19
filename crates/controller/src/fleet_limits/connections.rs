@@ -1,4 +1,9 @@
-//! Fleet connection admission and idle handling.
+//! Connection admission and idle handling, for the fleet listener and the
+//! management and gateway listeners (`crate::http_listener`). Each listener
+//! has its own registry (`Connections`) and limits (`ConnectionLimits`). The
+//! rest of this comment describes the fleet listener; on the other two no
+//! request makes a connection busy, so every connection is subject to the
+//! deadlines.
 //!
 //! Client certificates are optional on the fleet listener, so anyone can finish
 //! the TLS handshake. Without more, a client could then hold a connection open
@@ -57,13 +62,22 @@ use tonic::{
 };
 use tower_layer::Layer;
 
-use super::{FleetLimits, ThrottledWarning, address_key, has_device_certificate, is_connect};
+use super::{ThrottledWarning, address_key, has_device_certificate, is_connect};
 
-static TOTAL_CAP: ThrottledWarning = ThrottledWarning::new();
-static PER_ADDRESS_CAP: ThrottledWarning = ThrottledWarning::new();
-static EVICTIONS: ThrottledWarning = ThrottledWarning::new();
+/// Connection admission and idle limits for one listener.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ConnectionLimits {
+    /// Open connections allowed in total.
+    pub max_connections: usize,
+    /// Open connections allowed from one address key (`address_key`).
+    pub connections_per_address: usize,
+    /// Time a new connection has to make its first request.
+    pub first_request: Duration,
+    /// Time a connection may stay without a busy request after its last one.
+    pub idle: Duration,
+}
 
-/// Open fleet connections and their request activity, shared by the listener
+/// Open connections and their request activity, shared by the listener
 /// (which admits, times out and evicts connections) and the request layer (which
 /// marks connections busy).
 #[derive(Clone)]
@@ -72,6 +86,11 @@ pub struct Connections {
 }
 
 struct Shared {
+    /// Names the listener in logs, e.g. `fleet`.
+    listener: &'static str,
+    total_cap: ThrottledWarning,
+    per_address_cap: ThrottledWarning,
+    evictions: ThrottledWarning,
     max_connections: usize,
     connections_per_address: usize,
     first_request: Duration,
@@ -224,13 +243,17 @@ impl State {
 }
 
 impl Connections {
-    pub(super) fn new(limits: &FleetLimits) -> Self {
+    pub(crate) fn new(limits: ConnectionLimits, listener: &'static str) -> Self {
         Self {
             shared: Arc::new(Shared {
-                max_connections: limits.configured.max_connections,
-                connections_per_address: limits.configured.connections_per_address,
+                listener,
+                total_cap: ThrottledWarning::new(),
+                per_address_cap: ThrottledWarning::new(),
+                evictions: ThrottledWarning::new(),
+                max_connections: limits.max_connections,
+                connections_per_address: limits.connections_per_address,
                 first_request: limits.first_request,
-                idle: limits.idle_connection,
+                idle: limits.idle,
                 state: Mutex::default(),
             }),
         }
@@ -259,7 +282,9 @@ impl Connections {
         }
     }
 
-    fn admit(&self, stream: TcpStream) -> Option<LimitedConnection> {
+    /// Wraps an accepted connection in its limits, or returns `None` (closing
+    /// it) when the caps refuse it.
+    pub(crate) fn admit(&self, stream: TcpStream) -> Option<LimitedConnection> {
         let peer = stream.peer_addr().ok()?;
         let (activity, evicted) = self.register(peer)?;
         Some(LimitedConnection {
@@ -292,20 +317,22 @@ impl Connections {
             // at its cap never closes another client's connection. The one it
             // replaces frees a slot under the total cap too.
             if !state.evict_idle_from(address) {
-                if let Some(closed) = PER_ADDRESS_CAP.event(Instant::now()) {
+                if let Some(closed) = self.shared.per_address_cap.event(Instant::now()) {
                     tracing::warn!(
+                        listener = self.shared.listener,
                         latest_address = %address,
                         closed_since_last_warning = closed,
-                        "closed new fleet connections at the per-address connection limit with no connection from the address idle"
+                        "closed new connections at the per-address connection limit with no connection from the address idle"
                     );
                 }
                 return None;
             }
         } else if state.open.len() >= self.shared.max_connections && !state.evict_idle() {
-            if let Some(closed) = TOTAL_CAP.event(Instant::now()) {
+            if let Some(closed) = self.shared.total_cap.event(Instant::now()) {
                 tracing::warn!(
+                    listener = self.shared.listener,
                     closed_since_last_warning = closed,
-                    "closed new fleet connections at the connection limit with no connection idle"
+                    "closed new connections at the connection limit with no connection idle"
                 );
             }
             return None;
@@ -345,7 +372,7 @@ impl Connections {
 
     /// Records a request on `peer`'s connection; a `busy` one keeps the
     /// connection from going idle until the returned guard is dropped.
-    pub(super) fn start_request(&self, peer: SocketAddr, busy: bool) -> Option<RequestGuard> {
+    pub(crate) fn start_request(&self, peer: SocketAddr, busy: bool) -> Option<RequestGuard> {
         // Counted under the registry lock, which eviction holds, so a
         // connection is never evicted once its busy request has started.
         let activity = {
@@ -367,7 +394,7 @@ impl Connections {
     }
 
     #[cfg(test)]
-    pub(super) fn open_count(&self) -> usize {
+    pub(crate) fn open_count(&self) -> usize {
         self.state().open.len()
     }
 }
@@ -427,25 +454,23 @@ impl LimitedConnection {
     /// for eviction and the idle deadline otherwise.
     fn check_open(&mut self, context: &mut Context<'_>) -> io::Result<()> {
         if self.closed {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "fleet connection closed",
-            ));
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "connection closed"));
         }
         if let Some(evicted) = self.evicted.as_mut()
             && Pin::new(evicted).poll(context).is_ready()
         {
             self.evicted = None;
             self.closed = true;
-            if let Some(closed) = EVICTIONS.event(Instant::now()) {
+            if let Some(closed) = self.connections.shared.evictions.event(Instant::now()) {
                 tracing::warn!(
+                    listener = self.connections.shared.listener,
                     closed_since_last_warning = closed,
-                    "closed idle fleet connections to make room at the connection limit"
+                    "closed idle connections to make room at the connection limit"
                 );
             }
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                "idle fleet connection evicted",
+                "idle connection evicted",
             ));
         }
         {
@@ -470,10 +495,14 @@ impl LimitedConnection {
             };
             if deadline <= Instant::now() {
                 self.closed = true;
-                tracing::debug!(peer = %self.peer, "closing idle fleet connection");
+                tracing::debug!(
+                    listener = self.connections.shared.listener,
+                    peer = %self.peer,
+                    "closing idle connection"
+                );
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    "idle fleet connection closed",
+                    "idle connection closed",
                 ));
             }
             if self.timer.deadline() != deadline {
@@ -558,7 +587,7 @@ impl AsyncWrite for LimitedConnection {
 /// A request in progress. A device's request marks its connection busy while
 /// its handler runs, and for `Connect` while its session lasts (see
 /// `SessionBusy`); any request counts as activity when it starts and ends.
-pub(super) struct RequestGuard {
+pub(crate) struct RequestGuard {
     connections: Connections,
     peer: SocketAddr,
     activity: Arc<Activity>,

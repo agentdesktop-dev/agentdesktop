@@ -11,7 +11,7 @@ use aws_lc_rs::{rsa::KeyPair as RsaKeyPair, signature::KeyPair as _};
 use axum::{
     Json, Router,
     extract::State,
-    http::{StatusCode, header},
+    http::header,
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -34,25 +34,24 @@ pub struct GatewayJwks {
     keys: Vec<GatewayJwk>,
 }
 
-/// HTTP routes published on the controller's device-facing TLS listener.
-pub fn routes(jwks: Option<GatewayJwks>) -> Router {
-    Router::<Option<GatewayJwks>>::new()
+/// The JWKS route. Only the gateway listener (`crate::http_listener`) serves
+/// it, so the fleet and management listeners can be closed to gateways.
+pub fn routes(jwks: GatewayJwks) -> Router {
+    Router::new()
         .route("/.well-known/jwks.json", get(serve_jwks))
         .with_state(jwks)
 }
 
-async fn serve_jwks(State(jwks): State<Option<GatewayJwks>>) -> Result<Response, StatusCode> {
-    jwks.map(|jwks| {
-        (
-            [
-                (header::CACHE_CONTROL, "public, max-age=300"),
-                (header::CONTENT_TYPE, "application/jwk-set+json"),
-            ],
-            Json(jwks),
-        )
-            .into_response()
-    })
-    .ok_or(StatusCode::NOT_FOUND)
+async fn serve_jwks(State(jwks): State<GatewayJwks>) -> Response {
+    (
+        [
+            (header::CACHE_CONTROL, "public, max-age=300"),
+            (header::CONTENT_TYPE, "application/jwk-set+json"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        Json(jwks),
+    )
+        .into_response()
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -195,8 +194,7 @@ mod tests {
 
     use super::{Actor, Claims, GatewayJwtIssuer};
 
-    #[test]
-    fn published_jwks_verifies_issued_credentials() {
+    fn test_issuer() -> GatewayJwtIssuer {
         let key_pair = KeyPair::generate(KeySize::Rsa2048).expect("generate RSA key");
         let der: Pkcs8V1Der<'static> = key_pair.as_der().expect("encode private key");
         let pem = pem_rfc7468::encode_string("PRIVATE KEY", LineEnding::LF, der.as_ref())
@@ -207,7 +205,6 @@ mod tests {
             rand::random::<u64>()
         ));
         fs::write(&path, pem).expect("write test private key");
-
         let issuer = GatewayJwtIssuer::from_rsa_pem(
             &path,
             "agentdesktop-controller".to_owned(),
@@ -215,6 +212,56 @@ mod tests {
             std::time::Duration::from_secs(300),
         )
         .expect("create issuer");
+        let _ = fs::remove_file(path);
+        issuer
+    }
+
+    async fn assert_serves_jwks(client: &reqwest::Client, origin: &str) {
+        let response = client
+            .get(format!("{origin}/.well-known/jwks.json"))
+            .send()
+            .await
+            .expect("fetch JWKS");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-type"],
+            "application/jwk-set+json"
+        );
+        assert_eq!(response.headers()["cache-control"], "public, max-age=300");
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        let jwks: JwkSet = response.json().await.expect("decode JWKS");
+        assert!(jwks.find("agentdesktop").is_some());
+
+        let other = client
+            .get(format!("{origin}/api/v1/devices"))
+            .send()
+            .await
+            .expect("probe other path");
+        assert_eq!(other.status(), reqwest::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn the_gateway_listener_serves_only_the_jwks() {
+        let listener = crate::http_listener::HttpListener::bind(
+            "gateway",
+            std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+            None,
+            crate::http_listener::HttpListenerLimits::new(1024, 64),
+        )
+        .unwrap();
+        let address = listener.local_address().unwrap();
+        let server = tokio::spawn(listener.serve(super::routes(test_issuer().jwks())));
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        assert_serves_jwks(&client, &format!("http://{address}")).await;
+        server.abort();
+    }
+
+    #[test]
+    fn published_jwks_verifies_issued_credentials() {
+        let issuer = test_issuer();
         let (credential, _) = issuer
             .issue("user", "device", "codex", "agentgateway", None, false)
             .expect("issue credential");
@@ -231,8 +278,6 @@ mod tests {
         validation.set_audience(&["agentgateway"]);
         decode::<serde_json::Value>(&credential, &decoding_key, &validation)
             .expect("verify credential with published JWKS");
-
-        let _ = fs::remove_file(path);
     }
 
     #[test]
