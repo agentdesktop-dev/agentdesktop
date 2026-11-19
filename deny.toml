@@ -17,6 +17,7 @@ ignore = [
     { id = "RUSTSEC-2026-0371", reason = "zbus_names is unmaintained (merged into zbus 6); via zbus 5 in the Linux keyring store, pending upstream move to zbus 6." },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive is unmaintained (merged into zbus 6); via zbus 5 in the Linux keyring store, pending upstream move to zbus 6." },
     { id = "RUSTSEC-2026-0440", reason = "astral-tokio-tar is unmaintained; dev-dependency only, via testcontainers 0.28 in agent tests." },
+    { id = "RUSTSEC-2026-0542", reason = "humantime is unmaintained (as chrono is), with no maintained release; used only through humantime-serde for duration fields such as 250ms in config and API types. Drop once a maintained crate parses the same syntax." },
 ]
 
 [licenses]
