@@ -477,6 +477,14 @@ pub struct ControllerConnectionConfig {
     /// reach the IdP's device-authorization and token endpoints directly.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub device_authorization: bool,
+    /// Path to a file holding an enrollment token signed by an issuer the
+    /// controller trusts (`enrollmentTokens`).
+    ///
+    /// The daemon enrolls with this token instead of a user sign-in, so a
+    /// device management system can enroll devices unattended. Cannot be
+    /// combined with `deviceAuthorization`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrollment_token_path: Option<PathBuf>,
 }
 
 /// Startup configuration for the Agentdesktop fleet controller.
@@ -500,6 +508,9 @@ pub struct ControllerConfig {
     pub database_url: String,
     /// OpenID Connect settings used for device enrollment and authorization.
     pub oidc: ControllerOidcConfig,
+    /// Unattended device enrollment with operator-signed tokens. Disabled when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrollment_tokens: Option<ControllerEnrollmentTokensConfig>,
     /// Daemon configuration distributed to enrolled devices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daemon_config: Option<ControllerDaemonConfig>,
@@ -664,6 +675,35 @@ pub struct ControllerOidcConfig {
     /// Redirect URI registered for the native enrollment client.
     #[serde(default = "default_oidc_redirect_uri")]
     pub redirect_uri: String,
+}
+
+/// Enrollment tokens are JWTs with `iss`, `aud`, `jti` and `iat` claims; `exp`
+/// and `nbf` are honored when present. A token enrolls any number of devices.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerEnrollmentTokensConfig {
+    /// Audience (`aud`) every enrollment token must carry.
+    pub audience: String,
+    /// Token issuers the controller trusts.
+    pub issuers: Vec<ControllerEnrollmentTokenIssuer>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerEnrollmentTokenIssuer {
+    /// Issuer (`iss`) of the tokens this key verifies.
+    pub name: String,
+    /// Path to the PEM-encoded public key: ECDSA P-256 (ES256), Ed25519 (EdDSA)
+    /// or RSA (RS256).
+    ///
+    /// Relative paths are resolved from the controller configuration directory.
+    pub public_key_path: PathBuf,
+    /// Token IDs (`jti`) that are no longer accepted. Devices enrolled with
+    /// one of them are rejected as well.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revoked_ids: Vec<String>,
 }
 
 /// Controller-owned daemon configuration file and its revision.
@@ -1429,6 +1469,11 @@ pub fn load_controller(path: &Path) -> anyhow::Result<ControllerConfig> {
     if let Some(daemon) = &mut config.daemon_config {
         resolve_relative(&mut daemon.path, directory);
     }
+    if let Some(tokens) = &mut config.enrollment_tokens {
+        for issuer in &mut tokens.issuers {
+            resolve_relative(&mut issuer.public_key_path, directory);
+        }
+    }
     if let Some(gateway) = &mut config.gateway_jwt {
         resolve_relative(&mut gateway.private_key, directory);
     }
@@ -1483,6 +1528,23 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
         && daemon.revision == 0
     {
         anyhow::bail!("daemonConfig.revision must be greater than zero");
+    }
+    if let Some(tokens) = &config.enrollment_tokens {
+        if tokens.audience.trim().is_empty() {
+            anyhow::bail!("enrollmentTokens.audience cannot be empty");
+        }
+        if tokens.issuers.is_empty() {
+            anyhow::bail!("enrollmentTokens.issuers cannot be empty");
+        }
+        let mut names = std::collections::BTreeSet::new();
+        for issuer in &tokens.issuers {
+            if issuer.name.trim().is_empty() {
+                anyhow::bail!("enrollmentTokens.issuers has an entry with an empty name");
+            }
+            if !names.insert(&issuer.name) {
+                anyhow::bail!("enrollmentTokens.issuers.{} is defined twice", issuer.name);
+            }
+        }
     }
     if let Some(gateway) = &config.gateway_jwt {
         if gateway.issuer.trim().is_empty() {
@@ -1595,6 +1657,11 @@ fn parse_local_daemon(contents: &str) -> anyhow::Result<DaemonConfig> {
         }
         if controller.ca_certificate_path.as_os_str().is_empty() {
             anyhow::bail!("controller.caCertificatePath cannot be empty");
+        }
+        if controller.enrollment_token_path.is_some() && controller.device_authorization {
+            anyhow::bail!(
+                "controller.enrollmentTokenPath cannot be combined with deviceAuthorization"
+            );
         }
     }
     if config.inventory_interval.is_zero() {
@@ -2318,6 +2385,62 @@ controller:
                 .contains("controller.caCertificatePath cannot be empty"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn daemon_enrollment_token_replaces_user_sign_in() {
+        let token = r#"
+controller:
+  address: https://controller.example.com
+  caCertificatePath: controller-ca.pem
+  enrollmentTokenPath: /etc/agentdesktop/enrollment-token
+"#;
+        let daemon = parse_daemon(token).expect("enrollment token path");
+        assert_eq!(
+            daemon.controller.unwrap().enrollment_token_path,
+            Some(std::path::PathBuf::from(
+                "/etc/agentdesktop/enrollment-token"
+            ))
+        );
+
+        let error = parse_daemon(&format!("{token}  deviceAuthorization: true\n"))
+            .expect_err("enrollment token combined with device authorization");
+        assert!(error.to_string().contains("enrollmentTokenPath"), "{error}");
+    }
+
+    #[test]
+    fn controller_enrollment_tokens_need_an_audience_and_distinct_issuers() {
+        let controller = |enrollment_tokens: &str| {
+            parse_controller(&format!(
+                "tls: /etc/agentdesktop/tls\noidc:\n  issuer: https://idp.example.com\n  clientId: agentdesktop\nenrollmentTokens:\n{enrollment_tokens}"
+            ))
+        };
+        let tokens = controller(
+            "  audience: fleet\n  issuers:\n    - name: jamf\n      publicKeyPath: jamf.pub.pem\n      revokedIds: [batch-1]\n",
+        )
+        .expect("enrollment tokens")
+        .enrollment_tokens
+        .unwrap();
+        assert_eq!(tokens.audience, "fleet");
+        assert_eq!(tokens.issuers[0].revoked_ids, ["batch-1"]);
+
+        for (invalid, message) in [
+            (
+                "  audience: ''\n  issuers:\n    - name: jamf\n      publicKeyPath: a.pem\n",
+                "audience cannot be empty",
+            ),
+            (
+                "  audience: fleet\n  issuers: []\n",
+                "issuers cannot be empty",
+            ),
+            (
+                "  audience: fleet\n  issuers:\n    - name: jamf\n      publicKeyPath: a.pem\n    - name: jamf\n      publicKeyPath: b.pem\n",
+                "defined twice",
+            ),
+        ] {
+            let error = controller(invalid).expect_err("invalid enrollment tokens accepted");
+            assert!(error.to_string().contains(message), "{error}");
+        }
     }
 
     #[test]

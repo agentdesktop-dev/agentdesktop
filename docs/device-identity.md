@@ -35,6 +35,9 @@ matches the subject recorded for the device named in the certificate. A device
 certificate alone, or a valid user token presented with another user's
 device certificate, is rejected.
 
+A device enrolled with an [enrollment token](#enrollment-token) has no user:
+its certificate alone authenticates it.
+
 Key properties:
 
 - The device private key never leaves the workstation. The daemon sends only a
@@ -264,6 +267,59 @@ daemon's controller connection. The IdP must advertise a
    accepts tokens without a nonce only when the IdP advertises a device
    authorization endpoint.
 
+### Enrollment token
+
+A device management system can enroll devices with no user involved. The
+operator signs a token once, the controller trusts the operator's public key,
+and every device receives the same token file.
+
+The token is a JWT signed with ES256, EdDSA, or RS256:
+
+| Claim | Meaning |
+| --- | --- |
+| `iss` | The issuer's `name` in the controller configuration. |
+| `aud` | The controller's `enrollmentTokens.audience`. |
+| `jti` | The token's ID, used to revoke it. |
+| `iat` | When the token was issued. |
+| `exp`, `nbf` | Optional. Checked when present. |
+
+The controller lists the issuers it trusts:
+
+```yaml
+enrollmentTokens:
+  audience: agentdesktop-fleet
+  issuers:
+    - name: mdm
+      publicKeyPath: enrollment/mdm.pub.pem
+      revokedIds: []
+```
+
+The daemon reads the token from a file that only it can read:
+
+```yaml
+controller:
+  address: https://controller.example.com
+  caCertificatePath: /etc/agentdesktop/ca.pem
+  enrollmentTokenPath: /etc/agentdesktop/enrollment-token
+```
+
+With `enrollmentTokenPath` set, the daemon skips `GetLoginConfiguration` and
+sign-in. It generates the device key and calls `EnrollDevice` with the token
+instead of an ID token, and sends no access token. The controller verifies the
+CSR and the token, derives the device UUID from the token's issuer, its ID,
+and the CSR, and stores the issuer and ID with the device. One token enrolls
+any number of devices.
+
+Afterwards the device calls `Connect`, `RenewDeviceCertificate`, and
+`GetDeviceUsage` with its certificate alone. `GetLlmGatewayCredential` fails
+with `FAILED_PRECONDITION`, because the credential carries a user's identity
+and no user has signed in.
+
+To revoke a token, add its `jti` to the issuer's `revokedIds` and restart the
+controller. The token no longer enrolls devices, and the devices it enrolled
+are rejected as `Unauthenticated`. Removing the issuer rejects every device
+it enrolled. To remove one device, delete it in the controller UI.
+
 ### Controller validation
 
 On `EnrollDevice` the controller:
@@ -377,7 +433,7 @@ device identity.
 
 | Condition | Daemon behavior |
 | --- | --- |
-| Enrollment fails (IdP error, state mismatch, timeout, controller rejects) | Retry with backoff. Status returns to `starting`. |
+| Enrollment fails (IdP error, state mismatch, timeout, controller rejects) | Retry with backoff. Status returns to `starting`. A daemon with an enrollment token never falls back to sign-in. |
 | IdP rejects the refresh token | Delete the local identity and enroll again. The app reports the session as expired. |
 | Token refresh fails because of the network or an IdP outage | Keep the identity and retry with backoff. |
 | Controller returns `Unauthenticated` on the `Connect` stream, at open or later (unknown device certificate, or the IdP rejects the access token) | Delete the local identity and enroll again. |

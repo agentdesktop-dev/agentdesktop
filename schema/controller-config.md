@@ -18,6 +18,12 @@
 |`daemonConfig.path`|string|Path to the watched YAML configuration distributed to enrolled devices.<br><br>Relative paths are resolved from the controller configuration directory.<br>Valid file changes are published to connected devices automatically.|
 |`daemonConfig.revision`|integer|Monotonically increasing revision assigned to the daemon configuration.|
 |`databaseUrl`|string|SQLite or PostgreSQL URL used for controller state.|
+|`enrollmentTokens`|object|Unattended device enrollment with operator-signed tokens. Disabled when unset.|
+|`enrollmentTokens.audience`|string|Audience (`aud`) every enrollment token must carry.|
+|`enrollmentTokens.issuers`|[]object|Token issuers the controller trusts.|
+|`enrollmentTokens.issuers[].name`|string|Issuer (`iss`) of the tokens this key verifies.|
+|`enrollmentTokens.issuers[].publicKeyPath`|string|Path to the PEM-encoded public key: ECDSA P-256 (ES256), Ed25519 (EdDSA)<br>or RSA (RS256).<br><br>Relative paths are resolved from the controller configuration directory.|
+|`enrollmentTokens.issuers[].revokedIds`|[]string|Token IDs (`jti`) that are no longer accepted. Devices enrolled with<br>one of them are rejected as well.|
 |`fleetLimits`|object|Limits on the device-facing fleet API that depend on the deployment.|
 |`fleetLimits.connectionsPerAddress`|integer|Open fleet connections allowed from one client address: an IPv4<br>address, or an IPv6 /64. At the limit, that address's connection idle<br>the longest is closed to admit a new one; when none is idle, the new one<br>is closed. Raise it when more devices share an address, such as behind a<br>NAT or a load balancer that does not preserve client addresses. Defaults<br>to `4096`.|
 |`fleetLimits.deviceMessageBurst`|integer|Messages one device may send in a burst on its `Connect` stream, after<br>which it may send one more every `deviceMessageRefill`. Once a device<br>has sent its burst, the controller reads its messages no faster than<br>that, and the device waits to send more. Defaults to `600`.|

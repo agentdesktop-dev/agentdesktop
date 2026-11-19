@@ -7,6 +7,8 @@ use agentdesktop_proto::fleet::{
     ConfigStatus, Hello, Inventory, ProgramState, TelemetryEvent, telemetry_event,
 };
 use agentdesktop_usage::UsageStore;
+
+use crate::enrollment_token::EnrollmentToken;
 use serde::Serialize;
 
 #[derive(Clone)]
@@ -18,6 +20,7 @@ pub struct DevicePrincipal {
     pub issuer: String,
     pub subject: String,
     pub idp_claims: Option<BTreeMap<String, serde_json::Value>>,
+    pub enrollment_token: Option<EnrollmentToken>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -351,12 +354,14 @@ impl Database {
             response.client_certificate_expires_at_unix_seconds,
         ))
         .context("encode device enrollment receipt")?;
+        let token = completed.enrollment_token.as_ref();
         let mut transaction = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO devices
                 (id, hostname, created_at, last_seen_at, enrolled_by_issuer,
-                 enrolled_by_subject, idp_claims_json)
-             VALUES ($1, $2, $3, $3, $4, $5, $6)
+                 enrolled_by_subject, idp_claims_json, enrollment_token_issuer,
+                 enrollment_token_id)
+             VALUES ($1, $2, $3, $3, $4, $5, $6, $7, $8)
              ON CONFLICT (id) DO NOTHING",
         )
         .bind(&response.device_id)
@@ -365,6 +370,8 @@ impl Database {
         .bind(&completed.issuer)
         .bind(&completed.subject)
         .bind(idp_claims)
+        .bind(token.map(|token| token.issuer.as_str()))
+        .bind(token.map(|token| token.id.as_str()))
         .execute(&mut *transaction)
         .await?;
         sqlx::query(
@@ -386,8 +393,16 @@ impl Database {
     }
 
     pub async fn device_principal(&self, device_id: &str) -> anyhow::Result<DevicePrincipal> {
-        let (issuer, subject, idp_claims_json): (String, String, Option<String>) = sqlx::query_as(
-            "SELECT enrolled_by_issuer, enrolled_by_subject, idp_claims_json
+        type Row = (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let (issuer, subject, idp_claims_json, token_issuer, token_id): Row = sqlx::query_as(
+            "SELECT enrolled_by_issuer, enrolled_by_subject, idp_claims_json,
+                    enrollment_token_issuer, enrollment_token_id
              FROM devices WHERE id = $1",
         )
         .bind(device_id)
@@ -401,6 +416,9 @@ impl Database {
             issuer,
             subject,
             idp_claims,
+            enrollment_token: token_issuer
+                .zip(token_id)
+                .map(|(issuer, id)| EnrollmentToken { issuer, id }),
         })
     }
 

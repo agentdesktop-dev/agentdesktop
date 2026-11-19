@@ -17,6 +17,8 @@ use serde::Deserialize;
 use tokio::sync::Mutex;
 use url::Url;
 
+use crate::enrollment_token::EnrollmentToken;
+
 const JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Longest the controller waits for an identity provider request. Without a
 /// limit, an IdP that accepts the connection and never answers stalls whatever
@@ -56,6 +58,16 @@ pub struct CompletedEnrollment {
     pub issuer: String,
     pub subject: String,
     pub idp_claims: BTreeMap<String, serde_json::Value>,
+    /// Set when the device enrolled with a token instead of a user sign-in.
+    pub enrollment_token: Option<EnrollmentToken>,
+}
+
+pub(crate) fn validate_hostname(hostname: &str) -> anyhow::Result<()> {
+    if hostname.trim().is_empty() || hostname.len() > 255 || hostname.chars().any(char::is_control)
+    {
+        bail!("invalid enrollment hostname");
+    }
+    Ok(())
 }
 
 /// The identity provider could not be used to check a credential, so the
@@ -172,12 +184,7 @@ impl OidcProvider {
         access_token: &str,
         device_key_nonce: &str,
     ) -> anyhow::Result<CompletedEnrollment> {
-        if hostname.trim().is_empty()
-            || hostname.len() > 255
-            || hostname.chars().any(char::is_control)
-        {
-            bail!("invalid enrollment hostname");
-        }
+        validate_hostname(&hostname)?;
         if id_token.is_empty() || access_token.is_empty() {
             bail!("ID token and access token are required");
         }
@@ -218,6 +225,7 @@ impl OidcProvider {
             issuer: access_principal.issuer,
             subject: access_principal.subject,
             idp_claims,
+            enrollment_token: None,
         })
     }
 

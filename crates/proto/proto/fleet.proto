@@ -30,13 +30,17 @@ message LoginConfiguration {
   repeated string scopes = 7;
 }
 
-// Called only after user authentication; bearer access token is in metadata.
-// For a browser sign-in, the ID token's nonce must be the base64url SHA-256 of
-// the CSR's SubjectPublicKeyInfo (agentdesktop_proto::enrollment_nonce).
 message EnrollDeviceRequest {
   string hostname = 1;
   bytes certificate_signing_request_der = 2;
-  string id_token = 3;
+  oneof credential {
+    // Sent after user authentication; bearer access token is in metadata.
+    // For a browser sign-in, the ID token's nonce must be the base64url SHA-256
+    // of the CSR's SubjectPublicKeyInfo (agentdesktop_proto::enrollment_nonce).
+    string id_token = 3;
+    // Operator-signed JWT that enrolls the device without a user.
+    string enrollment_token = 4;
+  }
 }
 
 message RenewDeviceCertificateRequest {

@@ -153,12 +153,12 @@ impl Fixture {
             client_certificate_pem: cert.cert.pem(),
             client_private_key_pem: cert.signing_key.serialize_pem(),
             client_certificate_expires_at_unix_seconds: unix_time_seconds() + 30 * 86400,
-            oauth: crate::identity::OAuthCredentials {
+            oauth: Some(crate::identity::OAuthCredentials {
                 access_token: "stale".to_owned(),
                 refresh_token: "refresh-stale".to_owned(),
                 // A server rejection must force refresh even before our local deadline.
                 expires_at_unix_seconds: unix_time_seconds() + 3600,
-            },
+            }),
             oauth_token_endpoint: token_endpoint,
             oauth_client_id: "test-client".to_owned(),
         };
@@ -183,6 +183,7 @@ impl Fixture {
             ca_certificate_path: path.join("ca.pem"),
             heartbeat_interval: Duration::from_secs(30),
             device_authorization: false,
+            enrollment_token_path: None,
         };
         let state_dir = path.to_owned();
         let session_task = tokio::spawn(async move {
@@ -244,7 +245,7 @@ async fn rejected_access_token_refreshes_without_discarding_enrollment() {
         "{event:?}"
     );
     assert_eq!(fixture.refreshes.load(Ordering::SeqCst), 1);
-    assert_eq!(fixture.stored().oauth.refresh_token, "rotated-1");
+    assert_eq!(fixture.stored().oauth.unwrap().refresh_token, "rotated-1");
     assert_eq!(fixture.stored().device_id, "existing-device");
 }
 
@@ -257,7 +258,7 @@ async fn transient_refresh_failure_preserves_enrollment_until_recovery() {
         "{event:?}"
     );
     assert_eq!(fixture.refreshes.load(Ordering::SeqCst), 2);
-    assert_eq!(fixture.stored().oauth.refresh_token, "rotated-2");
+    assert_eq!(fixture.stored().oauth.unwrap().refresh_token, "rotated-2");
 }
 
 #[tokio::test]
@@ -295,5 +296,5 @@ async fn accepted_stream_resets_recovery_for_the_next_token_expiry() {
         "{event:?}"
     );
     assert_eq!(fixture.refreshes.load(Ordering::SeqCst), 2);
-    assert_eq!(fixture.stored().oauth.refresh_token, "rotated-2");
+    assert_eq!(fixture.stored().oauth.unwrap().refresh_token, "rotated-2");
 }

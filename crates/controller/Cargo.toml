@@ -46,3 +46,4 @@ x509-parser.workspace = true
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util.workspace = true
+tempfile = "3"
