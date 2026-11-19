@@ -764,6 +764,8 @@ mod tests {
         let (_, discovery) = tokio::sync::watch::channel(Arc::new(Discovery {
             agents: vec![],
             model_runtimes: vec![],
+            browser_pacs: vec![],
+            pac_fetches: vec![],
         }));
         let mut state = super::AppState {
             config,

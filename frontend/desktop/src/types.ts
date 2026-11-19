@@ -119,6 +119,24 @@ export interface Discovery {
     kind: string;
     models: Array<{ name: string }>;
   }>;
+  browserPacs?: BrowserPac[];
+  pacFetches?: Array<{
+    url: string;
+    sha256?: string;
+    size?: number;
+    error?: string;
+  }>;
+}
+
+/** The PAC one browser's machine policy sets, as read from policy. */
+export interface BrowserPac {
+  browser: string;
+  packaging?: string;
+  pacUrl?: string;
+  recommended?: boolean;
+  locked?: boolean;
+  source?: string;
+  detail?: string;
 }
 
 export type UsageRange = "24h" | "7d" | "30d";
