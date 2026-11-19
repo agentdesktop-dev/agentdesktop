@@ -655,7 +655,7 @@ fn at_its_cap_an_address_evicts_only_its_own_idle_connections() {
     let mut limits = FLEET_LIMITS;
     limits.configured.max_connections = 2;
     limits.configured.connections_per_address = 1;
-    let connections = Connections::new(&limits);
+    let connections = Connections::new(limits.connection_limits(), "fleet");
     let first_address = |port| SocketAddr::from(([192, 0, 2, 1], port));
     let (_first, mut first_evicted) = connections
         .register(first_address(1))
@@ -689,7 +689,7 @@ fn a_connection_made_idle_by_its_last_request_is_evictable_at_its_address_cap() 
 
     let mut limits = FLEET_LIMITS;
     limits.configured.connections_per_address = 1;
-    let connections = Connections::new(&limits);
+    let connections = Connections::new(limits.connection_limits(), "fleet");
     let peer = |port| SocketAddr::from(([192, 0, 2, 1], port));
     let (_first, mut first_evicted) = connections.register(peer(1)).expect("first connection");
     let busy = connections
@@ -708,7 +708,7 @@ fn a_connection_made_idle_by_its_last_request_is_evictable_at_its_address_cap() 
 fn a_request_without_a_device_certificate_does_not_keep_its_connection_from_eviction() {
     let mut limits = FLEET_LIMITS;
     limits.configured.max_connections = 1;
-    let connections = Connections::new(&limits);
+    let connections = Connections::new(limits.connection_limits(), "fleet");
     let (_anonymous, mut evicted) = connections
         .register(SocketAddr::from(([192, 0, 2, 1], 1)))
         .expect("first connection");
@@ -776,6 +776,33 @@ async fn at_the_total_cap_a_new_connection_is_closed_when_every_connection_is_bu
 
     // The busy connection was kept.
     assert!(bounded(stream.message()).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn http1_is_refused() {
+    // Gateways used to fetch the JWKS here over HTTP/1; they use the gateway
+    // listener now, and the fleet listener speaks only HTTP/2.
+    let address = serve(
+        FLEET_LIMITS,
+        None,
+        Slow {
+            delay: Duration::ZERO,
+        },
+    )
+    .await;
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    stream
+        .write_all(b"GET /.well-known/jwks.json HTTP/1.1\r\nHost: controller\r\n\r\n")
+        .await
+        .unwrap();
+
+    let mut response = Vec::new();
+    bounded(stream.read_to_end(&mut response)).await.ok();
+    assert!(
+        !response.starts_with(b"HTTP/"),
+        "{}",
+        String::from_utf8_lossy(&response)
+    );
 }
 
 #[tokio::test]

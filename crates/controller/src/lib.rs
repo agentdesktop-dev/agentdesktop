@@ -4,6 +4,7 @@ pub mod database;
 pub mod device_ca;
 pub mod fleet_limits;
 pub mod gateway_jwt;
+pub mod http_listener;
 pub mod management;
 pub mod oidc;
 pub mod service;

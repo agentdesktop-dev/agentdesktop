@@ -191,6 +191,28 @@ async fn request(app: Router, path: &str, method: Method, headers: HeaderMap) ->
 }
 
 #[tokio::test]
+async fn management_router_does_not_publish_the_gateway_jwks() {
+    let (database, path) = database().await;
+    let router = super::super::router(
+        state(database),
+        &ControllerAdminAccess::Local,
+        super::super::Extensions::default(),
+    )
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(header::HOST, "127.0.0.1:8080".parse().unwrap());
+    let response = request(router, "/.well-known/jwks.json", Method::GET, headers).await;
+    assert_ne!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/jwk-set+json")
+    );
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
 async fn local_mode_keeps_ui_api_and_bootstrap_without_session_tables() {
     let (database, path) = database().await;
     let auth = Auth::new(Arc::new(LocalAccess));
@@ -244,7 +266,7 @@ async fn local_mode_keeps_ui_api_and_bootstrap_without_session_tables() {
 #[tokio::test]
 async fn local_mode_rejects_rebinding_and_cross_site_mutations() {
     let auth = Auth::new(Arc::new(LocalAccess));
-    // Every loopback address `adminListen` accepts in local mode, not just .1.
+    // Every loopback address `adminListener.listen` accepts in local mode, not just .1.
     for host in [
         "localhost:8080",
         "LOCALHOST:8080",
@@ -343,13 +365,54 @@ async fn local_mode_rejects_rebinding_and_cross_site_mutations() {
 }
 
 #[tokio::test]
+async fn the_admin_listener_applies_its_configured_connection_limits() {
+    use tokio::io::AsyncReadExt;
+    let (database, path) = database().await;
+    let router = super::super::router(
+        state(database),
+        &ControllerAdminAccess::Local,
+        super::super::Extensions::default(),
+    )
+    .unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let limits = agentdesktop_core::config::ControllerAdminLimitsConfig {
+        max_connections: 2,
+        connections_per_address: 2,
+    };
+    let server = tokio::spawn(async move {
+        super::super::serve_router(listener, router, &ControllerAdminAccess::Local, limits).await
+    });
+    // Each connection is admitted in its own task, so let it register before
+    // the next one connects: `oldest` must be the longest idle.
+    let mut oldest = tokio::net::TcpStream::connect(address).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let _second = tokio::net::TcpStream::connect(address).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let response = reqwest::get(format!("http://{address}/auth/session"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut buffer = [0; 16];
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(5), oldest.read(&mut buffer))
+        .await
+        .expect("the oldest idle connection was not closed");
+    assert!(matches!(closed, Ok(0) | Err(_)));
+    server.abort();
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
 async fn authenticated_configuration_is_rejected_without_a_provider() {
     let (database, path) = database().await;
     let error = match super::super::serve(
-        "127.0.0.1:0".parse().unwrap(),
         state(database),
-        None,
-        authenticated_access(),
+        agentdesktop_core::config::ControllerAdminListener {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            access: authenticated_access(),
+            limits: Default::default(),
+        },
         super::super::Extensions::default(),
     )
     .await
@@ -432,7 +495,6 @@ async fn management_routes_check_precise_operations() {
     let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
     let router = super::super::router(
         state(database),
-        None,
         &authenticated_access(),
         super::super::Extensions {
             authentication: Some(Arc::new(RecordingProvider(calls.clone()))),
@@ -475,7 +537,6 @@ async fn local_configuration_is_rejected_with_a_provider() {
     let (database, path) = database().await;
     let error = match super::super::router(
         state(database),
-        None,
         &ControllerAdminAccess::Local,
         super::super::Extensions {
             authentication: Some(Arc::new(TokenProvider)),
@@ -488,7 +549,7 @@ async fn local_configuration_is_rejected_with_a_provider() {
     assert!(
         error
             .to_string()
-            .contains("requires adminAccess.mode authenticated")
+            .contains("requires adminListener.access.mode authenticated")
     );
     std::fs::remove_file(path).unwrap();
 }
@@ -639,7 +700,6 @@ async fn extension_providers_authenticate_and_authorize_the_management_router() 
     let (database, path) = database().await;
     let router = super::super::router(
         state(database),
-        None,
         &authenticated_access(),
         super::super::Extensions {
             authentication: Some(Arc::new(TokenProvider)),
@@ -757,7 +817,6 @@ async fn direct_tls_transport_serves_the_authenticated_router_over_https_only() 
     let access = ControllerAdminAccess::Authenticated(admin);
     let router = super::super::router(
         state(database),
-        None,
         &access,
         super::super::Extensions {
             authentication: Some(Arc::new(TokenProvider)),
@@ -765,9 +824,11 @@ async fn direct_tls_transport_serves_the_authenticated_router_over_https_only() 
         },
     )
     .unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(super::super::serve_router(listener, router, access));
+    let server = tokio::spawn(async move {
+        super::super::serve_router(listener, router, &access, Default::default()).await
+    });
     let client = reqwest::Client::builder()
         .add_root_certificate(reqwest::Certificate::from_pem(cert.pem().as_bytes()).unwrap())
         .timeout(std::time::Duration::from_secs(5))
