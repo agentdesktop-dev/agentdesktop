@@ -10,7 +10,7 @@ schema = ["dep:schemars"]
 
 [dependencies]
 anyhow.workspace = true
-humantime-serde.workspace = true
+jiff.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 schemars = { workspace = true, optional = true }
