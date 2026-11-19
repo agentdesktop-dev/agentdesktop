@@ -1,6 +1,8 @@
 # yaml-language-server: $schema=../../schema/controller-config.json
-fleetListen: 0.0.0.0:8443
-adminListen: 127.0.0.1:8080
+fleetListener:
+  listen: 0.0.0.0:8443
+adminListener:
+  listen: 127.0.0.1:8080
 allowInsecureDev: true
 databaseUrl: sqlite:///state/controller.db?mode=rwc
 tls: /keys

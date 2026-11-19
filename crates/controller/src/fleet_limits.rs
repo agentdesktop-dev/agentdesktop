@@ -39,13 +39,14 @@ use tower_layer::{Identity, Stack};
 
 mod connections;
 
-use connections::{Connections, LimitedIncoming, ReleaseOnDrop, SessionBusy, TrackRequests};
+pub(crate) use connections::{ConnectionLimits, Connections, LimitedConnection};
+use connections::{LimitedIncoming, ReleaseOnDrop, SessionBusy, TrackRequests};
 
 /// Limits applied to the fleet gRPC listener.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FleetLimits {
     /// The limits that depend on the deployment, set by the controller
-    /// configuration (`fleetLimits`), where each is documented.
+    /// configuration (`fleetListener.limits`), where each is documented.
     pub configured: ControllerFleetLimitsConfig,
     /// Time a client has to finish the TLS handshake after connecting. Tonic sets
     /// no limit by default, so a client could hold a connection open forever by
@@ -126,7 +127,7 @@ impl FleetLimits {
         config.validate()?;
         anyhow::ensure!(
             config.enrollment_in_flight <= Semaphore::MAX_PERMITS,
-            "fleetLimits.enrollmentInFlight must be at most {}",
+            "fleetListener.limits.enrollmentInFlight must be at most {}",
             Semaphore::MAX_PERMITS
         );
         Ok(Self {
@@ -145,15 +146,13 @@ impl FleetLimits {
     ) -> anyhow::Result<FleetListener> {
         // The listener and the request layer share one registry: the listener
         // admits and closes connections, and the layer marks them busy.
-        let connections = Connections::new(self);
+        let connections = Connections::new(self.connection_limits(), "fleet");
         let mut server = Server::builder()
             .timeout(self.request)
             .http2_keepalive_interval(Some(self.keepalive_interval))
             .http2_keepalive_timeout(Some(self.keepalive_timeout))
             .max_concurrent_streams(self.concurrent_streams_per_connection)
             .http2_max_local_error_reset_streams(Some(self.error_resets_per_connection))
-            // agentgateway fetches the gateway JWKS from this listener over HTTP/1.
-            .accept_http1(true)
             .layer(connections.track_requests());
         if let Some(tls) = tls {
             server = server
@@ -185,6 +184,16 @@ impl FleetLimits {
             devices: FleetAgentServer::from_arc(service)
                 .max_decoding_message_size(self.configured.max_message_bytes)
                 .max_encoding_message_size(self.configured.max_message_bytes),
+        }
+    }
+
+    /// The connection admission and idle limits for the fleet listener.
+    fn connection_limits(&self) -> ConnectionLimits {
+        ConnectionLimits {
+            max_connections: self.configured.max_connections,
+            connections_per_address: self.configured.connections_per_address,
+            first_request: self.first_request,
+            idle: self.idle_connection,
         }
     }
 }

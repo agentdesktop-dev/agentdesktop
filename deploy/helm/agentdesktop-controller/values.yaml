@@ -22,10 +22,39 @@ allowInsecureDev: false
 # Optional short-lived JWT issuer for authenticated LLM gateways.
 gatewayJwt: {}
 
-# Limits on the device-facing fleet API, such as connectionsPerAddress or
-# maxMessageBytes. Unset fields keep the controller defaults; see
-# schema/controller-config.md.
-fleetLimits: {}
+# Each listener's limits, such as maxConnections or connectionsPerAddress, are
+# passed to the controller configuration. Unset fields keep the controller
+# defaults; see schema/controller-config.md.
+
+# The device-facing fleet API.
+fleetListener:
+  limits: {}
+
+# The management UI and API, on loopback (see NOTES).
+adminListener:
+  limits: {}
+
+# The controller's gateway listener and its Service, <release>-gateway. LLM
+# gateways fetch the gateway JWKS (/.well-known/jwks.json) from it; no other
+# Service serves it. A NetworkPolicy can allow gateways this port and nothing
+# else on the controller (usage export also needs the fleet port).
+# The chart creates them when gatewayJwt or existingConfigSecret is set. With
+# existingConfigSecret, that configuration must set gatewayListener.listen to
+# 0.0.0.0:<port>, with the same tls setting. With enabled: false, the
+# controller listens on its default loopback address only.
+gatewayListener:
+  enabled: true
+  port: 8444
+  # Serve HTTPS with the controller certificate from tlsSecretName, which must
+  # then include the gateway Service name. Recommended unless the network
+  # between gateways and the controller is trusted: whoever can change the keys
+  # a gateway fetches can forge credentials it accepts.
+  tls: false
+  limits: {}
+  service:
+    type: ClusterIP
+    # Defaults to 443 with tls, otherwise 80.
+    port: ""
 
 # Daemon configuration distributed to enrolled devices. Leave empty to
 # disable managed configuration.
@@ -50,12 +79,62 @@ service:
   # balancer only sends traffic to nodes that run the controller (NodePort
   # clients must connect to such a node). Local does not help behind a load
   # balancer that proxies connections. Otherwise raise
-  # fleetLimits.connectionsPerAddress, and for large rollouts raise
-  # fleetLimits.enrollmentBurst or shorten fleetLimits.enrollmentRefill.
+  # fleetListener.limits.connectionsPerAddress, and for large rollouts raise
+  # fleetListener.limits.enrollmentBurst or shorten
+  # fleetListener.limits.enrollmentRefill.
   # Applies only to LoadBalancer and NodePort services.
   externalTrafficPolicy: ""
 
 resources: {}
+
+# Restrict the controller pod's traffic with a Kubernetes NetworkPolicy. Off by
+# default so existing installs keep working; enforcement needs a CNI that
+# implements NetworkPolicy. Peer lists use standard NetworkPolicyPeer entries
+# (podSelector, namespaceSelector, ipBlock).
+networkPolicy:
+  enabled: false
+  ingress:
+    fleet:
+      # Sources allowed to reach the fleet port (gRPC API, gateway JWKS and
+      # usage ingest). Empty allows any source, which devices need.
+      from: []
+    admin:
+      # Sources allowed to reach the management port. The generated config
+      # binds it to loopback, so this matters only when existingConfigSecret
+      # sets a non-loopback adminListen. Empty denies all ingress to it.
+      # Defaults to pods in the release namespace.
+      from:
+      - podSelector: {}
+  egress:
+    # DNS (UDP and TCP 53). Empty `to` allows port 53 to any destination,
+    # e.g. for NodeLocal DNSCache.
+    dns:
+      to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+        podSelector:
+          matchLabels:
+            k8s-app: kube-dns
+    # PostgreSQL. With an empty `to` no database rule is rendered, so the
+    # traffic must be allowed by another policy; otherwise the controller
+    # fails at startup.
+    database:
+      to: []
+      ports:
+      - port: 5432
+        protocol: TCP
+    # OIDC issuer (discovery and JWKS), contacted at startup. NetworkPolicy
+    # cannot match hostnames: for an external IdP, list its egress CIDRs as
+    # ipBlock peers, or leave `to` empty (no rule rendered) and allow the IdP
+    # with an FQDN-aware policy from your CNI, such as Cilium's toFQDNs.
+    idp:
+      to: []
+      ports:
+      - port: 443
+        protocol: TCP
+    # Additional NetworkPolicyEgressRule entries ({to, ports}), e.g. a KMS.
+    extra: []
 
 nodeSelector: {}
 tolerations: []

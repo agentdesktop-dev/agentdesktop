@@ -697,7 +697,7 @@ routes:
       issuer: agentdesktop-controller
       audiences: [agentgateway]
       jwks:
-        url: https://<controller>/.well-known/jwks.json
+        url: https://<controller>:8444/.well-known/jwks.json  # gatewayListener
     urlRewrite:
       authority:
         full: api.business.githubcopilot.com
@@ -809,13 +809,35 @@ stage.
 
 ![Agentdesktop controller device inventory](images/controller-ui.png)
 
+The controller has three listeners, each configured with `listen` and
+`limits`: `fleetListener` for devices, `adminListener` for the management UI
+and API, and `gatewayListener` for LLM gateways. Each listener's `limits` caps
+its open connections (`maxConnections`, `connectionsPerAddress`).
+
 The controller management UI/API accepts unauthenticated access only on a
-loopback `adminListen` address (default `127.0.0.1:8080`), and rejects
+loopback `adminListener.listen` address (default `127.0.0.1:8080`), and rejects
 cross-site browser mutations and non-loopback `Host` headers. Reach it remotely
-through an SSH tunnel. Remote management (`adminAccess.mode: authenticated`)
+through an SSH tunnel. Remote management (`adminListener.access.mode: authenticated`)
 requires a controller build with a compiled-in authentication provider; the
 standard executable rejects it at startup. Device enrollment is configured separately.
+LLM gateways need the controller's JWKS (`/.well-known/jwks.json`) to verify
+the JWTs it issues. Only the gateway listener (`gatewayListener`, default
+`127.0.0.1:8444`) serves it; the fleet and management listeners do not. A
+NetworkPolicy or firewall can allow gateways that one port and block the
+management API, so a compromised gateway cannot read the device inventory or
+delete devices. A gateway that exports usage to the controller also needs the
+fleet port. Set `gatewayListener.tls: true` unless gateways reach the listener
+over loopback or a trusted network: whoever can change the keys a gateway
+fetches can forge credentials it accepts.
 See the [controller configuration schema](schema/controller-config.md).
+
+Upgrade note: the fleet and management listeners no longer serve the JWKS, and
+the fleet listener no longer accepts HTTP/1. Point each gateway's JWKS URL at
+the gateway listener (with the Helm chart, the `<release>-gateway` Service)
+before upgrading the controller, or its controller-issued credentials are
+rejected until you do. In the controller configuration, `fleetListen` is now
+`fleetListener.listen` and `adminListen` is now `adminListener.listen`; the old
+keys are rejected.
 
 ### Configuration status
 

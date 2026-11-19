@@ -4,17 +4,19 @@
   "description": "Startup configuration for the Agentdesktop fleet controller.",
   "type": "object",
   "properties": {
-    "adminAccess": {
-      "description": "Management authentication, separate from device enrollment. Defaults to local-only access.",
-      "$ref": "#/$defs/ControllerAdminAccess",
+    "adminListener": {
+      "description": "Listener for the controller management UI and API.",
+      "$ref": "#/$defs/ControllerAdminListener",
       "default": {
-        "mode": "local"
+        "access": {
+          "mode": "local"
+        },
+        "limits": {
+          "connectionsPerAddress": 256,
+          "maxConnections": 256
+        },
+        "listen": "127.0.0.1:8080"
       }
-    },
-    "adminListen": {
-      "description": "Address on which the controller management UI listens. Local mode requires loopback.",
-      "type": "string",
-      "default": "127.0.0.1:8080"
     },
     "allowInsecureDev": {
       "description": "Permit a non-HTTPS OIDC issuer for isolated local development.\n\nThis escape hatch is only appropriate for isolated local development.",
@@ -37,24 +39,22 @@
       "type": "string",
       "default": "sqlite://agentdesktop-controller.db?mode=rwc"
     },
-    "fleetLimits": {
-      "description": "Limits on the device-facing fleet API that depend on the deployment.",
-      "$ref": "#/$defs/ControllerFleetLimitsConfig",
+    "fleetListener": {
+      "description": "Listener for the device-facing gRPC fleet API.",
+      "$ref": "#/$defs/ControllerFleetListener",
       "default": {
-        "connectionsPerAddress": 4096,
-        "deviceMessageBurst": 600,
-        "deviceMessageRefill": "50ms",
-        "enrollmentBurst": 60,
-        "enrollmentInFlight": 64,
-        "enrollmentRefill": "1s",
-        "maxConnections": 50000,
-        "maxMessageBytes": 4194304
+        "limits": {
+          "connectionsPerAddress": 4096,
+          "deviceMessageBurst": 600,
+          "deviceMessageRefill": "50ms",
+          "enrollmentBurst": 60,
+          "enrollmentInFlight": 64,
+          "enrollmentRefill": "1s",
+          "maxConnections": 50000,
+          "maxMessageBytes": 4194304
+        },
+        "listen": "127.0.0.1:8443"
       }
-    },
-    "fleetListen": {
-      "description": "Address on which the device-facing gRPC fleet API listens.",
-      "type": "string",
-      "default": "127.0.0.1:8443"
     },
     "gatewayJwt": {
       "description": "LLM gateway JWT signing settings.",
@@ -66,6 +66,18 @@
           "type": "null"
         }
       ]
+    },
+    "gatewayListener": {
+      "description": "Listener that LLM gateways use, started when `gatewayJwt` is set. It serves only `/.well-known/jwks.json`, the keys gateways use to verify controller-issued JWTs.\n\nNo other listener serves the keys, so a NetworkPolicy or firewall can allow gateways this port and block the management API, which can read the device inventory and delete devices. Gateways that export usage also need the fleet port.",
+      "$ref": "#/$defs/ControllerGatewayListener",
+      "default": {
+        "limits": {
+          "connectionsPerAddress": 64,
+          "maxConnections": 1024
+        },
+        "listen": "127.0.0.1:8444",
+        "tls": false
+      }
     },
     "oidc": {
       "description": "OpenID Connect settings used for device enrollment and authorization.",
@@ -141,6 +153,54 @@
           ]
         }
       ]
+    },
+    "ControllerAdminLimitsConfig": {
+      "description": "Connection limits on the management listener. Any connection can be closed\nto make room at a limit, including one with a request in progress. Unset\nfields keep their defaults.",
+      "type": "object",
+      "properties": {
+        "connectionsPerAddress": {
+          "description": "Open management connections allowed from one client address: an IPv4 address, or an IPv6 /64. At the limit, that address's connection idle the longest is closed to admit a new one. Defaults to `256`, the same as `maxConnections`, because behind a proxy or on loopback every connection has the same address.",
+          "type": "integer",
+          "format": "uint",
+          "default": 256,
+          "minimum": 1
+        },
+        "maxConnections": {
+          "description": "Open management connections allowed in total. At the limit, the connection idle the longest is closed to admit a new one. Defaults to `256`.",
+          "type": "integer",
+          "format": "uint",
+          "default": 256,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "ControllerAdminListener": {
+      "description": "Listener for the controller management UI and API.",
+      "type": "object",
+      "properties": {
+        "access": {
+          "description": "Management authentication, separate from device enrollment. Defaults to local-only access.",
+          "$ref": "#/$defs/ControllerAdminAccess",
+          "default": {
+            "mode": "local"
+          }
+        },
+        "limits": {
+          "description": "Connection limits on the management listener.",
+          "$ref": "#/$defs/ControllerAdminLimitsConfig",
+          "default": {
+            "connectionsPerAddress": 256,
+            "maxConnections": 256
+          }
+        },
+        "listen": {
+          "description": "Address on which the management listener accepts connections. Defaults to `127.0.0.1:8080`. Local access requires a loopback address.",
+          "type": "string",
+          "default": "127.0.0.1:8080"
+        }
+      },
+      "additionalProperties": false
     },
     "ControllerAdminTransport": {
       "oneOf": [
@@ -264,6 +324,32 @@
       },
       "additionalProperties": false
     },
+    "ControllerFleetListener": {
+      "description": "Listener for the device-facing gRPC fleet API.",
+      "type": "object",
+      "properties": {
+        "limits": {
+          "description": "Limits on the fleet API that depend on the deployment.",
+          "$ref": "#/$defs/ControllerFleetLimitsConfig",
+          "default": {
+            "connectionsPerAddress": 4096,
+            "deviceMessageBurst": 600,
+            "deviceMessageRefill": "50ms",
+            "enrollmentBurst": 60,
+            "enrollmentInFlight": 64,
+            "enrollmentRefill": "1s",
+            "maxConnections": 50000,
+            "maxMessageBytes": 4194304
+          }
+        },
+        "listen": {
+          "description": "Address on which the fleet listener accepts connections. Defaults to `127.0.0.1:8443`; devices on other hosts need a non-loopback address.",
+          "type": "string",
+          "default": "127.0.0.1:8443"
+        }
+      },
+      "additionalProperties": false
+    },
     "ControllerGatewayJwtConfig": {
       "description": "Settings for issuing short-lived LLM gateway JWTs.",
       "type": "object",
@@ -292,6 +378,52 @@
       "required": [
         "privateKey"
       ]
+    },
+    "ControllerGatewayLimitsConfig": {
+      "description": "Connection limits on the gateway listener. Any connection can be closed to\nmake room at a limit, including one with a request in progress. Unset fields\nkeep their defaults.",
+      "type": "object",
+      "properties": {
+        "connectionsPerAddress": {
+          "description": "Open gateway connections allowed from one client address: an IPv4 address, or an IPv6 /64. At the limit, that address's connection idle the longest is closed to admit a new one. Raise it when many gateway replicas share an address. Defaults to `64`.",
+          "type": "integer",
+          "format": "uint",
+          "default": 64,
+          "minimum": 1
+        },
+        "maxConnections": {
+          "description": "Open gateway connections allowed in total. At the limit, the connection idle the longest is closed to admit a new one. Defaults to `1024`.",
+          "type": "integer",
+          "format": "uint",
+          "default": 1024,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "ControllerGatewayListener": {
+      "description": "Listener for LLM gateways, separate from the fleet API and the management UI.",
+      "type": "object",
+      "properties": {
+        "limits": {
+          "description": "Connection limits on the gateway listener.",
+          "$ref": "#/$defs/ControllerGatewayLimitsConfig",
+          "default": {
+            "connectionsPerAddress": 64,
+            "maxConnections": 1024
+          }
+        },
+        "listen": {
+          "description": "Address on which the gateway listener accepts connections. Defaults to `127.0.0.1:8444`.",
+          "type": "string",
+          "default": "127.0.0.1:8444"
+        },
+        "tls": {
+          "description": "Serve HTTPS with the controller certificate from `tls` instead of plain HTTP. Use HTTPS unless gateways reach the listener over loopback or a trusted network: whoever can change the keys a gateway fetches can forge credentials it accepts.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
     },
     "ControllerOidcConfig": {
       "description": "OpenID Connect settings used for interactive device enrollment.",

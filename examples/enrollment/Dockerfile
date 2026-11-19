@@ -1,10 +1,10 @@
-# syntax=docker/dockerfile:1.26
+# syntax=docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
 
 # Device images for the enrollment lab: `headless` runs the headless daemon,
 # `desktop` runs the daemon and the desktop app in an XFCE session served
 # over noVNC.
 
-FROM docker.io/library/node:26.11.1-bookworm AS ui
+FROM docker.io/library/node:26.11.1-bookworm@sha256:f1233c415b41ffcf237c717b3dea92e9d4ea006e0e4c71edcb790605d74f5404 AS ui
 WORKDIR /app/frontend
 ENV CI=true
 COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
@@ -21,7 +21,7 @@ RUN --mount=type=cache,id=agentdesktop-pnpm,target=/pnpm/store \
 
 # The headless daemon needs neither the UI nor WebKit, so the `headless`
 # target, which the e2e test uses, builds it on its own.
-FROM docker.io/library/rust:1.99.0-trixie AS headless-builder
+FROM docker.io/library/rust:1.99.0-trixie@sha256:81015672d6939b0265f09adf96d5de125482bb1330106076956b0518e74edc90 AS headless-builder
 ARG TARGETARCH
 ARG BUILD_PROFILE=release
 WORKDIR /app
@@ -39,7 +39,7 @@ RUN --mount=type=cache,id=agentdesktop-lab-headless-target-${TARGETARCH},target=
     cargo build --locked ${flags} --package agentdesktop-agent --bin agentdesktop-headless && \
     cp "target/${BUILD_PROFILE}/agentdesktop-headless" /usr/local/bin/
 
-FROM docker.io/library/rust:1.99.0-trixie AS builder
+FROM docker.io/library/rust:1.99.0-trixie@sha256:81015672d6939b0265f09adf96d5de125482bb1330106076956b0518e74edc90 AS builder
 ARG TARGETARCH
 ARG BUILD_PROFILE=release
 RUN apt-get update \
@@ -67,7 +67,7 @@ RUN --mount=type=cache,id=agentdesktop-lab-target-${TARGETARCH},target=/app/targ
     cargo build --locked ${flags} --package agentdesktop --bin agentdesktop && \
     cp "target/${BUILD_PROFILE}/agentdesktop" /usr/local/bin/
 
-FROM docker.io/library/debian:trixie-slim AS headless
+FROM docker.io/library/debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS headless
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
@@ -76,7 +76,7 @@ COPY --from=headless-builder /usr/local/bin/agentdesktop-headless /usr/local/bin
 ENTRYPOINT ["/usr/local/bin/agentdesktop-headless"]
 CMD ["daemon", "--config", "/demo/agentdesktop.yaml"]
 
-FROM docker.io/library/debian:trixie AS desktop
+FROM docker.io/library/debian:trixie@sha256:9c6e381421d0f48d1b8133e573f33c185ee16cbf505eda9c4a8a4791b25ea8a6 AS desktop
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         ca-certificates \
