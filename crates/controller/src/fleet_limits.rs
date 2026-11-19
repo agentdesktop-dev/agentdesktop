@@ -65,8 +65,9 @@ pub struct FleetLimits {
     pub tcp_keepalive: Duration,
     /// Time a new connection has to make its first request, and time a
     /// connection may stay without any request in progress after its last one
-    /// finished. A connection with a request in progress (including an open
-    /// `Connect` stream) is never idle.
+    /// finished. A connection with a device's request in progress (including
+    /// an open `Connect` stream) is never idle; any other request counts as
+    /// activity when it starts and ends.
     pub first_request: Duration,
     pub idle_connection: Duration,
     /// HTTP/2 streams one connection may have open at once

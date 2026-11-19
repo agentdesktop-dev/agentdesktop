@@ -678,17 +678,18 @@ impl Default for ControllerGatewayLimitsConfig {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct ControllerFleetLimitsConfig {
-    /// Open fleet connections allowed in total. At the limit, the connection
-    /// idle the longest is closed to admit a new one; when none is idle, the
-    /// new one is closed. A connection is idle unless a client with a device
-    /// certificate has a request or `Connect` stream open on it. Defaults to
-    /// `50000`.
+    /// Open fleet connections allowed in total. At the limit, the idle
+    /// connection with the oldest activity (its last request starting or
+    /// ending, or else its being accepted) is closed to admit a new one; when
+    /// none is idle, the new one is closed. A connection is idle unless a
+    /// client with a device certificate has a request or `Connect` stream open
+    /// on it. Defaults to `50000`.
     #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub max_connections: usize,
     /// Open fleet connections allowed from one client address: an IPv4
-    /// address, or an IPv6 /64. At the limit, that address's connection idle
-    /// the longest is closed to admit a new one; when none is idle, the new one
-    /// is closed. Raise it when more devices share an address, such as behind a
+    /// address, or an IPv6 /64. At the limit, that address's idle connection
+    /// with the oldest activity is closed to admit a new one; when none is
+    /// idle, the new one is closed. Raise it when more devices share an address, such as behind a
     /// NAT or a load balancer that does not preserve client addresses. Defaults
     /// to `4096`.
     #[cfg_attr(feature = "schema", schemars(range(min = 1)))]

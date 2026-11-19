@@ -755,6 +755,39 @@ fn at_either_cap_the_longest_idle_connection_is_evicted_not_the_oldest() {
     }
 }
 
+/// A request that does not make its connection busy (no device certificate)
+/// still makes it the most recently active, when the request starts and when
+/// it ends.
+#[test]
+fn at_either_cap_a_connection_with_a_recent_anonymous_request_is_evicted_last() {
+    use tokio::sync::oneshot::error::TryRecvError;
+
+    let mut total_cap = FLEET_LIMITS;
+    total_cap.configured.max_connections = 2;
+    let mut address_cap = FLEET_LIMITS;
+    address_cap.configured.connections_per_address = 2;
+    for limits in [total_cap, address_cap] {
+        let connections = Connections::new(limits.connection_limits(), "fleet");
+        let peer = |port| SocketAddr::from(([192, 0, 2, 1], port));
+        let (_oldest, mut oldest_evicted) = connections.register(peer(1)).expect("oldest");
+        let (_newer, mut newer_evicted) = connections.register(peer(2)).expect("newer");
+
+        // The oldest connection's request is still in progress.
+        let request = connections
+            .start_request(peer(1), false)
+            .expect("anonymous request");
+        let (_third, mut third_evicted) = connections.register(peer(3)).expect("third");
+        assert_eq!(newer_evicted.try_recv(), Ok(()));
+        assert_eq!(oldest_evicted.try_recv(), Err(TryRecvError::Empty));
+
+        // It ends after the third connection was accepted.
+        drop(request);
+        assert!(connections.register(peer(4)).is_some());
+        assert_eq!(third_evicted.try_recv(), Ok(()));
+        assert_eq!(oldest_evicted.try_recv(), Err(TryRecvError::Empty));
+    }
+}
+
 #[test]
 fn a_request_on_an_evicted_connection_is_not_counted() {
     let mut limits = FLEET_LIMITS;
@@ -783,6 +816,29 @@ fn the_idle_maps_hold_only_idle_connections() {
 
     let _busy = connections.start_request(peer(2), true).expect("request");
     assert_eq!(connections.idle_entries(), (1, 1));
+}
+
+#[test]
+fn an_evicted_connection_stays_out_of_the_idle_maps_when_its_anonymous_request_ends() {
+    use tokio::sync::oneshot::error::TryRecvError;
+
+    let mut limits = FLEET_LIMITS;
+    limits.configured.max_connections = 1;
+    let connections = Connections::new(limits.connection_limits(), "fleet");
+    let peer = |last| SocketAddr::from(([192, 0, 2, last], 1));
+    let (_first, mut first_evicted) = connections.register(peer(1)).expect("first connection");
+    let request = connections
+        .start_request(peer(1), false)
+        .expect("anonymous request");
+    let (_second, mut second_evicted) = connections.register(peer(2)).expect("second");
+    assert_eq!(first_evicted.try_recv(), Ok(()));
+
+    drop(request);
+    assert_eq!(connections.idle_entries(), (1, 1));
+    // So the next connection evicts the second one rather than being refused.
+    assert!(connections.register(peer(3)).is_some());
+    assert_eq!(second_evicted.try_recv(), Ok(()));
+    assert_eq!(first_evicted.try_recv(), Err(TryRecvError::Closed));
 }
 
 #[tokio::test]

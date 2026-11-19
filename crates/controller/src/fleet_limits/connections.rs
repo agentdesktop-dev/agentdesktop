@@ -15,8 +15,10 @@
 //! it makes no request soon after it is accepted, or stays idle too long after
 //! its last request finishes. A connection with a device's request in progress,
 //! including an open `Connect` stream, is busy: never idle. When a cap is
-//! reached, the longest-idle connection is closed to make room instead of
-//! refusing the new one: at the total cap any connection, and at the
+//! reached, the longest-idle connection (the one whose last request started
+//! or ended the longest ago, or that was accepted the longest ago if it has
+//! made none) is closed to make room instead of refusing the new one: at the
+//! total cap any connection, and at the
 //! per-address cap one from the same address. So idle connections cannot crowd
 //! out devices that are using theirs. A device that goes away without closing
 //! its `Connect` stream keeps that connection busy until HTTP/2 keepalive
@@ -106,9 +108,10 @@ struct State {
     open: HashMap<SocketAddr, Connection>,
     /// Open connections by `address_key`.
     per_address: HashMap<IpAddr, Address>,
-    /// Idle connections by idle key, so the first has been idle the longest.
+    /// Connections without a busy request, by idle key: the first has gone
+    /// the longest without a request starting or ending.
     idle: BTreeMap<u64, SocketAddr>,
-    /// The idle key of the next connection to go idle.
+    /// The next idle key to hand out.
     next_idle: u64,
 }
 
@@ -186,6 +189,28 @@ impl State {
         connection.idle = Some(key);
         self.idle.insert(key, peer);
         if let Some(address) = self.per_address.get_mut(&address_key(peer.ip())) {
+            address.idle.insert(key, peer);
+        }
+    }
+
+    /// Moves `peer`'s connection to the back of the idle maps, as the most
+    /// recently active, if it is in them and `activity` is still its entry.
+    fn requeue(&mut self, peer: SocketAddr, activity: &Arc<Activity>) {
+        let key = self.next_idle;
+        let Some(idle) = self
+            .open
+            .get_mut(&peer)
+            .filter(|connection| Arc::ptr_eq(&connection.activity, activity))
+            .and_then(|connection| connection.idle.as_mut())
+        else {
+            return;
+        };
+        let previous = std::mem::replace(idle, key);
+        self.next_idle += 1;
+        self.idle.remove(&previous);
+        self.idle.insert(key, peer);
+        if let Some(address) = self.per_address.get_mut(&address_key(peer.ip())) {
+            address.idle.remove(&previous);
             address.idle.insert(key, peer);
         }
     }
@@ -387,6 +412,8 @@ impl Connections {
             if busy {
                 activity.in_flight.fetch_add(1, Ordering::AcqRel);
                 state.unqueue(peer);
+            } else {
+                state.requeue(peer, &activity);
             }
             activity
         };
@@ -450,7 +477,7 @@ where
     }
 }
 
-/// An accepted fleet connection. It holds its slots until it closes, and fails
+/// An accepted connection. It holds its slots until it closes, and fails
 /// its next read, write or flush once it is evicted or has been idle too long.
 /// Writes are checked too because a client that never reads fills the server's
 /// send buffer, and HTTP/2 then stops reading until it can write.
@@ -613,6 +640,7 @@ impl Drop for RequestGuard {
     fn drop(&mut self) {
         self.activity.touch();
         if !self.busy {
+            self.connections.state().requeue(self.peer, &self.activity);
             return;
         }
         // Under the registry lock, like `start_request`, so eviction never
