@@ -69,7 +69,12 @@ impl EnrollmentTokens {
             .issuers
             .iter()
             .find(|candidate| candidate.name == issuer)
-            .with_context(|| format!("enrollment token issuer {issuer} is not configured"))?;
+            .with_context(|| {
+                format!(
+                    "enrollment token issuer {} is not configured",
+                    loggable_claim(&issuer)
+                )
+            })?;
         // The token chooses its algorithm only among those of the configured
         // key's type.
         let mut validation = Validation::new_for_family(issuer.key.family());
@@ -108,6 +113,16 @@ fn public_key(pem: &[u8]) -> anyhow::Result<DecodingKey> {
         .or_else(|_| DecodingKey::from_ed_pem(pem))
         .or_else(|_| DecodingKey::from_rsa_pem(pem))
         .context("expected a PEM-encoded ECDSA, Ed25519 or RSA public key")
+}
+
+/// An unverified claim, quoted with control characters escaped and cut to a
+/// bounded length, since any caller chooses it and it ends up in the log.
+fn loggable_claim(value: &str) -> String {
+    const MAX_CHARS: usize = 64;
+    let mut chars = value.chars();
+    let prefix: String = chars.by_ref().take(MAX_CHARS).collect();
+    let ellipsis = if chars.next().is_some() { "…" } else { "" };
+    format!("{prefix:?}{ellipsis}")
 }
 
 #[cfg(test)]
@@ -210,6 +225,20 @@ pub(crate) mod tests {
         let p384 = Issuer::with_key(p384(), Algorithm::ES384);
         let token = Issuer::new().sign(claims());
         assert!(p384.tokens(&[]).verify(&token).is_err());
+    }
+
+    #[test]
+    fn an_unknown_issuer_is_reported_escaped_and_bounded() {
+        let issuer = Issuer::new();
+        let forged = format!("jamf\nFORGED LOG LINE{}", "x".repeat(1000));
+        let error = issuer
+            .tokens(&[])
+            .verify(&issuer.sign(json!({"iss": forged, "aud": "fleet", "jti": "a", "iat": 1})))
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(!message.contains('\n'), "{message}");
+        assert!(message.contains(r#""jamf\nFORGED LOG LINE"#), "{message}");
+        assert!(message.chars().count() < 200, "{message}");
     }
 
     #[test]
