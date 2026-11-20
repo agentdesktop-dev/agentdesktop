@@ -1012,6 +1012,7 @@ runs this setup.
 | Grok Build | Yes | System mode | MCP and skills | — |
 | GitHub Copilot CLI | Yes | User mode | — | — |
 | Pi | Yes | User mode | MCP and skills | — |
+| Muse Code | Yes | User mode | MCP and skills | — |
 
 A fleet policy can include programs for both user and system mode. Each daemon
 skips programs its mode cannot manage and reports them as **inactive** with a

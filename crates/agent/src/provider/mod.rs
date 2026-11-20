@@ -19,6 +19,7 @@ pub mod cursor;
 pub mod grok;
 mod json_merge;
 mod metadata;
+pub mod muse;
 pub mod ollama;
 pub mod opencode;
 pub mod pi;

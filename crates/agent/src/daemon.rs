@@ -93,6 +93,8 @@ struct ResolvedDaemonArgs {
     /// VS Code's user `settings.json`; `None` in system mode (user-only program).
     vscode_settings: Option<PathBuf>,
     pi: ResolvedPiStartupConfig,
+    /// Muse Code's user `settings.json`; `None` in system mode (user-only program).
+    muse_settings: Option<PathBuf>,
     /// `daemon.reconcileInterval`; `None` means no periodic re-apply.
     reconcile_interval: Option<Duration>,
     once: bool,
@@ -235,6 +237,12 @@ impl DaemonArgs {
                         settings: None,
                     }
                 },
+                muse_settings: {
+                    if startup.muse.settings.is_some() {
+                        bail!("daemon.muse.settings requires --user (or daemon.user: true)");
+                    }
+                    None
+                },
                 reconcile_interval: startup.reconcile_interval,
                 once: self.once || self.dry_run,
                 dry_run: self.dry_run,
@@ -331,6 +339,11 @@ impl DaemonArgs {
                     crate::provider::pi::user_pi_agent_dir(&home).join("settings.json")
                 })),
             },
+            muse_settings: Some(
+                startup.muse.settings.unwrap_or_else(|| {
+                    crate::provider::muse::user_muse_settings_path(&config_home)
+                }),
+            ),
             reconcile_interval: startup.reconcile_interval,
             once: self.once || self.dry_run,
             dry_run: self.dry_run,
@@ -458,6 +471,7 @@ where
         args.vscode_settings.clone(),
         args.pi.models.clone(),
         args.pi.settings.clone(),
+        args.muse_settings.clone(),
         agentdesktop_client_executable()?,
         socket.clone(),
     )
@@ -1157,6 +1171,11 @@ fn validate_one_shot(
                 .pi
                 .as_ref()
                 .is_some_and(|program| program.use_llm_gateway),
+            user && config
+                .programs
+                .muse
+                .as_ref()
+                .is_some_and(|program| program.use_llm_gateway),
         ]
         .into_iter()
         .any(|used| used);
@@ -1451,6 +1470,46 @@ mod tests {
             assert_eq!(
                 resolved.pi.settings.as_deref(),
                 Some(Path::new("custom/pi-settings.json"))
+            );
+        }
+    }
+
+    #[test]
+    fn muse_startup_path_requires_user_mode() {
+        for user in [false, true] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(
+                file.path(),
+                format!(
+                    "daemon:\n  user: {user}\n  muse:\n    settings: custom/muse-settings.json\n"
+                ),
+            )
+            .unwrap();
+            let config = agentdesktop_core::config::load_daemon(file.path()).unwrap();
+            let args = super::DaemonArgs {
+                user: false,
+                once: false,
+                dry_run: false,
+                config: None,
+            };
+            let result = args.resolve(
+                config.daemon.unwrap(),
+                file.path().to_path_buf(),
+                agentdesktop_core::DEFAULT_SOCKET_PATH.into(),
+            );
+            if !user {
+                assert!(
+                    result
+                        .err()
+                        .unwrap()
+                        .to_string()
+                        .contains("daemon.muse.settings requires --user")
+                );
+                continue;
+            }
+            assert_eq!(
+                result.unwrap().muse_settings.as_deref(),
+                Some(Path::new("custom/muse-settings.json"))
             );
         }
     }
@@ -2082,6 +2141,22 @@ programs:
                 .expect_err("Pi credentials require a running daemon");
             assert!(error.to_string().contains("credential helpers"));
         }
+    }
+
+    #[test]
+    fn one_shot_rejects_authenticated_muse_gateway() {
+        let gateway = "llmGateway:\n  url: https://gateway.example.com\n  authentication:\n    type: controllerJwt\n    audience: agentgateway\n    allowedClientIds: [muse]\n";
+        let config = parse_daemon(&format!("{gateway}programs:\n  muse: {{}}\n")).unwrap();
+        let error = validate_one_shot(&config, true)
+            .expect_err("Muse Code credentials require a running daemon");
+        assert!(error.to_string().contains("credential helpers"));
+        // A system daemon skips Muse Code, and an unrouted Muse Code needs no helper.
+        validate_one_shot(&config, false).unwrap();
+        let unrouted = parse_daemon(&format!(
+            "{gateway}programs:\n  muse:\n    useLlmGateway: false\n"
+        ))
+        .unwrap();
+        validate_one_shot(&unrouted, true).unwrap();
     }
 
     #[test]
