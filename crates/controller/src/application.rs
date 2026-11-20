@@ -219,7 +219,7 @@ async fn load_database_daemon_config(
         .transpose()
 }
 
-fn spawn_database_daemon_config_poller(database: Database, store: DaemonConfigStore) {
+pub(crate) fn spawn_database_daemon_config_poller(database: Database, store: DaemonConfigStore) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(3));
         loop {

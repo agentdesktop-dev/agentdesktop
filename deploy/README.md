@@ -39,7 +39,10 @@ daemonConfig:
 Changing from file mode to database mode does not automatically import the
 file. Provide its contents as `daemonConfig` for the one-time seed, or save the
 configuration through the management API. In database mode, edits and restores
-are recorded as new revisions and shared by controller replicas.
+are recorded as new revisions and shared by controller replicas. The save
+review warns if any enrolled daemon reports an older version than the
+controller. Saving is still allowed, but older daemons may not understand new
+configuration fields.
 
 When using `existingConfigSecret`, include `daemonConfig: { database: {} }` in
 the Secret's `controller.yaml` to enable database mode. To seed from a separate

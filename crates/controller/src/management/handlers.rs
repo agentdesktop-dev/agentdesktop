@@ -166,6 +166,7 @@ pub(super) async fn usage_report(
 
 #[derive(Serialize)]
 pub(super) struct ActiveDaemonConfig {
+    controller_version: &'static str,
     config: Option<serde_json::Value>,
     yaml: Option<String>,
     revision: Option<u64>,
@@ -364,6 +365,7 @@ async fn active_daemon_config(state: &ManagementState) -> Result<ActiveDaemonCon
         super::DaemonConfigSource::Database => match state.database.latest_daemon_config().await? {
             Some(revision) => active_database_daemon_config(revision, None),
             None => Ok(ActiveDaemonConfig {
+                controller_version: agentdesktop_core::VERSION,
                 config: None,
                 yaml: None,
                 revision: None,
@@ -385,6 +387,7 @@ async fn active_daemon_config(state: &ManagementState) -> Result<ActiveDaemonCon
                         String::from_utf8(active.yaml).context("daemon config is not UTF-8")?;
                     let config = agentdesktop_core::config::parse_daemon(&yaml)?;
                     Ok(ActiveDaemonConfig {
+                        controller_version: agentdesktop_core::VERSION,
                         config: Some(serde_json::to_value(config)?),
                         yaml: Some(yaml),
                         revision: Some(active.revision),
@@ -399,6 +402,7 @@ async fn active_daemon_config(state: &ManagementState) -> Result<ActiveDaemonCon
                     })
                 }
                 None => Ok(ActiveDaemonConfig {
+                    controller_version: agentdesktop_core::VERSION,
                     config: None,
                     yaml: None,
                     revision: None,
@@ -414,6 +418,7 @@ async fn active_daemon_config(state: &ManagementState) -> Result<ActiveDaemonCon
             }
         }
         super::DaemonConfigSource::None => Ok(ActiveDaemonConfig {
+            controller_version: agentdesktop_core::VERSION,
             config: None,
             yaml: None,
             revision: None,
@@ -435,6 +440,7 @@ fn active_database_daemon_config(
 ) -> Result<ActiveDaemonConfig, HandlerError> {
     let config = agentdesktop_core::config::parse_daemon(&revision.yaml)?;
     Ok(ActiveDaemonConfig {
+        controller_version: agentdesktop_core::VERSION,
         config: Some(serde_json::to_value(config)?),
         yaml: Some(revision.yaml),
         revision: Some(

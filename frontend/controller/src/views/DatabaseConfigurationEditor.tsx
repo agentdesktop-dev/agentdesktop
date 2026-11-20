@@ -1,5 +1,6 @@
 import { CircleAlert, RotateCcw, Save } from "lucide-react";
 import { useEffect, useState } from "react";
+import { lt, valid } from "semver";
 import { parseDocument } from "yaml";
 
 import { ApiError } from "../auth";
@@ -90,6 +91,14 @@ export function DatabaseConfigurationEditor({
     const now = Math.floor(Date.now() / 1000);
     return device.last_seen_at !== null && now - device.last_seen_at <= 90;
   }).length;
+  const controllerVersion = valid(active.controller_version ?? "");
+  const olderDaemons =
+    reviewOpen && controllerVersion
+      ? (devices ?? []).filter((device) => {
+          const version = valid(device.agent_version);
+          return version !== null && lt(version, controllerVersion);
+        }).length
+      : 0;
   const applied = devices?.filter(
     (device) =>
       device.config_revision === savedRevision && device.config_state === 1,
@@ -403,6 +412,18 @@ export function DatabaseConfigurationEditor({
                   Close
                 </button>
               </div>
+              {olderDaemons > 0 && (
+                <p className="config-review-warning" role="status">
+                  <CircleAlert
+                    className="config-review-warning-icon"
+                    size={14}
+                    aria-hidden="true"
+                  />
+                  {olderDaemons === 1
+                    ? "1 enrolled daemon is older than this controller and may not understand the new configuration."
+                    : `${olderDaemons} enrolled daemons are older than this controller and may not understand the new configuration.`}
+                </p>
+              )}
               <DiffView before={baseYaml} after={draft} />
               <details className="config-message-disclosure">
                 <summary>
