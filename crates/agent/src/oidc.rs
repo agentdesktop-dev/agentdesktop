@@ -1,9 +1,9 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use agentdesktop_core::config::ControllerConnectionConfig;
 use agentdesktop_proto::fleet::{
     EnrollDeviceRequest, LoginConfiguration, LoginConfigurationRequest,
-    fleet_agent_client::FleetAgentClient,
+    enroll_device_request::Credential, fleet_agent_client::FleetAgentClient,
 };
 use anyhow::{Context, bail};
 use axum::{
@@ -312,6 +312,45 @@ pub async fn enroll(
     complete_enrollment(&mut client, config, &device_key, &csr, tokens).await
 }
 
+/// Enrolls with the operator-signed token at `token_path`; no user signs in.
+pub async fn enroll_with_token(
+    controller: &ControllerConnectionConfig,
+    enrollment: &EnrollmentState,
+    token_path: &Path,
+) -> anyhow::Result<Identity> {
+    let token = std::fs::read_to_string(token_path)
+        .with_context(|| format!("read enrollment token from {}", token_path.display()))?;
+    let (device_key, csr) = device_csr()?;
+    enrollment.set("enrolling").await;
+    let mut request = tonic::Request::new(EnrollDeviceRequest {
+        hostname: remote::hostname(),
+        certificate_signing_request_der: csr.der().as_ref().to_vec(),
+        credential: Some(Credential::EnrollmentToken(token.trim().to_owned())),
+    });
+    request.set_timeout(Duration::from_secs(15));
+    let response = remote::client(controller, None)
+        .await?
+        .enroll_device(request)
+        .await
+        .context("enroll device with enrollment token")?
+        .into_inner();
+    let client_certificate_pem = String::from_utf8(response.client_certificate_pem)
+        .context("controller returned a non-UTF-8 device certificate")?;
+    if client_certificate_pem.is_empty() {
+        bail!("controller returned an empty device certificate");
+    }
+    Ok(Identity {
+        device_id: response.device_id,
+        client_certificate_pem,
+        client_private_key_pem: device_key.serialize_pem(),
+        client_certificate_expires_at_unix_seconds: response
+            .client_certificate_expires_at_unix_seconds,
+        oauth: None,
+        oauth_token_endpoint: String::new(),
+        oauth_client_id: String::new(),
+    })
+}
+
 async fn browser_login(
     config: &LoginConfiguration,
     enrollment: &EnrollmentState,
@@ -451,7 +490,7 @@ async fn complete_enrollment(
     let body = EnrollDeviceRequest {
         hostname: remote::hostname(),
         certificate_signing_request_der: csr.der().as_ref().to_vec(),
-        id_token,
+        credential: Some(Credential::IdToken(id_token)),
     };
     let authorization: tonic::metadata::MetadataValue<tonic::metadata::Ascii> =
         format!("Bearer {}", tokens.access_token)
@@ -493,11 +532,11 @@ async fn complete_enrollment(
         client_private_key_pem: device_key.serialize_pem(),
         client_certificate_expires_at_unix_seconds: response
             .client_certificate_expires_at_unix_seconds,
-        oauth: OAuthCredentials {
+        oauth: Some(OAuthCredentials {
             access_token: tokens.access_token,
             refresh_token,
             expires_at_unix_seconds: login_started.saturating_add(tokens.expires_in),
-        },
+        }),
         oauth_token_endpoint: config.token_endpoint,
         oauth_client_id: config.client_id,
     })
@@ -626,7 +665,10 @@ pub(crate) async fn poll_device_token(
 pub async fn refresh(identity: &mut Identity) -> anyhow::Result<()> {
     let endpoint = &identity.oauth_token_endpoint;
     let client_id = &identity.oauth_client_id;
-    let current = &identity.oauth;
+    let current = identity
+        .oauth
+        .as_ref()
+        .context("device has no OIDC session to refresh")?;
     let response = refresh_access_token(endpoint, client_id, &current.refresh_token).await?;
     apply_refreshed_tokens(identity, response)
 }
@@ -662,12 +704,15 @@ fn apply_refreshed_tokens(identity: &mut Identity, response: TokenResponse) -> a
     if !response.token_type.eq_ignore_ascii_case("Bearer") {
         bail!("OIDC token endpoint returned unsupported token type");
     }
-    let current_refresh_token = identity.oauth.refresh_token.clone();
-    identity.oauth = OAuthCredentials {
+    let current = identity
+        .oauth
+        .take()
+        .context("device has no OIDC session to refresh")?;
+    identity.oauth = Some(OAuthCredentials {
         access_token: response.access_token,
-        refresh_token: response.refresh_token.unwrap_or(current_refresh_token),
+        refresh_token: response.refresh_token.unwrap_or(current.refresh_token),
         expires_at_unix_seconds: unix_time_seconds().saturating_add(response.expires_in),
-    };
+    });
     Ok(())
 }
 
@@ -1040,6 +1085,17 @@ mod tests {
             request: tonic::Request<agentdesktop_proto::fleet::EnrollDeviceRequest>,
         ) -> Result<tonic::Response<agentdesktop_proto::fleet::EnrollResponse>, tonic::Status>
         {
+            if let Some(super::Credential::EnrollmentToken(token)) = &request.get_ref().credential {
+                assert_eq!(token, "signed-token");
+                assert!(request.metadata().get("authorization").is_none());
+                return Ok(tonic::Response::new(
+                    agentdesktop_proto::fleet::EnrollResponse {
+                        device_id: "token-device".to_owned(),
+                        client_certificate_pem: b"mock-certificate".to_vec(),
+                        client_certificate_expires_at_unix_seconds: 12345,
+                    },
+                ));
+            }
             assert!(
                 self.authenticated.load(std::sync::atomic::Ordering::SeqCst),
                 "enrollment must not be called before user authentication"
@@ -1212,6 +1268,7 @@ mod tests {
                 ca_certificate_path,
                 heartbeat_interval: Duration::from_secs(30),
                 device_authorization: headless,
+                enrollment_token_path: None,
             };
             let enrollment = crate::enrollment::EnrollmentState::new(true);
             let mut pending = Box::pin(super::enroll(&controller, &enrollment, None, false));
@@ -1263,7 +1320,7 @@ mod tests {
             if approved {
                 let identity = result.unwrap();
                 assert_eq!(identity.device_id, "device-1");
-                assert_eq!(identity.oauth.access_token, "access-token");
+                assert_eq!(identity.oauth.unwrap().access_token, "access-token");
                 assert_eq!(requests.lock().await.len(), 2);
                 assert_eq!(enrollment.get().await.status, "enrolling");
                 let request = requests.lock().await[0].clone();
@@ -1271,9 +1328,12 @@ mod tests {
                     &request.certificate_signing_request_der.as_slice().into(),
                 )
                 .unwrap();
+                let Some(super::Credential::IdToken(id_token)) = &request.credential else {
+                    panic!("enrollment did not send an ID token");
+                };
                 let claims: serde_json::Value = serde_json::from_slice(
                     &super::URL_SAFE_NO_PAD
-                        .decode(request.id_token.split('.').nth(1).unwrap())
+                        .decode(id_token.split('.').nth(1).unwrap())
                         .unwrap(),
                 )
                 .unwrap();
@@ -1293,6 +1353,46 @@ mod tests {
             server.abort();
             idp.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn token_enrollment_needs_no_user_sign_in() {
+        use agentdesktop_proto::fleet::fleet_agent_server::FleetAgentServer;
+
+        let mock = EnrollmentController {
+            config: Default::default(),
+            authenticated: Default::default(),
+            requests: Default::default(),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(FleetAgentServer::new(mock))
+                .serve_with_incoming(tonic::transport::server::TcpIncoming::from(listener)),
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let ca_certificate_path = directory.path().join("ca.pem");
+        let ca = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        std::fs::write(&ca_certificate_path, ca.cert.pem()).unwrap();
+        let token_path = directory.path().join("enrollment-token");
+        std::fs::write(&token_path, "signed-token\n").unwrap();
+        let controller = agentdesktop_core::config::ControllerConnectionConfig {
+            address: format!("http://{address}"),
+            ca_certificate_path,
+            heartbeat_interval: Duration::from_secs(30),
+            device_authorization: false,
+            enrollment_token_path: Some(token_path.clone()),
+        };
+        let enrollment = crate::enrollment::EnrollmentState::new(true);
+
+        let identity = super::enroll_with_token(&controller, &enrollment, &token_path)
+            .await
+            .unwrap();
+        assert_eq!(identity.device_id, "token-device");
+        assert!(identity.oauth.is_none());
+        assert!(identity.client_private_key_pem.contains("PRIVATE KEY"));
+        server.abort();
     }
 
     #[test]
@@ -1624,11 +1724,11 @@ mod tests {
             client_certificate_pem: "certificate".to_owned(),
             client_private_key_pem: "key".to_owned(),
             client_certificate_expires_at_unix_seconds: u64::MAX,
-            oauth: OAuthCredentials {
+            oauth: Some(OAuthCredentials {
                 access_token: "old-access".to_owned(),
                 refresh_token: "old-refresh".to_owned(),
                 expires_at_unix_seconds: 0,
-            },
+            }),
             oauth_token_endpoint: "https://idp.example/token".to_owned(),
             oauth_client_id: "client".to_owned(),
         };
@@ -1644,7 +1744,7 @@ mod tests {
             },
         )
         .unwrap();
-        let oauth = identity.oauth;
+        let oauth = identity.oauth.unwrap();
         assert_eq!(oauth.access_token, "new-access");
         assert_eq!(oauth.refresh_token, "new-refresh");
         assert!(oauth.expires_at_unix_seconds > 0);

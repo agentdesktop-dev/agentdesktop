@@ -1852,7 +1852,8 @@ mod fleet_service {
 
     use agentdesktop_proto::fleet::{
         AgentMessage, ControllerMessage, DaemonConfig, EnrollDeviceRequest,
-        LoginConfigurationRequest, fleet_agent_server::FleetAgent,
+        LoginConfigurationRequest, enroll_device_request::Credential,
+        fleet_agent_server::FleetAgent,
     };
     use axum::{
         http::{StatusCode, Uri},
@@ -2064,7 +2065,10 @@ mod fleet_service {
             let mut request = Request::new(EnrollDeviceRequest {
                 hostname: "host".to_owned(),
                 certificate_signing_request_der: csr.der().to_vec(),
-                id_token: format!("{}.e30.c2ln", URL_SAFE_NO_PAD.encode(header)),
+                credential: Some(Credential::IdToken(format!(
+                    "{}.e30.c2ln",
+                    URL_SAFE_NO_PAD.encode(header)
+                ))),
             });
             request
                 .metadata_mut()

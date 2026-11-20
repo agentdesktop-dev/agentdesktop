@@ -352,7 +352,22 @@ async fn run_session(
                     enrollment,
                     logout,
                     INITIAL_RETRY_DELAY,
-                    || oidc::enroll(controller, enrollment, oidc_callback_listen, open_browser),
+                    || async {
+                        match &controller.enrollment_token_path {
+                            Some(path) => {
+                                oidc::enroll_with_token(controller, enrollment, path).await
+                            }
+                            None => {
+                                oidc::enroll(
+                                    controller,
+                                    enrollment,
+                                    oidc_callback_listen,
+                                    open_browser,
+                                )
+                                .await
+                            }
+                        }
+                    },
                 )
                 .await;
                 identity::save(&identity_path, &identity)?;
@@ -823,14 +838,19 @@ async fn connect(
     info!(address = %controller.address, "connected to controller");
     controller_status.mark_connected().await;
     let mut heartbeat = time::interval(controller.heartbeat_interval);
-    let reconnect_at = identity.oauth.expires_at_unix_seconds.saturating_sub(60);
+    let reconnect_at = identity
+        .oauth
+        .as_ref()
+        .map(|oauth| oauth.expires_at_unix_seconds.saturating_sub(60));
     let oauth_reconnect = time::sleep(Duration::from_secs(
-        reconnect_at.saturating_sub(unix_time_seconds()),
+        reconnect_at
+            .unwrap_or_default()
+            .saturating_sub(unix_time_seconds()),
     ));
     tokio::pin!(oauth_reconnect);
     loop {
         tokio::select! {
-            _ = &mut oauth_reconnect => {
+            _ = &mut oauth_reconnect, if reconnect_at.is_some() => {
                 info!("reconnecting controller stream to refresh OIDC access token");
                 return Ok(());
             }
@@ -1304,8 +1324,13 @@ fn controller_ca(path: &Path) -> anyhow::Result<Certificate> {
     Ok(Certificate::from_pem(pem))
 }
 
+/// Adds the user's access token. A token-enrolled device has none: its
+/// client certificate alone authenticates it.
 fn authenticate_request<T>(identity: &Identity, request: &mut Request<T>) -> anyhow::Result<()> {
-    let access_token = &identity.oauth.access_token;
+    let Some(oauth) = &identity.oauth else {
+        return Ok(());
+    };
+    let access_token = &oauth.access_token;
     request.metadata_mut().insert(
         "authorization",
         format!("Bearer {access_token}")
@@ -1358,14 +1383,17 @@ async fn refresh_oauth(
     identity_path: &Path,
     force: bool,
 ) -> anyhow::Result<()> {
-    let oauth = &identity.oauth;
+    let Some(oauth) = &identity.oauth else {
+        return Ok(());
+    };
     if force || oauth.expires_at_unix_seconds <= unix_time_seconds().saturating_add(120) {
         let _guard = OAUTH_REFRESH_MUTEX.lock().await;
         match identity::load(identity_path) {
             Ok(Some(stored))
-                if stored.oauth.expires_at_unix_seconds
-                    > unix_time_seconds().saturating_add(120)
-                    && (!force || stored.oauth.access_token != identity.oauth.access_token) =>
+                if stored.oauth.as_ref().is_some_and(|stored| {
+                    stored.expires_at_unix_seconds > unix_time_seconds().saturating_add(120)
+                        && (!force || stored.access_token != oauth.access_token)
+                }) =>
             {
                 *identity = stored;
                 return Ok(());
@@ -2002,6 +2030,7 @@ mod tests {
             ca_certificate_path,
             heartbeat_interval: Duration::from_secs(30),
             device_authorization: false,
+            enrollment_token_path: None,
         };
         (directory, controller)
     }

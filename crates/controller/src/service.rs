@@ -5,7 +5,7 @@ use agentdesktop_proto::fleet::{
     DeviceUsageRequest, DeviceUsageResponse, EnrollDeviceRequest, EnrollResponse,
     LlmGatewayCredentialRequest, LlmGatewayCredentialResponse, LoginConfiguration,
     LoginConfigurationRequest, RenewDeviceCertificateRequest, agent_message, controller_message,
-    fleet_agent_server::FleetAgent,
+    enroll_device_request::Credential, fleet_agent_server::FleetAgent,
 };
 use futures_core::Stream;
 use sha2::{Digest, Sha256};
@@ -26,16 +26,18 @@ use crate::{
     daemon_config::DaemonConfigStore,
     database::{Database, DevicePrincipal},
     device_ca::DeviceCertificateIssuer,
+    enrollment_token::EnrollmentTokens,
     fleet_limits::{
         DeviceStream, DeviceStreams, EnrollmentLimiter, FleetLimits, StreamEvent, ThrottledWarning,
     },
     gateway_jwt::GatewayJwtIssuer,
-    oidc::{OidcPrincipal, OidcProvider},
+    oidc::{CompletedEnrollment, EnrollmentCredential, OidcPrincipal, OidcProvider},
 };
 
 #[derive(Clone)]
 pub struct FleetAgentService {
     oidc: Option<OidcProvider>,
+    enrollment_tokens: Option<EnrollmentTokens>,
     database: Database,
     daemon_config: DaemonConfigStore,
     gateway_jwt_issuer: Option<GatewayJwtIssuer>,
@@ -59,6 +61,7 @@ impl FleetAgentService {
     ) -> Self {
         Self {
             oidc,
+            enrollment_tokens: None,
             database,
             daemon_config,
             gateway_jwt_issuer,
@@ -67,6 +70,12 @@ impl FleetAgentService {
             enrollment: EnrollmentLimiter::new(limits),
             device_streams: DeviceStreams::new(limits),
         }
+    }
+
+    /// Accepts operator-signed enrollment tokens in place of a user sign-in.
+    pub fn with_enrollment_tokens(mut self, tokens: Option<EnrollmentTokens>) -> Self {
+        self.enrollment_tokens = tokens;
+        self
     }
 
     /// Tells devices that the controller collects gateway usage.
@@ -104,29 +113,35 @@ impl FleetAgent for FleetAgentService {
             .enrollment
             .admit_enrollment(request.remote_addr())
             .await?;
-        let oidc = self
-            .oidc
-            .as_ref()
-            .ok_or_else(|| Status::failed_precondition("OIDC enrollment is disabled"))?;
-        let access_token = bearer_credential(request.metadata())?.to_owned();
-        let request = request.into_inner();
-        let csr_der = request.certificate_signing_request_der.clone();
+        let (metadata, _, request) = request.into_parts();
+        let csr_der = request.certificate_signing_request_der;
         // Parsing verifies the CSR signature, which proves the caller holds the key
         // that the ID token's nonce must be bound to.
         let csr = rcgen::CertificateSigningRequestParams::from_der(&csr_der.as_slice().into())
             .map_err(|error| invalid_csr(error.into()))?;
-        let device_key_nonce = agentdesktop_proto::enrollment_nonce(
-            &rcgen::PublicKeyData::subject_public_key_info(&csr.public_key),
-        );
-        let completed = oidc
-            .authenticate_enrollment(
-                request.hostname,
-                &request.id_token,
-                &access_token,
-                &device_key_nonce,
-            )
-            .await
-            .map_err(invalid_enrollment)?;
+        let completed = match request.credential {
+            Some(Credential::IdToken(id_token)) => {
+                let oidc = self
+                    .oidc
+                    .as_ref()
+                    .ok_or_else(|| Status::failed_precondition("OIDC enrollment is disabled"))?;
+                let device_key_nonce = agentdesktop_proto::enrollment_nonce(
+                    &rcgen::PublicKeyData::subject_public_key_info(&csr.public_key),
+                );
+                oidc.authenticate_enrollment(
+                    request.hostname,
+                    &id_token,
+                    bearer_credential(&metadata)?,
+                    &device_key_nonce,
+                )
+                .await
+                .map_err(invalid_enrollment)?
+            }
+            Some(Credential::EnrollmentToken(token)) => {
+                self.authenticate_enrollment_token(request.hostname, &token)?
+            }
+            None => return Err(Status::invalid_argument("missing enrollment credential")),
+        };
         self.issue_enrolled_device(&completed, &csr_der).await
     }
 
@@ -210,25 +225,24 @@ impl FleetAgent for FleetAgentService {
             .device_principal(&device_id)
             .await
             .map_err(internal)?;
-        let subject = if principal.subject.is_empty() {
-            device_id.as_str()
-        } else {
-            principal.subject.as_str()
-        };
+        // The credential carries the identity of the device's user.
+        let user = principal
+            .user
+            .ok_or_else(|| Status::failed_precondition("sign in to use the LLM gateway"))?;
         let (credential, expires_at_unix_seconds) = issuer
             .issue(
-                subject,
+                &user.subject,
                 &device_id,
                 &client_id,
                 audience,
-                principal.idp_claims.as_ref(),
+                Some(&user.idp_claims),
                 subscription,
             )
             .map_err(internal)?;
         info!(
             device_id,
             expires_at_unix_seconds,
-            enrolled_by_issuer = principal.issuer,
+            enrolled_by_issuer = user.issuer,
             client_id,
             subscription,
             "issued LLM gateway credential"
@@ -266,11 +280,16 @@ impl FleetAgent for FleetAgentService {
         // Rate-limit opens per device before checking the access token, which
         // calls the identity provider.
         let permit = self.device_streams.admit_open(&device_id)?;
-        let access_token = bearer_credential(request.metadata())?.to_owned();
-        let oidc = self
-            .authenticate_device_identity(&device_id, &access_token)
+        let access = match self
+            .authenticate_device_identity(&device_id, request.metadata())
             .await?
-            .clone();
+        {
+            Some(oidc) => Some((
+                oidc.clone(),
+                bearer_credential(request.metadata())?.to_owned(),
+            )),
+            None => None,
+        };
         let (responses, receiver) = mpsc::channel(8);
         let session = ConnectSession {
             device_id,
@@ -278,8 +297,7 @@ impl FleetAgent for FleetAgentService {
             stream: permit.open(request),
             responses,
             database: self.database.clone(),
-            oidc,
-            access_token,
+            access,
         };
         tokio::spawn(session.run());
         Ok(Response::new(Box::pin(ReceiverStream::new(receiver))))
@@ -299,9 +317,9 @@ struct ConnectSession {
     responses: mpsc::Sender<Result<ControllerMessage, Status>>,
     daemon_updates: watch::Receiver<Option<DaemonConfig>>,
     database: Database,
-    oidc: OidcProvider,
-    /// The access token the stream opened with.
-    access_token: String,
+    /// The identity provider and the access token the stream opened with.
+    /// `None` for a device enrolled with a token.
+    access: Option<(OidcProvider, String)>,
 }
 
 impl ConnectSession {
@@ -369,11 +387,10 @@ impl ConnectSession {
     /// still identifies the user who enrolled the device. The stream stays open
     /// while the identity provider is unavailable.
     async fn recheck_access_token(&self, enrolled: &DevicePrincipal) -> ControlFlow<()> {
-        match self
-            .oidc
-            .authenticate_access_token(&self.access_token)
-            .await
-        {
+        let Some((oidc, access_token)) = &self.access else {
+            return ControlFlow::Continue(());
+        };
+        match oidc.authenticate_access_token(access_token).await {
             Ok(principal) if oidc_principals_match(&principal, enrolled) => {
                 ControlFlow::Continue(())
             }
@@ -446,58 +463,90 @@ impl ConnectSession {
 impl FleetAgentService {
     async fn authenticate_device<T>(&self, request: &Request<T>) -> Result<String, Status> {
         let device_id = peer_certificate_device_id(request)?;
-        let access_token = bearer_credential(request.metadata())?;
-        self.authenticate_device_identity(&device_id, access_token)
+        self.authenticate_device_identity(&device_id, request.metadata())
             .await?;
         Ok(device_id)
     }
 
-    /// Checks that `access_token` identifies the user who enrolled
-    /// `device_id`, and returns the identity provider that checked it.
+    /// Authenticates `device_id`. A device enrolled with a token needs only
+    /// its certificate. Any other device also needs the access token of the
+    /// user who enrolled it; the identity provider that checked it is returned.
     async fn authenticate_device_identity(
         &self,
         device_id: &str,
-        access_token: &str,
-    ) -> Result<&OidcProvider, Status> {
+        metadata: &tonic::metadata::MetadataMap,
+    ) -> Result<Option<&OidcProvider>, Status> {
+        let enrolled = self.enrolled_principal(device_id).await?;
+        if let Some(token) = &enrolled.enrollment_token {
+            let accepted = self
+                .enrollment_tokens
+                .as_ref()
+                .is_some_and(|tokens| tokens.accepts(token));
+            if !accepted {
+                warn!(device_id, "device enrollment token is no longer accepted");
+                return Err(Status::unauthenticated(
+                    "device enrollment token is no longer accepted",
+                ));
+            }
+            return Ok(None);
+        }
         let oidc = self.oidc.as_ref().ok_or_else(|| {
             Status::failed_precondition("OIDC access-token validation is disabled")
         })?;
         let access_principal = oidc
-            .authenticate_access_token(access_token)
+            .authenticate_access_token(bearer_credential(metadata)?)
             .await
             .map_err(invalid_access_token)?;
-        self.authenticate_device_certificate_identity(device_id, &access_principal)
-            .await?;
-        Ok(oidc)
+        authenticate_enrolled_user(&enrolled, &access_principal)?;
+        Ok(Some(oidc))
     }
 
-    async fn authenticate_device_certificate_identity(
+    fn authenticate_enrollment_token(
         &self,
-        device_id: &str,
-        access_principal: &OidcPrincipal,
-    ) -> Result<(), Status> {
-        let principal = self
-            .database
+        hostname: String,
+        token: &str,
+    ) -> Result<CompletedEnrollment, Status> {
+        let tokens = self
+            .enrollment_tokens
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("enrollment tokens are disabled"))?;
+        crate::oidc::validate_hostname(&hostname)
+            .map_err(|_| Status::invalid_argument("invalid enrollment hostname"))?;
+        let token = tokens.verify(token).map_err(|error| {
+            warn!(error = %format!("{error:#}"), "enrollment token rejected");
+            Status::unauthenticated("enrollment token rejected")
+        })?;
+        Ok(CompletedEnrollment {
+            hostname,
+            credential: EnrollmentCredential::Token(token),
+        })
+    }
+
+    async fn enrolled_principal(&self, device_id: &str) -> Result<DevicePrincipal, Status> {
+        self.database
             .device_principal(device_id)
             .await
             .map_err(|error| {
                 warn!(%error, device_id, "certificate references an unknown device");
                 Status::unauthenticated("unrecognized device certificate")
-            })?;
-        if !oidc_principals_match(access_principal, &principal) {
-            return Err(Status::permission_denied(
-                "access token principal does not match enrolled device user",
-            ));
-        }
-        Ok(())
+            })
     }
 
     async fn issue_enrolled_device(
         &self,
-        completed: &crate::oidc::CompletedEnrollment,
+        completed: &CompletedEnrollment,
         csr_der: &[u8],
     ) -> Result<Response<EnrollResponse>, Status> {
-        let device_id = enrollment_device_id(&completed.issuer, &completed.subject, csr_der);
+        let device_id = match &completed.credential {
+            EnrollmentCredential::User(user) => {
+                enrollment_device_id(&user.issuer, &user.subject, csr_der)
+            }
+            EnrollmentCredential::Token(token) => enrollment_device_id(
+                &format!("enrollment-token:{}", token.issuer),
+                &token.id,
+                csr_der,
+            ),
+        };
         if let Some(response) = self
             .database
             .enrollment_receipt(&device_id)
@@ -525,13 +574,22 @@ impl FleetAgentService {
             )
             .await
             .map_err(internal)?;
-        info!(
-            %device_id,
-            hostname = %completed.hostname,
-            enrolled_by_issuer = %completed.issuer,
-            enrolled_by_subject = %completed.subject,
-            "enrolled device"
-        );
+        match &completed.credential {
+            EnrollmentCredential::User(user) => info!(
+                %device_id,
+                hostname = %completed.hostname,
+                enrolled_by_issuer = %user.issuer,
+                enrolled_by_subject = %user.subject,
+                "enrolled device"
+            ),
+            EnrollmentCredential::Token(token) => info!(
+                %device_id,
+                hostname = %completed.hostname,
+                enrollment_token_issuer = %token.issuer,
+                enrollment_token_id = %token.id,
+                "enrolled device"
+            ),
+        }
 
         Ok(Response::new(response))
     }
@@ -549,11 +607,22 @@ fn enrollment_device_id(issuer: &str, subject: &str, csr_der: &[u8]) -> String {
     Uuid::from_bytes(bytes).to_string()
 }
 
+fn authenticate_enrolled_user(
+    enrolled: &DevicePrincipal,
+    access_principal: &OidcPrincipal,
+) -> Result<(), Status> {
+    if !oidc_principals_match(access_principal, enrolled) {
+        return Err(Status::permission_denied(
+            "access token principal does not match enrolled device user",
+        ));
+    }
+    Ok(())
+}
+
 fn oidc_principals_match(authenticated: &OidcPrincipal, enrolled: &DevicePrincipal) -> bool {
-    !enrolled.issuer.is_empty()
-        && !enrolled.subject.is_empty()
-        && authenticated.issuer == enrolled.issuer
-        && authenticated.subject == enrolled.subject
+    enrolled.user.as_ref().is_some_and(|user| {
+        authenticated.issuer == user.issuer && authenticated.subject == user.subject
+    })
 }
 
 fn peer_certificate_device_id<T>(request: &Request<T>) -> Result<String, Status> {
@@ -754,7 +823,8 @@ mod tests {
     use tonic::Code;
 
     use super::{
-        FleetAgentService, device_id_from_certificate, subscription_is_configured_for_client,
+        FleetAgentService, authenticate_enrolled_user, device_id_from_certificate,
+        subscription_is_configured_for_client,
     };
     use crate::{daemon_config::DaemonConfigStore, database::Database, oidc::OidcPrincipal};
 
@@ -762,7 +832,8 @@ mod tests {
     async fn enrollment_rpc_is_user_bound_idempotent_and_durable() {
         use crate::oidc::tests::{authenticated_provider, id_token, user_claims};
         use agentdesktop_proto::fleet::{
-            EnrollDeviceRequest, LoginConfigurationRequest, fleet_agent_server::FleetAgent,
+            EnrollDeviceRequest, LoginConfigurationRequest, enroll_device_request::Credential,
+            fleet_agent_server::FleetAgent,
         };
         use rcgen::{BasicConstraints, IsCa, KeyUsagePurpose};
 
@@ -826,7 +897,10 @@ mod tests {
         let body = EnrollDeviceRequest {
             hostname: "workstation".to_owned(),
             certificate_signing_request_der: csr.der().as_ref().to_vec(),
-            id_token: id_token(&signing_key, &user_claims(&key_nonce(&device_key))),
+            credential: Some(Credential::IdToken(id_token(
+                &signing_key,
+                &user_claims(&key_nonce(&device_key)),
+            ))),
         };
         let request_with = |token: &str, body: EnrollDeviceRequest| {
             let mut request = tonic::Request::new(body);
@@ -845,7 +919,7 @@ mod tests {
             Code::Unauthenticated,
         );
         let mut invalid = body.clone();
-        invalid.id_token = "invalid".to_owned();
+        invalid.credential = Some(Credential::IdToken("invalid".to_owned()));
         assert_eq!(
             service
                 .enroll_device(request(invalid))
@@ -865,7 +939,10 @@ mod tests {
             Code::InvalidArgument
         );
         let mut other_key_sign_in = body.clone();
-        other_key_sign_in.id_token = id_token(&signing_key, &user_claims("other-key-nonce"));
+        other_key_sign_in.credential = Some(Credential::IdToken(id_token(
+            &signing_key,
+            &user_claims("other-key-nonce"),
+        )));
         assert_eq!(
             service
                 .enroll_device(request(other_key_sign_in))
@@ -894,8 +971,9 @@ mod tests {
             .device_principal(&response.device_id)
             .await
             .unwrap();
-        assert_eq!(principal.issuer, "https://idp.example");
-        assert_eq!(principal.subject, "user-1");
+        let user = principal.user.unwrap();
+        assert_eq!(user.issuer, "https://idp.example");
+        assert_eq!(user.subject, "user-1");
         assert_eq!(counts().await, (1, 1));
         let mut tasks = tokio::task::JoinSet::new();
         for _ in 0..8 {
@@ -932,7 +1010,10 @@ mod tests {
             .serialize_request(&other_key)
             .unwrap();
         other_body.certificate_signing_request_der = other_csr.der().as_ref().to_vec();
-        other_body.id_token = id_token(&signing_key, &user_claims(&key_nonce(&other_key)));
+        other_body.credential = Some(Credential::IdToken(id_token(
+            &signing_key,
+            &user_claims(&key_nonce(&other_key)),
+        )));
         let mut tasks = tokio::task::JoinSet::new();
         for _ in 0..4 {
             let service = service.clone();
@@ -961,6 +1042,101 @@ mod tests {
         assert_eq!(counts().await, (1, 1));
         idp.abort();
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_token_enrolls_a_device_that_then_needs_only_its_certificate() {
+        use crate::enrollment_token::tests::Issuer;
+        use agentdesktop_proto::fleet::{
+            EnrollDeviceRequest, enroll_device_request::Credential, fleet_agent_server::FleetAgent,
+        };
+        use rcgen::{BasicConstraints, IsCa, KeyUsagePurpose};
+
+        let directory = tempfile::tempdir().unwrap();
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("controller.db").display()
+        );
+        let database = Database::connect(&url).await.unwrap();
+        let ca_key = KeyPair::generate().unwrap();
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+        let ca = ca_params.self_signed(&ca_key).unwrap();
+        let certificates =
+            crate::device_ca::DeviceCertificateIssuer::from_pem(ca.pem(), &ca_key.serialize_pem())
+                .unwrap();
+        let tokens = Issuer::new();
+        let service = |revoked_ids: &[&str]| {
+            FleetAgentService::new(
+                None,
+                database.clone(),
+                DaemonConfigStore::new(None),
+                None,
+                Some(certificates.clone()),
+                &crate::fleet_limits::FleetLimits::from_config(&Default::default())
+                    .expect("default limits"),
+            )
+            .with_enrollment_tokens(Some(tokens.tokens(revoked_ids)))
+        };
+        let enroll = |service: FleetAgentService, token: String| async move {
+            let csr = CertificateParams::new(Vec::<String>::new())
+                .unwrap()
+                .serialize_request(&KeyPair::generate().unwrap())
+                .unwrap();
+            let request = EnrollDeviceRequest {
+                hostname: "workstation".to_owned(),
+                certificate_signing_request_der: csr.der().as_ref().to_vec(),
+                credential: Some(Credential::EnrollmentToken(token)),
+            };
+            let response = service
+                .enroll_device(tonic::Request::new(request.clone()))
+                .await?
+                .into_inner();
+            let retried = service.enroll_device(tonic::Request::new(request)).await?;
+            assert_eq!(retried.into_inner(), response, "a retry must be idempotent");
+            Ok::<_, tonic::Status>(response.device_id)
+        };
+        let no_access_token = tonic::metadata::MetadataMap::new();
+
+        let first = enroll(service(&[]), tokens.token("batch-1")).await.unwrap();
+        let second = enroll(service(&[]), tokens.token("batch-1")).await.unwrap();
+        assert_ne!(first, second, "one token enrolls many devices");
+        service(&[])
+            .authenticate_device_identity(&first, &no_access_token)
+            .await
+            .expect("the certificate alone authenticates the device");
+        let principal = database.device_principal(&first).await.unwrap();
+        assert_eq!(principal.user, None);
+        let token = principal.enrollment_token.unwrap();
+        assert_eq!(
+            (token.issuer.as_str(), token.id.as_str()),
+            ("jamf", "batch-1")
+        );
+
+        let revoked = service(&["batch-1"]);
+        for device_id in [&first, &second] {
+            let status = revoked
+                .authenticate_device_identity(device_id, &no_access_token)
+                .await
+                .err()
+                .expect("a device enrolled with a revoked token must be rejected");
+            assert_eq!(status.code(), Code::Unauthenticated);
+        }
+        let status = enroll(revoked, tokens.token("batch-1")).await.unwrap_err();
+        assert_eq!(status.code(), Code::Unauthenticated);
+
+        let without_tokens = service(&[]).with_enrollment_tokens(None);
+        let status = without_tokens
+            .authenticate_device_identity(&first, &no_access_token)
+            .await
+            .err()
+            .expect("token-enrolled devices need enrollment tokens to stay enabled");
+        assert_eq!(status.code(), Code::Unauthenticated);
+        let status = enroll(without_tokens, tokens.token("batch-1"))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::FailedPrecondition);
     }
 
     #[test]
@@ -1098,9 +1274,8 @@ mod tests {
             issuer: issuer.to_owned(),
             subject: subject.to_owned(),
         };
-        service
-            .authenticate_device_certificate_identity(device_id, &principal("issuer", "subject"))
-            .await
+        let enrolled = service.enrolled_principal(device_id).await.unwrap();
+        authenticate_enrolled_user(&enrolled, &principal("issuer", "subject"))
             .expect("the enrolled principal is accepted");
 
         for mismatched in [
@@ -1108,20 +1283,16 @@ mod tests {
             principal("other-issuer", "subject"),
             principal("other-issuer", "other-subject"),
         ] {
-            let status = service
-                .authenticate_device_certificate_identity(device_id, &mismatched)
-                .await
+            let status = authenticate_enrolled_user(&enrolled, &mismatched)
                 .expect_err("mismatched OIDC principal must fail");
             assert_eq!(status.code(), Code::PermissionDenied);
         }
 
         let status = service
-            .authenticate_device_certificate_identity(
-                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-                &principal("issuer", "subject"),
-            )
+            .enrolled_principal("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
             .await
-            .expect_err("unknown device certificate must fail");
+            .err()
+            .expect("unknown device certificate must fail");
         assert_eq!(status.code(), Code::Unauthenticated);
     }
 
@@ -1150,16 +1321,15 @@ mod tests {
                 .expect("default limits"),
         );
 
-        let status = service
-            .authenticate_device_certificate_identity(
-                device_id,
-                &OidcPrincipal {
-                    issuer: String::new(),
-                    subject: "subject".to_owned(),
-                },
-            )
-            .await
-            .expect_err("empty enrolled issuer must fail closed");
+        let enrolled = service.enrolled_principal(device_id).await.unwrap();
+        let status = authenticate_enrolled_user(
+            &enrolled,
+            &OidcPrincipal {
+                issuer: String::new(),
+                subject: "subject".to_owned(),
+            },
+        )
+        .expect_err("empty enrolled issuer must fail closed");
         assert_eq!(status.code(), Code::PermissionDenied);
     }
 

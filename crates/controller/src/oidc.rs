@@ -17,6 +17,8 @@ use serde::Deserialize;
 use tokio::sync::Mutex;
 use url::Url;
 
+use crate::enrollment_token::EnrollmentToken;
+
 const JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Longest the controller waits for an identity provider request. Without a
 /// limit, an IdP that accepts the connection and never answers stalls whatever
@@ -53,9 +55,29 @@ struct JwksCache {
 
 pub struct CompletedEnrollment {
     pub hostname: String,
+    pub credential: EnrollmentCredential,
+}
+
+/// What a device enrolled with.
+pub enum EnrollmentCredential {
+    User(EnrolledUser),
+    Token(EnrollmentToken),
+}
+
+/// The user signed in on a device.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnrolledUser {
     pub issuer: String,
     pub subject: String,
     pub idp_claims: BTreeMap<String, serde_json::Value>,
+}
+
+pub(crate) fn validate_hostname(hostname: &str) -> anyhow::Result<()> {
+    if hostname.trim().is_empty() || hostname.len() > 255 || hostname.chars().any(char::is_control)
+    {
+        bail!("invalid enrollment hostname");
+    }
+    Ok(())
 }
 
 /// The identity provider could not be used to check a credential, so the
@@ -172,12 +194,7 @@ impl OidcProvider {
         access_token: &str,
         device_key_nonce: &str,
     ) -> anyhow::Result<CompletedEnrollment> {
-        if hostname.trim().is_empty()
-            || hostname.len() > 255
-            || hostname.chars().any(char::is_control)
-        {
-            bail!("invalid enrollment hostname");
-        }
+        validate_hostname(&hostname)?;
         if id_token.is_empty() || access_token.is_empty() {
             bail!("ID token and access token are required");
         }
@@ -215,9 +232,11 @@ impl OidcProvider {
 
         Ok(CompletedEnrollment {
             hostname,
-            issuer: access_principal.issuer,
-            subject: access_principal.subject,
-            idp_claims,
+            credential: EnrollmentCredential::User(EnrolledUser {
+                issuer: access_principal.issuer,
+                subject: access_principal.subject,
+                idp_claims,
+            }),
         })
     }
 
@@ -372,7 +391,10 @@ pub(crate) mod tests {
     use tokio::task::yield_now;
     use url::Url;
 
-    use super::{Inner, JWKS_FETCH_TIMEOUT, JwkSet, JwksCache, OidcProvider, refresh_jwks_request};
+    use super::{
+        EnrollmentCredential, Inner, JWKS_FETCH_TIMEOUT, JwkSet, JwksCache, OidcProvider,
+        refresh_jwks_request,
+    };
 
     const RSA_MODULUS: &str = "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzsKJkZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw";
 
@@ -506,9 +528,12 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(completed.hostname, "host");
-        assert_eq!(completed.issuer, "https://idp.example");
-        assert_eq!(completed.subject, "user-1");
-        assert_eq!(completed.idp_claims["sub"], "user-1");
+        let EnrollmentCredential::User(user) = completed.credential else {
+            panic!("a sign-in enrolls with a user");
+        };
+        assert_eq!(user.issuer, "https://idp.example");
+        assert_eq!(user.subject, "user-1");
+        assert_eq!(user.idp_claims["sub"], "user-1");
         server.abort();
     }
 

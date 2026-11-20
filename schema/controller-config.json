@@ -39,6 +39,17 @@
       "type": "string",
       "default": "sqlite://agentdesktop-controller.db?mode=rwc"
     },
+    "enrollmentTokens": {
+      "description": "Unattended device enrollment with operator-signed tokens. Disabled when unset.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ControllerEnrollmentTokensConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "fleetListener": {
       "description": "Listener for the device-facing gRPC fleet API.",
       "$ref": "#/$defs/ControllerFleetListener",
@@ -263,6 +274,53 @@
       "additionalProperties": false,
       "required": [
         "path"
+      ]
+    },
+    "ControllerEnrollmentTokenIssuer": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Issuer (`iss`) of the tokens this key verifies.",
+          "type": "string"
+        },
+        "publicKeyPath": {
+          "description": "Path to the PEM-encoded public key: ECDSA P-256 or P-384, Ed25519, or\nRSA of at least 2048 bits. Tokens must be signed with an algorithm of\nthe key's type.\n\nRelative paths are resolved from the controller configuration directory.",
+          "type": "string"
+        },
+        "revokedIds": {
+          "description": "Token IDs (`jti`) that are no longer accepted. Devices enrolled with\none of them are rejected as well.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "publicKeyPath"
+      ]
+    },
+    "ControllerEnrollmentTokensConfig": {
+      "description": "Enrollment tokens are JWTs with `iss`, `aud`, `jti` and `iat` claims; `exp`\nand `nbf` are honored when present. A token enrolls any number of devices.",
+      "type": "object",
+      "properties": {
+        "audience": {
+          "description": "Audience (`aud`) every enrollment token must carry.",
+          "type": "string"
+        },
+        "issuers": {
+          "description": "Token issuers the controller trusts.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ControllerEnrollmentTokenIssuer"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "audience",
+        "issuers"
       ]
     },
     "ControllerFleetLimitsConfig": {

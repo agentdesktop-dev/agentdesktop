@@ -7,6 +7,11 @@ use agentdesktop_proto::fleet::{
     ConfigStatus, Hello, Inventory, ProgramState, TelemetryEvent, telemetry_event,
 };
 use agentdesktop_usage::UsageStore;
+
+use crate::{
+    enrollment_token::EnrollmentToken,
+    oidc::{CompletedEnrollment, EnrolledUser, EnrollmentCredential},
+};
 use serde::Serialize;
 
 #[derive(Clone)]
@@ -15,9 +20,8 @@ pub struct Database {
 }
 
 pub struct DevicePrincipal {
-    pub issuer: String,
-    pub subject: String,
-    pub idp_claims: Option<BTreeMap<String, serde_json::Value>>,
+    pub user: Option<EnrolledUser>,
+    pub enrollment_token: Option<EnrollmentToken>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -340,11 +344,17 @@ impl Database {
     /// for the same principal/key return the first committed certificate.
     pub async fn finish_enrollment(
         &self,
-        completed: &crate::oidc::CompletedEnrollment,
+        completed: &CompletedEnrollment,
         response: &agentdesktop_proto::fleet::EnrollResponse,
     ) -> anyhow::Result<agentdesktop_proto::fleet::EnrollResponse> {
-        let idp_claims =
-            serde_json::to_string(&completed.idp_claims).context("encode verified IdP claims")?;
+        let (user, token) = match &completed.credential {
+            EnrollmentCredential::User(user) => (Some(user), None),
+            EnrollmentCredential::Token(token) => (None, Some(token)),
+        };
+        let idp_claims = user
+            .map(|user| serde_json::to_string(&user.idp_claims))
+            .transpose()
+            .context("encode verified IdP claims")?;
         let receipt = serde_json::to_string(&(
             &response.device_id,
             &response.client_certificate_pem,
@@ -355,16 +365,19 @@ impl Database {
         sqlx::query(
             "INSERT INTO devices
                 (id, hostname, created_at, last_seen_at, enrolled_by_issuer,
-                 enrolled_by_subject, idp_claims_json)
-             VALUES ($1, $2, $3, $3, $4, $5, $6)
+                 enrolled_by_subject, idp_claims_json, enrollment_token_issuer,
+                 enrollment_token_id)
+             VALUES ($1, $2, $3, $3, $4, $5, $6, $7, $8)
              ON CONFLICT (id) DO NOTHING",
         )
         .bind(&response.device_id)
         .bind(&completed.hostname)
         .bind(unix_time_seconds())
-        .bind(&completed.issuer)
-        .bind(&completed.subject)
+        .bind(user.map_or("", |user| &user.issuer))
+        .bind(user.map_or("", |user| &user.subject))
         .bind(idp_claims)
+        .bind(token.map(|token| token.issuer.as_str()))
+        .bind(token.map(|token| token.id.as_str()))
         .execute(&mut *transaction)
         .await?;
         sqlx::query(
@@ -386,21 +399,40 @@ impl Database {
     }
 
     pub async fn device_principal(&self, device_id: &str) -> anyhow::Result<DevicePrincipal> {
-        let (issuer, subject, idp_claims_json): (String, String, Option<String>) = sqlx::query_as(
-            "SELECT enrolled_by_issuer, enrolled_by_subject, idp_claims_json
+        type Row = (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let (issuer, subject, idp_claims_json, token_issuer, token_id): Row = sqlx::query_as(
+            "SELECT enrolled_by_issuer, enrolled_by_subject, idp_claims_json,
+                    enrollment_token_issuer, enrollment_token_id
              FROM devices WHERE id = $1",
         )
         .bind(device_id)
         .fetch_one(&self.pool)
         .await
         .context("load device enrollment principal")?;
-        let idp_claims = idp_claims_json
-            .map(|claims| serde_json::from_str(&claims).context("decode verified IdP claims"))
-            .transpose()?;
+        let user = if issuer.is_empty() || subject.is_empty() {
+            None
+        } else {
+            let idp_claims = idp_claims_json
+                .map(|claims| serde_json::from_str(&claims).context("decode verified IdP claims"))
+                .transpose()?
+                .unwrap_or_default();
+            Some(EnrolledUser {
+                issuer,
+                subject,
+                idp_claims,
+            })
+        };
         Ok(DevicePrincipal {
-            issuer,
-            subject,
-            idp_claims,
+            user,
+            enrollment_token: token_issuer
+                .zip(token_id)
+                .map(|(issuer, id)| EnrollmentToken { issuer, id }),
         })
     }
 
@@ -942,7 +974,10 @@ mod tests {
             .device_principal("device")
             .await
             .expect("load device principal");
-        assert_eq!(principal.idp_claims.unwrap()["email"], "john@example.com");
+        assert_eq!(
+            principal.user.unwrap().idp_claims["email"],
+            "john@example.com"
+        );
 
         drop(database);
         let _ = std::fs::remove_file(path);
