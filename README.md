@@ -797,6 +797,36 @@ program again and turning it back on restores the user's choice. A daemon that
 predates `programSelection` rejects a configuration that contains it: upgrade
 devices before setting it in the configuration the controller pushes.
 
+## Limit the controller's gateway origins (opt-in)
+
+By default a controller-managed device applies whatever LLM gateway the
+controller pushes. To keep prompts on gateways you approve even if the
+controller is compromised, list the allowed origins in the local
+configuration file, which the controller cannot change:
+
+```yaml
+daemon:
+  controllerLimits:
+    allowedGatewayOrigins:
+      - https://gateway.example.com
+      - https://login.example.com   # the OIDC issuer, with authentication.type: oidc
+```
+
+The origins of `llmGateway.url`, `llmGateway.proxyUrl` and the OIDC `issuer`
+must each be in the list. Paths may change freely. A pushed configuration
+outside the list is not applied: the device keeps the last configuration it
+accepted and reports the push as **Rejected**, with the reason, on the
+controller's device page (an older controller shows it as not reported).
+
+The list is read when the daemon starts. If the saved controller configuration
+is outside a newly installed list, the daemon applies the local configuration
+instead, which removes the tool settings it wrote, and reports **Rejected**
+once the controller pushes the same configuration again. The saved
+configuration stays on disk, so reverting the list and restarting the daemon
+restores it. The check does not cover URLs in programs' free-form settings,
+such as Claude Code `env`. See the
+[control-plane threat model](docs/threat-model.md).
+
 ## Start locally, grow into a fleet
 
 Agentdesktop uses the same daemon and tool-native configuration model at every
@@ -1044,6 +1074,8 @@ the user's tokens. There is no separate manual enrollment step, pre-login
 enrollment ticket, or pending-enrollment reservation on the controller.
 After enrollment, protected controller operations require the device
 certificate and a valid token for the user who enrolled it.
+The [control-plane threat model](docs/threat-model.md) states what devices
+should be protected from when the controller itself is compromised.
 
 Browser sign-in uses PKCE and `state`, and its OIDC `nonce` is the SHA-256 of
 the device public key. The controller validates the ID token and bearer access

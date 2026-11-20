@@ -196,6 +196,7 @@ impl Fixture {
             let mut channels = ConfigChannels {
                 current,
                 tick_statuses: None,
+                limits: Default::default(),
             };
             let reconciler = super::tests::test_reconciler(&state_dir);
             let _keep_channels_open = (inventory_sender, telemetry_sender, logout_sender);

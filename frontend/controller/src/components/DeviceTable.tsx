@@ -1,5 +1,5 @@
 import { friendlyTool, ToolIcon } from "@agentdesktop/ui";
-import { Check, ChevronRight, CircleAlert } from "lucide-react";
+import { Check, ChevronRight, CircleAlert, ShieldAlert } from "lucide-react";
 
 import { friendlyOs } from "../format";
 import { navigate } from "../router";
@@ -129,6 +129,16 @@ export function ConfigBadge({
     return (
       <span className="badge danger">
         <CircleAlert size={13} /> Failed{revision ? ` · r${revision}` : ""}
+      </span>
+    );
+  }
+  if (state === 3) {
+    return (
+      <span
+        className="badge danger"
+        title="Refused by the device's local policy (daemon.controllerLimits)"
+      >
+        <ShieldAlert size={13} /> Rejected{revision ? ` · r${revision}` : ""}
       </span>
     );
   }
