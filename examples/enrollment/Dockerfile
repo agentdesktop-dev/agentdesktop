@@ -4,7 +4,7 @@
 # `desktop` runs the daemon and the desktop app in an XFCE session served
 # over noVNC.
 
-FROM docker.io/library/node:26.11.1-bookworm@sha256:f1233c415b41ffcf237c717b3dea92e9d4ea006e0e4c71edcb790605d74f5404 AS ui
+FROM docker.io/library/node:26.13.1-bookworm@sha256:b7087bc4d973034b30854b378ba107f9fab622b47514cb7e2592e41b8bab8d49 AS ui
 WORKDIR /app/frontend
 ENV CI=true
 COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
@@ -21,7 +21,7 @@ RUN --mount=type=cache,id=agentdesktop-pnpm,target=/pnpm/store \
 
 # The headless daemon needs neither the UI nor WebKit, so the `headless`
 # target, which the e2e test uses, builds it on its own.
-FROM docker.io/library/rust:1.99.0-trixie@sha256:81015672d6939b0265f09adf96d5de125482bb1330106076956b0518e74edc90 AS headless-builder
+FROM docker.io/library/rust:1.99.1-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07 AS headless-builder
 ARG TARGETARCH
 ARG BUILD_PROFILE=release
 WORKDIR /app
@@ -39,7 +39,7 @@ RUN --mount=type=cache,id=agentdesktop-lab-headless-target-${TARGETARCH},target=
     cargo build --locked ${flags} --package agentdesktop-agent --bin agentdesktop-headless && \
     cp "target/${BUILD_PROFILE}/agentdesktop-headless" /usr/local/bin/
 
-FROM docker.io/library/rust:1.99.0-trixie@sha256:81015672d6939b0265f09adf96d5de125482bb1330106076956b0518e74edc90 AS builder
+FROM docker.io/library/rust:1.99.1-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07 AS builder
 ARG TARGETARCH
 ARG BUILD_PROFILE=release
 RUN apt-get update \

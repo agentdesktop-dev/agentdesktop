@@ -46,7 +46,10 @@ pub struct DaemonConfig {
     ///
     /// Discovery walks user home directories and developer-tool configuration
     /// files, so this trades inventory freshness against local disk activity.
-    #[serde(default = "default_inventory_interval", with = "humantime_serde")]
+    #[serde(
+        default = "default_inventory_interval",
+        with = "crate::serdes::duration"
+    )]
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub inventory_interval: Duration,
 }
@@ -111,7 +114,7 @@ pub struct DaemonStartupConfig {
     /// device still re-applies the controller's configuration on every
     /// reconnect. Must be greater than zero and at most 30 days; read at
     /// startup only (restart the daemon after changing it).
-    #[serde(default, with = "humantime_serde::option")]
+    #[serde(default, with = "crate::serdes::duration::option")]
     #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
     pub reconcile_interval: Option<Duration>,
 }
@@ -464,7 +467,10 @@ pub struct ControllerConnectionConfig {
     /// the operating system's certificate roots.
     pub ca_certificate_path: PathBuf,
     /// Interval between device heartbeats. Defaults to `30s`.
-    #[serde(default = "default_heartbeat_interval", with = "humantime_serde")]
+    #[serde(
+        default = "default_heartbeat_interval",
+        with = "crate::serdes::duration"
+    )]
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub heartbeat_interval: Duration,
     /// Enroll with the OAuth 2.0 Device Authorization Grant (RFC 8628) instead
@@ -713,7 +719,7 @@ pub struct ControllerFleetLimitsConfig {
     pub enrollment_burst: u32,
     /// Time for a client address to get back one enrollment request. Defaults
     /// to `1s`.
-    #[serde(with = "humantime_serde")]
+    #[serde(with = "crate::serdes::duration")]
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub enrollment_refill: Duration,
     /// Messages one device may send in a burst on its `Connect` stream, after
@@ -723,7 +729,7 @@ pub struct ControllerFleetLimitsConfig {
     #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub device_message_burst: u32,
     /// Time for a device to get back one message. Defaults to `50ms`.
-    #[serde(with = "humantime_serde")]
+    #[serde(with = "crate::serdes::duration")]
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub device_message_refill: Duration,
 }
@@ -813,7 +819,10 @@ pub struct ControllerGatewayJwtConfig {
     #[serde(default = "default_gateway_jwt_key_id")]
     pub key_id: String,
     /// Lifetime of generated JWTs. Defaults to `5m`.
-    #[serde(default = "default_gateway_jwt_lifetime", with = "humantime_serde")]
+    #[serde(
+        default = "default_gateway_jwt_lifetime",
+        with = "crate::serdes::duration"
+    )]
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub lifetime: Duration,
 }
