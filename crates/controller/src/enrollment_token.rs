@@ -73,6 +73,9 @@ impl EnrollmentTokens {
         // The token chooses its algorithm only among those of the configured
         // key's type.
         let mut validation = Validation::new_for_family(issuer.key.family());
+        // Cannot fail while the key is selected by `iss`. Kept so that
+        // selecting keys another way (such as by `kid`) still binds the token
+        // to its issuer.
         validation.set_issuer(&[&issuer.name]);
         validation.set_audience(&[&self.audience]);
         validation.set_required_spec_claims(&["iss", "aud"]);
