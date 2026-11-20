@@ -13,6 +13,7 @@ use crate::{
     oidc::{CompletedEnrollment, EnrolledUser, EnrollmentCredential},
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 #[derive(Clone)]
 pub struct Database {
@@ -22,6 +23,31 @@ pub struct Database {
 pub struct DevicePrincipal {
     pub user: Option<EnrolledUser>,
     pub enrollment_token: Option<EnrollmentToken>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DaemonConfigAuthor {
+    pub kind: String,
+    pub issuer: String,
+    pub subject: String,
+    pub client_id: Option<String>,
+    pub display: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DaemonConfigRevisionSummary {
+    pub revision: i64,
+    pub sha256: String,
+    pub created_at: i64,
+    pub author: DaemonConfigAuthor,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DaemonConfigRevision {
+    #[serde(flatten)]
+    pub summary: DaemonConfigRevisionSummary,
+    pub yaml: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -64,6 +90,72 @@ struct DeviceRow {
     config_error: Option<String>,
     config_updated_at: Option<i64>,
     discovery_count: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct DaemonConfigRevisionRow {
+    revision: i64,
+    yaml: String,
+    sha256: String,
+    created_at: i64,
+    author_kind: String,
+    author_issuer: String,
+    author_subject: String,
+    author_client_id: Option<String>,
+    author_display: Option<String>,
+    message: String,
+}
+
+impl From<DaemonConfigRevisionRow> for DaemonConfigRevision {
+    fn from(row: DaemonConfigRevisionRow) -> Self {
+        Self {
+            summary: DaemonConfigRevisionSummary {
+                revision: row.revision,
+                sha256: row.sha256,
+                created_at: row.created_at,
+                author: DaemonConfigAuthor {
+                    kind: row.author_kind,
+                    issuer: row.author_issuer,
+                    subject: row.author_subject,
+                    client_id: row.author_client_id,
+                    display: row.author_display,
+                },
+                message: row.message,
+            },
+            yaml: row.yaml,
+        }
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct DaemonConfigRevisionSummaryRow {
+    revision: i64,
+    sha256: String,
+    created_at: i64,
+    author_kind: String,
+    author_issuer: String,
+    author_subject: String,
+    author_client_id: Option<String>,
+    author_display: Option<String>,
+    message: String,
+}
+
+impl From<DaemonConfigRevisionSummaryRow> for DaemonConfigRevisionSummary {
+    fn from(row: DaemonConfigRevisionSummaryRow) -> Self {
+        Self {
+            revision: row.revision,
+            sha256: row.sha256,
+            created_at: row.created_at,
+            author: DaemonConfigAuthor {
+                kind: row.author_kind,
+                issuer: row.author_issuer,
+                subject: row.author_subject,
+                client_id: row.author_client_id,
+                display: row.author_display,
+            },
+            message: row.message,
+        }
+    }
 }
 
 impl From<DeviceRow> for DeviceSummary {
@@ -293,6 +385,110 @@ impl Database {
     /// The usage tables of this database.
     pub fn usage(&self) -> UsageStore {
         UsageStore::new(self.pool.clone())
+    }
+
+    pub async fn latest_daemon_config(&self) -> anyhow::Result<Option<DaemonConfigRevision>> {
+        let row: Option<DaemonConfigRevisionRow> = sqlx::query_as(
+            "SELECT revision, yaml, sha256, created_at, author_kind, author_issuer,
+                    author_subject, author_client_id, author_display, message
+             FROM daemon_config_revisions ORDER BY revision DESC LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .context("load latest daemon configuration revision")?;
+        Ok(row.map(Into::into))
+    }
+
+    pub async fn latest_daemon_config_revision(&self) -> anyhow::Result<Option<i64>> {
+        sqlx::query_scalar("SELECT MAX(revision) FROM daemon_config_revisions")
+            .fetch_one(&self.pool)
+            .await
+            .context("load latest daemon configuration revision number")
+    }
+
+    pub async fn daemon_config_revision(
+        &self,
+        revision: i64,
+    ) -> anyhow::Result<Option<DaemonConfigRevision>> {
+        let row: Option<DaemonConfigRevisionRow> = sqlx::query_as(
+            "SELECT revision, yaml, sha256, created_at, author_kind, author_issuer,
+                    author_subject, author_client_id, author_display, message
+             FROM daemon_config_revisions WHERE revision = $1",
+        )
+        .bind(revision)
+        .fetch_optional(&self.pool)
+        .await
+        .context("load daemon configuration revision")?;
+        Ok(row.map(Into::into))
+    }
+
+    pub async fn list_daemon_config_revisions(
+        &self,
+        before: Option<i64>,
+        limit: i64,
+    ) -> anyhow::Result<Vec<DaemonConfigRevisionSummary>> {
+        let rows: Vec<DaemonConfigRevisionSummaryRow> = sqlx::query_as(
+            "SELECT revision, sha256, created_at, author_kind, author_issuer,
+                    author_subject, author_client_id, author_display, message
+             FROM daemon_config_revisions
+             WHERE $1 IS NULL OR revision < $1
+             ORDER BY revision DESC LIMIT $2",
+        )
+        .bind(before)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("list daemon configuration revisions")?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    /// Inserts the next revision only if `base_revision` is still current.
+    /// Returns `None` when another writer changed the latest revision first.
+    pub async fn insert_daemon_config_revision(
+        &self,
+        base_revision: i64,
+        yaml: &str,
+        author: &DaemonConfigAuthor,
+        message: &str,
+    ) -> anyhow::Result<Option<DaemonConfigRevision>> {
+        let next_revision = base_revision
+            .checked_add(1)
+            .context("daemon configuration revision overflow")?;
+        let created_at = unix_time_seconds();
+        let sha256 = Sha256::digest(yaml.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let result = sqlx::query(
+            "INSERT INTO daemon_config_revisions (
+                 revision, yaml, sha256, created_at, author_kind, author_issuer,
+                 author_subject, author_client_id, author_display, message
+             )
+             SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+             WHERE COALESCE((SELECT MAX(revision) FROM daemon_config_revisions), 0) = $11
+             ON CONFLICT(revision) DO NOTHING",
+        )
+        .bind(next_revision)
+        .bind(yaml)
+        .bind(sha256)
+        .bind(created_at)
+        .bind(&author.kind)
+        .bind(&author.issuer)
+        .bind(&author.subject)
+        .bind(&author.client_id)
+        .bind(&author.display)
+        .bind(message)
+        .bind(base_revision)
+        .execute(&self.pool)
+        .await
+        .context("insert daemon configuration revision")?;
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        self.daemon_config_revision(next_revision)
+            .await?
+            .context("inserted daemon configuration revision is missing")
+            .map(Some)
     }
 
     pub async fn enroll_device(
@@ -878,7 +1074,7 @@ mod tests {
         ProgramState, ProgramStatus, Skill, TelemetryEvent, ToolUseEvent, telemetry_event,
     };
 
-    use super::{Database, readable_name};
+    use super::{DaemonConfigAuthor, Database, readable_name};
 
     #[tokio::test]
     async fn persists_device_inventory_and_telemetry() {
@@ -999,6 +1195,112 @@ mod tests {
             .await
             .expect("enroll device");
         (database, path)
+    }
+
+    #[tokio::test]
+    async fn daemon_config_revisions_are_conditional_and_append_only() {
+        let (database, path) = test_database("daemon-config-revisions").await;
+        let author = DaemonConfigAuthor {
+            kind: "human".to_owned(),
+            issuer: "https://idp.example".to_owned(),
+            subject: "admin-1".to_owned(),
+            client_id: None,
+            display: Some("admin@example.com".to_owned()),
+        };
+        let first = database
+            .insert_daemon_config_revision(0, "programs: {}\n", &author, "Initial configuration")
+            .await
+            .expect("insert initial revision")
+            .expect("initial revision inserted");
+        assert_eq!(first.summary.revision, 1);
+        assert_eq!(
+            first.summary.sha256,
+            "1293e6277fd6f4b0db8d0b1630d758cb93e23df817c9fd3f2877b5f2639e18b1"
+        );
+        assert_eq!(
+            first.summary.author.display.as_deref(),
+            Some("admin@example.com")
+        );
+
+        assert!(
+            database
+                .insert_daemon_config_revision(0, "programs: {}\n", &author, "")
+                .await
+                .expect("stale revision check")
+                .is_none()
+        );
+        let second = database
+            .insert_daemon_config_revision(1, "programs:\n  claudeCode: {}\n", &author, "Enable")
+            .await
+            .expect("insert second revision")
+            .expect("second revision inserted");
+        assert_eq!(second.summary.revision, 2);
+
+        let history = database
+            .list_daemon_config_revisions(None, 10)
+            .await
+            .expect("list history");
+        assert_eq!(
+            history
+                .iter()
+                .map(|revision| revision.revision)
+                .collect::<Vec<_>>(),
+            [2, 1]
+        );
+        assert!(
+            database
+                .daemon_config_revision(1)
+                .await
+                .expect("read old revision")
+                .is_some()
+        );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn concurrent_daemon_config_saves_from_one_base_have_one_winner() {
+        let (database, path) = test_database("daemon-config-concurrent").await;
+        let author = DaemonConfigAuthor {
+            kind: "human".to_owned(),
+            issuer: "https://idp.example".to_owned(),
+            subject: "admin-1".to_owned(),
+            client_id: None,
+            display: None,
+        };
+        database
+            .insert_daemon_config_revision(0, "programs: {}\n", &author, "")
+            .await
+            .expect("seed first revision")
+            .expect("first revision inserted");
+
+        let (left, right) = tokio::join!(
+            database.insert_daemon_config_revision(
+                1,
+                "programs:\n  claudeCode: {}\n",
+                &author,
+                "left"
+            ),
+            database.insert_daemon_config_revision(1, "programs:\n  codex: {}\n", &author, "right")
+        );
+        let left = left.expect("left save");
+        let right = right.expect("right save");
+        assert_eq!(
+            usize::from(left.is_some()) + usize::from(right.is_some()),
+            1
+        );
+        assert_eq!(
+            database
+                .list_daemon_config_revisions(None, 10)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

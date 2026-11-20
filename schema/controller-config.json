@@ -256,25 +256,52 @@
       ]
     },
     "ControllerDaemonConfig": {
-      "description": "Controller-owned daemon configuration file and its revision.",
+      "description": "Controller-owned daemon configuration source and revision.",
       "type": "object",
       "properties": {
+        "database": {
+          "description": "Store the fleet configuration in the controller database.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ControllerDaemonDatabaseConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "path": {
           "description": "Path to the watched YAML configuration distributed to enrolled devices.\n\nRelative paths are resolved from the controller configuration directory.\nValid file changes are published to connected devices automatically.",
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "revision": {
-          "description": "Monotonically increasing revision assigned to the daemon configuration.",
-          "type": "integer",
+          "description": "Monotonically increasing revision assigned to the daemon configuration.\n\nApplies to file mode only. Older configurations that omit it start at 1.",
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint64",
-          "default": 1,
           "minimum": 0
         }
       },
-      "additionalProperties": false,
-      "required": [
-        "path"
-      ]
+      "additionalProperties": false
+    },
+    "ControllerDaemonDatabaseConfig": {
+      "description": "Database-backed daemon configuration settings.",
+      "type": "object",
+      "properties": {
+        "seedPath": {
+          "description": "YAML file imported once when the revision table is empty.\n\nRelative paths are resolved from the controller configuration directory.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "ControllerEnrollmentTokenIssuer": {
       "type": "object",
