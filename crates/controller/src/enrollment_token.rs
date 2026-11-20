@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use agentdesktop_core::config::ControllerEnrollmentTokensConfig;
 use anyhow::{Context, bail};
-use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
+use jsonwebtoken::{DecodingKey, Validation, decode};
 use serde::Deserialize;
 
 /// The verified enrollment token a device enrolled with.
@@ -23,7 +23,6 @@ pub struct EnrollmentTokens {
 struct Issuer {
     name: String,
     key: DecodingKey,
-    algorithm: Algorithm,
     revoked_ids: HashSet<String>,
 }
 
@@ -31,8 +30,9 @@ struct Issuer {
 struct Claims {
     iss: String,
     jti: String,
-    #[allow(dead_code)]
-    iat: u64,
+    /// Required, so that a token records when it was issued. Not checked.
+    #[serde(rename = "iat")]
+    _issued_at: u64,
 }
 
 impl EnrollmentTokens {
@@ -45,12 +45,11 @@ impl EnrollmentTokens {
                 let path = &issuer.public_key_path;
                 let pem = std::fs::read(path)
                     .with_context(|| format!("read public key from {}", path.display()))?;
-                let (key, algorithm) = public_key(&pem)
+                let key = public_key(&pem)
                     .with_context(|| format!("parse public key from {}", path.display()))?;
                 Ok(Issuer {
                     name: issuer.name.clone(),
                     key,
-                    algorithm,
                     revoked_ids: issuer.revoked_ids.iter().cloned().collect(),
                 })
             })
@@ -71,8 +70,9 @@ impl EnrollmentTokens {
             .iter()
             .find(|candidate| candidate.name == issuer)
             .with_context(|| format!("enrollment token issuer {issuer} is not configured"))?;
-        // The algorithm comes from the configured key, never from the token.
-        let mut validation = Validation::new(issuer.algorithm);
+        // The token chooses its algorithm only among those of the configured
+        // key's type.
+        let mut validation = Validation::new_for_family(issuer.key.family());
         validation.set_issuer(&[&issuer.name]);
         validation.set_audience(&[&self.audience]);
         validation.set_required_spec_claims(&["iss", "aud"]);
@@ -100,12 +100,11 @@ impl EnrollmentTokens {
     }
 }
 
-fn public_key(pem: &[u8]) -> anyhow::Result<(DecodingKey, Algorithm)> {
+fn public_key(pem: &[u8]) -> anyhow::Result<DecodingKey> {
     DecodingKey::from_ec_pem(pem)
-        .map(|key| (key, Algorithm::ES256))
-        .or_else(|_| DecodingKey::from_ed_pem(pem).map(|key| (key, Algorithm::EdDSA)))
-        .or_else(|_| DecodingKey::from_rsa_pem(pem).map(|key| (key, Algorithm::RS256)))
-        .context("expected a PEM-encoded ECDSA P-256, Ed25519 or RSA public key")
+        .or_else(|_| DecodingKey::from_ed_pem(pem))
+        .or_else(|_| DecodingKey::from_rsa_pem(pem))
+        .context("expected a PEM-encoded ECDSA, Ed25519 or RSA public key")
 }
 
 #[cfg(test)]
@@ -113,23 +112,35 @@ pub(crate) mod tests {
     use agentdesktop_core::config::{
         ControllerEnrollmentTokenIssuer, ControllerEnrollmentTokensConfig,
     };
-    use jsonwebtoken::{Algorithm, EncodingKey, Header};
+    use aws_lc_rs::encoding::{AsDer, Pkcs8V1Der};
+    use jsonwebtoken::{Algorithm, AlgorithmFamily, EncodingKey, Header};
     use serde_json::json;
 
     use super::{EnrollmentToken, EnrollmentTokens};
 
     pub(crate) struct Issuer {
         key: EncodingKey,
+        algorithm: Algorithm,
         directory: tempfile::TempDir,
     }
 
     impl Issuer {
         pub(crate) fn new() -> Self {
-            let key = rcgen::KeyPair::generate().unwrap();
+            Self::with_key(rcgen::KeyPair::generate().unwrap(), Algorithm::ES256)
+        }
+
+        fn with_key(key: rcgen::KeyPair, algorithm: Algorithm) -> Self {
+            let pem = key.serialize_pem();
             let directory = tempfile::tempdir().unwrap();
             std::fs::write(directory.path().join("jamf.pub.pem"), key.public_key_pem()).unwrap();
             Self {
-                key: EncodingKey::from_ec_pem(key.serialize_pem().as_bytes()).unwrap(),
+                key: match algorithm.family() {
+                    AlgorithmFamily::Ec => EncodingKey::from_ec_pem(pem.as_bytes()),
+                    AlgorithmFamily::Ed => EncodingKey::from_ed_pem(pem.as_bytes()),
+                    _ => EncodingKey::from_rsa_pem(pem.as_bytes()),
+                }
+                .unwrap(),
+                algorithm,
                 directory,
             }
         }
@@ -147,7 +158,11 @@ pub(crate) mod tests {
         }
 
         pub(crate) fn sign(&self, claims: serde_json::Value) -> String {
-            jsonwebtoken::encode(&Header::new(Algorithm::ES256), &claims, &self.key).unwrap()
+            self.sign_with(self.algorithm, claims)
+        }
+
+        fn sign_with(&self, algorithm: Algorithm, claims: serde_json::Value) -> String {
+            jsonwebtoken::encode(&Header::new(algorithm), &claims, &self.key).unwrap()
         }
 
         pub(crate) fn token(&self, id: &str) -> String {
@@ -166,6 +181,32 @@ pub(crate) mod tests {
                 id: "batch-1".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn the_configured_key_decides_which_algorithms_are_accepted() {
+        let claims = || json!({"iss": "jamf", "aud": "fleet", "jti": "batch-1", "iat": 1});
+        let p384 = || rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let ed25519 = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        for (key, algorithm) in [(p384(), Algorithm::ES384), (ed25519, Algorithm::EdDSA)] {
+            let issuer = Issuer::with_key(key, algorithm);
+            let verified = issuer.tokens(&[]).verify(&issuer.sign(claims()));
+            assert!(verified.is_ok(), "{algorithm:?}: {verified:?}");
+        }
+
+        let rsa = aws_lc_rs::rsa::KeyPair::generate(aws_lc_rs::rsa::KeySize::Rsa2048).unwrap();
+        let rsa: Pkcs8V1Der = rsa.as_der().unwrap();
+        let rsa = rcgen::KeyPair::try_from(rsa.as_ref()).unwrap();
+        let rsa = Issuer::with_key(rsa, Algorithm::RS256);
+        for algorithm in [Algorithm::RS256, Algorithm::RS384, Algorithm::PS512] {
+            let verified = rsa.tokens(&[]).verify(&rsa.sign_with(algorithm, claims()));
+            assert!(verified.is_ok(), "{algorithm:?}: {verified:?}");
+        }
+
+        // ES256 is ECDSA with P-256, so a P-384 key does not verify it.
+        let p384 = Issuer::with_key(p384(), Algorithm::ES384);
+        let token = Issuer::new().sign(claims());
+        assert!(p384.tokens(&[]).verify(&token).is_err());
     }
 
     #[test]

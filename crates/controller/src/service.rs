@@ -31,7 +31,7 @@ use crate::{
         DeviceStream, DeviceStreams, EnrollmentLimiter, FleetLimits, StreamEvent, ThrottledWarning,
     },
     gateway_jwt::GatewayJwtIssuer,
-    oidc::{CompletedEnrollment, OidcPrincipal, OidcProvider},
+    oidc::{CompletedEnrollment, EnrollmentCredential, OidcPrincipal, OidcProvider},
 };
 
 #[derive(Clone)]
@@ -225,31 +225,24 @@ impl FleetAgent for FleetAgentService {
             .device_principal(&device_id)
             .await
             .map_err(internal)?;
-        // The credential carries a user's identity, and no user has signed in.
-        if principal.enrollment_token.is_some() {
-            return Err(Status::failed_precondition(
-                "sign in to use the LLM gateway",
-            ));
-        }
-        let subject = if principal.subject.is_empty() {
-            device_id.as_str()
-        } else {
-            principal.subject.as_str()
-        };
+        // The credential carries the identity of the device's user.
+        let user = principal
+            .user
+            .ok_or_else(|| Status::failed_precondition("sign in to use the LLM gateway"))?;
         let (credential, expires_at_unix_seconds) = issuer
             .issue(
-                subject,
+                &user.subject,
                 &device_id,
                 &client_id,
                 audience,
-                principal.idp_claims.as_ref(),
+                Some(&user.idp_claims),
                 subscription,
             )
             .map_err(internal)?;
         info!(
             device_id,
             expires_at_unix_seconds,
-            enrolled_by_issuer = principal.issuer,
+            enrolled_by_issuer = user.issuer,
             client_id,
             subscription,
             "issued LLM gateway credential"
@@ -525,10 +518,7 @@ impl FleetAgentService {
         })?;
         Ok(CompletedEnrollment {
             hostname,
-            issuer: String::new(),
-            subject: String::new(),
-            idp_claims: Default::default(),
-            enrollment_token: Some(token),
+            credential: EnrollmentCredential::Token(token),
         })
     }
 
@@ -547,13 +537,15 @@ impl FleetAgentService {
         completed: &CompletedEnrollment,
         csr_der: &[u8],
     ) -> Result<Response<EnrollResponse>, Status> {
-        let device_id = match &completed.enrollment_token {
-            Some(token) => enrollment_device_id(
+        let device_id = match &completed.credential {
+            EnrollmentCredential::User(user) => {
+                enrollment_device_id(&user.issuer, &user.subject, csr_der)
+            }
+            EnrollmentCredential::Token(token) => enrollment_device_id(
                 &format!("enrollment-token:{}", token.issuer),
                 &token.id,
                 csr_der,
             ),
-            None => enrollment_device_id(&completed.issuer, &completed.subject, csr_der),
         };
         if let Some(response) = self
             .database
@@ -582,15 +574,22 @@ impl FleetAgentService {
             )
             .await
             .map_err(internal)?;
-        info!(
-            %device_id,
-            hostname = %completed.hostname,
-            enrolled_by_issuer = %completed.issuer,
-            enrolled_by_subject = %completed.subject,
-            enrollment_token_issuer = completed.enrollment_token.as_ref().map(|token| token.issuer.as_str()),
-            enrollment_token_id = completed.enrollment_token.as_ref().map(|token| token.id.as_str()),
-            "enrolled device"
-        );
+        match &completed.credential {
+            EnrollmentCredential::User(user) => info!(
+                %device_id,
+                hostname = %completed.hostname,
+                enrolled_by_issuer = %user.issuer,
+                enrolled_by_subject = %user.subject,
+                "enrolled device"
+            ),
+            EnrollmentCredential::Token(token) => info!(
+                %device_id,
+                hostname = %completed.hostname,
+                enrollment_token_issuer = %token.issuer,
+                enrollment_token_id = %token.id,
+                "enrolled device"
+            ),
+        }
 
         Ok(Response::new(response))
     }
@@ -621,10 +620,9 @@ fn authenticate_enrolled_user(
 }
 
 fn oidc_principals_match(authenticated: &OidcPrincipal, enrolled: &DevicePrincipal) -> bool {
-    !enrolled.issuer.is_empty()
-        && !enrolled.subject.is_empty()
-        && authenticated.issuer == enrolled.issuer
-        && authenticated.subject == enrolled.subject
+    enrolled.user.as_ref().is_some_and(|user| {
+        authenticated.issuer == user.issuer && authenticated.subject == user.subject
+    })
 }
 
 fn peer_certificate_device_id<T>(request: &Request<T>) -> Result<String, Status> {
@@ -973,8 +971,9 @@ mod tests {
             .device_principal(&response.device_id)
             .await
             .unwrap();
-        assert_eq!(principal.issuer, "https://idp.example");
-        assert_eq!(principal.subject, "user-1");
+        let user = principal.user.unwrap();
+        assert_eq!(user.issuer, "https://idp.example");
+        assert_eq!(user.subject, "user-1");
         assert_eq!(counts().await, (1, 1));
         let mut tasks = tokio::task::JoinSet::new();
         for _ in 0..8 {
@@ -1108,6 +1107,7 @@ mod tests {
             .await
             .expect("the certificate alone authenticates the device");
         let principal = database.device_principal(&first).await.unwrap();
+        assert_eq!(principal.user, None);
         let token = principal.enrollment_token.unwrap();
         assert_eq!(
             (token.issuer.as_str(), token.id.as_str()),

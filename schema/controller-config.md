@@ -26,7 +26,7 @@
 |`enrollmentTokens.audience`|string|Audience (`aud`) every enrollment token must carry.|
 |`enrollmentTokens.issuers`|[]object|Token issuers the controller trusts.|
 |`enrollmentTokens.issuers[].name`|string|Issuer (`iss`) of the tokens this key verifies.|
-|`enrollmentTokens.issuers[].publicKeyPath`|string|Path to the PEM-encoded public key: ECDSA P-256 (ES256), Ed25519 (EdDSA)<br>or RSA (RS256).<br><br>Relative paths are resolved from the controller configuration directory.|
+|`enrollmentTokens.issuers[].publicKeyPath`|string|Path to the PEM-encoded public key: ECDSA P-256 or P-384, Ed25519, or<br>RSA of at least 2048 bits. Tokens must be signed with an algorithm of<br>the key's type.<br><br>Relative paths are resolved from the controller configuration directory.|
 |`enrollmentTokens.issuers[].revokedIds`|[]string|Token IDs (`jti`) that are no longer accepted. Devices enrolled with<br>one of them are rejected as well.|
 |`fleetListener`|object|Listener for the device-facing gRPC fleet API.|
 |`fleetListener.limits`|object|Limits on the fleet API that depend on the deployment.|

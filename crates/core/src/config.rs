@@ -817,8 +817,9 @@ pub struct ControllerEnrollmentTokensConfig {
 pub struct ControllerEnrollmentTokenIssuer {
     /// Issuer (`iss`) of the tokens this key verifies.
     pub name: String,
-    /// Path to the PEM-encoded public key: ECDSA P-256 (ES256), Ed25519 (EdDSA)
-    /// or RSA (RS256).
+    /// Path to the PEM-encoded public key: ECDSA P-256 or P-384, Ed25519, or
+    /// RSA of at least 2048 bits. Tokens must be signed with an algorithm of
+    /// the key's type.
     ///
     /// Relative paths are resolved from the controller configuration directory.
     pub public_key_path: PathBuf,

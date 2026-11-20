@@ -284,7 +284,7 @@
           "type": "string"
         },
         "publicKeyPath": {
-          "description": "Path to the PEM-encoded public key: ECDSA P-256 (ES256), Ed25519 (EdDSA)\nor RSA (RS256).\n\nRelative paths are resolved from the controller configuration directory.",
+          "description": "Path to the PEM-encoded public key: ECDSA P-256 or P-384, Ed25519, or\nRSA of at least 2048 bits. Tokens must be signed with an algorithm of\nthe key's type.\n\nRelative paths are resolved from the controller configuration directory.",
           "type": "string"
         },
         "revokedIds": {

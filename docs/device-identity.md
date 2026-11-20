@@ -273,7 +273,10 @@ A device management system can enroll devices with no user involved. The
 operator signs a token once, the controller trusts the operator's public key,
 and every device receives the same token file.
 
-The token is a JWT signed with ES256, EdDSA, or RS256:
+The token is a JWT signed with an algorithm of the issuer's key type: ES256
+or ES384 for an ECDSA P-256 or P-384 key, EdDSA for an Ed25519 key, and
+RS256, RS384, RS512, PS256, PS384, or PS512 for an RSA key of at least 2048
+bits. Its claims are:
 
 | Claim | Meaning |
 | --- | --- |

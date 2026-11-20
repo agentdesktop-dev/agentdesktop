@@ -55,11 +55,21 @@ struct JwksCache {
 
 pub struct CompletedEnrollment {
     pub hostname: String,
+    pub credential: EnrollmentCredential,
+}
+
+/// What a device enrolled with.
+pub enum EnrollmentCredential {
+    User(EnrolledUser),
+    Token(EnrollmentToken),
+}
+
+/// The user signed in on a device.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnrolledUser {
     pub issuer: String,
     pub subject: String,
     pub idp_claims: BTreeMap<String, serde_json::Value>,
-    /// Set when the device enrolled with a token instead of a user sign-in.
-    pub enrollment_token: Option<EnrollmentToken>,
 }
 
 pub(crate) fn validate_hostname(hostname: &str) -> anyhow::Result<()> {
@@ -222,10 +232,11 @@ impl OidcProvider {
 
         Ok(CompletedEnrollment {
             hostname,
-            issuer: access_principal.issuer,
-            subject: access_principal.subject,
-            idp_claims,
-            enrollment_token: None,
+            credential: EnrollmentCredential::User(EnrolledUser {
+                issuer: access_principal.issuer,
+                subject: access_principal.subject,
+                idp_claims,
+            }),
         })
     }
 
@@ -380,7 +391,10 @@ pub(crate) mod tests {
     use tokio::task::yield_now;
     use url::Url;
 
-    use super::{Inner, JWKS_FETCH_TIMEOUT, JwkSet, JwksCache, OidcProvider, refresh_jwks_request};
+    use super::{
+        EnrollmentCredential, Inner, JWKS_FETCH_TIMEOUT, JwkSet, JwksCache, OidcProvider,
+        refresh_jwks_request,
+    };
 
     const RSA_MODULUS: &str = "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzsKJkZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw";
 
@@ -514,9 +528,12 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(completed.hostname, "host");
-        assert_eq!(completed.issuer, "https://idp.example");
-        assert_eq!(completed.subject, "user-1");
-        assert_eq!(completed.idp_claims["sub"], "user-1");
+        let EnrollmentCredential::User(user) = completed.credential else {
+            panic!("a sign-in enrolls with a user");
+        };
+        assert_eq!(user.issuer, "https://idp.example");
+        assert_eq!(user.subject, "user-1");
+        assert_eq!(user.idp_claims["sub"], "user-1");
         server.abort();
     }
 
