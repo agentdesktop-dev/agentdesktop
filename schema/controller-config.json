@@ -90,6 +90,17 @@
         "tls": false
       }
     },
+    "metricsListener": {
+      "description": "Listener that serves the controller's metrics in the Prometheus text format at `GET /metrics`, over plain HTTP. Not started unless set.\n\nThe metrics count each time a listener's limits refuse, close or slow something (`agentdesktop_limit_hits_total`), and the connections open on each listener (`agentdesktop_connections`). They name no client address or device.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ControllerMetricsListener"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "oidc": {
       "description": "OpenID Connect settings used for device enrollment and authorization.",
       "$ref": "#/$defs/ControllerOidcConfig"
@@ -482,6 +493,49 @@
         }
       },
       "additionalProperties": false
+    },
+    "ControllerMetricsLimitsConfig": {
+      "description": "Connection limits on the metrics listener. Any connection can be closed to\nmake room at a limit, including one with a request in progress. Unset fields\nkeep their defaults.",
+      "type": "object",
+      "properties": {
+        "connectionsPerAddress": {
+          "description": "Open metrics connections allowed from one client address: an IPv4 address, or an IPv6 /64. At the limit, that address's connection idle the longest is closed to admit a new one. Defaults to `64`, the same as `maxConnections`, because behind a proxy every connection has the same address.",
+          "type": "integer",
+          "format": "uint",
+          "default": 64,
+          "minimum": 1
+        },
+        "maxConnections": {
+          "description": "Open metrics connections allowed in total. At the limit, the connection idle the longest is closed to admit a new one. Defaults to `64`.",
+          "type": "integer",
+          "format": "uint",
+          "default": 64,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "ControllerMetricsListener": {
+      "description": "Listener for metrics scrapes, separate from the fleet API and the management UI.",
+      "type": "object",
+      "properties": {
+        "limits": {
+          "description": "Connection limits on the metrics listener.",
+          "$ref": "#/$defs/ControllerMetricsLimitsConfig",
+          "default": {
+            "connectionsPerAddress": 64,
+            "maxConnections": 64
+          }
+        },
+        "listen": {
+          "description": "Address on which the metrics listener accepts connections, such as `0.0.0.0:9464` for a scraper in another pod. The metrics are served over plain HTTP, so bind an address that only the scraper can reach.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "listen"
+      ]
     },
     "ControllerOidcConfig": {
       "description": "OpenID Connect settings used for interactive device enrollment.",

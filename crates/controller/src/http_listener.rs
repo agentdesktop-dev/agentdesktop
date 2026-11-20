@@ -27,7 +27,10 @@ use axum_server::{
 };
 use tokio::net::TcpStream;
 
-use crate::fleet_limits::{ConnectionLimits, Connections, LimitedConnection};
+use crate::{
+    fleet_limits::{ConnectionLimits, Connections, LimitedConnection},
+    metrics::LimitMetrics,
+};
 
 /// Time a new connection has to make its first request.
 const FIRST_REQUEST: Duration = Duration::from_secs(20);
@@ -78,16 +81,18 @@ pub struct HttpListener {
 }
 
 impl HttpListener {
-    /// Binds `address`. `name` labels logs and errors, e.g. `gateway`.
+    /// Binds `address`. `name` labels logs, errors and `metrics`, e.g.
+    /// `gateway`.
     pub fn bind(
         name: &'static str,
         address: SocketAddr,
         tls: Option<HttpListenerTls<'_>>,
         limits: HttpListenerLimits,
+        metrics: &LimitMetrics,
     ) -> anyhow::Result<Self> {
         let listener = std::net::TcpListener::bind(address)
             .with_context(|| format!("bind {name} listener on {address}"))?;
-        Self::from_std(name, listener, tls, limits)
+        Self::from_std(name, listener, tls, limits, metrics)
     }
 
     /// Serves on an already bound `listener`.
@@ -96,6 +101,7 @@ impl HttpListener {
         listener: std::net::TcpListener,
         tls: Option<HttpListenerTls<'_>>,
         limits: HttpListenerLimits,
+        metrics: &LimitMetrics,
     ) -> anyhow::Result<Self> {
         let tls = tls
             .map(|tls| {
@@ -108,7 +114,7 @@ impl HttpListener {
             listener,
             tls,
             limits,
-            connections: Connections::new(limits.connections, name),
+            connections: Connections::new(limits.connections, name, metrics),
         })
     }
 
@@ -210,7 +216,10 @@ mod tests {
     };
 
     use super::{HttpListener, HttpListenerLimits, HttpListenerTls};
-    use crate::fleet_limits::Connections;
+    use crate::{
+        fleet_limits::Connections,
+        metrics::{Limit, LimitMetrics, Outcome, Telemetry},
+    };
 
     const LIMITS: HttpListenerLimits = HttpListenerLimits::new(1024, 64);
 
@@ -233,8 +242,24 @@ mod tests {
         limits: HttpListenerLimits,
         tls: Option<HttpListenerTls<'_>>,
     ) -> (SocketAddr, Connections) {
-        let listener =
-            HttpListener::bind("test", SocketAddr::from(([127, 0, 0, 1], 0)), tls, limits).unwrap();
+        serve_measured(limits, tls, &LimitMetrics::disabled())
+    }
+
+    /// Like `serve`, counting the limits that act in `metrics` as the `test`
+    /// listener.
+    fn serve_measured(
+        limits: HttpListenerLimits,
+        tls: Option<HttpListenerTls<'_>>,
+        metrics: &LimitMetrics,
+    ) -> (SocketAddr, Connections) {
+        let listener = HttpListener::bind(
+            "test",
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            tls,
+            limits,
+            metrics,
+        )
+        .unwrap();
         let address = listener.local_address().unwrap();
         let connections = listener.connections().clone();
         tokio::spawn(listener.serve(Router::new().route("/", get(|| async { "ok" }))));
@@ -245,6 +270,16 @@ mod tests {
     async fn until_open(connections: &Connections, count: usize) {
         bounded(async {
             while connections.open_count() < count {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+    }
+
+    /// Waits until the `test` listener's connection gauge reads `count`.
+    async fn until_gauge(telemetry: &Telemetry, count: i64) {
+        bounded(async {
+            while telemetry.connections("test") != count {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
@@ -322,9 +357,19 @@ mod tests {
     async fn a_connection_that_never_makes_a_request_is_closed() {
         let mut limits = LIMITS;
         limits.connections.first_request = Duration::from_millis(200);
-        let (address, _) = serve(limits, None);
+        let telemetry = Telemetry::new().unwrap();
+        let (address, _) = serve_measured(limits, None, &telemetry.limits());
 
         until_closed(bounded(TcpStream::connect(address)).await.unwrap()).await;
+
+        assert_eq!(
+            telemetry.hits("test", Limit::FirstRequest, Outcome::TimedOut),
+            1
+        );
+        assert_eq!(
+            telemetry.hits("test", Limit::IdleConnection, Outcome::TimedOut),
+            0
+        );
     }
 
     #[tokio::test]
@@ -333,7 +378,8 @@ mod tests {
         // Far past the test's bound, so only the idle close can end the connection.
         limits.connections.first_request = Duration::from_secs(60);
         limits.connections.idle = Duration::from_millis(200);
-        let (address, _) = serve(limits, None);
+        let telemetry = Telemetry::new().unwrap();
+        let (address, _) = serve_measured(limits, None, &telemetry.limits());
         let mut stream = bounded(TcpStream::connect(address)).await.unwrap();
 
         bounded(stream.write_all(b"GET / HTTP/1.1\r\nHost: listener\r\n\r\n"))
@@ -344,6 +390,61 @@ mod tests {
         assert_eq!(&status, b"HTTP/1.1 200");
 
         until_closed(stream).await;
+
+        assert_eq!(
+            telemetry.hits("test", Limit::IdleConnection, Outcome::TimedOut),
+            1
+        );
+        assert_eq!(
+            telemetry.hits("test", Limit::FirstRequest, Outcome::TimedOut),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn the_connection_gauge_follows_the_open_connections() {
+        let mut limits = LIMITS;
+        limits.connections.first_request = Duration::from_secs(60);
+        let telemetry = Telemetry::new().unwrap();
+        let (address, connections) = serve_measured(limits, None, &telemetry.limits());
+        assert_eq!(telemetry.connections("test"), 0);
+
+        let first = bounded(TcpStream::connect(address)).await.unwrap();
+        let second = bounded(TcpStream::connect(address)).await.unwrap();
+        until_open(&connections, 2).await;
+        until_gauge(&telemetry, 2).await;
+
+        drop(first);
+        until_gauge(&telemetry, 1).await;
+        assert_eq!(connections.open_count(), 1);
+
+        drop(second);
+        until_gauge(&telemetry, 0).await;
+    }
+
+    #[tokio::test]
+    async fn an_evicted_connection_leaves_the_gauge_at_the_open_count() {
+        let mut limits = LIMITS;
+        limits.connections.first_request = Duration::from_secs(60);
+        limits.connections.max_connections = 2;
+        let telemetry = Telemetry::new().unwrap();
+        let (address, connections) = serve_measured(limits, None, &telemetry.limits());
+        let oldest = bounded(TcpStream::connect(address)).await.unwrap();
+        until_open(&connections, 1).await;
+        let _second = bounded(TcpStream::connect(address)).await.unwrap();
+        until_open(&connections, 2).await;
+
+        let _third = bounded(TcpStream::connect(address)).await.unwrap();
+        until_closed(oldest).await;
+
+        // The eviction counted, and the evicted connection's close took it
+        // out of the gauge as the new one's open added it.
+        assert_eq!(
+            telemetry.hits("test", Limit::MaxConnections, Outcome::Evicted),
+            1
+        );
+        until_gauge(&telemetry, 2).await;
+        assert_eq!(connections.open_count(), 2);
     }
 
     #[tokio::test]

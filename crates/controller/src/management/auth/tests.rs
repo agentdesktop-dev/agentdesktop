@@ -381,7 +381,14 @@ async fn the_admin_listener_applies_its_configured_connection_limits() {
         connections_per_address: 2,
     };
     let server = tokio::spawn(async move {
-        super::super::serve_router(listener, router, &ControllerAdminAccess::Local, limits).await
+        super::super::serve_router(
+            listener,
+            router,
+            &ControllerAdminAccess::Local,
+            limits,
+            &crate::metrics::LimitMetrics::disabled(),
+        )
+        .await
     });
     let bounded = |future| tokio::time::timeout(std::time::Duration::from_secs(5), future);
     let mut first = bounded(tokio::net::TcpStream::connect(address))
@@ -429,6 +436,7 @@ async fn authenticated_configuration_is_rejected_without_a_provider() {
             limits: Default::default(),
         },
         super::super::Extensions::default(),
+        &crate::metrics::LimitMetrics::disabled(),
     )
     .await
     {
@@ -842,7 +850,14 @@ async fn direct_tls_transport_serves_the_authenticated_router_over_https_only() 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
-        super::super::serve_router(listener, router, &access, Default::default()).await
+        super::super::serve_router(
+            listener,
+            router,
+            &access,
+            Default::default(),
+            &crate::metrics::LimitMetrics::disabled(),
+        )
+        .await
     });
     let client = reqwest::Client::builder()
         .add_root_certificate(reqwest::Certificate::from_pem(cert.pem().as_bytes()).unwrap())

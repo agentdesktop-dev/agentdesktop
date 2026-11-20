@@ -509,6 +509,11 @@ pub struct ControllerConfig {
     /// No other listener serves the keys, so a NetworkPolicy or firewall can allow gateways this port and block the management API, which can read the device inventory and delete devices. Gateways that export usage also need the fleet port.
     #[serde(default)]
     pub gateway_listener: ControllerGatewayListener,
+    /// Listener that serves the controller's metrics in the Prometheus text format at `GET /metrics`, over plain HTTP. Not started unless set.
+    ///
+    /// The metrics count each time a listener's limits refuse, close or slow something (`agentdesktop_limit_hits_total`), and the connections open on each listener (`agentdesktop_connections`). They name no client address or device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics_listener: Option<ControllerMetricsListener>,
     /// SQLite or PostgreSQL URL used for controller state.
     #[serde(default = "default_controller_database_url")]
     pub database_url: String,
@@ -883,6 +888,43 @@ pub struct ControllerGatewayListener {
     /// Connection limits on the gateway listener.
     #[serde(default)]
     pub limits: ControllerGatewayLimitsConfig,
+}
+
+/// Listener for metrics scrapes, separate from the fleet API and the management UI.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerMetricsListener {
+    /// Address on which the metrics listener accepts connections, such as `0.0.0.0:9464` for a scraper in another pod. The metrics are served over plain HTTP, so bind an address that only the scraper can reach.
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub listen: SocketAddr,
+    /// Connection limits on the metrics listener.
+    #[serde(default)]
+    pub limits: ControllerMetricsLimitsConfig,
+}
+
+/// Connection limits on the metrics listener. Any connection can be closed to
+/// make room at a limit, including one with a request in progress. Unset fields
+/// keep their defaults.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct ControllerMetricsLimitsConfig {
+    /// Open metrics connections allowed in total. At the limit, the connection idle the longest is closed to admit a new one. Defaults to `64`.
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
+    pub max_connections: usize,
+    /// Open metrics connections allowed from one client address: an IPv4 address, or an IPv6 /64. At the limit, that address's connection idle the longest is closed to admit a new one. Defaults to `64`, the same as `maxConnections`, because behind a proxy every connection has the same address.
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
+    pub connections_per_address: usize,
+}
+
+impl Default for ControllerMetricsLimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: 64,
+            connections_per_address: 64,
+        }
+    }
 }
 
 /// Collection of LLM token and cost records that agentgateway exports to the
@@ -1718,31 +1760,42 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
             anyhow::bail!("gatewayJwt.lifetime must be greater than zero");
         }
     }
-    // Each listener needs its own port. The gateway listener starts only with gatewayJwt.
+    // Each listener needs its own port. The gateway listener starts only with
+    // gatewayJwt, and the metrics listener only when it is set.
     let mut listeners = vec![
         (
             "fleetListener.listen",
             config.fleet_listener.listen,
-            default_fleet_listen(),
+            Some(default_fleet_listen()),
         ),
         (
             "adminListener.listen",
             config.admin_listener.listen,
-            default_admin_listen(),
+            Some(default_admin_listen()),
         ),
     ];
     if config.gateway_jwt.is_some() {
         listeners.push((
             "gatewayListener.listen",
             config.gateway_listener.listen,
-            default_gateway_listen(),
+            Some(default_gateway_listen()),
         ));
     }
+    if let Some(metrics) = &config.metrics_listener {
+        listeners.push(("metricsListener.listen", metrics.listen, None));
+    }
+    let described = |field: &str, address: &SocketAddr, default: &Option<SocketAddr>| match default
+    {
+        Some(default) => format!("{field} ({address}, default {default})"),
+        None => format!("{field} ({address})"),
+    };
     for (index, (field, address, default)) in listeners.iter().enumerate() {
         for (other_field, other, other_default) in &listeners[index + 1..] {
             if address.port() == other.port() {
                 anyhow::bail!(
-                    "{field} ({address}, default {default}) and {other_field} ({other}, default {other_default}) use the same port; each listener needs its own port"
+                    "{} and {} use the same port; each listener needs its own port",
+                    described(field, address, default),
+                    described(other_field, other, other_default)
                 );
             }
         }
@@ -1750,6 +1803,10 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
     config.fleet_listener.limits.validate()?;
     let admin = &config.admin_listener.limits;
     let gateway = &config.gateway_listener.limits;
+    let metrics = config
+        .metrics_listener
+        .as_ref()
+        .map(|listener| listener.limits);
     for (field, zero) in [
         (
             "adminListener.limits.maxConnections",
@@ -1766,6 +1823,14 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
         (
             "gatewayListener.limits.connectionsPerAddress",
             gateway.connections_per_address == 0,
+        ),
+        (
+            "metricsListener.limits.maxConnections",
+            metrics.is_some_and(|limits| limits.max_connections == 0),
+        ),
+        (
+            "metricsListener.limits.connectionsPerAddress",
+            metrics.is_some_and(|limits| limits.connections_per_address == 0),
         ),
     ] {
         if zero {
@@ -2753,6 +2818,50 @@ gatewayJwt:
     }
 
     #[test]
+    fn controller_metrics_listener_is_off_unless_set_and_needs_its_own_port() {
+        let base = r#"
+tls: /etc/agentdesktop/tls
+oidc:
+  issuer: https://idp.example.com
+  clientId: agentdesktop
+"#;
+        assert!(
+            parse_controller(base)
+                .expect("no metrics listener")
+                .metrics_listener
+                .is_none()
+        );
+
+        let listener =
+            parse_controller(&format!("{base}metricsListener:\n  listen: 0.0.0.0:9464\n"))
+                .expect("metrics listener")
+                .metrics_listener
+                .expect("set");
+        assert_eq!(listener.listen, "0.0.0.0:9464".parse().unwrap());
+        assert_eq!(listener.limits.max_connections, 64);
+        assert_eq!(listener.limits.connections_per_address, 64);
+
+        // The address has no default: setting the block means choosing one.
+        assert!(parse_controller(&format!("{base}metricsListener: {{}}\n")).is_err());
+        assert!(
+            parse_controller(&format!(
+                "{base}metricsListener:\n  listen: 0.0.0.0:9464\n  tls: true\n"
+            ))
+            .is_err(),
+            "the metrics listener serves plain HTTP only"
+        );
+
+        let error = parse_controller(&format!("{base}metricsListener:\n  listen: 0.0.0.0:8443\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("fleetListener.listen (127.0.0.1:8443, default 127.0.0.1:8443)")
+                && error.contains("metricsListener.listen (0.0.0.0:8443) use"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn controller_usage_token_file_is_relative_to_the_configuration() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -3130,6 +3239,10 @@ oidc:
             (
                 "gatewayListener:\n  limits:\n    connectionsPerAddress: 0\n",
                 "gatewayListener.limits.connectionsPerAddress",
+            ),
+            (
+                "metricsListener:\n  listen: 0.0.0.0:9464\n  limits:\n    maxConnections: 0\n",
+                "metricsListener.limits.maxConnections",
             ),
         ] {
             let error = parse_controller(&format!("{base}{document}")).unwrap_err();

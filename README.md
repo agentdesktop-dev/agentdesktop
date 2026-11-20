@@ -814,6 +814,33 @@ The controller has three listeners, each configured with `listen` and
 and API, and `gatewayListener` for LLM gateways. Each listener's `limits` caps
 its open connections (`maxConnections`, `connectionsPerAddress`).
 
+Set `metricsListener.listen` to add a fourth, which serves the controller's
+metrics at `GET /metrics` in the Prometheus text format over plain HTTP.
+`agentdesktop_connections` is the number of connections open on each listener,
+to compare with its `maxConnections`. `agentdesktop_limit_hits_total` counts
+each time a limit acts, labeled by listener (`agentdesktop_listener`: `fleet`,
+`admin`, `gateway` or `metrics`), limit (`agentdesktop_limit_name`) and outcome
+(`agentdesktop_limit_outcome`). No label names a client address or device.
+
+| Limit | Listeners | Outcome | Counts |
+| --- | --- | --- | --- |
+| `max_connections` | all | `evicted`, `rejected` | A new connection at `limits.maxConnections`: the longest-idle connection closed to admit it, or the new one closed when none is idle |
+| `connections_per_address` | all | `evicted`, `rejected` | The same at `limits.connectionsPerAddress`, among the address's own connections |
+| `first_request` | all | `timed_out` | A connection closed for making no request within 20 s |
+| `idle_connection` | all | `timed_out` | A connection closed after 120 s without a request in progress |
+| `enrollment_rate` | fleet | `rejected` | An enrollment request over its address's `enrollmentBurst` and `enrollmentRefill` |
+| `enrollment_in_flight` | fleet | `rejected` | An enrollment request refused with `enrollmentInFlight` requests already in progress |
+| `stream_open_rate` | fleet | `rejected` | A `Connect` stream refused because its device opens them too often |
+| `device_message_rate` | fleet | `throttled` | A device message past `deviceMessageBurst` and `deviceMessageRefill`; the controller waits before reading the device's next one |
+| `max_message_bytes` | fleet | `rejected` | A device message over `maxMessageBytes` |
+| `unauthenticated_message_bytes` | fleet | `rejected` | A request over 64 KiB from a caller without a device certificate, such as enrollment |
+| `request_timeout` | fleet | `timed_out` | A request whose handler took over 30 s to respond |
+| `connect_response_buffer` | fleet | `closed` | A `Connect` stream closed because its device stopped reading it |
+
+TLS handshake timeouts and the HTTP/2 limits that the server library enforces
+itself (streams per connection, protocol-error resets, keepalive PINGs) are not
+counted.
+
 The controller management UI/API accepts unauthenticated access only on a
 loopback `adminListener.listen` address (default `127.0.0.1:8080`), and rejects
 cross-site browser mutations and non-loopback `Host` headers. Reach it remotely

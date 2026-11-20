@@ -50,6 +50,11 @@
 |`gatewayListener.limits.maxConnections`|integer|Open gateway connections allowed in total. At the limit, the connection idle the longest is closed to admit a new one. Defaults to `1024`.|
 |`gatewayListener.listen`|string|Address on which the gateway listener accepts connections. Defaults to `127.0.0.1:8444`.|
 |`gatewayListener.tls`|boolean|Serve HTTPS with the controller certificate from `tls` instead of plain HTTP. Use HTTPS unless gateways reach the listener over loopback or a trusted network: whoever can change the keys a gateway fetches can forge credentials it accepts.|
+|`metricsListener`|object|Listener that serves the controller's metrics in the Prometheus text format at `GET /metrics`, over plain HTTP. Not started unless set.<br><br>The metrics count each time a listener's limits refuse, close or slow something (`agentdesktop_limit_hits_total`), and the connections open on each listener (`agentdesktop_connections`). They name no client address or device.|
+|`metricsListener.limits`|object|Connection limits on the metrics listener.|
+|`metricsListener.limits.connectionsPerAddress`|integer|Open metrics connections allowed from one client address: an IPv4 address, or an IPv6 /64. At the limit, that address's connection idle the longest is closed to admit a new one. Defaults to `64`, the same as `maxConnections`, because behind a proxy every connection has the same address.|
+|`metricsListener.limits.maxConnections`|integer|Open metrics connections allowed in total. At the limit, the connection idle the longest is closed to admit a new one. Defaults to `64`.|
+|`metricsListener.listen`|string|Address on which the metrics listener accepts connections, such as `0.0.0.0:9464` for a scraper in another pod. The metrics are served over plain HTTP, so bind an address that only the scraper can reach.|
 |`oidc`|object|OpenID Connect settings used for device enrollment and authorization.|
 |`oidc.clientId`|string|Public OpenID Connect client identifier.|
 |`oidc.issuer`|string|Exact OpenID Connect issuer URL.|

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{
     daemon_config::{self, DaemonConfigStore},
     database::Database,
@@ -7,6 +9,7 @@ use crate::{
     gateway_jwt::{self, GatewayJwtIssuer},
     http_listener::{HttpListener, HttpListenerLimits, HttpListenerTls},
     management::{self, Settings, State},
+    metrics::{LimitMetrics, Telemetry},
     oidc::OidcProvider,
     service::FleetAgentService,
 };
@@ -34,6 +37,15 @@ pub async fn run(
     management::auth(&config.admin_listener.access, &extensions)?;
     // Out-of-range fleet limits fail here too, before any network setup.
     let limits = FleetLimits::from_config(&config.fleet_listener.limits)?;
+    // Metrics are recorded only when something serves them.
+    let telemetry = config
+        .metrics_listener
+        .as_ref()
+        .map(|_| Telemetry::new().map(Arc::new))
+        .transpose()?;
+    let metrics = telemetry
+        .as_ref()
+        .map_or_else(LimitMetrics::disabled, |telemetry| telemetry.limits());
     let tls = config.tls.files();
     let daemon_config = match &config.daemon_config {
         Some(daemon) => Some(daemon_config::load(&daemon.path, daemon.revision)?),
@@ -125,6 +137,7 @@ pub async fn run(
         gateway_jwt_issuer,
         Some(device_certificate_issuer),
         &limits,
+        &metrics,
     )
     .with_enrollment_tokens(enrollment_tokens)
     .with_usage_collection(usage_ingest.is_some());
@@ -144,7 +157,7 @@ pub async fn run(
         .client_ca_root(Certificate::from_pem(client_ca))
         .client_auth_optional(true);
     let fleet_listen = config.fleet_listener.listen;
-    let fleet_listener = limits.listener(fleet_listen, Some(tls_config))?;
+    let fleet_listener = limits.listener(fleet_listen, Some(tls_config), &metrics)?;
     // Started only with gatewayJwt: the gateway listener serves its JWKS.
     let gateway_listener = gateway_jwks
         .map(|jwks| {
@@ -158,8 +171,23 @@ pub async fn run(
                 listener.limits.connections_per_address,
             );
             anyhow::Ok((
-                HttpListener::bind("gateway", listener.listen, tls, limits)?,
+                HttpListener::bind("gateway", listener.listen, tls, limits, &metrics)?,
                 jwks,
+            ))
+        })
+        .transpose()?;
+    let metrics_listener = config
+        .metrics_listener
+        .as_ref()
+        .zip(telemetry)
+        .map(|(listener, telemetry)| {
+            let limits = HttpListenerLimits::new(
+                listener.limits.max_connections,
+                listener.limits.connections_per_address,
+            );
+            anyhow::Ok((
+                HttpListener::bind("metrics", listener.listen, None, limits, &metrics)?,
+                telemetry,
             ))
         })
         .transpose()?;
@@ -175,13 +203,19 @@ pub async fn run(
             .await
             .context("serve fleet gRPC API")
     };
-    let admin = management::serve(admin_state, config.admin_listener, extensions);
+    let admin = management::serve(admin_state, config.admin_listener, extensions, &metrics);
     let gateway = async move {
         match gateway_listener {
             Some((listener, jwks)) => listener.serve(gateway_jwt::routes(jwks)).await,
             None => std::future::pending().await,
         }
     };
-    tokio::try_join!(fleet, admin, gateway)?;
+    let metrics_listener = async move {
+        match metrics_listener {
+            Some((listener, telemetry)) => listener.serve(telemetry.router()).await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::try_join!(fleet, admin, gateway, metrics_listener)?;
     Ok(())
 }

@@ -24,6 +24,7 @@ use crate::{
     daemon_config::DaemonConfigStore,
     database::Database,
     http_listener::{HttpListener, HttpListenerLimits, HttpListenerTls},
+    metrics::LimitMetrics,
 };
 
 pub mod auth;
@@ -112,17 +113,19 @@ pub fn auth(access: &ControllerAdminAccess, extensions: &Extensions) -> anyhow::
     }
 }
 
-/// Serves the management UI and API on the configured listener.
+/// Serves the management UI and API on the configured listener, counting the
+/// connection limits that act in `metrics`.
 pub async fn serve(
     state: State,
     listener: ControllerAdminListener,
     extensions: Extensions,
+    metrics: &LimitMetrics,
 ) -> anyhow::Result<()> {
     let app = router(state, &listener.access, extensions)?;
     let address = listener.listen;
     let bound = std::net::TcpListener::bind(address)
         .with_context(|| format!("bind admin listener on {address}"))?;
-    serve_router(bound, app, &listener.access, listener.limits).await
+    serve_router(bound, app, &listener.access, listener.limits, metrics).await
 }
 
 /// Serves `app` on `listener` with the connection limits, over HTTPS when the
@@ -132,6 +135,7 @@ pub async fn serve_router(
     app: Router,
     access: &ControllerAdminAccess,
     limits: ControllerAdminLimitsConfig,
+    metrics: &LimitMetrics,
 ) -> anyhow::Result<()> {
     let tls = match access {
         ControllerAdminAccess::Authenticated(config) => match &config.transport {
@@ -148,7 +152,7 @@ pub async fn serve_router(
     };
     info!(mode, "admin listener access mode");
     let limits = HttpListenerLimits::new(limits.max_connections, limits.connections_per_address);
-    HttpListener::from_std("admin", listener, tls, limits)?
+    HttpListener::from_std("admin", listener, tls, limits, metrics)?
         .serve(app)
         .await
 }
