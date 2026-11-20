@@ -473,7 +473,7 @@ fn queue_response(
         Err(mpsc::error::TrySendError::Full(_)) => {
             metrics.hit(Limit::ConnectResponseBuffer, Outcome::Closed);
             warn!(
-                device_id,
+                device_id = %device_id,
                 "closing stream after the device stopped reading it"
             );
             ControlFlow::Break(())

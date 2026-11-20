@@ -1981,8 +1981,8 @@ mod device_streams {
             Some(start + 2 * second),
             "one message per refill"
         );
-        // The first two messages were within the budget; the last two left it
-        // over budget.
+        // The first two messages left tokens in the budget; the third and the
+        // fourth each spent the last one.
         assert_eq!(
             telemetry.hits("fleet", Limit::DeviceMessageRate, Outcome::Throttled),
             2

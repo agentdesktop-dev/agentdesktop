@@ -279,7 +279,7 @@ pub(crate) enum Outcome {
     Evicted,
     /// A connection or request ran out of time.
     TimedOut,
-    /// A device's message was read later, within its budget.
+    /// A device spent its message budget; its next message is read no sooner than the refill.
     Throttled,
     /// An open stream was closed.
     Closed,

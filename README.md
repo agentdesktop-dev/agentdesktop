@@ -831,7 +831,7 @@ each time a limit acts, labeled by listener (`agentdesktop_listener`: `fleet`,
 | `enrollment_rate` | fleet | `rejected` | An enrollment request over its address's `enrollmentBurst` and `enrollmentRefill` |
 | `enrollment_in_flight` | fleet | `rejected` | An enrollment request refused with `enrollmentInFlight` requests already in progress |
 | `stream_open_rate` | fleet | `rejected` | A `Connect` stream refused because its device opens them too often |
-| `device_message_rate` | fleet | `throttled` | A device message past `deviceMessageBurst` and `deviceMessageRefill`; the controller waits before reading the device's next one |
+| `device_message_rate` | fleet | `throttled` | A device message that spends the last of the budget set by `deviceMessageBurst` and `deviceMessageRefill`; the controller reads the device's next message no sooner than the budget refills |
 | `max_message_bytes` | fleet | `rejected` | A device message over `maxMessageBytes` |
 | `unauthenticated_message_bytes` | fleet | `rejected` | A request over 64 KiB from a caller without a device certificate, such as enrollment |
 | `request_timeout` | fleet | `timed_out` | A request whose handler took over 30 s to respond |
