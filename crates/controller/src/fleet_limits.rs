@@ -17,7 +17,10 @@ use std::{
 };
 
 use agentdesktop_core::config::ControllerFleetLimitsConfig;
-use agentdesktop_proto::fleet::fleet_agent_server::{FleetAgent, FleetAgentServer, SERVICE_NAME};
+use agentdesktop_proto::fleet::{
+    AgentMessage,
+    fleet_agent_server::{FleetAgent, FleetAgentServer, SERVICE_NAME},
+};
 use anyhow::Context as _;
 use futures_core::Stream;
 use tokio::{
@@ -351,7 +354,7 @@ pub(crate) fn address_key(address: IpAddr) -> IpAddr {
 
 /// Admission control for the unauthenticated enrollment RPCs.
 #[derive(Clone)]
-pub struct EnrollmentLimiter {
+pub(crate) struct EnrollmentLimiter {
     in_flight: Arc<Semaphore>,
     peers: Arc<Mutex<PeerBuckets>>,
     /// Each address's budget: `burst` enrollment requests, refilled at one per
@@ -456,7 +459,7 @@ impl Bucket {
 }
 
 impl EnrollmentLimiter {
-    pub fn new(limits: &FleetLimits) -> Self {
+    pub(crate) fn new(limits: &FleetLimits) -> Self {
         Self {
             in_flight: Arc::new(Semaphore::new(limits.configured.enrollment_in_flight)),
             peers: Arc::default(),
@@ -468,7 +471,7 @@ impl EnrollmentLimiter {
 
     /// Admits one `GetLoginConfiguration` from `peer`, or rejects it with
     /// `RESOURCE_EXHAUSTED`. Hold the returned permit until the request finishes.
-    pub fn admit(&self, peer: Option<SocketAddr>) -> Result<OwnedSemaphorePermit, Status> {
+    pub(crate) fn admit(&self, peer: Option<SocketAddr>) -> Result<OwnedSemaphorePermit, Status> {
         self.spend(peer)?;
         self.in_flight
             .clone()
@@ -481,7 +484,7 @@ impl EnrollmentLimiter {
     /// request, then waits up to `enrollment_completion_wait` for an in-flight
     /// slot rather than failing at once. Hold the returned permit until the
     /// request finishes.
-    pub async fn admit_enrollment(
+    pub(crate) async fn admit_enrollment(
         &self,
         peer: Option<SocketAddr>,
     ) -> Result<OwnedSemaphorePermit, Status> {
@@ -544,7 +547,7 @@ fn in_flight_refusal() -> Status {
 /// controller has not yet noticed is dead. The device's message budget and its
 /// budget for opening streams live here too, so reconnecting does not reset them.
 #[derive(Clone)]
-pub struct DeviceStreams {
+pub(crate) struct DeviceStreams {
     devices: Arc<Mutex<HashMap<String, DeviceState>>>,
     next: Arc<AtomicU64>,
     limits: FleetLimits,
@@ -581,7 +584,7 @@ impl DeviceState {
 const MAX_TRACKED_DEVICES: usize = 100_000;
 
 impl DeviceStreams {
-    pub fn new(limits: &FleetLimits) -> Self {
+    pub(crate) fn new(limits: &FleetLimits) -> Self {
         Self {
             devices: Arc::default(),
             next: Arc::default(),
@@ -609,7 +612,7 @@ impl DeviceStreams {
     /// `RESOURCE_EXHAUSTED` when the device opens streams too often. Call this
     /// before any per-stream work, such as checking the access token. A stream
     /// opens only with the returned permit.
-    pub fn admit_open(&self, device_id: &str) -> Result<StreamPermit, Status> {
+    pub(crate) fn admit_open(&self, device_id: &str) -> Result<StreamPermit, Status> {
         let admitted = self.with_device(device_id, |device| device.opens.take(Instant::now()));
         if admitted {
             Ok(StreamPermit {
@@ -633,7 +636,7 @@ impl DeviceStreams {
 
 /// Permission to open one `Connect` stream for a device, from
 /// `DeviceStreams::admit_open`.
-pub struct StreamPermit {
+pub(crate) struct StreamPermit {
     streams: DeviceStreams,
     device_id: String,
 }
@@ -641,7 +644,7 @@ pub struct StreamPermit {
 impl StreamPermit {
     /// Opens the device's stream for its `Connect` request, and tells the
     /// device's previous stream, if any, to close.
-    pub fn open<S>(self, request: tonic::Request<S>) -> DeviceStream<S> {
+    pub(crate) fn open<S>(self, request: tonic::Request<S>) -> DeviceStream<S> {
         let busy = SessionBusy::release_for(&request);
         let generation = self.streams.next.fetch_add(1, Ordering::Relaxed);
         let (replace, superseded) = oneshot::channel();
@@ -673,7 +676,7 @@ impl StreamPermit {
 /// registration, until a newer stream from the device replaces it, and the
 /// connection's busy release when the request has one (see `SessionBusy`).
 /// Dropping it gives up both.
-pub struct DeviceStream<S> {
+pub(crate) struct DeviceStream<S = tonic::Streaming<AgentMessage>> {
     inbound: S,
     /// Resolves when the device opens a newer stream; `None` once it has.
     superseded: Option<oneshot::Receiver<()>>,
@@ -683,7 +686,7 @@ pub struct DeviceStream<S> {
 
 /// What a device's stream yields next.
 #[derive(Debug)]
-pub enum StreamEvent<T> {
+pub(crate) enum StreamEvent<T> {
     /// A message from the device, read within its budget.
     Message(T),
     /// The device opened a newer stream, so this one should close.
@@ -702,7 +705,7 @@ impl<S> DeviceStream<S> {
     /// disconnected.
     ///
     /// Cancel-safe: a message is spent from the budget only when one is read.
-    pub async fn next<T>(&mut self) -> StreamEvent<T>
+    pub(crate) async fn next<T>(&mut self) -> StreamEvent<T>
     where
         S: Stream<Item = Result<T, Status>> + Unpin,
     {

@@ -295,7 +295,7 @@ const ACCESS_TOKEN_RECHECK: Duration = Duration::from_secs(5 * 60);
 /// sent from the same task, so no other task keeps the response open.
 struct ConnectSession {
     device_id: String,
-    stream: DeviceStream<tonic::Streaming<AgentMessage>>,
+    stream: DeviceStream,
     responses: mpsc::Sender<Result<ControllerMessage, Status>>,
     daemon_updates: watch::Receiver<Option<DaemonConfig>>,
     database: Database,
