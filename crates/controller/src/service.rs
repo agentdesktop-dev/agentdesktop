@@ -170,7 +170,11 @@ impl FleetAgent for FleetAgentService {
         &self,
         request: Request<LlmGatewayCredentialRequest>,
     ) -> Result<Response<LlmGatewayCredentialResponse>, Status> {
-        let device_id = self.authenticate_device(&request).await?;
+        let device_id = peer_certificate_device_id(&request)?;
+        let principal = self
+            .authenticate_device_identity(&device_id, request.metadata())
+            .await?
+            .principal;
         let LlmGatewayCredentialRequest {
             client_id,
             subscription,
@@ -220,11 +224,6 @@ impl FleetAgent for FleetAgentService {
         let issuer = self.gateway_jwt_issuer.as_ref().ok_or_else(|| {
             Status::failed_precondition("controller gateway JWT issuer is not configured")
         })?;
-        let principal = self
-            .database
-            .device_principal(&device_id)
-            .await
-            .map_err(internal)?;
         // The credential carries the identity of the device's user.
         let user = principal
             .user
@@ -280,10 +279,10 @@ impl FleetAgent for FleetAgentService {
         // Rate-limit opens per device before checking the access token, which
         // calls the identity provider.
         let permit = self.device_streams.admit_open(&device_id)?;
-        let access = match self
+        let AuthenticatedDevice { principal, oidc } = self
             .authenticate_device_identity(&device_id, request.metadata())
-            .await?
-        {
+            .await?;
+        let access = match oidc {
             Some(oidc) => Some((
                 oidc.clone(),
                 bearer_credential(request.metadata())?.to_owned(),
@@ -297,6 +296,7 @@ impl FleetAgent for FleetAgentService {
             stream: permit.open(request),
             responses,
             database: self.database.clone(),
+            enrolled: principal,
             access,
         };
         tokio::spawn(session.run());
@@ -317,9 +317,19 @@ struct ConnectSession {
     responses: mpsc::Sender<Result<ControllerMessage, Status>>,
     daemon_updates: watch::Receiver<Option<DaemonConfig>>,
     database: Database,
+    /// How the device enrolled, as loaded when the stream opened.
+    enrolled: DevicePrincipal,
     /// The identity provider and the access token the stream opened with.
     /// `None` for a device enrolled with a token.
     access: Option<(OidcProvider, String)>,
+}
+
+/// A device that passed [`FleetAgentService::authenticate_device_identity`].
+struct AuthenticatedDevice<'a> {
+    principal: DevicePrincipal,
+    /// The identity provider that checked the access token; `None` for a
+    /// device enrolled with a token.
+    oidc: Option<&'a OidcProvider>,
 }
 
 impl ConnectSession {
@@ -331,13 +341,6 @@ impl ConnectSession {
         {
             return;
         }
-        let enrolled = match self.database.device_principal(&self.device_id).await {
-            Ok(principal) => principal,
-            Err(error) => {
-                error!(%error, device_id = %self.device_id, "failed to load stream identity");
-                return;
-            }
-        };
         let mut recheck = time::interval(ACCESS_TOKEN_RECHECK);
         recheck.tick().await;
         loop {
@@ -347,7 +350,7 @@ impl ConnectSession {
                     Ok(()) => self.forward_config(),
                     Err(_) => ControlFlow::Break(()),
                 },
-                _ = recheck.tick() => self.recheck_access_token(&enrolled).await,
+                _ = recheck.tick() => self.recheck_access_token().await,
                 // Waits while the device is over its message budget; the other
                 // branches keep running.
                 event = self.stream.next() => self.receive(event).await,
@@ -386,12 +389,12 @@ impl ConnectSession {
     /// Checks the stream's access token again, and closes the stream unless it
     /// still identifies the user who enrolled the device. The stream stays open
     /// while the identity provider is unavailable.
-    async fn recheck_access_token(&self, enrolled: &DevicePrincipal) -> ControlFlow<()> {
+    async fn recheck_access_token(&self) -> ControlFlow<()> {
         let Some((oidc, access_token)) = &self.access else {
             return ControlFlow::Continue(());
         };
         match oidc.authenticate_access_token(access_token).await {
-            Ok(principal) if oidc_principals_match(&principal, enrolled) => {
+            Ok(principal) if oidc_principals_match(&principal, &self.enrolled) => {
                 ControlFlow::Continue(())
             }
             Ok(_) => {
@@ -470,12 +473,12 @@ impl FleetAgentService {
 
     /// Authenticates `device_id`. A device enrolled with a token needs only
     /// its certificate. Any other device also needs the access token of the
-    /// user who enrolled it; the identity provider that checked it is returned.
+    /// user who enrolled it.
     async fn authenticate_device_identity(
         &self,
         device_id: &str,
         metadata: &tonic::metadata::MetadataMap,
-    ) -> Result<Option<&OidcProvider>, Status> {
+    ) -> Result<AuthenticatedDevice<'_>, Status> {
         let enrolled = self.enrolled_principal(device_id).await?;
         if let Some(token) = &enrolled.enrollment_token {
             let accepted = self
@@ -488,7 +491,10 @@ impl FleetAgentService {
                     "device enrollment token is no longer accepted",
                 ));
             }
-            return Ok(None);
+            return Ok(AuthenticatedDevice {
+                principal: enrolled,
+                oidc: None,
+            });
         }
         let oidc = self.oidc.as_ref().ok_or_else(|| {
             Status::failed_precondition("OIDC access-token validation is disabled")
@@ -498,7 +504,10 @@ impl FleetAgentService {
             .await
             .map_err(invalid_access_token)?;
         authenticate_enrolled_user(&enrolled, &access_principal)?;
-        Ok(Some(oidc))
+        Ok(AuthenticatedDevice {
+            principal: enrolled,
+            oidc: Some(oidc),
+        })
     }
 
     fn authenticate_enrollment_token(
@@ -1102,11 +1111,11 @@ mod tests {
         let first = enroll(service(&[]), tokens.token("batch-1")).await.unwrap();
         let second = enroll(service(&[]), tokens.token("batch-1")).await.unwrap();
         assert_ne!(first, second, "one token enrolls many devices");
-        service(&[])
+        let principal = service(&[])
             .authenticate_device_identity(&first, &no_access_token)
             .await
-            .expect("the certificate alone authenticates the device");
-        let principal = database.device_principal(&first).await.unwrap();
+            .expect("the certificate alone authenticates the device")
+            .principal;
         assert_eq!(principal.user, None);
         let token = principal.enrollment_token.unwrap();
         assert_eq!(
