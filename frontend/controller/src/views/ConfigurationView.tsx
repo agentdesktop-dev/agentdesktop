@@ -13,6 +13,7 @@ import type { AgentDraft, AgentKind, DaemonConfigDocument } from "../types";
 
 export interface ConfigurationViewProps {
   initialConfig?: DaemonConfigDocument | null;
+  embedded?: boolean;
   onCopy?: (yaml: string) => Promise<void> | void;
   copyLabel?: string;
   copySuccessLabel?: string;
@@ -20,6 +21,7 @@ export interface ConfigurationViewProps {
 
 export function ConfigurationView({
   initialConfig,
+  embedded = false,
   onCopy,
   copyLabel = "Copy",
   copySuccessLabel = "Copied",
@@ -156,19 +158,17 @@ export function ConfigurationView({
 
   return (
     <div className="stack">
-      <section className="section-intro">
-        <div>
+      {!embedded && (
+        <section className="section-intro">
           <h2>Build a configuration</h2>
-          <p>Choose the settings to manage, then copy the generated YAML.</p>
-        </div>
-      </section>
+        </section>
+      )}
       <div className="configuration-builder">
         <section className="card wizard-card">
           <details className="wizard-section" open={gateway}>
             <summary className="wizard-section-summary">
               <span className="wizard-section-title">
                 <strong>LLM gateway</strong>
-                <small>Shared connection settings for managed agents.</small>
               </span>
               <ChevronRight size={15} />
             </summary>
@@ -176,7 +176,6 @@ export function ConfigurationView({
               <label className="toggle-row">
                 <span>
                   <strong>Enable LLM gateway</strong>
-                  <small>Agents can opt into these shared settings.</small>
                 </span>
                 <input
                   type="checkbox"
@@ -194,7 +193,7 @@ export function ConfigurationView({
                     />
                   </label>
                   <label className="field full-width">
-                    <span>Pass-through URL (proxyUrl, optional)</span>
+                    <span>Pass-through URL (optional)</span>
                     <input
                       value={gatewayProxyUrl}
                       placeholder="https://gateway.example.com/copilot-proxy"
@@ -203,9 +202,8 @@ export function ConfigurationView({
                       }
                     />
                     <small>
-                      Gateway route that forwards to the provider with the
-                      client's own token. Required for VS Code Copilot Chat on
-                      GitHub's models (copilotChat: githubModels).
+                      Required for VS Code Copilot Chat with GitHub Models;
+                      forwards requests with the client's token.
                     </small>
                   </label>
                   {usesLocalProxy && (
@@ -213,10 +211,8 @@ export function ConfigurationView({
                       <span>
                         <strong>Fail open without the local proxy</strong>
                         <small>
-                          Off (default): while the local proxy is down, Copilot
-                          fails instead of reaching GitHub past the gateway,
-                          once the daemon has pointed it at the proxy. On: the
-                          Copilot entries are removed until it is back.
+                          Off blocks gateway bypass. On removes Copilot entries
+                          until the proxy returns.
                         </small>
                       </span>
                       <input
@@ -230,8 +226,7 @@ export function ConfigurationView({
                   )}
                   <label className="toggle-row compact full-width">
                     <span>
-                      <strong>Controller JWT</strong>
-                      <small>Use identity-aware short-lived credentials.</small>
+                      <strong>Use controller-issued JWTs</strong>
                     </span>
                     <input
                       type="checkbox"
@@ -257,10 +252,7 @@ export function ConfigurationView({
           <details className="wizard-section" open={sandboxEnabled}>
             <summary className="wizard-section-summary">
               <span className="wizard-section-title">
-                <strong>Sandbox</strong>
-                <small>
-                  Restrict local command execution for managed agents.
-                </small>
+                <strong>Command sandbox</strong>
               </span>
               <ChevronRight size={15} />
             </summary>
@@ -269,7 +261,7 @@ export function ConfigurationView({
                 <span>
                   <strong>Require sandbox</strong>
                   <small>
-                    Commands fail closed when sandboxing is unavailable.
+                    Commands fail closed if sandboxing is unavailable.
                   </small>
                 </span>
                 <input
@@ -292,7 +284,7 @@ export function ConfigurationView({
               {sandboxEnabled && (
                 <div className="form-grid sandbox-fields">
                   <label className="field full-width">
-                    <span>Allowed domains</span>
+                    <span>Allowed domains (empty blocks network)</span>
                     <textarea
                       rows={4}
                       spellCheck={false}
@@ -302,12 +294,9 @@ export function ConfigurationView({
                         setAllowedDomains(event.target.value)
                       }
                     />
-                    <small>
-                      One domain per line. Leave empty to block network access.
-                    </small>
                   </label>
                   <label className="field full-width">
-                    <span>Writable paths</span>
+                    <span>Writable paths (one per line)</span>
                     <textarea
                       rows={4}
                       spellCheck={false}
@@ -315,10 +304,9 @@ export function ConfigurationView({
                       value={writablePaths}
                       onChange={(event) => setWritablePaths(event.target.value)}
                     />
-                    <small>One additional writable path per line.</small>
                   </label>
                   <label className="field full-width">
-                    <span>Denied paths</span>
+                    <span>Denied paths (one per line)</span>
                     <textarea
                       rows={4}
                       spellCheck={false}
@@ -326,9 +314,7 @@ export function ConfigurationView({
                       value={deniedPaths}
                       onChange={(event) => setDeniedPaths(event.target.value)}
                     />
-                    <small>
-                      One path per line. Denied paths cannot be read or changed.
-                    </small>
+                    <small>Denied paths cannot be read or changed.</small>
                   </label>
                 </div>
               )}
@@ -341,7 +327,6 @@ export function ConfigurationView({
             <summary className="wizard-section-summary">
               <span className="wizard-section-title">
                 <strong>Telemetry</strong>
-                <small>Select the events to collect.</small>
               </span>
               <ChevronRight size={15} />
             </summary>
@@ -350,7 +335,6 @@ export function ConfigurationView({
                 <label className="telemetry-option">
                   <span>
                     <strong>New session</strong>
-                    <small>A developer-tool session starts.</small>
                   </span>
                   <code>session.new</code>
                   <input
@@ -364,7 +348,7 @@ export function ConfigurationView({
                 <label className="telemetry-option">
                   <span>
                     <strong>Tool use</strong>
-                    <small>Agent, tool name, and invocation ID.</small>
+                    <small>Agent, tool, and invocation ID.</small>
                   </span>
                   <code>tool.use</code>
                   <input
@@ -379,7 +363,7 @@ export function ConfigurationView({
                 <label className="telemetry-option">
                   <span>
                     <strong>Tool input</strong>
-                    <small>May contain source code, prompts, or secrets.</small>
+                    <small>May include source code, prompts, or secrets.</small>
                   </span>
                   <code>tool.use.input</code>
                   <input
@@ -398,7 +382,6 @@ export function ConfigurationView({
             <summary className="wizard-section-summary">
               <span className="wizard-section-title">
                 <strong>Program selection</strong>
-                <small>Decide whether device users can opt out.</small>
               </span>
               <ChevronRight size={15} />
             </summary>
@@ -408,10 +391,7 @@ export function ConfigurationView({
                   <strong>
                     Let device users choose which programs are managed
                   </strong>
-                  <small>
-                    Users can opt out of configured programs on their device.
-                    Agentdesktop then removes the settings it wrote for them.
-                  </small>
+                  <small>Opted-out programs are removed from the device.</small>
                 </span>
                 <input
                   type="checkbox"
@@ -435,7 +415,6 @@ export function ConfigurationView({
             <summary className="wizard-section-summary">
               <span className="wizard-section-title">
                 <strong>Agents</strong>
-                <small>Add the developer tools you want to manage.</small>
               </span>
               <ChevronRight size={15} />
             </summary>
@@ -509,9 +488,6 @@ export function ConfigurationView({
                       <label className="toggle-row compact">
                         <span>
                           <strong>Use LLM gateway</strong>
-                          <small>
-                            Apply the general gateway settings above.
-                          </small>
                         </span>
                         <input
                           type="checkbox"
@@ -525,7 +501,7 @@ export function ConfigurationView({
                         />
                       </label>
                       <label className="field">
-                        <span>Additional settings (YAML)</span>
+                        <span>Agent settings (YAML)</span>
                         <textarea
                           rows={7}
                           spellCheck={false}
@@ -537,9 +513,6 @@ export function ConfigurationView({
                             })
                           }
                         />
-                        <small>
-                          Use the agent’s native configuration keys.
-                        </small>
                       </label>
                     </section>
                   );
@@ -553,10 +526,7 @@ export function ConfigurationView({
         </section>
         <section className="card output-card">
           <div className="output-heading">
-            <div>
-              <h3>Generated YAML</h3>
-              <p>Copy this into the daemon configuration file.</p>
-            </div>
+            <h3>{embedded ? "Preview" : "Generated YAML"}</h3>
             <button
               type="button"
               className="button secondary"

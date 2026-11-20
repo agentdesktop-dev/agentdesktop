@@ -166,7 +166,7 @@ export const BuildsYaml: Story = {
 
 export const BuildsSandboxYaml: Story = {
   play: async ({ canvas, canvasElement }) => {
-    await userEvent.click(canvas.getByText("Sandbox"));
+    await userEvent.click(canvas.getByText("Command sandbox"));
     await userEvent.click(
       canvas.getByRole("checkbox", { name: /Require sandbox/ }),
     );
@@ -207,7 +207,7 @@ export const BuildsSandboxYaml: Story = {
 export const BlocksSandboxForUnsupportedAgents: Story = {
   args: { initialConfig: activeDaemonConfig },
   play: async ({ canvas }) => {
-    await userEvent.click(canvas.getByText("Sandbox"));
+    await userEvent.click(canvas.getByText("Command sandbox"));
     await expect(
       canvas.getByRole("checkbox", { name: /Require sandbox/ }),
     ).toBeDisabled();

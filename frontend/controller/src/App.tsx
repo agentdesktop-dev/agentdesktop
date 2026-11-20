@@ -410,8 +410,7 @@ function ConfigurationPage() {
     return (
       <div className="stack">
         <p className="config-file-banner">
-          This configuration is managed by a file. Edit it there, or copy YAML
-          from the builder below.
+          File-managed. Edit the source file or copy YAML from the builder.
         </p>
         {query.data.reload_error && (
           <p className="config-notice config-error" role="alert">
