@@ -15,17 +15,21 @@ export class ApiError extends Error {
   constructor(
     public status: number,
     public code: string,
+    message?: string,
   ) {
     super(
-      code === "reauthentication_required"
-        ? "Sign in again before performing this action."
-        : status === 403
-          ? "You do not have permission to perform this action."
-          : status === 401
-            ? "Your session has ended. Sign in again."
-            : status === 503
-              ? "The identity provider is unavailable. Try again shortly."
-              : code,
+      message ??
+        (code === "reauthentication_required"
+          ? "Sign in again before performing this action."
+          : status === 403
+            ? "You do not have permission to perform this action."
+            : status === 401
+              ? "Your session has ended. Sign in again."
+              : status === 413
+                ? "The request is too large."
+                : status === 503
+                  ? "The identity provider is unavailable. Try again shortly."
+                  : code),
     );
   }
 }
@@ -158,6 +162,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const failure = new ApiError(
           response.status,
           typeof body?.error === "string" ? body.error : "Request failed",
+          response.status === 422 && typeof body?.detail === "string"
+            ? body.detail
+            : undefined,
         );
         if (
           !quiet &&

@@ -2,16 +2,20 @@ import { useEffect, useState } from "react";
 
 import { useAuth } from "./auth";
 
-export function useApi<T>(path: string) {
+export function useApi<T>(path: string | null) {
   const { request } = useAuth();
   const [query, setQuery] = useState<{
-    path: string;
+    path: string | null;
     data: T | null;
     error: string | null;
     loading: boolean;
   }>({ path, data: null, error: null, loading: true });
 
   useEffect(() => {
+    if (path === null) {
+      setQuery({ path: null, data: null, error: null, loading: false });
+      return;
+    }
     const controller = new AbortController();
     let active = true;
     setQuery({ path, data: null, error: null, loading: true });
@@ -42,5 +46,5 @@ export function useApi<T>(path: string) {
 
   return query.path === path
     ? query
-    : { path, data: null, error: null, loading: true };
+    : { path, data: null, error: null, loading: path !== null };
 }
