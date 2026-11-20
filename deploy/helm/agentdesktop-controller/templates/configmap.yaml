@@ -39,9 +39,19 @@ data:
 {{ toYaml . | indent 8 }}
       {{- end }}
     {{- end }}
+    {{- if eq .Values.daemonConfigMode "database" }}
+    daemonConfig:
+      {{- if .Values.daemonConfig }}
+      database:
+        seedPath: /etc/agentdesktop/config/daemon.yaml
+      {{- else }}
+      database: {}
+      {{- end }}
+    {{- else }}
     {{- with .Values.daemonConfig }}
     daemonConfig:
       path: /etc/agentdesktop/config/daemon.yaml
+    {{- end }}
     {{- end }}
   {{- with .Values.daemonConfig }}
   daemon.yaml: |

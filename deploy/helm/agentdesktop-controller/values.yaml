@@ -56,9 +56,19 @@ gatewayListener:
     # Defaults to 443 with tls, otherwise 80.
     port: ""
 
-# Daemon configuration distributed to enrolled devices. Leave empty to
-# disable managed configuration.
+# Select whether daemon configuration is read from the chart-mounted file or
+# stored in the controller database. Database mode is opt-in.
+daemonConfigMode: file
+
+# Daemon configuration distributed to enrolled devices. In file mode this is
+# the live configuration. In database mode it is an optional seed imported
+# once, only when the revision table is empty. Leave empty for no seed.
 daemonConfig: {}
+
+# Optional seed Secret for database mode when using existingConfigSecret.
+# Its configured key is mounted as /etc/agentdesktop/config-seed/daemon.yaml.
+daemonConfigSeedSecret: ""
+daemonConfigSeedKey: daemon.yaml
 
 # When set, this Secret is mounted instead of the generated ConfigMap. It
 # must contain a complete controller configuration at configSecretKey.
