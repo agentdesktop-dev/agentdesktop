@@ -1,21 +1,24 @@
+use std::{path::Path, time::Duration};
+
 use crate::{
     daemon_config::{self, DaemonConfigStore},
-    database::Database,
+    database::{DaemonConfigAuthor, Database},
     device_ca::DeviceCertificateIssuer,
     fleet_limits::FleetLimits,
     gateway_jwt::{self, GatewayJwtIssuer},
     http_listener::{HttpListener, HttpListenerLimits, HttpListenerTls},
-    management::{self, Settings, State},
+    management::{self, DaemonConfigSource, Settings, State},
     oidc::OidcProvider,
     service::FleetAgentService,
 };
 use agentdesktop_core::config::ControllerConfig;
 use agentdesktop_usage::UsageIngest;
-use anyhow::Context;
+use anyhow::{Context, bail};
 use tonic::{
     service::Routes,
     transport::{Certificate, Identity, ServerTlsConfig},
 };
+use tracing::{info, warn};
 
 /// Runs the fleet, management and gateway listeners with application-owned extensions.
 /// Shared by every controller executable: enrollment/gateway setup stays here,
@@ -34,13 +37,25 @@ pub async fn run(
     // Out-of-range fleet limits fail here too, before any network setup.
     let limits = FleetLimits::from_config(&config.fleet_listener.limits)?;
     let tls = config.tls.files();
-    let daemon_config = match &config.daemon_config {
-        Some(daemon) => Some(daemon_config::load(&daemon.path, daemon.revision)?),
-        None => None,
+    let (active_daemon_config, daemon_config_source) = match &config.daemon_config {
+        Some(daemon) if let Some(path) = &daemon.path => (
+            Some(daemon_config::load(path, daemon.file_revision())?),
+            DaemonConfigSource::File,
+        ),
+        Some(daemon) if let Some(database_config) = &daemon.database => (
+            load_database_daemon_config(&database, database_config.seed_path.as_deref()).await?,
+            DaemonConfigSource::Database,
+        ),
+        Some(_) => bail!("validated daemonConfig has no source"),
+        None => (None, DaemonConfigSource::None),
     };
-    let daemon_config = DaemonConfigStore::new(daemon_config);
+    let daemon_config = DaemonConfigStore::new(active_daemon_config);
     if let Some(daemon) = &config.daemon_config {
-        daemon_config::watch(daemon.path.clone(), daemon.revision, daemon_config.clone())?;
+        if let Some(path) = &daemon.path {
+            daemon_config::watch(path.clone(), daemon.file_revision(), daemon_config.clone())?;
+        } else if daemon.database.is_some() {
+            spawn_database_daemon_config_poller(database.clone(), daemon_config.clone());
+        }
     }
     let oidc = &config.oidc;
     if oidc.issuer.starts_with("http://") {
@@ -87,6 +102,7 @@ pub async fn run(
     let admin_state = State::new(
         database.clone(),
         daemon_config.clone(),
+        daemon_config_source,
         Settings {
             fleet_listen: config.fleet_listener.listen.to_string(),
             admin_listen: config.admin_listener.listen.to_string(),
@@ -173,4 +189,132 @@ pub async fn run(
     };
     tokio::try_join!(fleet, admin, gateway)?;
     Ok(())
+}
+
+async fn load_database_daemon_config(
+    database: &Database,
+    seed_path: Option<&Path>,
+) -> anyhow::Result<Option<agentdesktop_proto::fleet::DaemonConfig>> {
+    if database.latest_daemon_config_revision().await?.is_none()
+        && let Some(path) = seed_path
+    {
+        let seed = daemon_config::load(path, 1)?;
+        let yaml =
+            String::from_utf8(seed.yaml).context("daemon configuration seed is not UTF-8")?;
+        let author = DaemonConfigAuthor {
+            kind: "seed".to_owned(),
+            issuer: String::new(),
+            subject: "seed".to_owned(),
+            client_id: None,
+            display: Some("Initial seed".to_owned()),
+        };
+        let _ = database
+            .insert_daemon_config_revision(0, &yaml, &author, "")
+            .await?;
+    }
+
+    database
+        .latest_daemon_config()
+        .await?
+        .map(|revision| daemon_config::from_database(revision.summary.revision, revision.yaml))
+        .transpose()
+}
+
+pub(crate) fn spawn_database_daemon_config_poller(database: Database, store: DaemonConfigStore) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(3));
+        loop {
+            interval.tick().await;
+            let result = async {
+                let Some(latest) = database.latest_daemon_config_revision().await? else {
+                    return Ok::<_, anyhow::Error>(());
+                };
+                let current = match store.current() {
+                    Some(config) => i64::try_from(config.revision)
+                        .context("active daemon configuration revision is out of range")?,
+                    None => 0,
+                };
+                if latest <= current {
+                    return Ok(());
+                }
+                let revision = database
+                    .daemon_config_revision(latest)
+                    .await?
+                    .context("latest daemon configuration revision is missing")?;
+                let config =
+                    daemon_config::from_database(revision.summary.revision, revision.yaml)?;
+                if store.publish(config) {
+                    info!(
+                        revision = latest,
+                        "loaded daemon configuration revision from database"
+                    );
+                }
+                Ok(())
+            }
+            .await;
+            if let Err(error) = result {
+                warn!(
+                    error = %format!("{error:#}"),
+                    "failed to poll daemon configuration revisions"
+                );
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn database_configuration_is_seeded_once_and_stays_empty_without_a_seed() {
+        let directory = std::env::temp_dir().join(format!(
+            "agentdesktop-config-seed-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).expect("create test directory");
+        let database_path = directory.join("controller.db");
+        let database = Database::connect(&format!("sqlite://{}?mode=rwc", database_path.display()))
+            .await
+            .expect("connect test database");
+
+        assert!(
+            load_database_daemon_config(&database, None)
+                .await
+                .expect("load empty database")
+                .is_none()
+        );
+        assert!(
+            database
+                .latest_daemon_config_revision()
+                .await
+                .expect("read empty revision table")
+                .is_none()
+        );
+
+        let seed_path = directory.join("daemon.yaml");
+        std::fs::write(&seed_path, "programs: {}\n").expect("write seed");
+        let seeded = load_database_daemon_config(&database, Some(&seed_path))
+            .await
+            .expect("load seed")
+            .expect("seeded configuration");
+        assert_eq!(seeded.revision, 1);
+
+        std::fs::write(&seed_path, "invalid: [").expect("replace seed");
+        let still_seeded = load_database_daemon_config(&database, Some(&seed_path))
+            .await
+            .expect("load existing configuration")
+            .expect("existing configuration");
+        assert_eq!(still_seeded.sha256, seeded.sha256);
+        assert_eq!(
+            database
+                .latest_daemon_config_revision()
+                .await
+                .expect("read seeded revision"),
+            Some(1)
+        );
+
+        drop(database);
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
 }

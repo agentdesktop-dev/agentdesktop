@@ -18,6 +18,7 @@ RUN --mount=type=cache,id=agentdesktop-pnpm,target=/pnpm/store \
 FROM docker.io/library/rust:1.99.1-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07 AS builder
 ARG TARGETARCH
 ARG BUILD_PROFILE=release
+ARG AGENTDESKTOP_VERSION
 WORKDIR /app
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates

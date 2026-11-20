@@ -55,6 +55,11 @@ spec:
         - name: config
           mountPath: /etc/agentdesktop/config
           readOnly: true
+        {{- if and .Values.existingConfigSecret .Values.daemonConfigSeedSecret }}
+        - name: daemon-config-seed
+          mountPath: /etc/agentdesktop/config-seed
+          readOnly: true
+        {{- end }}
         - name: tls
           mountPath: /etc/agentdesktop/tls
           readOnly: true
@@ -73,6 +78,14 @@ spec:
       - name: tls
         secret:
           secretName: {{ required "tlsSecretName is required" .Values.tlsSecretName }}
+      {{- if and .Values.existingConfigSecret .Values.daemonConfigSeedSecret }}
+      - name: daemon-config-seed
+        secret:
+          secretName: {{ .Values.daemonConfigSeedSecret }}
+          items:
+          - key: {{ .Values.daemonConfigSeedKey }}
+            path: daemon.yaml
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -17,6 +17,40 @@ JWT signing key, such as `gateway-jwt-key.pem`.
 The controller certificate must be valid for the address used by device
 daemons. Keep both private key files secret.
 
+## Managed daemon configuration
+
+The chart defaults to `daemonConfigMode: file`, preserving file-backed
+configuration. In that mode, `daemonConfig` is the policy file distributed to
+devices, and the management UI is read-only.
+
+To opt in to database-backed editing, set `daemonConfigMode: database`. The
+same `daemonConfig` value then becomes an optional one-time seed: it is
+imported only when the database has no configuration revisions. If omitted,
+the controller starts without an active configuration and publishes nothing
+until an administrator saves one in the management UI.
+
+```yaml
+daemonConfigMode: database
+daemonConfig:
+  programs:
+    claudeCode: {}
+```
+
+Changing from file mode to database mode does not automatically import the
+file. Provide its contents as `daemonConfig` for the one-time seed, or save the
+configuration through the management API. In database mode, edits and restores
+are recorded as new revisions and shared by controller replicas. The save
+review warns if any enrolled daemon reports an older version than the
+controller. Saving is still allowed, but older daemons may not understand new
+configuration fields.
+
+When using `existingConfigSecret`, include `daemonConfig: { database: {} }` in
+the Secret's `controller.yaml` to enable database mode. To seed from a separate
+Secret, set `daemonConfigSeedSecret` and (if needed) `daemonConfigSeedKey`; the
+seed is mounted at `/etc/agentdesktop/config-seed/daemon.yaml`, so set
+`daemonConfig.database.seedPath` to that path in `controller.yaml`. Omit the
+seed Secret to start with an empty revision table.
+
 ## Helm
 
 The chart does not install PostgreSQL. Set `databaseUrl` to the URL

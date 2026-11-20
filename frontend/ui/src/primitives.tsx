@@ -5,7 +5,7 @@ export function CardHeader({
   heading: Heading = "h3",
 }: {
   title: string;
-  description: string;
+  description?: string;
   action?: React.ReactNode;
   heading?: "h2" | "h3";
 }) {
@@ -13,7 +13,7 @@ export function CardHeader({
     <div className="card-header">
       <div>
         <Heading>{title}</Heading>
-        <p>{description}</p>
+        {description && <p>{description}</p>}
       </div>
       {action}
     </div>

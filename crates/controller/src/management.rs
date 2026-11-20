@@ -35,7 +35,8 @@ use auth::{
     authorization::{self, AccessRequest, Verb},
 };
 use handlers::{
-    api_not_found, daemon_config, delete_device, device, devices, overview, settings, usage_report,
+    api_not_found, daemon_config, daemon_config_revision, daemon_config_revisions, delete_device,
+    device, devices, overview, settings, update_daemon_config, usage_report,
 };
 
 /// Embedded UI file lookup by path, e.g. `|path| Assets::get(path).map(|file| file.data)`.
@@ -64,7 +65,15 @@ pub struct ProtectedRoutes {
 pub struct State {
     database: Database,
     daemon_config: DaemonConfigStore,
+    daemon_config_source: DaemonConfigSource,
     settings: Settings,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DaemonConfigSource {
+    None,
+    File,
+    Database,
 }
 
 #[derive(Clone, Serialize)]
@@ -78,10 +87,16 @@ pub struct Settings {
 }
 
 impl State {
-    pub fn new(database: Database, daemon_config: DaemonConfigStore, settings: Settings) -> Self {
+    pub fn new(
+        database: Database,
+        daemon_config: DaemonConfigStore,
+        daemon_config_source: DaemonConfigSource,
+        settings: Settings,
+    ) -> Self {
         Self {
             database,
             daemon_config,
+            daemon_config_source,
             settings,
         }
     }
@@ -180,7 +195,18 @@ pub fn router(
     let mut app = Router::new()
         .route("/api/v1/overview", api(get(overview)))
         .route("/api/v1/devices", api(get(devices)))
-        .route("/api/v1/daemon-config", api(get(daemon_config)))
+        .route(
+            "/api/v1/daemon-config",
+            api(get(daemon_config).put(update_daemon_config)),
+        )
+        .route(
+            "/api/v1/daemon-config/revisions",
+            api(get(daemon_config_revisions)),
+        )
+        .route(
+            "/api/v1/daemon-config/revisions/{revision}",
+            api(get(daemon_config_revision)),
+        )
         .route(
             "/api/v1/devices/{device_id}",
             api(get(device).delete(delete_device)),

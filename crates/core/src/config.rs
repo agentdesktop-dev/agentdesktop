@@ -788,7 +788,7 @@ pub struct ControllerOidcConfig {
     pub redirect_uri: String,
 }
 
-/// Controller-owned daemon configuration file and its revision.
+/// Controller-owned daemon configuration source and revision.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -797,10 +797,34 @@ pub struct ControllerDaemonConfig {
     ///
     /// Relative paths are resolved from the controller configuration directory.
     /// Valid file changes are published to connected devices automatically.
-    pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// Store the fleet configuration in the controller database.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<ControllerDaemonDatabaseConfig>,
     /// Monotonically increasing revision assigned to the daemon configuration.
-    #[serde(default = "default_daemon_config_revision")]
-    pub revision: u64,
+    ///
+    /// Applies to file mode only. Older configurations that omit it start at 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+}
+
+/// Database-backed daemon configuration settings.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerDaemonDatabaseConfig {
+    /// YAML file imported once when the revision table is empty.
+    ///
+    /// Relative paths are resolved from the controller configuration directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_path: Option<PathBuf>,
+}
+
+impl ControllerDaemonConfig {
+    pub fn file_revision(&self) -> u64 {
+        self.revision.unwrap_or(1)
+    }
 }
 
 /// Settings for issuing short-lived LLM gateway JWTs.
@@ -924,10 +948,6 @@ fn default_oidc_redirect_uri() -> String {
 
 fn default_gateway_oidc_scopes() -> Vec<String> {
     vec!["openid".to_owned(), "offline_access".to_owned()]
-}
-
-fn default_daemon_config_revision() -> u64 {
-    1
 }
 
 impl Default for ControllerGatewayListener {
@@ -1585,7 +1605,16 @@ pub fn load_controller(path: &Path) -> anyhow::Result<ControllerConfig> {
         .with_context(|| format!("parse controller configuration from {}", path.display()))?;
     let directory = path.parent().unwrap_or_else(|| Path::new("."));
     if let Some(daemon) = &mut config.daemon_config {
-        resolve_relative(&mut daemon.path, directory);
+        if let Some(path) = &mut daemon.path {
+            resolve_relative(path, directory);
+        }
+        if let Some(seed) = daemon
+            .database
+            .as_mut()
+            .and_then(|database| database.seed_path.as_mut())
+        {
+            resolve_relative(seed, directory);
+        }
     }
     if let Some(gateway) = &mut config.gateway_jwt {
         resolve_relative(&mut gateway.private_key, directory);
@@ -1639,10 +1668,25 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
         scheme => anyhow::bail!("oidc.issuer must use HTTPS, got {scheme}"),
     }
     Url::parse(&oidc.redirect_uri).context("parse oidc.redirectUri URL")?;
-    if let Some(daemon) = &config.daemon_config
-        && daemon.revision == 0
-    {
-        anyhow::bail!("daemonConfig.revision must be greater than zero");
+    if let Some(daemon) = &config.daemon_config {
+        match (&daemon.path, &daemon.database) {
+            (Some(_), None) => {
+                if daemon.revision == Some(0) {
+                    anyhow::bail!("daemonConfig.revision must be greater than zero");
+                }
+            }
+            (None, Some(_)) => {
+                if daemon.revision.is_some() {
+                    anyhow::bail!("daemonConfig.revision is only valid with daemonConfig.path");
+                }
+            }
+            (Some(_), Some(_)) => {
+                anyhow::bail!("daemonConfig.path and daemonConfig.database are mutually exclusive");
+            }
+            (None, None) => {
+                anyhow::bail!("daemonConfig must contain either path or database");
+            }
+        }
     }
     if let Some(gateway) = &config.gateway_jwt {
         if gateway.issuer.trim().is_empty() {
@@ -2158,6 +2202,83 @@ mod tests {
                 }
             }
         })
+    }
+
+    #[test]
+    fn daemon_config_file_mode_keeps_the_legacy_revision_default() {
+        let mut document = admin_document();
+        document["daemonConfig"] = serde_json::json!({"path": "daemon.yaml"});
+        let config = parse_controller(&document.to_string()).expect("file mode config");
+        let daemon = config.daemon_config.expect("daemon config");
+        assert_eq!(
+            daemon.path.as_deref(),
+            Some(std::path::Path::new("daemon.yaml"))
+        );
+        assert_eq!(daemon.file_revision(), 1);
+    }
+
+    #[test]
+    fn daemon_config_database_mode_and_source_validation() {
+        let mut document = admin_document();
+        document["daemonConfig"] = serde_json::json!({"database": {"seedPath": "seed.yaml"}});
+        let config = parse_controller(&document.to_string()).expect("database mode config");
+        let daemon = config.daemon_config.expect("daemon config");
+        assert!(daemon.path.is_none());
+        assert_eq!(
+            daemon.database.and_then(|database| database.seed_path),
+            Some(std::path::PathBuf::from("seed.yaml"))
+        );
+
+        for daemon in [
+            serde_json::json!({}),
+            serde_json::json!({"path": "daemon.yaml", "database": {}}),
+            serde_json::json!({"database": {}, "revision": 2}),
+        ] {
+            let mut document = admin_document();
+            document["daemonConfig"] = daemon;
+            assert!(
+                parse_controller(&document.to_string()).is_err(),
+                "accepted invalid source: {}",
+                document["daemonConfig"]
+            );
+        }
+
+        let mut document = admin_document();
+        document["daemonConfig"] = serde_json::json!({"path": "daemon.yaml", "revision": 0});
+        assert!(
+            parse_controller(&document.to_string())
+                .unwrap_err()
+                .to_string()
+                .contains("revision must be greater than zero")
+        );
+    }
+
+    #[test]
+    fn daemon_config_seed_path_is_resolved_relative_to_controller_file() {
+        let directory = std::env::temp_dir().join(format!(
+            "agentdesktop-controller-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).expect("create config directory");
+        let path = directory.join("controller.yaml");
+        let mut document = admin_document();
+        document["daemonConfig"] =
+            serde_json::json!({"database": {"seedPath": "seed/daemon.yaml"}});
+        std::fs::write(&path, document.to_string()).expect("write controller config");
+
+        let config = load_controller(&path).expect("load controller config");
+        assert_eq!(
+            config
+                .daemon_config
+                .and_then(|daemon| daemon.database)
+                .and_then(|database| database.seed_path),
+            Some(directory.join("seed/daemon.yaml"))
+        );
+        std::fs::remove_dir_all(directory).expect("remove config directory");
     }
 
     #[test]

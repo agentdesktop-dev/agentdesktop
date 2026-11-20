@@ -2150,6 +2150,118 @@ mod fleet_service {
         assert!(quiet.is_err(), "the newer session ended: {quiet:?}");
     }
 
+    #[tokio::test]
+    #[ignore = "requires an empty PostgreSQL database; CI runs this separately"]
+    async fn postgres_concurrent_save_rolls_out_to_a_second_replica() {
+        use agentdesktop_core::config::ControllerAdminAccess;
+        use agentdesktop_proto::fleet::controller_message::Message;
+        use axum::{Router, body::Body, http};
+        use http_body_util::BodyExt;
+        use sha2::{Digest, Sha256};
+        use tower::ServiceExt;
+
+        use crate::{application::spawn_database_daemon_config_poller, management};
+
+        async fn save(router: Router, base: u64, yaml: &str) -> Response {
+            router
+                .oneshot(
+                    http::Request::builder()
+                        .method(http::Method::PUT)
+                        .uri("/api/v1/daemon-config")
+                        .header(http::header::HOST, "127.0.0.1:8080")
+                        .header("sec-fetch-site", "same-origin")
+                        .body(Body::from(
+                            json!({"base_revision": base, "yaml": yaml}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+
+        let url = std::env::var("AGENTDESKTOP_TEST_POSTGRES_URL")
+            .expect("set AGENTDESKTOP_TEST_POSTGRES_URL to a fresh PostgreSQL test database");
+        assert!(url.starts_with("postgres://") || url.starts_with("postgresql://"));
+        let writer_db = Database::connect(&url).await.unwrap();
+        let follower_db = Database::connect(&url).await.unwrap();
+        let writer = management::router(
+            management::State::new(
+                writer_db,
+                DaemonConfigStore::new(None),
+                management::DaemonConfigSource::Database,
+                management::Settings {
+                    fleet_listen: String::new(),
+                    admin_listen: "127.0.0.1:8080".to_owned(),
+                    oidc_enabled: false,
+                    tls_enabled: false,
+                    gateway_jwt_enabled: false,
+                    usage_enabled: false,
+                },
+            ),
+            &ControllerAdminAccess::Local,
+            management::Extensions::default(),
+        )
+        .unwrap();
+        let idp = IdentityProvider::start().await;
+        follower_db
+            .enroll_device(DEVICE_ID, "host", &idp.issuer, SUBJECT, None)
+            .await
+            .unwrap();
+        let follower_store = DaemonConfigStore::new(None);
+        spawn_database_daemon_config_poller(follower_db.clone(), follower_store.clone());
+        let follower = FleetAgentService::new(
+            Some(idp.client().await),
+            follower_db,
+            follower_store,
+            None,
+            None,
+            &FLEET_LIMITS,
+        );
+        let pki = pki();
+        let (address, _) = serve_mtls_with(FLEET_LIMITS, &pki, follower).await;
+        let (_outbound, receiver) = mpsc::channel::<AgentMessage>(1);
+        let mut request = Request::new(ReceiverStream::new(receiver));
+        request
+            .metadata_mut()
+            .insert("authorization", AUTHORIZATION.parse().unwrap());
+        let mut session = bounded(tls_client(address, &pki, true).await.connect(request))
+            .await
+            .expect("connect daemon to the follower")
+            .into_inner();
+
+        let (first, second) = tokio::join!(
+            save(writer.clone(), 0, "# first draft\nprograms: {}\n"),
+            save(writer, 0, "# second draft\nprograms: {}\n"),
+        );
+        let (winner, loser) = if first.status() == StatusCode::OK {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        assert_eq!(winner.status(), StatusCode::OK);
+        assert_eq!(loser.status(), StatusCode::CONFLICT);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&winner.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(saved["revision"], 1);
+        assert_eq!(saved["controller_version"], agentdesktop_core::VERSION);
+
+        let pushed = time::timeout(Duration::from_secs(10), session.message())
+            .await
+            .expect("the daemon should receive the new revision from the follower")
+            .unwrap()
+            .expect("the daemon stream should stay open");
+        let Some(Message::DaemonConfig(config)) = pushed.message else {
+            panic!("expected daemon config, got {:?}", pushed.message);
+        };
+        assert_eq!(config.revision, saved["revision"].as_u64().unwrap());
+        assert_eq!(config.yaml, saved["yaml"].as_str().unwrap().as_bytes());
+        let hash = Sha256::digest(&config.yaml);
+        assert_eq!(config.sha256, hash.to_vec());
+        let hex: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(saved["sha256"], hex);
+    }
+
     /// `EnrollDevice` holds its in-flight slot while it waits on the identity
     /// provider, and frees it when it ends.
     #[tokio::test]

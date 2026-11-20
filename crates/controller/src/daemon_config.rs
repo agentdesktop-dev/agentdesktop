@@ -42,7 +42,7 @@ impl DaemonConfigStore {
             .clone()
     }
 
-    fn publish(&self, next: DaemonConfig) -> bool {
+    pub(crate) fn publish(&self, next: DaemonConfig) -> bool {
         let unchanged = self.sender.borrow().as_ref().is_some_and(|current| {
             current.revision == next.revision && current.sha256 == next.sha256
         });
@@ -63,6 +63,21 @@ impl DaemonConfigStore {
             .write()
             .expect("daemon-config reload status lock poisoned") = Some(format!("{error:#}"));
     }
+}
+
+pub(crate) fn from_database(revision: i64, yaml: String) -> anyhow::Result<DaemonConfig> {
+    let revision =
+        u64::try_from(revision).context("daemon configuration revision is out of range")?;
+    let yaml = yaml.into_bytes();
+    let text = std::str::from_utf8(&yaml).context("stored daemon configuration is not UTF-8")?;
+    agentdesktop_core::config::parse_daemon(text)
+        .context("validate stored daemon configuration")?;
+    let sha256 = Sha256::digest(&yaml).to_vec();
+    Ok(DaemonConfig {
+        revision,
+        yaml,
+        sha256,
+    })
 }
 
 /// Watches a daemon-configuration file and publishes validated changes.

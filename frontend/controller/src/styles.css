@@ -858,9 +858,13 @@ code {
 
 .configuration-builder {
   display: grid;
-  grid-template-columns: minmax(360px, 0.9fr) minmax(420px, 1.1fr);
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
   gap: 16px;
   align-items: start;
+}
+
+.configuration-builder > .card {
+  min-width: 0;
 }
 
 .wizard-section {
@@ -872,8 +876,8 @@ code {
 }
 
 .wizard-section-summary {
-  min-height: 66px;
-  padding: 12px 18px;
+  min-height: 50px;
+  padding: 10px 18px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -901,22 +905,10 @@ code {
   transform: rotate(90deg);
 }
 
-.wizard-section-title {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
 .wizard-section-title strong {
   color: var(--ink);
   font-size: 13px;
   font-weight: 600;
-}
-
-.wizard-section-title small {
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.4;
 }
 
 .wizard-section-content {
@@ -1207,8 +1199,8 @@ code {
 }
 
 .output-heading {
-  min-height: 68px;
-  padding: 14px 16px;
+  min-height: 52px;
+  padding: 10px 16px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1219,12 +1211,6 @@ code {
 .output-heading h3 {
   margin: 0;
   font-size: 13px;
-}
-
-.output-heading p {
-  margin: 4px 0 0;
-  color: var(--muted);
-  font-size: 12px;
 }
 
 .output-heading .button {
@@ -1262,7 +1248,7 @@ code {
 .setting-row > div {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 5px;
 }
 
 .setting-row strong {
@@ -1478,10 +1464,487 @@ code {
   border: 0;
 }
 
+.configuration-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
+  align-items: start;
+  gap: 16px;
+  container-name: config-workspace;
+  container-type: inline-size;
+}
+
+.config-editor-column {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  container-name: config-editor;
+  container-type: inline-size;
+}
+
+.config-editor,
+.config-review,
+.config-conflict,
+.config-history {
+  min-width: 0;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.config-editor-header,
+.config-history-header {
+  min-height: 52px;
+  padding: 9px 13px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.config-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.config-tabs button {
+  min-height: 32px;
+  padding: 0 11px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.config-tabs button:hover {
+  color: var(--ink);
+  background: var(--surface);
+}
+
+.config-tabs button.active {
+  color: var(--ink);
+  background: var(--surface);
+  font-weight: 600;
+}
+
+.config-draft-state {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.config-draft-state.dirty {
+  color: var(--warning-strong);
+}
+
+.config-yaml-editor {
+  display: block;
+  padding: 13px;
+}
+
+.config-yaml-editor textarea {
+  width: 100%;
+  min-height: 400px;
+  padding: 13px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  font:
+    12px / 1.65 "SFMono-Regular",
+    Consolas,
+    monospace;
+  tab-size: 2;
+  resize: vertical;
+}
+
+.config-yaml-editor textarea:focus-visible,
+.config-message-field input:focus-visible {
+  border-color: var(--focus-border);
+  outline: 2px solid var(--focus-border);
+  outline-offset: 1px;
+}
+
+.config-yaml-editor textarea[readonly] {
+  opacity: 0.78;
+}
+
+.config-editor-footer {
+  min-height: 52px;
+  padding: 10px 13px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.config-editor-footer .button,
+.config-review-actions .button,
+.config-history-detail > .button {
+  gap: 7px;
+}
+
+.config-current-revision {
+  padding: 6px 9px;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.config-conflict,
+.config-review {
+  padding: 14px;
+}
+
+.config-conflict {
+  border-color: var(--warning-border);
+}
+
+.config-rollout > strong,
+.config-conflict strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.config-conflict p,
+.config-review-heading p {
+  margin: 5px 0 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.config-conflict-actions,
+.config-review-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.config-review-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.config-review-heading h3,
+.config-history-header h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.config-review-heading p {
+  margin-bottom: 10px;
+}
+
+.config-review-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 12px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.config-review-warning-icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.config-message-disclosure {
+  margin: 14px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.config-message-disclosure summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.config-message-field {
+  margin: 8px 0 0;
+}
+
+.config-message-field input {
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 9px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.config-diff {
+  max-height: 300px;
+  margin: 12px 0;
+  padding: 10px;
+  overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  font:
+    11px / 1.6 "SFMono-Regular",
+    Consolas,
+    monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.config-diff .added {
+  color: var(--green);
+}
+
+.config-diff .removed {
+  color: var(--red);
+}
+
+.config-diff-empty,
+.config-history-empty {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.config-history {
+  position: sticky;
+  top: 16px;
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+}
+
+.config-history-header {
+  position: sticky;
+  top: 0;
+  background: var(--card);
+}
+
+.config-history-list {
+  margin: 0;
+  padding: 4px 8px;
+  list-style: none;
+}
+
+.config-history-list li + li {
+  border-top: 1px solid var(--border-soft);
+}
+
+.config-history-list button {
+  width: 100%;
+  padding: 10px 7px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.config-history-list button:hover,
+.config-history-list button.selected {
+  background: var(--surface);
+}
+
+.config-history-list button strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.config-history-list button small {
+  font-size: 11px;
+  color: var(--subtle);
+}
+
+.config-history-message {
+  overflow: hidden;
+  max-width: 100%;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-history-meta {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.config-history-meta > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-history-more,
+.config-history-empty,
+.config-history-error {
+  margin: 10px 14px;
+}
+
+.config-history-error,
+.config-error {
+  color: var(--red);
+}
+
+.config-history-detail {
+  padding: 12px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.config-history-detail-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.config-history-detail-heading h4 {
+  margin: 0;
+  font-size: 12px;
+}
+
+.config-history-detail-heading span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.config-history-detail > p {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.config-history-detail details {
+  margin: 12px 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.config-history-detail summary {
+  cursor: pointer;
+}
+
+.config-history-yaml {
+  max-height: 220px;
+  padding: 9px;
+  overflow: auto;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  font:
+    10px / 1.5 "SFMono-Regular",
+    Consolas,
+    monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.config-rollout {
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.config-rollout > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.config-file-banner {
+  margin: 0;
+  padding: 11px 13px;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.config-editor-error,
+.stack > .config-notice.config-error {
+  margin: 0;
+  padding: 11px 13px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.stack > .config-notice.config-error {
+  color: var(--red);
+}
+
+.config-notice .text-button {
+  margin-left: auto;
+}
+
+.button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+@container config-workspace (max-width: 980px) {
+  .config-history {
+    position: static;
+    max-height: none;
+  }
+
+  .configuration-workspace > .config-editor-column,
+  .configuration-workspace > .config-history {
+    grid-column: 1 / -1;
+  }
+}
+
+@container config-editor (max-width: 820px) {
+  .configuration-builder {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 @media (max-width: 950px) {
   .overview-grid,
-  .configuration-builder {
+  .configuration-builder,
+  .configuration-workspace {
     grid-template-columns: 1fr;
+  }
+
+  .config-history {
+    position: static;
+    max-height: none;
   }
 }
 
@@ -1571,6 +2034,12 @@ code {
 
   .detail-grid {
     grid-template-columns: 1fr;
+  }
+
+  .config-editor-footer,
+  .config-rollout {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .search-box {
