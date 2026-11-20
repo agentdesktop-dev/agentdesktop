@@ -318,6 +318,8 @@ pub async fn enroll_with_token(
     enrollment: &EnrollmentState,
     token_path: &Path,
 ) -> anyhow::Result<Identity> {
+    #[cfg(unix)]
+    warn_if_token_file_is_shared(token_path);
     let token = std::fs::read_to_string(token_path)
         .with_context(|| format!("read enrollment token from {}", token_path.display()))?;
     let (device_key, csr) = device_csr()?;
@@ -349,6 +351,28 @@ pub async fn enroll_with_token(
         oauth_token_endpoint: String::new(),
         oauth_client_id: String::new(),
     })
+}
+
+/// Warns when users other than the token file's owner can read it: anyone who
+/// reads the token can enroll devices of their own.
+#[cfg(unix)]
+fn warn_if_token_file_is_shared(token_path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    if let Ok(metadata) = std::fs::metadata(token_path)
+        && token_file_is_shared(metadata.permissions().mode())
+    {
+        tracing::warn!(
+            path = %token_path.display(),
+            mode = format_args!("{:o}", metadata.permissions().mode() & 0o777),
+            "enrollment token file is accessible to other users; restrict it to mode 0600"
+        );
+    }
+}
+
+#[cfg(unix)]
+fn token_file_is_shared(mode: u32) -> bool {
+    mode & 0o077 != 0
 }
 
 async fn browser_login(
@@ -1393,6 +1417,16 @@ mod tests {
         assert!(identity.oauth.is_none());
         assert!(identity.client_private_key_pem.contains("PRIVATE KEY"));
         server.abort();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn token_file_shared_with_other_users_is_detected() {
+        assert!(!super::token_file_is_shared(0o100600));
+        assert!(!super::token_file_is_shared(0o100400));
+        assert!(super::token_file_is_shared(0o100640));
+        assert!(super::token_file_is_shared(0o100644));
+        assert!(super::token_file_is_shared(0o100604));
     }
 
     #[test]

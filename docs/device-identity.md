@@ -306,6 +306,11 @@ controller:
   enrollmentTokenPath: /etc/agentdesktop/enrollment-token
 ```
 
+Anyone who can read the token can enroll devices, so restrict the file to the
+daemon's user: mode `0600` on macOS and Linux, SYSTEM and Administrators on
+Windows. On macOS and Linux the daemon logs a warning when other users can
+access it.
+
 With `enrollmentTokenPath` set, the daemon skips `GetLoginConfiguration` and
 sign-in. It generates the device key and calls `EnrollDevice` with the token
 instead of an ID token, and sends no access token. The controller verifies the
