@@ -14,11 +14,15 @@ import type { AgentDraft, AgentKind, DaemonConfigDocument } from "../types";
 export interface ConfigurationViewProps {
   initialConfig?: DaemonConfigDocument | null;
   onCopy?: (yaml: string) => Promise<void> | void;
+  copyLabel?: string;
+  copySuccessLabel?: string;
 }
 
 export function ConfigurationView({
   initialConfig,
   onCopy,
+  copyLabel = "Copy",
+  copySuccessLabel = "Copied",
 }: ConfigurationViewProps) {
   const addAgentMenu = useRef<HTMLDetailsElement>(null);
   const initializedFromController = useRef(false);
@@ -559,7 +563,7 @@ export function ConfigurationView({
               onClick={copyYaml}
             >
               {copied ? <Check size={14} /> : <Copy size={14} />}
-              {copied ? "Copied" : "Copy"}
+              {copied ? copySuccessLabel : copyLabel}
             </button>
           </div>
           {/* biome-ignore lint/a11y/noNoninteractiveTabindex: Keyboard users need to focus this scrollable preview. */}

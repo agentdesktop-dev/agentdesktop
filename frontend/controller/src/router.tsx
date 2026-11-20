@@ -1,6 +1,15 @@
 import type { PropsWithChildren } from "react";
 import { useEffect, useState } from "react";
 
+let navigationGuard: (() => boolean) | null = null;
+
+export function registerNavigationGuard(guard: () => boolean) {
+  navigationGuard = guard;
+  return () => {
+    if (navigationGuard === guard) navigationGuard = null;
+  };
+}
+
 export function usePath() {
   const [path, setPath] = useState(window.location.pathname);
   useEffect(() => {
@@ -12,6 +21,7 @@ export function usePath() {
 }
 
 export function navigate(href: string) {
+  if (navigationGuard && !navigationGuard()) return;
   window.history.pushState({}, "", href);
   window.dispatchEvent(new PopStateEvent("popstate"));
   window.scrollTo({ top: 0 });
