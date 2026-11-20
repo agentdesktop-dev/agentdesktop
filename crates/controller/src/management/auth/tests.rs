@@ -70,9 +70,17 @@ fn authenticated_access() -> ControllerAdminAccess {
 }
 
 fn state(database: Database) -> super::super::State {
+    state_with_source(database, super::super::DaemonConfigSource::None)
+}
+
+fn state_with_source(
+    database: Database,
+    source: super::super::DaemonConfigSource,
+) -> super::super::State {
     super::super::State::new(
         database,
         crate::daemon_config::DaemonConfigStore::new(None),
+        source,
         super::super::Settings {
             fleet_listen: "127.0.0.1:8443".into(),
             admin_listen: "127.0.0.1:8080".into(),
@@ -452,9 +460,11 @@ fn admin_read_covers_every_management_read_but_no_mutation() {
         (Verb::List, "devices", true),
         (Verb::Read, "devices", true),
         (Verb::Read, "daemon-config", true),
+        (Verb::List, "daemon-config", true),
         (Verb::Read, "settings", true),
         (Verb::Read, "usage", true),
         (Verb::Delete, "devices", false),
+        (Verb::Update, "daemon-config", false),
         // Reads outside the catalog, such as an extension's policy, are not covered.
         (Verb::Read, "rbac.policy", false),
         (Verb::List, "settings", false),
@@ -531,6 +541,17 @@ async fn management_routes_check_precise_operations() {
             "devices.delete device-1",
         ),
         (Method::GET, "/api/v1/daemon-config", "daemon-config.read"),
+        (Method::PUT, "/api/v1/daemon-config", "daemon-config.update"),
+        (
+            Method::GET,
+            "/api/v1/daemon-config/revisions",
+            "daemon-config.list",
+        ),
+        (
+            Method::GET,
+            "/api/v1/daemon-config/revisions/3",
+            "daemon-config.read 3",
+        ),
         (Method::GET, "/api/v1/settings", "settings.read"),
         (Method::GET, "/api/v1/usage", "usage.read"),
         (Method::GET, "/devices", "admin.read"),
@@ -544,6 +565,218 @@ async fn management_routes_check_precise_operations() {
             "{method} {path}"
         );
     }
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn daemon_config_update_checks_permission_before_decoding_json() {
+    let (database, path) = database().await;
+    let router = super::super::router(
+        state(database),
+        &authenticated_access(),
+        super::super::Extensions {
+            authentication: Some(Arc::new(TokenProvider)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut request = Request::builder()
+        .method(Method::PUT)
+        .uri("/api/v1/daemon-config")
+        .header(header::AUTHORIZATION, "Bearer viewer")
+        .header("sec-fetch-site", "same-origin")
+        .body(Body::from("{"))
+        .unwrap();
+    request
+        .headers_mut()
+        .insert(header::HOST, HeaderValue::from_static("admin.example"));
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"],
+        "forbidden"
+    );
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn database_mode_saves_valid_configs_and_reports_rejections() {
+    let (database, path) = database().await;
+    let router = super::super::router(
+        state_with_source(database.clone(), super::super::DaemonConfigSource::Database),
+        &ControllerAdminAccess::Local,
+        super::super::Extensions::default(),
+    )
+    .unwrap();
+
+    async fn put(router: Router, body: &str) -> Response {
+        let mut request = Request::builder()
+            .method(Method::PUT)
+            .uri("/api/v1/daemon-config")
+            .header("sec-fetch-site", "same-origin")
+            .body(Body::from(body.to_owned()))
+            .unwrap();
+        request
+            .headers_mut()
+            .insert(header::HOST, HeaderValue::from_static("127.0.0.1:8080"));
+        router.oneshot(request).await.unwrap()
+    }
+
+    let invalid = put(
+        router.clone(),
+        r#"{"base_revision":0,"yaml":"programs: [","message":"bad"}"#,
+    )
+    .await;
+    assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &invalid.into_body().collect().await.unwrap().to_bytes()
+        )
+        .unwrap()["error"],
+        "invalid_daemon_config"
+    );
+    assert!(database.latest_daemon_config().await.unwrap().is_none());
+
+    let saved = put(
+        router.clone(),
+        r#"{"base_revision":0,"yaml":"programs: {}\n","message":"Initial"}"#,
+    )
+    .await;
+    assert_eq!(saved.status(), StatusCode::OK);
+    let saved: serde_json::Value =
+        serde_json::from_slice(&saved.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(saved["revision"], 1);
+    assert_eq!(saved["changed"], true);
+    assert_eq!(saved["author"]["kind"], "local");
+    assert_eq!(saved["source"], "database");
+    assert_eq!(saved["writable"], true);
+    assert_eq!(saved["yaml"], "programs: {}\n");
+    assert_eq!(saved["sha256"].as_str().unwrap().len(), 64);
+
+    let mut history_request = Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/daemon-config/revisions?limit=10")
+        .body(Body::empty())
+        .unwrap();
+    history_request
+        .headers_mut()
+        .insert(header::HOST, HeaderValue::from_static("127.0.0.1:8080"));
+    let history = router.clone().oneshot(history_request).await.unwrap();
+    assert_eq!(history.status(), StatusCode::OK);
+    let history: serde_json::Value =
+        serde_json::from_slice(&history.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(history["revisions"][0]["revision"], 1);
+
+    let mut revision_request = Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/daemon-config/revisions/1")
+        .body(Body::empty())
+        .unwrap();
+    revision_request
+        .headers_mut()
+        .insert(header::HOST, HeaderValue::from_static("127.0.0.1:8080"));
+    let revision = router.clone().oneshot(revision_request).await.unwrap();
+    assert_eq!(revision.status(), StatusCode::OK);
+    let revision: serde_json::Value =
+        serde_json::from_slice(&revision.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(revision["yaml"], "programs: {}\n");
+
+    let unchanged = put(
+        router.clone(),
+        r#"{"base_revision":1,"yaml":"programs: {}\n"}"#,
+    )
+    .await;
+    assert_eq!(unchanged.status(), StatusCode::OK);
+    let unchanged: serde_json::Value =
+        serde_json::from_slice(&unchanged.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(unchanged["revision"], 1);
+    assert_eq!(unchanged["changed"], false);
+    assert_eq!(
+        database
+            .list_daemon_config_revisions(None, 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let stale = put(
+        router.clone(),
+        r#"{"base_revision":0,"yaml":"programs: {}\n"}"#,
+    )
+    .await;
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+
+    let too_large_yaml = "x".repeat(256 * 1024 + 1);
+    let too_large = put(
+        router,
+        &serde_json::json!({"base_revision": 1, "yaml": too_large_yaml}).to_string(),
+    )
+    .await;
+    assert_eq!(too_large.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        database
+            .list_daemon_config_revisions(None, 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn file_mode_remains_read_only_and_does_not_create_history() {
+    let (database, path) = database().await;
+    let router = super::super::router(
+        state_with_source(database.clone(), super::super::DaemonConfigSource::File),
+        &ControllerAdminAccess::Local,
+        super::super::Extensions::default(),
+    )
+    .unwrap();
+
+    let mut get_request = Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/daemon-config")
+        .body(Body::empty())
+        .unwrap();
+    get_request
+        .headers_mut()
+        .insert(header::HOST, HeaderValue::from_static("127.0.0.1:8080"));
+    let response = router.clone().oneshot(get_request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(response["source"], "file");
+    assert_eq!(response["writable"], false);
+
+    let mut put_request = Request::builder()
+        .method(Method::PUT)
+        .uri("/api/v1/daemon-config")
+        .body(Body::from("invalid JSON"))
+        .unwrap();
+    put_request
+        .headers_mut()
+        .insert(header::HOST, HeaderValue::from_static("127.0.0.1:8080"));
+    let response = router.clone().oneshot(put_request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(response.headers()[header::ALLOW], "GET");
+
+    let mut history_request = Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/daemon-config/revisions")
+        .body(Body::empty())
+        .unwrap();
+    history_request
+        .headers_mut()
+        .insert(header::HOST, HeaderValue::from_static("127.0.0.1:8080"));
+    assert_eq!(
+        router.oneshot(history_request).await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+    assert!(database.latest_daemon_config().await.unwrap().is_none());
     std::fs::remove_file(path).unwrap();
 }
 
