@@ -44,6 +44,11 @@ spec:
           containerPort: {{ .Values.gatewayListener.port }}
           protocol: TCP
         {{- end }}
+        {{- if .Values.metricsListener.enabled }}
+        - name: metrics
+          containerPort: {{ .Values.metricsListener.port }}
+          protocol: TCP
+        {{- end }}
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

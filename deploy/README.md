@@ -39,9 +39,11 @@ For production, avoid placing database credentials in Helm values. Create a
 Secret containing the complete controller configuration under the key
 `controller.yaml`, then set `existingConfigSecret` to its name. The chart then
 does not render the configuration, so it must set the listen addresses the
-Services need: `fleetListener.listen: 0.0.0.0:8443`, and with `gatewayJwt`,
+Services need: `fleetListener.listen: 0.0.0.0:8443`, with `gatewayJwt`,
 `gatewayListener.listen: 0.0.0.0:8444` (with `gatewayListener.tls` matching the
-chart's value). The controller defaults both to loopback.
+chart's value), and with `metricsListener.enabled`,
+`metricsListener.listen: 0.0.0.0:9464`. The controller defaults the first two to
+loopback and starts no metrics listener unless it is set.
 See `values.yaml` for all chart settings.
 
 The `<release>` Service exposes only the TLS-protected fleet API. With
@@ -60,6 +62,15 @@ the controller. With the default policy, or behind a load balancer that proxies
 connections, raise `fleetListener.limits.connectionsPerAddress`, and for large
 rollouts raise `fleetListener.limits.enrollmentBurst` or shorten
 `fleetListener.limits.enrollmentRefill`.
+
+Set `metricsListener.enabled: true` to serve the controller's metrics in the
+Prometheus text format from a `<release>-metrics` ClusterIP Service, at
+`/metrics` on port 9464. They count each time a listener's limits act and the
+connections open on each listener; see the root README for the list. Add
+`metricsListener.service.annotations` for a scraper that discovers targets by
+annotation. `agentdesktop_limit_hits_total` rising for `connections_per_address`
+or `enrollment_rate` on the `fleet` listener is the sign that many devices
+share one address, as described above.
 
 To inspect the loopback-only management UI:
 
@@ -80,6 +91,10 @@ When it is enabled:
 - Ingress to the management port is allowed only from
   `networkPolicy.ingress.admin.from`, by default pods in the release namespace.
   The generated configuration binds it to loopback anyway.
+- With `metricsListener.enabled`, ingress to the metrics port is allowed only
+  from `networkPolicy.ingress.metrics.from`, by default pods in the release
+  namespace. A Prometheus in another namespace needs a `namespaceSelector`
+  there.
 - Egress is limited to DNS (`networkPolicy.egress.dns`, kube-dns by default),
   the database (`networkPolicy.egress.database`), the OIDC issuer
   (`networkPolicy.egress.idp`), and any rules in `networkPolicy.egress.extra`,

@@ -29,6 +29,15 @@ spec:
     from:
       {{- toYaml . | nindent 6 }}
   {{- end }}
+  {{- if .Values.metricsListener.enabled }}
+  {{- with $np.ingress.metrics.from }}
+  - ports:
+    - port: metrics
+      protocol: TCP
+    from:
+      {{- toYaml . | nindent 6 }}
+  {{- end }}
+  {{- end }}
   egress:
   - ports:
     - port: 53

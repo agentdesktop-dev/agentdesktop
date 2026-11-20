@@ -1,0 +1,23 @@
+{{- if .Values.metricsListener.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "agentdesktop-controller.metricsServiceName" . }}
+  labels:
+    {{- include "agentdesktop-controller.labels" . | nindent 4 }}
+  {{- with .Values.metricsListener.service.annotations }}
+  annotations:
+    {{- range $key, $value := . }}
+    {{ $key }}: {{ $value | quote }}
+    {{- end }}
+  {{- end }}
+spec:
+  type: {{ .Values.metricsListener.service.type }}
+  selector:
+    {{- include "agentdesktop-controller.selectorLabels" . | nindent 4 }}
+  ports:
+  - name: http-metrics
+    port: {{ .Values.metricsListener.service.port }}
+    targetPort: metrics
+    protocol: TCP
+{{- end }}

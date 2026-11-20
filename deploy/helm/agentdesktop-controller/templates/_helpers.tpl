@@ -35,6 +35,15 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
 {{- .Values.gatewayListener.service.port | default (ternary 443 80 .Values.gatewayListener.tls) }}
 {{- end }}
 
+{{- define "agentdesktop-controller.metricsServiceName" -}}
+{{- $fullname := include "agentdesktop-controller.fullname" . }}
+{{- $name := printf "%s-metrics" ($fullname | trunc 55 | trimSuffix "-") }}
+{{- if eq $name $fullname }}
+{{- fail (printf "the metrics Service name %q equals the fleet Service name; choose a fullnameOverride that does not end in -metrics" $name) }}
+{{- end }}
+{{- $name }}
+{{- end }}
+
 {{- define "agentdesktop-controller.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "agentdesktop-controller.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
