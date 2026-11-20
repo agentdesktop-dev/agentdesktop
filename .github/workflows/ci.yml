@@ -21,6 +21,19 @@ jobs:
   check:
     name: Test and lint
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:526f86d93c6ea08fd3f1fe5605650cacc781b2c6013169a0ad8f42c7d3d84f32
+        env:
+          POSTGRES_DB: agentdesktop_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U postgres -d agentdesktop_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -66,6 +79,11 @@ jobs:
 
       - name: Test Rust
         run: cargo nextest run --workspace
+
+      - name: Test daemon config rollout on PostgreSQL
+        env:
+          AGENTDESKTOP_TEST_POSTGRES_URL: postgres://postgres@127.0.0.1:${{ job.services.postgres.ports[5432] }}/agentdesktop_test
+        run: cargo test -p agentdesktop-controller postgres_concurrent_save_rolls_out_to_a_second_replica -- --ignored
 
       - name: Lint Rust
         run: make lint

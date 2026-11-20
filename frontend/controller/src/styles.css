@@ -1647,6 +1647,20 @@ code {
   margin-bottom: 10px;
 }
 
+.config-review-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 12px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.config-review-warning-icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
 .config-message-disclosure {
   margin: 14px 0;
   color: var(--muted);

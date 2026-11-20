@@ -1,12 +1,19 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fireEvent, fn, userEvent } from "storybook/test";
+import { ApiError } from "../auth";
 import { ControllerStoryFrame } from "../stories/ControllerStoryFrame";
+import { macDevice } from "../stories/fixtures";
 import type {
   ActiveDaemonConfig,
   DaemonConfigAuthor,
   DaemonConfigRevisionSummary,
 } from "../types";
-import { DatabaseConfigurationEditor } from "./DatabaseConfigurationEditor";
+import {
+  DatabaseConfigurationEditor,
+  type DatabaseConfigurationEditorProps,
+} from "./DatabaseConfigurationEditor";
+
+type Save = DatabaseConfigurationEditorProps["onSave"];
 
 const yaml = [
   "# Keep this comment when using the builder.",
@@ -78,7 +85,7 @@ const meta = {
     previousRevisionLoading: false,
     onLoadMore: fn(),
     onSelectRevision: fn(),
-    onSave: fn(async ({ yaml: nextYaml, base_revision }) => ({
+    onSave: fn<Save>(async ({ yaml: nextYaml, base_revision }) => ({
       ...active,
       yaml: nextYaml,
       revision: base_revision + 1,
@@ -115,6 +122,39 @@ export const EditsAndSaves: Story = {
   },
 };
 
+export const WarnsAboutOlderDaemonsWithoutBlocking: Story = {
+  args: {
+    active: { ...active, controller_version: "0.10.0" },
+    devices: [
+      { ...macDevice, agent_version: "0.9.9", last_seen_at: null },
+      { ...macDevice, agent_version: "0.10.0+build" },
+      { ...macDevice, agent_version: "0.11.0" },
+      { ...macDevice, agent_version: "" },
+    ],
+  },
+  play: async ({ args, canvas }) => {
+    fireEvent.change(
+      canvas.getByRole("textbox", { name: "Daemon configuration YAML" }),
+      { target: { value: "programs: {}\n" } },
+    );
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Review changes" }),
+    );
+    await expect(
+      canvas.getByText(
+        "1 enrolled daemon is older than this controller and may not understand the new configuration.",
+      ),
+    ).toBeVisible();
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Save configuration" }),
+    );
+    await expect(args.onSave).toHaveBeenCalledWith({
+      base_revision: 7,
+      yaml: "programs: {}\n",
+    });
+  },
+};
+
 export const BuilderPreservesUnmanagedYaml: Story = {
   play: async ({ canvas }) => {
     await userEvent.click(canvas.getByRole("tab", { name: "Builder" }));
@@ -132,5 +172,113 @@ export const BuilderPreservesUnmanagedYaml: Story = {
       "# Keep this comment when using the builder.",
     );
     await expect(editedYaml).toContain("customSettings:\n  owner: platform");
+  },
+};
+
+function draftEditor(
+  canvas: Parameters<NonNullable<Story["play"]>>[0]["canvas"],
+) {
+  return canvas.getByRole("textbox", { name: "Daemon configuration YAML" });
+}
+
+async function reviewAndSave(canvas: Parameters<typeof draftEditor>[0]) {
+  await userEvent.click(canvas.getByRole("button", { name: "Review changes" }));
+  await userEvent.click(
+    canvas.getByRole("button", { name: "Save configuration" }),
+  );
+}
+
+const draftYaml = "programs: {}\n";
+
+export const KeepsDraftAfterConflict: Story = {
+  args: {
+    onSave: fn<Save>(async ({ base_revision }) => {
+      if (base_revision === 7) throw new ApiError(409, "revision_conflict");
+      return { ...active, revision: 9, yaml: draftYaml };
+    }),
+    onLoadLatest: fn(async () => ({
+      ...active,
+      revision: 8,
+      yaml: "inventoryInterval: 30m\nprograms: {}\n",
+    })),
+  },
+  play: async ({ args, canvas }) => {
+    fireEvent.change(draftEditor(canvas), { target: { value: draftYaml } });
+    await reviewAndSave(canvas);
+    await expect(await canvas.findByRole("alert")).toHaveTextContent(
+      "Revision 8 is newer than your draft.",
+    );
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Keep my draft" }),
+    );
+    await expect(draftEditor(canvas)).toHaveValue(draftYaml);
+    await reviewAndSave(canvas);
+    await expect(args.onSave).toHaveBeenLastCalledWith({
+      base_revision: 8,
+      yaml: draftYaml,
+    });
+    await expect(await canvas.findByText("Revision 9 saved")).toBeVisible();
+  },
+};
+
+export const ShowsInvalidYamlWithoutLosingDraft: Story = {
+  args: {
+    onSave: fn<Save>(async () => {
+      throw new ApiError(422, "invalid_daemon_config", "Unclosed sequence");
+    }),
+  },
+  play: async ({ canvas }) => {
+    fireEvent.change(draftEditor(canvas), { target: { value: "programs: [" } });
+    await reviewAndSave(canvas);
+    await expect(await canvas.findByRole("alert")).toHaveTextContent(
+      "Unclosed sequence",
+    );
+    await expect(draftEditor(canvas)).toHaveValue("programs: [");
+    await expect(
+      canvas.queryByText(/Revision \d+ saved/),
+    ).not.toBeInTheDocument();
+  },
+};
+
+export const OffersFreshSignIn: Story = {
+  args: {
+    onSave: fn<Save>(async () => {
+      throw new ApiError(403, "reauthentication_required");
+    }),
+    onReauthenticate: fn(),
+  },
+  play: async ({ args, canvas }) => {
+    fireEvent.change(draftEditor(canvas), { target: { value: draftYaml } });
+    await reviewAndSave(canvas);
+    await userEvent.click(
+      await canvas.findByRole("button", { name: "Sign in again" }),
+    );
+    await expect(args.onReauthenticate).toHaveBeenCalledOnce();
+    await expect(draftEditor(canvas)).toHaveValue(draftYaml);
+  },
+};
+
+export const RestoresRevisionAsADraft: Story = {
+  args: {
+    selectedRevision: 1,
+    selectedRevisionData: { ...history[0], revision: 1, yaml: draftYaml },
+    onSave: fn<Save>(async () => ({
+      ...active,
+      revision: 8,
+      yaml: draftYaml,
+    })),
+  },
+  play: async ({ args, canvas }) => {
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Restore to draft" }),
+    );
+    await expect(draftEditor(canvas)).toHaveValue(draftYaml);
+    await expect(args.onSave).not.toHaveBeenCalled();
+    await reviewAndSave(canvas);
+    await expect(args.onSave).toHaveBeenCalledWith({
+      base_revision: 7,
+      yaml: draftYaml,
+    });
+    await expect(await canvas.findByText("Revision 8 saved")).toBeVisible();
   },
 };

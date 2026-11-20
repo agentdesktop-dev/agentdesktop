@@ -177,6 +177,7 @@ export type DaemonConfigDocument = {
 };
 
 export type ActiveDaemonConfig = {
+  controller_version?: string;
   config: DaemonConfigDocument | null;
   yaml: string | null;
   revision: number | null;
