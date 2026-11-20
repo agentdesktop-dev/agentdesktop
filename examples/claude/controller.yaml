@@ -1,5 +1,6 @@
 # yaml-language-server: $schema=../../schema/controller-config.json
-fleetListen: 0.0.0.0:8443
+fleetListener:
+  listen: 0.0.0.0:8443
 allowInsecureDev: true
 databaseUrl: sqlite:///tmp/agentdesktop-controller.db?mode=rwc
 tls: /tmp/agentdesktop-keys

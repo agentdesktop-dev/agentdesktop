@@ -20,4 +20,22 @@ daemonConfig:
     claudeCode:
       companyAnnouncements:
       - Managed by Agentdesktop
+gatewayListener:
+  tls: true
 tlsSecretName: agentdesktop-controller-tls
+networkPolicy:
+  enabled: true
+  egress:
+    database:
+      to:
+      - podSelector:
+          matchLabels:
+            app: postgres
+    idp:
+      to:
+      - podSelector:
+          matchLabels:
+            app: dex
+      ports:
+      - port: 5556
+        protocol: TCP

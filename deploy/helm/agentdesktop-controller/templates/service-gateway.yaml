@@ -1,0 +1,17 @@
+{{- if include "agentdesktop-controller.gatewayListenerEnabled" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "agentdesktop-controller.gatewayServiceName" . }}
+  labels:
+    {{- include "agentdesktop-controller.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.gatewayListener.service.type }}
+  selector:
+    {{- include "agentdesktop-controller.selectorLabels" . | nindent 4 }}
+  ports:
+  - name: {{ ternary "https" "http" .Values.gatewayListener.tls }}
+    port: {{ include "agentdesktop-controller.gatewayServicePort" . }}
+    targetPort: gateway
+    protocol: TCP
+{{- end }}

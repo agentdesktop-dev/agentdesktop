@@ -329,9 +329,7 @@ fn skill_front_matter(contents: &str) -> Option<BTreeMap<String, serde_json::Val
         .or_else(|| rest.strip_suffix("\n---").map(str::len))
         .or_else(|| rest.strip_suffix("\r\n---").map(str::len))?;
     let yaml = &rest[..end];
-    let value: serde_yaml::Value = serde_yaml::from_str(yaml).ok()?;
-    let json = serde_json::to_value(value).ok()?;
-    serde_json::from_value(json).ok()
+    agentdesktop_core::serdes::yamlviajson::from_str(yaml).ok()
 }
 
 #[cfg(test)]

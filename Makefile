@@ -1,7 +1,7 @@
 IMAGE ?= agentdesktop-controller:dev
 BUILD_PROFILE ?= release
 
-.PHONY: build install test check lint frontend frontend-check desktop desktop-check format gen generate-schema docker e2e-enrollment clean
+.PHONY: build install test check lint deny frontend frontend-check desktop desktop-check format gen generate-schema docker e2e-enrollment clean
 
 build: frontend
 	cargo build --workspace
@@ -18,6 +18,9 @@ check: lint frontend-check
 lint:
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets -- -D warnings
+
+deny:
+	cargo deny --locked check
 
 frontend:
 	cd frontend && pnpm install --frozen-lockfile
