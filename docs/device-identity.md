@@ -321,7 +321,14 @@ and no user has signed in.
 To revoke a token, add its `jti` to the issuer's `revokedIds` and restart the
 controller. The token no longer enrolls devices, and the devices it enrolled
 are rejected as `Unauthenticated`. Removing the issuer rejects every device
-it enrolled. To remove one device, delete it in the controller UI.
+it enrolled.
+
+Deleting a token-enrolled device in the controller UI does not keep it out.
+The daemon discards the rejected identity and enrolls again with the same
+token file, under a new device ID. To remove one device, first delete the
+token file on the device (or uninstall the daemon), then delete the device in
+the controller UI. Revoking the token's `jti` removes every device it
+enrolled.
 
 ### Controller validation
 
