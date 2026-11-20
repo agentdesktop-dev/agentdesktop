@@ -367,4 +367,32 @@ mod tests {
         assert_eq!(response.text().await.unwrap(), "ok");
         until_closed(oldest).await;
     }
+
+    #[tokio::test]
+    async fn at_the_address_cap_a_connection_that_just_made_a_request_is_kept() {
+        let mut limits = LIMITS;
+        limits.connections.first_request = Duration::from_secs(60);
+        limits.connections.connections_per_address = 2;
+        let (address, connections) = serve(limits, None);
+        let mut older = bounded(TcpStream::connect(address)).await.unwrap();
+        until_open(&connections, 1).await;
+        let newer = bounded(TcpStream::connect(address)).await.unwrap();
+        until_open(&connections, 2).await;
+        // The older connection makes a request after the newer one connected,
+        // so the newer one has gone longer without a request.
+        bounded(older.write_all(b"GET / HTTP/1.1\r\nHost: listener\r\n\r\n"))
+            .await
+            .unwrap();
+        let mut status = [0; 12];
+        bounded(older.read_exact(&mut status)).await.unwrap();
+        assert_eq!(&status, b"HTTP/1.1 200");
+
+        let response = client()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.text().await.unwrap(), "ok");
+        until_closed(newer).await;
+    }
 }

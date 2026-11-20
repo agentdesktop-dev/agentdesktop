@@ -15,10 +15,15 @@
 //! it makes no request soon after it is accepted, or stays idle too long after
 //! its last request finishes. A connection with a device's request in progress,
 //! including an open `Connect` stream, is busy: never idle. When a cap is
-//! reached, the longest-idle connection is closed to make room instead of
-//! refusing the new one: at the total cap any connection, and at the
+//! reached, the longest-idle connection (the one whose last request started
+//! or ended the longest ago, or that was accepted the longest ago if it has
+//! made none) is closed to make room instead of refusing the new one: at the
+//! total cap any connection, and at the
 //! per-address cap one from the same address. So idle connections cannot crowd
-//! out devices that are using theirs.
+//! out devices that are using theirs. A device that goes away without closing
+//! its `Connect` stream keeps that connection busy until HTTP/2 keepalive
+//! closes it, so if it reconnects before then, at a cap with nothing idle, it
+//! is refused until then.
 //!
 //! Only a request from a caller with a device certificate makes its connection
 //! busy. Anyone can open a request and never send its body, and tonic waits for
@@ -34,14 +39,14 @@
 //! never send the response body and hyper never drops it.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap},
     future::Future,
     io,
     net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     task::{Context, Poll, Waker},
     time::Duration,
@@ -100,73 +105,42 @@ struct Shared {
 
 #[derive(Default)]
 struct State {
-    open: HashMap<SocketAddr, Arc<Activity>>,
+    open: HashMap<SocketAddr, Connection>,
     /// Open connections by `address_key`.
     per_address: HashMap<IpAddr, Address>,
-    /// Connections in the order they became idle.
-    idle: IdleQueue,
+    /// Connections without a busy request, by idle key: the first has gone
+    /// the longest without a request starting or ending.
+    idle: BTreeMap<u64, SocketAddr>,
+    /// The next idle key to hand out.
+    next_idle: u64,
 }
 
 /// One address key's open connections.
 #[derive(Default)]
 struct Address {
     count: usize,
-    /// This address's connections in the order they became idle.
-    idle: IdleQueue,
+    /// This address's idle connections, keyed as in `State::idle`.
+    idle: BTreeMap<u64, SocketAddr>,
 }
 
-/// Connections in the order they became idle. An entry is stale once its
-/// connection starts a device request or closes; `Activity::idle_epoch` tells.
-#[derive(Default)]
-struct IdleQueue(VecDeque<(SocketAddr, u64)>);
-
-impl IdleQueue {
-    /// Queues `peer`, dropping stale entries once they dominate, so the queue
-    /// stays bounded by its `open` connections. Each address has a queue, so
-    /// the slack is small.
-    fn push(
-        &mut self,
-        peer: SocketAddr,
-        epoch: u64,
-        open: usize,
-        connections: &HashMap<SocketAddr, Arc<Activity>>,
-    ) {
-        self.0.push_back((peer, epoch));
-        if self.0.len() > 2 * open + 8 {
-            self.0.retain(|(peer, epoch)| {
-                connections
-                    .get(peer)
-                    .is_some_and(|activity| activity.is_idle_at(*epoch))
-            });
-        }
-    }
-
-    /// Closes the longest-idle connection in the queue. Returns false when
-    /// none is idle.
-    fn evict(&mut self, connections: &HashMap<SocketAddr, Arc<Activity>>) -> bool {
-        while let Some((peer, epoch)) = self.0.pop_front() {
-            if connections
-                .get(&peer)
-                .is_some_and(|activity| activity.is_idle_at(epoch) && activity.evict())
-            {
-                return true;
-            }
-        }
-        false
-    }
+/// An open connection's entry in the registry.
+struct Connection {
+    activity: Arc<Activity>,
+    /// Its key in the idle maps while it is idle.
+    idle: Option<u64>,
+    /// Closes the connection. Taken when the connection is evicted; an
+    /// evicted connection takes no more requests and is never idle again.
+    evict: Option<oneshot::Sender<()>>,
 }
 
-/// One connection's request activity.
+/// One connection's request activity, read by the connection itself without
+/// the registry lock.
 pub(super) struct Activity {
     in_flight: AtomicUsize,
-    /// Advanced each time the connection becomes idle.
-    idle_epoch: AtomicU64,
     /// Whether the connection has made any request.
     used: AtomicBool,
     /// When the connection was accepted, or last started or finished a request.
     last_active: Mutex<Instant>,
-    /// Closes the connection when it is evicted.
-    evict: Mutex<Option<oneshot::Sender<()>>>,
     /// Wakes the connection so it recomputes its idle deadline when its last
     /// request finishes.
     waker: Mutex<Option<Waker>>,
@@ -198,47 +172,91 @@ impl Activity {
                 + allowed,
         )
     }
-
-    /// Whether the connection is idle and has been since it was queued at `epoch`.
-    fn is_idle_at(&self, epoch: u64) -> bool {
-        self.in_flight.load(Ordering::Acquire) == 0
-            && self.idle_epoch.load(Ordering::Acquire) == epoch
-    }
-
-    /// Tells the connection to close. Returns false if it already was told.
-    fn evict(&self) -> bool {
-        self.evict
-            .lock()
-            .expect("connection eviction lock poisoned")
-            .take()
-            .is_some_and(|evict| {
-                let _ = evict.send(());
-                true
-            })
-    }
 }
 
 impl State {
+    /// Queues `peer`'s connection as the most recently idle one, unless it
+    /// has closed (`activity` is no longer its entry) or been evicted.
+    fn mark_idle(&mut self, peer: SocketAddr, activity: &Arc<Activity>) {
+        let Some(connection) = self.open.get_mut(&peer) else {
+            return;
+        };
+        if !Arc::ptr_eq(&connection.activity, activity) || connection.evict.is_none() {
+            return;
+        }
+        let key = self.next_idle;
+        self.next_idle += 1;
+        connection.idle = Some(key);
+        self.idle.insert(key, peer);
+        if let Some(address) = self.per_address.get_mut(&address_key(peer.ip())) {
+            address.idle.insert(key, peer);
+        }
+    }
+
+    /// Moves `peer`'s connection to the back of the idle maps, as the most
+    /// recently active, if it is in them and `activity` is still its entry.
+    fn requeue(&mut self, peer: SocketAddr, activity: &Arc<Activity>) {
+        let key = self.next_idle;
+        let Some(idle) = self
+            .open
+            .get_mut(&peer)
+            .filter(|connection| Arc::ptr_eq(&connection.activity, activity))
+            .and_then(|connection| connection.idle.as_mut())
+        else {
+            return;
+        };
+        let previous = std::mem::replace(idle, key);
+        self.next_idle += 1;
+        self.idle.remove(&previous);
+        self.idle.insert(key, peer);
+        if let Some(address) = self.per_address.get_mut(&address_key(peer.ip())) {
+            address.idle.remove(&previous);
+            address.idle.insert(key, peer);
+        }
+    }
+
+    /// Takes `peer`'s connection out of the idle maps, if it is in them.
+    fn unqueue(&mut self, peer: SocketAddr) {
+        let Some(key) = self
+            .open
+            .get_mut(&peer)
+            .and_then(|connection| connection.idle.take())
+        else {
+            return;
+        };
+        self.idle.remove(&key);
+        if let Some(address) = self.per_address.get_mut(&address_key(peer.ip())) {
+            address.idle.remove(&key);
+        }
+    }
+
     /// Closes the longest-idle connection. Returns false when every open
     /// connection has a device request in progress.
     fn evict_idle(&mut self) -> bool {
-        self.idle.evict(&self.open)
+        let longest_idle = self.idle.first_key_value().map(|(_, peer)| *peer);
+        longest_idle.is_some_and(|peer| self.evict(peer))
     }
 
     /// Closes `address`'s longest-idle connection. Returns false when each of
     /// its connections has a device request in progress.
     fn evict_idle_from(&mut self, address: IpAddr) -> bool {
-        self.per_address
-            .get_mut(&address)
-            .is_some_and(|connections| connections.idle.evict(&self.open))
+        let longest_idle = self
+            .per_address
+            .get(&address)
+            .and_then(|address| address.idle.first_key_value())
+            .map(|(_, peer)| *peer);
+        longest_idle.is_some_and(|peer| self.evict(peer))
     }
 
-    fn mark_idle(&mut self, peer: SocketAddr, epoch: u64) {
-        let open = self.open.len();
-        self.idle.push(peer, epoch, open, &self.open);
-        if let Some(address) = self.per_address.get_mut(&address_key(peer.ip())) {
-            address.idle.push(peer, epoch, address.count, &self.open);
-        }
+    fn evict(&mut self, peer: SocketAddr) -> bool {
+        self.unqueue(peer);
+        self.open
+            .get_mut(&peer)
+            .and_then(|connection| connection.evict.take())
+            .is_some_and(|evict| {
+                let _ = evict.send(());
+                true
+            })
     }
 }
 
@@ -341,14 +359,22 @@ impl Connections {
         let (evict, evicted) = oneshot::channel();
         let activity = Arc::new(Activity {
             in_flight: AtomicUsize::new(0),
-            idle_epoch: AtomicU64::new(0),
             used: AtomicBool::new(false),
             last_active: Mutex::new(Instant::now()),
-            evict: Mutex::new(Some(evict)),
             waker: Mutex::new(None),
         });
-        state.open.insert(peer, activity.clone());
-        state.mark_idle(peer, 0);
+        // An entry left for this peer address by a connection that has not
+        // been released yet is replaced; take it out of the idle maps first.
+        state.unqueue(peer);
+        state.open.insert(
+            peer,
+            Connection {
+                activity: activity.clone(),
+                idle: None,
+                evict: Some(evict),
+            },
+        );
+        state.mark_idle(peer, &activity);
         Some((activity, evicted))
     }
 
@@ -357,8 +383,9 @@ impl Connections {
         if state
             .open
             .get(&peer)
-            .is_some_and(|open| Arc::ptr_eq(open, activity))
+            .is_some_and(|open| Arc::ptr_eq(&open.activity, activity))
         {
+            state.unqueue(peer);
             state.open.remove(&peer);
         }
         let address = address_key(peer.ip());
@@ -376,10 +403,17 @@ impl Connections {
         // Counted under the registry lock, which eviction holds, so a
         // connection is never evicted once its busy request has started.
         let activity = {
-            let state = self.state();
-            let activity = state.open.get(&peer)?.clone();
+            let mut state = self.state();
+            let connection = state.open.get(&peer)?;
+            // An evicted connection fails its next read or write, which ends
+            // this request too; it is not counted.
+            connection.evict.as_ref()?;
+            let activity = connection.activity.clone();
             if busy {
                 activity.in_flight.fetch_add(1, Ordering::AcqRel);
+                state.unqueue(peer);
+            } else {
+                state.requeue(peer, &activity);
             }
             activity
         };
@@ -396,6 +430,14 @@ impl Connections {
     #[cfg(test)]
     pub(crate) fn open_count(&self) -> usize {
         self.state().open.len()
+    }
+
+    /// Entries in the idle map, and in the per-address idle maps.
+    #[cfg(test)]
+    pub(super) fn idle_entries(&self) -> (usize, usize) {
+        let state = self.state();
+        let by_address = state.per_address.values().map(|address| address.idle.len());
+        (state.idle.len(), by_address.sum())
     }
 }
 
@@ -435,7 +477,7 @@ where
     }
 }
 
-/// An accepted fleet connection. It holds its slots until it closes, and fails
+/// An accepted connection. It holds its slots until it closes, and fails
 /// its next read, write or flush once it is evicted or has been idle too long.
 /// Writes are checked too because a client that never reads fills the server's
 /// send buffer, and HTTP/2 then stops reading until it can write.
@@ -598,16 +640,16 @@ impl Drop for RequestGuard {
     fn drop(&mut self) {
         self.activity.touch();
         if !self.busy {
+            self.connections.state().requeue(self.peer, &self.activity);
             return;
         }
         // Under the registry lock, like `start_request`, so eviction never
-        // sees the connection idle before it is queued with its new epoch.
+        // sees the connection idle before it is in the idle maps.
         let idle = {
             let mut state = self.connections.state();
             let idle = self.activity.in_flight.fetch_sub(1, Ordering::AcqRel) == 1;
             if idle {
-                let epoch = self.activity.idle_epoch.fetch_add(1, Ordering::AcqRel) + 1;
-                state.mark_idle(self.peer, epoch);
+                state.mark_idle(self.peer, &self.activity);
             }
             idle
         };
@@ -710,13 +752,14 @@ where
 
 /// Keeps a `Connect` stream's connection busy. The connection goes idle when
 /// the first release is dropped: the response body holds one, and the handler
-/// can claim another from the request extensions (`SessionBusy::of`) and hold
-/// it in the session's task. Without the handler's release, a client that
-/// grants no HTTP/2 flow-control window could end the session and still keep
-/// the connection busy, because hyper keeps a response body it cannot send.
-/// If every handle is dropped without a release, the connection goes idle too.
+/// claims another from the request (`SessionBusy::release_for`) and holds it
+/// for the session, as `DeviceStream` does. Without the handler's release, a
+/// client that grants no HTTP/2 flow-control window could end the session and
+/// still keep the connection busy, because hyper keeps a response body it
+/// cannot send. If every handle is dropped without a release, the connection
+/// goes idle too.
 #[derive(Clone)]
-pub struct SessionBusy {
+pub(super) struct SessionBusy {
     guard: Arc<Mutex<Option<RequestGuard>>>,
 }
 
@@ -727,14 +770,18 @@ impl SessionBusy {
         }
     }
 
-    /// The handle for `request`'s connection, when it is a tracked `Connect`.
-    pub fn of<T>(request: &tonic::Request<T>) -> Option<Self> {
-        request.extensions().get::<Self>().cloned()
+    /// A release for `request`'s session, when the request is a tracked
+    /// `Connect`.
+    pub(super) fn release_for<T>(request: &tonic::Request<T>) -> Option<ReleaseOnDrop> {
+        request
+            .extensions()
+            .get::<Self>()
+            .map(Self::release_on_drop)
     }
 
     /// Marks the connection idle when the returned value is dropped, unless
     /// another release already has.
-    pub fn release_on_drop(&self) -> ReleaseOnDrop {
+    fn release_on_drop(&self) -> ReleaseOnDrop {
         ReleaseOnDrop {
             guard: self.guard.clone(),
         }
@@ -742,7 +789,7 @@ impl SessionBusy {
 }
 
 /// Releases a `SessionBusy` when dropped.
-pub struct ReleaseOnDrop {
+pub(super) struct ReleaseOnDrop {
     guard: Arc<Mutex<Option<RequestGuard>>>,
 }
 

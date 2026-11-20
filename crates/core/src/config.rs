@@ -684,17 +684,18 @@ impl Default for ControllerGatewayLimitsConfig {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct ControllerFleetLimitsConfig {
-    /// Open fleet connections allowed in total. At the limit, the connection
-    /// idle the longest is closed to admit a new one; when none is idle, the
-    /// new one is closed. A connection is idle unless a client with a device
-    /// certificate has a request or `Connect` stream open on it. Defaults to
-    /// `50000`.
+    /// Open fleet connections allowed in total. At the limit, the idle
+    /// connection with the oldest activity (its last request starting or
+    /// ending, or else its being accepted) is closed to admit a new one; when
+    /// none is idle, the new one is closed. A connection is idle unless a
+    /// client with a device certificate has a request or `Connect` stream open
+    /// on it. Defaults to `50000`.
     #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub max_connections: usize,
     /// Open fleet connections allowed from one client address: an IPv4
-    /// address, or an IPv6 /64. At the limit, that address's connection idle
-    /// the longest is closed to admit a new one; when none is idle, the new one
-    /// is closed. Raise it when more devices share an address, such as behind a
+    /// address, or an IPv6 /64. At the limit, that address's idle connection
+    /// with the oldest activity is closed to admit a new one; when none is
+    /// idle, the new one is closed. Raise it when more devices share an address, such as behind a
     /// NAT or a load balancer that does not preserve client addresses. Defaults
     /// to `4096`.
     #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
@@ -745,6 +746,26 @@ impl ControllerFleetLimitsConfig {
         device_message_burst: 600,
         device_message_refill: Duration::from_millis(50),
     };
+
+    /// Fails when a limit is zero. A zero count would refuse everything, and a
+    /// zero refill would turn its rate limit off.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for (field, zero) in [
+            ("maxConnections", self.max_connections == 0),
+            ("connectionsPerAddress", self.connections_per_address == 0),
+            ("maxMessageBytes", self.max_message_bytes == 0),
+            ("enrollmentInFlight", self.enrollment_in_flight == 0),
+            ("enrollmentBurst", self.enrollment_burst == 0),
+            ("enrollmentRefill", self.enrollment_refill.is_zero()),
+            ("deviceMessageBurst", self.device_message_burst == 0),
+            ("deviceMessageRefill", self.device_message_refill.is_zero()),
+        ] {
+            if zero {
+                anyhow::bail!("fleetListener.limits.{field} must be greater than zero");
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for ControllerFleetLimitsConfig {
@@ -1663,24 +1684,7 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
             }
         }
     }
-    let limits = &config.fleet_listener.limits;
-    for (field, zero) in [
-        ("maxConnections", limits.max_connections == 0),
-        ("connectionsPerAddress", limits.connections_per_address == 0),
-        ("maxMessageBytes", limits.max_message_bytes == 0),
-        ("enrollmentInFlight", limits.enrollment_in_flight == 0),
-        ("enrollmentBurst", limits.enrollment_burst == 0),
-        ("enrollmentRefill", limits.enrollment_refill.is_zero()),
-        ("deviceMessageBurst", limits.device_message_burst == 0),
-        (
-            "deviceMessageRefill",
-            limits.device_message_refill.is_zero(),
-        ),
-    ] {
-        if zero {
-            anyhow::bail!("fleetListener.limits.{field} must be greater than zero");
-        }
-    }
+    config.fleet_listener.limits.validate()?;
     let admin = &config.admin_listener.limits;
     let gateway = &config.gateway_listener.limits;
     for (field, zero) in [
@@ -3048,17 +3052,37 @@ oidc:
             configured.max_connections, 50_000,
             "unset fields keep defaults"
         );
+    }
 
-        let error = parse_controller(&format!(
-            "{base}fleetListener:\n  limits:\n    enrollmentRefill: 0s\n"
-        ))
-        .expect_err("zero refill");
-        assert!(
-            error
-                .to_string()
-                .contains("fleetListener.limits.enrollmentRefill"),
-            "{error}"
-        );
+    #[test]
+    fn controller_fleet_limits_reject_zero() {
+        let base = r#"
+tls: /etc/agentdesktop/tls
+oidc:
+  issuer: https://idp.example.com
+  clientId: agentdesktop
+"#;
+        for (field, zero) in [
+            ("maxConnections", "0"),
+            ("connectionsPerAddress", "0"),
+            ("maxMessageBytes", "0"),
+            ("enrollmentInFlight", "0"),
+            ("enrollmentBurst", "0"),
+            ("enrollmentRefill", "0s"),
+            ("deviceMessageBurst", "0"),
+            ("deviceMessageRefill", "0s"),
+        ] {
+            let error = parse_controller(&format!(
+                "{base}fleetListener:\n  limits:\n    {field}: {zero}\n"
+            ))
+            .expect_err(field);
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("fleetListener.limits.{field} ")),
+                "{field}: {error}"
+            );
+        }
     }
 
     #[test]

@@ -21,7 +21,9 @@ use tonic::{
     transport::{Identity, ServerTlsConfig},
 };
 
-use super::{Connections, FLEET_LIMITS, FleetLimits, RPC_CLASSES, rpc_class};
+use super::{
+    Connections, DeviceStreams, FLEET_LIMITS, FleetLimits, RPC_CLASSES, RpcClass, rpc_class,
+};
 
 /// Fails the test, instead of hanging it, when the server never ends the wait.
 async fn bounded<T>(call: impl std::future::Future<Output = T>) -> T {
@@ -31,8 +33,8 @@ async fn bounded<T>(call: impl std::future::Future<Output = T>) -> T {
 }
 
 /// A fleet service whose calls take `delay`; `Connect` sends a message after each
-/// `delay`, twice, then ends its session, holding the connection's session
-/// release as the controller's `Connect` does.
+/// `delay`, twice, then ends its session. Like the controller's `Connect`, it
+/// holds the device's stream for the session, which keeps the connection busy.
 #[derive(Clone)]
 struct Slow {
     delay: Duration,
@@ -84,11 +86,14 @@ impl FleetAgent for Slow {
         &self,
         request: Request<Streaming<AgentMessage>>,
     ) -> Result<Response<Self::ConnectStream>, Status> {
-        let session = super::SessionBusy::of(&request).map(|busy| busy.release_on_drop());
+        let stream = DeviceStreams::new(&FLEET_LIMITS)
+            .admit_open("device")
+            .expect("the first open is admitted")
+            .open(request);
         let (sender, receiver) = mpsc::channel(2);
         let delay = self.delay;
         tokio::spawn(async move {
-            let _session = session;
+            let _stream = stream;
             for _ in 0..2 {
                 time::sleep(delay).await;
                 if sender.send(Ok(ControllerMessage::default())).await.is_err() {
@@ -724,6 +729,118 @@ fn a_request_without_a_device_certificate_does_not_keep_its_connection_from_evic
     assert_eq!(evicted.try_recv(), Ok(()));
 }
 
+#[test]
+fn at_either_cap_the_longest_idle_connection_is_evicted_not_the_oldest() {
+    use tokio::sync::oneshot::error::TryRecvError;
+
+    let mut total_cap = FLEET_LIMITS;
+    total_cap.configured.max_connections = 2;
+    let mut address_cap = FLEET_LIMITS;
+    address_cap.configured.connections_per_address = 2;
+    for limits in [total_cap, address_cap] {
+        let connections = Connections::new(limits.connection_limits(), "fleet");
+        let peer = |port| SocketAddr::from(([192, 0, 2, 1], port));
+        let (_oldest, mut oldest_evicted) = connections.register(peer(1)).expect("oldest");
+        let (_newer, mut newer_evicted) = connections.register(peer(2)).expect("newer");
+        // The oldest connection's request ends after the newer one went idle.
+        drop(
+            connections
+                .start_request(peer(1), true)
+                .expect("busy request"),
+        );
+
+        assert!(connections.register(peer(3)).is_some());
+        assert_eq!(newer_evicted.try_recv(), Ok(()));
+        assert_eq!(oldest_evicted.try_recv(), Err(TryRecvError::Empty));
+    }
+}
+
+/// A request that does not make its connection busy (no device certificate)
+/// still makes it the most recently active, when the request starts and when
+/// it ends.
+#[test]
+fn at_either_cap_a_connection_with_a_recent_anonymous_request_is_evicted_last() {
+    use tokio::sync::oneshot::error::TryRecvError;
+
+    let mut total_cap = FLEET_LIMITS;
+    total_cap.configured.max_connections = 2;
+    let mut address_cap = FLEET_LIMITS;
+    address_cap.configured.connections_per_address = 2;
+    for limits in [total_cap, address_cap] {
+        let connections = Connections::new(limits.connection_limits(), "fleet");
+        let peer = |port| SocketAddr::from(([192, 0, 2, 1], port));
+        let (_oldest, mut oldest_evicted) = connections.register(peer(1)).expect("oldest");
+        let (_newer, mut newer_evicted) = connections.register(peer(2)).expect("newer");
+
+        // The oldest connection's request is still in progress.
+        let request = connections
+            .start_request(peer(1), false)
+            .expect("anonymous request");
+        let (_third, mut third_evicted) = connections.register(peer(3)).expect("third");
+        assert_eq!(newer_evicted.try_recv(), Ok(()));
+        assert_eq!(oldest_evicted.try_recv(), Err(TryRecvError::Empty));
+
+        // It ends after the third connection was accepted.
+        drop(request);
+        assert!(connections.register(peer(4)).is_some());
+        assert_eq!(third_evicted.try_recv(), Ok(()));
+        assert_eq!(oldest_evicted.try_recv(), Err(TryRecvError::Empty));
+    }
+}
+
+#[test]
+fn a_request_on_an_evicted_connection_is_not_counted() {
+    let mut limits = FLEET_LIMITS;
+    limits.configured.max_connections = 1;
+    let connections = Connections::new(limits.connection_limits(), "fleet");
+    let peer = |last| SocketAddr::from(([192, 0, 2, last], 1));
+    let (_first, mut first_evicted) = connections.register(peer(1)).expect("first connection");
+    assert!(connections.register(peer(2)).is_some());
+    assert_eq!(first_evicted.try_recv(), Ok(()));
+
+    // The evicted connection fails its next read or write.
+    assert!(connections.start_request(peer(1), true).is_none());
+}
+
+#[test]
+fn the_idle_maps_hold_only_idle_connections() {
+    let connections = Connections::new(FLEET_LIMITS.connection_limits(), "fleet");
+    let peer = |port| SocketAddr::from(([192, 0, 2, 1], port));
+    let _first = connections.register(peer(1)).expect("first connection");
+    let _second = connections.register(peer(2)).expect("second connection");
+
+    for _ in 0..100 {
+        drop(connections.start_request(peer(1), true).expect("request"));
+    }
+    assert_eq!(connections.idle_entries(), (2, 2));
+
+    let _busy = connections.start_request(peer(2), true).expect("request");
+    assert_eq!(connections.idle_entries(), (1, 1));
+}
+
+#[test]
+fn an_evicted_connection_stays_out_of_the_idle_maps_when_its_anonymous_request_ends() {
+    use tokio::sync::oneshot::error::TryRecvError;
+
+    let mut limits = FLEET_LIMITS;
+    limits.configured.max_connections = 1;
+    let connections = Connections::new(limits.connection_limits(), "fleet");
+    let peer = |last| SocketAddr::from(([192, 0, 2, last], 1));
+    let (_first, mut first_evicted) = connections.register(peer(1)).expect("first connection");
+    let request = connections
+        .start_request(peer(1), false)
+        .expect("anonymous request");
+    let (_second, mut second_evicted) = connections.register(peer(2)).expect("second");
+    assert_eq!(first_evicted.try_recv(), Ok(()));
+
+    drop(request);
+    assert_eq!(connections.idle_entries(), (1, 1));
+    // So the next connection evicts the second one rather than being refused.
+    assert!(connections.register(peer(3)).is_some());
+    assert_eq!(second_evicted.try_recv(), Ok(()));
+    assert_eq!(first_evicted.try_recv(), Err(TryRecvError::Closed));
+}
+
 #[tokio::test]
 async fn at_the_total_cap_the_longest_idle_connection_makes_room() {
     let mut limits = FLEET_LIMITS;
@@ -1138,8 +1255,9 @@ async fn an_evicted_connection_that_floods_pings_is_closed() {
     assert!(stays_open(newcomer).await, "the new connection was closed");
 }
 
-/// The RPC names in `fleet.proto`'s `FleetAgent` service.
-fn fleet_rpcs(proto: &str) -> std::collections::BTreeSet<&str> {
+/// The RPCs in `fleet.proto`'s `FleetAgent` service, by name, with whether
+/// each one's response is a stream.
+fn fleet_rpcs(proto: &str) -> std::collections::BTreeMap<&str, bool> {
     let (_, service) = proto
         .split_once("service FleetAgent {")
         .expect("fleet.proto declares service FleetAgent");
@@ -1149,7 +1267,16 @@ fn fleet_rpcs(proto: &str) -> std::collections::BTreeSet<&str> {
     service
         .lines()
         .filter_map(|line| line.trim().strip_prefix("rpc "))
-        .map(|rpc| rpc.split_once('(').map_or(rpc, |(name, _)| name).trim())
+        .map(|rpc| {
+            let (name, signature) = rpc.split_once('(').unwrap_or((rpc, ""));
+            let streams_response = signature
+                .split_once("returns")
+                .is_some_and(|(_, response)| {
+                    let response = response.trim_start().trim_start_matches('(');
+                    response.trim_start().starts_with("stream ")
+                });
+            (name.trim(), streams_response)
+        })
         .collect()
 }
 
@@ -1164,14 +1291,30 @@ fn every_fleet_rpc_has_a_limit_class() {
         "RPC_CLASSES lists an RPC twice"
     );
 
-    let unclassified: Vec<_> = rpcs.difference(&classified).collect();
-    let not_in_proto: Vec<_> = classified.difference(&rpcs).collect();
+    let in_proto: std::collections::BTreeSet<&str> = rpcs.keys().copied().collect();
+    let unclassified: Vec<_> = in_proto.difference(&classified).collect();
+    let not_in_proto: Vec<_> = classified.difference(&in_proto).collect();
     assert!(
         unclassified.is_empty() && not_in_proto.is_empty(),
         "every FleetAgent RPC needs a class in RPC_CLASSES (fleet_limits.rs), which sets its \
          message limit and how long it keeps its connection busy; an Enrollment RPC's handler \
          must also take an EnrollmentLimiter permit. Not classified: {unclassified:?}. \
          Classified but not in fleet.proto: {not_in_proto:?}"
+    );
+
+    let misclassified: Vec<_> = RPC_CLASSES
+        .iter()
+        .filter(|(name, class)| rpcs[name] != (*class == RpcClass::Connect))
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        misclassified.is_empty(),
+        "an RPC whose response is a stream must be classed Connect, and no other RPC may be: \
+         only a Connect RPC keeps its connection busy after its handler returns, so a stream \
+         classed otherwise can be closed as idle while it is open, and a unary RPC classed \
+         Connect stays busy while its client leaves the response unread. A Connect RPC's \
+         handler must also hold its session's release, as DeviceStream does. Misclassified: \
+         {misclassified:?}"
     );
 }
 
@@ -1207,12 +1350,47 @@ fn a_repeated_warning_is_logged_once_per_interval_with_its_count() {
     assert_eq!(warning.event(start + Duration::from_secs(11)), None);
 }
 
+#[test]
+fn limits_out_of_range_are_refused_where_they_are_built() {
+    use agentdesktop_core::config::ControllerFleetLimitsConfig;
+    use tokio::sync::Semaphore;
+
+    let zero_refill = ControllerFleetLimitsConfig {
+        device_message_refill: Duration::ZERO,
+        ..ControllerFleetLimitsConfig::DEFAULT
+    };
+    let error = FleetLimits::from_config(&zero_refill).expect_err("zero refill");
+    assert!(
+        error
+            .to_string()
+            .contains("fleetListener.limits.deviceMessageRefill"),
+        "{error}"
+    );
+
+    // Above this, building the enrollment limiter's semaphore would panic.
+    let in_flight = |enrollment_in_flight| ControllerFleetLimitsConfig {
+        enrollment_in_flight,
+        ..ControllerFleetLimitsConfig::DEFAULT
+    };
+    FleetLimits::from_config(&in_flight(Semaphore::MAX_PERMITS)).expect("most slots");
+    let error = FleetLimits::from_config(&in_flight(Semaphore::MAX_PERMITS + 1))
+        .expect_err("more slots than a semaphore holds");
+    assert!(
+        error
+            .to_string()
+            .contains("fleetListener.limits.enrollmentInFlight"),
+        "{error}"
+    );
+}
+
 mod enrollment {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
     use tokio::time::Instant;
 
-    use super::super::{FLEET_LIMITS, FleetLimits, PEERS_PER_GENERATION, address_key};
+    use super::super::{
+        EnrollmentLimiter, FLEET_LIMITS, FleetLimits, PEERS_PER_GENERATION, address_key,
+    };
     use super::Duration;
 
     fn limits(in_flight: usize, burst: u32) -> FleetLimits {
@@ -1229,7 +1407,7 @@ mod enrollment {
 
     #[test]
     fn a_peer_gets_its_burst_then_one_request_per_refill() {
-        let limiter = limits(64, 3).enrollment();
+        let limiter = EnrollmentLimiter::new(&limits(64, 3));
         let start = Instant::now();
 
         for _ in 0..3 {
@@ -1246,7 +1424,7 @@ mod enrollment {
 
     #[test]
     fn peers_have_separate_budgets() {
-        let limiter = limits(64, 1).enrollment();
+        let limiter = EnrollmentLimiter::new(&limits(64, 1));
         let now = Instant::now();
 
         assert!(limiter.take(peer(1), now));
@@ -1256,7 +1434,7 @@ mod enrollment {
 
     #[test]
     fn a_full_bucket_is_never_overfilled() {
-        let limiter = limits(64, 2).enrollment();
+        let limiter = EnrollmentLimiter::new(&limits(64, 2));
         let start = Instant::now();
 
         assert!(limiter.take(peer(1), start));
@@ -1269,7 +1447,7 @@ mod enrollment {
 
     #[tokio::test]
     async fn requests_in_progress_are_capped_until_one_finishes() {
-        let limiter = limits(2, 60).enrollment();
+        let limiter = EnrollmentLimiter::new(&limits(2, 60));
         let address = |last| Some(SocketAddr::new(peer(last), 4000));
 
         let first = limiter.admit(address(1)).expect("first request");
@@ -1287,7 +1465,7 @@ mod enrollment {
 
     #[tokio::test]
     async fn a_rate_limited_peer_is_rejected_with_resource_exhausted() {
-        let limiter = limits(64, 1).enrollment();
+        let limiter = EnrollmentLimiter::new(&limits(64, 1));
         let address = Some(SocketAddr::new(peer(1), 4000));
 
         let _first = limiter.admit(address).expect("first request");
@@ -1298,7 +1476,7 @@ mod enrollment {
 
     #[tokio::test]
     async fn enrolling_spends_the_address_budget() {
-        let limiter = limits(64, 1).enrollment();
+        let limiter = EnrollmentLimiter::new(&limits(64, 1));
         let address = Some(SocketAddr::new(peer(1), 4000));
         let _configuration = limiter.admit(address).expect("login configuration");
 
@@ -1319,7 +1497,7 @@ mod enrollment {
 
     #[tokio::test]
     async fn enrolling_waits_for_a_slot() {
-        let limiter = one_slot(Duration::from_secs(5)).enrollment();
+        let limiter = EnrollmentLimiter::new(&one_slot(Duration::from_secs(5)));
         let other = limiter.admit(None).expect("other request");
         let waiting = tokio::spawn({
             let limiter = limiter.clone();
@@ -1338,7 +1516,7 @@ mod enrollment {
 
     #[tokio::test]
     async fn enrolling_gives_up_after_the_wait() {
-        let limiter = one_slot(Duration::from_millis(50)).enrollment();
+        let limiter = EnrollmentLimiter::new(&one_slot(Duration::from_millis(50)));
         let _other = limiter.admit(None).expect("other request");
 
         let error = limiter.admit_enrollment(None).await.expect_err("admitted");
@@ -1348,7 +1526,7 @@ mod enrollment {
 
     #[tokio::test]
     async fn requests_without_a_peer_address_still_count_against_the_cap() {
-        let limiter = limits(1, 60).enrollment();
+        let limiter = EnrollmentLimiter::new(&limits(1, 60));
 
         let _first = limiter.admit(None).expect("first request");
         assert!(limiter.admit(None).is_err());
@@ -1361,7 +1539,7 @@ mod enrollment {
 
     #[test]
     fn the_peer_table_stays_bounded_while_addresses_keep_changing() {
-        let limiter = limits(64, 1).enrollment();
+        let limiter = EnrollmentLimiter::new(&limits(64, 1));
         let now = Instant::now();
 
         for index in 0..5 * PEERS_PER_GENERATION {
@@ -1373,7 +1551,7 @@ mod enrollment {
 
     #[test]
     fn a_peer_seen_recently_keeps_its_spent_budget_when_the_table_turns_over() {
-        let limiter = limits(64, 1).enrollment();
+        let limiter = EnrollmentLimiter::new(&limits(64, 1));
         let now = Instant::now();
         assert!(limiter.take(peer(1), now));
 
@@ -1391,7 +1569,7 @@ mod enrollment {
 
     #[test]
     fn addresses_in_one_ipv6_64_share_a_budget() {
-        let limiter = limits(64, 1).enrollment();
+        let limiter = EnrollmentLimiter::new(&limits(64, 1));
         let now = Instant::now();
 
         assert!(limiter.take(v6("2001:db8:1:2::1"), now));
@@ -1408,45 +1586,86 @@ mod enrollment {
 }
 
 mod device_streams {
-    use tokio::{sync::oneshot::error::TryRecvError, time::Instant};
+    use tokio::{
+        sync::mpsc,
+        time::{self, Instant},
+    };
+    use tokio_stream::wrappers::ReceiverStream;
+    use tonic::{Code, Request, Status};
 
-    use super::super::{DeviceStreams, FLEET_LIMITS};
+    use super::super::{DeviceStream, DeviceStreams, FLEET_LIMITS, FleetLimits, StreamEvent};
     use super::Duration;
 
+    /// A stream from a device that sends nothing.
+    type Silent = DeviceStream<tokio_stream::Pending<Result<(), Status>>>;
+
     fn streams() -> DeviceStreams {
-        FLEET_LIMITS.device_streams()
+        DeviceStreams::new(&FLEET_LIMITS)
     }
 
-    #[test]
-    fn a_newer_stream_from_the_same_device_replaces_the_older_one() {
-        let streams = streams();
-        let mut older = streams.open("device-a");
-        let mut other_device = streams.open("device-b");
-
-        let mut newer = streams.open("device-a");
-
-        assert_eq!(older.superseded.try_recv(), Ok(()));
-        assert_eq!(other_device.superseded.try_recv(), Err(TryRecvError::Empty));
-        assert_eq!(newer.superseded.try_recv(), Err(TryRecvError::Empty));
+    /// Limits that give each device `burst` messages, refilled at one per `refill`.
+    fn message_budget(burst: u32, refill: Duration) -> FleetLimits {
+        let mut limits = FLEET_LIMITS;
+        limits.configured.device_message_burst = burst;
+        limits.configured.device_message_refill = refill;
+        limits
     }
 
-    #[test]
-    fn a_replaced_stream_closing_keeps_the_newer_registration() {
+    /// Opens a stream from `device_id` whose device sends `inbound`.
+    fn open<S>(streams: &DeviceStreams, device_id: &str, inbound: S) -> DeviceStream<S> {
+        streams
+            .admit_open(device_id)
+            .expect("open admitted")
+            .open(Request::new(inbound))
+    }
+
+    fn open_silent(streams: &DeviceStreams, device_id: &str) -> Silent {
+        open(streams, device_id, tokio_stream::pending())
+    }
+
+    /// Whether a newer stream from the device has replaced `stream`.
+    async fn superseded(stream: &mut Silent) -> bool {
+        match time::timeout(Duration::from_secs(1), stream.next()).await {
+            Ok(StreamEvent::Superseded) => true,
+            Err(_) => false,
+            Ok(event) => panic!("a silent device's stream yielded {event:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_newer_stream_from_the_same_device_replaces_the_older_one() {
         let streams = streams();
-        let older = streams.open("device-a");
-        let mut newer = streams.open("device-a");
+        let mut older = open_silent(&streams, "device-a");
+        let mut other_device = open_silent(&streams, "device-b");
+
+        let mut newer = open_silent(&streams, "device-a");
+
+        assert!(superseded(&mut older).await);
+        assert!(
+            superseded(&mut older).await,
+            "a replaced stream stays replaced"
+        );
+        assert!(!superseded(&mut other_device).await);
+        assert!(!superseded(&mut newer).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_replaced_stream_closing_keeps_the_newer_registration() {
+        let streams = streams();
+        let older = open_silent(&streams, "device-a");
+        let mut newer = open_silent(&streams, "device-a");
 
         drop(older);
-        let _newest = streams.open("device-a");
+        let _newest = open_silent(&streams, "device-a");
 
         // The newer stream was still registered, so the newest one replaced it.
-        assert_eq!(newer.superseded.try_recv(), Ok(()));
+        assert!(superseded(&mut newer).await);
     }
 
     #[test]
     fn a_closed_stream_is_unregistered() {
         let streams = streams();
-        drop(streams.open("device-a"));
+        drop(open_silent(&streams, "device-a"));
 
         assert!(
             streams.devices.lock().unwrap()["device-a"]
@@ -1456,24 +1675,40 @@ mod device_streams {
         );
     }
 
+    #[tokio::test]
+    async fn a_stream_ends_or_fails_with_the_device_request_stream() {
+        let streams = streams();
+        let inbound = tokio_stream::iter([Ok(()), Err(Status::internal("reset"))]);
+        let mut stream = open(&streams, "device-a", inbound);
+
+        let message = stream.next().await;
+        assert!(matches!(message, StreamEvent::Message(())), "{message:?}");
+        let failed = stream.next().await;
+        assert!(
+            matches!(&failed, StreamEvent::Failed(status) if status.code() == Code::Internal),
+            "{failed:?}"
+        );
+        let ended = stream.next().await;
+        assert!(matches!(ended, StreamEvent::Ended), "{ended:?}");
+    }
+
     #[test]
     fn a_device_gets_its_message_burst_then_the_refill_rate() {
-        let mut limits = FLEET_LIMITS;
-        limits.configured.device_message_burst = 3;
-        limits.configured.device_message_refill = Duration::from_secs(1);
-        let stream = limits.device_streams().open("device-a");
+        let streams = DeviceStreams::new(&message_budget(3, Duration::from_secs(1)));
+        let stream = open_silent(&streams, "device-a");
+        let budget = &stream.registration;
         let start = Instant::now();
         let second = Duration::from_secs(1);
 
-        assert_eq!(stream.spend_message(start), None);
-        assert_eq!(stream.spend_message(start), None);
+        assert_eq!(budget.spend_message(start), None);
+        assert_eq!(budget.spend_message(start), None);
         assert_eq!(
-            stream.spend_message(start),
+            budget.spend_message(start),
             Some(start + second),
             "the burst is spent"
         );
         assert_eq!(
-            stream.spend_message(start + second),
+            budget.spend_message(start + second),
             Some(start + 2 * second),
             "one message per refill"
         );
@@ -1481,68 +1716,119 @@ mod device_streams {
 
     #[test]
     fn a_message_read_before_the_budget_refills_delays_the_next_one() {
-        let mut limits = FLEET_LIMITS;
-        limits.configured.device_message_burst = 1;
-        limits.configured.device_message_refill = Duration::from_secs(1);
-        let stream = limits.device_streams().open("device-a");
+        let streams = DeviceStreams::new(&message_budget(1, Duration::from_secs(1)));
+        let stream = open_silent(&streams, "device-a");
+        let budget = &stream.registration;
         let start = Instant::now();
 
         assert_eq!(
-            stream.spend_message(start),
+            budget.spend_message(start),
             Some(start + Duration::from_secs(1))
         );
 
         assert_eq!(
-            stream.spend_message(start),
+            budget.spend_message(start),
             Some(start + Duration::from_secs(2))
         );
     }
 
     #[test]
     fn an_absurdly_long_refill_caps_the_wait() {
-        let mut limits = FLEET_LIMITS;
-        limits.configured.device_message_burst = 1;
-        limits.configured.device_message_refill = Duration::MAX;
-        let stream = limits.device_streams().open("device-a");
+        let streams = DeviceStreams::new(&message_budget(1, Duration::MAX));
+        let stream = open_silent(&streams, "device-a");
         let start = Instant::now();
 
         assert_eq!(
-            stream.spend_message(start),
+            stream.registration.spend_message(start),
             Some(start + super::super::LONGEST_WAIT)
         );
     }
 
     #[test]
     fn reconnecting_does_not_reset_the_message_budget() {
-        let mut limits = FLEET_LIMITS;
-        limits.configured.device_message_burst = 2;
-        limits.configured.device_message_refill = Duration::from_secs(3600);
-        let streams = limits.device_streams();
+        let streams = DeviceStreams::new(&message_budget(2, Duration::from_secs(3600)));
         let now = Instant::now();
-        let first = streams.open("device-a");
-        assert_eq!(first.spend_message(now), None);
-        assert!(first.spend_message(now).is_some(), "the burst is spent");
+        let first = open_silent(&streams, "device-a");
+        assert_eq!(first.registration.spend_message(now), None);
+        assert!(
+            first.registration.spend_message(now).is_some(),
+            "the burst is spent"
+        );
         drop(first);
 
-        let second = streams.open("device-a");
+        let second = open_silent(&streams, "device-a");
 
         assert!(
-            second.spend_message(now).is_some(),
+            second.registration.spend_message(now).is_some(),
             "a new stream got a fresh budget"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn messages_past_the_burst_are_read_at_the_refill_rate() {
+        let streams = DeviceStreams::new(&message_budget(2, Duration::from_secs(1)));
+        let inbound = tokio_stream::iter([1, 2, 3, 4].map(Ok::<_, Status>));
+        let mut stream = open(&streams, "device-a", inbound);
+        let start = Instant::now();
+
+        for (message, read_after) in [(1, 0), (2, 0), (3, 1), (4, 2)] {
+            let read = stream.next().await;
+            assert!(
+                matches!(read, StreamEvent::Message(read) if read == message),
+                "{read:?}"
+            );
+            assert_eq!(start.elapsed().as_secs(), read_after, "message {message}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn waiting_for_a_message_does_not_spend_the_budget() {
+        let streams = DeviceStreams::new(&message_budget(1, Duration::from_secs(3600)));
+        let (device, inbound) = mpsc::channel(1);
+        let mut stream = open(&streams, "device-a", ReceiverStream::new(inbound));
+        let waited = time::timeout(Duration::from_secs(1), stream.next()).await;
+        assert!(waited.is_err(), "read a message from a silent device");
+
+        let start = Instant::now();
+        device.send(Ok::<_, Status>(())).await.unwrap();
+        let read = stream.next().await;
+
+        assert!(matches!(read, StreamEvent::Message(())), "{read:?}");
+        assert_eq!(start.elapsed(), Duration::ZERO, "the wait spent the budget");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_waiting_for_its_budget_is_still_replaced() {
+        let streams = DeviceStreams::new(&message_budget(1, Duration::from_secs(3600)));
+        let inbound = tokio_stream::iter([1, 2].map(Ok::<_, Status>));
+        let mut stream = open(&streams, "device-a", inbound);
+        let first = stream.next().await;
+        assert!(matches!(first, StreamEvent::Message(1)), "{first:?}");
+        let start = Instant::now();
+
+        // The second message waits an hour for the budget; a newer stream
+        // opens after a minute.
+        let newer = async {
+            time::sleep(Duration::from_secs(60)).await;
+            open_silent(&streams, "device-a")
+        };
+        let (event, _newer) = tokio::join!(stream.next(), newer);
+
+        assert!(matches!(event, StreamEvent::Superseded), "{event:?}");
+        assert_eq!(start.elapsed(), Duration::from_secs(60));
     }
 
     #[test]
     fn a_device_that_opens_streams_too_often_is_refused() {
         let mut limits = FLEET_LIMITS;
         limits.stream_open_burst = 2;
-        let streams = limits.device_streams();
+        let streams = DeviceStreams::new(&limits);
 
         streams.admit_open("device-a").expect("first open");
         streams.admit_open("device-a").expect("second open");
-        let error = streams
-            .admit_open("device-a")
-            .expect_err("third open admitted");
+        let Err(error) = streams.admit_open("device-a") else {
+            panic!("third open admitted");
+        };
 
         assert_eq!(error.code(), tonic::Code::ResourceExhausted);
         streams
@@ -1565,8 +1851,8 @@ mod fleet_service {
     };
 
     use agentdesktop_proto::fleet::{
-        AgentMessage, DaemonConfig, EnrollDeviceRequest, LoginConfigurationRequest,
-        fleet_agent_server::FleetAgent,
+        AgentMessage, ControllerMessage, DaemonConfig, EnrollDeviceRequest,
+        LoginConfigurationRequest, fleet_agent_server::FleetAgent,
     };
     use axum::{
         http::{StatusCode, Uri},
@@ -1576,7 +1862,7 @@ mod fleet_service {
     use serde_json::json;
     use tokio::{sync::mpsc, time};
     use tokio_stream::wrappers::ReceiverStream;
-    use tonic::{Code, Request, Status};
+    use tonic::{Code, Request, Status, Streaming};
 
     use super::{
         super::{Connections, FLEET_LIMITS, FleetLimits},
@@ -1809,13 +2095,30 @@ mod fleet_service {
         let controller = Controller::start(limits).await;
         let pki = pki();
         let (address, connections) = controller.serve(&pki).await;
+        let (outbound, mut session) = open_session(address, &pki).await;
 
+        // Nothing is sent either way for several idle limits.
+        let quiet = time::timeout(5 * limits.idle_connection, session.message()).await;
+        assert!(quiet.is_err(), "the quiet session ended: {quiet:?}");
+        assert_eq!(connections.open_count(), 1);
+
+        // The device ends the session, so its connection goes idle and closes.
+        drop(outbound);
+        bounded(until_open_at_most(&connections, 0)).await;
+    }
+
+    /// Opens a `Connect` session as `DEVICE_ID` and reads the configuration
+    /// it starts with. The session lasts until the returned sender is dropped.
+    async fn open_session(
+        address: SocketAddr,
+        pki: &Pki,
+    ) -> (mpsc::Sender<AgentMessage>, Streaming<ControllerMessage>) {
         let (outbound, receiver) = mpsc::channel::<AgentMessage>(1);
         let mut request = Request::new(ReceiverStream::new(receiver));
         request
             .metadata_mut()
             .insert("authorization", AUTHORIZATION.parse().unwrap());
-        let mut session = bounded(tls_client(address, &pki, true).await.connect(request))
+        let mut session = bounded(tls_client(address, pki, true).await.connect(request))
             .await
             .expect("open the session")
             .into_inner();
@@ -1826,15 +2129,25 @@ mod fleet_service {
             config.is_some(),
             "the session ended before its configuration"
         );
+        (outbound, session)
+    }
 
-        // Nothing is sent either way for several idle limits.
-        let quiet = time::timeout(5 * limits.idle_connection, session.message()).await;
-        assert!(quiet.is_err(), "the quiet session ended: {quiet:?}");
-        assert_eq!(connections.open_count(), 1);
+    /// A device that opens a new `Connect` session closes its older one.
+    #[tokio::test]
+    async fn a_newer_session_from_the_same_device_closes_the_older_one() {
+        let controller = Controller::start(FLEET_LIMITS).await;
+        let pki = pki();
+        let (address, _) = controller.serve(&pki).await;
+        let (_older_device, mut older) = open_session(address, &pki).await;
 
-        // The device ends the session, so its connection goes idle and closes.
-        drop(outbound);
-        bounded(until_open_at_most(&connections, 0)).await;
+        let (_newer_device, mut newer) = open_session(address, &pki).await;
+
+        let closed = bounded(older.message())
+            .await
+            .expect_err("the older session stayed open");
+        assert_eq!(closed.code(), Code::Aborted, "{closed}");
+        let quiet = time::timeout(Duration::from_millis(200), newer.message()).await;
+        assert!(quiet.is_err(), "the newer session ended: {quiet:?}");
     }
 
     /// `EnrollDevice` holds its in-flight slot while it waits on the identity
