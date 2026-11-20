@@ -484,7 +484,11 @@ async fn run_session(
                 }
                 Err(error) if is_unauthenticated(&error) => {
                     let error_chain = format!("{error:#}");
-                    if auth_recovery != ControllerAuthRecovery::Refreshed {
+                    // Only a user's access token can be refreshed; a
+                    // token-enrolled device has nothing to retry with.
+                    if identity.oauth.is_some()
+                        && auth_recovery != ControllerAuthRecovery::Refreshed
+                    {
                         auth_recovery = ControllerAuthRecovery::RefreshRequired;
                         controller_status.mark_disconnected(None).await;
                         warn!(

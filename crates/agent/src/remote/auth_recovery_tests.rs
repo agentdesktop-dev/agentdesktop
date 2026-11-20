@@ -15,6 +15,8 @@ type Reply<T> = Result<tonic::Response<T>, tonic::Status>;
 enum Event {
     Connected { token: String, device_id: String },
     EnrollmentRequested,
+    TokenDeviceRejected,
+    TokenEnrollmentRequested,
 }
 
 #[derive(Clone)]
@@ -35,7 +37,13 @@ impl FleetAgent for Controller {
             "interactive enrollment is not part of this test",
         ))
     }
-    async fn enroll_device(&self, _: Request<EnrollDeviceRequest>) -> Reply<EnrollResponse> {
+    async fn enroll_device(&self, request: Request<EnrollDeviceRequest>) -> Reply<EnrollResponse> {
+        if let Some(enroll_device_request::Credential::EnrollmentToken(_)) =
+            request.get_ref().credential
+        {
+            let _ = self.events.send(Event::TokenEnrollmentRequested);
+            return Err(tonic::Status::unauthenticated("enrollment token rejected"));
+        }
         Err(tonic::Status::unimplemented("not used"))
     }
     async fn renew_device_certificate(
@@ -58,13 +66,15 @@ impl FleetAgent for Controller {
         &self,
         request: Request<tonic::Streaming<AgentMessage>>,
     ) -> Reply<Self::ConnectStream> {
-        let token = request
-            .metadata()
-            .get("authorization")
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_owned();
+        // A token-enrolled device sends no access token; this controller no
+        // longer accepts its token.
+        let Some(token) = request.metadata().get("authorization") else {
+            let _ = self.events.send(Event::TokenDeviceRejected);
+            return Err(tonic::Status::unauthenticated(
+                "device enrollment token is no longer accepted",
+            ));
+        };
+        let token = token.to_str().unwrap().to_owned();
         if self.reject_fresh && token.starts_with("Bearer fresh-") {
             return Err(tonic::Status::unauthenticated("device was revoked"));
         }
@@ -121,6 +131,21 @@ impl Fixture {
         reject_fresh: bool,
         expire_first_fresh: bool,
     ) -> Self {
+        Self::launch(statuses, reject_fresh, expire_first_fresh, false).await
+    }
+
+    /// A device enrolled with an enrollment token, which the controller no
+    /// longer accepts.
+    async fn start_token_enrolled() -> Self {
+        Self::launch(vec![], false, false, true).await
+    }
+
+    async fn launch(
+        statuses: Vec<StatusCode>,
+        reject_fresh: bool,
+        expire_first_fresh: bool,
+        token_enrolled: bool,
+    ) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let refreshes = Arc::new(AtomicUsize::new(0));
         let calls = refreshes.clone();
@@ -162,7 +187,21 @@ impl Fixture {
             oauth_token_endpoint: token_endpoint,
             oauth_client_id: "test-client".to_owned(),
         };
+        let identity = if token_enrolled {
+            Identity {
+                oauth: None,
+                oauth_token_endpoint: String::new(),
+                oauth_client_id: String::new(),
+                ..identity
+            }
+        } else {
+            identity
+        };
         identity::save(&path.join("identity.json"), &identity).unwrap();
+        let enrollment_token_path = token_enrolled.then(|| path.join("enrollment-token"));
+        if let Some(token_path) = &enrollment_token_path {
+            std::fs::write(token_path, "signed-token").unwrap();
+        }
         let (events_sender, events) = mpsc::unbounded_channel();
         let controller = Controller {
             events: events_sender,
@@ -183,7 +222,7 @@ impl Fixture {
             ca_certificate_path: path.join("ca.pem"),
             heartbeat_interval: Duration::from_secs(30),
             device_authorization: false,
-            enrollment_token_path: None,
+            enrollment_token_path,
         };
         let state_dir = path.to_owned();
         let session_task = tokio::spawn(async move {
@@ -297,4 +336,20 @@ async fn accepted_stream_resets_recovery_for_the_next_token_expiry() {
     );
     assert_eq!(fixture.refreshes.load(Ordering::SeqCst), 2);
     assert_eq!(fixture.stored().oauth.unwrap().refresh_token, "rotated-2");
+}
+
+#[tokio::test]
+async fn rejected_token_device_reenrolls_without_reconnecting() {
+    let mut fixture = Fixture::start_token_enrolled().await;
+    assert!(matches!(
+        fixture.next_event().await,
+        Event::TokenDeviceRejected
+    ));
+    let event = fixture.next_event().await;
+    assert!(
+        matches!(event, Event::TokenEnrollmentRequested),
+        "a rejected token device must enroll again without reconnecting first: {event:?}"
+    );
+    assert_eq!(fixture.refreshes.load(Ordering::SeqCst), 0);
+    assert!(!fixture.directory.path().join("identity.json").exists());
 }
