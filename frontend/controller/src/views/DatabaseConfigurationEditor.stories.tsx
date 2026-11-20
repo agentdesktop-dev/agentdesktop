@@ -103,9 +103,7 @@ export const EditsAndSaves: Story = {
     await userEvent.click(
       canvas.getByRole("button", { name: "Review changes" }),
     );
-    await expect(
-      canvas.getByRole("heading", { name: "Review before saving" }),
-    ).toBeVisible();
+    await expect(canvas.getByRole("heading", { name: "Review" })).toBeVisible();
     await userEvent.click(
       canvas.getByRole("button", { name: "Save configuration" }),
     );
@@ -120,6 +118,9 @@ export const EditsAndSaves: Story = {
 export const BuilderPreservesUnmanagedYaml: Story = {
   play: async ({ canvas }) => {
     await userEvent.click(canvas.getByRole("tab", { name: "Builder" }));
+    await expect(
+      canvas.getByRole("heading", { name: "Preview" }),
+    ).toBeVisible();
     await userEvent.click(
       canvas.getByRole("button", { name: "Apply to draft" }),
     );

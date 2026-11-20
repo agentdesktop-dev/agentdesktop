@@ -1,4 +1,4 @@
-import { CircleAlert, Clock3, RotateCcw, Save } from "lucide-react";
+import { CircleAlert, RotateCcw, Save } from "lucide-react";
 import { useEffect, useState } from "react";
 import { parseDocument } from "yaml";
 
@@ -230,16 +230,12 @@ export function DatabaseConfigurationEditor({
   return (
     <div className="stack">
       <section className="section-intro config-page-intro">
-        <div>
-          <h2>Fleet configuration</h2>
-          <p>
-            Changes are recorded as revisions and sent to connected devices.
-          </p>
-        </div>
-        <div className="config-current-revision">
-          <span>Active revision</span>
-          <strong>{activeConfig.revision ?? "Not configured"}</strong>
-        </div>
+        <h2>Fleet configuration</h2>
+        <span className="config-current-revision">
+          {activeConfig.revision === null
+            ? "Not configured"
+            : `Revision ${activeConfig.revision}`}
+        </span>
       </section>
 
       {error && (
@@ -262,17 +258,15 @@ export function DatabaseConfigurationEditor({
         <section className="config-conflict" role="alert">
           <div>
             <strong>
-              Someone saved revision {conflict.revision} while you were editing.
+              Revision {conflict.revision} is newer than your draft.
             </strong>
             <p>
               {conflict.author?.display ??
                 conflict.author?.subject ??
-                "Another admin"}{" "}
-              saved it
+                "Another admin"}
               {conflict.created_at
-                ? ` at ${formatTimestamp(conflict.created_at)}`
+                ? ` · ${formatTimestamp(conflict.created_at)}`
                 : ""}
-              . Compare the latest configuration with your draft.
             </p>
           </div>
           <div className="config-conflict-actions">
@@ -329,13 +323,11 @@ export function DatabaseConfigurationEditor({
                   </button>
                 )}
               </div>
-              <span
-                className={
-                  dirty ? "config-draft-state dirty" : "config-draft-state"
-                }
-              >
-                {dirty ? "Unsaved changes" : "Up to date"}
-              </span>
+              {dirty && (
+                <span className="config-draft-state dirty" aria-live="polite">
+                  Unsaved
+                </span>
+              )}
             </header>
 
             <div
@@ -361,6 +353,7 @@ export function DatabaseConfigurationEditor({
               ) : builderConfig ? (
                 <ConfigurationView
                   key={`${baseRevision}-${tab}`}
+                  embedded
                   initialConfig={builderConfig}
                   onCopy={applyBuilderYaml}
                   copyLabel="Apply to draft"
@@ -376,10 +369,6 @@ export function DatabaseConfigurationEditor({
 
             {canUpdate && (
               <footer className="config-editor-footer">
-                <span>
-                  Based on revision {baseRevision}. Restore a past revision from
-                  history to create a new revision.
-                </span>
                 <button
                   type="button"
                   className="button primary"
@@ -397,15 +386,13 @@ export function DatabaseConfigurationEditor({
             <section className="config-review">
               <div className="config-review-heading">
                 <div>
-                  <h3>Review before saving</h3>
+                  <h3>Review</h3>
                   <p>
                     {devicesLoading
-                      ? "Checking connected devices…"
+                      ? "Checking device status…"
                       : devicesError
-                        ? `Device rollout status could not be loaded: ${devicesError} The change will still be sent to connected devices.`
-                        : `${devicesOnline} connected ${
-                            devicesOnline === 1 ? "device will" : "devices will"
-                          } receive this change right away.`}
+                        ? `Device status unavailable: ${devicesError} Saving still updates connected devices.`
+                        : `${devicesOnline} online · updates now`}
                   </p>
                 </div>
                 <button
@@ -417,15 +404,20 @@ export function DatabaseConfigurationEditor({
                 </button>
               </div>
               <DiffView before={baseYaml} after={draft} />
-              <label className="field config-message-field">
-                <span>Revision message (optional)</span>
-                <input
-                  maxLength={1024}
-                  value={message}
-                  onChange={(event) => setMessage(event.target.value)}
-                  placeholder="Describe this change"
-                />
-              </label>
+              <details className="config-message-disclosure">
+                <summary>
+                  {message.trim() ? "Edit revision note" : "Add revision note"}
+                </summary>
+                <label className="field config-message-field">
+                  <span className="sr-only">Revision note</span>
+                  <input
+                    maxLength={1024}
+                    value={message}
+                    onChange={(event) => setMessage(event.target.value)}
+                    placeholder="Optional"
+                  />
+                </label>
+              </details>
               <div className="config-review-actions">
                 <button
                   type="button"
@@ -465,19 +457,13 @@ export function DatabaseConfigurationEditor({
           aria-label="Configuration revision history"
         >
           <header className="config-history-header">
-            <div>
-              <h3>Revision history</h3>
-              <p>Restoring creates a new revision.</p>
-            </div>
-            <Clock3 size={16} aria-hidden="true" />
+            <h3>Revision history</h3>
           </header>
           {historyError && (
             <p className="config-history-error">{historyError}</p>
           )}
           {!historyError && history.length === 0 && !historyLoading && (
-            <p className="config-history-empty">
-              No revisions yet. Save a configuration to start the history.
-            </p>
+            <p className="config-history-empty">No saved revisions.</p>
           )}
           <ol className="config-history-list">
             {history.map((revision) => (
@@ -496,17 +482,26 @@ export function DatabaseConfigurationEditor({
                   }
                 >
                   <strong>Revision {revision.revision}</strong>
-                  <span>
-                    {revision.author.display ?? revision.author.subject}
+                  {revision.message && (
+                    <small
+                      className="config-history-message"
+                      title={revision.message}
+                    >
+                      {revision.message}
+                    </small>
+                  )}
+                  <span className="config-history-meta">
+                    <span>
+                      {revision.author.display ?? revision.author.subject}
+                    </span>
+                    <time
+                      dateTime={new Date(
+                        revision.created_at * 1000,
+                      ).toISOString()}
+                    >
+                      {formatTimestamp(revision.created_at)}
+                    </time>
                   </span>
-                  <time
-                    dateTime={new Date(
-                      revision.created_at * 1000,
-                    ).toISOString()}
-                  >
-                    {formatTimestamp(revision.created_at)}
-                  </time>
-                  {revision.message && <small>{revision.message}</small>}
                 </button>
               </li>
             ))}
@@ -525,7 +520,16 @@ export function DatabaseConfigurationEditor({
           )}
           {selectedRevision !== null && (
             <section className="config-history-detail">
-              <h4>Revision {selectedRevision}</h4>
+              <div className="config-history-detail-heading">
+                <h4>Revision {selectedRevision}</h4>
+                {selectedRevision === 1 ? (
+                  <span>Initial</span>
+                ) : (
+                  previousRevisionData && (
+                    <span>vs. r{previousRevisionData.revision}</span>
+                  )
+                )}
+              </div>
               {selectedRevisionError && (
                 <p className="config-history-error">{selectedRevisionError}</p>
               )}
@@ -533,10 +537,7 @@ export function DatabaseConfigurationEditor({
               {selectedRevisionData && (
                 <>
                   {selectedRevision === 1 ? (
-                    <>
-                      <p>Diff against the initial configuration.</p>
-                      <DiffView before="" after={selectedRevisionData.yaml} />
-                    </>
+                    <DiffView before="" after={selectedRevisionData.yaml} />
                   ) : previousRevisionLoading ? (
                     <p>Loading revision {selectedRevision - 1}…</p>
                   ) : previousRevisionError ? (
@@ -545,15 +546,10 @@ export function DatabaseConfigurationEditor({
                       {previousRevisionError}
                     </p>
                   ) : previousRevisionData ? (
-                    <>
-                      <p>
-                        Diff against revision {previousRevisionData.revision}
-                      </p>
-                      <DiffView
-                        before={previousRevisionData.yaml}
-                        after={selectedRevisionData.yaml}
-                      />
-                    </>
+                    <DiffView
+                      before={previousRevisionData.yaml}
+                      after={selectedRevisionData.yaml}
+                    />
                   ) : (
                     <p className="config-history-error" role="alert">
                       The previous revision is unavailable.
