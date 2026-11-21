@@ -321,7 +321,15 @@ and no user has signed in.
 To revoke a token, add its `jti` to the issuer's `revokedIds` and restart the
 controller. The token no longer enrolls devices, and the devices it enrolled
 are rejected as `Unauthenticated`. Removing the issuer rejects every device
-it enrolled. To remove one device, delete it in the controller UI.
+it enrolled. A rejected daemon discards its identity and retries enrollment
+with backoff. It reads the token file on every attempt, so it enrolls again
+once the file holds a token the controller accepts.
+
+Deleting a token-enrolled device in the controller UI removes its record but
+does not keep the device out. The controller rejects the device's next
+`Connect` as an unknown device, so the daemon discards its identity and
+enrolls again with the same token, under a new device ID. To keep a device
+out, remove the token file from it before deleting it, or revoke the token.
 
 ### Controller validation
 
@@ -441,7 +449,7 @@ device identity.
 | Enrollment fails (IdP error, state mismatch, timeout, controller rejects) | Retry with backoff. Status returns to `starting`. A daemon with an enrollment token never falls back to sign-in. |
 | IdP rejects the refresh token | Delete the local identity and enroll again. The app reports the session as expired. |
 | Token refresh fails because of the network or an IdP outage | Keep the identity and retry with backoff. |
-| Controller returns `Unauthenticated` on the `Connect` stream, at open or later (unknown device certificate, or the IdP rejects the access token) | Delete the local identity and enroll again. |
+| Controller returns `Unauthenticated` on the `Connect` stream, at open or later (unknown device certificate, the IdP rejects the access token, or the device's enrollment token is no longer accepted) | Delete the local identity and enroll again. A daemon with an enrollment token enrolls again with the token file. |
 | Controller returns another error, such as `PermissionDenied` (subject mismatch) or `Unavailable` (IdP unreachable at open), or the stream closes | Keep the identity and reconnect with backoff. |
 | Certificate renewal fails | Keep the current certificate and try again before the next session. |
 
