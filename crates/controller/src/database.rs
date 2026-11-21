@@ -559,6 +559,42 @@ impl Database {
         }))
     }
 
+    /// IDs and hostnames of the devices last seen before `seen_before` (Unix
+    /// seconds), or, for a device that never connected, enrolled before it.
+    pub async fn inactive_devices(
+        &self,
+        seen_before: i64,
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        sqlx::query_as(
+            "SELECT id, hostname FROM devices
+             WHERE COALESCE(last_seen_at, created_at) < $1
+             ORDER BY id ASC",
+        )
+        .bind(seen_before)
+        .fetch_all(&self.pool)
+        .await
+        .context("list inactive devices")
+    }
+
+    /// Deletes `device_id` only if it is still inactive in the sense of
+    /// [`Self::inactive_devices`], so a device that connected since it was
+    /// listed is kept. Returns whether a record was deleted.
+    pub async fn delete_inactive_device(
+        &self,
+        device_id: &str,
+        seen_before: i64,
+    ) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM devices WHERE id = $1 AND COALESCE(last_seen_at, created_at) < $2",
+        )
+        .bind(device_id)
+        .bind(seen_before)
+        .execute(&self.pool)
+        .await
+        .context("delete inactive device")?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn delete_device(&self, device_id: &str) -> anyhow::Result<bool> {
         let result = sqlx::query("DELETE FROM devices WHERE id = $1")
             .bind(device_id)

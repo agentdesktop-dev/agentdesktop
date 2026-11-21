@@ -50,6 +50,8 @@
 |`gatewayListener.limits.maxConnections`|integer|Open gateway connections allowed in total. At the limit, the connection idle the longest is closed to admit a new one. Defaults to `1024`.|
 |`gatewayListener.listen`|string|Address on which the gateway listener accepts connections. Defaults to `127.0.0.1:8444`.|
 |`gatewayListener.tls`|boolean|Serve HTTPS with the controller certificate from `tls` instead of plain HTTP. Use HTTPS unless gateways reach the listener over loopback or a trusted network: whoever can change the keys a gateway fetches can forge credentials it accepts.|
+|`inactiveDevices`|object|Removal of device records the controller has not heard from for a while, such as the record a device leaves behind when it enrolls again. Disabled when unset: device records are kept until deleted.|
+|`inactiveDevices.removeAfter`|string|Remove a device record when the device has not connected or sent a heartbeat for this long, for example `30days`. At least `1day`.<br><br>A device with an open stream to this controller is never removed. A removed device that comes back is rejected as unknown, and enrolls again under a new device ID, as after a deletion in the UI; its usage records are kept.|
 |`oidc`|object|OpenID Connect settings used for device enrollment and authorization.|
 |`oidc.clientId`|string|Public OpenID Connect client identifier.|
 |`oidc.issuer`|string|Exact OpenID Connect issuer URL.|
