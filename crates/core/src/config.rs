@@ -526,6 +526,9 @@ pub struct ControllerConfig {
     /// Token and cost collection from agentgateway access logs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<ControllerUsageConfig>,
+    /// Removal of device records the controller has not heard from for a while, such as the record a device leaves behind when it enrolls again. Disabled when unset: device records are kept until deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inactive_devices: Option<ControllerInactiveDevicesConfig>,
     /// TLS identities used by the device-facing fleet API.
     ///
     /// A string selects a directory containing `controller.pem`,
@@ -842,6 +845,34 @@ pub struct ControllerDaemonConfig {
     /// Monotonically increasing revision assigned to the daemon configuration.
     #[serde(default = "default_daemon_config_revision")]
     pub revision: u64,
+}
+
+/// Removal of device records that have been inactive for a while.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerInactiveDevicesConfig {
+    /// Remove a device record when the device has not connected or sent a heartbeat for this long, for example `30days`. At least `1day`.
+    ///
+    /// A device with an open stream to this controller is never removed. A removed device that comes back is rejected as unknown, and enrolls again under a new device ID, as after a deletion in the UI; its usage records are kept.
+    #[serde(with = "crate::serdes::duration")]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub remove_after: Duration,
+}
+
+impl ControllerInactiveDevicesConfig {
+    /// The shortest `removeAfter`. Heartbeats carry the device's clock, so a
+    /// short value could remove a device whose clock is behind; a day also
+    /// leaves room for a laptop that is closed overnight.
+    pub const MINIMUM_REMOVE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+
+    /// Fails when `removeAfter` is shorter than [`Self::MINIMUM_REMOVE_AFTER`].
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.remove_after < Self::MINIMUM_REMOVE_AFTER {
+            anyhow::bail!("inactiveDevices.removeAfter must be at least 1day");
+        }
+        Ok(())
+    }
 }
 
 /// Settings for issuing short-lived LLM gateway JWTs.
@@ -1771,6 +1802,9 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
         if zero {
             anyhow::bail!("{field} must be greater than zero");
         }
+    }
+    if let Some(inactive) = &config.inactive_devices {
+        inactive.validate()?;
     }
     Ok(config)
 }
@@ -2750,6 +2784,35 @@ gatewayJwt:
             "{error}"
         );
         assert!(parse_controller(&format!("{base}gatewayListener:\n  path: /jwks\n")).is_err());
+    }
+
+    #[test]
+    fn controller_inactive_device_removal_is_off_by_default_and_at_least_a_day() {
+        let base = r#"
+tls: /etc/agentdesktop/tls
+oidc:
+  issuer: https://idp.example.com
+  clientId: agentdesktop
+"#;
+        assert!(parse_controller(base).unwrap().inactive_devices.is_none());
+
+        let inactive =
+            parse_controller(&format!("{base}inactiveDevices:\n  removeAfter: 30days\n"))
+                .expect("30 days")
+                .inactive_devices
+                .expect("inactiveDevices set");
+        assert_eq!(
+            inactive.remove_after,
+            std::time::Duration::from_secs(30 * 24 * 60 * 60)
+        );
+        parse_controller(&format!("{base}inactiveDevices:\n  removeAfter: 1day\n"))
+            .expect("the minimum");
+
+        let error = parse_controller(&format!("{base}inactiveDevices:\n  removeAfter: 12h\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("inactiveDevices.removeAfter"), "{error}");
+        assert!(parse_controller(&format!("{base}inactiveDevices: {{}}\n")).is_err());
     }
 
     #[test]

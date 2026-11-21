@@ -608,6 +608,15 @@ impl DeviceStreams {
         f(device)
     }
 
+    /// Whether `device_id` has an open `Connect` stream to this controller.
+    pub(crate) fn has_open_stream(&self, device_id: &str) -> bool {
+        self.devices
+            .lock()
+            .expect("device stream registry lock poisoned")
+            .get(device_id)
+            .is_some_and(|device| device.current.is_some())
+    }
+
     /// Admits one more `Connect` from `device_id`, or rejects it with
     /// `RESOURCE_EXHAUSTED` when the device opens streams too often. Call this
     /// before any per-stream work, such as checking the access token. A stream
