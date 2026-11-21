@@ -31,6 +31,7 @@ use crate::{
         DeviceStream, DeviceStreams, EnrollmentLimiter, FleetLimits, StreamEvent, ThrottledWarning,
     },
     gateway_jwt::GatewayJwtIssuer,
+    metrics::{self, Metrics},
     oidc::{CompletedEnrollment, EnrollmentCredential, OidcPrincipal, OidcProvider},
 };
 
@@ -45,6 +46,7 @@ pub struct FleetAgentService {
     usage_enabled: bool,
     enrollment: EnrollmentLimiter,
     device_streams: DeviceStreams,
+    metrics: Metrics,
 }
 
 impl FleetAgentService {
@@ -69,12 +71,19 @@ impl FleetAgentService {
             usage_enabled: false,
             enrollment: EnrollmentLimiter::new(limits),
             device_streams: DeviceStreams::new(limits),
+            metrics: Metrics::default(),
         }
     }
 
     /// Accepts operator-signed enrollment tokens in place of a user sign-in.
     pub fn with_enrollment_tokens(mut self, tokens: Option<EnrollmentTokens>) -> Self {
         self.enrollment_tokens = tokens;
+        self
+    }
+
+    /// Reports stream and telemetry activity to `metrics`.
+    pub fn with_metrics(mut self, metrics: Metrics) -> Self {
+        self.metrics = metrics;
         self
     }
 
@@ -297,10 +306,13 @@ impl FleetAgent for FleetAgentService {
             stream: permit.open(request),
             responses,
             database: self.database.clone(),
+            metrics: self.metrics.clone(),
             access,
         };
         tokio::spawn(session.run());
-        Ok(Response::new(Box::pin(ReceiverStream::new(receiver))))
+        Ok(Response::new(Box::pin(
+            self.metrics.track_stream(ReceiverStream::new(receiver)),
+        )))
     }
 }
 
@@ -317,6 +329,7 @@ struct ConnectSession {
     responses: mpsc::Sender<Result<ControllerMessage, Status>>,
     daemon_updates: watch::Receiver<Option<DaemonConfig>>,
     database: Database,
+    metrics: Metrics,
     /// The identity provider and the access token the stream opened with.
     /// `None` for a device enrolled with a token.
     access: Option<(OidcProvider, String)>,
@@ -446,7 +459,14 @@ impl ConnectSession {
                 "hello does not match the device certificate",
             ));
         }
-        if let Err(error) = handle_agent_message(&self.database, &self.device_id, message).await {
+        let message_type = message_type(&message);
+        let stored =
+            handle_agent_message(&self.database, &self.metrics, &self.device_id, message).await;
+        self.metrics.message(
+            message_type,
+            stored.is_err().then_some(metrics::message::STORE_FAILED),
+        );
+        if let Err(error) = stored {
             error!(%error, device_id = %self.device_id, "failed to store device state");
             return ControlFlow::Break(());
         }
@@ -663,8 +683,23 @@ fn device_id_from_certificate(certificate_der: &[u8]) -> Result<String, Status> 
     Ok(device_id.to_owned())
 }
 
+/// The `message.type` attribute for a device message: a constant, never
+/// anything the device sent.
+fn message_type(message: &AgentMessage) -> &'static str {
+    use metrics::message;
+    match &message.message {
+        Some(agent_message::Message::Hello(_)) => message::HELLO,
+        Some(agent_message::Message::Heartbeat(_)) => message::HEARTBEAT,
+        Some(agent_message::Message::Inventory(_)) => message::INVENTORY,
+        Some(agent_message::Message::ConfigStatus(_)) => message::CONFIG_STATUS,
+        Some(agent_message::Message::Telemetry(_)) => message::TELEMETRY,
+        None => message::OTHER,
+    }
+}
+
 async fn handle_agent_message(
     database: &Database,
+    metrics: &Metrics,
     device_id: &str,
     message: AgentMessage,
 ) -> anyhow::Result<()> {
@@ -720,7 +755,8 @@ async fn handle_agent_message(
             }
         }
         Some(agent_message::Message::Telemetry(event)) => {
-            database.insert_telemetry(device_id, &event).await?;
+            let event_type = database.insert_telemetry(device_id, &event).await?;
+            metrics.telemetry_event(event_type);
             debug!(device_id, "stored telemetry event");
         }
         None => {}
