@@ -1,8 +1,9 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
-# The real CLI is an npm package that needs Node. Discovery reads the
-# `@github/copilot` manifest next to the launcher and never runs the tool, so
-# an npm-shaped install of a stand-in launcher exercises the same code path:
+# The real CLI is an npm package that needs Node. Discovery never runs the
+# tool. With no package cache in this image it reads the `@github/copilot`
+# manifest next to the launcher, so an npm-shaped install of a stand-in
+# launcher exercises the same code path:
 # `<prefix>/bin/copilot` -> `<prefix>/lib/node_modules/@github/copilot/bin/copilot`.
 ARG COPILOT_VERSION=1.0.88
 RUN groupadd --system agentdesktop \

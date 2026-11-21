@@ -221,6 +221,94 @@ fn npm_version_ignores_a_manifest_of_another_package() {
     assert_eq!(discovery::npm_version(&dir.path().join("copilot")), None);
 }
 
+fn cached_build(root: &std::path::Path, platform: &str, version: &str, complete: bool) {
+    let build = root.join(platform).join(version);
+    fs::create_dir_all(&build).unwrap();
+    if complete {
+        fs::write(build.join("app.js"), "").unwrap();
+    }
+}
+
+fn cache_platform() -> String {
+    format!("{}-arm64", discovery::CACHE_PLATFORM)
+}
+
+#[test]
+fn cached_build_version_is_the_newest_complete_build() {
+    let cache = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    cached_build(cache.path(), &cache_platform(), "1.0.88", true);
+    cached_build(cache.path(), &cache_platform(), "1.0.9", true);
+    cached_build(other.path(), "universal", "1.0.114", true);
+    // Still downloading, staged elsewhere, or built for another platform.
+    cached_build(cache.path(), &cache_platform(), "1.0.200", false);
+    cached_build(cache.path(), "tmp", "1.0.300", true);
+    cached_build(cache.path(), "other-arm64", "1.0.400", true);
+    cached_build(cache.path(), &cache_platform(), "latest", true);
+
+    let roots = [cache.path().to_path_buf(), other.path().to_path_buf()];
+    assert_eq!(
+        discovery::cached_build_version(&roots).as_deref(),
+        Some("1.0.114")
+    );
+}
+
+#[test]
+fn cached_build_version_ranks_a_pre_release_below_its_release() {
+    let cache = tempfile::tempdir().unwrap();
+    cached_build(cache.path(), &cache_platform(), "1.1.0-beta.2", true);
+    cached_build(cache.path(), &cache_platform(), "1.0.114", true);
+    let roots = [cache.path().to_path_buf()];
+    assert_eq!(
+        discovery::cached_build_version(&roots).as_deref(),
+        Some("1.1.0-beta.2")
+    );
+
+    // Pre-release numbers order numerically, not as text.
+    cached_build(cache.path(), &cache_platform(), "1.1.0-beta.10", true);
+    assert_eq!(
+        discovery::cached_build_version(&roots).as_deref(),
+        Some("1.1.0-beta.10")
+    );
+
+    cached_build(cache.path(), &cache_platform(), "1.1.0+build.7", true);
+    assert_eq!(
+        discovery::cached_build_version(&roots).as_deref(),
+        Some("1.1.0+build.7")
+    );
+}
+
+#[test]
+fn running_version_is_the_higher_of_the_cached_and_installed_builds() {
+    let version = |cached: Option<&str>, installed: Option<&str>| {
+        discovery::running_version(cached.map(str::to_owned), installed.map(str::to_owned))
+    };
+    // The CLI updated itself past the installed package.
+    assert_eq!(
+        version(Some("1.0.114"), Some("1.0.85")).as_deref(),
+        Some("1.0.114")
+    );
+    // The package was upgraded past the cache and has not run yet.
+    assert_eq!(
+        version(Some("1.0.114"), Some("1.0.120")).as_deref(),
+        Some("1.0.120")
+    );
+    assert_eq!(version(Some("1.0.114"), None).as_deref(), Some("1.0.114"));
+    assert_eq!(version(None, Some("1.0.85")).as_deref(), Some("1.0.85"));
+    assert_eq!(
+        version(Some("1.0.114"), Some("unknown")).as_deref(),
+        Some("1.0.114")
+    );
+    assert_eq!(version(None, None), None);
+}
+
+#[test]
+fn cached_build_version_is_none_without_a_cache() {
+    let cache = tempfile::tempdir().unwrap();
+    let roots = [cache.path().join("missing"), cache.path().to_path_buf()];
+    assert_eq!(discovery::cached_build_version(&roots), None);
+}
+
 #[test]
 fn npm_version_is_none_for_a_standalone_binary() {
     let dir = tempfile::tempdir().unwrap();

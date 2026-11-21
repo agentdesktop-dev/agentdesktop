@@ -476,9 +476,10 @@ in one-shot mode, so `daemon.llmProxy.listen` is refused together with
 point the CLI at. A running CLI session does not pick up a changed `providers.json`;
 start a new one. Each device's `providers.json` is tied to that device's
 pairing value, so after a re-enrollment the daemon rewrites it on the next
-apply. Discovery reports the CLI's version from the `@github/copilot` npm
-manifest next to the launcher; a standalone binary shows no version. The
-program cannot be applied with `--once`.
+apply. The CLI updates itself into a per-user package cache, so discovery
+reports the higher of the newest cached build and the `@github/copilot` npm
+manifest next to the launcher; a standalone binary that has never updated
+shows no version. The program cannot be applied with `--once`.
 
 ### Managed program: VS Code Copilot Chat on own models
 
