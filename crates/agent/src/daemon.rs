@@ -175,7 +175,7 @@ impl DaemonArgs {
                 state_dir: startup
                     .state_dir
                     .unwrap_or_else(|| PathBuf::from(agentdesktop_core::DEFAULT_STATE_DIR)),
-                socket,
+                socket: absolute_socket(socket)?,
                 oidc_callback_listen: startup.oidc_callback_listen,
                 llm_proxy_listen: None,
                 llm_proxy_client_id: llm_proxy_client_id.clone(),
@@ -251,11 +251,13 @@ impl DaemonArgs {
         let state_dir = startup
             .state_dir
             .unwrap_or_else(|| state_home.join("agentdesktop"));
-        let socket = if startup.socket.is_none() && socket == Path::new(DEFAULT_SOCKET_PATH) {
-            user_socket_path(&state_dir)
-        } else {
-            socket
-        };
+        let socket = absolute_socket(
+            if startup.socket.is_none() && socket == Path::new(DEFAULT_SOCKET_PATH) {
+                user_socket_path(&state_dir)
+            } else {
+                socket
+            },
+        )?;
         let claude_desktop_settings = user_claude_desktop_settings(&home, &config_home);
         Ok(ResolvedDaemonArgs {
             user: true,
@@ -343,6 +345,14 @@ fn home_directory() -> anyhow::Result<PathBuf> {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
         .context("--user requires HOME or USERPROFILE")
+}
+
+/// The socket path is written into the credential helper commands of managed
+/// tools, and each tool runs its helper from its own working directory. A path
+/// relative to the daemon's directory would point those helpers somewhere else.
+fn absolute_socket(socket: PathBuf) -> anyhow::Result<PathBuf> {
+    std::path::absolute(&socket)
+        .with_context(|| format!("resolve daemon.socket {}", socket.display()))
 }
 
 #[cfg(unix)]
@@ -2275,6 +2285,38 @@ programs:
             Ok(_) => panic!("resolve succeeded unexpectedly"),
             Err(error) => error,
         }
+    }
+
+    fn resolved_socket(user: bool, socket: Option<&str>) -> PathBuf {
+        let startup = config::DaemonStartupConfig {
+            socket: socket.map(PathBuf::from),
+            ..Default::default()
+        };
+        match daemon_args(user).resolve(
+            startup,
+            PathBuf::from("config.yaml"),
+            PathBuf::from(DEFAULT_SOCKET_PATH),
+        ) {
+            Ok(resolved) => resolved.socket,
+            Err(error) => panic!("resolve failed: {error:#}"),
+        }
+    }
+
+    #[test]
+    fn a_relative_socket_is_resolved_against_the_daemon_directory() {
+        let expected = std::env::current_dir().unwrap().join("ad.sock");
+        assert_eq!(resolved_socket(false, Some("ad.sock")), expected);
+        assert_eq!(resolved_socket(true, Some("ad.sock")), expected);
+    }
+
+    #[test]
+    fn an_absolute_or_default_socket_is_kept() {
+        let absolute = std::env::temp_dir().join("ad.sock");
+        assert_eq!(resolved_socket(false, absolute.to_str()), absolute,);
+        assert_eq!(
+            resolved_socket(false, None),
+            PathBuf::from(DEFAULT_SOCKET_PATH)
+        );
     }
 
     fn startup_with_llm_proxy(listen: &str) -> config::DaemonStartupConfig {
