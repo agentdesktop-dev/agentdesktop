@@ -316,12 +316,59 @@ any number of devices.
 Afterwards the device calls `Connect`, `RenewDeviceCertificate`, and
 `GetDeviceUsage` with its certificate alone. `GetLlmGatewayCredential` fails
 with `FAILED_PRECONDITION`, because the credential carries a user's identity
-and no user has signed in.
+and no user has signed in. See
+[Signing in on a token-enrolled device](#signing-in-on-a-token-enrolled-device).
 
 To revoke a token, add its `jti` to the issuer's `revokedIds` and restart the
 controller. The token no longer enrolls devices, and the devices it enrolled
 are rejected as `Unauthenticated`. Removing the issuer rejects every device
 it enrolled. To remove one device, delete it in the controller UI.
+
+### Signing in on a token-enrolled device
+
+A user can sign in on a device after it enrolled with a token. This gives the
+device a user, which is what `GetLlmGatewayCredential` needs. The device keeps
+its identity: signing in does not enroll it again, and its device ID and
+certificate do not change.
+
+`POST /v1/login` on the local API starts the sign-in and returns the URL
+where the user signs in. The desktop app's status page has a "Sign in" action
+for it, and `agentdesktop sign-in` does the same from a terminal. The daemon uses the same flow as
+for enrollment, the browser flow or, with `deviceAuthorization: true`, the
+device authorization flow. `GET /v1/enrollment` keeps reporting `enrolled`
+and adds a `user` field: `signedOut`, `awaitingAuthentication` (with the
+sign-in URL and, for device authorization, the user code), or `signedIn`.
+
+After the user has signed in, the daemon calls `AttachUser` with the ID token,
+over mTLS with the access token as Bearer. The controller:
+
+1. Requires the device to be enrolled with a token that it still accepts.
+2. Validates the ID token and the access token as it does for `EnrollDevice`.
+   The nonce of a browser sign-in must be the base64url SHA-256 of the
+   SubjectPublicKeyInfo in the device's certificate, which ties the sign-in to
+   this device.
+3. Stores the IdP issuer, the subject, and the ID token's claims with the
+   device, replacing a user who signed in before. Shared devices have one
+   device record and the user who signed in last.
+
+The daemon stores the user's tokens apart from the device identity, in
+`user-session.json` and the secret store. It sends the access token only on
+`GetLlmGatewayCredential`, which the controller checks against the signed-in
+user: `PERMISSION_DENIED` for another user, and `UNAUTHENTICATED` when the
+IdP rejects the token. `Connect`, `RenewDeviceCertificate`, and
+`GetDeviceUsage` still take the certificate alone, so the device keeps
+reporting when the user's session ends.
+
+`POST /v1/logout` (`agentdesktop sign-out`) on a token-enrolled device signs
+the user out and keeps the device enrolled. The daemon deletes the user's
+tokens and calls `DetachUser`, which clears the user at the controller. If the
+controller cannot be reached, it keeps naming the user on the device until the
+next sign-in or sign-out, but it issues no gateway credential, because that
+takes the user's access token.
+
+When the IdP rejects the user's refresh token, the daemon signs the user out
+locally and the next gateway credential request fails until the user signs in
+again.
 
 ### Controller validation
 
@@ -444,6 +491,7 @@ device identity.
 | Controller returns `Unauthenticated` on the `Connect` stream, at open or later (unknown device certificate, or the IdP rejects the access token) | Delete the local identity and enroll again. |
 | Controller returns another error, such as `PermissionDenied` (subject mismatch) or `Unavailable` (IdP unreachable at open), or the stream closes | Keep the identity and reconnect with backoff. |
 | Certificate renewal fails | Keep the current certificate and try again before the next session. |
+| On a token-enrolled device, the IdP rejects the signed-in user's refresh token | Sign the user out and keep the identity. Gateway credential requests fail until the user signs in again. |
 
 ## Logout and revocation
 
@@ -456,6 +504,10 @@ configuration is applied.
 Logout does not notify the controller, and the device record is kept. Gateway
 JWTs that were already issued remain valid at the gateway until they expire
 (5 minutes by default).
+
+On a device that enrolled with a token, logging out signs out the user and
+keeps the device enrolled (see
+[Signing in on a token-enrolled device](#signing-in-on-a-token-enrolled-device)).
 
 To cut off a user centrally, disable the user or revoke their session at the
 IdP. The controller rejects the next authenticated call and closes open

@@ -89,6 +89,13 @@ export interface ManagedDeviceSnapshot {
   organizationName: string | null;
   enrollment: string;
   detail: string | null;
+  /**
+   * On a device enrolled with an enrollment token, whether a user is signed
+   * in. `null` on any other device, where the user who enrolled it is its user.
+   */
+  user: "signedOut" | "awaitingAuthentication" | "signedIn" | null;
+  /** The code to confirm when signing in with device authorization. */
+  userCode: string | null;
 }
 
 export interface McpServer {

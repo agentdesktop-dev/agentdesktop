@@ -29,6 +29,7 @@ use crate::{
     reconcile::{Reconciler, apply_program_choice, configured_programs},
     remote, subscription,
     tick::{self, CurrentConfig, TickStatus},
+    user_session::UserSessions,
 };
 
 #[derive(Clone)]
@@ -42,6 +43,9 @@ pub struct AppState {
     pub oidc_callback_listen: Option<SocketAddr>,
     pub telemetry: Option<mpsc::Sender<TelemetryEvent>>,
     pub logout: Option<mpsc::Sender<remote::LogoutRequest>>,
+    /// Signs a user in and out on a device enrolled with an enrollment
+    /// token; `None` without a controller.
+    pub user_sessions: Option<UserSessions>,
     /// This device's usage, recorded by the daemon itself (`daemon.usage`).
     pub usage: Option<UsageStore>,
     /// The device user's program choice; `None` serves no program routes.
@@ -206,6 +210,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/remote-config", get(remote_config))
         .route("/v1/discovery", get(discover))
         .route("/v1/enrollment", get(enrollment))
+        .route("/v1/login", post(login))
         .route("/v1/logout", post(logout))
         .route("/v1/telemetry", post(telemetry))
         .route("/v1/llm-gateway/credential", get(llm_gateway_credential))
@@ -391,10 +396,49 @@ async fn discover(State(state): State<AppState>) -> Json<Discovery> {
 }
 
 async fn enrollment(State(state): State<AppState>) -> Json<EnrollmentStatus> {
-    Json(state.enrollment.get().await)
+    Json(match &state.user_sessions {
+        Some(sessions) => sessions.status().await,
+        None => state.enrollment.get().await,
+    })
+}
+
+/// Starts the sign-in of a user on a device enrolled with an enrollment
+/// token, and answers with the page where the user signs in.
+async fn login(
+    State(state): State<AppState>,
+) -> Result<Json<EnrollmentStatus>, (StatusCode, String)> {
+    let sessions = state.user_sessions.as_ref().ok_or_else(|| {
+        (
+            StatusCode::FAILED_DEPENDENCY,
+            "daemon has no controller to sign in to".to_owned(),
+        )
+    })?;
+    if sessions.status().await.user.is_none() {
+        return Err((
+            StatusCode::CONFLICT,
+            "only a device enrolled with an enrollment token has a separate user sign-in"
+                .to_owned(),
+        ));
+    }
+    sessions
+        .sign_in()
+        .await
+        .map(Json)
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("{error:#}")))
 }
 
 async fn logout(State(state): State<AppState>) -> Result<StatusCode, (StatusCode, String)> {
+    // A device enrolled with an enrollment token stays enrolled: logging out
+    // signs out its user. The device identity is not the user's to remove.
+    if let Some(sessions) = &state.user_sessions
+        && sessions.status().await.user.is_some()
+    {
+        sessions
+            .sign_out()
+            .await
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")))?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
     let sender = state.logout.as_ref().ok_or_else(|| {
         (
             StatusCode::FAILED_DEPENDENCY,
@@ -439,8 +483,8 @@ async fn llm_gateway_credential(
     })?;
     // Pi executes its helper on every request. Reuse the proxy's 60 s cache
     // for controller identities; OIDC and subscription flows keep their own
-    // refresh behavior. Read identity.json on each call so logout/re-enrollment
-    // cannot reuse another device's token.
+    // refresh behavior. Read the credential's owner on each call so a logout,
+    // a re-enrollment or another user's sign-in cannot reuse an earlier token.
     if !program_uses_subscription(&effective, &query.client_id)
         && let Some(gateway) = effective.llm_gateway.as_ref()
         && let Some(LlmGatewayAuthentication::ControllerJwt {
@@ -448,8 +492,7 @@ async fn llm_gateway_credential(
             allowed_client_ids,
         }) = &gateway.authentication
         && allowed_client_ids.contains(&query.client_id)
-        && let Ok(Some(device_id)) =
-            crate::identity::load_device_id(&state.state_dir.join("identity.json"))
+        && let Some(device_id) = crate::user_session::credential_owner(&state.state_dir)
     {
         let key = format!("{}\0{}\0{audience}", query.client_id, gateway.url);
         return cache
@@ -784,6 +827,7 @@ mod tests {
             oidc_callback_listen: None,
             telemetry: None,
             logout: None,
+            user_sessions: None,
             usage: None,
             programs: None,
         };

@@ -481,14 +481,17 @@ pub struct ControllerConnectionConfig {
     /// any other device. The identity provider must support device
     /// authorization for the controller's client. The daemon must be able to
     /// reach the IdP's device-authorization and token endpoints directly.
+    ///
+    /// With `enrollmentTokenPath`, this is how a user signs in on the device
+    /// after it enrolled.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub device_authorization: bool,
     /// Path to a file holding an enrollment token signed by an issuer the
     /// controller trusts (`enrollmentTokens`).
     ///
     /// The daemon enrolls with this token instead of a user sign-in, so a
-    /// device management system can enroll devices unattended. Cannot be
-    /// combined with `deviceAuthorization`.
+    /// device management system can enroll devices unattended. A user can
+    /// sign in on the device afterwards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enrollment_token_path: Option<PathBuf>,
 }
@@ -1855,11 +1858,6 @@ fn parse_local_daemon(contents: &str) -> anyhow::Result<DaemonConfig> {
         if controller.ca_certificate_path.as_os_str().is_empty() {
             anyhow::bail!("controller.caCertificatePath cannot be empty");
         }
-        if controller.enrollment_token_path.is_some() && controller.device_authorization {
-            anyhow::bail!(
-                "controller.enrollmentTokenPath cannot be combined with deviceAuthorization"
-            );
-        }
     }
     if config.inventory_interval.is_zero() {
         anyhow::bail!("inventoryInterval must be greater than zero");
@@ -2625,9 +2623,10 @@ controller:
             ))
         );
 
-        let error = parse_daemon(&format!("{token}  deviceAuthorization: true\n"))
-            .expect_err("enrollment token combined with device authorization");
-        assert!(error.to_string().contains("enrollmentTokenPath"), "{error}");
+        // Device authorization then selects how a user signs in afterwards.
+        let daemon = parse_daemon(&format!("{token}  deviceAuthorization: true\n"))
+            .expect("enrollment token with device authorization");
+        assert!(daemon.controller.unwrap().device_authorization);
     }
 
     #[test]

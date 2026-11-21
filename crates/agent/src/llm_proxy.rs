@@ -681,22 +681,20 @@ async fn forward(
     );
     // Only controller-issued credentials are cached, keyed by client id,
     // gateway and audience, and tagged with the enrolled device so a logout or
-    // re-enrollment (a different identity.json) never reuses an old token. The
-    // device id is read from identity.json alone; the secret store is not opened.
+    // re-enrollment (a different identity.json) never reuses an old token. On a
+    // device enrolled with an enrollment token the tag also names the user's
+    // sign-in. The tag is read from metadata alone; the secret store is not opened.
     let cache_key = match &gateway.authentication {
         Some(agentdesktop_core::config::LlmGatewayAuthentication::ControllerJwt {
             audience,
             ..
-        }) => crate::identity::load_device_id(&state.state_dir.join("identity.json"))
-            .ok()
-            .flatten()
-            .map(|device_id| {
-                let mut key = format!("{client_id}\u{0}{}\u{0}{audience}", gateway.url);
-                if subscription {
-                    key.push_str("\0subscription");
-                }
-                (key, device_id)
-            }),
+        }) => crate::user_session::credential_owner(&state.state_dir).map(|device_id| {
+            let mut key = format!("{client_id}\u{0}{}\u{0}{audience}", gateway.url);
+            if subscription {
+                key.push_str("\0subscription");
+            }
+            (key, device_id)
+        }),
         _ => None,
     };
     let mut retried = false;

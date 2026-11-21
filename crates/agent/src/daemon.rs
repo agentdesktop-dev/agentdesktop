@@ -38,7 +38,7 @@ use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use crate::windows_security::SecurityDescriptor;
 use crate::{
     api, enrollment::EnrollmentState, gateway_oidc, inventory_watch::InventoryWatch, llm_proxy,
-    reconcile, remote, secure_fs,
+    reconcile, remote, secure_fs, user_session::UserSessions,
 };
 
 #[cfg(unix)]
@@ -630,6 +630,16 @@ where
         ));
     }
     let has_controller = config.controller.is_some();
+    let user_sessions = config.controller.clone().map(|controller| {
+        UserSessions::new(
+            controller,
+            args.state_dir.clone(),
+            enrollment.clone(),
+            args.oidc_callback_listen,
+            // As for enrollment: a system-mode daemon's browser is not the user's.
+            args.user,
+        )
+    });
     let state = api::AppState {
         config,
         daemon_info,
@@ -640,6 +650,7 @@ where
         oidc_callback_listen: args.oidc_callback_listen,
         telemetry,
         logout,
+        user_sessions,
         usage: usage_store,
         programs: Some(program_control),
     };
@@ -1694,6 +1705,7 @@ programs:
             oidc_callback_listen: None,
             telemetry: None,
             logout: None,
+            user_sessions: None,
             usage: None,
             programs: None,
         });
@@ -1833,6 +1845,7 @@ programs:
             oidc_callback_listen: None,
             telemetry: None,
             logout: None,
+            user_sessions: None,
             usage: store,
             programs: None,
         });
@@ -1919,6 +1932,7 @@ programs:
             oidc_callback_listen: None,
             telemetry: None,
             logout: None,
+            user_sessions: None,
             usage: None,
             programs: None,
         });

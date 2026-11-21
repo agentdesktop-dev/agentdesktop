@@ -637,7 +637,7 @@ fn is_unauthenticated(error: &anyhow::Error) -> bool {
         .is_some_and(|status| status.code() == tonic::Code::Unauthenticated)
 }
 
-fn is_oauth_refresh_rejected(error: &anyhow::Error) -> bool {
+pub(crate) fn is_oauth_refresh_rejected(error: &anyhow::Error) -> bool {
     error
         .chain()
         .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
@@ -672,8 +672,14 @@ pub async fn llm_gateway_credential(
         identity::load(&state_dir.join("identity.json"))?.context("device is not enrolled")?;
     let identity_path = state_dir.join("identity.json");
     refresh_oauth(&mut identity, &identity_path, false).await?;
-    // The refresh above is not cut off (its result is saved); the controller
-    // connection and call are bounded together.
+    // A device enrolled with an enrollment token has no user of its own; the
+    // credential is for the user signed in on it, if any.
+    let signed_in_user = match identity.oauth {
+        Some(_) => None,
+        None => crate::user_session::access_token(state_dir, &identity.device_id).await?,
+    };
+    // The refreshes above are not cut off (their results are saved); the
+    // controller connection and call are bounded together.
     let call = async {
         let mut client = client(controller, Some(&identity)).await?;
         let mut request = Request::new(LlmGatewayCredentialRequest {
@@ -681,6 +687,9 @@ pub async fn llm_gateway_credential(
             subscription,
         });
         authenticate_request(&identity, &mut request)?;
+        if let Some(access_token) = &signed_in_user {
+            set_access_token(&mut request, access_token)?;
+        }
         client
             .get_llm_gateway_credential(request)
             .await
@@ -1330,7 +1339,10 @@ fn authenticate_request<T>(identity: &Identity, request: &mut Request<T>) -> any
     let Some(oauth) = &identity.oauth else {
         return Ok(());
     };
-    let access_token = &oauth.access_token;
+    set_access_token(request, &oauth.access_token)
+}
+
+fn set_access_token<T>(request: &mut Request<T>, access_token: &str) -> anyhow::Result<()> {
     request.metadata_mut().insert(
         "authorization",
         format!("Bearer {access_token}")

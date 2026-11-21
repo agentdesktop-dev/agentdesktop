@@ -8,6 +8,10 @@ service FleetAgent {
   rpc RenewDeviceCertificate(RenewDeviceCertificateRequest) returns (DeviceCertificateResponse);
   rpc GetLlmGatewayCredential(LlmGatewayCredentialRequest) returns (LlmGatewayCredentialResponse);
   rpc GetDeviceUsage(DeviceUsageRequest) returns (DeviceUsageResponse);
+  // Signs a user in on a device that was enrolled with an enrollment token.
+  rpc AttachUser(AttachUserRequest) returns (AttachUserResponse);
+  // Signs out the user that AttachUser signed in.
+  rpc DetachUser(DetachUserRequest) returns (DetachUserResponse);
   rpc Connect(stream AgentMessage) returns (stream ControllerMessage);
 }
 
@@ -42,6 +46,20 @@ message EnrollDeviceRequest {
     string enrollment_token = 4;
   }
 }
+
+// Sent with the device certificate; bearer access token is in metadata. For a
+// browser sign-in, the ID token's nonce must be the base64url SHA-256 of the
+// device certificate's SubjectPublicKeyInfo
+// (agentdesktop_proto::enrollment_nonce), as it is for EnrollDevice.
+message AttachUserRequest {
+  string id_token = 1;
+}
+
+message AttachUserResponse {}
+
+message DetachUserRequest {}
+
+message DetachUserResponse {}
 
 message RenewDeviceCertificateRequest {
   bytes certificate_signing_request_der = 1;

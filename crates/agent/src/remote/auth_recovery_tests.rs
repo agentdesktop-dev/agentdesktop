@@ -53,6 +53,12 @@ impl FleetAgent for Controller {
     async fn get_device_usage(&self, _: Request<DeviceUsageRequest>) -> Reply<DeviceUsageResponse> {
         Err(tonic::Status::unimplemented("not used"))
     }
+    async fn attach_user(&self, _: Request<AttachUserRequest>) -> Reply<AttachUserResponse> {
+        Err(tonic::Status::unimplemented("not used"))
+    }
+    async fn detach_user(&self, _: Request<DetachUserRequest>) -> Reply<DetachUserResponse> {
+        Err(tonic::Status::unimplemented("not used"))
+    }
     type ConnectStream = ReceiverStream<Result<ControllerMessage, tonic::Status>>;
     async fn connect(
         &self,

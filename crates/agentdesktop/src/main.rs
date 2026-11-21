@@ -20,8 +20,8 @@ use agentdesktop_core::{
     DEFAULT_SOCKET_PATH, VERSION, client_socket_path,
     config::DaemonConfig,
     model::{
-        ControllerConnectionStatus, DaemonInfo, DeviceUsage, Discovery, EnrollmentStatus, Health,
-        ProgramChoice, ProgramManagement,
+        ControllerConnectionStatus, DaemonInfo, DaemonScope, DeviceUsage, Discovery,
+        EnrollmentStatus, Health, ProgramChoice, ProgramManagement,
     },
 };
 use clap::{Parser, Subcommand};
@@ -173,6 +173,11 @@ struct ManagedDeviceSnapshot {
     organization_name: Option<String>,
     enrollment: &'static str,
     detail: Option<String>,
+    /// On a device enrolled with an enrollment token, whether a user is
+    /// signed in (`EnrollmentStatus::user`); `None` on any other device.
+    user: Option<String>,
+    /// The code the user confirms when signing in with device authorization.
+    user_code: Option<String>,
 }
 
 #[cfg(target_os = "macos")]
@@ -484,6 +489,10 @@ fn managed_snapshot(configured: bool, status: Option<&EnrollmentStatus>) -> Mana
         organization_name: configured.then(|| "Managed organization".to_owned()),
         enrollment,
         detail,
+        user: status.and_then(|value| value.user.clone()),
+        user_code: status
+            .filter(|value| value.user.is_some())
+            .and_then(|value| value.user_code.clone()),
     }
 }
 
@@ -583,6 +592,29 @@ async fn logout_managed_device() -> Result<(), String> {
     client::post_json(&client_socket_path(), "/v1/logout", &())
         .await
         .map_err(|error| format!("{error:#}"))
+}
+
+/// Starts the sign-in of a user on a device enrolled with an enrollment
+/// token, and opens the sign-in page unless the daemon does.
+#[tauri::command]
+async fn sign_in_managed_device() -> Result<ManagedDeviceSnapshot, String> {
+    let endpoint = client_socket_path();
+    let config = daemon_config().await?;
+    let status: EnrollmentStatus = client::post(&endpoint, "/v1/login")
+        .await
+        .map_err(|error| format!("{error:#}"))?;
+    if let Some(url) = status.authorization_url.as_deref() {
+        // A user-mode daemon opens its own sign-in page for the browser flow.
+        // A system-mode daemon cannot, and device authorization opens nothing.
+        let daemon_opens_browser = status.user_code.is_none()
+            && client::get::<DaemonInfo>(&endpoint, "/v1/daemon-info")
+                .await
+                .is_ok_and(|info| info.scope == DaemonScope::User);
+        if !daemon_opens_browser {
+            open::that(url).map_err(|error| format!("could not open sign-in URL: {error}"))?;
+        }
+    }
+    Ok(managed_snapshot(config.controller.is_some(), Some(&status)))
 }
 
 #[tauri::command]
@@ -716,6 +748,7 @@ fn run_desktop() -> anyhow::Result<()> {
             get_discovery,
             get_device_usage,
             logout_managed_device,
+            sign_in_managed_device,
             get_program_management,
             set_program_choice,
             setup_managed_device
@@ -947,11 +980,13 @@ mod enrollment_tests {
                 status: "starting".to_owned(),
                 authorization_url: None,
                 user_code: None,
+                user: None,
             },
             EnrollmentStatus {
                 status: "awaitingAuthentication".to_owned(),
                 authorization_url: Some("https://login.example/authorize".to_owned()),
                 user_code: None,
+                user: None,
             },
         ]);
         let mut opened = Vec::new();
