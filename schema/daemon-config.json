@@ -62,7 +62,7 @@
       ]
     },
     "telemetry": {
-      "description": "Telemetry collected from managed developer tools.",
+      "description": "Telemetry collected from managed developer tools. Events go to the\ncontroller, so a local configuration file may set this only together\nwith `controller`.",
       "$ref": "#/$defs/TelemetryConfig"
     }
   },

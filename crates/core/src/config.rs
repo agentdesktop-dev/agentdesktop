@@ -28,7 +28,9 @@ pub struct DaemonConfig {
     /// Local execution sandbox required for managed developer tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<SandboxConfig>,
-    /// Telemetry collected from managed developer tools.
+    /// Telemetry collected from managed developer tools. Events go to the
+    /// controller, so a local configuration file may set this only together
+    /// with `controller`.
     #[serde(default, skip_serializing_if = "TelemetryConfig::is_empty")]
     pub telemetry: TelemetryConfig,
     /// Per-program settings reconciled on this device.
@@ -1614,8 +1616,21 @@ pub enum ProgramAuthentication {
 pub fn load_daemon(path: &Path) -> anyhow::Result<DaemonConfig> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("read configuration from {}", path.display()))?;
-    parse_local_daemon(&contents)
+    parse_daemon_file(&contents)
         .with_context(|| format!("parse configuration from {}", path.display()))
+}
+
+/// The daemon's own configuration file. A document the controller sends has no
+/// `controller` section, so the rule that ties telemetry to one applies only
+/// here.
+fn parse_daemon_file(contents: &str) -> anyhow::Result<DaemonConfig> {
+    let config = parse_local_daemon(contents)?;
+    if config.controller.is_none() && !config.telemetry.is_empty() {
+        anyhow::bail!(
+            "telemetry requires a controller; a daemon without one has nowhere to send the events"
+        );
+    }
+    Ok(config)
 }
 
 /// Loads and validates a controller YAML configuration file from `path`.
@@ -2541,6 +2556,26 @@ programs: { claudeCode: { useLlmGateway: false } }
             error.to_string().contains("only allowed in the local"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn telemetry_in_the_daemon_file_requires_a_controller() {
+        let telemetry = "telemetry:\n  events: [tool.use]\n";
+        let error = super::parse_daemon_file(telemetry).expect_err("no controller");
+        assert!(
+            error
+                .to_string()
+                .contains("telemetry requires a controller"),
+            "{error}"
+        );
+
+        let with_controller = format!(
+            "controller:\n  address: https://controller.example.com\n  caCertificatePath: controller-ca.pem\n{telemetry}"
+        );
+        super::parse_daemon_file(&with_controller).expect("telemetry with a controller");
+        // A document pushed by the controller carries no controller section.
+        super::parse_daemon(telemetry).expect("telemetry from the controller");
+        super::parse_daemon_file("programs: {}").expect("no telemetry");
     }
 
     #[test]
