@@ -19,6 +19,7 @@ import {
   saveSettings,
   setProgramChoice as sendProgramChoice,
   setupManagedDevice,
+  signInManagedDevice,
 } from "./backend";
 import type {
   Bootstrap,
@@ -178,9 +179,11 @@ export function useDesktopModel() {
   useEffect(() => {
     if (
       !managedDevice ||
-      !["pending", "issuing"].includes(managedDevice.enrollment)
+      (!["pending", "issuing"].includes(managedDevice.enrollment) &&
+        managedDevice.user !== "awaitingAuthentication")
     )
       return;
+    const wasSigningIn = managedDevice.user === "awaitingAuthentication";
     let active = true;
     let timeout: number | undefined;
     let polling = false;
@@ -210,7 +213,11 @@ export function useDesktopModel() {
           startTransition(() => {
             setManagedDevice(nextManagedDevice);
           });
-          if (nextManagedDevice.enrollment === "approved") {
+          if (wasSigningIn) {
+            if (nextManagedDevice.user === "signedIn") {
+              setNotice({ tone: "success", message: "Signed in" });
+            }
+          } else if (nextManagedDevice.enrollment === "approved") {
             setNotice({
               tone: "success",
               message: "Organization access is ready",
@@ -243,7 +250,7 @@ export function useDesktopModel() {
       stopPolling();
       document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
-  }, [managedDevice?.enrollment]);
+  }, [managedDevice?.enrollment, managedDevice?.user]);
 
   useEffect(() => {
     let active = true;
@@ -309,8 +316,32 @@ export function useDesktopModel() {
     });
   }
 
+  function signIn() {
+    setNotice(null);
+    startManaging(async () => {
+      try {
+        const nextManagedDevice = await signInManagedDevice();
+        setManagedDevice(nextManagedDevice);
+        setNotice({
+          tone: "success",
+          message:
+            nextManagedDevice.user === "signedIn"
+              ? "Signed in"
+              : nextManagedDevice.userCode
+                ? `Confirm the code ${nextManagedDevice.userCode} in your browser`
+                : "Continue signing in in your browser",
+        });
+      } catch (error: unknown) {
+        setNotice({ tone: "error", message: errorMessage(error) });
+      }
+    });
+  }
+
   function logout() {
     setNotice(null);
+    // On a device enrolled with an enrollment token, this signs the user out
+    // and the device stays enrolled.
+    const signingOutUser = managedDevice?.user != null;
     startLoggingOut(async () => {
       try {
         await logoutManagedDevice();
@@ -323,7 +354,9 @@ export function useDesktopModel() {
         setView("home");
         setNotice({
           tone: "success",
-          message: "Signed out of the organization on this device",
+          message: signingOutUser
+            ? "Signed out"
+            : "Signed out of the organization on this device",
         });
       } catch (error: unknown) {
         setNotice({ tone: "error", message: errorMessage(error) });
@@ -436,6 +469,7 @@ export function useDesktopModel() {
     setProgramChoice,
     settings,
     showUsage,
+    signIn,
     view,
   };
 }

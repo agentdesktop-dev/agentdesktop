@@ -70,12 +70,23 @@ pub fn is_unreadable(error: &anyhow::Error) -> bool {
 /// only the identity's *name* matters (cache tagging), so a keyring that is
 /// locked or unavailable does not turn a lookup into a failure.
 pub fn load_device_id(path: &Path) -> anyhow::Result<Option<String>> {
+    Ok(load_metadata(path)?.map(|stored| stored.device_id))
+}
+
+/// The enrolled device ID if the device was enrolled with an enrollment
+/// token, so no user enrolled it. Like [`load_device_id`], this does not open
+/// the secret store.
+pub fn load_token_enrolled_device_id(path: &Path) -> anyhow::Result<Option<String>> {
+    Ok(load_metadata(path)?
+        .filter(|stored| stored.oauth_client_id.is_empty())
+        .map(|stored| stored.device_id))
+}
+
+fn load_metadata(path: &Path) -> anyhow::Result<Option<StoredIdentity>> {
     match fs::read(path) {
-        Ok(contents) => {
-            let stored: StoredIdentity =
-                serde_json::from_slice(&contents).context("parse device identity")?;
-            Ok(Some(stored.device_id))
-        }
+        Ok(contents) => serde_json::from_slice(&contents)
+            .context("parse device identity")
+            .map(Some),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error).with_context(|| format!("read identity from {}", path.display())),
     }
@@ -195,6 +206,16 @@ pub fn delete(path: &Path, device_id: &str) -> anyhow::Result<()> {
             device_id,
             error = %format!("{error:#}"),
             "removed device identity, but some of its secrets could not be removed"
+        );
+    }
+    // A user signed in on the device was signed in on this identity.
+    if let Some(state_dir) = path.parent()
+        && let Err(error) = crate::user_session::forget(state_dir, device_id)
+    {
+        tracing::warn!(
+            device_id,
+            error = %format!("{error:#}"),
+            "removed device identity, but the session of the user signed in on it could not be removed"
         );
     }
     Ok(())

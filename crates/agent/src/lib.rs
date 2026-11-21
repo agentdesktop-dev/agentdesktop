@@ -19,6 +19,7 @@ pub mod secure_fs;
 pub mod subscription;
 mod subscription_oauth;
 mod tick;
+pub mod user_session;
 
 #[cfg(windows)]
 mod windows_security;

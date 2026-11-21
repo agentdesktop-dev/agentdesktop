@@ -14,6 +14,7 @@ import {
   reconnectingConnector,
   standaloneConnector,
   standaloneDaemonInfo,
+  tokenEnrolledDevice,
   unconfiguredDevice,
   usageReceiverOffDaemonInfo,
 } from "../stories/fixtures";
@@ -36,16 +37,73 @@ const meta = {
     connector: managedConnector,
     discovery: populatedDiscovery,
     isLoggingOut: false,
+    isSigningIn: false,
     managedDevice: approvedDevice,
     onCopy: fn(),
     onLogout: fn(),
+    onSignIn: fn(),
   },
 } satisfies Meta<typeof StatusView>;
 
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const ManagedReady: Story = {};
+export const ManagedReady: Story = {
+  play: async ({ canvas }) => {
+    // The user who enrolled the device is its user: nothing to sign in to.
+    await expect(
+      canvas.queryByRole("button", { name: "Sign in" }),
+    ).not.toBeInTheDocument();
+  },
+};
+
+export const TokenEnrolledSignedOut: Story = {
+  args: { managedDevice: tokenEnrolledDevice },
+  play: async ({ args, canvas }) => {
+    await expect(canvas.getByText("Approved")).toBeVisible();
+    await userEvent.click(canvas.getByRole("button", { name: "Sign in" }));
+    await expect(args.onSignIn).toHaveBeenCalledOnce();
+    // There is no user to sign out, and the device itself stays enrolled.
+    await userEvent.click(canvas.getByText("Advanced"));
+    await expect(
+      canvas.queryByRole("button", { name: "Sign out" }),
+    ).not.toBeInTheDocument();
+  },
+};
+
+export const TokenEnrolledAwaitingSignIn: Story = {
+  args: {
+    managedDevice: {
+      ...tokenEnrolledDevice,
+      user: "awaitingAuthentication",
+      userCode: "WDJB-MJHT",
+    },
+  },
+  play: async ({ canvas }) => {
+    await expect(
+      canvas.getByText("Confirm the code WDJB-MJHT in your browser"),
+    ).toBeVisible();
+    await expect(
+      canvas.getByRole("button", { name: "Open sign-in again" }),
+    ).toBeVisible();
+  },
+};
+
+export const TokenEnrolledSignedIn: Story = {
+  args: { managedDevice: { ...tokenEnrolledDevice, user: "signedIn" } },
+  play: async ({ args, canvas }) => {
+    await expect(canvas.getByText("Signed in")).toBeVisible();
+    await userEvent.click(canvas.getByText("Advanced"));
+    await expect(
+      canvas.getByText(/The device stays enrolled in your organization/),
+    ).toBeVisible();
+    await userEvent.click(canvas.getByRole("button", { name: "Sign out" }));
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Yes, sign out" }),
+    );
+    await expect(args.onLogout).toHaveBeenCalledOnce();
+  },
+};
 
 export const DaemonInformation: Story = {
   play: async ({ args, canvas }) => {

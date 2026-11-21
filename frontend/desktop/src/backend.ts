@@ -47,6 +47,10 @@ export async function logoutManagedDevice(): Promise<void> {
   return invoke<void>("logout_managed_device");
 }
 
+export async function signInManagedDevice(): Promise<ManagedDeviceSnapshot> {
+  return invoke<ManagedDeviceSnapshot>("sign_in_managed_device");
+}
+
 export async function getProgramManagement(): Promise<ProgramManagement> {
   return invoke<ProgramManagement>("get_program_management");
 }

@@ -2,7 +2,7 @@ use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use agentdesktop_core::config::ControllerConnectionConfig;
 use agentdesktop_proto::fleet::{
-    EnrollDeviceRequest, LoginConfiguration, LoginConfigurationRequest,
+    AttachUserRequest, EnrollDeviceRequest, LoginConfiguration, LoginConfigurationRequest,
     enroll_device_request::Credential, fleet_agent_client::FleetAgentClient,
 };
 use anyhow::{Context, bail};
@@ -26,10 +26,11 @@ use tonic::transport::Channel;
 use url::Url;
 
 use crate::{
-    enrollment::EnrollmentState,
+    enrollment::{EnrollmentState, LoginPrompt},
     gateway_oidc,
     identity::{Identity, OAuthCredentials},
     remote,
+    user_session::UserSession,
 };
 
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -302,11 +303,12 @@ pub async fn enroll(
     // The key exists only locally until sign-in completes; its hash is the
     // browser nonce, which ties the sign-in to this key for the controller.
     let (device_key, csr) = device_csr()?;
+    let prompt = LoginPrompt::Enrollment(enrollment);
     let tokens = if controller.device_authorization {
-        device_authorization_login(&config, enrollment).await?
+        device_authorization_login(&config, prompt).await?
     } else {
         let nonce = agentdesktop_proto::enrollment_nonce(&device_key.subject_public_key_info());
-        browser_login(&config, enrollment, callback_listen, open_browser, &nonce).await?
+        browser_login(&config, prompt, callback_listen, open_browser, &nonce).await?
     };
     enrollment.set("enrolling").await;
     complete_enrollment(&mut client, config, &device_key, &csr, tokens).await
@@ -351,9 +353,111 @@ pub async fn enroll_with_token(
     })
 }
 
+/// Signs a user in on `identity`'s device, which was enrolled with an
+/// enrollment token, and tells the controller (`AttachUser`). The device keeps
+/// its identity; the returned session is the user's.
+pub async fn attach_user(
+    controller: &ControllerConnectionConfig,
+    identity: &Identity,
+    enrollment: &EnrollmentState,
+    callback_listen: Option<SocketAddr>,
+    open_browser: bool,
+) -> anyhow::Result<UserSession> {
+    let mut client = remote::client(controller, Some(identity)).await?;
+    let config = client
+        .get_login_configuration(LoginConfigurationRequest {})
+        .await
+        .context("get controller login configuration")?
+        .into_inner();
+    let prompt = LoginPrompt::User(enrollment);
+    let tokens = if controller.device_authorization {
+        device_authorization_login(&config, prompt).await?
+    } else {
+        // As at enrollment, the device key's hash is the browser nonce, which
+        // ties the sign-in to this device for the controller.
+        let device_key = KeyPair::from_pem(&identity.client_private_key_pem)
+            .context("parse device TLS private key")?;
+        let nonce = agentdesktop_proto::enrollment_nonce(&device_key.subject_public_key_info());
+        browser_login(&config, prompt, callback_listen, open_browser, &nonce).await?
+    };
+    let login_started = unix_time_seconds();
+    let expires_at_unix_seconds = login_started.saturating_add(tokens.expires_in);
+    let id_token = tokens
+        .id_token
+        .context("OIDC token response did not contain an ID token")?;
+    let refresh_token = tokens
+        .refresh_token
+        .context("OIDC token response did not contain a refresh token")?;
+    let authorization = bearer(&tokens.access_token)?;
+    let body = AttachUserRequest { id_token };
+    retry_with_sign_in(expires_at_unix_seconds, "user sign-in", || {
+        let mut request = tonic::Request::new(body.clone());
+        request
+            .metadata_mut()
+            .insert("authorization", authorization.clone());
+        request.set_timeout(Duration::from_secs(15));
+        let mut client = client.clone();
+        async move { client.attach_user(request).await }
+    })
+    .await
+    .context("sign in user on device")?;
+    Ok(UserSession {
+        id: random_secret(),
+        oauth: OAuthCredentials {
+            access_token: tokens.access_token,
+            refresh_token,
+            expires_at_unix_seconds,
+        },
+        oauth_token_endpoint: config.token_endpoint,
+        oauth_client_id: config.client_id,
+    })
+}
+
+fn bearer(
+    access_token: &str,
+) -> anyhow::Result<tonic::metadata::MetadataValue<tonic::metadata::Ascii>> {
+    format!("Bearer {access_token}")
+        .parse()
+        .context("encode OIDC access token")
+}
+
+/// Calls the controller with the tokens of a sign-in the user just completed.
+/// The call is retried while the controller cannot answer and the access
+/// token is still valid, so an interruption does not send the user back to
+/// sign-in.
+async fn retry_with_sign_in<T, F, Fut>(
+    access_token_expires_at_unix_seconds: u64,
+    what: &str,
+    mut call: F,
+) -> Result<T, tonic::Status>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<tonic::Response<T>, tonic::Status>>,
+{
+    let mut delay = Duration::from_secs(1);
+    loop {
+        match call().await {
+            Ok(response) => return Ok(response.into_inner()),
+            Err(error)
+                if matches!(
+                    error.code(),
+                    tonic::Code::Unavailable
+                        | tonic::Code::DeadlineExceeded
+                        | tonic::Code::ResourceExhausted
+                ) && unix_time_seconds() < access_token_expires_at_unix_seconds =>
+            {
+                tracing::warn!(%error, "{what} interrupted; retrying with the same sign-in");
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(30));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 async fn browser_login(
     config: &LoginConfiguration,
-    enrollment: &EnrollmentState,
+    prompt: LoginPrompt<'_>,
     callback_listen: Option<SocketAddr>,
     open_browser: bool,
     nonce: &str,
@@ -372,9 +476,7 @@ async fn browser_login(
     authorization_url
         .query_pairs_mut()
         .append_pair("nonce", nonce);
-    enrollment
-        .awaiting_authentication(authorization_url.to_string())
-        .await;
+    prompt.show(authorization_url.to_string(), None).await;
     let authorization_code = wait_for_authorization_code(
         authorization_url.as_str(),
         &redirect_uri,
@@ -403,7 +505,7 @@ async fn browser_login(
 
 async fn device_authorization_login(
     config: &LoginConfiguration,
-    enrollment: &EnrollmentState,
+    prompt: LoginPrompt<'_>,
 ) -> anyhow::Result<TokenResponse> {
     let endpoint = Url::parse(&config.device_authorization_endpoint)
         .context("controller's OIDC provider does not support device authorization")?;
@@ -417,10 +519,10 @@ async fn device_authorization_login(
     tracing::info!(
         verification_uri = %device.verification_uri,
         user_code = %device.user_code,
-        "approve device enrollment: open the verification URL on any device and confirm the code"
+        "approve the sign-in: open the verification URL on any device and confirm the code"
     );
-    enrollment
-        .awaiting_device_authorization(verification_url, device.user_code.clone())
+    prompt
+        .show(verification_url, Some(device.user_code.clone()))
         .await;
 
     let interval = device
@@ -492,34 +594,24 @@ async fn complete_enrollment(
         certificate_signing_request_der: csr.der().as_ref().to_vec(),
         credential: Some(Credential::IdToken(id_token)),
     };
-    let authorization: tonic::metadata::MetadataValue<tonic::metadata::Ascii> =
-        format!("Bearer {}", tokens.access_token)
-            .parse()
-            .context("encode OIDC access token")?;
-    let mut delay = Duration::from_secs(1);
-    let response = loop {
-        let mut request = tonic::Request::new(body.clone());
-        request
-            .metadata_mut()
-            .insert("authorization", authorization.clone());
-        request.set_timeout(Duration::from_secs(15));
-        match client.enroll_device(request).await {
-            Ok(response) => break response.into_inner(),
-            Err(error)
-                if matches!(
-                    error.code(),
-                    tonic::Code::Unavailable
-                        | tonic::Code::DeadlineExceeded
-                        | tonic::Code::ResourceExhausted
-                ) && unix_time_seconds() < tokens.expires_in.saturating_add(login_started) =>
-            {
-                tracing::warn!(%error, "device enrollment interrupted; retrying with the same device key");
-                tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(Duration::from_secs(30));
-            }
-            Err(error) => return Err(error).context("enroll authenticated device"),
-        }
-    };
+    let authorization = bearer(&tokens.access_token)?;
+    // A retry also sends the same CSR, so the controller answers it with the
+    // certificate it issued the first time.
+    let response = retry_with_sign_in(
+        login_started.saturating_add(tokens.expires_in),
+        "device enrollment",
+        || {
+            let mut request = tonic::Request::new(body.clone());
+            request
+                .metadata_mut()
+                .insert("authorization", authorization.clone());
+            request.set_timeout(Duration::from_secs(15));
+            let mut client = client.clone();
+            async move { client.enroll_device(request).await }
+        },
+    )
+    .await
+    .context("enroll authenticated device")?;
 
     let client_certificate_pem = String::from_utf8(response.client_certificate_pem)
         .context("controller returned a non-UTF-8 device certificate")?;
@@ -1151,6 +1243,20 @@ mod tests {
             &self,
             _: tonic::Request<agentdesktop_proto::fleet::DeviceUsageRequest>,
         ) -> Result<tonic::Response<agentdesktop_proto::fleet::DeviceUsageResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used"))
+        }
+        async fn attach_user(
+            &self,
+            _: tonic::Request<agentdesktop_proto::fleet::AttachUserRequest>,
+        ) -> Result<tonic::Response<agentdesktop_proto::fleet::AttachUserResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used"))
+        }
+        async fn detach_user(
+            &self,
+            _: tonic::Request<agentdesktop_proto::fleet::DetachUserRequest>,
+        ) -> Result<tonic::Response<agentdesktop_proto::fleet::DetachUserResponse>, tonic::Status>
         {
             Err(tonic::Status::unimplemented("not used"))
         }

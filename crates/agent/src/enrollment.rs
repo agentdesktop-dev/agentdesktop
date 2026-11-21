@@ -8,6 +8,41 @@ pub struct EnrollmentState {
     status: Arc<RwLock<EnrollmentStatus>>,
 }
 
+/// Who a sign-in is for, which decides how the pending sign-in is reported.
+#[derive(Clone, Copy)]
+pub enum LoginPrompt<'a> {
+    /// The sign-in enrolls the device.
+    Enrollment(&'a EnrollmentState),
+    /// A user signs in on a device that is already enrolled.
+    User(&'a EnrollmentState),
+}
+
+impl LoginPrompt<'_> {
+    /// Reports the page where the user signs in, and for device authorization
+    /// the code to confirm there.
+    pub async fn show(self, authorization_url: String, user_code: Option<String>) {
+        match self {
+            Self::Enrollment(enrollment) => {
+                *enrollment.status.write().await = EnrollmentStatus {
+                    status: "awaitingAuthentication".to_owned(),
+                    authorization_url: Some(authorization_url),
+                    user_code,
+                    user: None,
+                };
+            }
+            Self::User(enrollment) => {
+                let mut status = enrollment.status.write().await;
+                // The device may have lost its enrollment meanwhile.
+                if status.status == "enrolled" {
+                    status.authorization_url = Some(authorization_url);
+                    status.user_code = user_code;
+                    status.user = Some("awaitingAuthentication".to_owned());
+                }
+            }
+        }
+    }
+}
+
 impl EnrollmentState {
     pub fn new(configured: bool) -> Self {
         Self {
@@ -19,6 +54,7 @@ impl EnrollmentState {
                 },
                 authorization_url: None,
                 user_code: None,
+                user: None,
             })),
         }
     }
@@ -32,22 +68,16 @@ impl EnrollmentState {
             status: status.to_owned(),
             authorization_url: None,
             user_code: None,
+            user: None,
         };
     }
 
-    pub async fn awaiting_authentication(&self, authorization_url: String) {
-        *self.status.write().await = EnrollmentStatus {
-            status: "awaitingAuthentication".to_owned(),
-            authorization_url: Some(authorization_url),
-            user_code: None,
-        };
-    }
-
-    pub async fn awaiting_device_authorization(&self, verification_url: String, user_code: String) {
-        *self.status.write().await = EnrollmentStatus {
-            status: "awaitingAuthentication".to_owned(),
-            authorization_url: Some(verification_url),
-            user_code: Some(user_code),
-        };
+    /// Ends a user's pending sign-in on an enrolled device, however it ended.
+    pub async fn user_sign_in_ended(&self) {
+        let mut status = self.status.write().await;
+        if status.user.take().is_some() {
+            status.authorization_url = None;
+            status.user_code = None;
+        }
     }
 }

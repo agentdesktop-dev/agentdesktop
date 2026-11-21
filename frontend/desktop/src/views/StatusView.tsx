@@ -5,8 +5,10 @@ import {
   Gauge,
   Laptop,
   LoaderCircle,
+  LogIn,
   LogOut,
   ShieldCheck,
+  UserRound,
   Waypoints,
 } from "lucide-react";
 import type { ReactNode } from "react";
@@ -26,9 +28,11 @@ export interface StatusViewProps {
   connector: ConnectorSnapshot | null;
   discovery: Discovery | null;
   isLoggingOut: boolean;
+  isSigningIn: boolean;
   managedDevice: ManagedDeviceSnapshot | null;
   onCopy: () => void;
   onLogout: () => void;
+  onSignIn: () => void;
 }
 
 function humanize(value: string | undefined): string {
@@ -90,8 +94,10 @@ export function StatusView({
   managedDevice,
   discovery,
   isLoggingOut,
+  isSigningIn,
   onCopy,
   onLogout,
+  onSignIn,
 }: StatusViewProps) {
   const runtime = connector?.runtime;
   const managed =
@@ -108,6 +114,9 @@ export function StatusView({
     controllerConnection?.lastSeenUnixSeconds,
   );
   const [confirmingLogout, setConfirmingLogout] = useState(false);
+  // Set on a device enrolled with an enrollment token: the device is
+  // enrolled without a user, and a user signs in and out separately.
+  const user = enrolled ? (managedDevice?.user ?? null) : null;
   const agents = discovery?.agents ?? [];
   const capabilityCount = agents.reduce(
     (total, agent) =>
@@ -163,6 +172,46 @@ export function StatusView({
                   ? "Approved"
                   : humanize(managedDevice.enrollment)}
             </span>
+          </div>
+        ) : null}
+        {user ? (
+          <div className="status-row">
+            <span
+              className={`status-row-icon ${user === "signedIn" ? "success" : "neutral"}`}
+            >
+              <UserRound size={17} />
+            </span>
+            <div>
+              <strong>User</strong>
+              <span>
+                {user === "signedIn"
+                  ? "Signed in for LLM gateway access"
+                  : user === "awaitingAuthentication"
+                    ? managedDevice?.userCode
+                      ? `Confirm the code ${managedDevice.userCode} in your browser`
+                      : "Continue signing in in your browser"
+                    : "Sign in to use the LLM gateway"}
+              </span>
+            </div>
+            {user === "signedIn" ? (
+              <span className="badge success">Signed in</span>
+            ) : (
+              <button
+                className="button button-secondary"
+                type="button"
+                onClick={onSignIn}
+                disabled={isSigningIn}
+              >
+                {isSigningIn ? (
+                  <LoaderCircle className="spin" size={13} />
+                ) : (
+                  <LogIn size={13} />
+                )}
+                {user === "awaitingAuthentication"
+                  ? "Open sign-in again"
+                  : "Sign in"}
+              </button>
+            )}
           </div>
         ) : null}
         <div className="status-row">
@@ -300,18 +349,20 @@ export function StatusView({
         <div className="advanced-config-body">
           <DaemonInformation info={runtime?.daemon} />
 
-          {managed && enrolled ? (
+          {managed && enrolled && user !== "signedOut" ? (
             <section
               className="advanced-danger-zone"
               aria-labelledby="logout-heading"
             >
               <div>
                 <p className="eyebrow">Danger zone</p>
-                <h3 id="logout-heading">Sign out of this organization</h3>
+                <h3 id="logout-heading">
+                  {user ? "Sign out" : "Sign out of this organization"}
+                </h3>
                 <p>
-                  Removes this device’s local organization credentials and stops
-                  managed access. It does not revoke the device record in the
-                  controller.
+                  {user
+                    ? "Signs you out on this device and stops LLM gateway access. The device stays enrolled in your organization."
+                    : "Removes this device’s local organization credentials and stops managed access. It does not revoke the device record in the controller."}
                 </p>
               </div>
               {confirmingLogout ? (

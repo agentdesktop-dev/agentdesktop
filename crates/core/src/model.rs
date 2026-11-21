@@ -261,6 +261,12 @@ pub struct EnrollmentStatus {
     /// authorization enrollment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_code: Option<String>,
+    /// On a device enrolled with an enrollment token, whether a user is
+    /// signed in: `signedOut`, `awaitingAuthentication` (the user signs in at
+    /// `authorization_url`) or `signedIn`. Absent on any other device, where
+    /// the user who enrolled the device is its user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

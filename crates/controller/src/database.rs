@@ -436,6 +436,35 @@ impl Database {
         })
     }
 
+    /// Sets the user signed in on a device that was enrolled with an
+    /// enrollment token, or clears it with `None`.
+    pub async fn set_device_user(
+        &self,
+        device_id: &str,
+        user: Option<&EnrolledUser>,
+    ) -> anyhow::Result<()> {
+        let idp_claims = user
+            .map(|user| serde_json::to_string(&user.idp_claims))
+            .transpose()
+            .context("encode verified IdP claims")?;
+        let updated = sqlx::query(
+            "UPDATE devices
+             SET enrolled_by_issuer = $2, enrolled_by_subject = $3, idp_claims_json = $4
+             WHERE id = $1 AND enrollment_token_issuer IS NOT NULL",
+        )
+        .bind(device_id)
+        .bind(user.map_or("", |user| &user.issuer))
+        .bind(user.map_or("", |user| &user.subject))
+        .bind(idp_claims)
+        .execute(&self.pool)
+        .await
+        .context("update device user")?;
+        if updated.rows_affected() == 0 {
+            anyhow::bail!("device {device_id} was not enrolled with an enrollment token");
+        }
+        Ok(())
+    }
+
     pub async fn list_devices(&self) -> anyhow::Result<Vec<DeviceSummary>> {
         let rows: Vec<DeviceRow> = sqlx::query_as(
             "SELECT d.id, d.hostname, d.os, d.architecture, d.agent_version,
