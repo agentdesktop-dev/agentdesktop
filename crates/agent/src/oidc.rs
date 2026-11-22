@@ -204,6 +204,13 @@ setTimeout(advance, 400);
         )
     }
 
+    fn is_identity_only(self) -> bool {
+        self == Self::Identity {
+            subscription_available: false,
+            github_available: false,
+        }
+    }
+
     fn optional(self) -> bool {
         matches!(self, Self::Subscription)
     }
@@ -761,8 +768,65 @@ pub(crate) async fn wait_for_authorization_code_with_page(
         page,
         open_browser,
         None,
+        Some(CALLBACK_TIMEOUT),
     )
     .await
+}
+
+/// Serves the authorization page and callback until the user completes or
+/// fails sign-in, with no deadline, so a tab left open while the user is away
+/// keeps working when they return. The caller can reopen the same page with
+/// [`open_in_browser`] and [`authorization_prompt_url`] instead of starting a
+/// new flow.
+pub(crate) async fn wait_for_authorization_code_until_completed(
+    authorization_url: &str,
+    redirect_uri: &Url,
+    expected_state: String,
+    callback_listen: Option<SocketAddr>,
+    page: AuthorizationPage,
+) -> anyhow::Result<Option<String>> {
+    wait_for_authorization_code_with_callback(
+        authorization_url,
+        redirect_uri,
+        expected_state,
+        callback_listen,
+        page,
+        true,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Pages opened by [`open_in_browser`] in tests, which never launch a browser.
+#[cfg(test)]
+pub(crate) static OPENED_PAGES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Opens `url` in the user's browser without waiting for the launcher.
+pub(crate) fn open_in_browser(url: &str) {
+    #[cfg(test)]
+    {
+        OPENED_PAGES.lock().unwrap().push(url.to_owned());
+    }
+    #[cfg(not(test))]
+    {
+        // Detached: `open::that` waits for the launcher to exit, and a stuck
+        // `xdg-open` (no display, portal call hanging) would block this runtime
+        // worker with the just-spawned callback server behind it, so the page
+        // the user is told to open never answers.
+        if let Err(error) = open::that_detached(url) {
+            tracing::warn!(%error, "could not open the browser automatically");
+        }
+    }
+}
+
+/// The local page that starts the authorization flow served for `redirect_uri`.
+pub(crate) fn authorization_prompt_url(redirect_uri: &Url) -> Url {
+    let mut prompt_url = redirect_uri.clone();
+    prompt_url.set_path("/");
+    prompt_url.set_query(None);
+    prompt_url.set_fragment(None);
+    prompt_url
 }
 
 pub(crate) async fn wait_for_subscription_authorization_code(
@@ -782,10 +846,12 @@ pub(crate) async fn wait_for_subscription_authorization_code(
         AuthorizationPage::Subscription,
         open_browser,
         Some(provider_callback),
+        Some(CALLBACK_TIMEOUT),
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn wait_for_authorization_code_with_callback(
     authorization_url: &str,
     redirect_uri: &Url,
@@ -794,6 +860,7 @@ async fn wait_for_authorization_code_with_callback(
     page: AuthorizationPage,
     open_browser: bool,
     provider_callback: Option<&Url>,
+    timeout: Option<Duration>,
 ) -> anyhow::Result<Option<String>> {
     let listener = bind_callback(redirect_uri, callback_listen).await?;
     let provider_listener = match provider_callback {
@@ -844,29 +911,23 @@ async fn wait_for_authorization_code_with_callback(
             .context("serve OIDC callback")
     });
 
-    let mut prompt_url = redirect_uri.clone();
-    prompt_url.set_path("/");
-    prompt_url.set_query(None);
-    prompt_url.set_fragment(None);
+    let prompt_url = authorization_prompt_url(redirect_uri);
     println!("Open this URL to connect Agentdesktop:\n{prompt_url}");
     if open_browser {
         tracing::info!(%authorization_url, %prompt_url, "opening Agentdesktop authorization page");
-        // Detached: `open::that` waits for the launcher to exit, and a stuck
-        // `xdg-open` (no display, portal call hanging) would block this runtime
-        // worker with the just-spawned callback server behind it, so the page
-        // the user is told to open never answers.
-        if let Err(error) = open::that_detached(prompt_url.as_str()) {
-            tracing::warn!(%error, "could not open the browser automatically");
-        }
+        open_in_browser(prompt_url.as_str());
     } else {
         tracing::info!(%prompt_url, "continuing in existing Agentdesktop authorization page");
     }
 
     let authorization_code = async {
-        tokio::time::timeout(CALLBACK_TIMEOUT, result_receiver)
-            .await
-            .context("timed out waiting for OIDC callback")?
-            .context("OIDC callback server stopped")?
+        match timeout {
+            Some(timeout) => tokio::time::timeout(timeout, result_receiver)
+                .await
+                .context("timed out waiting for OIDC callback")?,
+            None => result_receiver.await,
+        }
+        .context("OIDC callback server stopped")?
     }
     .await;
     let _ = shutdown_sender.send(());
@@ -880,8 +941,15 @@ async fn wait_for_authorization_code_with_callback(
     authorization_code
 }
 
-async fn authorization_prompt(State(state): State<CallbackState>) -> Html<String> {
-    Html(state.page.html())
+async fn authorization_prompt(State(state): State<CallbackState>) -> Response {
+    // With nothing to choose, the page is only a click-through: go straight to
+    // the identity provider. When the provider still has a session, it
+    // redirects back to the callback without user interaction, so a page opened
+    // while the user is away completes on its own.
+    if state.page.is_identity_only() {
+        return Redirect::temporary(&state.authorization_url).into_response();
+    }
+    Html(state.page.html()).into_response()
 }
 
 async fn continue_authorization(State(state): State<CallbackState>) -> Redirect {
@@ -1053,7 +1121,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        AuthorizationPage, DevicePoll, TokenResponse, apply_refreshed_tokens,
+        AuthorizationPage, DevicePoll, OPENED_PAGES, TokenResponse, apply_refreshed_tokens,
         classify_device_token_error, continue_subscription_page, poll_device_token,
     };
     use crate::identity::{Identity, OAuthCredentials};
@@ -1553,6 +1621,7 @@ mod tests {
                     super::AuthorizationPage::Subscription,
                     false,
                     Some(&callback),
+                    Some(super::CALLBACK_TIMEOUT),
                 )
                 .await
             });
@@ -1599,6 +1668,90 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn identity_only_prompt_goes_straight_to_the_provider() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            drop(listener);
+            let redirect = url::Url::parse(&format!("http://{address}/callback")).unwrap();
+            let task = tokio::spawn(async move {
+                super::wait_for_authorization_code_until_completed(
+                    "https://idp.example/authorize",
+                    &redirect,
+                    "expected-state".to_owned(),
+                    None,
+                    super::AuthorizationPage::Identity {
+                        subscription_available: false,
+                        github_available: false,
+                    },
+                )
+                .await
+            });
+            let client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap();
+            let response = loop {
+                if let Ok(response) = client.get(format!("http://{address}/")).send().await {
+                    break response;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            };
+            assert!(response.status().is_redirection());
+            assert_eq!(
+                response.headers()["location"],
+                "https://idp.example/authorize"
+            );
+            assert!(
+                OPENED_PAGES
+                    .lock()
+                    .unwrap()
+                    .contains(&format!("http://{address}/"))
+            );
+            let response = client
+                .get(format!(
+                    "http://{address}/callback?state=expected-state&code=identity-code"
+                ))
+                .send()
+                .await
+                .unwrap();
+            assert!(response.status().is_success());
+            assert_eq!(
+                task.await.unwrap().unwrap().as_deref(),
+                Some("identity-code")
+            );
+        })
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn prompt_with_more_steps_stays_on_the_checklist() {
+        assert!(
+            AuthorizationPage::Identity {
+                subscription_available: false,
+                github_available: false,
+            }
+            .is_identity_only()
+        );
+        assert!(
+            !AuthorizationPage::Identity {
+                subscription_available: false,
+                github_available: true,
+            }
+            .is_identity_only()
+        );
+        assert!(
+            !AuthorizationPage::Identity {
+                subscription_available: true,
+                github_available: false,
+            }
+            .is_identity_only()
+        );
+        assert!(!AuthorizationPage::Subscription.is_identity_only());
     }
 
     #[tokio::test]

@@ -1,9 +1,12 @@
 use std::{
     collections::BTreeMap,
     net::SocketAddr,
-    path::Path,
-    sync::{Arc, Mutex as StdMutex},
-    time::Duration,
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 use agentdesktop_core::http::ClientExt;
@@ -12,7 +15,7 @@ use anyhow::{Context, bail};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 use url::Url;
 
 use crate::{oidc, secret_store::SecretStore};
@@ -38,6 +41,60 @@ const DEVICE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_DEVICE_LIFETIME: Duration = Duration::from_secs(30 * 60);
 /// Longest poll interval honoured, for the same reason.
 const MAX_DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(60);
+/// How long one credential request waits for a pending browser sign-in before
+/// it returns [`BrowserSignInPending`]. The sign-in itself has no deadline.
+#[cfg(not(test))]
+const BROWSER_SIGN_IN_WAIT: Duration = Duration::from_secs(10 * 60);
+#[cfg(test)]
+const BROWSER_SIGN_IN_WAIT: Duration = Duration::from_millis(300);
+/// How long after opening the sign-in page a new credential request may open
+/// it again, in case the user closed it. The interval doubles on each reopen.
+const BROWSER_REOPEN_INITIAL: Duration = Duration::from_secs(60 * 60);
+const BROWSER_REOPEN_MAX: Duration = Duration::from_secs(8 * 60 * 60);
+/// The browser sign-in in progress or last finished. There is at most one,
+/// because every sign-in serves the same loopback callback port. Requests that
+/// need a token while it is pending wait on it instead of opening a new tab.
+static BROWSER_LOGIN: StdMutex<Option<BrowserLogin>> = StdMutex::new(None);
+
+type BrowserLoginResult = Option<Result<LlmGatewayCredential, String>>;
+
+struct BrowserLogin {
+    account: String,
+    prompt_url: Url,
+    result: watch::Receiver<BrowserLoginResult>,
+    /// Set until one request claims the sign-in as interactive, so only that
+    /// request continues to the next step in the same browser tab.
+    interactive: Arc<AtomicBool>,
+    opened_at: Instant,
+    reopen_after: Duration,
+    task: tokio::task::AbortHandle,
+}
+
+impl BrowserLogin {
+    /// Finished with a result, or stopped without one (aborted or panicked).
+    fn finished(&self) -> bool {
+        self.result.borrow().is_some() || self.result.has_changed().is_err()
+    }
+}
+
+/// A browser sign-in is waiting for the user. The request did not open
+/// another tab; the user finishes the sign-in in the one already open.
+#[derive(Debug)]
+pub struct BrowserSignInPending {
+    prompt_url: Url,
+}
+
+impl std::fmt::Display for BrowserSignInPending {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "LLM gateway sign-in pending: finish signing in at {}",
+            self.prompt_url
+        )
+    }
+}
+
+impl std::error::Error for BrowserSignInPending {}
 
 #[derive(Clone)]
 pub struct LoginOptions {
@@ -152,51 +209,170 @@ async fn credential_inner(
     state_dir: &Path,
     login: LoginOptions,
 ) -> anyhow::Result<CredentialAcquisition> {
-    let _login = LOGIN.lock().await;
-    let store = SecretStore::new(state_dir)?;
-    let account = account(issuer, client_id);
-    if let Some(credential) = stored_credential(&store, &account, client_id).await? {
-        return Ok(CredentialAcquisition {
-            credential,
-            interactive: false,
-        });
-    }
-    if login.device_authorization {
-        return Err(SignInRequired {
-            pending: pending_device_login(&account),
+    let (prompt_url, mut result, interactive) = {
+        // Checking the store and joining or starting the browser sign-in under
+        // one lock means a request cannot miss a token the sign-in is saving
+        // and start a second sign-in: the sign-in saves under this lock too.
+        let _login = LOGIN.lock().await;
+        let store = SecretStore::new(state_dir)?;
+        let account = account(issuer, client_id);
+        if let Some(credential) = stored_credential(&store, &account, client_id).await? {
+            return Ok(CredentialAcquisition {
+                credential,
+                interactive: false,
+            });
         }
-        .into());
+        if login.device_authorization {
+            return Err(SignInRequired {
+                pending: pending_device_login(&account),
+            }
+            .into());
+        }
+        let redirect_uri = Url::parse(redirect_uri).context("parse OIDC redirect URI")?;
+        join_browser_login(&account, || BrowserLoginRequest {
+            issuer: issuer.clone(),
+            client_id: client_id.to_owned(),
+            redirect_uri,
+            scopes: scopes.to_owned(),
+            allow_insecure,
+            state_dir: state_dir.to_owned(),
+            account: account.clone(),
+            login,
+        })
+    };
+    let finished = tokio::time::timeout(BROWSER_SIGN_IN_WAIT, result.wait_for(Option::is_some))
+        .await
+        .map_err(|_| BrowserSignInPending {
+            prompt_url: prompt_url.clone(),
+        })?
+        .context("browser sign-in stopped")?
+        .clone()
+        .expect("waited for a finished sign-in");
+    match finished {
+        Ok(credential) => Ok(CredentialAcquisition {
+            credential,
+            interactive: interactive.swap(false, Ordering::AcqRel),
+        }),
+        Err(error) => Err(anyhow::anyhow!(error)),
     }
+}
 
-    let metadata = discover(issuer, allow_insecure).await?;
-    let redirect_uri = Url::parse(redirect_uri).context("parse OIDC redirect URI")?;
+struct BrowserLoginRequest {
+    issuer: Url,
+    client_id: String,
+    redirect_uri: Url,
+    scopes: Vec<String>,
+    allow_insecure: bool,
+    state_dir: PathBuf,
+    account: String,
+    login: LoginOptions,
+}
+
+/// Joins the pending browser sign-in for `account`, or starts one. Returns the
+/// sign-in page, its result, and the flag that marks the sign-in interactive.
+///
+/// A pending sign-in is never restarted, so requests made while the user is
+/// away do not each open a tab. The page is reopened only after a backoff, in
+/// case the user closed it. A pending sign-in for another account (the gateway
+/// configuration changed) is abandoned, because both need the callback port.
+fn join_browser_login(
+    account: &str,
+    request: impl FnOnce() -> BrowserLoginRequest,
+) -> (Url, watch::Receiver<BrowserLoginResult>, Arc<AtomicBool>) {
+    let mut slot = BROWSER_LOGIN
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some(pending) = slot.as_mut().filter(|login| !login.finished()) {
+        if pending.account == account {
+            if pending.opened_at.elapsed() >= pending.reopen_after {
+                tracing::info!(prompt_url = %pending.prompt_url, "reopening pending Agentdesktop sign-in page");
+                oidc::open_in_browser(pending.prompt_url.as_str());
+                pending.opened_at = Instant::now();
+                pending.reopen_after = pending
+                    .reopen_after
+                    .saturating_mul(2)
+                    .min(BROWSER_REOPEN_MAX);
+            } else {
+                tracing::debug!(prompt_url = %pending.prompt_url, "waiting on pending Agentdesktop sign-in");
+            }
+            return (
+                pending.prompt_url.clone(),
+                pending.result.clone(),
+                pending.interactive.clone(),
+            );
+        }
+        tracing::info!("abandoning pending sign-in for a different LLM gateway account");
+        pending.task.abort();
+    }
+    let request = request();
+    let prompt_url = oidc::authorization_prompt_url(&request.redirect_uri);
+    let (sender, result) = watch::channel(None);
+    let task = tokio::spawn(async move {
+        let outcome = browser_login(&request).await;
+        let signed_in = {
+            // Save and publish under LOGIN: see `credential_inner`.
+            let _login = LOGIN.lock().await;
+            let outcome = match outcome {
+                Ok(stored) => SecretStore::new(&request.state_dir)
+                    .and_then(|store| save(&store, &request.account, &stored))
+                    .map(|()| as_credential(&stored)),
+                Err(error) => Err(error),
+            };
+            if let Err(error) = &outcome {
+                tracing::warn!(error = %format!("{error:#}"), "LLM gateway browser sign-in failed");
+            }
+            let signed_in = outcome.is_ok();
+            let _ = sender.send(Some(outcome.map_err(|error| format!("{error:#}"))));
+            signed_in
+        };
+        if signed_in {
+            continue_to_github(&request).await;
+        }
+    });
+    let interactive = Arc::new(AtomicBool::new(true));
+    *slot = Some(BrowserLogin {
+        account: account.to_owned(),
+        prompt_url: prompt_url.clone(),
+        result: result.clone(),
+        interactive: interactive.clone(),
+        opened_at: Instant::now(),
+        reopen_after: BROWSER_REOPEN_INITIAL,
+        task: task.abort_handle(),
+    });
+    (prompt_url, result, interactive)
+}
+
+/// Runs one browser sign-in to completion. It has no deadline: the page stays
+/// usable until the user finishes, however long they are away.
+async fn browser_login(request: &BrowserLoginRequest) -> anyhow::Result<StoredTokens> {
+    let login = &request.login;
+    let metadata = discover(&request.issuer, request.allow_insecure).await?;
     let state = oidc::random_secret();
     let (verifier, challenge) = oidc::pkce();
     let authorization_url = authorization_url(
         metadata.authorization_endpoint,
-        client_id,
-        &redirect_uri,
-        scopes,
+        &request.client_id,
+        &request.redirect_uri,
+        &request.scopes,
         &state,
         &challenge,
     );
-    let authorization_code = oidc::wait_for_authorization_code_with_page(
+    let authorization_code = oidc::wait_for_authorization_code_until_completed(
         authorization_url.as_str(),
-        &redirect_uri,
+        &request.redirect_uri,
         state,
         login.callback_listen,
         oidc::AuthorizationPage::Identity {
             subscription_available: login.subscription_available,
             github_available: login.github_client_id.is_some(),
         },
-        true,
     )
     .await?
     .context("required identity authorization was skipped")?;
     let tokens = oidc::exchange_authorization_code(
         metadata.token_endpoint.as_str(),
-        client_id,
-        redirect_uri.as_str(),
+        &request.client_id,
+        request.redirect_uri.as_str(),
         &authorization_code,
         &verifier,
     )
@@ -207,22 +383,29 @@ async fn credential_inner(
         expires_at_unix_seconds: now().saturating_add(tokens.expires_in),
         token_endpoint: metadata.token_endpoint.to_string(),
     };
-    save(&store, &account, &stored)?;
-    if let Some(client_id) = login
+    Ok(stored)
+}
+
+/// Continues the finished identity sign-in to GitHub in the same tab, when
+/// GitHub is the next step.
+async fn continue_to_github(request: &BrowserLoginRequest) {
+    let login = &request.login;
+    let Some(client_id) = login
         .github_client_id
+        .as_deref()
         .filter(|_| !login.subscription_available)
+    else {
+        return;
+    };
+    if let Err(error) = crate::github_oauth::credential(
+        client_id,
+        &request.state_dir,
+        Some((request.redirect_uri.clone(), login.callback_listen)),
+    )
+    .await
     {
-        crate::github_oauth::credential(
-            &client_id,
-            state_dir,
-            Some((redirect_uri, login.callback_listen)),
-        )
-        .await?;
+        tracing::warn!(error = %format!("{error:#}"), "GitHub sign-in after LLM gateway sign-in failed");
     }
-    Ok(CredentialAcquisition {
-        credential: as_credential(&stored),
-        interactive: true,
-    })
 }
 
 /// Returns the stored access token, refreshing it first if it is about to
@@ -635,6 +818,126 @@ mod tests {
         PendingDeviceLogin, SignInRequired, authorization_url, device_authorization_form,
         device_login, lock_pending, pending_from, poll_interval, validate_device,
     };
+
+    /// Many requests made while the user is away share one sign-in tab, the
+    /// tab still works after every request has given up on it, and finishing
+    /// it serves later requests from the store.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn browser_sign_in_is_shared_and_outlives_waiting_requests() {
+        use axum::{Json, Router, routing::get, routing::post};
+
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let idp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let idp_address = idp.local_addr().unwrap();
+            let issuer = Url::parse(&format!("http://{idp_address}/")).unwrap();
+            let discovery = serde_json::json!({
+                "authorization_endpoint": format!("http://{idp_address}/authorize"),
+                "token_endpoint": format!("http://{idp_address}/token"),
+            });
+            let app = Router::new()
+                .route(
+                    "/.well-known/openid-configuration",
+                    get(move || {
+                        let discovery = discovery.clone();
+                        async move { Json(discovery) }
+                    }),
+                )
+                .route(
+                    "/token",
+                    post(|| async {
+                        Json(serde_json::json!({
+                            "access_token": "signed-in-token",
+                            "expires_in": 3600,
+                            "token_type": "Bearer",
+                        }))
+                    }),
+                );
+            tokio::spawn(async move { axum::serve(idp, app).await });
+            let callback = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let callback_address = callback.local_addr().unwrap();
+            drop(callback);
+            let redirect_uri = format!("http://{callback_address}/callback");
+            let prompt_url = format!("http://{callback_address}/");
+            let state_dir = tempfile::tempdir().unwrap();
+            let client_id = "coalesce-test";
+            let request = || {
+                let issuer = issuer.clone();
+                let redirect_uri = redirect_uri.clone();
+                let state_dir = state_dir.path().to_owned();
+                async move {
+                    super::credential(
+                        &issuer,
+                        client_id,
+                        &redirect_uri,
+                        &["openid".to_owned()],
+                        true,
+                        &state_dir,
+                        super::LoginOptions {
+                            callback_listen: None,
+                            subscription_available: false,
+                            github_client_id: None,
+                            device_authorization: false,
+                        },
+                    )
+                    .await
+                }
+            };
+            let opened = || {
+                crate::oidc::OPENED_PAGES
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|page| **page == prompt_url)
+                    .count()
+            };
+
+            // Nobody is at the machine: every request gives up, one tab opens.
+            let waiting = futures_util::future::join_all((0..5).map(|_| request())).await;
+            for result in waiting {
+                let error = result.err().expect("no one signed in");
+                assert!(error.is::<super::BrowserSignInPending>(), "{error:#}");
+                assert!(error.to_string().contains(&prompt_url));
+            }
+            assert_eq!(opened(), 1);
+
+            // The user returns to the same tab and signs in.
+            let late = tokio::spawn(request());
+            let client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap();
+            let response = client.get(&prompt_url).send().await.unwrap();
+            let location = Url::parse(response.headers()["location"].to_str().unwrap()).unwrap();
+            assert_eq!(location.path(), "/authorize");
+            let state = location
+                .query_pairs()
+                .find(|(name, _)| name == "state")
+                .unwrap()
+                .1
+                .into_owned();
+            let response = client
+                .get(format!("{redirect_uri}?code=identity-code&state={state}"))
+                .send()
+                .await
+                .unwrap();
+            assert!(response.status().is_success());
+
+            let acquired = late.await.unwrap().unwrap();
+            assert_eq!(acquired.credential.credential, "signed-in-token");
+            assert!(acquired.interactive);
+            let stored = request().await.unwrap();
+            assert_eq!(stored.credential.credential, "signed-in-token");
+            assert!(!stored.interactive);
+            assert_eq!(opened(), 1);
+
+            let store = crate::secret_store::SecretStore::new(state_dir.path()).unwrap();
+            store
+                .delete(super::SECRET_SERVICE, &super::account(&issuer, client_id))
+                .unwrap();
+        })
+        .await
+        .unwrap();
+    }
 
     fn device(value: serde_json::Value) -> DeviceAuthorizationResponse {
         serde_json::from_value(value).unwrap()
