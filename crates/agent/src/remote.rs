@@ -1018,6 +1018,15 @@ fn apply_parsed(
             .downcast_ref::<config::OutsideControllerLimits>()
             .is_some()
     });
+    if rejected {
+        // Nothing from the rejected configuration was applied, so report the
+        // outcomes of the last apply: the configuration still in effect. They
+        // come from the reconciler alone, never from the rejected configuration.
+        programs = reconciler
+            .last_report()
+            .map(|report| program_statuses(&report))
+            .unwrap_or_default();
+    }
     let mut status = config_status(
         config.revision,
         programs,
@@ -2130,6 +2139,84 @@ mod tests {
         );
         assert!(!state_dir.join("remote-config.yaml").exists());
         let _ = std::fs::remove_dir_all(&state_dir);
+    }
+
+    /// A rejected push reports the outcomes of the configuration still in
+    /// effect, and nothing in it can change them: neither its programs nor its
+    /// `programSelection`, which would let a stored opt-out leave a program out.
+    #[test]
+    fn a_rejected_push_reports_the_programs_still_in_effect() {
+        use super::{ConfigState, ProgramStatus};
+        use sha2::{Digest, Sha256};
+        let state_dir = tempfile::tempdir().unwrap();
+        let reconciler = test_reconciler(state_dir.path());
+        reconciler.set_program_choice(agentdesktop_core::model::ProgramChoice::Selected {
+            programs: ["codex".to_owned()].into(),
+        });
+        let limits: super::ControllerLimits = serde_json::from_value(serde_json::json!({
+            "allowedGatewayOrigins": ["https://gateway.example.com"],
+        }))
+        .unwrap();
+        let pushed = |revision: u64, yaml: &str| agentdesktop_proto::fleet::DaemonConfig {
+            revision,
+            yaml: yaml.as_bytes().to_vec(),
+            sha256: Sha256::digest(yaml.as_bytes()).to_vec(),
+        };
+        let rows = |programs: &[ProgramStatus]| {
+            programs
+                .iter()
+                .map(|program| {
+                    (
+                        program.program.clone(),
+                        program.state,
+                        program.detail.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let rejected_yaml = "llmGateway:\n  url: https://other.example.com/v1\nprogramSelection:\n  allowUserChoice: true\nprograms:\n  codex: {}\n";
+        let before_any_apply = super::apply_daemon_config(
+            state_dir.path(),
+            pushed(1, rejected_yaml),
+            &limits,
+            &reconciler,
+        );
+        assert_eq!(before_any_apply.state, ConfigState::Rejected as i32);
+        assert!(before_any_apply.programs.is_empty());
+
+        let accepted = super::apply_daemon_config(
+            state_dir.path(),
+            pushed(
+                2,
+                "llmGateway:\n  url: https://gateway.example.com/v1\nprograms:\n  claudeCode: {}\n  codex: {}\n",
+            ),
+            &limits,
+            &reconciler,
+        );
+        assert_eq!(
+            accepted.state,
+            ConfigState::Applied as i32,
+            "{}",
+            accepted.error
+        );
+        let in_effect = rows(&super::program_statuses(&reconciler.last_report().unwrap()));
+        assert!(
+            in_effect
+                .iter()
+                .any(|(program, _, _)| program == "claude-code")
+        );
+
+        let rejected = super::apply_daemon_config(
+            state_dir.path(),
+            pushed(3, rejected_yaml),
+            &limits,
+            &reconciler,
+        );
+        assert_eq!(rejected.state, ConfigState::Rejected as i32);
+        assert_eq!(rejected.revision, 3);
+        assert_eq!(rows(&rejected.programs), in_effect);
+        assert!(rejected.programs_reported);
     }
 
     /// A peer that accepts connections and then never reads or writes, like a

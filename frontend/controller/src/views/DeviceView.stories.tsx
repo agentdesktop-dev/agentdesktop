@@ -111,6 +111,17 @@ export const ConfigurationRejected: Story = {
         /is not in daemon\.controllerLimits\.allowedGatewayOrigins/,
       ),
     ).toBeVisible();
+    // The programs still in effect are listed, under a note that the
+    // rejected revision was not applied.
+    await expect(
+      canvas.getByText(/^Revision 4 was not applied\./),
+    ).toBeVisible();
+    const programs = within(
+      canvas
+        .getByRole("heading", { name: "Managed programs" })
+        .closest("section") as HTMLElement,
+    );
+    await expect(programs.getByText("Claude Code")).toBeVisible();
   },
 };
 

@@ -71,7 +71,8 @@ https://other.example.com is not in daemon.controllerLimits.allowedGatewayOrigin
 
 The overview counts the device under **Config failures**. The device keeps the
 configuration it accepted before, so the Claude Code settings still point at
-`https://gateway.example.com/anthropic`.
+`https://gateway.example.com/anthropic`, and **Managed programs** still lists
+Claude Code, under a note that the revision was not applied.
 
 Restore the policy, and the device shows **Applied** again:
 
@@ -106,7 +107,7 @@ does not apply that policy again once they are.
    daemon applies its local configuration instead. That configuration manages
    no programs, so the Claude Code settings file is removed (fail closed). When
    the controller pushes the same policy on reconnect, the device reports
-   **Rejected**. The log says why:
+   **Rejected**, and **Managed programs** shows Claude Code as **Removed**. The log says why:
 
    ```console
    docker compose exec device sh -c 'grep -h "outside the local limits" /var/lib/agentdesktop/logs/*.log'

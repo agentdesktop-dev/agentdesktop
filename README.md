@@ -816,7 +816,8 @@ The origins of `llmGateway.url`, `llmGateway.proxyUrl` and the OIDC `issuer`
 must each be in the list. Paths may change freely. A pushed configuration
 outside the list is not applied: the device keeps the last configuration it
 accepted and reports the push as **Rejected**, with the reason, on the
-controller's device page (an older controller shows it as not reported).
+controller's device page (an older controller shows it as not reported). The
+page keeps listing the programs of the configuration still in effect.
 
 The list is read when the daemon starts. If the saved controller configuration
 is outside a newly installed list, the daemon applies the local configuration
@@ -914,6 +915,11 @@ by this agent version", and an older controller ignores the new fields. The
 controller's database migration is one-way: once this controller has run, an
 older controller refuses the same database, so roll back from a database
 backup taken before the upgrade.
+
+A configuration the device's [local limits](#limit-the-controllers-gateway-origins-opt-in)
+refuse shows as **Rejected**. Nothing from it is applied, so the device
+reports the programs of the configuration still in effect, from its last
+apply, and the device page says the revision was not applied.
 
 ## Token and cost usage
 

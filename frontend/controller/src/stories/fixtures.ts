@@ -379,11 +379,21 @@ export const optedOutDeviceDetail: DeviceDetail = {
   ],
 };
 
-// A rejected configuration was not applied, so it reports no programs.
+// A rejected configuration was not applied, so the device reports the
+// programs of the configuration still in effect, stamped with the rejected
+// revision.
 export const rejectedDeviceDetail: DeviceDetail = {
   ...deviceDetail,
   ...rejectedDevice,
-  programs: [],
+  programs: [
+    {
+      program: "claude-code",
+      state: "unchanged",
+      detail: "",
+      revision: 4,
+      updated_at: now - 60,
+    },
+  ],
   programs_reported: true,
 };
 

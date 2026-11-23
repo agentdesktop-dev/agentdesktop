@@ -68,6 +68,9 @@ export function DeviceView({
   const enrolledBy: Array<[string, string]> = device.enrolled_by_name
     ? [["Enrolled by", device.enrolled_by_name]]
     : [];
+  // A rejected configuration was not applied: the programs are those of the
+  // configuration still in effect.
+  const rejected = device.config_state === 3;
   return (
     <div className="stack">
       <Link href="/devices" className="back-link">
@@ -133,7 +136,11 @@ export function DeviceView({
         <section className="card table-card">
           <CardHeader
             title="Managed programs"
-            description="Outcome of the latest apply, per program"
+            description={
+              rejected
+                ? `Revision ${device.config_revision} was not applied. Outcome of the configuration still in effect, per program`
+                : "Outcome of the latest apply, per program"
+            }
           />
           {!device.programs_reported ? (
             <p className="empty-state compact">
