@@ -237,7 +237,7 @@ mod handler {
             state_dir: temp.path().to_owned(),
         });
         let effective: agentdesktop_core::config::DaemonConfig =
-            serde_yaml::from_str("{}").unwrap();
+            agentdesktop_core::serdes::yamlviajson::from_str("{}").unwrap();
         let (status, message) =
             program_launch_checks(&FAILING, effective.clone(), &host, Path::new("copilot.exe"))
                 .await
@@ -409,7 +409,7 @@ mod handler {
             sessions: crate::llm_proxy::sessions::SessionRegistry::default(),
             proxy_address: Some(std::net::SocketAddr::from(([127, 0, 0, 1], 4000))),
             session_policy: Arc::new(crate::llm_proxy::sessions::ConfigPolicy {
-                config: serde_yaml::from_str(
+                config: agentdesktop_core::serdes::yamlviajson::from_str(
                     "llmGateway: {url: 'https://gw', authentication: {type: oidc, issuer: 'https://kc', clientId: 'agentdesktop'}}",
                 )
                 .unwrap(),

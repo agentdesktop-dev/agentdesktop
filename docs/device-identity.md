@@ -35,6 +35,9 @@ matches the subject recorded for the device named in the certificate. A device
 certificate alone, or a valid user token presented with another user's
 device certificate, is rejected.
 
+A device enrolled with an [enrollment token](#enrollment-token) has no user:
+its certificate alone authenticates it.
+
 Key properties:
 
 - The device private key never leaves the workstation. The daemon sends only a
@@ -42,9 +45,15 @@ Key properties:
 - The daemon is an OIDC public client. It talks to the IdP's token endpoint
   directly. The controller never sees the PKCE verifier or the authorization
   code, and never holds the user's refresh token.
-- The controller drives the parts of the protocol that bind the result to an
-  enrollment: it generates `state` and `nonce`, builds the authorization URL,
-  and validates the ID token it is given.
+- The user signs in before the device is enrolled. The controller keeps no
+  state for a sign-in in progress: it publishes read-only login settings, and
+  creates a device only when it is given valid tokens for a user. The daemon
+  generates `state`, `nonce`, and the PKCE values, builds the authorization
+  URL, and checks the callback; the controller validates the tokens.
+- A browser sign-in is bound to the device key: the `nonce` is a hash of the
+  key's public key, and the controller requires the ID token to carry the
+  hash of the key in the CSR. Tokens from another sign-in, or from a refresh
+  grant, cannot enroll a device.
 
 ## Sequence
 
@@ -64,21 +73,21 @@ sequenceDiagram
 
     rect rgba(128, 35, 195, 0.08)
     Note over User,IdP: Enrollment
-    Daemon->>Daemon: Generate device key pair and CSR
+    Daemon->>Controller: GetLoginConfiguration over server-auth TLS
+    Controller-->>Daemon: issuer, endpoints, client_id, redirect_uri, scopes
+    Note over Controller: Read-only. No enrollment state is stored.
+    Daemon->>Daemon: Generate device key pair and CSR (kept local until sign-in completes)
     alt Browser flow (default)
-        Daemon->>Daemon: Generate PKCE verifier and S256 challenge
-        Daemon->>Controller: BeginEnrollment(hostname, code_challenge) over server-auth TLS
-        Controller->>Controller: Create enrollment_id, state, nonce. Store pending enrollment (10 min)
-        Controller-->>Daemon: enrollment_id, authorization_url, state, redirect_uri, token_endpoint, client_id
+        Daemon->>Daemon: Generate PKCE verifier and S256 challenge, state. nonce = SHA-256 of device public key. Build authorization_url
         Daemon->>Daemon: Listen on loopback redirect_uri (default 127.0.0.1:51327)
         Daemon->>Daemon: Publish authorization_url on GET /v1/enrollment and wait up to 10 min
-        alt Daemon runs as a system service (normal install)
-            Note over Daemon: Cannot open a browser. It runs outside any user session.
+        alt Daemon runs in system mode (normal install)
+            Note over Daemon: Does not open a browser. It runs as root, outside the user's session.
             User->>App: Sign in
             App->>Daemon: GET /v1/enrollment
             Daemon-->>App: authorization_url
             App->>Browser: Open authorization_url
-        else Daemon runs in the user's session (sudo, user mode, development)
+        else Daemon runs in user mode (--user, development)
             Daemon->>Browser: Open the local sign-in page
             User->>Browser: Continue to sign in
         end
@@ -89,12 +98,10 @@ sequenceDiagram
         Daemon->>Daemon: Check state matches
         Daemon->>IdP: Token request (authorization_code, code_verifier, client_id)
         IdP-->>Daemon: access_token, id_token, refresh_token
+        Daemon->>Daemon: Check ID token nonce matches
     else Device authorization flow (deviceAuthorization true)
-        Daemon->>Controller: BeginEnrollment(hostname, device_authorization)
-        Controller->>IdP: Device authorization request (client_id, scope)
-        IdP-->>Controller: device_code, user_code, verification_uri, interval, expires_in
-        Controller->>Controller: Store pending enrollment (no nonce)
-        Controller-->>Daemon: enrollment_id, device_code, user_code, verification_uri, token_endpoint, client_id
+        Daemon->>IdP: Device authorization request (client_id, scope)
+        IdP-->>Daemon: device_code, user_code, verification_uri, interval, expires_in
         Daemon-->>User: Show verification URL and user code (app, CLI, logs)
         loop Every interval until approved or expired
             Daemon->>IdP: Token request (device_code grant)
@@ -104,15 +111,17 @@ sequenceDiagram
         Daemon->>IdP: Token request (device_code grant)
         IdP-->>Daemon: access_token, id_token, refresh_token
     end
-    Daemon->>Controller: CompleteEnrollment(enrollment_id, CSR, id_token) with Bearer access_token
-    Controller->>Controller: Consume pending enrollment (single use, not expired)
+    Daemon->>Controller: EnrollDevice(hostname, CSR, id_token) with Bearer access_token
+    Controller->>Controller: Verify CSR signature
     Controller->>IdP: Fetch JWKS if the ID token key ID is unknown
-    Controller->>Controller: Verify ID token signature, iss, aud, exp, sub, and nonce
+    Controller->>Controller: Verify ID token signature, iss, aud, exp, and sub
+    Controller->>Controller: Require nonce equal to the hash of the CSR public key (no nonce only if the IdP offers device authorization)
     Controller->>IdP: UserInfo with access_token
     IdP-->>Controller: sub
     Controller->>Controller: Require UserInfo sub equal to ID token sub
-    Controller->>Controller: New device_id. Sign CSR with device CA (30 days, client auth)
-    Controller->>Controller: Store device with hostname, issuer, subject, IdP claims
+    Controller->>Controller: device_id from issuer, subject, and CSR. Return the stored result if it exists
+    Controller->>Controller: Otherwise sign CSR with device CA (30 days, client auth)
+    Controller->>Controller: Store device and enrollment receipt with hostname, issuer, subject, IdP claims
     Controller-->>Daemon: device_id, certificate chain, expiry
     Daemon->>Daemon: Save certificate to identity.json. Save private key and tokens to the secret store
     end
@@ -187,8 +196,9 @@ sequenceDiagram
 ## Enrollment
 
 The daemon enrolls when it starts without a stored identity, or after it has
-discarded one (see [Failure handling](#failure-handling)). It starts at once,
-without waiting for a user to ask: an attempt that nobody completes times out
+discarded one (see [Failure handling](#failure-handling)). It starts sign-in at
+once, without waiting for a user to ask, but the controller records nothing
+until the user has signed in: an attempt that nobody completes times out
 after 10 minutes, and the daemon starts a new one after a retry delay of up to
 60 seconds, with a new URL each time. While enrollment is
 in progress, the daemon publishes its state on the local API at
@@ -202,38 +212,40 @@ device authorization, the user code. The desktop app and
 The default flow is the OAuth 2.0 authorization code grant with PKCE for a
 native app (RFC 8252):
 
-1. The daemon generates the device key pair, a CSR for it, and a PKCE
-   verifier and challenge.
-2. `BeginEnrollment` sends the hostname and PKCE challenge. The daemon has no
-   client certificate yet, so this call uses server-authenticated TLS only.
-   The controller generates a random `enrollment_id`, `state`, and `nonce`,
-   and keeps a pending enrollment (hostname and nonce) for 10 minutes. At most
-   1024 enrollments can be pending at once.
-3. The controller returns an authorization URL built from the IdP's discovery
-   document, requesting `openid profile email offline_access`, plus the
-   values the daemon needs to finish the exchange itself: `state`,
-   `redirect_uri`, `token_endpoint`, and `client_id`.
-4. The daemon serves a small HTTP server on the loopback `redirect_uri`
+1. `GetLoginConfiguration` returns the IdP issuer, authorization and token
+   endpoints, client ID, `redirect_uri`, and scopes
+   (`openid profile email offline_access`), taken from the IdP's discovery
+   document. The daemon has no client certificate yet, so this call uses
+   server-authenticated TLS only. The call is read-only: the controller stores
+   nothing.
+2. The daemon generates the device key pair and a CSR for it. The key stays
+   on the workstation, and nothing is sent to the controller yet. The daemon
+   also generates a PKCE verifier and challenge and `state`, sets `nonce` to
+   the base64url SHA-256 of the key's DER SubjectPublicKeyInfo, and builds the
+   authorization URL.
+3. The daemon serves a small HTTP server on the loopback `redirect_uri`
    (default `http://127.0.0.1:51327/callback`) and publishes the
    authorization URL on `/v1/enrollment`. How the browser gets there depends
    on how the daemon runs:
-   - **As a system service** (the normal install: LaunchDaemon, Windows
-     service, systemd), the daemon runs outside any user session and cannot
-     open a browser. Its attempt to do so fails and is only logged. The user
-     clicks sign-in in the desktop app, which reads the URL from
-     `/v1/enrollment` and opens it in the user's browser. The browser goes
-     straight to the IdP.
-   - **In the user's session** (`sudo` from a terminal, `--user` mode,
-     development), the daemon opens the browser on its own landing page, and
-     **Continue to sign in** redirects to the IdP.
+   - **In system mode** (the normal install: LaunchDaemon, Windows service,
+     systemd; also `sudo agentdesktop daemon` from a terminal), the daemon
+     runs as root and does not open a browser. Such an attempt would not
+     simply fail: on macOS, `open` run by root starts Safari on the daemon's
+     landing page instead of the user's browser. The user clicks sign-in in
+     the desktop app, which reads the URL from `/v1/enrollment` and opens it
+     in the user's browser. The browser goes straight to the IdP.
+   - **In user mode** (`--user`, development), the daemon opens the browser
+     on its own landing page, and **Continue to sign in** redirects to the
+     IdP.
 
    `agentdesktop enrollment` prints the same URL.
-5. After the user authenticates, the IdP redirects to the loopback callback.
+4. After the user authenticates, the IdP redirects to the loopback callback.
    The daemon rejects the callback unless `state` matches, then exchanges the
-   code and PKCE verifier at the IdP token endpoint. The callback times out
-   after 10 minutes.
-6. `CompleteEnrollment` sends the `enrollment_id`, the CSR, and the ID token,
-   with the access token as a bearer credential.
+   code and PKCE verifier at the IdP token endpoint, and requires the ID
+   token's `nonce` to match the one it sent. The callback times out after 10
+   minutes.
+5. `EnrollDevice` sends the hostname, the CSR, and the ID token, with the
+   access token as a bearer credential.
 
 ### Device authorization flow
 
@@ -241,36 +253,109 @@ For hosts without a local browser, set `deviceAuthorization: true` in the
 daemon's controller connection. The IdP must advertise a
 `device_authorization_endpoint`. This follows RFC 8628:
 
-1. `BeginEnrollment` is sent with `device_authorization` set. The controller
-   requests a device grant from the IdP and returns the `device_code`,
-   `user_code`, and verification URL. The pending enrollment lives for the
-   shorter of the IdP's `expires_in` and 10 minutes.
+1. After `GetLoginConfiguration`, the daemon requests a device grant from the
+   IdP's `device_authorization_endpoint` itself and receives the
+   `device_code`, `user_code`, and verification URL. The daemon must be able
+   to reach this endpoint as well as the token endpoint.
 2. The daemon logs the verification URL and user code and publishes them on
    `/v1/enrollment`. The user approves the request from any device.
 3. The daemon polls the IdP token endpoint at the returned interval, adding
    5 seconds on each `slow_down`, until it receives tokens or the code
    expires.
-4. `CompleteEnrollment` proceeds as in the browser flow. There is no nonce to
-   check, because the device grant does not carry one.
+4. The daemon calls `EnrollDevice` as in the browser flow. RFC 8628 has no
+   nonce, so these tokens are not bound to the device key. The controller
+   accepts tokens without a nonce only when the IdP advertises a device
+   authorization endpoint.
+
+### Enrollment token
+
+A device management system can enroll devices with no user involved. The
+operator signs a token once, the controller trusts the operator's public key,
+and every device receives the same token file.
+
+The token is a JWT signed with an algorithm of the issuer's key type: ES256
+or ES384 for an ECDSA P-256 or P-384 key, EdDSA for an Ed25519 key, and
+RS256, RS384, RS512, PS256, PS384, or PS512 for an RSA key of at least 2048
+bits. Its claims are:
+
+| Claim | Meaning |
+| --- | --- |
+| `iss` | The issuer's `name` in the controller configuration. |
+| `aud` | The controller's `enrollmentTokens.audience`. |
+| `jti` | The token's ID, used to revoke it. |
+| `iat` | When the token was issued. |
+| `exp`, `nbf` | Optional. Checked when present. |
+
+The controller lists the issuers it trusts:
+
+```yaml
+enrollmentTokens:
+  audience: agentdesktop-fleet
+  issuers:
+    - name: mdm
+      publicKeyPath: enrollment/mdm.pub.pem
+      revokedIds: []
+```
+
+The daemon reads the token from a file that only it can read:
+
+```yaml
+controller:
+  address: https://controller.example.com
+  caCertificatePath: /etc/agentdesktop/ca.pem
+  enrollmentTokenPath: /etc/agentdesktop/enrollment-token
+```
+
+With `enrollmentTokenPath` set, the daemon skips `GetLoginConfiguration` and
+sign-in. It generates the device key and calls `EnrollDevice` with the token
+instead of an ID token, and sends no access token. The controller verifies the
+CSR and the token, derives the device UUID from the token's issuer, its ID,
+and the CSR, and stores the issuer and ID with the device. One token enrolls
+any number of devices.
+
+Afterwards the device calls `Connect`, `RenewDeviceCertificate`, and
+`GetDeviceUsage` with its certificate alone. `GetLlmGatewayCredential` fails
+with `FAILED_PRECONDITION`, because the credential carries a user's identity
+and no user has signed in.
+
+To revoke a token, add its `jti` to the issuer's `revokedIds` and restart the
+controller. The token no longer enrolls devices, and the devices it enrolled
+are rejected as `Unauthenticated`. Removing the issuer rejects every device
+it enrolled. To remove one device, delete it in the controller UI.
 
 ### Controller validation
 
-On `CompleteEnrollment` the controller:
+On `EnrollDevice` the controller:
 
-1. Removes the pending enrollment, so an `enrollment_id` can be completed
-   only once, and rejects it if expired.
+1. Verifies the CSR signature, which proves the caller holds the device key.
 2. Verifies the ID token signature against the IdP's JWKS. An unknown key ID
    triggers one JWKS refresh, rate limited to once every 30 seconds.
 3. Validates `iss`, `aud` (the configured client ID), `exp`, and `sub`, and
-   for the browser flow, that `nonce` matches the one it generated.
+   requires `nonce` to equal the base64url SHA-256 of the CSR's
+   SubjectPublicKeyInfo. This ties the sign-in to the key without the
+   controller storing anything: a token from a refresh grant (which should
+   carry no nonce, or else the original one) or from a sign-in for another
+   key is rejected. A token without a nonce is accepted only when the IdP
+   advertises device authorization, because that grant cannot carry one.
 4. Calls the IdP's UserInfo endpoint with the access token and requires its
    `sub` to equal the ID token's `sub`. This binds the access token, which the
    daemon will present on every later call, to the validated ID token.
-5. Generates a new device UUID and signs the CSR with the device CA. The
-   certificate is valid for 30 days, allows only client authentication, and
-   carries the device ID in its SAN.
-6. Stores the device with its hostname, the IdP issuer and subject, and the
-   ID token's claims. The claims are later copied into gateway credentials.
+5. Derives the device UUID from the issuer, subject, and CSR. If a device
+   with that ID was already enrolled, it returns the stored result, so a
+   daemon that lost the response and retries with the same CSR gets the same
+   device and certificate, including after a controller restart.
+6. Otherwise signs the CSR with the device CA. The certificate is valid for
+   30 days, allows only client authentication, and carries the device ID in
+   its SAN.
+7. Stores the device with its hostname, the IdP issuer and subject, and the
+   ID token's claims, together with an enrollment receipt (the response, with
+   the public certificate only) in one transaction. The receipt is deleted
+   with the device. The claims are later copied into gateway credentials.
+
+When the IdP cannot be reached or fails (a UserInfo or JWKS request that does
+not end in 401 or 403, or a JWKS refresh held back by the rate limit), the
+controller returns `UNAVAILABLE`. The daemon retries with the same CSR and
+tokens until the access token expires, so the user does not sign in again.
 
 ### Local storage
 
@@ -340,7 +425,9 @@ managed tools obtain short-lived gateway credentials through the daemon:
 4. The daemon caches the JWT for at most 60 seconds per client ID, never
    within 30 seconds of its expiry, and never across logout or re-enrollment.
 5. The gateway verifies the JWT with the controller's public keys, served at
-   `/.well-known/jwks.json`.
+   `/.well-known/jwks.json` only by the gateway listener (`gatewayListener`;
+   plain HTTP, or HTTPS with the controller certificate). The fleet and
+   management listeners do not serve them.
 
 With `authentication.type: oidc`, the controller is not involved. The daemon
 signs the user in to the gateway's own OIDC client, using the browser or
@@ -351,7 +438,7 @@ device identity.
 
 | Condition | Daemon behavior |
 | --- | --- |
-| Enrollment fails (IdP error, state mismatch, timeout, controller rejects) | Retry with backoff. Status returns to `starting`. |
+| Enrollment fails (IdP error, state mismatch, timeout, controller rejects) | Retry with backoff. Status returns to `starting`. A daemon with an enrollment token never falls back to sign-in. |
 | IdP rejects the refresh token | Delete the local identity and enroll again. The app reports the session as expired. |
 | Token refresh fails because of the network or an IdP outage | Keep the identity and retry with backoff. |
 | Controller returns `Unauthenticated` on the `Connect` stream, at open or later (unknown device certificate, or the IdP rejects the access token) | Delete the local identity and enroll again. |

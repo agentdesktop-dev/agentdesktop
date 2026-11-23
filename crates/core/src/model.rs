@@ -130,7 +130,7 @@ pub struct DaemonInfo {
     pub scope: DaemonScope,
     pub config_path: String,
     pub state_directory: String,
-    #[serde(with = "humantime_serde")]
+    #[serde(with = "crate::serdes::duration")]
     pub inventory_interval: Duration,
     pub controller: Option<DaemonControllerInfo>,
     /// Local loopback LLM proxy, when configured. Absent in system mode and when
@@ -338,7 +338,7 @@ pub struct DaemonControllerInfo {
     pub address: String,
     /// Lossy UTF-8 display path; never used to load the certificate.
     pub ca_certificate_path: Option<String>,
-    #[serde(with = "humantime_serde")]
+    #[serde(with = "crate::serdes::duration")]
     pub heartbeat_interval: Duration,
 }
 

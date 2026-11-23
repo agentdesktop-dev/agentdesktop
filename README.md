@@ -702,7 +702,7 @@ routes:
       issuer: agentdesktop-controller
       audiences: [agentgateway]
       jwks:
-        url: https://<controller>/.well-known/jwks.json
+        url: https://<controller>:8444/.well-known/jwks.json  # gatewayListener
     urlRewrite:
       authority:
         full: api.business.githubcopilot.com
@@ -1472,13 +1472,35 @@ stage.
 
 ![Agentdesktop controller device inventory](images/controller-ui.png)
 
+The controller has three listeners, each configured with `listen` and
+`limits`: `fleetListener` for devices, `adminListener` for the management UI
+and API, and `gatewayListener` for LLM gateways. Each listener's `limits` caps
+its open connections (`maxConnections`, `connectionsPerAddress`).
+
 The controller management UI/API accepts unauthenticated access only on a
-loopback `adminListen` address (default `127.0.0.1:8080`), and rejects
+loopback `adminListener.listen` address (default `127.0.0.1:8080`), and rejects
 cross-site browser mutations and non-loopback `Host` headers. Reach it remotely
-through an SSH tunnel. Remote management (`adminAccess.mode: authenticated`)
+through an SSH tunnel. Remote management (`adminListener.access.mode: authenticated`)
 requires a controller build with a compiled-in authentication provider; the
 standard executable rejects it at startup. Device enrollment is configured separately.
+LLM gateways need the controller's JWKS (`/.well-known/jwks.json`) to verify
+the JWTs it issues. Only the gateway listener (`gatewayListener`, default
+`127.0.0.1:8444`) serves it; the fleet and management listeners do not. A
+NetworkPolicy or firewall can allow gateways that one port and block the
+management API, so a compromised gateway cannot read the device inventory or
+delete devices. A gateway that exports usage to the controller also needs the
+fleet port. Set `gatewayListener.tls: true` unless gateways reach the listener
+over loopback or a trusted network: whoever can change the keys a gateway
+fetches can forge credentials it accepts.
 See the [controller configuration schema](schema/controller-config.md).
+
+Upgrade note: the fleet and management listeners no longer serve the JWKS, and
+the fleet listener no longer accepts HTTP/1. Point each gateway's JWKS URL at
+the gateway listener (with the Helm chart, the `<release>-gateway` Service)
+before upgrading the controller, or its controller-issued credentials are
+rejected until you do. In the controller configuration, `fleetListen` is now
+`fleetListener.listen` and `adminListen` is now `adminListener.listen`; the old
+keys are rejected.
 
 ### Configuration status
 
@@ -1679,10 +1701,35 @@ locally and can request credentials for an LLM gateway through the daemon.
 
 ![Agentdesktop controller, workstation daemon, and LLM gateway architecture](images/overview.png)
 
-In controller-managed mode, the daemon generates its private device key on the
-workstation and sends only a certificate signing request to the controller.
+In controller-managed mode, the daemon starts user sign-in automatically using
+read-only login configuration from the controller. It generates its private
+device key on the workstation, authenticates directly with the identity
+provider, then automatically enrolls with a certificate signing request and
+the user's tokens. There is no separate manual enrollment step, pre-login
+enrollment ticket, or pending-enrollment reservation on the controller.
 After enrollment, protected controller operations require the device
 certificate and a valid token for the user who enrolled it.
+
+Browser sign-in uses PKCE and `state`, and its OIDC `nonce` is the SHA-256 of
+the device public key. The controller validates the ID token and bearer access
+token, binds enrollment to their verified user identity, and requires the
+nonce to match the key in the CSR, so tokens from a refresh grant or from a
+sign-in for another key cannot enroll a device. Headless device authorization
+retains the verification URL/code experience; the daemon now contacts the
+IdP's device-authorization endpoint directly, as well as its token endpoint.
+That grant carries no nonce, so the controller accepts tokens without one only
+when the IdP supports device authorization.
+
+Enrollment retries reuse the same CSR. The controller atomically stores a
+public-certificate receipt with the device, so the same user/CSR recovers the
+original result across concurrent requests or controller restarts. Receipts
+are removed with their device. Losing an unsaved device key in a daemon crash
+does not resume that enrollment.
+
+**Upgrade compatibility:** upgrade the controller and agents together.
+`GetLoginConfiguration` and `EnrollDevice` replace the old two-step enrollment
+RPCs; there is no legacy fallback. Existing enrolled-device connection,
+refresh, and renewal behavior is unchanged.
 
 When a supported tool requests gateway access, the controller can issue a
 short-lived JWT containing the user, device ID, allowed client label, audience,

@@ -14,10 +14,11 @@ anyhow.workspace = true
 async-trait = "0.1"
 aws-lc-rs.workspace = true
 axum.workspace = true
-axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+axum-server = { version = "0.9", features = ["tls-rustls-no-provider"] }
 base64.workspace = true
 clap.workspace = true
 futures-core.workspace = true
+http-body.workspace = true
 jsonwebtoken.workspace = true
 mime_guess = "2"
 notify.workspace = true
@@ -35,6 +36,7 @@ sqlx = { workspace = true, features = ["postgres", "tls-rustls-aws-lc-rs"] }
 tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true
+tower-layer.workspace = true
 tracing.workspace = true
 time.workspace = true
 url.workspace = true
@@ -42,5 +44,7 @@ uuid.workspace = true
 x509-parser.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util.workspace = true
+tempfile = "3"

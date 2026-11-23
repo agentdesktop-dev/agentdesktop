@@ -22,7 +22,9 @@ pub struct Identity {
     pub client_certificate_pem: String,
     pub client_private_key_pem: String,
     pub client_certificate_expires_at_unix_seconds: u64,
-    pub oauth: OAuthCredentials,
+    /// `None` for a device enrolled with an enrollment token: no user signed
+    /// in, and the OAuth endpoint and client ID are empty.
+    pub oauth: Option<OAuthCredentials>,
     pub oauth_token_endpoint: String,
     pub oauth_client_id: String,
 }
@@ -92,8 +94,12 @@ pub fn load(path: &Path) -> anyhow::Result<Option<Identity>> {
     let secrets = secret_store(path)?;
     #[cfg(target_os = "linux")]
     migrate_legacy_linux_secrets(path, &secrets, &stored.device_id)?;
-    let (client_private_key_pem, oauth) =
-        read_secrets(&secrets, &stored.device_id).context(IdentityUnreadable)?;
+    let (client_private_key_pem, oauth) = read_secrets(
+        &secrets,
+        &stored.device_id,
+        !stored.oauth_client_id.is_empty(),
+    )
+    .context(IdentityUnreadable)?;
     Ok(Some(Identity {
         device_id: stored.device_id,
         client_certificate_pem: stored.client_certificate_pem,
@@ -109,30 +115,39 @@ pub fn load(path: &Path) -> anyhow::Result<Option<Identity>> {
 fn read_secrets(
     secrets: &SecretStore,
     device_id: &str,
-) -> anyhow::Result<(String, OAuthCredentials)> {
+    has_oauth: bool,
+) -> anyhow::Result<(String, Option<OAuthCredentials>)> {
     let client_private_key_pem = secrets
         .get(TLS_KEY_SERVICE, device_id)
         .context("read device TLS private key")?;
+    if !has_oauth {
+        return Ok((client_private_key_pem, None));
+    }
     let oauth = secrets
         .get(OAUTH_SERVICE, device_id)
         .context("read OAuth credentials")?;
     let oauth = serde_json::from_str(&oauth).context("decode stored OAuth credentials")?;
-    Ok((client_private_key_pem, oauth))
+    Ok((client_private_key_pem, Some(oauth)))
 }
 
 pub fn save(path: &Path, identity: &Identity) -> anyhow::Result<()> {
     let parent = path.parent().context("identity path has no parent")?;
     secure_fs::ensure_private_dir(parent)?;
     let secrets = SecretStore::new(parent)?;
-    let oauth = serde_json::to_string(&identity.oauth)?;
-    for (service, secret, operation) in [
-        (
-            TLS_KEY_SERVICE,
-            identity.client_private_key_pem.as_str(),
-            "store device TLS private key",
-        ),
-        (OAUTH_SERVICE, oauth.as_str(), "store OAuth credentials"),
-    ] {
+    let oauth = identity
+        .oauth
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    let mut items = vec![(
+        TLS_KEY_SERVICE,
+        identity.client_private_key_pem.as_str(),
+        "store device TLS private key",
+    )];
+    if let Some(oauth) = &oauth {
+        items.push((OAUTH_SERVICE, oauth.as_str(), "store OAuth credentials"));
+    }
+    for (service, secret, operation) in items {
         // The macOS Keychain adds a new item whenever looking up the existing
         // one fails, including when the item is there but unreadable (after a
         // code-signature change), and leaves the unreadable copy behind as a
@@ -317,11 +332,11 @@ mod tests {
             client_certificate_pem: "certificate".to_owned(),
             client_private_key_pem: "private-key".to_owned(),
             client_certificate_expires_at_unix_seconds: 123,
-            oauth: OAuthCredentials {
+            oauth: Some(OAuthCredentials {
                 access_token: "access-token".to_owned(),
                 refresh_token: "refresh-token".to_owned(),
                 expires_at_unix_seconds: 456,
-            },
+            }),
             oauth_token_endpoint: "https://issuer.example/token".to_owned(),
             oauth_client_id: "client-1".to_owned(),
         }
@@ -356,12 +371,38 @@ mod tests {
 
         let loaded = load(&path).unwrap().unwrap();
         assert_eq!(loaded.client_private_key_pem, "private-key");
-        assert_eq!(loaded.oauth.access_token, "access-token");
-        assert_eq!(loaded.oauth.refresh_token, "refresh-token");
+        assert_eq!(loaded.oauth.as_ref().unwrap().access_token, "access-token");
+        assert_eq!(
+            loaded.oauth.as_ref().unwrap().refresh_token,
+            "refresh-token"
+        );
 
         delete(&path, "device-1").unwrap();
         assert!(!path.exists());
         assert!(secret_paths.iter().all(|path| !path.exists()));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn token_enrolled_identity_round_trips_without_oauth_credentials() {
+        let directory = temp_directory();
+        let path = directory.join("identity.json");
+        let identity = Identity {
+            oauth: None,
+            oauth_token_endpoint: String::new(),
+            oauth_client_id: String::new(),
+            ..test_identity()
+        };
+
+        save(&path, &identity).unwrap();
+        assert_eq!(secret_count(&directory), 1);
+
+        let loaded = load(&path).unwrap().unwrap();
+        assert_eq!(loaded.client_private_key_pem, "private-key");
+        assert!(loaded.oauth.is_none());
+
+        delete(&path, "device-1").unwrap();
+        assert_eq!(secret_count(&directory), 0);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -437,7 +478,10 @@ mod tests {
 
         let loaded = load(&path).unwrap().unwrap();
         assert_eq!(loaded.client_private_key_pem, "private-key");
-        assert_eq!(loaded.oauth.refresh_token, "refresh-token");
+        assert_eq!(
+            loaded.oauth.as_ref().unwrap().refresh_token,
+            "refresh-token"
+        );
         assert_eq!(secret_count(&directory), 2);
         fs::remove_dir_all(directory).unwrap();
     }

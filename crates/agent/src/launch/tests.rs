@@ -2262,7 +2262,7 @@ impl Default for Setup {
             managed_file: None,
             proxy_address: Some(std::net::SocketAddr::from(([127, 0, 0, 1], 4000))),
             session_policy: Arc::new(crate::llm_proxy::sessions::ConfigPolicy {
-                config: serde_yaml::from_str(GOOD_CONFIG).unwrap(),
+                config: agentdesktop_core::serdes::yamlviajson::from_str(GOOD_CONFIG).unwrap(),
                 state_dir: std::env::temp_dir(),
             }),
             sessions: crate::llm_proxy::sessions::SessionRegistry::default(),
@@ -3785,7 +3785,7 @@ async fn a_refusing_session_policy_passes_its_status_and_text_through() {
 #[tokio::test(start_paused = true)]
 async fn controller_jwt_without_claude_code_in_allowed_client_ids_is_refused() {
     let config: agentdesktop_core::config::DaemonConfig =
-        serde_yaml::from_str(
+        agentdesktop_core::serdes::yamlviajson::from_str(
             "llmGateway:\n  url: https://gateway.example.com\n  authentication:\n    type: controllerJwt\n    audience: agentgateway\n    allowedClientIds: [copilot-cli]\nprograms:\n  claudeCode: {}\n"
         )
         .unwrap();
@@ -5321,7 +5321,8 @@ fn writable_6a(plan: &plan::LaunchPlan, path: &str) -> bool {
 }
 
 fn yaml_config(text: &str) -> agentdesktop_core::config::DaemonConfig {
-    serde_yaml::from_str(text).unwrap_or_else(|error| panic!("{error}: {text}"))
+    agentdesktop_core::serdes::yamlviajson::from_str(text)
+        .unwrap_or_else(|error| panic!("{error}: {text}"))
 }
 
 const GATEWAY_6A: &str = "llmGateway:\n  url: https://gateway.example.com\n  authentication:\n    type: oidc\n    issuer: https://login.example.com\n    clientId: agentdesktop\n";
@@ -7386,7 +7387,7 @@ async fn an_opencode_client_id_outside_allowed_client_ids_answers_409() {
     let h = Harness::start(Setup {
         config: SIX_A_CONFIG,
         session_policy: Arc::new(crate::llm_proxy::sessions::ConfigPolicy {
-            config: serde_yaml::from_str(
+            config: agentdesktop_core::serdes::yamlviajson::from_str(
                 "llmGateway:\n  url: https://gateway.example.com\n  authentication:\n    type: controllerJwt\n    audience: agentgateway\n    allowedClientIds: [claude-code, copilot-cli]\n",
             )
             .unwrap(),

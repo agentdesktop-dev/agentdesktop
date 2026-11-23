@@ -39,6 +39,11 @@ spec:
         - name: admin
           containerPort: 8080
           protocol: TCP
+        {{- if include "agentdesktop-controller.gatewayListenerEnabled" . }}
+        - name: gateway
+          containerPort: {{ .Values.gatewayListener.port }}
+          protocol: TCP
+        {{- end }}
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

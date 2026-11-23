@@ -7,8 +7,18 @@ metadata:
     {{- include "agentdesktop-controller.labels" . | nindent 4 }}
 data:
   controller.yaml: |
-    fleetListen: 0.0.0.0:8443
-    adminListen: 127.0.0.1:8080
+    fleetListener:
+      listen: 0.0.0.0:8443
+      {{- with .Values.fleetListener.limits }}
+      limits:
+{{ toYaml . | indent 8 }}
+      {{- end }}
+    adminListener:
+      listen: 127.0.0.1:8080
+      {{- with .Values.adminListener.limits }}
+      limits:
+{{ toYaml . | indent 8 }}
+      {{- end }}
     databaseUrl: {{ required "databaseUrl is required" .Values.databaseUrl | quote }}
     tls: /etc/agentdesktop/tls
     allowInsecureDev: {{ .Values.allowInsecureDev }}
@@ -19,6 +29,15 @@ data:
     {{- with .Values.gatewayJwt }}
     gatewayJwt:
 {{ toYaml . | indent 6 }}
+    {{- end }}
+    {{- if include "agentdesktop-controller.gatewayListenerEnabled" . }}
+    gatewayListener:
+      listen: 0.0.0.0:{{ .Values.gatewayListener.port }}
+      tls: {{ .Values.gatewayListener.tls }}
+      {{- with .Values.gatewayListener.limits }}
+      limits:
+{{ toYaml . | indent 8 }}
+      {{- end }}
     {{- end }}
     {{- with .Values.daemonConfig }}
     daemonConfig:
