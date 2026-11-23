@@ -123,6 +123,10 @@ pub struct DaemonStartupConfig {
     /// saved controller configuration outside them is kept on disk but not
     /// applied at startup: the local configuration is applied instead. Read at
     /// startup only. See `docs/threat-model.md`.
+    ///
+    /// A daemon that predates this setting fails to load a local
+    /// configuration that contains it, and does not start, so upgrade devices
+    /// before installing it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub controller_limits: Option<ControllerLimits>,
 }

@@ -827,6 +827,10 @@ restores it. The check does not cover URLs in programs' free-form settings,
 such as Claude Code `env`. See the
 [control-plane threat model](docs/threat-model.md).
 
+Roll out in this order: upgrade the controller, then the daemons, then install
+the list. A daemon that predates `controllerLimits` fails to load a local
+configuration that contains it, and does not start.
+
 ## Start locally, grow into a fleet
 
 Agentdesktop uses the same daemon and tool-native configuration model at every

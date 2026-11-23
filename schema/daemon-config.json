@@ -284,7 +284,7 @@
           "default": {}
         },
         "controllerLimits": {
-          "description": "Local limits on the configuration a controller pushes. A pushed\nconfiguration outside them is rejected as a whole, reported to the\ncontroller as `rejected`, and the last accepted one stays in effect. A\nsaved controller configuration outside them is kept on disk but not\napplied at startup: the local configuration is applied instead. Read at\nstartup only. See `docs/threat-model.md`.",
+          "description": "Local limits on the configuration a controller pushes. A pushed\nconfiguration outside them is rejected as a whole, reported to the\ncontroller as `rejected`, and the last accepted one stays in effect. A\nsaved controller configuration outside them is kept on disk but not\napplied at startup: the local configuration is applied instead. Read at\nstartup only. See `docs/threat-model.md`.\n\nA daemon that predates this setting fails to load a local\nconfiguration that contains it, and does not start, so upgrade devices\nbefore installing it.",
           "anyOf": [
             {
               "$ref": "#/$defs/ControllerLimits"

@@ -212,7 +212,8 @@ message ConfigStatus {
   ConfigState state = 2;
   string error = 3;
   // Per-program outcomes of this apply, in the agent's provider order. Empty
-  // when the configuration was not applied at all (hash or parse error), and
+  // when the configuration was not applied at all (hash or parse error, or
+  // CONFIG_STATE_REJECTED), and
   // from agents that do not report per-program status: `programs_reported`
   // distinguishes the two.
   repeated ProgramStatus programs = 4;
