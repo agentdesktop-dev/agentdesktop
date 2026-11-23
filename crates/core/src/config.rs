@@ -46,7 +46,10 @@ pub struct DaemonConfig {
     ///
     /// Discovery walks user home directories and developer-tool configuration
     /// files, so this trades inventory freshness against local disk activity.
-    #[serde(default = "default_inventory_interval", with = "humantime_serde")]
+    #[serde(
+        default = "default_inventory_interval",
+        with = "crate::serdes::duration"
+    )]
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub inventory_interval: Duration,
 }
@@ -111,7 +114,7 @@ pub struct DaemonStartupConfig {
     /// device still re-applies the controller's configuration on every
     /// reconnect. Must be greater than zero and at most 30 days; read at
     /// startup only (restart the daemon after changing it).
-    #[serde(default, with = "humantime_serde::option")]
+    #[serde(default, with = "crate::serdes::duration::option")]
     #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
     pub reconcile_interval: Option<Duration>,
 }
@@ -195,7 +198,8 @@ pub struct OpenCodeStartupConfig {
     /// Configuration file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<PathBuf>,
-    /// Credential plugin path.
+    /// Credential plugin path (OpenCode 1 plugin file). The OpenCode 2 plugin
+    /// is written next to it as a directory: `<dir>/<name>/index.js`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin: Option<PathBuf>,
 }
@@ -463,7 +467,10 @@ pub struct ControllerConnectionConfig {
     /// the operating system's certificate roots.
     pub ca_certificate_path: PathBuf,
     /// Interval between device heartbeats. Defaults to `30s`.
-    #[serde(default = "default_heartbeat_interval", with = "humantime_serde")]
+    #[serde(
+        default = "default_heartbeat_interval",
+        with = "crate::serdes::duration"
+    )]
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub heartbeat_interval: Duration,
     /// Enroll with the OAuth 2.0 Device Authorization Grant (RFC 8628) instead
@@ -472,9 +479,18 @@ pub struct ControllerConnectionConfig {
     /// Use this on hosts without a local browser, such as servers reached over
     /// SSH. The daemon logs a verification URL and user code to approve from
     /// any other device. The identity provider must support device
-    /// authorization for the controller's client.
+    /// authorization for the controller's client. The daemon must be able to
+    /// reach the IdP's device-authorization and token endpoints directly.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub device_authorization: bool,
+    /// Path to a file holding an enrollment token signed by an issuer the
+    /// controller trusts (`enrollmentTokens`).
+    ///
+    /// The daemon enrolls with this token instead of a user sign-in, so a
+    /// device management system can enroll devices unattended. Cannot be
+    /// combined with `deviceAuthorization`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrollment_token_path: Option<PathBuf>,
 }
 
 /// Startup configuration for the Agentdesktop fleet controller.
@@ -482,22 +498,25 @@ pub struct ControllerConnectionConfig {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ControllerConfig {
-    /// Address on which the device-facing gRPC fleet API listens.
-    #[serde(default = "default_fleet_listen")]
-    #[cfg_attr(feature = "schema", schemars(with = "String"))]
-    pub fleet_listen: SocketAddr,
-    /// Address on which the controller management UI listens. Local mode requires loopback.
-    #[serde(default = "default_admin_listen")]
-    #[cfg_attr(feature = "schema", schemars(with = "String"))]
-    pub admin_listen: SocketAddr,
-    /// Management authentication, separate from device enrollment. Defaults to local-only access.
+    /// Listener for the device-facing gRPC fleet API.
     #[serde(default)]
-    pub admin_access: ControllerAdminAccess,
+    pub fleet_listener: ControllerFleetListener,
+    /// Listener for the controller management UI and API.
+    #[serde(default)]
+    pub admin_listener: ControllerAdminListener,
+    /// Listener that LLM gateways use, started when `gatewayJwt` is set. It serves only `/.well-known/jwks.json`, the keys gateways use to verify controller-issued JWTs.
+    ///
+    /// No other listener serves the keys, so a NetworkPolicy or firewall can allow gateways this port and block the management API, which can read the device inventory and delete devices. Gateways that export usage also need the fleet port.
+    #[serde(default)]
+    pub gateway_listener: ControllerGatewayListener,
     /// SQLite or PostgreSQL URL used for controller state.
     #[serde(default = "default_controller_database_url")]
     pub database_url: String,
     /// OpenID Connect settings used for device enrollment and authorization.
     pub oidc: ControllerOidcConfig,
+    /// Unattended device enrollment with operator-signed tokens. Disabled when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrollment_tokens: Option<ControllerEnrollmentTokensConfig>,
     /// Daemon configuration distributed to enrolled devices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daemon_config: Option<ControllerDaemonConfig>,
@@ -598,6 +617,201 @@ pub enum ControllerAdminTransport {
     },
 }
 
+/// Listener for the device-facing gRPC fleet API.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerFleetListener {
+    /// Address on which the fleet listener accepts connections. Defaults to `127.0.0.1:8443`; devices on other hosts need a non-loopback address.
+    #[serde(default = "default_fleet_listen")]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub listen: SocketAddr,
+    /// Limits on the fleet API that depend on the deployment.
+    #[serde(default)]
+    pub limits: ControllerFleetLimitsConfig,
+}
+
+/// Listener for the controller management UI and API.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerAdminListener {
+    /// Address on which the management listener accepts connections. Defaults to `127.0.0.1:8080`. Local access requires a loopback address.
+    #[serde(default = "default_admin_listen")]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub listen: SocketAddr,
+    /// Management authentication, separate from device enrollment. Defaults to local-only access.
+    #[serde(default)]
+    pub access: ControllerAdminAccess,
+    /// Connection limits on the management listener.
+    #[serde(default)]
+    pub limits: ControllerAdminLimitsConfig,
+}
+
+impl Default for ControllerFleetListener {
+    fn default() -> Self {
+        Self {
+            listen: default_fleet_listen(),
+            limits: ControllerFleetLimitsConfig::default(),
+        }
+    }
+}
+
+impl Default for ControllerAdminListener {
+    fn default() -> Self {
+        Self {
+            listen: default_admin_listen(),
+            access: ControllerAdminAccess::default(),
+            limits: ControllerAdminLimitsConfig::default(),
+        }
+    }
+}
+
+/// Connection limits on the management listener. Any connection can be closed
+/// to make room at a limit, including one with a request in progress. Unset
+/// fields keep their defaults.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct ControllerAdminLimitsConfig {
+    /// Open management connections allowed in total. At the limit, the connection idle the longest is closed to admit a new one. Defaults to `256`.
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
+    pub max_connections: usize,
+    /// Open management connections allowed from one client address: an IPv4 address, or an IPv6 /64. At the limit, that address's connection idle the longest is closed to admit a new one. Defaults to `256`, the same as `maxConnections`, because behind a proxy or on loopback every connection has the same address.
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
+    pub connections_per_address: usize,
+}
+
+impl Default for ControllerAdminLimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: 256,
+            connections_per_address: 256,
+        }
+    }
+}
+
+/// Connection limits on the gateway listener. Any connection can be closed to
+/// make room at a limit, including one with a request in progress. Unset fields
+/// keep their defaults.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct ControllerGatewayLimitsConfig {
+    /// Open gateway connections allowed in total. At the limit, the connection idle the longest is closed to admit a new one. Defaults to `1024`.
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
+    pub max_connections: usize,
+    /// Open gateway connections allowed from one client address: an IPv4 address, or an IPv6 /64. At the limit, that address's connection idle the longest is closed to admit a new one. Raise it when many gateway replicas share an address. Defaults to `64`.
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
+    pub connections_per_address: usize,
+}
+
+impl Default for ControllerGatewayLimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: 1024,
+            connections_per_address: 64,
+        }
+    }
+}
+
+/// Limits on the device-facing fleet API that depend on the deployment: how
+/// many devices connect, how many share one client address, and how much they
+/// send. Unset fields keep their defaults.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct ControllerFleetLimitsConfig {
+    /// Open fleet connections allowed in total. At the limit, the idle
+    /// connection with the oldest activity (its last request starting or
+    /// ending, or else its being accepted) is closed to admit a new one; when
+    /// none is idle, the new one is closed. A connection is idle unless a
+    /// client with a device certificate has a request or `Connect` stream open
+    /// on it. Defaults to `50000`.
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
+    pub max_connections: usize,
+    /// Open fleet connections allowed from one client address: an IPv4
+    /// address, or an IPv6 /64. At the limit, that address's idle connection
+    /// with the oldest activity is closed to admit a new one; when none is
+    /// idle, the new one is closed. Raise it when more devices share an address, such as behind a
+    /// NAT or a load balancer that does not preserve client addresses. Defaults
+    /// to `4096`.
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
+    pub connections_per_address: usize,
+    /// Largest message, in bytes, that a device and the controller may send
+    /// each other. Requests from clients without a device certificate, such as
+    /// enrollment, stay limited to 64 KiB. Devices accept at most 4 MiB, so
+    /// raising this only raises what devices may send. Defaults to `4194304`
+    /// (4 MiB).
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
+    pub max_message_bytes: usize,
+    /// Enrollment requests in progress at once across all clients. Enrollment
+    /// calls the identity provider. Defaults to `64`.
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
+    pub enrollment_in_flight: usize,
+    /// Enrollment requests one client address may make in a burst, after which
+    /// it may make one more every `enrollmentRefill`. Each device sign-in makes
+    /// at least two: one to read the login configuration and one to enroll.
+    /// Defaults to `60`.
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
+    pub enrollment_burst: u32,
+    /// Time for a client address to get back one enrollment request. Defaults
+    /// to `1s`.
+    #[serde(with = "crate::serdes::duration")]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub enrollment_refill: Duration,
+    /// Messages one device may send in a burst on its `Connect` stream, after
+    /// which it may send one more every `deviceMessageRefill`. Once a device
+    /// has sent its burst, the controller reads its messages no faster than
+    /// that, and the device waits to send more. Defaults to `600`.
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
+    pub device_message_burst: u32,
+    /// Time for a device to get back one message. Defaults to `50ms`.
+    #[serde(with = "crate::serdes::duration")]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub device_message_refill: Duration,
+}
+
+impl ControllerFleetLimitsConfig {
+    /// The defaults, usable in constants.
+    pub const DEFAULT: Self = Self {
+        max_connections: 50_000,
+        connections_per_address: 4_096,
+        max_message_bytes: 4 * 1024 * 1024,
+        enrollment_in_flight: 64,
+        enrollment_burst: 60,
+        enrollment_refill: Duration::from_secs(1),
+        device_message_burst: 600,
+        device_message_refill: Duration::from_millis(50),
+    };
+
+    /// Fails when a limit is zero. A zero count would refuse everything, and a
+    /// zero refill would turn its rate limit off.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for (field, zero) in [
+            ("maxConnections", self.max_connections == 0),
+            ("connectionsPerAddress", self.connections_per_address == 0),
+            ("maxMessageBytes", self.max_message_bytes == 0),
+            ("enrollmentInFlight", self.enrollment_in_flight == 0),
+            ("enrollmentBurst", self.enrollment_burst == 0),
+            ("enrollmentRefill", self.enrollment_refill.is_zero()),
+            ("deviceMessageBurst", self.device_message_burst == 0),
+            ("deviceMessageRefill", self.device_message_refill.is_zero()),
+        ] {
+            if zero {
+                anyhow::bail!("fleetListener.limits.{field} must be greater than zero");
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for ControllerFleetLimitsConfig {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// OpenID Connect settings used for interactive device enrollment.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -610,6 +824,36 @@ pub struct ControllerOidcConfig {
     /// Redirect URI registered for the native enrollment client.
     #[serde(default = "default_oidc_redirect_uri")]
     pub redirect_uri: String,
+}
+
+/// Enrollment tokens are JWTs with `iss`, `aud`, `jti` and `iat` claims; `exp`
+/// and `nbf` are honored when present. A token enrolls any number of devices.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerEnrollmentTokensConfig {
+    /// Audience (`aud`) every enrollment token must carry.
+    pub audience: String,
+    /// Token issuers the controller trusts.
+    pub issuers: Vec<ControllerEnrollmentTokenIssuer>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerEnrollmentTokenIssuer {
+    /// Issuer (`iss`) of the tokens this key verifies.
+    pub name: String,
+    /// Path to the PEM-encoded public key: ECDSA P-256 or P-384, Ed25519, or
+    /// RSA of at least 2048 bits. Tokens must be signed with an algorithm of
+    /// the key's type.
+    ///
+    /// Relative paths are resolved from the controller configuration directory.
+    pub public_key_path: PathBuf,
+    /// Token IDs (`jti`) that are no longer accepted. Devices enrolled with
+    /// one of them are rejected as well.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revoked_ids: Vec<String>,
 }
 
 /// Controller-owned daemon configuration file and its revision.
@@ -643,9 +887,29 @@ pub struct ControllerGatewayJwtConfig {
     #[serde(default = "default_gateway_jwt_key_id")]
     pub key_id: String,
     /// Lifetime of generated JWTs. Defaults to `5m`.
-    #[serde(default = "default_gateway_jwt_lifetime", with = "humantime_serde")]
+    #[serde(
+        default = "default_gateway_jwt_lifetime",
+        with = "crate::serdes::duration"
+    )]
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub lifetime: Duration,
+}
+
+/// Listener for LLM gateways, separate from the fleet API and the management UI.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerGatewayListener {
+    /// Address on which the gateway listener accepts connections. Defaults to `127.0.0.1:8444`.
+    #[serde(default = "default_gateway_listen")]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub listen: SocketAddr,
+    /// Serve HTTPS with the controller certificate from `tls` instead of plain HTTP. Use HTTPS unless gateways reach the listener over loopback or a trusted network: whoever can change the keys a gateway fetches can forge credentials it accepts.
+    #[serde(default)]
+    pub tls: bool,
+    /// Connection limits on the gateway listener.
+    #[serde(default)]
+    pub limits: ControllerGatewayLimitsConfig,
 }
 
 /// Collection of LLM token and cost records that agentgateway exports to the
@@ -732,6 +996,22 @@ fn default_gateway_oidc_scopes() -> Vec<String> {
 
 fn default_daemon_config_revision() -> u64 {
     1
+}
+
+impl Default for ControllerGatewayListener {
+    fn default() -> Self {
+        Self {
+            listen: default_gateway_listen(),
+            tls: false,
+            limits: ControllerGatewayLimitsConfig::default(),
+        }
+    }
+}
+
+fn default_gateway_listen() -> SocketAddr {
+    "127.0.0.1:8444"
+        .parse()
+        .expect("valid gateway listen default")
 }
 
 fn default_gateway_jwt_issuer() -> String {
@@ -1375,13 +1655,18 @@ pub fn load_controller(path: &Path) -> anyhow::Result<ControllerConfig> {
     if let Some(daemon) = &mut config.daemon_config {
         resolve_relative(&mut daemon.path, directory);
     }
+    if let Some(tokens) = &mut config.enrollment_tokens {
+        for issuer in &mut tokens.issuers {
+            resolve_relative(&mut issuer.public_key_path, directory);
+        }
+    }
     if let Some(gateway) = &mut config.gateway_jwt {
         resolve_relative(&mut gateway.private_key, directory);
     }
     if let Some(usage) = &mut config.usage {
         resolve_relative(&mut usage.token_file, directory);
     }
-    if let ControllerAdminAccess::Authenticated(admin) = &mut config.admin_access {
+    if let ControllerAdminAccess::Authenticated(admin) = &mut config.admin_listener.access {
         admin.config_directory = directory.to_path_buf();
         if let ControllerAdminTransport::Tls { certificate, key } = &mut admin.transport {
             resolve_relative(certificate, directory);
@@ -1404,9 +1689,11 @@ pub fn load_controller(path: &Path) -> anyhow::Result<ControllerConfig> {
 pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
     let config: ControllerConfig =
         crate::serdes::yamlviajson::from_str(contents).context("parse controller configuration")?;
-    match &config.admin_access {
-        ControllerAdminAccess::Local if !config.admin_listen.ip().is_loopback() => {
-            anyhow::bail!("adminListen must use a loopback address in local adminAccess mode");
+    match &config.admin_listener.access {
+        ControllerAdminAccess::Local if !config.admin_listener.listen.ip().is_loopback() => {
+            anyhow::bail!(
+                "adminListener.listen must use a loopback address with local adminListener.access"
+            );
         }
         ControllerAdminAccess::Local => {}
         ControllerAdminAccess::Authenticated(admin) => validate_admin_authenticated(admin)?,
@@ -1438,6 +1725,23 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
     {
         anyhow::bail!("browserEgress.compliance.pacUrl must be an http or https URL");
     }
+    if let Some(tokens) = &config.enrollment_tokens {
+        if tokens.audience.trim().is_empty() {
+            anyhow::bail!("enrollmentTokens.audience cannot be empty");
+        }
+        if tokens.issuers.is_empty() {
+            anyhow::bail!("enrollmentTokens.issuers cannot be empty");
+        }
+        let mut names = std::collections::BTreeSet::new();
+        for issuer in &tokens.issuers {
+            if issuer.name.trim().is_empty() {
+                anyhow::bail!("enrollmentTokens.issuers has an entry with an empty name");
+            }
+            if !names.insert(&issuer.name) {
+                anyhow::bail!("enrollmentTokens.issuers.{} is defined twice", issuer.name);
+            }
+        }
+    }
     if let Some(gateway) = &config.gateway_jwt {
         if gateway.issuer.trim().is_empty() {
             anyhow::bail!("gatewayJwt.issuer cannot be empty");
@@ -1449,22 +1753,76 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
             anyhow::bail!("gatewayJwt.lifetime must be greater than zero");
         }
     }
+    // Each listener needs its own port. The gateway listener starts only with gatewayJwt.
+    let mut listeners = vec![
+        (
+            "fleetListener.listen",
+            config.fleet_listener.listen,
+            default_fleet_listen(),
+        ),
+        (
+            "adminListener.listen",
+            config.admin_listener.listen,
+            default_admin_listen(),
+        ),
+    ];
+    if config.gateway_jwt.is_some() {
+        listeners.push((
+            "gatewayListener.listen",
+            config.gateway_listener.listen,
+            default_gateway_listen(),
+        ));
+    }
+    for (index, (field, address, default)) in listeners.iter().enumerate() {
+        for (other_field, other, other_default) in &listeners[index + 1..] {
+            if address.port() == other.port() {
+                anyhow::bail!(
+                    "{field} ({address}, default {default}) and {other_field} ({other}, default {other_default}) use the same port; each listener needs its own port"
+                );
+            }
+        }
+    }
+    config.fleet_listener.limits.validate()?;
+    let admin = &config.admin_listener.limits;
+    let gateway = &config.gateway_listener.limits;
+    for (field, zero) in [
+        (
+            "adminListener.limits.maxConnections",
+            admin.max_connections == 0,
+        ),
+        (
+            "adminListener.limits.connectionsPerAddress",
+            admin.connections_per_address == 0,
+        ),
+        (
+            "gatewayListener.limits.maxConnections",
+            gateway.max_connections == 0,
+        ),
+        (
+            "gatewayListener.limits.connectionsPerAddress",
+            gateway.connections_per_address == 0,
+        ),
+    ] {
+        if zero {
+            anyhow::bail!("{field} must be greater than zero");
+        }
+    }
     Ok(config)
 }
 
 fn validate_admin_authenticated(admin: &ControllerAdminAuthenticated) -> anyhow::Result<()> {
-    let public = validate_admin_https_url(&admin.public_url, "adminAccess.publicUrl")?;
+    let public = validate_admin_https_url(&admin.public_url, "adminListener.access.publicUrl")?;
     if public.path() != "/"
         || admin.public_url.split_once("://").is_some_and(|(_, rest)| {
             rest.split_once('/')
                 .is_some_and(|(_, path)| !path.is_empty())
         })
     {
-        anyhow::bail!("adminAccess.publicUrl must be an HTTPS origin without a path");
+        anyhow::bail!("adminListener.access.publicUrl must be an HTTPS origin without a path");
     }
     if let ControllerAdminTransport::Tls { certificate, key } = &admin.transport {
-        require_admin_path(certificate, "adminAccess.transport.certificate")?;
-        require_admin_path(key, "adminAccess.transport.key")?;
+        require_admin_path(certificate, "adminListener.access.transport.certificate")?;
+        require_admin_path(key, "adminListener.access.transport.key")?;
     }
     Ok(())
 }
@@ -1531,6 +1889,11 @@ fn parse_local_daemon(contents: &str) -> anyhow::Result<DaemonConfig> {
         }
         if controller.ca_certificate_path.as_os_str().is_empty() {
             anyhow::bail!("controller.caCertificatePath cannot be empty");
+        }
+        if controller.enrollment_token_path.is_some() && controller.device_authorization {
+            anyhow::bail!(
+                "controller.enrollmentTokenPath cannot be combined with deviceAuthorization"
+            );
         }
     }
     if config.inventory_interval.is_zero() {
@@ -1886,13 +2249,15 @@ mod tests {
         serde_json::json!({
             "oidc": {"issuer": "https://enrollment.example", "clientId": "devices"},
             "tls": "fleet-tls",
-            "adminListen": "0.0.0.0:8080",
-            "adminAccess": {
-                "mode": "authenticated",
-                "publicUrl": "https://admin.example",
-                "transport": {"mode": "proxy"},
-                "provider": {
-                    "oidc": {"issuer": "https://identity.example", "clientSecretFile": "admin-secret"}
+            "adminListener": {
+                "listen": "0.0.0.0:8080",
+                "access": {
+                    "mode": "authenticated",
+                    "publicUrl": "https://admin.example",
+                    "transport": {"mode": "proxy"},
+                    "provider": {
+                        "oidc": {"issuer": "https://identity.example", "clientSecretFile": "admin-secret"}
+                    }
                 }
             }
         })
@@ -1901,16 +2266,18 @@ mod tests {
     #[test]
     fn admin_local_default_is_loopback_only_including_ipv6() {
         let mut document = admin_document();
-        document.as_object_mut().unwrap().remove("adminAccess");
-        document.as_object_mut().unwrap().remove("adminListen");
+        document.as_object_mut().unwrap().remove("adminListener");
         let config = parse_controller(&document.to_string()).unwrap();
         assert!(matches!(
-            config.admin_access,
+            config.admin_listener.access,
             super::ControllerAdminAccess::Local
         ));
-        assert_eq!(config.admin_listen, "127.0.0.1:8080".parse().unwrap());
+        assert_eq!(
+            config.admin_listener.listen,
+            "127.0.0.1:8080".parse().unwrap()
+        );
         for listen in ["127.0.0.1:8080", "127.12.34.56:8080", "[::1]:8080"] {
-            document["adminListen"] = listen.into();
+            document["adminListener"] = serde_json::json!({ "listen": listen });
             assert!(parse_controller(&document.to_string()).is_ok(), "{listen}");
         }
         for listen in [
@@ -1919,7 +2286,7 @@ mod tests {
             "192.0.2.1:8080",
             "[::ffff:127.0.0.1]:8080",
         ] {
-            document["adminListen"] = listen.into();
+            document["adminListener"] = serde_json::json!({ "listen": listen });
             assert!(parse_controller(&document.to_string()).is_err(), "{listen}");
         }
     }
@@ -1927,7 +2294,8 @@ mod tests {
     #[test]
     fn admin_authenticated_keeps_provider_settings_opaque() {
         let config = parse_controller(&admin_document().to_string()).unwrap();
-        let super::ControllerAdminAccess::Authenticated(admin) = &config.admin_access else {
+        let super::ControllerAdminAccess::Authenticated(admin) = &config.admin_listener.access
+        else {
             panic!("expected authenticated");
         };
         assert_eq!(
@@ -1935,15 +2303,22 @@ mod tests {
             serde_json::json!("admin-secret")
         );
         let serialized = serde_json::to_value(&config).unwrap();
-        assert_eq!(serialized["adminAccess"]["mode"], "authenticated");
         assert_eq!(
-            serialized["adminAccess"]["publicUrl"],
+            serialized["adminListener"]["access"]["mode"],
+            "authenticated"
+        );
+        assert_eq!(
+            serialized["adminListener"]["access"]["publicUrl"],
             "https://admin.example"
         );
-        assert!(serialized["adminAccess"].get("configDirectory").is_none());
+        assert!(
+            serialized["adminListener"]["access"]
+                .get("configDirectory")
+                .is_none()
+        );
         assert_eq!(
-            serialized["adminAccess"]["provider"],
-            admin_document()["adminAccess"]["provider"]
+            serialized["adminListener"]["access"]["provider"],
+            admin_document()["adminListener"]["access"]["provider"]
         );
         parse_controller(&serialized.to_string()).unwrap();
     }
@@ -1952,42 +2327,54 @@ mod tests {
     fn admin_authenticated_rejects_unsafe_exposure_even_in_dev_mode() {
         use serde_json::json;
         let cases = [
-            ("/adminAccess/publicUrl", json!("http://admin.example")),
             (
-                "/adminAccess/publicUrl",
+                "/adminListener/access/publicUrl",
+                json!("http://admin.example"),
+            ),
+            (
+                "/adminListener/access/publicUrl",
                 json!("https://admin.example/path"),
             ),
             (
-                "/adminAccess/publicUrl",
+                "/adminListener/access/publicUrl",
                 json!("https://admin.example/a/.."),
             ),
             (
-                "/adminAccess/publicUrl",
+                "/adminListener/access/publicUrl",
                 json!("https://admin.example/?a=1"),
             ),
             (
-                "/adminAccess/publicUrl",
+                "/adminListener/access/publicUrl",
                 json!("https://admin.example/#fragment"),
             ),
-            ("/adminAccess/publicUrl", json!("https://@admin.example")),
             (
-                "/adminAccess/publicUrl",
+                "/adminListener/access/publicUrl",
+                json!("https://@admin.example"),
+            ),
+            (
+                "/adminListener/access/publicUrl",
                 json!("https://user@admin.example"),
             ),
-            ("/adminAccess/publicUrl", json!("https://admin.exa\nmple")),
             (
-                "/adminAccess/transport",
+                "/adminListener/access/publicUrl",
+                json!("https://admin.exa\nmple"),
+            ),
+            (
+                "/adminListener/access/transport",
                 json!({"mode":"tls", "certificate":"", "key":"key.pem"}),
             ),
             (
-                "/adminAccess/transport",
+                "/adminListener/access/transport",
                 json!({"mode":"tls", "certificate":"cert.pem", "key":""}),
             ),
-            ("/adminAccess/transport", json!({"mode":"plaintext"})),
-            ("/adminAccess/provider", json!("settings")),
-            ("/adminAccess/provider", json!(["settings"])),
-            ("/adminAccess/configDirectory", json!("/etc")),
-            ("/adminAccess/unknownSetting", json!(true)),
+            (
+                "/adminListener/access/transport",
+                json!({"mode":"plaintext"}),
+            ),
+            ("/adminListener/access/provider", json!("settings")),
+            ("/adminListener/access/provider", json!(["settings"])),
+            ("/adminListener/access/configDirectory", json!("/etc")),
+            ("/adminListener/access/unknownSetting", json!(true)),
         ];
         for (pointer, value) in cases {
             let mut document = admin_document();
@@ -2001,7 +2388,7 @@ mod tests {
         }
         for field in ["publicUrl", "transport", "provider"] {
             let mut document = admin_document();
-            document["adminAccess"]
+            document["adminListener"]["access"]
                 .as_object_mut()
                 .unwrap()
                 .remove(field);
@@ -2016,14 +2403,15 @@ mod tests {
             .join(format!(".admin-config-test-{}", std::process::id()));
         std::fs::create_dir(&directory).unwrap();
         let mut document = admin_document();
-        document["adminAccess"]["transport"] = serde_json::json!({
+        document["adminListener"]["access"]["transport"] = serde_json::json!({
             "mode":"tls", "certificate":"admin-cert.pem", "key":"admin-key.pem"
         });
         let path = directory.join("controller.yaml");
         std::fs::write(&path, document.to_string()).unwrap();
         let result = load_controller(&path);
         std::fs::remove_dir_all(&directory).unwrap();
-        let super::ControllerAdminAccess::Authenticated(admin) = result.unwrap().admin_access
+        let super::ControllerAdminAccess::Authenticated(admin) =
+            result.unwrap().admin_listener.access
         else {
             panic!("expected authenticated");
         };
@@ -2292,6 +2680,62 @@ controller:
     }
 
     #[test]
+    fn daemon_enrollment_token_replaces_user_sign_in() {
+        let token = r#"
+controller:
+  address: https://controller.example.com
+  caCertificatePath: controller-ca.pem
+  enrollmentTokenPath: /etc/agentdesktop/enrollment-token
+"#;
+        let daemon = parse_daemon(token).expect("enrollment token path");
+        assert_eq!(
+            daemon.controller.unwrap().enrollment_token_path,
+            Some(std::path::PathBuf::from(
+                "/etc/agentdesktop/enrollment-token"
+            ))
+        );
+
+        let error = parse_daemon(&format!("{token}  deviceAuthorization: true\n"))
+            .expect_err("enrollment token combined with device authorization");
+        assert!(error.to_string().contains("enrollmentTokenPath"), "{error}");
+    }
+
+    #[test]
+    fn controller_enrollment_tokens_need_an_audience_and_distinct_issuers() {
+        let controller = |enrollment_tokens: &str| {
+            parse_controller(&format!(
+                "tls: /etc/agentdesktop/tls\noidc:\n  issuer: https://idp.example.com\n  clientId: agentdesktop\nenrollmentTokens:\n{enrollment_tokens}"
+            ))
+        };
+        let tokens = controller(
+            "  audience: fleet\n  issuers:\n    - name: jamf\n      publicKeyPath: jamf.pub.pem\n      revokedIds: [batch-1]\n",
+        )
+        .expect("enrollment tokens")
+        .enrollment_tokens
+        .unwrap();
+        assert_eq!(tokens.audience, "fleet");
+        assert_eq!(tokens.issuers[0].revoked_ids, ["batch-1"]);
+
+        for (invalid, message) in [
+            (
+                "  audience: ''\n  issuers:\n    - name: jamf\n      publicKeyPath: a.pem\n",
+                "audience cannot be empty",
+            ),
+            (
+                "  audience: fleet\n  issuers: []\n",
+                "issuers cannot be empty",
+            ),
+            (
+                "  audience: fleet\n  issuers:\n    - name: jamf\n      publicKeyPath: a.pem\n    - name: jamf\n      publicKeyPath: b.pem\n",
+                "defined twice",
+            ),
+        ] {
+            let error = controller(invalid).expect_err("invalid enrollment tokens accepted");
+            assert!(error.to_string().contains(message), "{error}");
+        }
+    }
+
+    #[test]
     fn controller_tls_accepts_explicit_files_and_directory_shorthand() {
         let explicit = r#"
 tls:
@@ -2316,6 +2760,66 @@ oidc:
             controller.tls.files().certificate,
             std::path::PathBuf::from("/etc/agentdesktop/tls/controller.pem")
         );
+    }
+
+    #[test]
+    fn controller_gateway_listener_defaults_to_loopback_and_is_separate_from_other_listeners() {
+        let base = r#"
+tls: /etc/agentdesktop/tls
+oidc:
+  issuer: https://idp.example.com
+  clientId: agentdesktop
+gatewayJwt:
+  privateKey: /gateway-jwt-key.pem
+"#;
+        let listener = parse_controller(base)
+            .expect("gateway JWT without a gateway listener")
+            .gateway_listener;
+        assert_eq!(listener.listen, "127.0.0.1:8444".parse().unwrap());
+        assert!(!listener.tls);
+
+        let listener = parse_controller(&format!(
+            "{base}gatewayListener:\n  listen: 0.0.0.0:9000\n  tls: true\n"
+        ))
+        .expect("HTTPS gateway listener")
+        .gateway_listener;
+        assert_eq!(listener.listen, "0.0.0.0:9000".parse().unwrap());
+        assert!(listener.tls);
+
+        // A configuration that moves another listener onto the default port names
+        // the default, which the user did not set.
+        let error = parse_controller(&format!("{base}adminListener:\n  listen: 127.0.0.1:8444\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("default 127.0.0.1:8444") && error.contains("adminListener.listen"),
+            "{error}"
+        );
+        let error = parse_controller(&format!(
+            "{base}gatewayListener:\n  listen: 0.0.0.0:8443\nfleetListener:\n  listen: 0.0.0.0:8443\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("fleetListener.listen"), "{error}");
+
+        // Without gatewayJwt the listener is not started, so its port is not checked.
+        parse_controller(&format!(
+            "{}adminListener:\n  listen: 127.0.0.1:8444\n",
+            base.replace("gatewayJwt:\n  privateKey: /gateway-jwt-key.pem\n", "")
+        ))
+        .expect("no gateway listener without gatewayJwt");
+        // The fleet and management listeners are always checked against each other.
+        let without_gateway = base.replace("gatewayJwt:\n  privateKey: /gateway-jwt-key.pem\n", "");
+        let error = parse_controller(&format!(
+            "{without_gateway}fleetListener:\n  listen: 127.0.0.1:8080\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("fleetListener.listen") && error.contains("adminListener.listen"),
+            "{error}"
+        );
+        assert!(parse_controller(&format!("{base}gatewayListener:\n  path: /jwks\n")).is_err());
     }
 
     #[test]
@@ -2638,7 +3142,8 @@ llmGateway:
         assert!(
             parse_controller(
                 r#"
-fleetListen: 0.0.0.0:8443
+fleetListener:
+  listen: 0.0.0.0:8443
 tls: /etc/agentdesktop/tls
 oidc:
   issuer: http://idp.example.com
@@ -2649,7 +3154,8 @@ oidc:
         );
         parse_controller(
             r#"
-fleetListen: 0.0.0.0:8443
+fleetListener:
+  listen: 0.0.0.0:8443
 allowInsecureDev: true
 tls: /etc/agentdesktop/tls
 oidc:
@@ -2658,6 +3164,119 @@ oidc:
 "#,
         )
         .expect("explicit insecure development configuration");
+    }
+
+    #[test]
+    fn controller_admin_and_gateway_limits_default_and_parse() {
+        let base = r#"
+tls: /etc/agentdesktop/tls
+oidc:
+  issuer: https://idp.example.com
+  clientId: agentdesktop
+"#;
+        let config = parse_controller(base).expect("defaults");
+        assert_eq!(config.admin_listener.limits.max_connections, 256);
+        assert_eq!(config.admin_listener.limits.connections_per_address, 256);
+        assert_eq!(config.gateway_listener.limits.max_connections, 1024);
+        assert_eq!(config.gateway_listener.limits.connections_per_address, 64);
+
+        let config = parse_controller(&format!(
+            "{base}adminListener:\n  limits:\n    maxConnections: 32\ngatewayListener:\n  limits:\n    connectionsPerAddress: 500\n"
+        ))
+        .expect("configured limits");
+        assert_eq!(config.admin_listener.limits.max_connections, 32);
+        assert_eq!(
+            config.admin_listener.limits.connections_per_address, 256,
+            "unset fields keep their listener's defaults"
+        );
+        assert_eq!(config.gateway_listener.limits.connections_per_address, 500);
+        assert_eq!(config.gateway_listener.limits.max_connections, 1024);
+
+        for (document, field) in [
+            (
+                "adminListener:\n  limits:\n    maxConnections: 0\n",
+                "adminListener.limits.maxConnections",
+            ),
+            (
+                "gatewayListener:\n  limits:\n    connectionsPerAddress: 0\n",
+                "gatewayListener.limits.connectionsPerAddress",
+            ),
+        ] {
+            let error = parse_controller(&format!("{base}{document}")).unwrap_err();
+            assert!(error.to_string().contains(field), "{error}");
+        }
+        for old in [
+            "fleetListen: 0.0.0.0:8443\n",
+            "adminListen: 127.0.0.1:8080\n",
+            "adminAccess:\n  mode: local\n",
+            "fleetLimits: {}\n",
+        ] {
+            assert!(parse_controller(&format!("{base}{old}")).is_err(), "{old}");
+        }
+    }
+
+    #[test]
+    fn controller_fleet_limits_default_and_parse() {
+        let base = r#"
+tls: /etc/agentdesktop/tls
+oidc:
+  issuer: https://idp.example.com
+  clientId: agentdesktop
+"#;
+        assert_eq!(
+            parse_controller(base)
+                .expect("defaults")
+                .fleet_listener
+                .limits,
+            super::ControllerFleetLimitsConfig::default()
+        );
+
+        let configured = parse_controller(&format!(
+            "{base}fleetListener:\n  limits:\n    connectionsPerAddress: 20000\n    enrollmentRefill: 250ms\n"
+        ))
+        .expect("configured limits")
+        .fleet_listener
+        .limits;
+        assert_eq!(configured.connections_per_address, 20_000);
+        assert_eq!(
+            configured.enrollment_refill,
+            std::time::Duration::from_millis(250)
+        );
+        assert_eq!(
+            configured.max_connections, 50_000,
+            "unset fields keep defaults"
+        );
+    }
+
+    #[test]
+    fn controller_fleet_limits_reject_zero() {
+        let base = r#"
+tls: /etc/agentdesktop/tls
+oidc:
+  issuer: https://idp.example.com
+  clientId: agentdesktop
+"#;
+        for (field, zero) in [
+            ("maxConnections", "0"),
+            ("connectionsPerAddress", "0"),
+            ("maxMessageBytes", "0"),
+            ("enrollmentInFlight", "0"),
+            ("enrollmentBurst", "0"),
+            ("enrollmentRefill", "0s"),
+            ("deviceMessageBurst", "0"),
+            ("deviceMessageRefill", "0s"),
+        ] {
+            let error = parse_controller(&format!(
+                "{base}fleetListener:\n  limits:\n    {field}: {zero}\n"
+            ))
+            .expect_err(field);
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("fleetListener.limits.{field} ")),
+                "{field}: {error}"
+            );
+        }
     }
 
     #[test]

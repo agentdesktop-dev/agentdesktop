@@ -2,21 +2,23 @@ use crate::{
     daemon_config::{self, DaemonConfigStore},
     database::Database,
     device_ca::DeviceCertificateIssuer,
+    enrollment_token::EnrollmentTokens,
+    fleet_limits::FleetLimits,
     gateway_jwt::{self, GatewayJwtIssuer},
+    http_listener::{HttpListener, HttpListenerLimits, HttpListenerTls},
     management::{self, Settings, State},
     oidc::OidcProvider,
     service::FleetAgentService,
 };
 use agentdesktop_core::config::ControllerConfig;
-use agentdesktop_proto::fleet::fleet_agent_server::FleetAgentServer;
 use agentdesktop_usage::UsageIngest;
 use anyhow::Context;
 use tonic::{
     service::Routes,
-    transport::{Certificate, Identity, Server, ServerTlsConfig},
+    transport::{Certificate, Identity, ServerTlsConfig},
 };
 
-/// Runs fleet and management listeners with application-owned extensions.
+/// Runs the fleet, management and gateway listeners with application-owned extensions.
 /// Shared by every controller executable: enrollment/gateway setup stays here,
 /// while the caller supplies the concrete admin authentication/policy integration.
 /// Authenticated admin mode without a provider is rejected before network setup.
@@ -25,8 +27,13 @@ pub async fn run(
     database: Database,
     extensions: management::Extensions,
 ) -> anyhow::Result<()> {
+    // Before any TLS configuration is built: the fleet listener uses the
+    // process-wide rustls provider.
+    crate::install_rustls_provider();
     // Fail before any network setup when the access mode has no provider.
-    management::auth(&config.admin_access, &extensions)?;
+    management::auth(&config.admin_listener.access, &extensions)?;
+    // Out-of-range fleet limits fail here too, before any network setup.
+    let limits = FleetLimits::from_config(&config.fleet_listener.limits)?;
     let tls = config.tls.files();
     let daemon_config = match &config.daemon_config {
         Some(daemon) => Some(daemon_config::load(&daemon.path, daemon.revision)?),
@@ -48,6 +55,15 @@ pub async fn run(
     .await
     .context("initialize OIDC enrollment")?;
     tracing::info!("OIDC enrollment enabled");
+    let enrollment_tokens = config
+        .enrollment_tokens
+        .as_ref()
+        .map(EnrollmentTokens::load)
+        .transpose()
+        .context("initialize enrollment tokens")?;
+    if enrollment_tokens.is_some() {
+        tracing::info!("token enrollment enabled");
+    }
     let gateway_jwt_issuer = config
         .gateway_jwt
         .as_ref()
@@ -65,7 +81,6 @@ pub async fn run(
         tracing::info!("LLM gateway JWT issuance enabled");
     }
     let gateway_jwks = gateway_jwt_issuer.as_ref().map(GatewayJwtIssuer::jwks);
-    let admin_gateway_jwks = gateway_jwks.clone();
     let usage_token = config
         .usage
         .as_ref()
@@ -83,8 +98,8 @@ pub async fn run(
         database.clone(),
         daemon_config.clone(),
         Settings {
-            fleet_listen: config.fleet_listen.to_string(),
-            admin_listen: config.admin_listen.to_string(),
+            fleet_listen: config.fleet_listener.listen.to_string(),
+            admin_listen: config.admin_listener.listen.to_string(),
             oidc_enabled: true,
             tls_enabled: true,
             gateway_jwt_enabled: gateway_jwt_issuer.is_some(),
@@ -116,7 +131,9 @@ pub async fn run(
         daemon_config,
         gateway_jwt_issuer,
         Some(device_certificate_issuer),
+        &limits,
     )
+    .with_enrollment_tokens(enrollment_tokens)
     .with_usage_collection(usage_ingest.is_some());
 
     let certificate = std::fs::read(&tls.certificate)
@@ -133,32 +150,45 @@ pub async fn run(
         .identity(Identity::from_pem(certificate, key))
         .client_ca_root(Certificate::from_pem(client_ca))
         .client_auth_optional(true);
-    let mut server = Server::builder()
-        .accept_http1(true)
-        .tls_config(tls_config)?;
+    let fleet_listen = config.fleet_listener.listen;
+    let fleet_listener = limits.listener(fleet_listen, Some(tls_config))?;
+    // Started only with gatewayJwt: the gateway listener serves its JWKS.
+    let gateway_listener = gateway_jwks
+        .map(|jwks| {
+            let listener = &config.gateway_listener;
+            let tls = listener.tls.then(|| HttpListenerTls {
+                certificate: &tls.certificate,
+                key: &tls.key,
+            });
+            let limits = HttpListenerLimits::new(
+                listener.limits.max_connections,
+                listener.limits.connections_per_address,
+            );
+            anyhow::Ok((
+                HttpListener::bind("gateway", listener.listen, tls, limits)?,
+                jwks,
+            ))
+        })
+        .transpose()?;
 
-    let fleet_listen = config.fleet_listen;
-    let admin_listen = config.admin_listen;
     tracing::info!(listen = %fleet_listen, "fleet controller listening");
     let fleet = async move {
-        let mut routes = Routes::from(gateway_jwt::routes(gateway_jwks))
-            .add_service(FleetAgentServer::new(service));
+        let mut routes = Routes::default();
         if let Some(usage_ingest) = usage_ingest {
             routes = routes.add_service(usage_ingest);
         }
-        server
-            .add_routes(routes)
-            .serve(fleet_listen)
+        fleet_listener
+            .serve(service, routes)
             .await
             .context("serve fleet gRPC API")
     };
-    let admin = management::serve(
-        admin_listen,
-        admin_state,
-        admin_gateway_jwks,
-        config.admin_access,
-        extensions,
-    );
-    tokio::try_join!(fleet, admin)?;
+    let admin = management::serve(admin_state, config.admin_listener, extensions);
+    let gateway = async move {
+        match gateway_listener {
+            Some((listener, jwks)) => listener.serve(gateway_jwt::routes(jwks)).await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::try_join!(fleet, admin, gateway)?;
     Ok(())
 }

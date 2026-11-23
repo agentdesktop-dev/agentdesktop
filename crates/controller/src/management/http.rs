@@ -96,7 +96,7 @@ pub fn private_routes(router: Router) -> Router {
 }
 
 /// Whether a `Host` header names this machine: `localhost` or any loopback address,
-/// matching the loopback addresses local mode accepts for `adminListen`. Rejecting
+/// matching the loopback addresses local mode accepts for `adminListener.listen`. Rejecting
 /// other names stops DNS rebinding from reaching the unauthenticated listener.
 pub fn is_loopback_host(host: &str) -> bool {
     let Ok(url) = url::Url::parse(&format!("http://{host}")) else {

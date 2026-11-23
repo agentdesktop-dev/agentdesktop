@@ -1,9 +1,9 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use agentdesktop_core::config::ControllerConnectionConfig;
 use agentdesktop_proto::fleet::{
-    BeginEnrollmentRequest, BeginEnrollmentResponse, CompleteEnrollmentRequest,
-    fleet_agent_client::FleetAgentClient,
+    EnrollDeviceRequest, LoginConfiguration, LoginConfigurationRequest,
+    enroll_device_request::Credential, fleet_agent_client::FleetAgentClient,
 };
 use anyhow::{Context, bail};
 use axum::{
@@ -16,7 +16,8 @@ use axum::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::Rng;
 use rcgen::{
-    CertificateParams, CertificateSigningRequest, ExtendedKeyUsagePurpose, KeyPair, KeyUsagePurpose,
+    CertificateParams, CertificateSigningRequest, ExtendedKeyUsagePurpose, KeyPair,
+    KeyUsagePurpose, PublicKeyData as _,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -26,6 +27,7 @@ use url::Url;
 
 use crate::{
     enrollment::EnrollmentState,
+    gateway_oidc,
     identity::{Identity, OAuthCredentials},
     remote,
 };
@@ -289,101 +291,174 @@ pub async fn enroll(
     controller: &ControllerConnectionConfig,
     enrollment: &EnrollmentState,
     callback_listen: Option<SocketAddr>,
+    open_browser: bool,
 ) -> anyhow::Result<Identity> {
-    if controller.device_authorization {
-        return enroll_with_device_authorization(controller, enrollment).await;
-    }
-    let (verifier, challenge) = pkce();
     let mut client = remote::client(controller, None).await?;
-    let (device_key, csr) = device_csr()?;
-    let mut begin = client
-        .begin_enrollment(BeginEnrollmentRequest {
-            hostname: remote::hostname(),
-            code_challenge: challenge,
-            device_authorization: false,
-        })
+    let config = client
+        .get_login_configuration(LoginConfigurationRequest {})
         .await
-        .context("begin OIDC enrollment")?
+        .context("get controller login configuration (controller and agent must support the same enrollment protocol)")?
         .into_inner();
+    // The key exists only locally until sign-in completes; its hash is the
+    // browser nonce, which ties the sign-in to this key for the controller.
+    let (device_key, csr) = device_csr()?;
+    let tokens = if controller.device_authorization {
+        device_authorization_login(&config, enrollment).await?
+    } else {
+        let nonce = agentdesktop_proto::enrollment_nonce(&device_key.subject_public_key_info());
+        browser_login(&config, enrollment, callback_listen, open_browser, &nonce).await?
+    };
+    enrollment.set("enrolling").await;
+    complete_enrollment(&mut client, config, &device_key, &csr, tokens).await
+}
 
-    let redirect_uri = Url::parse(&begin.redirect_uri).context("parse OIDC redirect URI")?;
+/// Enrolls with the operator-signed token at `token_path`; no user signs in.
+pub async fn enroll_with_token(
+    controller: &ControllerConnectionConfig,
+    enrollment: &EnrollmentState,
+    token_path: &Path,
+) -> anyhow::Result<Identity> {
+    let token = std::fs::read_to_string(token_path)
+        .with_context(|| format!("read enrollment token from {}", token_path.display()))?;
+    let (device_key, csr) = device_csr()?;
+    enrollment.set("enrolling").await;
+    let mut request = tonic::Request::new(EnrollDeviceRequest {
+        hostname: remote::hostname(),
+        certificate_signing_request_der: csr.der().as_ref().to_vec(),
+        credential: Some(Credential::EnrollmentToken(token.trim().to_owned())),
+    });
+    request.set_timeout(Duration::from_secs(15));
+    let response = remote::client(controller, None)
+        .await?
+        .enroll_device(request)
+        .await
+        .context("enroll device with enrollment token")?
+        .into_inner();
+    let client_certificate_pem = String::from_utf8(response.client_certificate_pem)
+        .context("controller returned a non-UTF-8 device certificate")?;
+    if client_certificate_pem.is_empty() {
+        bail!("controller returned an empty device certificate");
+    }
+    Ok(Identity {
+        device_id: response.device_id,
+        client_certificate_pem,
+        client_private_key_pem: device_key.serialize_pem(),
+        client_certificate_expires_at_unix_seconds: response
+            .client_certificate_expires_at_unix_seconds,
+        oauth: None,
+        oauth_token_endpoint: String::new(),
+        oauth_client_id: String::new(),
+    })
+}
+
+async fn browser_login(
+    config: &LoginConfiguration,
+    enrollment: &EnrollmentState,
+    callback_listen: Option<SocketAddr>,
+    open_browser: bool,
+    nonce: &str,
+) -> anyhow::Result<TokenResponse> {
+    let (verifier, challenge) = pkce();
+    let state = random_secret();
+    let redirect_uri = Url::parse(&config.redirect_uri).context("parse OIDC redirect URI")?;
+    let mut authorization_url = gateway_oidc::authorization_url(
+        Url::parse(&config.authorization_endpoint).context("parse OIDC authorization endpoint")?,
+        &config.client_id,
+        &redirect_uri,
+        &config.scopes,
+        &state,
+        &challenge,
+    );
+    authorization_url
+        .query_pairs_mut()
+        .append_pair("nonce", nonce);
     enrollment
-        .awaiting_authentication(begin.authorization_url.clone())
+        .awaiting_authentication(authorization_url.to_string())
         .await;
     let authorization_code = wait_for_authorization_code(
-        &begin.authorization_url,
+        authorization_url.as_str(),
         &redirect_uri,
-        std::mem::take(&mut begin.state),
+        state,
         callback_listen,
+        open_browser,
     )
     .await?;
-    enrollment.set("enrolling").await;
-
     let tokens = exchange_authorization_code(
-        &begin.token_endpoint,
-        &begin.client_id,
-        &begin.redirect_uri,
+        &config.token_endpoint,
+        &config.client_id,
+        redirect_uri.as_str(),
         &authorization_code,
         &verifier,
     )
     .await?;
-    complete_enrollment(&mut client, begin, &device_key, &csr, tokens).await
+    validate_login_nonce(
+        tokens
+            .id_token
+            .as_deref()
+            .context("OIDC token response did not contain an ID token")?,
+        nonce,
+    )?;
+    Ok(tokens)
 }
 
-/// Enrolls with the OAuth 2.0 Device Authorization Grant (RFC 8628).
-///
-/// The controller starts the device authorization with the identity provider
-/// and returns a user code. The daemon publishes the verification URL and code
-/// through the enrollment status and logs, then polls the token endpoint until
-/// the user approves the request from another device.
-async fn enroll_with_device_authorization(
-    controller: &ControllerConnectionConfig,
+async fn device_authorization_login(
+    config: &LoginConfiguration,
     enrollment: &EnrollmentState,
-) -> anyhow::Result<Identity> {
-    let mut client = remote::client(controller, None).await?;
-    let (device_key, csr) = device_csr()?;
-    let begin = client
-        .begin_enrollment(BeginEnrollmentRequest {
-            hostname: remote::hostname(),
-            code_challenge: String::new(),
-            device_authorization: true,
-        })
-        .await
-        .context("begin OIDC device authorization enrollment")?
-        .into_inner();
-    if begin.device_code.is_empty() || begin.user_code.is_empty() {
-        bail!("controller does not support device authorization enrollment");
-    }
-
-    let verification_url = if begin.verification_uri_complete.is_empty() {
-        begin.verification_uri.clone()
-    } else {
-        begin.verification_uri_complete.clone()
-    };
+) -> anyhow::Result<TokenResponse> {
+    let endpoint = Url::parse(&config.device_authorization_endpoint)
+        .context("controller's OIDC provider does not support device authorization")?;
+    let device =
+        gateway_oidc::request_device_authorization(endpoint, &config.client_id, &config.scopes)
+            .await?;
+    let verification_url = device
+        .verification_uri_complete
+        .clone()
+        .unwrap_or_else(|| device.verification_uri.clone());
     tracing::info!(
-        verification_uri = %begin.verification_uri,
-        verification_uri_complete = %begin.verification_uri_complete,
-        user_code = %begin.user_code,
+        verification_uri = %device.verification_uri,
+        user_code = %device.user_code,
         "approve device enrollment: open the verification URL on any device and confirm the code"
     );
     enrollment
-        .awaiting_device_authorization(verification_url, begin.user_code.clone())
+        .awaiting_device_authorization(verification_url, device.user_code.clone())
         .await;
 
-    let interval = match begin.interval_seconds {
-        0 => DEFAULT_DEVICE_POLL_INTERVAL,
-        seconds => Duration::from_secs(seconds),
-    };
-    let tokens = poll_device_token(
-        &begin.token_endpoint,
-        &begin.client_id,
-        &begin.device_code,
+    let interval = device
+        .interval
+        .filter(|seconds| *seconds > 0)
+        .map_or(DEFAULT_DEVICE_POLL_INTERVAL, Duration::from_secs);
+    poll_device_token(
+        &config.token_endpoint,
+        &config.client_id,
+        &device.device_code,
         interval,
-        Duration::from_secs(begin.expires_in_seconds),
+        Duration::from_secs(device.expires_in),
     )
-    .await?;
-    enrollment.set("enrolling").await;
-    complete_enrollment(&mut client, begin, &device_key, &csr, tokens).await
+    .await
+}
+
+fn validate_login_nonce(id_token: &str, expected: &str) -> anyhow::Result<()> {
+    // The controller verifies this same token's signature, issuer, audience and
+    // nonce. Checking the nonce here too rejects a mismatched token response
+    // before the agent sends it anywhere.
+    #[derive(Deserialize)]
+    struct Nonce {
+        nonce: String,
+    }
+    let payload = id_token
+        .split('.')
+        .nth(1)
+        .context("ID token has no payload")?;
+    let claims: Nonce = serde_json::from_slice(
+        &URL_SAFE_NO_PAD
+            .decode(payload)
+            .context("decode ID token payload")?,
+    )
+    .context("decode ID token nonce")?;
+    if claims.nonce != expected {
+        bail!("OIDC nonce mismatch");
+    }
+    Ok(())
 }
 
 fn device_csr() -> anyhow::Result<(KeyPair, CertificateSigningRequest)> {
@@ -399,11 +474,12 @@ fn device_csr() -> anyhow::Result<(KeyPair, CertificateSigningRequest)> {
 
 async fn complete_enrollment(
     client: &mut FleetAgentClient<Channel>,
-    begin: BeginEnrollmentResponse,
+    config: LoginConfiguration,
     device_key: &KeyPair,
     csr: &CertificateSigningRequest,
     tokens: TokenResponse,
 ) -> anyhow::Result<Identity> {
+    let login_started = unix_time_seconds();
     let id_token = tokens
         .id_token
         .context("OIDC token response did not contain an ID token")?;
@@ -411,24 +487,39 @@ async fn complete_enrollment(
         .refresh_token
         .context("OIDC token response did not contain a refresh token")?;
 
-    let mut request = tonic::Request::new(CompleteEnrollmentRequest {
-        enrollment_id: begin.enrollment_id,
-        authorization_code: String::new(),
-        code_verifier: String::new(),
+    let body = EnrollDeviceRequest {
+        hostname: remote::hostname(),
         certificate_signing_request_der: csr.der().as_ref().to_vec(),
-        id_token,
-    });
-    request.metadata_mut().insert(
-        "authorization",
+        credential: Some(Credential::IdToken(id_token)),
+    };
+    let authorization: tonic::metadata::MetadataValue<tonic::metadata::Ascii> =
         format!("Bearer {}", tokens.access_token)
             .parse()
-            .context("encode OIDC access token")?,
-    );
-    let response = client
-        .complete_enrollment(request)
-        .await
-        .context("complete OIDC enrollment")?
-        .into_inner();
+            .context("encode OIDC access token")?;
+    let mut delay = Duration::from_secs(1);
+    let response = loop {
+        let mut request = tonic::Request::new(body.clone());
+        request
+            .metadata_mut()
+            .insert("authorization", authorization.clone());
+        request.set_timeout(Duration::from_secs(15));
+        match client.enroll_device(request).await {
+            Ok(response) => break response.into_inner(),
+            Err(error)
+                if matches!(
+                    error.code(),
+                    tonic::Code::Unavailable
+                        | tonic::Code::DeadlineExceeded
+                        | tonic::Code::ResourceExhausted
+                ) && unix_time_seconds() < tokens.expires_in.saturating_add(login_started) =>
+            {
+                tracing::warn!(%error, "device enrollment interrupted; retrying with the same device key");
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(30));
+            }
+            Err(error) => return Err(error).context("enroll authenticated device"),
+        }
+    };
 
     let client_certificate_pem = String::from_utf8(response.client_certificate_pem)
         .context("controller returned a non-UTF-8 device certificate")?;
@@ -441,13 +532,13 @@ async fn complete_enrollment(
         client_private_key_pem: device_key.serialize_pem(),
         client_certificate_expires_at_unix_seconds: response
             .client_certificate_expires_at_unix_seconds,
-        oauth: OAuthCredentials {
+        oauth: Some(OAuthCredentials {
             access_token: tokens.access_token,
             refresh_token,
-            expires_at_unix_seconds: unix_time_seconds().saturating_add(tokens.expires_in),
-        },
-        oauth_token_endpoint: begin.token_endpoint,
-        oauth_client_id: begin.client_id,
+            expires_at_unix_seconds: login_started.saturating_add(tokens.expires_in),
+        }),
+        oauth_token_endpoint: config.token_endpoint,
+        oauth_client_id: config.client_id,
     })
 }
 
@@ -574,7 +665,10 @@ pub(crate) async fn poll_device_token(
 pub async fn refresh(identity: &mut Identity) -> anyhow::Result<()> {
     let endpoint = &identity.oauth_token_endpoint;
     let client_id = &identity.oauth_client_id;
-    let current = &identity.oauth;
+    let current = identity
+        .oauth
+        .as_ref()
+        .context("device has no OIDC session to refresh")?;
     let response = refresh_access_token(endpoint, client_id, &current.refresh_token).await?;
     apply_refreshed_tokens(identity, response)
 }
@@ -610,12 +704,15 @@ fn apply_refreshed_tokens(identity: &mut Identity, response: TokenResponse) -> a
     if !response.token_type.eq_ignore_ascii_case("Bearer") {
         bail!("OIDC token endpoint returned unsupported token type");
     }
-    let current_refresh_token = identity.oauth.refresh_token.clone();
-    identity.oauth = OAuthCredentials {
+    let current = identity
+        .oauth
+        .take()
+        .context("device has no OIDC session to refresh")?;
+    identity.oauth = Some(OAuthCredentials {
         access_token: response.access_token,
-        refresh_token: response.refresh_token.unwrap_or(current_refresh_token),
+        refresh_token: response.refresh_token.unwrap_or(current.refresh_token),
         expires_at_unix_seconds: unix_time_seconds().saturating_add(response.expires_in),
-    };
+    });
     Ok(())
 }
 
@@ -631,6 +728,7 @@ pub(crate) async fn wait_for_authorization_code(
     redirect_uri: &Url,
     expected_state: String,
     callback_listen: Option<SocketAddr>,
+    open_browser: bool,
 ) -> anyhow::Result<String> {
     wait_for_authorization_code_with_page(
         authorization_url,
@@ -641,7 +739,7 @@ pub(crate) async fn wait_for_authorization_code(
             subscription_available: false,
             github_available: false,
         },
-        true,
+        open_browser,
     )
     .await?
     .context("required authorization was skipped")
@@ -960,6 +1058,369 @@ mod tests {
     };
     use crate::identity::{Identity, OAuthCredentials};
 
+    #[derive(Clone)]
+    struct EnrollmentController {
+        config: agentdesktop_proto::fleet::LoginConfiguration,
+        authenticated: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        requests:
+            std::sync::Arc<tokio::sync::Mutex<Vec<agentdesktop_proto::fleet::EnrollDeviceRequest>>>,
+    }
+
+    #[tonic::async_trait]
+    impl agentdesktop_proto::fleet::fleet_agent_server::FleetAgent for EnrollmentController {
+        type ConnectStream = tokio_stream::wrappers::ReceiverStream<
+            Result<agentdesktop_proto::fleet::ControllerMessage, tonic::Status>,
+        >;
+
+        async fn get_login_configuration(
+            &self,
+            _: tonic::Request<agentdesktop_proto::fleet::LoginConfigurationRequest>,
+        ) -> Result<tonic::Response<agentdesktop_proto::fleet::LoginConfiguration>, tonic::Status>
+        {
+            Ok(tonic::Response::new(self.config.clone()))
+        }
+
+        async fn enroll_device(
+            &self,
+            request: tonic::Request<agentdesktop_proto::fleet::EnrollDeviceRequest>,
+        ) -> Result<tonic::Response<agentdesktop_proto::fleet::EnrollResponse>, tonic::Status>
+        {
+            if let Some(super::Credential::EnrollmentToken(token)) = &request.get_ref().credential {
+                assert_eq!(token, "signed-token");
+                assert!(request.metadata().get("authorization").is_none());
+                return Ok(tonic::Response::new(
+                    agentdesktop_proto::fleet::EnrollResponse {
+                        device_id: "token-device".to_owned(),
+                        client_certificate_pem: b"mock-certificate".to_vec(),
+                        client_certificate_expires_at_unix_seconds: 12345,
+                    },
+                ));
+            }
+            assert!(
+                self.authenticated.load(std::sync::atomic::Ordering::SeqCst),
+                "enrollment must not be called before user authentication"
+            );
+            assert_eq!(
+                request.metadata().get("authorization").unwrap(),
+                "Bearer access-token"
+            );
+            let request = request.into_inner();
+            rcgen::CertificateSigningRequestParams::from_der(
+                &request.certificate_signing_request_der.as_slice().into(),
+            )
+            .unwrap();
+            let mut requests = self.requests.lock().await;
+            requests.push(request);
+            if requests.len() == 1 {
+                return Err(tonic::Status::unavailable(
+                    "simulated lost enrollment response",
+                ));
+            }
+            assert_eq!(
+                requests[0], requests[1],
+                "retries must reuse the CSR and user credentials"
+            );
+            Ok(tonic::Response::new(
+                agentdesktop_proto::fleet::EnrollResponse {
+                    device_id: "device-1".to_owned(),
+                    client_certificate_pem: b"mock-certificate".to_vec(),
+                    client_certificate_expires_at_unix_seconds: 12345,
+                },
+            ))
+        }
+
+        async fn renew_device_certificate(
+            &self,
+            _: tonic::Request<agentdesktop_proto::fleet::RenewDeviceCertificateRequest>,
+        ) -> Result<
+            tonic::Response<agentdesktop_proto::fleet::DeviceCertificateResponse>,
+            tonic::Status,
+        > {
+            Err(tonic::Status::unimplemented("not used"))
+        }
+        async fn get_llm_gateway_credential(
+            &self,
+            _: tonic::Request<agentdesktop_proto::fleet::LlmGatewayCredentialRequest>,
+        ) -> Result<
+            tonic::Response<agentdesktop_proto::fleet::LlmGatewayCredentialResponse>,
+            tonic::Status,
+        > {
+            Err(tonic::Status::unimplemented("not used"))
+        }
+        async fn get_device_usage(
+            &self,
+            _: tonic::Request<agentdesktop_proto::fleet::DeviceUsageRequest>,
+        ) -> Result<tonic::Response<agentdesktop_proto::fleet::DeviceUsageResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used"))
+        }
+        async fn connect(
+            &self,
+            _: tonic::Request<tonic::Streaming<agentdesktop_proto::fleet::AgentMessage>>,
+        ) -> Result<tonic::Response<Self::ConnectStream>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used"))
+        }
+    }
+
+    #[tokio::test]
+    async fn automatic_browser_and_headless_login_precede_enrollment_and_retries_reuse_key() {
+        use agentdesktop_proto::fleet::{LoginConfiguration, fleet_agent_server::FleetAgentServer};
+        use axum::{Json, Router, response::IntoResponse, routing::post};
+        use base64::Engine as _;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        use tokio::sync::{Mutex, Notify};
+
+        for (headless, approved) in [(false, true), (true, true), (false, false), (true, false)] {
+            let authenticated = Arc::new(AtomicBool::new(false));
+            let release = Arc::new(Notify::new());
+            let token_claims = Arc::new(Mutex::new(serde_json::json!({"sub": "user-1"})));
+            let idp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let idp_address = idp_listener.local_addr().unwrap();
+            let app = Router::new()
+                .route(
+                    "/device",
+                    post(|| async {
+                        Json(serde_json::json!({
+                            "device_code": "device-code", "user_code": "CODE",
+                            "verification_uri": "https://idp.example/activate",
+                            "expires_in": 600, "interval": 1,
+                        }))
+                    }),
+                )
+                .route(
+                    "/token",
+                    post({
+                        let authenticated = authenticated.clone();
+                        let release = release.clone();
+                        let token_claims = token_claims.clone();
+                        move |axum::Form(form): axum::Form<
+                            std::collections::HashMap<String, String>,
+                        >| {
+                            let authenticated = authenticated.clone();
+                            let release = release.clone();
+                            let token_claims = token_claims.clone();
+                            async move {
+                                assert_eq!(form["client_id"], "client");
+                                if headless {
+                                    assert_eq!(form["device_code"], "device-code");
+                                } else {
+                                    assert_eq!(form["code"], "authorization-code");
+                                    assert!(!form["code_verifier"].is_empty());
+                                }
+                                release.notified().await;
+                                if !approved {
+                                    return (
+                                        axum::http::StatusCode::BAD_REQUEST,
+                                        Json(serde_json::json!({"error": "access_denied"})),
+                                    )
+                                        .into_response();
+                                }
+                                authenticated.store(true, Ordering::SeqCst);
+                                let payload = super::URL_SAFE_NO_PAD.encode(
+                                    serde_json::to_vec(&*token_claims.lock().await).unwrap(),
+                                );
+                                Json(serde_json::json!({
+                                "access_token": "access-token", "refresh_token": "refresh-token",
+                                "id_token": format!("header.{payload}.signature"),
+                                "expires_in": 600, "token_type": "Bearer",
+                            })).into_response()
+                            }
+                        }
+                    }),
+                );
+            let idp = tokio::spawn(async move { axum::serve(idp_listener, app).await.unwrap() });
+            let callback_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let callback_address = callback_listener.local_addr().unwrap();
+            drop(callback_listener);
+            let config = LoginConfiguration {
+                issuer: "https://idp.example".to_owned(),
+                authorization_endpoint: format!("http://{idp_address}/authorize"),
+                token_endpoint: format!("http://{idp_address}/token"),
+                client_id: "client".to_owned(),
+                redirect_uri: format!("http://{callback_address}/callback"),
+                device_authorization_endpoint: format!("http://{idp_address}/device"),
+                scopes: vec!["openid".to_owned(), "offline_access".to_owned()],
+            };
+            let mock = EnrollmentController {
+                config,
+                authenticated: authenticated.clone(),
+                requests: Arc::default(),
+            };
+            let requests = mock.requests.clone();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(FleetAgentServer::new(mock))
+                    .serve_with_incoming(tonic::transport::server::TcpIncoming::from(listener))
+                    .await
+                    .unwrap();
+            });
+            let directory = tempfile::tempdir().unwrap();
+            let ca_certificate_path = directory.path().join("ca.pem");
+            let ca = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+            std::fs::write(&ca_certificate_path, ca.cert.pem()).unwrap();
+            let controller = agentdesktop_core::config::ControllerConnectionConfig {
+                address: format!("http://{address}"),
+                ca_certificate_path,
+                heartbeat_interval: Duration::from_secs(30),
+                device_authorization: headless,
+                enrollment_token_path: None,
+            };
+            let enrollment = crate::enrollment::EnrollmentState::new(true);
+            let mut pending = Box::pin(super::enroll(&controller, &enrollment, None, false));
+            let status = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::select! {
+                    result = &mut pending => panic!("enrollment finished before login: {result:?}"),
+                    status = async {
+                        loop {
+                            let status = enrollment.get().await;
+                            if status.status == "awaitingAuthentication" {
+                                break status;
+                            }
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    } => status,
+                }
+            })
+            .await
+            .expect("login must become ready");
+            assert_eq!(status.status, "awaitingAuthentication");
+            assert!(requests.lock().await.is_empty());
+            assert!(!authenticated.load(Ordering::SeqCst));
+            if headless {
+                assert_eq!(status.user_code.as_deref(), Some("CODE"));
+                assert_eq!(
+                    status.authorization_url.as_deref(),
+                    Some("https://idp.example/activate")
+                );
+            } else {
+                let url = url::Url::parse(status.authorization_url.as_deref().unwrap()).unwrap();
+                let query: std::collections::HashMap<_, _> = url.query_pairs().collect();
+                assert_eq!(query["code_challenge_method"], "S256");
+                assert!(!query["code_challenge"].is_empty());
+                token_claims.lock().await["nonce"] = serde_json::json!(query["nonce"]);
+                let callback = format!(
+                    "http://{callback_address}/callback?code=authorization-code&state={}",
+                    query["state"],
+                );
+                reqwest::get(callback)
+                    .await
+                    .unwrap()
+                    .error_for_status()
+                    .unwrap();
+            }
+            release.notify_one();
+            let result = tokio::time::timeout(Duration::from_secs(5), pending)
+                .await
+                .unwrap();
+            if approved {
+                let identity = result.unwrap();
+                assert_eq!(identity.device_id, "device-1");
+                assert_eq!(identity.oauth.unwrap().access_token, "access-token");
+                assert_eq!(requests.lock().await.len(), 2);
+                assert_eq!(enrollment.get().await.status, "enrolling");
+                let request = requests.lock().await[0].clone();
+                let csr = rcgen::CertificateSigningRequestParams::from_der(
+                    &request.certificate_signing_request_der.as_slice().into(),
+                )
+                .unwrap();
+                let Some(super::Credential::IdToken(id_token)) = &request.credential else {
+                    panic!("enrollment did not send an ID token");
+                };
+                let claims: serde_json::Value = serde_json::from_slice(
+                    &super::URL_SAFE_NO_PAD
+                        .decode(id_token.split('.').nth(1).unwrap())
+                        .unwrap(),
+                )
+                .unwrap();
+                let key_nonce = agentdesktop_proto::enrollment_nonce(
+                    &rcgen::PublicKeyData::subject_public_key_info(&csr.public_key),
+                );
+                assert_eq!(
+                    claims["nonce"].as_str(),
+                    (!headless).then_some(key_nonce.as_str()),
+                    "a browser sign-in must be bound to the enrolled device key"
+                );
+            } else {
+                assert!(result.is_err());
+                assert!(requests.lock().await.is_empty());
+                assert!(!authenticated.load(Ordering::SeqCst));
+            }
+            server.abort();
+            idp.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn token_enrollment_needs_no_user_sign_in() {
+        use agentdesktop_proto::fleet::fleet_agent_server::FleetAgentServer;
+
+        let mock = EnrollmentController {
+            config: Default::default(),
+            authenticated: Default::default(),
+            requests: Default::default(),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(FleetAgentServer::new(mock))
+                .serve_with_incoming(tonic::transport::server::TcpIncoming::from(listener)),
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let ca_certificate_path = directory.path().join("ca.pem");
+        let ca = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        std::fs::write(&ca_certificate_path, ca.cert.pem()).unwrap();
+        let token_path = directory.path().join("enrollment-token");
+        std::fs::write(&token_path, "signed-token\n").unwrap();
+        let controller = agentdesktop_core::config::ControllerConnectionConfig {
+            address: format!("http://{address}"),
+            ca_certificate_path,
+            heartbeat_interval: Duration::from_secs(30),
+            device_authorization: false,
+            enrollment_token_path: Some(token_path.clone()),
+        };
+        let enrollment = crate::enrollment::EnrollmentState::new(true);
+
+        let identity = super::enroll_with_token(&controller, &enrollment, &token_path)
+            .await
+            .unwrap();
+        assert_eq!(identity.device_id, "token-device");
+        assert!(identity.oauth.is_none());
+        assert!(identity.client_private_key_pem.contains("PRIVATE KEY"));
+        server.abort();
+    }
+
+    #[test]
+    fn browser_nonce_must_match_before_device_enrollment() {
+        use base64::Engine as _;
+        let token = |value| {
+            format!(
+                "header.{}.signature",
+                super::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&value).unwrap()),
+            )
+        };
+        assert!(
+            super::validate_login_nonce(
+                &token(serde_json::json!({"nonce": "expected"})),
+                "expected"
+            )
+            .is_ok()
+        );
+        for token in [
+            "invalid".to_owned(),
+            "header.invalid.signature".to_owned(),
+            token(serde_json::json!({})),
+            token(serde_json::json!({"nonce": "other"})),
+        ] {
+            assert!(super::validate_login_nonce(&token, "expected").is_err());
+        }
+    }
+
     // The poll interval is provider-controlled and grows on every slow_down, so it can
     // exceed what is left of expires_in. Sleeping the whole interval kept the task, and
     // the pending login it stands for, alive long after the code had expired.
@@ -1263,11 +1724,11 @@ mod tests {
             client_certificate_pem: "certificate".to_owned(),
             client_private_key_pem: "key".to_owned(),
             client_certificate_expires_at_unix_seconds: u64::MAX,
-            oauth: OAuthCredentials {
+            oauth: Some(OAuthCredentials {
                 access_token: "old-access".to_owned(),
                 refresh_token: "old-refresh".to_owned(),
                 expires_at_unix_seconds: 0,
-            },
+            }),
             oauth_token_endpoint: "https://idp.example/token".to_owned(),
             oauth_client_id: "client".to_owned(),
         };
@@ -1283,7 +1744,7 @@ mod tests {
             },
         )
         .unwrap();
-        let oauth = identity.oauth;
+        let oauth = identity.oauth.unwrap();
         assert_eq!(oauth.access_token, "new-access");
         assert_eq!(oauth.refresh_token, "new-refresh");
         assert!(oauth.expires_at_unix_seconds > 0);

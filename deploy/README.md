@@ -37,12 +37,74 @@ helm install agentdesktop deploy/helm/agentdesktop-controller \
 
 For production, avoid placing database credentials in Helm values. Create a
 Secret containing the complete controller configuration under the key
-`controller.yaml`, then set `existingConfigSecret` to its name.
+`controller.yaml`, then set `existingConfigSecret` to its name. The chart then
+does not render the configuration, so it must set the listen addresses the
+Services need: `fleetListener.listen: 0.0.0.0:8443`, and with `gatewayJwt`,
+`gatewayListener.listen: 0.0.0.0:8444` (with `gatewayListener.tls` matching the
+chart's value). The controller defaults both to loopback.
 See `values.yaml` for all chart settings.
 
-The Service exposes only the TLS-protected fleet API. To inspect the
-loopback-only management UI:
+The `<release>` Service exposes only the TLS-protected fleet API. With
+`gatewayJwt`, the chart adds a `<release>-gateway` ClusterIP Service for LLM
+gateways, which serves only the gateway JWKS; point gateways' JWKS URL at it.
+Set `gatewayListener.tls: true` unless the network between gateways and the
+controller is trusted, and include the Service name in the controller
+certificate.
+
+The controller limits connections and enrollment per client address. With the
+Kubernetes default external traffic policy, it may see node addresses instead of
+devices' own, and many devices then share one address's connection limit and
+enrollment budget. Set `service.externalTrafficPolicy` to `Local` to keep
+devices' addresses when your load balancer sends traffic only to nodes that run
+the controller. With the default policy, or behind a load balancer that proxies
+connections, raise `fleetListener.limits.connectionsPerAddress`, and for large
+rollouts raise `fleetListener.limits.enrollmentBurst` or shorten
+`fleetListener.limits.enrollmentRefill`.
+
+To inspect the loopback-only management UI:
 
 ```console
 kubectl port-forward deployment/agentdesktop 8080:8080
 ```
+
+## Network policy
+
+Set `networkPolicy.enabled=true` to restrict the controller pod with a
+Kubernetes NetworkPolicy. It is off by default, and enforcement requires a CNI
+that implements NetworkPolicy.
+
+When it is enabled:
+
+- Ingress to the fleet port (gRPC API, gateway JWKS, usage ingest) is allowed
+  from `networkPolicy.ingress.fleet.from`. The default empty list allows any source.
+- Ingress to the management port is allowed only from
+  `networkPolicy.ingress.admin.from`, by default pods in the release namespace.
+  The generated configuration binds it to loopback anyway.
+- Egress is limited to DNS (`networkPolicy.egress.dns`, kube-dns by default),
+  the database (`networkPolicy.egress.database`), the OIDC issuer
+  (`networkPolicy.egress.idp`), and any rules in `networkPolicy.egress.extra`,
+  such as a KMS endpoint.
+
+Each `to` list takes standard NetworkPolicy peers. For example, with
+PostgreSQL in the same namespace and an external IdP:
+
+```yaml
+networkPolicy:
+  enabled: true
+  egress:
+    database:
+      to:
+      - podSelector:
+          matchLabels:
+            app: postgres
+    idp:
+      to:
+      - ipBlock:
+          cidr: 203.0.113.0/24
+```
+
+NetworkPolicy cannot match hostnames. An IdP outside the cluster therefore
+needs either its egress CIDRs as `ipBlock` peers, or an empty `idp.to` plus an
+FQDN-aware policy from your CNI, such as Cilium's `toFQDNs`, that allows it.
+When `database.to` or `idp.to` is empty, no rule is rendered for that
+destination. The controller fails at startup if it cannot reach either one.
