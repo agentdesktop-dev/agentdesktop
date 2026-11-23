@@ -486,8 +486,19 @@ impl FleetAgentService {
                 .as_ref()
                 .is_some_and(|tokens| tokens.accepts(token));
             if !accepted {
-                warn!(device_id, "device enrollment token is no longer accepted");
-                return Err(Status::unauthenticated(
+                // Revoked devices keep retrying, so warn about them in bulk.
+                if let Some(retained) = TOKEN_NOT_ACCEPTED.event(time::Instant::now()) {
+                    warn!(
+                        latest_device_id = device_id,
+                        latest_token_issuer = token.issuer,
+                        latest_token_id = token.id,
+                        retained_since_last_warning = retained,
+                        "device enrollment token is no longer accepted"
+                    );
+                }
+                // Not UNAUTHENTICATED: the device is known, so it keeps its
+                // identity in case the token is accepted again.
+                return Err(Status::permission_denied(
                     "device enrollment token is no longer accepted",
                 ));
             }
@@ -791,6 +802,9 @@ fn invalid_csr(err: anyhow::Error) -> Status {
 /// Stream rechecks that kept a stream open because the identity provider was
 /// unavailable.
 static RECHECK_UNAVAILABLE: ThrottledWarning = ThrottledWarning::new();
+
+/// Requests from devices whose enrollment token is no longer accepted.
+static TOKEN_NOT_ACCEPTED: ThrottledWarning = ThrottledWarning::new();
 
 fn invalid_access_token(err: anyhow::Error) -> Status {
     warn!(error = %err, "OIDC access token rejected");
@@ -1130,7 +1144,7 @@ mod tests {
                 .await
                 .err()
                 .expect("a device enrolled with a revoked token must be rejected");
-            assert_eq!(status.code(), Code::Unauthenticated);
+            assert_eq!(status.code(), Code::PermissionDenied);
         }
         let status = enroll(revoked, tokens.token("batch-1")).await.unwrap_err();
         assert_eq!(status.code(), Code::Unauthenticated);
@@ -1141,7 +1155,7 @@ mod tests {
             .await
             .err()
             .expect("token-enrolled devices need enrollment tokens to stay enabled");
-        assert_eq!(status.code(), Code::Unauthenticated);
+        assert_eq!(status.code(), Code::PermissionDenied);
         let status = enroll(without_tokens, tokens.token("batch-1"))
             .await
             .unwrap_err();

@@ -325,14 +325,17 @@ and no user has signed in.
 
 To revoke a token, add its `jti` to the issuer's `revokedIds` and restart the
 controller. The token no longer enrolls devices, and the devices it enrolled
-are rejected as `Unauthenticated`. Removing the issuer rejects every device
-it enrolled.
+are rejected as `PermissionDenied`. Because the controller still knows these
+devices, they keep their identity and retry, so taking the `jti` out of
+`revokedIds` again brings them back under the same device IDs. Removing the
+issuer, or `enrollmentTokens` altogether, does the same to every device the
+issuer enrolled.
 
 Deleting a token-enrolled device in the controller UI does not keep it out.
 The daemon discards the rejected identity and enrolls again with the same
 token file, under a new device ID. To remove one device, first delete the
 token file on the device (or uninstall the daemon), then delete the device in
-the controller UI. Revoking the token's `jti` removes every device it
+the controller UI. Revoking the token's `jti` cuts off every device it
 enrolled.
 
 ### Controller validation
@@ -454,7 +457,7 @@ device identity.
 | IdP rejects the refresh token | Delete the local identity and enroll again. The app reports the session as expired. |
 | Token refresh fails because of the network or an IdP outage | Keep the identity and retry with backoff. |
 | Controller returns `Unauthenticated` on the `Connect` stream, at open or later (unknown device certificate, or the IdP rejects the access token) | Delete the local identity and enroll again. |
-| Controller returns another error, such as `PermissionDenied` (subject mismatch) or `Unavailable` (IdP unreachable at open), or the stream closes | Keep the identity and reconnect with backoff. |
+| Controller returns another error, such as `PermissionDenied` (subject mismatch, or an enrollment token that is no longer accepted) or `Unavailable` (IdP unreachable at open), or the stream closes | Keep the identity and reconnect with backoff. |
 | Certificate renewal fails | Keep the current certificate and try again before the next session. |
 
 ## Logout and revocation
