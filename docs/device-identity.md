@@ -297,6 +297,23 @@ enrollmentTokens:
       revokedIds: []
 ```
 
+An issuer can have several keys instead, for example while rotating its
+signing key. List them in `publicKeys` in place of `publicKeyPath`:
+
+```yaml
+    - name: mdm
+      publicKeys:
+        - path: enrollment/mdm-2026.pub.pem
+        - path: enrollment/mdm-2027.pub.pem
+```
+
+A token is accepted when any of the keys verifies it. To require tokens to
+name their key, give every key an `id`; each token must then carry that ID in
+its `kid` header, and only that key is tried. To rotate a key, add the new
+key, switch the device management system to tokens signed with it, and then
+remove the old key. Devices that already enrolled are not affected, because
+after enrollment a device authenticates with its certificate, not the token.
+
 The daemon reads the token from a file that only it can read:
 
 ```yaml

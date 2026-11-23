@@ -1,8 +1,10 @@
 use std::collections::HashSet;
 
 use agentdesktop_core::config::ControllerEnrollmentTokensConfig;
-use anyhow::{Context, bail};
-use jsonwebtoken::{DecodingKey, Validation, decode};
+use anyhow::{Context, anyhow, bail};
+use jsonwebtoken::{
+    DecodingKey, Validation, decode, decode_header, errors::ErrorKind as JwtErrorKind,
+};
 use serde::Deserialize;
 
 /// The verified enrollment token a device enrolled with.
@@ -22,8 +24,16 @@ pub struct EnrollmentTokens {
 #[derive(Clone)]
 struct Issuer {
     name: String,
-    key: DecodingKey,
+    keys: Vec<IssuerKey>,
+    /// Every key has an ID, so tokens must name theirs in `kid`.
+    requires_kid: bool,
     revoked_ids: HashSet<String>,
+}
+
+#[derive(Clone)]
+struct IssuerKey {
+    id: Option<String>,
+    key: DecodingKey,
 }
 
 #[derive(Deserialize)]
@@ -42,14 +52,26 @@ impl EnrollmentTokens {
             .issuers
             .iter()
             .map(|issuer| {
-                let path = &issuer.public_key_path;
-                let pem = std::fs::read(path)
-                    .with_context(|| format!("read public key from {}", path.display()))?;
-                let key = public_key(&pem)
-                    .with_context(|| format!("parse public key from {}", path.display()))?;
+                let keys = issuer
+                    .keys()
+                    .map(|(id, path)| {
+                        let pem = std::fs::read(path)
+                            .with_context(|| format!("read public key from {}", path.display()))?;
+                        let key = public_key(&pem)
+                            .with_context(|| format!("parse public key from {}", path.display()))?;
+                        Ok(IssuerKey {
+                            id: id.map(str::to_owned),
+                            key,
+                        })
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                if keys.is_empty() {
+                    bail!("enrollment token issuer {} has no public keys", issuer.name);
+                }
                 Ok(Issuer {
                     name: issuer.name.clone(),
-                    key,
+                    requires_kid: keys.iter().all(|key| key.id.is_some()),
+                    keys,
                     revoked_ids: issuer.revoked_ids.iter().cloned().collect(),
                 })
             })
@@ -61,7 +83,7 @@ impl EnrollmentTokens {
     }
 
     pub fn verify(&self, token: &str) -> anyhow::Result<EnrollmentToken> {
-        // Only selects the key; the claims are verified below.
+        // Only selects the keys; the claims are verified below.
         let issuer = jsonwebtoken::dangerous::insecure_decode_claims::<Claims>(token)
             .context("decode enrollment token")?
             .iss;
@@ -75,19 +97,51 @@ impl EnrollmentTokens {
                     loggable_claim(&issuer)
                 )
             })?;
-        // The token chooses its algorithm only among those of the configured
-        // key's type.
-        let mut validation = Validation::new_for_family(issuer.key.family());
-        // Cannot fail while the key is selected by `iss`. Kept so that
-        // selecting keys another way (such as by `kid`) still binds the token
-        // to its issuer.
-        validation.set_issuer(&[&issuer.name]);
-        validation.set_audience(&[&self.audience]);
-        validation.set_required_spec_claims(&["iss", "aud"]);
-        validation.validate_nbf = true;
-        let claims = decode::<Claims>(token, &issuer.key, &validation)
-            .context("validate enrollment token")?
-            .claims;
+        let header = decode_header(token).context("decode enrollment token header")?;
+        let candidates: Vec<&IssuerKey> = if issuer.requires_kid {
+            let kid = header
+                .kid
+                .context("enrollment token has no kid, which its issuer requires")?;
+            let key = issuer
+                .keys
+                .iter()
+                .find(|key| key.id.as_deref() == Some(kid.as_str()))
+                .with_context(|| {
+                    format!(
+                        "enrollment token key {} is not configured",
+                        loggable_claim(&kid)
+                    )
+                })?;
+            vec![key]
+        } else {
+            issuer
+                .keys
+                .iter()
+                .filter(|key| key.key.family() == header.alg.family())
+                .collect()
+        };
+        let mut errors = Vec::new();
+        let claims = candidates.into_iter().find_map(|key| {
+            decode::<Claims>(token, &key.key, &self.validation(issuer, &key.key))
+                .map_err(|error| errors.push(error))
+                .ok()
+        });
+        let Some(claims) = claims.map(|data| data.claims) else {
+            // Prefer the error of a key whose signature matched: it names the
+            // claim that failed.
+            let error = match errors
+                .iter()
+                .position(|error| *error.kind() != JwtErrorKind::InvalidSignature)
+            {
+                Some(index) => Some(errors.swap_remove(index)),
+                None => errors.pop(),
+            };
+            let error = error.map_or_else(
+                || anyhow!("no public key of the token's issuer matches its algorithm"),
+                anyhow::Error::new,
+            );
+            return Err(error.context("validate enrollment token"));
+        };
         if claims.jti.is_empty() {
             bail!("enrollment token has an empty jti");
         }
@@ -98,6 +152,20 @@ impl EnrollmentTokens {
             issuer: claims.iss,
             id: claims.jti,
         })
+    }
+
+    fn validation(&self, issuer: &Issuer, key: &DecodingKey) -> Validation {
+        // The token chooses its algorithm only among those of the configured
+        // key's type.
+        let mut validation = Validation::new_for_family(key.family());
+        // Cannot fail: only the keys of the issuer named by `iss` are tried.
+        // Kept so that the token stays bound to its issuer if keys are ever
+        // looked up another way.
+        validation.set_issuer(&[&issuer.name]);
+        validation.set_audience(&[&self.audience]);
+        validation.set_required_spec_claims(&["iss", "aud"]);
+        validation.validate_nbf = true;
+        validation
     }
 
     /// Whether a device that enrolled with `token` is still accepted.
@@ -128,7 +196,8 @@ fn loggable_claim(value: &str) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use agentdesktop_core::config::{
-        ControllerEnrollmentTokenIssuer, ControllerEnrollmentTokensConfig,
+        ControllerEnrollmentTokenIssuer, ControllerEnrollmentTokenKey,
+        ControllerEnrollmentTokensConfig,
     };
     use aws_lc_rs::encoding::{AsDer, Pkcs8V1Der};
     use jsonwebtoken::{Algorithm, AlgorithmFamily, EncodingKey, Header};
@@ -168,11 +237,16 @@ pub(crate) mod tests {
                 audience: "fleet".to_owned(),
                 issuers: vec![ControllerEnrollmentTokenIssuer {
                     name: "jamf".to_owned(),
-                    public_key_path: self.directory.path().join("jamf.pub.pem"),
+                    public_key_path: Some(self.public_key_path()),
+                    public_keys: Vec::new(),
                     revoked_ids: revoked_ids.iter().map(|id| (*id).to_owned()).collect(),
                 }],
             })
             .unwrap()
+        }
+
+        fn public_key_path(&self) -> std::path::PathBuf {
+            self.directory.path().join("jamf.pub.pem")
         }
 
         pub(crate) fn sign(&self, claims: serde_json::Value) -> String {
@@ -185,6 +259,65 @@ pub(crate) mod tests {
 
         pub(crate) fn token(&self, id: &str) -> String {
             self.sign(json!({"iss": "jamf", "aud": "fleet", "jti": id, "iat": 1}))
+        }
+
+        fn token_with_kid(&self, kid: &str) -> String {
+            let mut header = Header::new(self.algorithm);
+            header.kid = Some(kid.to_owned());
+            let claims = json!({"iss": "jamf", "aud": "fleet", "jti": "a", "iat": 1});
+            jsonwebtoken::encode(&header, &claims, &self.key).unwrap()
+        }
+    }
+
+    #[test]
+    fn an_issuer_accepts_tokens_signed_by_any_of_its_keys() {
+        let (old, new, other) = (Issuer::new(), Issuer::new(), Issuer::new());
+        let tokens = |ids: [Option<&str>; 2]| {
+            EnrollmentTokens::load(&ControllerEnrollmentTokensConfig {
+                audience: "fleet".to_owned(),
+                issuers: vec![ControllerEnrollmentTokenIssuer {
+                    name: "jamf".to_owned(),
+                    public_key_path: None,
+                    public_keys: [&old, &new]
+                        .into_iter()
+                        .zip(ids)
+                        .map(|(issuer, id)| ControllerEnrollmentTokenKey {
+                            path: issuer.public_key_path(),
+                            id: id.map(str::to_owned),
+                        })
+                        .collect(),
+                    revoked_ids: Vec::new(),
+                }],
+            })
+            .unwrap()
+        };
+
+        let any_key = tokens([None, None]);
+        assert!(any_key.verify(&old.token("a")).is_ok());
+        assert!(any_key.verify(&new.token("a")).is_ok());
+        assert!(any_key.verify(&new.token_with_kid("ignored")).is_ok());
+        assert!(any_key.verify(&other.token("a")).is_err());
+        // The second key's error is reported: the first one's signature never matched.
+        let expired =
+            new.sign(json!({"iss": "jamf", "aud": "fleet", "jti": "a", "iat": 1, "exp": 1}));
+        let error = any_key.verify(&expired).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("ExpiredSignature"),
+            "{error:#}"
+        );
+
+        let named_keys = tokens([Some("old"), Some("new")]);
+        assert!(named_keys.verify(&old.token_with_kid("old")).is_ok());
+        assert!(named_keys.verify(&new.token_with_kid("new")).is_ok());
+        for (case, token) in [
+            ("no kid", old.token("a")),
+            ("unknown kid", old.token_with_kid("unknown")),
+            ("another key's kid", old.token_with_kid("new")),
+        ] {
+            assert!(
+                named_keys.verify(&token).is_err(),
+                "accepted a token: {case}"
+            );
         }
     }
 
