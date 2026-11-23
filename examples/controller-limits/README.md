@@ -20,12 +20,15 @@ The only host listener is the controller UI at <http://127.0.0.1:18090>.
 
 ## Start
 
-From the repository root:
+From the repository root, point `docker compose` at the lab and start it:
 
 ```console
-cd examples/controller-limits
+export COMPOSE_FILE="$PWD/examples/controller-limits/compose.yaml"
 docker compose up -d --build
 ```
+
+Every `docker compose` command below then works from any directory in that
+shell. In a new terminal, run the `export` line again from the repository root.
 
 The first build compiles the controller and the headless daemon, and takes a
 while. To rebuild the device faster while changing the daemon, run
