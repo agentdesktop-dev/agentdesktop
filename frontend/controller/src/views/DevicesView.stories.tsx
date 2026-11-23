@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, userEvent } from "storybook/test";
 
 import { ControllerStoryFrame } from "../stories/ControllerStoryFrame";
-import { devices } from "../stories/fixtures";
+import { devices, tokenDevice } from "../stories/fixtures";
 import { DevicesView } from "./DevicesView";
 
 const meta = {
@@ -60,6 +60,25 @@ export const SearchesByOwner: Story = {
 export const DeviceWithoutAReadableOwnerStillRenders: Story = {
   play: async ({ canvas }) => {
     await expect(canvas.getByText("build-linux")).toBeVisible();
+  },
+};
+
+export const ShowsTheEnrollmentTokenOfATokenDevice: Story = {
+  args: { devices: [...devices, tokenDevice] },
+  play: async ({ canvas }) => {
+    await expect(canvas.getByText("Token batch-2026-11")).toBeVisible();
+  },
+};
+
+export const SearchesByEnrollmentToken: Story = {
+  args: { devices: [...devices, tokenDevice] },
+  play: async ({ canvas }) => {
+    await userEvent.type(
+      canvas.getByRole("textbox", { name: "Search devices" }),
+      "batch-2026",
+    );
+    await expect(canvas.getByText("kiosk-01")).toBeVisible();
+    await expect(canvas.queryByText("dev-mac")).not.toBeInTheDocument();
   },
 };
 

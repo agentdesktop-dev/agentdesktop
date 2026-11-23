@@ -65,6 +65,32 @@ export const OmitsEnrolledByWithoutAReadableName: Story = {
   },
 };
 
+export const ShowsAUserSignIn: Story = {
+  play: async ({ canvas }) => {
+    await expect(canvas.getByText("User sign-in")).toBeVisible();
+    await expect(canvas.getByText("https://issuer.example")).toBeVisible();
+  },
+};
+
+export const ShowsTheEnrollmentToken: Story = {
+  args: {
+    device: {
+      ...deviceDetail,
+      enrolled_by_issuer: "",
+      enrolled_by_subject: "",
+      enrolled_by_name: null,
+      enrollment_token_issuer: "jamf",
+      enrollment_token_id: "batch-2026-11",
+    },
+  },
+  play: async ({ canvas }) => {
+    await expect(canvas.getByText("Enrollment token")).toBeVisible();
+    await expect(canvas.getByText("jamf")).toBeVisible();
+    await expect(canvas.getByText("batch-2026-11")).toBeVisible();
+    await expect(canvas.queryByText("Enrolled by")).not.toBeInTheDocument();
+  },
+};
+
 export const BrowsesDiscoveredCapabilities: Story = {
   play: async ({ canvas }) => {
     await userEvent.click(
