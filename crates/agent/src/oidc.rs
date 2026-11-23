@@ -320,14 +320,13 @@ pub async fn enroll_with_token(
 ) -> anyhow::Result<Identity> {
     #[cfg(unix)]
     warn_if_token_file_is_shared(token_path);
-    let token = std::fs::read_to_string(token_path)
-        .with_context(|| format!("read enrollment token from {}", token_path.display()))?;
+    let token = read_enrollment_token(token_path)?;
     let (device_key, csr) = device_csr()?;
     enrollment.set("enrolling").await;
     let mut request = tonic::Request::new(EnrollDeviceRequest {
         hostname: remote::hostname(),
         certificate_signing_request_der: csr.der().as_ref().to_vec(),
-        credential: Some(Credential::EnrollmentToken(token.trim().to_owned())),
+        credential: Some(Credential::EnrollmentToken(token.clone())),
     });
     request.set_timeout(Duration::from_secs(15));
     let response = remote::client(controller, None)
@@ -350,7 +349,25 @@ pub async fn enroll_with_token(
         oauth: None,
         oauth_token_endpoint: String::new(),
         oauth_client_id: String::new(),
+        enrollment_token_sha256: Some(enrollment_token_sha256(&token)),
     })
+}
+
+/// The enrollment token in `token_path`, without surrounding whitespace.
+fn read_enrollment_token(token_path: &Path) -> anyhow::Result<String> {
+    let token = std::fs::read_to_string(token_path)
+        .with_context(|| format!("read enrollment token from {}", token_path.display()))?;
+    Ok(token.trim().to_owned())
+}
+
+/// The SHA-256 of the enrollment token in `token_path`, to compare with the
+/// one a device enrolled with.
+pub fn enrollment_token_file_sha256(token_path: &Path) -> anyhow::Result<String> {
+    read_enrollment_token(token_path).map(|token| enrollment_token_sha256(&token))
+}
+
+fn enrollment_token_sha256(token: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()))
 }
 
 /// Warns when users other than the token file's owner can read it: anyone who
@@ -563,6 +580,7 @@ async fn complete_enrollment(
         }),
         oauth_token_endpoint: config.token_endpoint,
         oauth_client_id: config.client_id,
+        enrollment_token_sha256: None,
     })
 }
 
@@ -1765,6 +1783,7 @@ mod tests {
             }),
             oauth_token_endpoint: "https://idp.example/token".to_owned(),
             oauth_client_id: "client".to_owned(),
+            enrollment_token_sha256: None,
         };
 
         apply_refreshed_tokens(

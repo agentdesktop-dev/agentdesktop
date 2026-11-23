@@ -329,7 +329,10 @@ are rejected as `PermissionDenied`. Because the controller still knows these
 devices, they keep their identity and retry, so taking the `jti` out of
 `revokedIds` again brings them back under the same device IDs. Removing the
 issuer, or `enrollmentTokens` altogether, does the same to every device the
-issuer enrolled.
+issuer enrolled. To move devices to a new token instead, replace their token
+file: a daemon whose token is rejected enrolls again when the file no longer
+holds the token it enrolled with. The daemon stores only a SHA-256 of that
+token, never the token itself.
 
 Deleting a token-enrolled device in the controller UI does not keep it out.
 The daemon discards the rejected identity and enrolls again with the same
@@ -457,7 +460,8 @@ device identity.
 | IdP rejects the refresh token | Delete the local identity and enroll again. The app reports the session as expired. |
 | Token refresh fails because of the network or an IdP outage | Keep the identity and retry with backoff. |
 | Controller returns `Unauthenticated` on the `Connect` stream, at open or later (unknown device certificate, or the IdP rejects the access token) | Delete the local identity and enroll again. |
-| Controller returns another error, such as `PermissionDenied` (subject mismatch, or an enrollment token that is no longer accepted) or `Unavailable` (IdP unreachable at open), or the stream closes | Keep the identity and reconnect with backoff. |
+| Controller returns `PermissionDenied` to a token-enrolled device (its token was revoked or its issuer removed) | Keep the identity and reconnect with backoff. The app reports the token as no longer accepted. If the token file has changed since the device enrolled, delete the identity and enroll again with the new token. |
+| Controller returns another error, such as `PermissionDenied` (subject mismatch) or `Unavailable` (IdP unreachable at open), or the stream closes | Keep the identity and reconnect with backoff. |
 | Certificate renewal fails | Keep the current certificate and try again before the next session. |
 
 ## Logout and revocation

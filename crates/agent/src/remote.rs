@@ -510,6 +510,33 @@ async fn run_session(
                     );
                     break;
                 }
+                // A token-enrolled device the controller still knows, but whose
+                // token it no longer accepts (revoked, or its issuer removed).
+                Err(error) if identity.oauth.is_none() && is_permission_denied(&error) => {
+                    let error_chain = format!("{error:#}");
+                    if token_file_changed(controller, &identity) {
+                        identity::delete(&identity_path, &identity.device_id)?;
+                        enrollment.set("starting").await;
+                        controller_status
+                            .mark_disconnected(Some(ControllerConnectionError::IdentityRejected))
+                            .await;
+                        warn!(
+                            controller = %controller.address,
+                            error = %error_chain,
+                            "controller no longer accepts this device's enrollment token, and the token file changed; enrolling again with the new token"
+                        );
+                        break;
+                    }
+                    controller_status
+                        .mark_disconnected(Some(ControllerConnectionError::TokenNotAccepted))
+                        .await;
+                    warn!(
+                        controller = %controller.address,
+                        retry_in_seconds = delay.as_secs(),
+                        error = %error_chain,
+                        "controller no longer accepts this device's enrollment token; keeping the identity and retrying"
+                    );
+                }
                 Err(error) => {
                     let error_chain = format!("{error:#}");
                     controller_status
@@ -639,6 +666,28 @@ fn is_unauthenticated(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<tonic::Status>()
         .is_some_and(|status| status.code() == tonic::Code::Unauthenticated)
+}
+
+fn is_permission_denied(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<tonic::Status>()
+        .is_some_and(|status| status.code() == tonic::Code::PermissionDenied)
+}
+
+/// Whether the configured enrollment token differs from the one the device
+/// enrolled with. An identity enrolled before the token was recorded counts
+/// as changed; an unreadable or unconfigured token file does not.
+fn token_file_changed(controller: &ControllerConnectionConfig, identity: &Identity) -> bool {
+    let Some(path) = &controller.enrollment_token_path else {
+        return false;
+    };
+    match oidc::enrollment_token_file_sha256(path) {
+        Ok(current) => identity.enrollment_token_sha256.as_deref() != Some(current.as_str()),
+        Err(error) => {
+            warn!(error = %format!("{error:#}"), "could not read the enrollment token file");
+            false
+        }
+    }
 }
 
 fn is_oauth_refresh_rejected(error: &anyhow::Error) -> bool {
@@ -1379,6 +1428,7 @@ async fn renew_device_certificate(
         oauth: identity.oauth.clone(),
         oauth_token_endpoint: identity.oauth_token_endpoint.clone(),
         oauth_client_id: identity.oauth_client_id.clone(),
+        enrollment_token_sha256: identity.enrollment_token_sha256.clone(),
     })
 }
 

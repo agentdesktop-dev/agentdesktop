@@ -24,6 +24,16 @@ struct Controller {
     events: mpsc::UnboundedSender<Event>,
     reject_fresh: bool,
     expire_first_fresh: bool,
+    /// How `connect` rejects a token-enrolled device, which sends no access token.
+    token_rejection: tonic::Code,
+}
+
+/// A device enrolled with an enrollment token the controller rejects.
+#[derive(Clone, Copy)]
+struct TokenDevice {
+    rejection: tonic::Code,
+    /// Whether the token file changed after the device enrolled.
+    file_changed: bool,
 }
 
 #[tonic::async_trait]
@@ -70,7 +80,8 @@ impl FleetAgent for Controller {
         // longer accepts its token.
         let Some(token) = request.metadata().get("authorization") else {
             let _ = self.events.send(Event::TokenDeviceRejected);
-            return Err(tonic::Status::unauthenticated(
+            return Err(tonic::Status::new(
+                self.token_rejection,
                 "device enrollment token is no longer accepted",
             ));
         };
@@ -131,20 +142,18 @@ impl Fixture {
         reject_fresh: bool,
         expire_first_fresh: bool,
     ) -> Self {
-        Self::launch(statuses, reject_fresh, expire_first_fresh, false).await
+        Self::launch(statuses, reject_fresh, expire_first_fresh, None).await
     }
 
-    /// A device enrolled with an enrollment token, which the controller no
-    /// longer accepts.
-    async fn start_token_enrolled() -> Self {
-        Self::launch(vec![], false, false, true).await
+    async fn start_token_enrolled(token_device: TokenDevice) -> Self {
+        Self::launch(vec![], false, false, Some(token_device)).await
     }
 
     async fn launch(
         statuses: Vec<StatusCode>,
         reject_fresh: bool,
         expire_first_fresh: bool,
-        token_enrolled: bool,
+        token_device: Option<TokenDevice>,
     ) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let refreshes = Arc::new(AtomicUsize::new(0));
@@ -186,27 +195,35 @@ impl Fixture {
             }),
             oauth_token_endpoint: token_endpoint,
             oauth_client_id: "test-client".to_owned(),
+            enrollment_token_sha256: None,
         };
-        let identity = if token_enrolled {
-            Identity {
-                oauth: None,
-                oauth_token_endpoint: String::new(),
-                oauth_client_id: String::new(),
-                ..identity
+        let enrollment_token_path = token_device.map(|_| path.join("enrollment-token"));
+        let identity = match (&token_device, &enrollment_token_path) {
+            (Some(token_device), Some(token_path)) => {
+                std::fs::write(token_path, "signed-token").unwrap();
+                let enrolled_with = crate::oidc::enrollment_token_file_sha256(token_path).unwrap();
+                if token_device.file_changed {
+                    std::fs::write(token_path, "rotated-token").unwrap();
+                }
+                Identity {
+                    oauth: None,
+                    oauth_token_endpoint: String::new(),
+                    oauth_client_id: String::new(),
+                    enrollment_token_sha256: Some(enrolled_with),
+                    ..identity
+                }
             }
-        } else {
-            identity
+            _ => identity,
         };
         identity::save(&path.join("identity.json"), &identity).unwrap();
-        let enrollment_token_path = token_enrolled.then(|| path.join("enrollment-token"));
-        if let Some(token_path) = &enrollment_token_path {
-            std::fs::write(token_path, "signed-token").unwrap();
-        }
         let (events_sender, events) = mpsc::unbounded_channel();
         let controller = Controller {
             events: events_sender,
             reject_fresh,
             expire_first_fresh,
+            token_rejection: token_device.map_or(tonic::Code::Unauthenticated, |token_device| {
+                token_device.rejection
+            }),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -339,8 +356,12 @@ async fn accepted_stream_resets_recovery_for_the_next_token_expiry() {
 }
 
 #[tokio::test]
-async fn rejected_token_device_reenrolls_without_reconnecting() {
-    let mut fixture = Fixture::start_token_enrolled().await;
+async fn unknown_token_device_reenrolls_without_reconnecting() {
+    let mut fixture = Fixture::start_token_enrolled(TokenDevice {
+        rejection: tonic::Code::Unauthenticated,
+        file_changed: false,
+    })
+    .await;
     assert!(matches!(
         fixture.next_event().await,
         Event::TokenDeviceRejected
@@ -351,5 +372,41 @@ async fn rejected_token_device_reenrolls_without_reconnecting() {
         "a rejected token device must enroll again without reconnecting first: {event:?}"
     );
     assert_eq!(fixture.refreshes.load(Ordering::SeqCst), 0);
+    assert!(!fixture.directory.path().join("identity.json").exists());
+}
+
+#[tokio::test]
+async fn token_device_whose_token_is_no_longer_accepted_keeps_its_identity() {
+    let mut fixture = Fixture::start_token_enrolled(TokenDevice {
+        rejection: tonic::Code::PermissionDenied,
+        file_changed: false,
+    })
+    .await;
+    for _ in 0..2 {
+        let event = fixture.next_event().await;
+        assert!(
+            matches!(event, Event::TokenDeviceRejected),
+            "the device must retry with the same identity: {event:?}"
+        );
+    }
+    assert_eq!(fixture.stored().device_id, "existing-device");
+}
+
+#[tokio::test]
+async fn token_device_reenrolls_when_its_rejected_token_was_replaced() {
+    let mut fixture = Fixture::start_token_enrolled(TokenDevice {
+        rejection: tonic::Code::PermissionDenied,
+        file_changed: true,
+    })
+    .await;
+    assert!(matches!(
+        fixture.next_event().await,
+        Event::TokenDeviceRejected
+    ));
+    let event = fixture.next_event().await;
+    assert!(
+        matches!(event, Event::TokenEnrollmentRequested),
+        "a replaced token must be used to enroll again: {event:?}"
+    );
     assert!(!fixture.directory.path().join("identity.json").exists());
 }
