@@ -1,0 +1,8 @@
+# yaml-language-server: $schema=../../../schema/daemon-config.json
+# The device's local configuration without limits: the controller is fully
+# trusted.
+controller:
+  address: https://controller:8443
+  caCertificatePath: /keys/device-ca.pem
+  heartbeatInterval: 30s
+  enrollmentTokenPath: /keys/enrollment-token

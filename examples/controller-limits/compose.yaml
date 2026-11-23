@@ -1,0 +1,93 @@
+# A controller and one device that enrolls unattended with an enrollment
+# token. The controller's policy and the device's local configuration live in
+# volumes; `lab.sh` (the `lab` service) switches them between the versions in
+# policies/ and device/. Only the controller UI reaches the host, on loopback.
+name: agentdesktop-controller-limits
+
+services:
+  setup:
+    image: docker.io/library/alpine:3.22
+    environment:
+      CONTROLLER_SAN: DNS:controller
+    command: [sh, /lab/setup.sh]
+    volumes:
+    - keys:/tmp/agentdesktop-keys
+    - policy:/policy
+    - device-config:/device-config
+    - .:/lab:ro
+    - ../claude/create-keys.sh:/demo/create-keys.sh:ro
+
+  dex:
+    image: ghcr.io/dexidp/dex:v2.45.1
+    command: dex serve /etc/dex/config.yaml
+    # The controller fetches Dex's discovery document at startup. The device
+    # enrolls with a token and never signs in.
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:5556/dex/.well-known/openid-configuration]
+      interval: 2s
+      retries: 30
+    volumes:
+    - ../enrollment/dex.yaml:/etc/dex/config.yaml:ro
+
+  controller:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    command: [--config, /lab/controller.yaml]
+    user: "0:0"
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+      dex:
+        condition: service_healthy
+    ports:
+    - 127.0.0.1:18090:18090 # Controller UI, through controller-ui
+    volumes:
+    - keys:/keys:ro
+    - controller-state:/state
+    - policy:/policy
+    - ./controller.yaml:/lab/controller.yaml:ro
+
+  # The controller's management UI listens on loopback only. This joins the
+  # controller's network namespace and forwards the published port to it.
+  controller-ui:
+    image: docker.io/library/alpine:3.22
+    network_mode: service:controller
+    command:
+    - sh
+    - -c
+    - apk add --no-cache socat && exec socat TCP-LISTEN:18090,fork,reuseaddr TCP:127.0.0.1:8080
+    depends_on:
+    - controller
+
+  device:
+    build:
+      context: ../..
+      dockerfile: examples/enrollment/Dockerfile
+      target: headless
+    hostname: limits-device
+    depends_on:
+      controller:
+        condition: service_started
+    volumes:
+    - keys:/keys:ro
+    - device-state:/var/lib/agentdesktop
+    - device-config:/demo:ro
+
+  # Switches the controller's policy and the device's local configuration:
+  # docker compose -f examples/controller-limits/compose.yaml run --rm lab policy outside
+  lab:
+    image: docker.io/library/alpine:3.22
+    profiles: [tools]
+    entrypoint: [sh, /lab/lab.sh]
+    volumes:
+    - policy:/policy
+    - device-config:/device-config
+    - .:/lab:ro
+
+volumes:
+  keys:
+  controller-state:
+  device-state:
+  policy:
+  device-config:

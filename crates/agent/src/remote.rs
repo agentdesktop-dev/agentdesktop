@@ -920,6 +920,12 @@ async fn connect(
                     last_sent = Some(status.clone());
                     if status.error.is_empty() {
                         info!(revision = status.revision, "applied daemon configuration");
+                    } else if status.state() == ConfigState::Rejected {
+                        warn!(
+                            revision = status.revision,
+                            error = %status.error,
+                            "rejected daemon configuration: outside the local limits"
+                        );
                     } else {
                         warn!(
                             revision = status.revision,

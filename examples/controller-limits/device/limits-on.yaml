@@ -1,0 +1,12 @@
+# yaml-language-server: $schema=../../../schema/daemon-config.json
+# The device's local configuration, as MDM would install it. The controller
+# cannot change the daemon section.
+daemon:
+  controllerLimits:
+    allowedGatewayOrigins:
+    - https://gateway.example.com
+controller:
+  address: https://controller:8443
+  caCertificatePath: /keys/device-ca.pem
+  heartbeatInterval: 30s
+  enrollmentTokenPath: /keys/enrollment-token
