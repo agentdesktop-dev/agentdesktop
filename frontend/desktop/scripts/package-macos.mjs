@@ -13,7 +13,10 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { macosArchitecture } from "./package-macos-architecture.mjs";
+import {
+  distributionForArchitecture,
+  macosArchitecture,
+} from "./package-macos-architecture.mjs";
 import {
   createTauriVersionConfig,
   normalizeTauriArguments,
@@ -181,9 +184,19 @@ try {
       ),
     ),
   );
+  // The distribution declares the package's architecture, so the installer
+  // doesn't require Rosetta 2 on Apple silicon for the native arm64 package.
+  const distributionPath = path.join(stagingDirectory, "distribution.xml");
+  writeFileSync(
+    distributionPath,
+    distributionForArchitecture(
+      readFileSync(path.join(macosDirectory, "distribution.xml"), "utf8"),
+      architecture,
+    ),
+  );
   const productArguments = [
     "--distribution",
-    path.join(macosDirectory, "distribution.xml"),
+    distributionPath,
     "--resources",
     installerResourcesDirectory,
     "--package-path",
