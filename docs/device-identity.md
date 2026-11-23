@@ -271,7 +271,9 @@ daemon's controller connection. The IdP must advertise a
 
 A device management system can enroll devices with no user involved. The
 operator signs a token once, the controller trusts the operator's public key,
-and every device receives the same token file.
+and every device receives the same token file. Token enrollment works
+alongside sign-in, not instead of it: the controller still requires its
+`oidc` section.
 
 The token is a JWT signed with an algorithm of the issuer's key type: ES256
 or ES384 for an ECDSA P-256 or P-384 key, EdDSA for an Ed25519 key, and
@@ -350,6 +352,24 @@ issuer enrolled. To move devices to a new token instead, replace their token
 file: a daemon whose token is rejected enrolls again when the file no longer
 holds the token it enrolled with. The daemon stores only a SHA-256 of that
 token, never the token itself.
+
+`exp` and `revokedIds` do different things:
+
+| | New enrollments | Devices already enrolled |
+| --- | --- | --- |
+| Token past its `exp` | Rejected | Keep working |
+| Token's `jti` in `revokedIds` | Rejected | Rejected as `PermissionDenied` |
+
+Give tokens an `exp` and mint a replacement before it passes. That limits how
+long a copied token is useful without touching the devices it enrolled. Use
+`revokedIds` when a token leaked and the devices it enrolled cannot be trusted
+either.
+
+Until it expires or is revoked, anyone holding a leaked token can enroll
+devices. Such a device receives the fleet's daemon configuration and can
+report inventory, telemetry, and usage. It gets no LLM gateway credential,
+which needs a signed-in user. To see which devices a token enrolled, search
+the controller's device list for its ID.
 
 Deleting a token-enrolled device in the controller UI does not keep it out.
 The daemon discards the rejected identity and enrolls again with the same
