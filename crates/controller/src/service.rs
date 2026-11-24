@@ -293,7 +293,7 @@ impl FleetAgent for FleetAgentService {
             )),
             None => None,
         };
-        let (responses, receiver) = mpsc::channel(8);
+        let (responses, receiver) = response_queue();
         let session = ConnectSession {
             device_id,
             daemon_updates: self.daemon_config.subscribe(),
@@ -310,6 +310,19 @@ impl FleetAgent for FleetAgentService {
 /// How often an open `Connect` stream checks its access token again.
 const ACCESS_TOKEN_RECHECK: Duration = Duration::from_secs(5 * 60);
 
+/// Messages queued on a device's `Connect` stream before the session decides
+/// the device stopped reading it.
+const QUEUED_RESPONSES: usize = 8;
+
+type Responses = mpsc::Sender<Result<ControllerMessage, Status>>;
+
+/// The queue behind a device's `Connect` stream. It has one slot more than
+/// `QUEUED_RESPONSES`, kept for the status that closes the stream, so that
+/// status reaches the device even when the queue is otherwise full.
+fn response_queue() -> (Responses, mpsc::Receiver<Result<ControllerMessage, Status>>) {
+    mpsc::channel(QUEUED_RESPONSES + 1)
+}
+
 /// A device's `Connect` session, run by its own task. The task owns the
 /// response stream: it ends when the device's request stream ends, the device
 /// goes away, or the session closes the stream for cause. Configuration is
@@ -317,7 +330,7 @@ const ACCESS_TOKEN_RECHECK: Duration = Duration::from_secs(5 * 60);
 struct ConnectSession {
     device_id: String,
     stream: DeviceStream,
-    responses: mpsc::Sender<Result<ControllerMessage, Status>>,
+    responses: Responses,
     daemon_updates: watch::Receiver<Option<DaemonConfig>>,
     database: Database,
     /// The identity provider and the access token the stream opened with.
@@ -454,7 +467,8 @@ impl ConnectSession {
         ControlFlow::Continue(())
     }
 
-    /// Ends the stream with `status`, dropped if the device is not reading.
+    /// Ends the stream with `status`, after the messages already queued. The
+    /// queue keeps a slot for it (`response_queue`).
     fn close(&self, status: Status) -> ControlFlow<()> {
         let _ = self.responses.try_send(Err(status));
         ControlFlow::Break(())
@@ -462,14 +476,14 @@ impl ConnectSession {
 }
 
 /// Queues `message` on a device's `Connect` stream without waiting for room,
-/// and ends the session when the queue is full: a device that stopped reading
-/// would otherwise hold the session forever.
+/// and ends the session when `QUEUED_RESPONSES` messages wait unread: a device
+/// that stopped reading would otherwise hold the session forever.
 ///
 /// A message over `max_message_bytes` ends the session too. Tonic would fail
 /// the stream when it encoded the message, with the status only in the
 /// stream's trailers, so it is checked here, where it can be counted and logged.
 fn queue_response(
-    responses: &mpsc::Sender<Result<ControllerMessage, Status>>,
+    responses: &Responses,
     message: ControllerMessage,
     device_id: &str,
     max_message_bytes: usize,
@@ -495,17 +509,20 @@ fn queue_response(
         ))));
         return ControlFlow::Break(());
     }
+    // The last slot is kept for a closing status.
+    if responses.capacity() <= 1 && !responses.is_closed() {
+        metrics.hit(Limit::ConnectResponseBuffer, Outcome::Closed);
+        warn!(
+            device_id = %device_id,
+            "closing stream after the device stopped reading it"
+        );
+        return ControlFlow::Break(());
+    }
     match responses.try_send(Ok(message)) {
         Ok(()) => ControlFlow::Continue(()),
-        Err(mpsc::error::TrySendError::Full(_)) => {
-            metrics.hit(Limit::ConnectResponseBuffer, Outcome::Closed);
-            warn!(
-                device_id = %device_id,
-                "closing stream after the device stopped reading it"
-            );
-            ControlFlow::Break(())
-        }
-        Err(mpsc::error::TrySendError::Closed(_)) => ControlFlow::Break(()),
+        // The device closed its stream. The queue has room: the session is its
+        // only sender.
+        Err(_) => ControlFlow::Break(()),
     }
 }
 
@@ -880,10 +897,10 @@ mod tests {
 
     use agentdesktop_proto::fleet::{ControllerMessage, DaemonConfig, controller_message};
     use prost::Message as _;
-    use tokio::sync::mpsc;
 
     use super::{
-        FleetAgentService, authenticate_enrolled_user, device_id_from_certificate, queue_response,
+        FleetAgentService, QUEUED_RESPONSES, authenticate_enrolled_user,
+        device_id_from_certificate, queue_response, response_queue,
         subscription_is_configured_for_client,
     };
     use crate::{
@@ -901,46 +918,30 @@ mod tests {
         let telemetry = Telemetry::new().unwrap();
         let metrics = telemetry.limits().listener("fleet");
         let count = || telemetry.hits("fleet", Limit::ConnectResponseBuffer, Outcome::Closed);
-        let (responses, mut receiver) = mpsc::channel(1);
-
-        // Room left: the message is queued and nothing is counted.
-        assert_eq!(
+        let (responses, mut receiver) = response_queue();
+        let queue = || {
             queue_response(
                 &responses,
                 ControllerMessage::default(),
                 "device",
                 MAX_MESSAGE_BYTES,
-                &metrics
-            ),
-            ControlFlow::Continue(())
-        );
+                &metrics,
+            )
+        };
+
+        // Room left: each message is queued and nothing is counted.
+        for _ in 0..QUEUED_RESPONSES {
+            assert_eq!(queue(), ControlFlow::Continue(()));
+        }
         assert_eq!(count(), 0);
 
-        // The device has not read the queued message, so the queue is full.
-        assert_eq!(
-            queue_response(
-                &responses,
-                ControllerMessage::default(),
-                "device",
-                MAX_MESSAGE_BYTES,
-                &metrics
-            ),
-            ControlFlow::Break(())
-        );
+        // The device has read none of them, so it stopped reading.
+        assert_eq!(queue(), ControlFlow::Break(()));
         assert_eq!(count(), 1);
 
         // A stream the device already closed is not a full buffer.
         receiver.close();
-        assert_eq!(
-            queue_response(
-                &responses,
-                ControllerMessage::default(),
-                "device",
-                MAX_MESSAGE_BYTES,
-                &metrics
-            ),
-            ControlFlow::Break(())
-        );
+        assert_eq!(queue(), ControlFlow::Break(()));
         assert_eq!(count(), 1);
     }
 
@@ -949,7 +950,7 @@ mod tests {
         let telemetry = Telemetry::new().unwrap();
         let metrics = telemetry.limits().listener("fleet");
         let count = || telemetry.hits("fleet", Limit::MaxMessageBytes, Outcome::Closed);
-        let (responses, mut receiver) = mpsc::channel(4);
+        let (responses, mut receiver) = response_queue();
         let config = |bytes: usize| ControllerMessage {
             message: Some(controller_message::Message::DaemonConfig(DaemonConfig {
                 revision: 1,
@@ -960,21 +961,27 @@ mod tests {
         let within = config(100);
         let limit = within.encoded_len();
 
-        // At the limit: queued and not counted.
-        assert_eq!(
-            queue_response(&responses, within, "device", limit, &metrics),
-            ControlFlow::Continue(())
-        );
+        // At the limit: queued and not counted, until the device has a full
+        // queue of them unread.
+        for _ in 0..QUEUED_RESPONSES {
+            assert_eq!(
+                queue_response(&responses, within.clone(), "device", limit, &metrics),
+                ControlFlow::Continue(())
+            );
+        }
         assert_eq!(count(), 0);
 
-        // Over it: the device is told why and the stream ends, instead of
-        // tonic failing it when it encodes the message.
+        // Over it: the stream ends, instead of tonic failing it when it
+        // encodes the message, and the device is told why even though the
+        // queue is full.
         assert_eq!(
             queue_response(&responses, config(101), "device", limit, &metrics),
             ControlFlow::Break(())
         );
         assert_eq!(count(), 1);
-        assert!(receiver.try_recv().unwrap().is_ok());
+        for _ in 0..QUEUED_RESPONSES {
+            assert!(receiver.try_recv().unwrap().is_ok());
+        }
         let status = receiver
             .try_recv()
             .unwrap()
