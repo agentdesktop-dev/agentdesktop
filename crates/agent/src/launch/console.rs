@@ -1,4 +1,6 @@
-//! Same-terminal console hosting (Windows).
+//! Same-terminal console hosting.
+//!
+//! Windows:
 //!
 //! `run --wait` started from a console asks the daemon to run the boxed
 //! program on that console. The daemon validates the requesting pid (same
@@ -7,6 +9,13 @@
 //! executor with the console's handles inherited. The boxed program then
 //! runs in the caller's terminal and `cmd /c` (no `start`) returns the
 //! program's own exit code.
+//!
+//! Linux: the daemon finds the requesting process's terminal, checks that it
+//! belongs to the daemon's user, and starts the executor with that terminal
+//! as its standard input, output and error. The executor gives the box no
+//! controlling terminal, so the terminal's signals stay with the client; a
+//! launch therefore ends when its client does (Ctrl+C outside raw mode, or a
+//! closed terminal).
 
 /// The `console-attach` helper's exit code when its own setup fails (attach
 /// refused, job or spawn failure) before the executor runs. The daemon does
@@ -23,10 +32,106 @@ pub(crate) const ATTACH_STARTED_MARKER: &str = "attach-started";
 #[cfg(windows)]
 pub(crate) use imp::*;
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "linux")))]
 pub(crate) fn client_console_available() -> bool {
     false
 }
+
+#[cfg(target_os = "linux")]
+pub(crate) use linux::*;
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use std::{
+        os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt},
+        path::{Path, PathBuf},
+    };
+
+    use anyhow::{Context, bail};
+
+    /// Whether this process has one terminal as standard input, output and
+    /// error. The daemon applies the same rule to the pid it is given.
+    pub(crate) fn client_console_available() -> bool {
+        // SAFETY: isatty only inspects the descriptor.
+        (0..=2).all(|fd| unsafe { libc::isatty(fd) } == 1)
+    }
+
+    /// The terminal of process `client_pid`: the one device its standard
+    /// input, output and error all name. It must be a pseudo-terminal owned
+    /// by this daemon's user, and the process must be that user's too.
+    pub(crate) fn client_tty(client_pid: u32) -> anyhow::Result<PathBuf> {
+        // SAFETY: geteuid has no preconditions.
+        let uid = unsafe { libc::geteuid() };
+        let process = PathBuf::from(format!("/proc/{client_pid}"));
+        let owner = std::fs::metadata(&process)
+            .with_context(|| format!("process {client_pid} is gone"))?
+            .uid();
+        if owner != uid {
+            bail!("process {client_pid} belongs to another user");
+        }
+        let link = |fd: u32| std::fs::read_link(process.join(format!("fd/{fd}")));
+        let tty = link(0).context("read the client's standard input")?;
+        if link(1).ok().as_ref() != Some(&tty) || link(2).ok().as_ref() != Some(&tty) {
+            bail!("the client's standard streams are not one terminal");
+        }
+        if !tty.starts_with("/dev/pts") {
+            bail!("{} is not a pseudo-terminal", tty.display());
+        }
+        let metadata = std::fs::symlink_metadata(&tty)
+            .with_context(|| format!("inspect {}", tty.display()))?;
+        if !metadata.file_type().is_char_device() || metadata.uid() != uid {
+            bail!("{} is not a terminal of this user", tty.display());
+        }
+        Ok(tty)
+    }
+
+    /// Opens `tty` for a child's standard stream, without making it this
+    /// process's controlling terminal.
+    pub(crate) fn open_tty(tty: &Path) -> std::io::Result<std::fs::File> {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOCTTY)
+            .open(tty)
+    }
+
+    /// The start time of process `pid` in clock ticks since boot (field 22
+    /// of `/proc/<pid>/stat`): with the pid, the identity of a process.
+    pub(crate) fn process_start_ticks(pid: u32) -> Option<u64> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // The command name (field 2) may contain spaces and parentheses.
+        let rest = &stat[stat.rfind(')')? + 1..];
+        rest.split_whitespace().nth(19)?.parse().ok()
+    }
+
+    /// The terminal settings of standard input, to put back once a program
+    /// that ran on this terminal has exited.
+    pub(crate) struct TerminalState(libc::termios);
+
+    pub(crate) fn save_terminal() -> Option<TerminalState> {
+        // SAFETY: termios is plain data; tcgetattr fills it or fails.
+        let mut state = unsafe { std::mem::zeroed::<libc::termios>() };
+        (unsafe { libc::tcgetattr(0, &mut state) } == 0).then_some(TerminalState(state))
+    }
+
+    pub(crate) fn restore_terminal(state: Option<TerminalState>) {
+        if let Some(TerminalState(state)) = state {
+            // SAFETY: a termios read from this descriptor by save_terminal.
+            unsafe { libc::tcsetattr(0, libc::TCSADRAIN, &state) };
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) struct TerminalState;
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn save_terminal() -> Option<TerminalState> {
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn restore_terminal(_state: Option<TerminalState>) {}
 
 #[cfg(not(windows))]
 pub(crate) fn ignore_ctrl_c() {}

@@ -318,7 +318,14 @@ pub async fn run(command: ClientCommand, socket: PathBuf) -> anyhow::Result<()> 
                 });
             }
             if wait {
+                // A program on this terminal may leave it in raw mode.
+                let terminal = request
+                    .console
+                    .is_some()
+                    .then(crate::launch::console::save_terminal)
+                    .flatten();
                 let (code, line) = run_and_wait(&socket, &request, RUN_WAIT_POLL).await;
+                crate::launch::console::restore_terminal(terminal);
                 if let Some(line) = line {
                     eprintln!("{line}");
                 }

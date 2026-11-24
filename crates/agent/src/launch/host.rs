@@ -208,10 +208,27 @@ struct ProcessChild {
     child: Child,
     pid: u32,
     start_time: u64,
+    /// The client whose terminal the launch runs on (pid and start time):
+    /// the launch ends when that process does.
+    #[cfg(target_os = "linux")]
+    client: Option<(u32, u64)>,
 }
 
 impl LaunchChild for ProcessChild {
     fn try_wait(&mut self) -> io::Result<Option<i32>> {
+        #[cfg(target_os = "linux")]
+        if let Some((client, started)) = self.client
+            && super::console::process_start_ticks(client) != Some(started)
+        {
+            // The terminal's owner is gone (interrupted, or the terminal
+            // closed): nothing can drive the program any more.
+            self.client = None;
+            tracing::info!(
+                client,
+                "the launch's terminal client exited; stopping the box"
+            );
+            let _ = self.child.kill();
+        }
         Ok(self
             .child
             .try_wait()?
@@ -260,9 +277,47 @@ impl Executor for ProcessExecutor {
                 child,
                 pid,
                 start_time,
+                #[cfg(target_os = "linux")]
+                client: None,
             }));
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        if let super::plan::ConsolePlan::Attach { client_pid } = console {
+            use super::console::{client_tty, open_tty, process_start_ticks};
+            let tty =
+                client_tty(client_pid).map_err(|error| io::Error::other(format!("{error:#}")))?;
+            let started = process_start_ticks(client_pid)
+                .ok_or_else(|| io::Error::other("the terminal client is gone"))?;
+            let mut child = Command::new(executor)
+                .arg("--log-file")
+                .arg(log)
+                .arg(request)
+                .stdin(open_tty(&tty)?)
+                .stdout(open_tty(&tty)?)
+                .stderr(open_tty(&tty)?)
+                .spawn()?;
+            // From here an early exit is the program's own result.
+            if let Some(launch_dir) = request.parent() {
+                let _ = std::fs::write(launch_dir.join(super::console::ATTACH_STARTED_MARKER), b"");
+            }
+            let pid = child.id();
+            let start_time = match process_start_time(&child) {
+                Ok(start_time) => start_time,
+                Err(error) => {
+                    let _ = child.kill();
+                    return Err(io::Error::other(format!(
+                        "read process start time: {error:#}"
+                    )));
+                }
+            };
+            return Ok(Box::new(ProcessChild {
+                child,
+                pid,
+                start_time,
+                client: Some((client_pid, started)),
+            }));
+        }
+        #[cfg(all(not(windows), not(target_os = "linux")))]
         let _ = console;
         // The daemon opens the log file itself (it inherits the launch
         // directory's private DACL); the executor only inherits the handle, so
@@ -305,6 +360,8 @@ impl Executor for ProcessExecutor {
             child,
             pid,
             start_time,
+            #[cfg(target_os = "linux")]
+            client: None,
         }))
     }
 }

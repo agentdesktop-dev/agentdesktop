@@ -1508,7 +1508,24 @@ fn console_plan(request: Option<ConsoleAttach>) -> plan::ConsolePlan {
             }
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    if let Some(attach) = request {
+        match crate::launch::console::client_tty(attach.client_pid) {
+            Ok(_) => {
+                return plan::ConsolePlan::Attach {
+                    client_pid: attach.client_pid,
+                };
+            }
+            Err(error) => {
+                tracing::warn!(
+                    client_pid = attach.client_pid,
+                    error = format!("{error:#}"),
+                    "terminal attach refused; launching without a terminal"
+                );
+            }
+        }
+    }
+    #[cfg(all(not(windows), not(target_os = "linux")))]
     let _ = request;
     plan::ConsolePlan::Window
 }
