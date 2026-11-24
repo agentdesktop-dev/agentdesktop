@@ -564,7 +564,9 @@ async fn resolve_gateway_credential(
         )),
     }
     .map_err(|error| {
-        let status = if error.is::<gateway_oidc::SignInRequired>() {
+        let status = if error.is::<gateway_oidc::SignInRequired>()
+            || error.is::<gateway_oidc::BrowserSignInPending>()
+        {
             StatusCode::UNAUTHORIZED
         } else {
             StatusCode::BAD_GATEWAY
