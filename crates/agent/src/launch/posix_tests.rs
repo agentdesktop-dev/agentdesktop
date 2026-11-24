@@ -95,12 +95,37 @@ fn a_posix_plan_writes_posix_paths_and_environment() {
     }
     assert!(plan.readwrite.contains(&PathBuf::from("/ws")));
     assert!(plan.readwrite.contains(&PathBuf::from("/home/dev/.claude")));
-    assert!(
-        plan.denied
-            .contains(&PathBuf::from("/home/dev/.claude/.credentials.json"))
+}
+
+/// The backend creates a missing denied path on the host before masking it,
+/// so a POSIX plan denies only what exists.
+#[test]
+fn a_posix_plan_denies_only_paths_that_exist() {
+    let plan = posix_plan(
+        &[
+            "/ws/.git",
+            "/home/dev/.ssh",
+            "/home/dev/.claude/.credentials.json",
+        ],
+        deny(),
+        &[],
     );
-    assert!(plan.denied.contains(&PathBuf::from("/ws/.git/config")));
-    assert!(plan.denied.contains(&PathBuf::from("/home/dev/.gitconfig")));
+    assert_eq!(
+        plan.denied,
+        vec![
+            PathBuf::from("/home/dev/.claude/.credentials.json"),
+            PathBuf::from("/home/dev/.ssh"),
+        ]
+    );
+    // What exists and configures the program is read-only, not denied.
+    let plan = posix_plan(
+        &["/ws/.git", "/ws/.git/config", "/ws/.mcp.json"],
+        deny(),
+        &[],
+    );
+    assert!(plan.readonly.contains(&PathBuf::from("/ws/.git/config")));
+    assert!(plan.readonly.contains(&PathBuf::from("/ws/.mcp.json")));
+    assert!(plan.denied.is_empty());
 }
 
 #[test]

@@ -834,6 +834,15 @@ pub(crate) fn plan_program(
         }
     }
 
+    if posix {
+        // The bubblewrap backend masks a denied path by mounting over it,
+        // and a path that does not exist under a writable grant is first
+        // created on the host as an empty directory. So only what exists is
+        // denied here; something the box creates at one of these paths is
+        // reported by the integrity watch when the launch ends.
+        denied.retain(|path| exists(path));
+    }
+
     let mut readwrite = vec![PathBuf::from(cwd)];
     if let Some(claude_dir) = claude_dir {
         readwrite.push(PathBuf::from(claude_dir));
