@@ -174,6 +174,40 @@ impl MxcEngine {
     }
 }
 
+/// Reads the executor's `--available-backends` answer: `Ok` when the
+/// bubblewrap backend is there and can confine a box to its proxy
+/// (`proxyEnforcement`); otherwise the reason, the backend's own warning when
+/// it gives one (a missing `slirp4netns`, or user namespaces the host refuses).
+pub(crate) fn bubblewrap_ready(available_backends: &[u8]) -> Result<(), String> {
+    let backends: serde_json::Value = serde_json::from_slice(available_backends)
+        .map_err(|error| format!("the executor's backend report is not JSON: {error}"))?;
+    let Some(bubblewrap) = backends
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|backend| backend["backend"] == "bubblewrap")
+    else {
+        return Err("the executor reports no bubblewrap backend on this host".to_owned());
+    };
+    let enforces = bubblewrap["capabilities"]
+        .as_array()
+        .is_some_and(|capabilities| capabilities.iter().any(|c| c == "proxyEnforcement"));
+    if enforces {
+        return Ok(());
+    }
+    let warnings: Vec<&str> = bubblewrap["warnings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    Err(if warnings.is_empty() {
+        "the bubblewrap backend cannot confine a box to the relay on this host".to_owned()
+    } else {
+        warnings.join("; ")
+    })
+}
+
 // No Debug: the request's environment carries the session pairing.
 #[derive(Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]

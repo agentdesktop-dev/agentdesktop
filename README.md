@@ -742,6 +742,12 @@ below). The pieces and the brokered channels between them:
 
 ![Sandboxed launch architecture](docs/sandboxed-launch-architecture.png)
 
+**Linux (preview).** `agentdesktop run claude` also runs on Linux, in a box of
+MXC's bubblewrap backend whose only network destination is the daemon's relay.
+Host requirements and the differences from the Windows box are in
+[docs/sandboxed-launch-linux.md](docs/sandboxed-launch-linux.md). The rest of
+this section describes the Windows box.
+
 Startup setting (local only, user mode):
 
 ```yaml

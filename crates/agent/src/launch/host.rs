@@ -202,6 +202,19 @@ impl LaunchHost for HostEnvironment {
 
 /// Runs `wxc-exec.exe <request.json>` with its output appended to the launch's
 /// log file; no console window of its own.
+/// Asks the executor whether this Linux host can run a box confined to the
+/// relay. Run once at daemon startup; the answer is the containment error
+/// daemon-info reports.
+#[cfg(target_os = "linux")]
+pub fn bubblewrap_ready(executor: &Path) -> Result<(), String> {
+    let output = Command::new(executor)
+        .arg("--available-backends")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("run {} --available-backends: {error}", executor.display()))?;
+    super::engine::mxc::bubblewrap_ready(&output.stdout)
+}
+
 pub struct ProcessExecutor;
 
 struct ProcessChild {

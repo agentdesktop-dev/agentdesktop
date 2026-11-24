@@ -44,7 +44,7 @@ pub enum ClientCommand {
         #[command(subcommand)]
         command: Option<ProgramsCommand>,
     },
-    /// Run a program in a sandbox (Windows AppContainer) with the current
+    /// Run a program in a sandbox (a Windows AppContainer, or on Linux an MXC bubblewrap box) with the current
     /// directory as its workspace. Arguments after `--` go to the program.
     Run {
         /// Program to run: `claude-code` (alias `claude`), `opencode` or

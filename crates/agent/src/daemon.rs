@@ -647,6 +647,20 @@ where
         &|path| path.exists(),
         engine.name(),
     );
+    // On Linux the box needs more than the executor file: the backend must be
+    // able to confine it to the relay on this host.
+    #[cfg(target_os = "linux")]
+    let containment = containment.map(|mut info| {
+        if info.available
+            && let Some(startup) = args.containment.as_ref()
+            && let Err(reason) = launch::host::bubblewrap_ready(&startup.executor)
+        {
+            tracing::warn!(%reason, "sandboxed launches are unavailable on this host");
+            info.available = false;
+            info.error = Some(reason);
+        }
+        info
+    });
     let (usage_store, usage_receiver) = match &args.usage {
         Some(usage) => {
             let (store, receiver) = start_usage(usage, &args.state_dir).await;

@@ -171,6 +171,30 @@ fn a_bubblewrap_request_refuses_open_egress_and_a_missing_relay() {
 }
 
 #[test]
+fn the_backend_report_decides_whether_a_linux_host_can_run_a_box() {
+    use super::engine::mxc::bubblewrap_ready;
+    assert_eq!(
+        bubblewrap_ready(
+            br#"[{"backend":"bubblewrap","capabilities":["proxyEnforcement"]},{"backend":"lxc"}]"#
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        bubblewrap_ready(
+            br#"[{"backend":"bubblewrap","warnings":["needs slirp4netns","second"]}]"#
+        ),
+        Err("needs slirp4netns; second".to_owned())
+    );
+    assert!(bubblewrap_ready(br#"[{"backend":"bubblewrap"}]"#).is_err());
+    assert!(
+        bubblewrap_ready(br#"[{"backend":"lxc"}]"#)
+            .unwrap_err()
+            .contains("no bubblewrap backend")
+    );
+    assert!(bubblewrap_ready(b"not json").is_err());
+}
+
+#[test]
 fn posix_arguments_are_single_quoted_and_control_characters_refused() {
     let quoted = check_args_for(
         PathStyle::Posix,

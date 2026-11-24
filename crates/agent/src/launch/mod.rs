@@ -1379,6 +1379,17 @@ async fn launch(
     let Some(profile) = profile::program_profile(&request.program) else {
         return Err(bad_request(unknown_program()));
     };
+    // Linux preview: only the Claude Code profile has been run in a
+    // bubblewrap box; the others are refused until they have been.
+    if state.host.path_style() == plan::PathStyle::Posix && !profile.is_claude() {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "{} is not supported in a sandboxed launch on this operating system yet",
+                profile.display_name
+            ),
+        ));
+    }
     let console = console_plan(request.console);
     // Only the Claude box reads `<home>\.claude\settings.json`, so a
     // redirected Claude settings path refuses Claude launches only.
