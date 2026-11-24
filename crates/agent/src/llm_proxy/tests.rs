@@ -4109,6 +4109,8 @@ fn pr4_plan(
     };
     let is_dir = |_: &std::path::Path| false;
     let input = crate::launch::LaunchInput {
+        style: crate::launch::plan::PathStyle::Windows,
+        host_proxy: None,
         launch_id: "0123456789abcdef".into(),
         executable: std::path::PathBuf::from(r"C:\Users\dev\.local\bin\claude.exe"),
         client_exe_dir: std::path::PathBuf::from(r"C:\lab\agentdesktop"),
@@ -4576,7 +4578,7 @@ fn gitconfig_file_lifecycle() {
     let path = crate::launch::generate_gitconfig(
         &launch_dir,
         "pairing-x",
-        4000,
+        SocketAddr::from(([127, 0, 0, 1], 4000)),
         &["https://github.com/org/".to_owned()],
         &[],
         &[],

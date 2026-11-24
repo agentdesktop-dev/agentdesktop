@@ -40,6 +40,8 @@ pub mod git_ssh;
 pub mod host;
 pub mod integrity;
 pub(crate) mod plan;
+#[cfg(test)]
+mod posix_tests;
 pub(crate) mod profile;
 pub(crate) mod ssh;
 #[cfg(test)]
@@ -82,7 +84,7 @@ pub fn containment_info(
     let error = if !user {
         Some("requires user mode".to_owned())
     } else if !windows {
-        Some("Windows only".to_owned())
+        Some("Windows and Linux only".to_owned())
     } else if !exists(&cfg.executor) {
         Some(format!("executor not found: {executor}"))
     } else {
@@ -324,6 +326,22 @@ pub(crate) fn resolve_program_for(
     path_dirs: &[PathBuf],
     fs: &dyn ProgramFs,
 ) -> Result<PathBuf, String> {
+    resolve_program_styled(profile, home, path_dirs, fs, plan::PathStyle::Windows)
+}
+
+/// `resolve_program_for` on a host of `style`: a POSIX host has the program
+/// under its name without the `.exe` suffix.
+pub(crate) fn resolve_program_styled(
+    profile: &profile::ProgramProfile,
+    home: &Path,
+    path_dirs: &[PathBuf],
+    fs: &dyn ProgramFs,
+    style: plan::PathStyle,
+) -> Result<PathBuf, String> {
+    let exe_name = match style {
+        plan::PathStyle::Windows => profile.exe_name,
+        plan::PathStyle::Posix => profile.exe_name.trim_end_matches(".exe"),
+    };
     // An empty entry (a trailing `;` in PATH) would make every path "under" it.
     let path_dirs: Vec<&Path> = path_dirs
         .iter()
@@ -333,9 +351,9 @@ pub(crate) fn resolve_program_for(
     let mut candidates: Vec<PathBuf> = profile
         .home_candidates
         .iter()
-        .map(|relative| join_segments(home, relative).join(profile.exe_name))
+        .map(|relative| join_segments(home, relative).join(exe_name))
         .collect();
-    candidates.extend(path_dirs.iter().map(|dir| dir.join(profile.exe_name)));
+    candidates.extend(path_dirs.iter().map(|dir| dir.join(exe_name)));
     // A candidate counts only when it really lives under the user's home or a
     // PATH directory: both sides canonical, so a junction elsewhere is caught.
     let mut roots: Vec<PathBuf> = Vec::new();
@@ -362,6 +380,32 @@ pub(crate) fn resolve_program_for(
 /// Characters `cmd.exe` interprets even inside double quotes (`%`, `!`) or that
 /// end or split the command (`" ^ & | < >`).
 const ARG_FORBIDDEN: [char; 8] = ['"', '%', '^', '&', '|', '<', '>', '!'];
+
+/// `check_args` for the host's command line: `cmd.exe` rules on Windows;
+/// on POSIX every argument is single-quoted for `sh`, and only control
+/// characters are refused.
+pub fn check_args_for(style: plan::PathStyle, args: &[String]) -> Result<Vec<String>, String> {
+    match style {
+        plan::PathStyle::Windows => check_args(args),
+        plan::PathStyle::Posix => args
+            .iter()
+            .map(|arg| {
+                if arg
+                    .chars()
+                    .any(|character| character.is_control() && character != '\t')
+                {
+                    return Err("argument contains a control character".to_owned());
+                }
+                Ok(sh_quote(arg))
+            })
+            .collect(),
+    }
+}
+
+/// One word for `sh`: single-quoted, with each `'` written as `'\''`.
+pub(crate) fn sh_quote(word: &str) -> String {
+    format!("'{}'", word.replace('\'', "'\\''"))
+}
 
 /// Rejects arguments `cmd.exe` would interpret and quotes the others.
 pub fn check_args(args: &[String]) -> Result<Vec<String>, String> {
@@ -395,6 +439,11 @@ pub fn check_args(args: &[String]) -> Result<Vec<String>, String> {
 /// Everything `plan` may use. Paths are Windows-style strings in a
 /// `PathBuf`; `exists` is called with `\`-joined paths.
 pub struct LaunchInput<'a> {
+    /// How paths and the command line are written (the host's style).
+    pub style: plan::PathStyle,
+    /// The relay on the host, for a box that reaches it through the engine's
+    /// proxy gateway; `None` when the box shares host loopback.
+    pub host_proxy: Option<std::net::SocketAddr>,
     pub launch_id: String,
     pub executable: PathBuf,
     pub client_exe_dir: PathBuf,
@@ -425,10 +474,6 @@ pub(crate) fn win(path: &Path) -> String {
     path.to_string_lossy().replace('/', "\\")
 }
 
-fn join(base: &str, rest: &str) -> String {
-    format!("{}\\{rest}", base.trim_end_matches('\\'))
-}
-
 /// `plan_program` for Claude Code (no model to inject); the byte oracles
 /// and the request snapshot go through it.
 #[cfg(test)]
@@ -444,12 +489,16 @@ pub(crate) fn join_segments(base: &Path, relative: &str) -> PathBuf {
         .fold(base.to_owned(), |path, segment| path.join(segment))
 }
 
-/// A `\`-joined relative path under `base`, as the request carries it.
-fn join_relative(base: &str, relative: &str) -> String {
-    relative
-        .split('\\')
-        .fold(base.to_owned(), |path, segment| join(&path, segment))
-}
+/// The search path of a POSIX box before the program's own directories: the
+/// directories the engine's read-only baseline provides.
+const POSIX_SYSTEM_PATH: [&str; 6] = [
+    "/usr/local/sbin",
+    "/usr/local/bin",
+    "/usr/sbin",
+    "/usr/bin",
+    "/sbin",
+    "/bin",
+];
 
 /// Resolves a launch input into a plan for `profile`: the
 /// canonical executable, validated args, final environment, and
@@ -463,6 +512,11 @@ pub(crate) fn plan_program(
     model: Option<&str>,
 ) -> plan::LaunchPlan {
     let shared = &profile::SHARED;
+    let style = input.style;
+    let posix = style == plan::PathStyle::Posix;
+    let win = |path: &Path| style.render(path);
+    let join = |base: &str, rest: &str| style.join(base, rest);
+    let join_relative = join;
     let exists = |path: &str| (input.exists)(Path::new(path));
     let is_dir = |path: &str| (input.is_dir)(Path::new(path));
     let cwd = win(&input.cwd);
@@ -471,7 +525,7 @@ pub(crate) fn plan_program(
     let executable = win(&input.executable);
     let client_exe_dir = win(&input.client_exe_dir);
     let exe_dir = executable
-        .rsplit_once('\\')
+        .rsplit_once(style.sep())
         .map(|(dir, _)| dir.to_owned())
         .unwrap_or_default();
     let git_dir = input.git_dir.as_deref().map(win);
@@ -480,35 +534,52 @@ pub(crate) fn plan_program(
     let harness_root = join_relative(&home, profile::HARNESS_ROOT);
     let tmp = join(&launch_dir, "tmp");
 
-    let system_root = input
-        .base_env
-        .get("SystemRoot")
-        .cloned()
-        .unwrap_or_else(|| r"C:\Windows".to_owned());
-    let mut path = vec![
-        join(&system_root, "System32"),
-        system_root.clone(),
-        join(&system_root, r"System32\WindowsPowerShell\v1.0"),
-    ];
-    // Windows OpenSSH (`ssh`, `ssh-add`) for the box's own ssh use; only with
-    // ssh hosts, so launches without ssh keep byte-identical requests.
-    if input.ssh_enabled {
-        path.push(join(&system_root, r"System32\OpenSSH"));
-    }
-    if let Some(git_dir) = &git_dir {
-        path.push(join(git_dir, "cmd"));
-    }
-    path.push(exe_dir.clone());
-    path.push(client_exe_dir.clone());
+    let path = if posix {
+        // The backend's baseline directories, then the program's own.
+        let mut path: Vec<String> = POSIX_SYSTEM_PATH
+            .iter()
+            .map(|dir| (*dir).to_owned())
+            .collect();
+        path.push(exe_dir.clone());
+        path.push(client_exe_dir.clone());
+        path.join(":")
+    } else {
+        let system_root = input
+            .base_env
+            .get("SystemRoot")
+            .cloned()
+            .unwrap_or_else(|| r"C:\Windows".to_owned());
+        let mut path = vec![
+            join(&system_root, "System32"),
+            system_root.clone(),
+            join(&system_root, r"System32\WindowsPowerShell\v1.0"),
+        ];
+        if input.ssh_enabled {
+            path.push(join(&system_root, r"System32\OpenSSH"));
+        }
+        if let Some(git_dir) = &git_dir {
+            path.push(join(git_dir, "cmd"));
+        }
+        path.push(exe_dir.clone());
+        path.push(client_exe_dir.clone());
+        path.join(";")
+    };
 
     let mut env = input.base_env.clone();
-    env.insert("PATH".into(), path.join(";"));
-    env.insert("TEMP".into(), tmp.clone());
-    env.insert("TMP".into(), tmp.clone());
+    env.insert("PATH".into(), path);
+    if posix {
+        env.insert("TMPDIR".into(), tmp.clone());
+    } else {
+        env.insert("TEMP".into(), tmp.clone());
+        env.insert("TMP".into(), tmp.clone());
+    }
     if let (Some(claude), Some(claude_dir)) = (claude, &claude_dir) {
         env.insert(claude.config_env.to_owned(), claude_dir.clone());
     }
     for (key, value) in profile.fixed_env {
+        if posix && profile::WINDOWS_ONLY_ENV.contains(key) {
+            continue;
+        }
         env.insert((*key).to_owned(), (*value).to_owned());
     }
     // The relay and the session pairing, the only way to the model.
@@ -756,7 +827,7 @@ pub(crate) fn plan_program(
     // the XDG config when the parent exists. Extract the parent by finding
     // the last backslash (these are Windows `\`-joined paths, even when
     // tested on Linux).
-    if let Some(last_sep) = xdg_config_path.rfind('\\') {
+    if let Some(last_sep) = xdg_config_path.rfind(style.sep()) {
         let parent = &xdg_config_path[..last_sep];
         if exists(parent) {
             denied.push(xdg_config_path);
@@ -797,6 +868,8 @@ pub(crate) fn plan_program(
         denied: denied.into_iter().map(PathBuf::from).collect(),
         egress: input.egress,
         console: input.console,
+        style,
+        host_proxy: input.host_proxy,
     }
 }
 
@@ -1057,6 +1130,13 @@ pub trait LaunchHost: Send + Sync {
     fn client_exe_dir(&self) -> PathBuf;
     fn now(&self) -> u64;
 
+    /// How this host writes paths and command lines. The default is the
+    /// Windows style the launch code was first written for; the real host
+    /// reports its own.
+    fn path_style(&self) -> plan::PathStyle {
+        plan::PathStyle::Windows
+    }
+
     /// The file stem of the agentdesktop executable in `client_exe_dir`: the
     /// interpreter of git's ssh launcher script.
     fn client_exe_name(&self) -> String {
@@ -1304,7 +1384,7 @@ async fn launch(
     let cwd =
         validate_cwd(&request.cwd, &host.cwd_context(), host.cwd_fs()).map_err(bad_request)?;
     check_denied_args(profile, &request.args).map_err(bad_request)?;
-    let args = check_args(&request.args).map_err(bad_request)?;
+    let args = check_args_for(host.path_style(), &request.args).map_err(bad_request)?;
     // The applied configuration is read BEFORE resolving: wrap mode
     // resolves the configured executable, so a config read failure (500)
     // precedes a native not-found (400).
@@ -1340,8 +1420,14 @@ async fn launch(
             wrap::resolve_managed_program(profile, &configured, &host.home(), host.program_fs())
                 .map_err(|message| (StatusCode::CONFLICT, message))?
         }
-        None => resolve_program_for(profile, &host.home(), &host.path_dirs(), host.program_fs())
-            .map_err(bad_request)?,
+        None => resolve_program_styled(
+            profile,
+            &host.home(),
+            &host.path_dirs(),
+            host.program_fs(),
+            host.path_style(),
+        )
+        .map_err(bad_request)?,
     };
     if win(&executable).contains(PATH_FORBIDDEN) {
         return Err(bad_request(
@@ -1514,6 +1600,24 @@ async fn start_launch(
     })?;
 
     let profile = input.profile;
+    let style = host.path_style();
+    // The relay as the box reaches it, and, when that is not host loopback,
+    // the host-side address the engine names as the box's proxy.
+    let box_relay = state.engine.box_relay(style, input.proxy_address);
+    let host_proxy = (box_relay != input.proxy_address).then_some(input.proxy_address);
+    if style == plan::PathStyle::Posix
+        && state
+            .git
+            .as_ref()
+            .and_then(|git| git.ssh.as_ref())
+            .is_some_and(|ssh| !ssh.hosts.is_empty())
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "daemon.containment.git.ssh.hosts is not supported on this operating system yet"
+                .to_owned(),
+        ));
+    }
     let session = match state.sessions.register(
         profile.program,
         &format!("run {}", launch_id),
@@ -1605,7 +1709,7 @@ async fn start_launch(
     if let Err(error) = generate_gitconfig(
         &launch_dir,
         &session.pairing,
-        input.proxy_address.port(),
+        box_relay,
         &git_allow,
         &identity,
         &ssh_hosts,
@@ -1676,6 +1780,8 @@ async fn start_launch(
     let is_dir = |path: &Path| host.is_dir(path);
     let launch_plan = plan_program(
         &LaunchInput {
+            style,
+            host_proxy,
             launch_id: launch_id.clone(),
             executable: input.executable,
             client_exe_dir: host.client_exe_dir(),
@@ -1687,7 +1793,7 @@ async fn start_launch(
             git_dir: host.git_dir(),
             program_files_claude: host.program_files_claude(),
             egress: state.egress,
-            relay_base_url: crate::llm_proxy::sessions::sandbox_base_url(input.proxy_address),
+            relay_base_url: crate::llm_proxy::sessions::sandbox_base_url(box_relay),
             pairing: session.pairing.to_string(),
             base_env: host.base_env(),
             ssh_enabled: git_ssh.is_some(),
@@ -2362,6 +2468,7 @@ fn git_config_quote(value: &str) -> String {
 /// insteadOf mappings of allowlisted hosts to the `/git-ssh` refusal route —
 /// except hosts in `daemon.containment.git.ssh.hosts` (`ssh_hosts`), which
 /// use their real remotes over `GIT_SSH` (D5).
+#[cfg(test)]
 pub(crate) fn gitconfig_contents(
     pairing: &str,
     proxy_port: u16,
@@ -2369,7 +2476,25 @@ pub(crate) fn gitconfig_contents(
     identity: &[(String, Vec<String>)],
     ssh_hosts: &[String],
 ) -> String {
-    let loopback = format!("http://127.0.0.1:{proxy_port}/");
+    gitconfig_contents_for(
+        std::net::SocketAddr::from(([127, 0, 0, 1], proxy_port)),
+        pairing,
+        git_allow,
+        identity,
+        ssh_hosts,
+    )
+}
+
+/// `gitconfig_contents` for a relay the box reaches at `relay` (host
+/// loopback, or the engine's gateway address of the host).
+pub(crate) fn gitconfig_contents_for(
+    relay: std::net::SocketAddr,
+    pairing: &str,
+    git_allow: &[String],
+    identity: &[(String, Vec<String>)],
+    ssh_hosts: &[String],
+) -> String {
+    let loopback = format!("http://{relay}/");
     let mut contents = String::new();
     contents.push_str("# Generated by agentdesktop for one sandboxed launch; do not edit.\n");
     // Git for Windows' SYSTEM config sets credential.helper=manager and the
@@ -2425,13 +2550,13 @@ pub(crate) fn gitconfig_contents(
 pub(crate) fn generate_gitconfig(
     launch_dir: &Path,
     pairing: &str,
-    proxy_port: u16,
+    relay: std::net::SocketAddr,
     git_allow: &[String],
     identity: &[(String, Vec<String>)],
     ssh_hosts: &[String],
 ) -> anyhow::Result<PathBuf> {
     let path = launch_dir.join(GIT_CONFIG_FILE);
-    let contents = gitconfig_contents(pairing, proxy_port, git_allow, identity, ssh_hosts);
+    let contents = gitconfig_contents_for(relay, pairing, git_allow, identity, ssh_hosts);
     secure_fs::atomic_write(&path, contents.as_bytes(), 0o600)
         .with_context(|| format!("write {}", path.display()))?;
     Ok(path)

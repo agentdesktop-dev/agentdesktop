@@ -2,7 +2,9 @@
 
 use anyhow::Result;
 
-use super::plan::LaunchPlan;
+use std::net::SocketAddr;
+
+use super::plan::{LaunchPlan, PathStyle};
 
 pub mod mxc;
 
@@ -13,6 +15,11 @@ pub(crate) trait Engine: Send + Sync {
 
     /// The container id for a given launch id.
     fn container_id(&self, launch_id: &str) -> String;
+
+    /// The relay as a box on a host of `style` reaches it, given its
+    /// address on the host. Equal to `host_relay` when the box shares host
+    /// loopback.
+    fn box_relay(&self, style: PathStyle, host_relay: SocketAddr) -> SocketAddr;
 
     /// Build the request bytes from a plan.
     fn request(&self, plan: &LaunchPlan, launch_id: &str) -> Result<Vec<u8>>;

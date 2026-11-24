@@ -642,7 +642,7 @@ where
     let containment = launch::containment_info(
         args.containment.as_ref(),
         args.user,
-        cfg!(windows),
+        cfg!(any(windows, target_os = "linux")),
         args.claude_settings_overridden,
         &|path| path.exists(),
         engine.name(),

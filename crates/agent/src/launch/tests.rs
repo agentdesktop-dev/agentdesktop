@@ -154,7 +154,7 @@ fn containment_info_is_windows_only() {
     let cfg = executor_cfg("/opt/mxc/wxc-exec.exe");
     let info = containment_info(Some(&cfg), true, false, false, &|_| true, "mxc").unwrap();
     assert!(!info.available);
-    assert_eq!(info.error.as_deref(), Some("Windows only"));
+    assert_eq!(info.error.as_deref(), Some("Windows and Linux only"));
 }
 
 #[test]
@@ -942,6 +942,8 @@ fn launch_input<'a>(
     is_dir: &'a dyn Fn(&Path) -> bool,
 ) -> LaunchInput<'a> {
     LaunchInput {
+        style: crate::launch::plan::PathStyle::Windows,
+        host_proxy: None,
         launch_id: LAUNCH_ID.into(),
         executable: PathBuf::from(r"C:\Users\dev\.local\bin\claude.exe"),
         client_exe_dir: PathBuf::from(r"C:\lab\agentdesktop"),
@@ -4306,6 +4308,8 @@ fn the_engine_reproduces_the_baseline_request_bytes() {
     let exists_c = |_: &Path| false;
     let is_dir_c = |_: &Path| false;
     let input_c = LaunchInput {
+        style: crate::launch::plan::PathStyle::Windows,
+        host_proxy: None,
         launch_id: LAUNCH_ID.into(),
         executable: PathBuf::from(r"C:\Users\dev\.local\bin\claude.exe"),
         client_exe_dir: PathBuf::from(r"C:\lab\agentdesktop"),

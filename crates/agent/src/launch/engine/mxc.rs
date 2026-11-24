@@ -1,10 +1,13 @@
-//! MXC engine: Windows AppContainer request generation.
+//! MXC engine: request generation for the Windows process container and,
+//! on a POSIX host, the bubblewrap backend.
 
-use anyhow::{Context, Result};
+use std::net::SocketAddr;
+
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use super::Engine;
-use crate::launch::plan::{ConsolePlan, LaunchPlan};
+use crate::launch::plan::{ConsolePlan, LaunchPlan, PathStyle};
 use crate::launch::win;
 
 /// MXC sandbox engine.
@@ -19,8 +22,28 @@ impl Engine for MxcEngine {
         format!("agentdesktop-{}", launch_id)
     }
 
+    fn box_relay(&self, style: PathStyle, host_relay: SocketAddr) -> SocketAddr {
+        match style {
+            // The process container shares host loopback.
+            PathStyle::Windows => host_relay,
+            // A bubblewrap box has a private network; the host is its gateway.
+            PathStyle::Posix => SocketAddr::new(
+                crate::llm_proxy::BUBBLEWRAP_HOST_GATEWAY
+                    .parse()
+                    .expect("the gateway constant is an IP address"),
+                host_relay.port(),
+            ),
+        }
+    }
+
     fn request(&self, plan: &LaunchPlan, launch_id: &str) -> Result<Vec<u8>> {
-        serde_json::to_vec_pretty(&self.to_request(plan, launch_id)).context("encode MXC request")
+        match plan.style {
+            PathStyle::Windows => serde_json::to_vec_pretty(&self.to_request(plan, launch_id)),
+            PathStyle::Posix => {
+                serde_json::to_vec_pretty(&self.to_bubblewrap_request(plan, launch_id)?)
+            }
+        }
+        .context("encode MXC request")
     }
 }
 
@@ -87,6 +110,88 @@ impl MxcEngine {
             },
         }
     }
+}
+
+impl MxcEngine {
+    /// Wraps a resolved POSIX plan in the MXC request for the bubblewrap
+    /// backend. The box gets a private network whose only destination is the
+    /// relay, named as `runtimeConfig.networkProxy`; MXC points the box's
+    /// proxy variables at it and drops everything else, so there is no
+    /// "egress allow" form of this request.
+    pub(crate) fn to_bubblewrap_request(
+        &self,
+        plan: &LaunchPlan,
+        launch_id: &str,
+    ) -> Result<BubblewrapRequest> {
+        let Some(relay) = plan.host_proxy else {
+            bail!("a bubblewrap launch needs the relay address");
+        };
+        if plan.egress == agentdesktop_core::config::ContainmentEgress::Allow {
+            bail!(
+                "daemon.containment.egress: allow is not available on this operating system: the box reaches the relay only"
+            );
+        }
+        let render = |path: &std::path::PathBuf| plan.style.render(path);
+        // `exec` so the program replaces the backend's `sh -c` shell and its
+        // exit code is the box's.
+        let mut command_line = format!("exec {}", crate::launch::sh_quote(&render(&plan.program)));
+        for arg in &plan.args {
+            command_line.push(' ');
+            command_line.push_str(arg);
+        }
+        Ok(BubblewrapRequest {
+            version: "1.0.0".into(),
+            containment: "bubblewrap".into(),
+            container_id: self.container_id(launch_id),
+            process: MxcProcess {
+                command_line,
+                cwd: render(&plan.cwd),
+                inherit_default_env: false,
+                env: plan
+                    .env
+                    .iter()
+                    .map(|(key, value)| format!("{key}={value}"))
+                    .collect(),
+            },
+            filesystem: MxcFilesystem {
+                readwrite_paths: plan.readwrite.iter().map(render).collect(),
+                readonly_paths: plan.readonly.iter().map(render).collect(),
+                denied_paths: plan.denied.iter().map(render).collect(),
+            },
+            network: MxcNetwork {
+                egress: MxcEgress {
+                    default: "deny".into(),
+                },
+                ingress: MxcIngress {
+                    default: "deny".into(),
+                    host_loopback: "deny".into(),
+                },
+            },
+            runtime_config: MxcRuntimeConfig {
+                network_proxy: format!("http://{relay}"),
+            },
+        })
+    }
+}
+
+// No Debug: the request's environment carries the session pairing.
+#[derive(Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BubblewrapRequest {
+    pub version: String,
+    pub containment: String,
+    pub container_id: String,
+    pub process: MxcProcess,
+    pub filesystem: MxcFilesystem,
+    pub network: MxcNetwork,
+    pub runtime_config: MxcRuntimeConfig,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MxcRuntimeConfig {
+    /// The relay on host loopback: the box's only destination.
+    pub network_proxy: String,
 }
 
 // No Debug: the request's environment carries the session pairing.

@@ -13,6 +13,8 @@
 
 /// What every box gets, whatever the program.
 pub(crate) struct SharedProfile {
+    /// Host environment variables a POSIX box inherits.
+    pub posix_base_env_keys: &'static [&'static str],
     /// Environment variable names copied from the daemon into the box.
     pub base_env_keys: &'static [&'static str],
     /// The git user configuration (home-relative). Since PR 4 this is DENIED
@@ -61,6 +63,7 @@ pub(crate) struct SharedProfile {
 }
 
 pub(crate) const SHARED: SharedProfile = SharedProfile {
+    posix_base_env_keys: &["LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME", "COLORTERM"],
     base_env_keys: &[
         "SystemRoot",
         "windir",
@@ -136,6 +139,9 @@ pub(crate) enum InjectionStrategy {
 }
 
 /// The directory under the home that holds every harness home.
+/// Fixed environment entries that only mean something to a Windows box.
+pub(crate) const WINDOWS_ONLY_ENV: &[&str] = &["CLAUDE_CODE_USE_POWERSHELL_TOOL"];
+
 pub(crate) const HARNESS_ROOT: &str = r".agentdesktop\harness";
 
 /// Copilot CLI's package cache under [`HARNESS_ROOT`]: a sibling of

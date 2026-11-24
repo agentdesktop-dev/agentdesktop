@@ -94,9 +94,11 @@ impl LaunchHost for HostEnvironment {
     }
 
     fn base_env(&self) -> BTreeMap<String, String> {
-        super::profile::SHARED
-            .base_env_keys
-            .iter()
+        let keys = match super::plan::PathStyle::host() {
+            super::plan::PathStyle::Windows => super::profile::SHARED.base_env_keys,
+            super::plan::PathStyle::Posix => super::profile::SHARED.posix_base_env_keys,
+        };
+        keys.iter()
             .filter_map(|name| {
                 std::env::var(name)
                     .ok()
@@ -180,6 +182,10 @@ impl LaunchHost for HostEnvironment {
 
     fn client_exe_name(&self) -> String {
         self.client_exe_name.clone()
+    }
+
+    fn path_style(&self) -> super::plan::PathStyle {
+        super::plan::PathStyle::host()
     }
 
     fn now(&self) -> u64 {

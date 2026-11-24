@@ -93,6 +93,8 @@ fn the_executable_configuration_rule_covers_git_commondir_and_the_ide_directory_
     let exists = |path: &Path| existing.contains(path.to_str().unwrap());
     let is_dir = |path: &Path| directories.contains(path.to_str().unwrap());
     let request = build_request(&LaunchInput {
+        style: crate::launch::plan::PathStyle::Windows,
+        host_proxy: None,
         launch_id: "0123456789abcdef".into(),
         executable: PathBuf::from(r"C:\Users\dev\.local\bin\claude.exe"),
         client_exe_dir: PathBuf::from(r"C:\Program Files\Agentdesktop"),
@@ -494,6 +496,8 @@ mod handler {
         let exists = |path: &Path| existing.contains(path.to_str().unwrap());
         let is_dir = |_: &Path| false;
         let request = build_request(&LaunchInput {
+            style: crate::launch::plan::PathStyle::Windows,
+            host_proxy: None,
             launch_id: "0123456789abcdef".into(),
             executable: PathBuf::from(r"C:\Users\dev\.local\bin\claude.exe"),
             client_exe_dir: PathBuf::from(r"C:\Program Files\Agentdesktop"),
@@ -626,6 +630,8 @@ fn the_environment_is_a_list_of_key_value_entries_and_a_missing_workspace_claude
     let exists = |_: &Path| false;
     let is_dir = |_: &Path| false;
     let request = build_request(&LaunchInput {
+        style: crate::launch::plan::PathStyle::Windows,
+        host_proxy: None,
         launch_id: "0123456789abcdef".into(),
         executable: PathBuf::from(r"C:\Users\dev\.local\bin\claude.exe"),
         client_exe_dir: PathBuf::from(r"C:\Program Files\Agentdesktop"),
@@ -677,6 +683,8 @@ fn the_box_environment_has_home_set_to_the_daemon_home_when_daemon_env_has_no_ho
     let exists = |_: &Path| false;
     let is_dir = |_: &Path| false;
     let request = build_request(&LaunchInput {
+        style: crate::launch::plan::PathStyle::Windows,
+        host_proxy: None,
         launch_id: "0123456789abcdef".into(),
         executable: PathBuf::from(r"C:\Users\dev\.local\bin\claude.exe"),
         client_exe_dir: PathBuf::from(r"C:\Program Files\Agentdesktop"),
