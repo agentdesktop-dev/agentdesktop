@@ -18,6 +18,9 @@
 |`adminListener.limits.maxConnections`|integer|Open management connections allowed in total. At the limit, the connection idle the longest is closed to admit a new one. Defaults to `256`.|
 |`adminListener.listen`|string|Address on which the management listener accepts connections. Defaults to `127.0.0.1:8080`. Local access requires a loopback address.|
 |`allowInsecureDev`|boolean|Permit a non-HTTPS OIDC issuer for isolated local development.<br><br>This escape hatch is only appropriate for isolated local development.|
+|`browserEgress`|object|Browser proxy (PAC) reporting. Devices always report the PAC their<br>browser policy sets; these settings add a compliance check shown in<br>the management UI.|
+|`browserEgress.compliance`|object|Compliance check: the controller compares the PAC each device's<br>browser policy sets with these values and shows the result in the<br>management UI. Agentdesktop does not configure browsers from them.|
+|`browserEgress.compliance.pacUrl`|string|The PAC URL browser policy is expected to set (exact match).|
 |`daemonConfig`|object|Daemon configuration distributed to enrolled devices.|
 |`daemonConfig.path`|string|Path to the watched YAML configuration distributed to enrolled devices.<br><br>Relative paths are resolved from the controller configuration directory.<br>Valid file changes are published to connected devices automatically.|
 |`daemonConfig.revision`|integer|Monotonically increasing revision assigned to the daemon configuration.|

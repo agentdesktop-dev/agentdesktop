@@ -190,6 +190,8 @@ impl Fixture {
             let (inventory_sender, mut discovered) = watch::channel(Arc::new(AgentDiscovery {
                 agents: vec![],
                 model_runtimes: vec![],
+                browser_pacs: Vec::new(),
+                pac_fetches: Vec::new(),
             }));
             let (telemetry_sender, mut telemetry) = mpsc::channel(1);
             let (logout_sender, mut logout) = mpsc::channel(1);
