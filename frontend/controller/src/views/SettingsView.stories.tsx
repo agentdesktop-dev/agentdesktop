@@ -23,7 +23,12 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const AllCapabilities: Story = {};
+export const AllCapabilities: Story = {
+  play: async ({ canvas }) => {
+    await expect(canvas.getByText("Controller version")).toBeVisible();
+    await expect(canvas.getByText(controllerSettings.version)).toBeVisible();
+  },
+};
 
 export const AuthenticatedAccess: Story = {
   args: { authMode: "authenticated" },

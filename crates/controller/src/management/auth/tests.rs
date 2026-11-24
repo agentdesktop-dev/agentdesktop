@@ -213,6 +213,27 @@ async fn management_router_does_not_publish_the_gateway_jwks() {
 }
 
 #[tokio::test]
+async fn settings_include_controller_version() {
+    let (database, path) = database().await;
+    let router = super::super::router(
+        state(database),
+        &ControllerAdminAccess::Local,
+        super::super::Extensions::default(),
+    )
+    .unwrap();
+    let response = request(router, "/api/v1/settings", Method::GET, HeaderMap::new()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let settings: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        settings["version"],
+        option_env!("AGENTDESKTOP_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+    );
+    assert_eq!(settings["fleet_listen"], "127.0.0.1:8443");
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
 async fn local_mode_keeps_ui_api_and_bootstrap_without_session_tables() {
     let (database, path) = database().await;
     let auth = Auth::new(Arc::new(LocalAccess));

@@ -18,6 +18,7 @@ RUN --mount=type=cache,id=agentdesktop-pnpm,target=/pnpm/store \
 FROM docker.io/library/rust:1.99.1-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07 AS builder
 ARG TARGETARCH
 ARG BUILD_PROFILE=release
+ARG AGENTDESKTOP_VERSION
 WORKDIR /app
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
@@ -25,6 +26,7 @@ COPY --from=ui /app/frontend/controller/dist frontend/controller/dist
 RUN --mount=type=cache,id=agentdesktop-target-${TARGETARCH},target=/app/target \
     --mount=type=cache,id=agentdesktop-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=agentdesktop-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    if [ -n "${AGENTDESKTOP_VERSION}" ]; then export AGENTDESKTOP_VERSION; else unset AGENTDESKTOP_VERSION; fi && \
     case "${BUILD_PROFILE}" in \
       release) cargo build --locked --release --package agentdesktop-controller ;; \
       debug) cargo build --locked --package agentdesktop-controller ;; \
