@@ -2505,7 +2505,7 @@ fn git_config_quote(value: &str) -> String {
 /// insteadOf mappings of allowlisted hosts to the `/git-ssh` refusal route —
 /// except hosts in `daemon.containment.git.ssh.hosts` (`ssh_hosts`), which
 /// use their real remotes over `GIT_SSH` (D5).
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) fn gitconfig_contents(
     pairing: &str,
     proxy_port: u16,

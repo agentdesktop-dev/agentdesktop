@@ -200,8 +200,6 @@ impl LaunchHost for HostEnvironment {
     }
 }
 
-/// Runs `wxc-exec.exe <request.json>` with its output appended to the launch's
-/// log file; no console window of its own.
 /// Asks the executor whether this Linux host can run a box confined to the
 /// relay. Run once at daemon startup; the answer is the containment error
 /// daemon-info reports.
@@ -215,6 +213,9 @@ pub fn bubblewrap_ready(executor: &Path) -> Result<(), String> {
     super::engine::mxc::bubblewrap_ready(&output.stdout)
 }
 
+/// Runs the executor on a request file (`wxc-exec.exe <request.json>` on
+/// Windows, `lxc-exec <request.json>` on Linux) with its output appended to
+/// the launch's log file; no console window of its own.
 pub struct ProcessExecutor;
 
 struct ProcessChild {

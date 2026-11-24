@@ -178,6 +178,7 @@ impl MxcEngine {
 /// bubblewrap backend is there and can confine a box to its proxy
 /// (`proxyEnforcement`); otherwise the reason, the backend's own warning when
 /// it gives one (a missing `slirp4netns`, or user namespaces the host refuses).
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) fn bubblewrap_ready(available_backends: &[u8]) -> Result<(), String> {
     let backends: serde_json::Value = serde_json::from_slice(available_backends)
         .map_err(|error| format!("the executor's backend report is not JSON: {error}"))?;
