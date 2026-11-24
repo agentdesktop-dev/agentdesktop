@@ -139,6 +139,10 @@ async fn scrape(State(telemetry): State<Arc<Telemetry>>) -> Response {
     }
 }
 
+/// The fleet listener's name in logs and metrics. It has the limits of every
+/// listener and the fleet API's own.
+pub(crate) const FLEET_LISTENER: &str = "fleet";
+
 /// Attribute keys.
 const LISTENER: &str = "agentdesktop.listener";
 const LIMIT: &str = "agentdesktop.limit.name";
@@ -179,11 +183,25 @@ impl LimitMetrics {
     }
 
     /// The instruments for one listener; `listener` names it, e.g. `fleet`.
+    /// Every series the listener can record starts at 0, so the first hit
+    /// after a restart shows in `rate()` and `increase()`.
     pub(crate) fn listener(&self, listener: &'static str) -> ListenerMetrics {
-        ListenerMetrics {
+        let metrics = ListenerMetrics {
             metrics: self.clone(),
             listener: KeyValue::new(LISTENER, listener),
+        };
+        for limit in Limit::ALL {
+            if limit.on_every_listener() || listener == FLEET_LISTENER {
+                for &outcome in limit.outcomes() {
+                    metrics.add(limit, outcome, 0);
+                }
+            }
         }
+        metrics
+            .metrics
+            .connections
+            .add(0, std::slice::from_ref(&metrics.listener));
+        metrics
     }
 }
 
@@ -197,8 +215,24 @@ pub(crate) struct ListenerMetrics {
 impl ListenerMetrics {
     /// Counts one time `limit` acted, with `outcome`.
     pub(crate) fn hit(&self, limit: Limit, outcome: Outcome) {
+        debug_assert!(
+            limit.outcomes().contains(&outcome),
+            "{} has no {} outcome",
+            limit.name(),
+            outcome.name()
+        );
+        debug_assert!(
+            limit.on_every_listener() || self.listener.value.as_str() == FLEET_LISTENER,
+            "{} is not a limit of the {} listener",
+            limit.name(),
+            self.listener.value
+        );
+        self.add(limit, outcome, 1);
+    }
+
+    fn add(&self, limit: Limit, outcome: Outcome, hits: u64) {
         self.metrics.hits.add(
-            1,
+            hits,
             &[
                 self.listener.clone(),
                 KeyValue::new(LIMIT, limit.name()),
@@ -240,7 +274,8 @@ pub(crate) enum Limit {
     StreamOpenRate,
     /// `fleetListener.limits.deviceMessageBurst` and `deviceMessageRefill`.
     DeviceMessageRate,
-    /// `fleetListener.limits.maxMessageBytes`.
+    /// `fleetListener.limits.maxMessageBytes`, for a message from a device
+    /// (`rejected`) or to one on its `Connect` stream (`closed`).
     MaxMessageBytes,
     /// The message limit for callers without a device certificate.
     UnauthenticatedMessageBytes,
@@ -252,6 +287,51 @@ pub(crate) enum Limit {
 }
 
 impl Limit {
+    const ALL: [Self; 12] = [
+        Self::MaxConnections,
+        Self::ConnectionsPerAddress,
+        Self::FirstRequest,
+        Self::IdleConnection,
+        Self::EnrollmentRate,
+        Self::EnrollmentInFlight,
+        Self::StreamOpenRate,
+        Self::DeviceMessageRate,
+        Self::MaxMessageBytes,
+        Self::UnauthenticatedMessageBytes,
+        Self::RequestTimeout,
+        Self::ConnectResponseBuffer,
+    ];
+
+    /// Whether every listener has this limit, or only the fleet listener.
+    fn on_every_listener(self) -> bool {
+        matches!(
+            self,
+            Self::MaxConnections
+                | Self::ConnectionsPerAddress
+                | Self::FirstRequest
+                | Self::IdleConnection
+        )
+    }
+
+    /// The outcomes this limit records.
+    fn outcomes(self) -> &'static [Outcome] {
+        match self {
+            Self::MaxConnections | Self::ConnectionsPerAddress => {
+                &[Outcome::Evicted, Outcome::Rejected]
+            }
+            Self::FirstRequest | Self::IdleConnection | Self::RequestTimeout => {
+                &[Outcome::TimedOut]
+            }
+            Self::EnrollmentRate
+            | Self::EnrollmentInFlight
+            | Self::StreamOpenRate
+            | Self::UnauthenticatedMessageBytes => &[Outcome::Rejected],
+            Self::DeviceMessageRate => &[Outcome::Throttled],
+            Self::MaxMessageBytes => &[Outcome::Rejected, Outcome::Closed],
+            Self::ConnectResponseBuffer => &[Outcome::Closed],
+        }
+    }
+
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::MaxConnections => "max_connections",
@@ -279,7 +359,7 @@ pub(crate) enum Outcome {
     Evicted,
     /// A connection or request ran out of time.
     TimedOut,
-    /// A device spent its message budget; its next message is read no sooner than the refill.
+    /// A device's message was held back until its message budget refilled.
     Throttled,
     /// An open stream was closed.
     Closed,
@@ -301,7 +381,7 @@ impl Outcome {
 mod tests {
     use std::sync::Arc;
 
-    use super::{Limit, LimitMetrics, Outcome, Telemetry};
+    use super::{FLEET_LISTENER, LISTENER, Limit, LimitMetrics, Outcome, Telemetry};
 
     #[test]
     fn hits_are_counted_by_listener_limit_and_outcome() {
@@ -330,6 +410,35 @@ mod tests {
             telemetry.hits("admin", Limit::MaxConnections, Outcome::Evicted),
             1
         );
+    }
+
+    #[test]
+    fn every_series_a_listener_can_record_starts_at_zero() {
+        let telemetry = Telemetry::new().unwrap();
+        telemetry.limits().listener("admin");
+        telemetry.limits().listener(FLEET_LISTENER);
+        let body = String::from_utf8(telemetry.render().unwrap()).unwrap();
+        let hits = |listener: &str| -> Vec<String> {
+            let label = format!("agentdesktop_listener=\"{listener}\"");
+            body.lines()
+                .filter(|line| {
+                    line.starts_with("agentdesktop_limit_hits_total{") && line.contains(&label)
+                })
+                .map(|line| line.rsplit_once(' ').unwrap().1.to_owned())
+                .collect()
+        };
+
+        // The connection limits on every listener, and the fleet API's own on
+        // the fleet listener.
+        assert_eq!(hits("admin"), vec!["0"; 6], "{body}");
+        assert_eq!(hits(FLEET_LISTENER), vec!["0"; 15], "{body}");
+        for listener in ["admin", FLEET_LISTENER] {
+            assert_eq!(
+                telemetry.sample("agentdesktop_connections", &[(LISTENER, listener)]),
+                Some(0.0),
+                "{body}"
+            );
+        }
     }
 
     #[test]

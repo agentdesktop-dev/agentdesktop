@@ -1959,10 +1959,9 @@ mod device_streams {
 
     #[test]
     fn a_device_gets_its_message_burst_then_the_refill_rate() {
-        let telemetry = Telemetry::new().unwrap();
         let streams = DeviceStreams::new(
             &message_budget(3, Duration::from_secs(1)),
-            &telemetry.limits(),
+            &LimitMetrics::disabled(),
         );
         let stream = open_silent(&streams, "device-a");
         let budget = &stream.registration;
@@ -1980,12 +1979,6 @@ mod device_streams {
             budget.spend_message(start + second),
             Some(start + 2 * second),
             "one message per refill"
-        );
-        // The first two messages left tokens in the budget; the third and the
-        // fourth each spent the last one.
-        assert_eq!(
-            telemetry.hits("fleet", Limit::DeviceMessageRate, Outcome::Throttled),
-            2
         );
     }
 
@@ -2048,22 +2041,112 @@ mod device_streams {
 
     #[tokio::test(start_paused = true)]
     async fn messages_past_the_burst_are_read_at_the_refill_rate() {
+        let telemetry = Telemetry::new().unwrap();
         let streams = DeviceStreams::new(
             &message_budget(2, Duration::from_secs(1)),
-            &LimitMetrics::disabled(),
+            &telemetry.limits(),
         );
         let inbound = tokio_stream::iter([1, 2, 3, 4].map(Ok::<_, Status>));
         let mut stream = open(&streams, "device-a", inbound);
         let start = Instant::now();
 
-        for (message, read_after) in [(1, 0), (2, 0), (3, 1), (4, 2)] {
+        // Every message is sent at once, so the two past the burst were held
+        // back until the budget refilled.
+        for (message, read_after, held_back) in [(1, 0, 0), (2, 0, 0), (3, 1, 1), (4, 2, 2)] {
             let read = stream.next().await;
             assert!(
                 matches!(read, StreamEvent::Message(read) if read == message),
                 "{read:?}"
             );
             assert_eq!(start.elapsed().as_secs(), read_after, "message {message}");
+            assert_eq!(
+                telemetry.hits("fleet", Limit::DeviceMessageRate, Outcome::Throttled),
+                held_back,
+                "message {message}"
+            );
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_read_cancelled_while_it_waits_for_the_budget_counts_once() {
+        let telemetry = Telemetry::new().unwrap();
+        let streams = DeviceStreams::new(
+            &message_budget(1, Duration::from_secs(1)),
+            &telemetry.limits(),
+        );
+        let inbound = tokio_stream::iter([1, 2].map(Ok::<_, Status>));
+        let mut stream = open(&streams, "device-a", inbound);
+        assert!(matches!(stream.next().await, StreamEvent::Message(1)));
+
+        // As the session's `select!` does when another event comes first.
+        let cancelled = time::timeout(Duration::from_millis(500), stream.next()).await;
+        assert!(
+            cancelled.is_err(),
+            "read before the budget refilled: {cancelled:?}"
+        );
+        let read = stream.next().await;
+
+        assert!(matches!(read, StreamEvent::Message(2)), "{read:?}");
+        assert_eq!(
+            telemetry.hits("fleet", Limit::DeviceMessageRate, Outcome::Throttled),
+            1
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_device_that_spends_its_budget_and_pauses_is_not_held_back() {
+        let telemetry = Telemetry::new().unwrap();
+        let streams = DeviceStreams::new(
+            &message_budget(1, Duration::from_secs(1)),
+            &telemetry.limits(),
+        );
+        let (device, inbound) = mpsc::channel(1);
+        let mut stream = open(&streams, "device-a", ReceiverStream::new(inbound));
+        device.send(Ok::<_, Status>(1)).await.unwrap();
+        assert!(matches!(stream.next().await, StreamEvent::Message(1)));
+
+        // The budget refills after 1 s, but the next message comes at 5 s.
+        tokio::spawn(async move {
+            time::sleep(Duration::from_secs(5)).await;
+            device.send(Ok(2)).await.unwrap();
+        });
+        let start = Instant::now();
+        let read = stream.next().await;
+
+        assert!(matches!(read, StreamEvent::Message(2)), "{read:?}");
+        assert_eq!(start.elapsed().as_secs(), 5);
+        assert_eq!(
+            telemetry.hits("fleet", Limit::DeviceMessageRate, Outcome::Throttled),
+            0
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_device_within_its_refill_rate_is_not_held_back() {
+        let telemetry = Telemetry::new().unwrap();
+        let streams = DeviceStreams::new(
+            &message_budget(1, Duration::from_secs(1)),
+            &telemetry.limits(),
+        );
+        let (device, inbound) = mpsc::channel(1);
+        let mut stream = open(&streams, "device-a", ReceiverStream::new(inbound));
+
+        // A burst of 1 spends the whole budget on every message, but each
+        // comes after the refill.
+        for message in 1..=3 {
+            device.send(Ok::<_, Status>(message)).await.unwrap();
+            let read = stream.next().await;
+            assert!(
+                matches!(read, StreamEvent::Message(read) if read == message),
+                "{read:?}"
+            );
+            time::sleep(Duration::from_secs(2)).await;
+        }
+
+        assert_eq!(
+            telemetry.hits("fleet", Limit::DeviceMessageRate, Outcome::Throttled),
+            0
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -2140,7 +2223,7 @@ mod device_streams {
 /// The controller's own fleet service behind the fleet limits, with its
 /// identity provider on a local port.
 mod fleet_service {
-    use crate::metrics::LimitMetrics;
+    use crate::metrics::{Limit, Outcome, Telemetry};
     use std::{
         net::SocketAddr,
         path::PathBuf,
@@ -2153,7 +2236,7 @@ mod fleet_service {
 
     use agentdesktop_proto::fleet::{
         AgentMessage, ControllerMessage, DaemonConfig, EnrollDeviceRequest,
-        LoginConfigurationRequest, enroll_device_request::Credential,
+        LoginConfigurationRequest, controller_message, enroll_device_request::Credential,
         fleet_agent_server::FleetAgent,
     };
     use axum::{
@@ -2161,6 +2244,7 @@ mod fleet_service {
         response::{IntoResponse, Response},
     };
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use prost::Message as _;
     use serde_json::json;
     use tokio::{sync::mpsc, time};
     use tokio_stream::wrappers::ReceiverStream;
@@ -2168,7 +2252,7 @@ mod fleet_service {
 
     use super::{
         super::{Connections, FLEET_LIMITS, FleetLimits},
-        DEVICE_ID, Pki, bounded, pki, serve_mtls_with, tls_client, until_open_at_most,
+        DEVICE_ID, Pki, bounded, pki, serve_mtls_measured, tls_client, until_open_at_most,
     };
     use crate::{
         daemon_config::DaemonConfigStore, database::Database, oidc::OidcProvider,
@@ -2276,12 +2360,23 @@ mod fleet_service {
         }
     }
 
+    /// The daemon configuration `Controller` sends each device.
+    fn configuration() -> DaemonConfig {
+        DaemonConfig {
+            revision: 1,
+            yaml: b"{}".to_vec(),
+            sha256: Vec::new(),
+        }
+    }
+
     /// The controller's fleet service, signing users in with an
     /// `IdentityProvider`, with `DEVICE_ID` enrolled and a daemon configuration
     /// to send it.
     struct Controller {
         limits: FleetLimits,
         service: FleetAgentService,
+        /// What the fleet service and its listener count.
+        telemetry: Telemetry,
         idp: IdentityProvider,
         database: PathBuf,
     }
@@ -2301,23 +2396,20 @@ mod fleet_service {
                 .enroll_device(DEVICE_ID, "host", &idp.issuer, SUBJECT, None)
                 .await
                 .unwrap();
-            let config = DaemonConfig {
-                revision: 1,
-                yaml: b"{}".to_vec(),
-                sha256: Vec::new(),
-            };
+            let telemetry = Telemetry::new().unwrap();
             let service = FleetAgentService::new(
                 Some(idp.client().await),
                 devices,
-                DaemonConfigStore::new(Some(config)),
+                DaemonConfigStore::new(Some(configuration())),
                 None,
                 None,
                 &limits,
-                &LimitMetrics::disabled(),
+                &telemetry.limits(),
             );
             Self {
                 limits,
                 service,
+                telemetry,
                 idp,
                 database,
             }
@@ -2326,7 +2418,18 @@ mod fleet_service {
         /// Serves the fleet service on the fleet listener, over TLS with
         /// `pki`'s device CA.
         async fn serve(&self, pki: &Pki) -> (SocketAddr, Connections) {
-            serve_mtls_with(self.limits, pki, self.service.clone()).await
+            serve_mtls_measured(
+                self.limits,
+                pki,
+                self.service.clone(),
+                &self.telemetry.limits(),
+            )
+            .await
+        }
+
+        /// How often the fleet listener's `limit` acted with `outcome`.
+        fn hits(&self, limit: Limit, outcome: Outcome) -> u64 {
+            self.telemetry.hits("fleet", limit, outcome)
         }
 
         fn enrollment(&self) -> Enrollment {
@@ -2413,21 +2516,34 @@ mod fleet_service {
         bounded(until_open_at_most(&connections, 0)).await;
     }
 
+    /// Calls `Connect` as `DEVICE_ID`. The session lasts until the returned
+    /// sender is dropped.
+    async fn connect(
+        address: SocketAddr,
+        pki: &Pki,
+    ) -> (
+        mpsc::Sender<AgentMessage>,
+        Result<Streaming<ControllerMessage>, Status>,
+    ) {
+        let (outbound, receiver) = mpsc::channel::<AgentMessage>(1);
+        let mut request = Request::new(ReceiverStream::new(receiver));
+        request
+            .metadata_mut()
+            .insert("authorization", AUTHORIZATION.parse().unwrap());
+        let session = bounded(tls_client(address, pki, true).await.connect(request))
+            .await
+            .map(tonic::Response::into_inner);
+        (outbound, session)
+    }
+
     /// Opens a `Connect` session as `DEVICE_ID` and reads the configuration
     /// it starts with. The session lasts until the returned sender is dropped.
     async fn open_session(
         address: SocketAddr,
         pki: &Pki,
     ) -> (mpsc::Sender<AgentMessage>, Streaming<ControllerMessage>) {
-        let (outbound, receiver) = mpsc::channel::<AgentMessage>(1);
-        let mut request = Request::new(ReceiverStream::new(receiver));
-        request
-            .metadata_mut()
-            .insert("authorization", AUTHORIZATION.parse().unwrap());
-        let mut session = bounded(tls_client(address, pki, true).await.connect(request))
-            .await
-            .expect("open the session")
-            .into_inner();
+        let (outbound, session) = connect(address, pki).await;
+        let mut session = session.expect("open the session");
         let config = bounded(session.message())
             .await
             .expect("receive the configuration");
@@ -2456,6 +2572,60 @@ mod fleet_service {
         assert!(quiet.is_err(), "the newer session ended: {quiet:?}");
     }
 
+    /// A device that reopens `Connect` past its open budget is refused, and
+    /// the fleet service counts it.
+    #[tokio::test]
+    async fn a_device_that_reopens_its_session_too_often_is_refused() {
+        let mut limits = FLEET_LIMITS;
+        limits.stream_open_burst = 1;
+        let controller = Controller::start(limits).await;
+        let pki = pki();
+        let (address, _) = controller.serve(&pki).await;
+        let (_device, _session) = open_session(address, &pki).await;
+        assert_eq!(controller.hits(Limit::StreamOpenRate, Outcome::Rejected), 0);
+
+        let (_outbound, session) = connect(address, &pki).await;
+        let refused = session.expect_err("a second session opened");
+
+        assert_eq!(refused.code(), Code::ResourceExhausted, "{refused}");
+        assert_eq!(controller.hits(Limit::StreamOpenRate, Outcome::Rejected), 1);
+    }
+
+    /// A configuration over `maxMessageBytes` ends the device's session with
+    /// the controller's own status, from exactly the size tonic would refuse.
+    #[tokio::test]
+    async fn a_configuration_over_the_message_limit_ends_the_session_and_is_counted() {
+        let pki = pki();
+        let size = ControllerMessage {
+            message: Some(controller_message::Message::DaemonConfig(configuration())),
+        }
+        .encoded_len();
+
+        // At the limit, the configuration is sent.
+        let mut limits = FLEET_LIMITS;
+        limits.configured.max_message_bytes = size;
+        let controller = Controller::start(limits).await;
+        let (address, _) = controller.serve(&pki).await;
+        let _session = open_session(address, &pki).await;
+        assert_eq!(controller.hits(Limit::MaxMessageBytes, Outcome::Closed), 0);
+
+        // One byte over, the session ends before tonic would fail it.
+        limits.configured.max_message_bytes = size - 1;
+        let controller = Controller::start(limits).await;
+        let (address, _) = controller.serve(&pki).await;
+        let (_outbound, session) = connect(address, &pki).await;
+        let closed = bounded(session.expect("open the session").message())
+            .await
+            .expect_err("the configuration was sent");
+
+        assert_eq!(closed.code(), Code::OutOfRange, "{closed}");
+        assert!(
+            closed.message().starts_with("the controller's message is"),
+            "{closed}"
+        );
+        assert_eq!(controller.hits(Limit::MaxMessageBytes, Outcome::Closed), 1);
+    }
+
     /// `EnrollDevice` holds its in-flight slot while it waits on the identity
     /// provider, and frees it when it ends.
     #[tokio::test]
@@ -2466,6 +2636,10 @@ mod fleet_service {
         assert_eq!(controller.idp.held_request().await, "/keys");
 
         controller.enrollment().assert_full().await;
+        assert_eq!(
+            controller.hits(Limit::EnrollmentInFlight, Outcome::Rejected),
+            2
+        );
 
         running.abort();
         let _ = running.await;

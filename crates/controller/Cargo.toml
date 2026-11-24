@@ -28,6 +28,7 @@ opentelemetry-prometheus.workspace = true
 opentelemetry_sdk.workspace = true
 pem-rfc7468.workspace = true
 prometheus.workspace = true
+prost.workspace = true
 rand.workspace = true
 rcgen.workspace = true
 reqwest.workspace = true

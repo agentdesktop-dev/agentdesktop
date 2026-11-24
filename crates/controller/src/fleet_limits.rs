@@ -43,7 +43,7 @@ use tonic::{
 };
 use tower_layer::{Identity, Layer, Stack};
 
-use crate::metrics::{Limit, LimitMetrics, ListenerMetrics, Outcome};
+use crate::metrics::{FLEET_LISTENER, Limit, LimitMetrics, ListenerMetrics, Outcome};
 
 mod connections;
 
@@ -110,9 +110,6 @@ pub struct FleetLimits {
     pub stream_open_burst: u32,
     pub stream_open_refill: Duration,
 }
-
-/// The fleet listener's name in logs and metrics.
-pub(crate) const FLEET_LISTENER: &str = "fleet";
 
 /// Default limits. The controller configuration replaces `configured` (see
 /// `FleetLimits::from_config`).
@@ -818,9 +815,13 @@ impl<S> DeviceStream<S> {
     /// device to replace this one. A device that has spent its message budget
     /// is not read from until the budget refills; HTTP/2 flow control then
     /// makes it wait to send, so a busy device is slowed down rather than
-    /// disconnected.
+    /// disconnected. A message the device had already sent when the budget
+    /// refilled was held back, and counts as `device_message_rate`. A message
+    /// larger than the HTTP/2 stream window (1 MiB) can't be sent ahead in
+    /// full, so it isn't counted.
     ///
-    /// Cancel-safe: a message is spent from the budget only when one is read.
+    /// Cancel-safe: a message is spent from the budget, and counted as held
+    /// back, only when one is read.
     pub(crate) async fn next<T>(&mut self) -> StreamEvent<T>
     where
         S: Stream<Item = Result<T, Status>> + Unpin,
@@ -834,20 +835,33 @@ impl<S> DeviceStream<S> {
         let Some(replaced) = superseded else {
             return StreamEvent::Superseded;
         };
+        // Also says whether the message was held back: already sent when the
+        // budget refilled.
         let read = async {
             let ready = registration.bucket().next_token(Instant::now());
-            if let Some(ready) = ready {
-                tokio::time::sleep_until(ready).await;
+            let Some(ready) = ready else {
+                return (false, inbound.next().await);
+            };
+            tokio::time::sleep_until(ready).await;
+            match std::future::poll_fn(|context| {
+                Poll::Ready(Pin::new(&mut *inbound).poll_next(context))
+            })
+            .await
+            {
+                Poll::Ready(message) => (true, message),
+                Poll::Pending => (false, inbound.next().await),
             }
-            inbound.next().await
         };
         tokio::select! {
             _ = replaced => {
                 *superseded = None;
                 StreamEvent::Superseded
             }
-            message = read => match message {
+            (held, message) = read => match message {
                 Some(Ok(message)) => {
+                    if held {
+                        registration.held_back();
+                    }
                     registration.spend_message(Instant::now());
                     StreamEvent::Message(message)
                 }
@@ -871,6 +885,15 @@ impl<S> DeviceStream<S> {
     pub(crate) fn metrics(&self) -> &ListenerMetrics {
         &self.registration.streams.metrics
     }
+
+    /// The largest message the session may send the device.
+    pub(crate) fn max_message_bytes(&self) -> usize {
+        self.registration
+            .streams
+            .limits
+            .configured
+            .max_message_bytes
+    }
 }
 
 /// A stream's place as its device's registered stream, with the device's
@@ -892,22 +915,21 @@ impl Registration {
     /// Spends one message from the device's budget. Returns when the budget
     /// allows the next one: `None` when it allows it now.
     fn spend_message(&self, now: Instant) -> Option<Instant> {
-        let next = self.bucket().spend(now);
-        if next.is_some() {
-            self.streams
-                .metrics
-                .hit(Limit::DeviceMessageRate, Outcome::Throttled);
-        }
-        if next.is_some()
-            && let Some(throttled) = DEVICE_MESSAGES.event(now)
-        {
+        self.bucket().spend(now)
+    }
+
+    /// Counts a message that was read only once the device's budget refilled.
+    fn held_back(&self) {
+        self.streams
+            .metrics
+            .hit(Limit::DeviceMessageRate, Outcome::Throttled);
+        if let Some(throttled) = DEVICE_MESSAGES.event(Instant::now()) {
             tracing::warn!(
                 latest_device_id = %self.device_id,
                 throttled_since_last_warning = throttled,
                 "slowed reading from devices that send messages faster than their budget"
             );
         }
-        next
     }
 }
 
