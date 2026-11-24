@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Managed Claude Code package (WiX v4 source). Built by your organization's
+  own run of build-package.ps1: the agentdesktop project distributes only this
+  recipe, never the vendor binary or a built MSI.
+
+  What the MSI lays down:
+    - %ProgramFiles%\Anthropic\ClaudeCode\claude.exe, the fetched and verified
+      vendor binary, with agentdesktop-package.json beside it (the version
+      manifest agentdesktop discovery reads instead of running the binary).
+    - %ProgramFiles%\ClaudeCode\managed-settings.d\40-agentdesktop-package.json,
+      the updater-off managed-settings drop-in. %ProgramFiles%\ClaudeCode is
+      Claude Code's managed-settings root and is a different directory from
+      the binary install directory above; keep them distinct.
+    - %ProgramFiles%\Agent Desktop\launchers\claude.cmd and claude (the two
+      launcher scripts), with the launcher directory prepended to the machine
+      PATH. "Agent Desktop" is the agentdesktop product MSI's own install
+      directory (its Tauri productName), so the launchers live beside the
+      binary they call.
+
+  The machine-PATH prepend (the Environment element below) is this package's
+  only HKLM write: no policy keys, no AutoRun keys. Every install directory
+  is under %ProgramFiles% and inherits its ACL (writable by administrators
+  and the installer only), which is what keeps standard users from swapping
+  the binary or the launchers.
+
+  Preprocessor variables, passed by build-package.ps1 as -d name=value:
+    StagingDir       directory holding the verified binary and rendered files
+    PackageVersion   the pinned Claude Code version (the MSI version's first
+                     three fields)
+    PackageRevision  this package's own revision (the MSI version's fourth
+                     field), bumped to ship a launcher or recipe fix for the
+                     SAME Claude Code version. MSI ignores the fourth field
+                     when comparing versions, so MajorUpgrade carries
+                     AllowSameVersionUpgrades: a rebuild of the same Claude
+                     version replaces the installed package.
+    Manufacturer     your organization's name
+    UpgradeCode      a GUID your organization generates ONCE and keeps stable
+                     across versions, so version upgrades replace the install
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Claude Code (managed)"
+           Manufacturer="$(var.Manufacturer)"
+           Version="$(var.PackageVersion).$(var.PackageRevision)"
+           UpgradeCode="$(var.UpgradeCode)"
+           Scope="perMachine"
+           Compressed="yes">
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer managed Claude Code package is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="AnthropicDir" Name="Anthropic">
+        <Directory Id="BinaryInstallDir" Name="ClaudeCode" />
+      </Directory>
+      <Directory Id="ManagedSettingsRootDir" Name="ClaudeCode">
+        <Directory Id="ManagedSettingsDropInDir" Name="managed-settings.d" />
+      </Directory>
+      <Directory Id="AgentdesktopDir" Name="Agent Desktop">
+        <Directory Id="LaunchersDir" Name="launchers" />
+      </Directory>
+    </StandardDirectory>
+
+    <ComponentGroup Id="Managed">
+      <Component Directory="BinaryInstallDir">
+        <File Id="ClaudeExe" Source="$(var.StagingDir)\claude.exe" KeyPath="yes" />
+      </Component>
+      <Component Directory="BinaryInstallDir">
+        <File Id="PackageManifest" Source="$(var.StagingDir)\agentdesktop-package.json" KeyPath="yes" />
+      </Component>
+      <Component Directory="ManagedSettingsDropInDir">
+        <File Id="UpdaterOffDropIn" Source="$(var.StagingDir)\40-agentdesktop-package.json" KeyPath="yes" />
+      </Component>
+      <Component Directory="LaunchersDir">
+        <File Id="ClaudeCmdLauncher" Source="$(var.StagingDir)\launchers\claude.cmd" KeyPath="yes" />
+        <!-- The package's only HKLM write: the standard machine-PATH prepend
+             (Session Manager Environment). Removed again on uninstall. -->
+        <Environment Id="LaunchersOnMachinePath"
+                     Name="PATH"
+                     Value="[LaunchersDir]"
+                     Action="set"
+                     Part="first"
+                     Permanent="no"
+                     System="yes" />
+      </Component>
+      <Component Directory="LaunchersDir">
+        <File Id="ClaudeShLauncher" Source="$(var.StagingDir)\launchers\claude" Name="claude" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="Main" Level="1">
+      <ComponentGroupRef Id="Managed" />
+    </Feature>
+  </Package>
+</Wix>
