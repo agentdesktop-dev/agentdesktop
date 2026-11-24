@@ -331,6 +331,7 @@ fn default_config() -> ProxyConfig {
         sessions: SessionRegistry::default(),
         git: None,
         egress_upstream: None,
+        box_aliases: Arc::from(Vec::new()),
     }
 }
 
@@ -3871,6 +3872,76 @@ async fn connect_always_refused_egress_not_supported() {
         .await;
         assert_eq!(status, 403, "{text}");
         assert_eq!(raw_error_code(&text), "egress_not_supported");
+
+        proxy.abort();
+        let _ = proxy.await;
+        drop(dir);
+    })
+    .await
+    .unwrap();
+}
+
+/// A box on a proxy-gateway engine addresses the listener by its box alias,
+/// in origin form and, because its HTTP client uses the gateway as its
+/// proxy, in proxy form. Both reach the session-paired routes and nothing
+/// else; every other proxy-form target stays refused.
+#[tokio::test]
+async fn box_alias_serves_session_routes_only() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (dir, state) = request_source_state(SocketAddr::from(([127, 0, 0, 1], 0))).await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_address = listener.local_addr().unwrap();
+        let alias = format!("10.0.2.2:{}", proxy_address.port());
+        let mut config = default_config();
+        config.box_aliases = Arc::from(vec![alias.clone()]);
+        let sessions = config.sessions.clone();
+        let session = new_session(&sessions, "test-client");
+        let pairing_auth = base64::engine::general_purpose::STANDARD
+            .encode(format!("{}:", session.pairing));
+        let proxy = tokio::spawn(serve(listener, state, config));
+
+        // Past the Host gate: an unpaired request on the sandbox route fails
+        // on the session pairing, not on the host, in both request forms.
+        for target in ["/sandbox/v1/messages".to_owned(), format!("http://{alias}/sandbox/v1/messages")] {
+            let (status, text) = raw_http(
+                proxy_address,
+                format!("POST {target} HTTP/1.1\r\nHost: {alias}\r\nContent-Length: 0\r\n\r\n"),
+            )
+            .await;
+            assert_eq!(status, 403, "{target}: {text}");
+            assert_eq!(raw_error_code(&text), "pairing_invalid", "{target}");
+        }
+
+        // The alias opens no device-paired route, even with the device pairing.
+        for target in ["/v1/messages".to_owned(), format!("http://{alias}/v1/messages")] {
+            let (status, text) = raw_http(
+                proxy_address,
+                format!(
+                    "POST {target} HTTP/1.1\r\nHost: {alias}\r\n{PAIRING_HEADER}: {PAIRING}\r\nContent-Length: 0\r\n\r\n"
+                ),
+            )
+            .await;
+            assert_eq!(status, 403, "{target}: {text}");
+            assert_eq!(raw_error_code(&text), "host_not_allowed", "{target}");
+        }
+
+        // The same address on another port, another scheme, and any other
+        // host are forward-proxy requests: refused as before.
+        for target in [
+            "http://10.0.2.2:1/sandbox/v1/messages".to_owned(),
+            format!("https://{alias}/sandbox/v1/messages"),
+            "http://example.com/sandbox/v1/messages".to_owned(),
+        ] {
+            let (status, text) = raw_http(
+                proxy_address,
+                format!(
+                    "GET {target} HTTP/1.1\r\nHost: {alias}\r\nProxy-Authorization: Basic {pairing_auth}\r\n\r\n"
+                ),
+            )
+            .await;
+            assert_eq!(status, 403, "{target}: {text}");
+            assert_eq!(raw_error_code(&text), "egress_not_supported", "{target}");
+        }
 
         proxy.abort();
         let _ = proxy.await;

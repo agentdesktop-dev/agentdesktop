@@ -899,6 +899,14 @@ where
     // The git allowlists/credentials and the central egress upstream the git
     // routes serve, read once at startup from daemon.containment (PR 4).
     let containment_git = args.containment.as_ref().and_then(|c| c.git.clone());
+    // Linux boxes reach the listener through the engine's proxy gateway, not
+    // host loopback; the listener answers under that name for sessions only.
+    let box_aliases = llm_proxy::box_aliases(
+        args.containment.is_some(),
+        proxy_listener
+            .as_ref()
+            .and_then(|listener| listener.local_addr().ok()),
+    );
     let containment_egress_upstream = args
         .containment
         .as_ref()
@@ -918,6 +926,7 @@ where
                     sessions,
                     git: containment_git,
                     egress_upstream: containment_egress_upstream,
+                    box_aliases: box_aliases.into(),
                 },
             )
             .await

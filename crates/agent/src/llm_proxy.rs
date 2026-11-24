@@ -4,8 +4,8 @@ mod routes;
 pub(crate) use routes::{CAPI_ROUTE, CODEX_ROUTE, PAIRING_HEADER};
 use routes::{
     GIT_ROUTE, GIT_SSH_ROUTE, RouteCredential, RouteIdentity, SANDBOX_ROUTE, Upstream,
-    bearer_or_header, constant_time_eq, host_is_loopback, match_route, path_escapes_base,
-    resembles_route, split_path_pairing, upstream_base,
+    bearer_or_header, constant_time_eq, host_is_box_alias, host_is_loopback, match_route,
+    path_escapes_base, resembles_route, split_path_pairing, upstream_base,
 };
 
 pub(crate) use cache::CredentialCache;
@@ -143,6 +143,30 @@ pub(crate) struct ProxyConfig {
     /// `daemon.containment.egressUpstream.url`: when set, the git leg is sent
     /// to this central L7 egress endpoint instead of directly to the remote.
     pub egress_upstream: Option<url::Url>,
+    /// `host:port` names under which a boxed program reaches this listener
+    /// when its engine routes the box through a proxy gateway instead of host
+    /// loopback (MXC bubblewrap: `10.0.2.2:<port>`). A request addressed to
+    /// such a name, in origin form or as a proxy-form request for that same
+    /// name, is served on the session-paired routes only. Empty on engines
+    /// whose box shares host loopback.
+    pub box_aliases: Arc<[String]>,
+}
+
+/// The address of the host, as a box on the MXC bubblewrap backend sees it:
+/// the gateway of the box's private network. The engine opens exactly one
+/// port on it, the one named as the box's proxy.
+pub(crate) const BUBBLEWRAP_HOST_GATEWAY: &str = "10.0.2.2";
+
+/// The box aliases of a listener bound to `listener`: on Linux with
+/// containment configured, the bubblewrap gateway at the listener's port;
+/// none elsewhere (a Windows box shares host loopback).
+pub(crate) fn box_aliases(containment: bool, listener: Option<SocketAddr>) -> Vec<String> {
+    match listener {
+        Some(address) if containment && cfg!(target_os = "linux") => {
+            vec![format!("{BUBBLEWRAP_HOST_GATEWAY}:{}", address.port())]
+        }
+        _ => Vec::new(),
+    }
 }
 
 impl std::fmt::Debug for ProxyConfig {
@@ -156,6 +180,7 @@ impl std::fmt::Debug for ProxyConfig {
                 &self.git.as_ref().map_or(0, |git| git.allow.len()),
             )
             .field("egress_upstream", &self.egress_upstream)
+            .field("box_aliases", &self.box_aliases)
             .finish()
     }
 }
@@ -611,15 +636,47 @@ async fn forward(
     {
         log.sandbox = Some(SandboxRequest::new(request.method(), rest));
     }
-    // CONNECT and absolute-form requests (the forward-proxy request forms)
-    // skip the Host-loopback gate (their target is not this listener), carry
-    // their pairing as Proxy-Authorization credentials, and are ALWAYS
-    // refused after the pairing check: the egress architecture is L7 git
-    // routes on the loopback listener, never tunnels (AC 3).
-    if request.method() == Method::CONNECT || request.uri().scheme().is_some() {
+    // A box whose engine gives it a proxy gateway (not host loopback) reaches
+    // this listener under a box alias, and its HTTP client, told to use that
+    // gateway as its proxy, sends requests for the listener itself in proxy
+    // form (`GET http://<alias>/sandbox/...`). That one target is this
+    // listener, so it is served like the origin-form request it stands for.
+    let own_proxy_form = request.method() != Method::CONNECT
+        && request.uri().scheme_str() == Some("http")
+        && request
+            .uri()
+            .authority()
+            .is_some_and(|authority| host_is_box_alias(authority.as_str(), &config.box_aliases));
+    // CONNECT and every other absolute-form request (the forward-proxy
+    // request forms) skip the Host-loopback gate (their target is not this
+    // listener), carry their pairing as Proxy-Authorization credentials, and
+    // are ALWAYS refused after the pairing check: the egress architecture is
+    // L7 git routes on this listener, never tunnels (AC 3).
+    if !own_proxy_form && (request.method() == Method::CONNECT || request.uri().scheme().is_some())
+    {
         return handle_connect_request(&request, config, log);
     }
-    if !host_is_loopback(request.headers()) {
+    let via_box_alias = own_proxy_form
+        || request
+            .headers()
+            .get(HOST)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|host| host_is_box_alias(host, &config.box_aliases));
+    if via_box_alias {
+        // A box alias opens the session-paired routes and nothing else: the
+        // device-paired routes stay loopback-only.
+        let session_route = matched_route
+            .is_some_and(|route| route.identity == RouteIdentity::Session)
+            || route_rest(path, GIT_SSH_ROUTE).is_some()
+            || route_rest(path, GIT_ROUTE).is_some();
+        if !session_route {
+            return Err(ProxyError::new(
+                StatusCode::FORBIDDEN,
+                "host_not_allowed",
+                "agentdesktop proxy: this address serves sandbox sessions only",
+            ));
+        }
+    } else if !host_is_loopback(request.headers()) {
         return Err(ProxyError::new(
             StatusCode::FORBIDDEN,
             "host_not_allowed",
@@ -1223,6 +1280,7 @@ fn strip_hop_headers(headers: &mut HeaderMap) {
         "keep-alive",
         "proxy-authenticate",
         "proxy-authorization",
+        "proxy-connection",
         "te",
         "trailer",
         "transfer-encoding",

@@ -187,6 +187,15 @@ pub(super) fn host_is_loopback(headers: &HeaderMap) -> bool {
     name.trim_end_matches('.').eq_ignore_ascii_case("localhost")
 }
 
+/// Whether `host` (a `Host` value or a request-target authority) is one of
+/// the configured box aliases. The comparison is exact on `host:port` apart
+/// from ASCII case: an alias is an address the engine reported, never a
+/// pattern.
+pub(super) fn host_is_box_alias(host: &str, aliases: &[String]) -> bool {
+    let host = host.trim();
+    aliases.iter().any(|alias| alias.eq_ignore_ascii_case(host))
+}
+
 /// Refuse `..` segments so a route cannot escape the upstream base it pins.
 /// The check runs on a percent-decoded copy (the forwarded path stays as sent),
 /// so `%2e%2e` and encoded separators are caught too; a malformed escape is
