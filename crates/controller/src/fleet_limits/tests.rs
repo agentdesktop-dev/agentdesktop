@@ -1675,6 +1675,24 @@ mod device_streams {
         );
     }
 
+    #[test]
+    fn has_open_stream_follows_the_device_registration() {
+        let streams = streams();
+        assert!(!streams.has_open_stream("device-a"), "never connected");
+
+        let older = open_silent(&streams, "device-a");
+        assert!(streams.has_open_stream("device-a"));
+        assert!(!streams.has_open_stream("device-b"));
+
+        // A replaced stream closing leaves the newer one registered.
+        let newer = open_silent(&streams, "device-a");
+        drop(older);
+        assert!(streams.has_open_stream("device-a"));
+
+        drop(newer);
+        assert!(!streams.has_open_stream("device-a"), "disconnected");
+    }
+
     #[tokio::test]
     async fn a_stream_ends_or_fails_with_the_device_request_stream() {
         let streams = streams();

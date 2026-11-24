@@ -118,6 +118,7 @@ pub async fn run(
     let device_certificate_issuer = DeviceCertificateIssuer::from_pem(ca_certificate, &ca_key)
         .context("initialize device certificate issuer")?;
     tracing::info!("device certificate issuance enabled");
+    let service_database = database.clone();
     let service = FleetAgentService::new(
         Some(oidc),
         database,
@@ -128,6 +129,17 @@ pub async fn run(
     )
     .with_enrollment_tokens(enrollment_tokens)
     .with_usage_collection(usage_ingest.is_some());
+    if let Some(inactive) = &config.inactive_devices {
+        crate::inactive_devices::spawn(
+            service_database,
+            service.device_streams(),
+            inactive.remove_after,
+        );
+        tracing::info!(
+            remove_after = %agentdesktop_core::serdes::duration::format(&inactive.remove_after),
+            "inactive device removal enabled"
+        );
+    }
 
     let certificate = std::fs::read(&tls.certificate)
         .with_context(|| format!("read TLS certificate from {}", tls.certificate.display()))?;

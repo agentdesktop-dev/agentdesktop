@@ -461,7 +461,8 @@ the OIDC tokens, stops enforcing the controller's configuration, and returns
 to enrollment. Files it already wrote for managed tools stay until the next
 configuration is applied.
 
-Logout does not notify the controller, and the device record is kept. Gateway
+Logout does not notify the controller, and the device record is kept (see
+[Device records](#device-records)). Gateway
 JWTs that were already issued remain valid at the gateway until they expire
 (5 minutes by default).
 
@@ -470,3 +471,35 @@ IdP. The controller rejects the next authenticated call and closes open
 streams within 5 minutes. A daemon whose stream is closed as
 `Unauthenticated`, or whose refresh token is rejected, discards its identity
 and must enroll again.
+
+## Device records
+
+Every enrollment creates a device record, under a device UUID derived from the
+enrolling principal and the CSR. A device that enrolls again generates a new
+key, so it gets a new UUID and a new record: after its refresh token is
+rejected, after the controller rejects its identity, after a logout, or when
+its stored identity is unreadable. The old record never connects again, and the
+controller keeps it until it is deleted in the UI.
+
+To remove such records automatically, set `inactiveDevices.removeAfter` in the
+controller configuration:
+
+```yaml
+inactiveDevices:
+  removeAfter: 30days
+```
+
+Every hour, starting an hour after it starts, the controller removes the
+records of devices it has not heard from for that long: no `Connect` and no heartbeat, or, for a device that never
+connected, nothing since it enrolled. The minimum is `1day`. A device with an
+open stream to the controller is never removed: heartbeats carry the device's
+clock, so a device whose clock is behind can look inactive while connected.
+Each replica of the controller knows only its own streams, so with several
+replicas a connected device is removed only if its clock is behind by more than
+`removeAfter`.
+
+Removing a record deletes the device's inventory, configuration status, and
+telemetry events. Usage is kept: it is not tied to device records. A removed
+device that comes back is rejected as an unknown device and enrolls again under
+a new UUID, as after a deletion in the UI, so a device enrolled with a user's
+sign-in needs that user to sign in again.

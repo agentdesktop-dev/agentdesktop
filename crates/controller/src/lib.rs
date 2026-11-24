@@ -6,6 +6,7 @@ pub mod enrollment_token;
 pub mod fleet_limits;
 pub mod gateway_jwt;
 pub mod http_listener;
+pub mod inactive_devices;
 pub mod management;
 pub mod oidc;
 pub mod service;

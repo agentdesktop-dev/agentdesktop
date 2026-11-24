@@ -83,6 +83,11 @@ impl FleetAgentService {
         self.usage_enabled = enabled;
         self
     }
+
+    /// The registry of open device streams, shared with this service.
+    pub(crate) fn device_streams(&self) -> DeviceStreams {
+        self.device_streams.clone()
+    }
 }
 
 fn subscription_is_configured_for_client(programs: &ProgramsConfig, client_id: &str) -> bool {
