@@ -46,6 +46,16 @@ export const ShowsWhoEnrolledEachDevice: Story = {
   },
 };
 
+export const ShowsARejectedConfiguration: Story = {
+  play: async ({ canvas }) => {
+    await expect(
+      canvas.getByTitle(
+        "Refused by the device's local policy (daemon.controllerLimits)",
+      ),
+    ).toHaveTextContent("Rejected · r4");
+  },
+};
+
 export const SearchesByOwner: Story = {
   play: async ({ canvas }) => {
     await userEvent.type(

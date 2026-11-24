@@ -117,7 +117,100 @@ pub struct DaemonStartupConfig {
     #[serde(default, with = "crate::serdes::duration::option")]
     #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
     pub reconcile_interval: Option<Duration>,
+    /// Local limits on the configuration a controller pushes. A pushed
+    /// configuration outside them is rejected as a whole, reported to the
+    /// controller as `rejected`, and the last accepted one stays in effect. A
+    /// saved controller configuration outside them is kept on disk but not
+    /// applied at startup: the local configuration is applied instead. Read at
+    /// startup only. See `docs/threat-model.md`.
+    ///
+    /// A daemon that predates this setting fails to load a local
+    /// configuration that contains it, and does not start, so upgrade devices
+    /// before installing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller_limits: Option<ControllerLimits>,
 }
+
+/// Local limits on controller-delivered configuration (`daemon.controllerLimits`).
+///
+/// Only accepted in the local configuration file, so the controller cannot
+/// change or relax them.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerLimits {
+    /// Origins (`https://host[:port]`) the controller may point the LLM gateway
+    /// at. The origins of `llmGateway.url`, `llmGateway.proxyUrl` and, with
+    /// `oidc` authentication, `llmGateway.authentication.issuer` must each be
+    /// in this list; their paths may change freely. Omit to allow any origin;
+    /// an empty list allows no gateway.
+    ///
+    /// This does not cover URLs in programs' free-form settings, such as
+    /// Claude Code `env.ANTHROPIC_BASE_URL` or a base URL in a Codex
+    /// `managedConfig`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<Vec<String>>"))]
+    pub allowed_gateway_origins: Option<Vec<Url>>,
+}
+
+impl ControllerLimits {
+    fn validate(&self) -> anyhow::Result<()> {
+        for origin in self.allowed_gateway_origins.iter().flatten() {
+            if !matches!(origin.scheme(), "http" | "https")
+                || origin.host().is_none()
+                || !origin.username().is_empty()
+                || origin.password().is_some()
+                || origin.path() != "/"
+                || origin.query().is_some()
+                || origin.fragment().is_some()
+            {
+                anyhow::bail!(
+                    "daemon.controllerLimits.allowedGatewayOrigins entry {origin} must be an HTTP or HTTPS origin, such as https://gateway.example.com"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks a controller-delivered configuration against these limits. A
+    /// violation is an [`OutsideControllerLimits`] error.
+    pub fn check(&self, config: &DaemonConfig) -> anyhow::Result<()> {
+        let (Some(allowed), Some(gateway)) = (&self.allowed_gateway_origins, &config.llm_gateway)
+        else {
+            return Ok(());
+        };
+        let mut urls = vec![("llmGateway.url", &gateway.url)];
+        if let Some(proxy_url) = &gateway.proxy_url {
+            urls.push(("llmGateway.proxyUrl", proxy_url));
+        }
+        if let Some(LlmGatewayAuthentication::Oidc { issuer, .. }) = &gateway.authentication {
+            urls.push(("llmGateway.authentication.issuer", issuer));
+        }
+        for (field, url) in urls {
+            if !allowed.iter().any(|origin| origin.origin() == url.origin()) {
+                return Err(OutsideControllerLimits(format!(
+                    "{field} origin {} is not in daemon.controllerLimits.allowedGatewayOrigins",
+                    url.origin().ascii_serialization()
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A controller-delivered configuration that `daemon.controllerLimits`
+/// refuses, as opposed to one that is invalid.
+#[derive(Debug)]
+pub struct OutsideControllerLimits(String);
+
+impl std::fmt::Display for OutsideControllerLimits {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for OutsideControllerLimits {}
 
 /// Local loopback LLM proxy settings. User mode only: the proxy hands out the
 /// current user's gateway credential, so a system daemon never runs one.
@@ -1874,6 +1967,13 @@ fn parse_local_daemon(contents: &str) -> anyhow::Result<DaemonConfig> {
             "daemon.reconcileInterval must be greater than zero and at most 30 days (leave it unset for no periodic re-apply)"
         );
     }
+    if let Some(limits) = config
+        .daemon
+        .as_ref()
+        .and_then(|daemon| daemon.controller_limits.as_ref())
+    {
+        limits.validate()?;
+    }
     if let Some(usage) = config
         .daemon
         .as_ref()
@@ -1897,6 +1997,14 @@ fn parse_local_daemon(contents: &str) -> anyhow::Result<DaemonConfig> {
 }
 
 impl DaemonConfig {
+    /// `daemon.controllerLimits`, or no limits when unset.
+    pub fn controller_limits(&self) -> ControllerLimits {
+        self.daemon
+            .as_ref()
+            .and_then(|daemon| daemon.controller_limits.clone())
+            .unwrap_or_default()
+    }
+
     /// Returns whether this configuration manages no gateway or developer tools.
     pub fn is_empty(&self) -> bool {
         self.llm_gateway.is_none()
@@ -2541,6 +2649,89 @@ programs: { claudeCode: { useLlmGateway: false } }
             error.to_string().contains("only allowed in the local"),
             "unexpected error: {error}"
         );
+    }
+
+    fn limits(origins: &str) -> super::ControllerLimits {
+        let local = super::parse_local_daemon(&format!(
+            "daemon:\n  controllerLimits:\n    allowedGatewayOrigins: {origins}\n"
+        ))
+        .expect("valid local configuration");
+        local.daemon.unwrap().controller_limits.unwrap()
+    }
+
+    #[test]
+    fn controller_limits_reject_an_entry_that_is_not_an_origin() {
+        for entry in [
+            "https://gateway.example.com/v1",
+            "https://gateway.example.com/?a=b",
+            "https://user@gateway.example.com",
+            "file:///etc/gateway",
+        ] {
+            let error = super::parse_local_daemon(&format!(
+                "daemon:\n  controllerLimits:\n    allowedGatewayOrigins: ['{entry}']\n"
+            ))
+            .expect_err(entry);
+            assert!(
+                error
+                    .to_string()
+                    .contains("must be an HTTP or HTTPS origin"),
+                "{entry}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn controller_limits_check_the_origin_of_every_gateway_url() {
+        let limits = limits("[https://gateway.example.com, 'https://login.example.com:8443']");
+        let gateway = |extra: &str| {
+            parse_daemon(&format!(
+                "llmGateway:\n  url: https://gateway.example.com/anthropic\n{extra}"
+            ))
+            .unwrap()
+        };
+        let oidc = |issuer: &str| {
+            format!(
+                "  authentication:\n    type: oidc\n    issuer: {issuer}\n    clientId: agentdesktop\n"
+            )
+        };
+        for accepted in [
+            String::new(),
+            "  proxyUrl: https://gateway.example.com:443/openai\n".to_owned(),
+            oidc("https://login.example.com:8443/realms/dev"),
+        ] {
+            limits.check(&gateway(&accepted)).expect(&accepted);
+        }
+        for (rejected, field) in [
+            (
+                "  proxyUrl: https://evil.example.com/openai\n".to_owned(),
+                "llmGateway.proxyUrl",
+            ),
+            (
+                "  proxyUrl: http://gateway.example.com/openai\n".to_owned(),
+                "llmGateway.proxyUrl",
+            ),
+            (
+                oidc("https://login.example.com/realms/dev"),
+                "llmGateway.authentication.issuer",
+            ),
+        ] {
+            let error = limits.check(&gateway(&rejected)).expect_err(&rejected);
+            assert!(error.to_string().starts_with(field), "{rejected}: {error}");
+        }
+        let elsewhere =
+            parse_daemon("llmGateway:\n  url: https://gateway.example.com.evil.example/\n")
+                .unwrap();
+        assert!(limits.check(&elsewhere).is_err());
+    }
+
+    #[test]
+    fn controller_limits_without_origins_allow_any_gateway_and_an_empty_list_allows_none() {
+        let gateway = parse_daemon("llmGateway:\n  url: https://anywhere.example/\n").unwrap();
+        super::ControllerLimits::default().check(&gateway).unwrap();
+        assert!(limits("[]").check(&gateway).is_err());
+        limits("[]")
+            .check(&parse_daemon("programs: {}").unwrap())
+            .unwrap();
     }
 
     #[test]

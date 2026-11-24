@@ -1,0 +1,7 @@
+# yaml-language-server: $schema=../../../schema/daemon-config.json
+# The gateway is on an origin the device's local limits allow. Nothing
+# listens there: the lab only shows what the device accepts and writes.
+llmGateway:
+  url: https://gateway.example.com/anthropic
+programs:
+  claudeCode: {}

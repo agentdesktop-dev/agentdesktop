@@ -10,6 +10,7 @@ import {
   failedDeviceDetail,
   oldAgentDeviceDetail,
   optedOutDeviceDetail,
+  rejectedDeviceDetail,
 } from "../stories/fixtures";
 import { DeviceView } from "./DeviceView";
 
@@ -94,6 +95,33 @@ export const ConfigurationFailed: Story = {
     await expect(
       canvas.getByText("not applied: vscode conflicted"),
     ).toBeVisible();
+  },
+};
+
+export const ConfigurationRejected: Story = {
+  args: { device: rejectedDeviceDetail },
+  play: async ({ canvas }) => {
+    await expect(
+      canvas.getByTitle(
+        "Refused by the device's local policy (daemon.controllerLimits)",
+      ),
+    ).toHaveTextContent("Rejected · r4");
+    await expect(
+      canvas.getByText(
+        /is not in daemon\.controllerLimits\.allowedGatewayOrigins/,
+      ),
+    ).toBeVisible();
+    // The programs still in effect are listed, under a note that the
+    // rejected revision was not applied.
+    await expect(
+      canvas.getByText(/^Revision 4 was not applied\./),
+    ).toBeVisible();
+    const programs = within(
+      canvas
+        .getByRole("heading", { name: "Managed programs" })
+        .closest("section") as HTMLElement,
+    );
+    await expect(programs.getByText("Claude Code")).toBeVisible();
   },
 };
 

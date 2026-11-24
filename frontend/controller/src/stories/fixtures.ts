@@ -68,10 +68,26 @@ export const genericNameDevice: Device = {
   enrolled_by_name: "sam.okafor@example.com",
 };
 
+// The device's local policy (daemon.controllerLimits) refused the controller's
+// configuration.
+export const rejectedDevice: Device = {
+  ...macDevice,
+  id: "device-rejected-97531864",
+  hostname: "limits-device",
+  os: "linux",
+  architecture: "x86_64",
+  enrolled_by_subject: "ops-00u",
+  enrolled_by_name: "ops@example.com",
+  config_state: 3,
+  config_error:
+    "configuration is outside the local limits: llmGateway.url origin https://other.example.com is not in daemon.controllerLimits.allowedGatewayOrigins",
+};
+
 export const devices = [
   macDevice,
   linuxDevice,
   failedDevice,
+  rejectedDevice,
   genericNameDevice,
 ];
 
@@ -361,6 +377,24 @@ export const optedOutDeviceDetail: DeviceDetail = {
       updated_at: now - 60,
     },
   ],
+};
+
+// A rejected configuration was not applied, so the device reports the
+// programs of the configuration still in effect, stamped with the rejected
+// revision.
+export const rejectedDeviceDetail: DeviceDetail = {
+  ...deviceDetail,
+  ...rejectedDevice,
+  programs: [
+    {
+      program: "claude-code",
+      state: "unchanged",
+      detail: "",
+      revision: 4,
+      updated_at: now - 60,
+    },
+  ],
+  programs_reported: true,
 };
 
 export const oldAgentDeviceDetail: DeviceDetail = {

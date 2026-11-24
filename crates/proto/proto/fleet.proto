@@ -214,7 +214,9 @@ message ConfigStatus {
   // Per-program outcomes of this apply, in the agent's provider order. Empty
   // when the configuration was not applied at all (hash or parse error), and
   // from agents that do not report per-program status: `programs_reported`
-  // distinguishes the two.
+  // distinguishes the two. With CONFIG_STATE_REJECTED nothing was applied, and
+  // these are the outcomes of the last apply: the configuration still in
+  // effect on the device (empty before the first apply).
   repeated ProgramStatus programs = 4;
   // Whether this agent version reports per-program status at all. An older
   // agent never sets this field, so it reads back as `false`.
@@ -225,6 +227,9 @@ enum ConfigState {
   CONFIG_STATE_UNSPECIFIED = 0;
   CONFIG_STATE_APPLIED = 1;
   CONFIG_STATE_FAILED = 2;
+  // The device's local policy (`daemon.controllerLimits`) refused the
+  // configuration, and nothing from it was applied. `error` carries the reason.
+  CONFIG_STATE_REJECTED = 3;
 }
 
 // One managed program's outcome from an apply. `program` is the provider ID
