@@ -57,6 +57,12 @@ const signedOut: AdminSession = {
   recent_auth_required: false,
 };
 
+type SessionState =
+  | { status: "checking"; session: AdminSession | null }
+  | { status: "authenticated"; session: AdminSession }
+  | { status: "unauthenticated"; session: AdminSession }
+  | { status: "failed"; session: AdminSession | null; error: string };
+
 async function fetchSession(signal?: AbortSignal): Promise<AdminSession> {
   const response = await fetch("/auth/session", {
     credentials: "same-origin",
@@ -83,18 +89,25 @@ export function useAuth() {
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [session, setSession] = useState<AdminSession | null>(null);
-  const sessionRef = useRef(session);
+  const [state, setState] = useState<SessionState>({
+    status: "checking",
+    session: null,
+  });
+  const sessionRef = useRef<AdminSession | null>(null);
   const generation = useRef(0);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
+  const { session } = state;
+  const loading = state.status === "checking";
+  const error = state.status === "failed" ? state.error : null;
 
-  const replaceSession = useCallback((next: AdminSession | null) => {
+  const replaceSession = useCallback((next: AdminSession) => {
     generation.current += 1;
     sessionRef.current = next;
-    setSession(next);
+    setState({
+      status: next.authenticated ? "authenticated" : "unauthenticated",
+      session: next,
+    });
   }, []);
 
   const expireSession = useCallback(() => {
@@ -115,19 +128,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const controller = new AbortController();
     const started = generation.current;
-    setLoading(true);
-    setError(null);
+    setState((current) => ({ status: "checking", session: current.session }));
     fetchSession(controller.signal)
       .then((next) => {
         if (!controller.signal.aborted && generation.current === started) {
           replaceSession(next);
-          setLoading(false);
         }
       })
       .catch((reason: unknown) => {
         if (!controller.signal.aborted && generation.current === started) {
-          setError(reason instanceof Error ? reason.message : "Session failed");
-          setLoading(false);
+          setState((current) => ({
+            status: "failed",
+            session: current.session,
+            error: reason instanceof Error ? reason.message : "Session failed",
+          }));
         }
       });
     return () => controller.abort();

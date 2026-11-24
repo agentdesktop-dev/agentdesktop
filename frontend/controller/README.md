@@ -36,6 +36,12 @@ Only trusted foreground pointer, keyboard, touch, or wheel interaction triggers
 view, or fleet refresh extends the idle lifetime. An API 401 returns the UI to
 sign-in. Authentication routes must be served from the same origin as the UI.
 
+The browser models session checks, authenticated sessions, signed-out sessions,
+and failed checks as explicit lifecycle states, while keeping notices separate.
+Retries retain the last session until the check settles. Expiry or logout ends
+any pending check's loading state immediately; late checks and requests cannot
+restore an older session or raise notices for it.
+
 ## Storybook
 
 The controller views have deterministic Storybook states for development,
