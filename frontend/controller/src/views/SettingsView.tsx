@@ -36,6 +36,12 @@ export function SettingsView({
         <ErrorState message={error} />
       ) : (
         <section className="settings-list">
+          <div className="setting-row">
+            <div>
+              <strong>Controller version</strong>
+              <span>{data.version}</span>
+            </div>
+          </div>
           <SettingRow
             title="Fleet API"
             description={data.fleet_listen}

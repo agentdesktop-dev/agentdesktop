@@ -379,6 +379,7 @@ export const emptyDeviceDetail: DeviceDetail = {
 };
 
 export const controllerSettings: ControllerSettings = {
+  version: "0.1.1",
   fleet_listen: "0.0.0.0:8080",
   admin_listen: "127.0.0.1:8081",
   oidc_enabled: true,

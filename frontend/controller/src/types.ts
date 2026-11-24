@@ -100,6 +100,7 @@ export type Overview = {
 };
 
 export type ControllerSettings = {
+  version: string;
   fleet_listen: string;
   admin_listen: string;
   oidc_enabled: boolean;
