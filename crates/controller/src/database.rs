@@ -375,8 +375,10 @@ impl Database {
 
     /// Commits the device and its retry receipt together. Concurrent enrollments
     /// for the same principal/key return the first committed certificate.
+    /// Runs in the caller's transaction, which also records the enrollment's
+    /// audit completion (see `AuditLog::complete_in_transaction`).
     pub async fn finish_enrollment(
-        &self,
+        transaction: &mut sqlx::AnyConnection,
         completed: &CompletedEnrollment,
         response: &agentdesktop_proto::fleet::EnrollResponse,
     ) -> anyhow::Result<agentdesktop_proto::fleet::EnrollResponse> {
@@ -394,7 +396,6 @@ impl Database {
             response.client_certificate_expires_at_unix_seconds,
         ))
         .context("encode device enrollment receipt")?;
-        let mut transaction = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO devices
                 (id, hostname, created_at, last_seen_at, enrolled_by_issuer,
@@ -426,9 +427,7 @@ impl Database {
                 .bind(&response.device_id)
                 .fetch_one(&mut *transaction)
                 .await?;
-        let response = decode_enrollment_receipt(&receipt)?;
-        transaction.commit().await?;
-        Ok(response)
+        decode_enrollment_receipt(&receipt)
     }
 
     pub async fn device_principal(&self, device_id: &str) -> anyhow::Result<DevicePrincipal> {
@@ -592,10 +591,15 @@ impl Database {
         }))
     }
 
-    pub async fn delete_device(&self, device_id: &str) -> anyhow::Result<bool> {
+    /// Runs in the caller's transaction, which also records the deletion's audit
+    /// completion (see `Context::mutate`).
+    pub async fn delete_device(
+        connection: &mut sqlx::AnyConnection,
+        device_id: &str,
+    ) -> anyhow::Result<bool> {
         let result = sqlx::query("DELETE FROM devices WHERE id = $1")
             .bind(device_id)
-            .execute(&self.pool)
+            .execute(connection)
             .await
             .context("delete device")?;
         Ok(result.rows_affected() > 0)
@@ -1412,8 +1416,7 @@ mod tests {
         assert_eq!(count_rows().await, 1);
 
         assert!(
-            database
-                .delete_device("device")
+            Database::delete_device(&mut database.pool().acquire().await.unwrap(), "device")
                 .await
                 .expect("delete device")
         );

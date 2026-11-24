@@ -45,10 +45,12 @@ pub enum EventKind {
     /// Written before a mutation runs, and the request is refused if it cannot be
     /// written (fail closed). It is the only trace of a change whose process dies
     /// before `action.completed` is written. Only mutations produce it, and those
-    /// are rare operator actions, so it adds one line per change.
+    /// are rare operator actions, so it adds one line per change. Streamed to the
+    /// SIEM only, not stored: the completion commits with the change itself.
     ActionAttempted,
-    /// The mutation's outcome (and HTTP status, for management requests), linked to
-    /// its attempt by `request.id`.
+    /// The mutation's outcome, linked to its attempt by `request.id`. Carries the
+    /// HTTP status only when the router completes it (the handler did not use
+    /// `Context::mutate`).
     ActionCompleted,
     /// Interactive sign-in. Recorded by providers, not by the controller.
     AuthLogin,
@@ -485,16 +487,140 @@ impl AuditLog {
     /// its own task, so a cancelled caller cannot leave a stored event unstreamed.
     pub async fn record(&self, event: AuditEvent) -> anyhow::Result<i64> {
         let log = self.clone();
+        // Spawned so a cancelled caller cannot stop it between the insert and the stream.
         tokio::spawn(async move { log.write(event).await })
             .await
             .context("join admin audit writer")?
     }
 
     async fn write(&self, event: AuditEvent) -> anyhow::Result<i64> {
+        let prepared = Prepared::new(&event)?;
+        let seq = Database::append_audit_event(
+            &mut *self.database.pool().acquire().await?,
+            &prepared.columns(&event),
+            &prepared.event_json,
+        )
+        .await?;
+        self.stream.write(prepared.line(Some(seq))).await?;
+        Ok(seq)
+    }
+
+    /// Streams the event to the SIEM without storing it, so its line has no `seq`.
+    /// Used for `action.attempted`: the change's transaction stores its completion
+    /// atomically, so only the SIEM needs a line written before the change. An
+    /// error means the line may not have been written; the caller must not act.
+    pub async fn stream(&self, event: AuditEvent) -> anyhow::Result<()> {
+        self.stream.write(Prepared::new(&event)?.line(None)).await
+    }
+
+    /// Runs `change` in a database transaction and records `completions` with its
+    /// outcome in the same transaction, so the change and its `action.completed`
+    /// records commit together or not at all. The lines are streamed after the
+    /// commit.
+    ///
+    /// The work runs in its own task, so it finishes even if the caller is
+    /// cancelled (for example by a request timeout). `change` receives the open
+    /// transaction and hands it back with its result and the outcome to record.
+    /// If it fails or the transaction cannot commit, nothing it did is kept, and
+    /// the completions are recorded as `failed` on their own (best effort).
+    pub async fn complete_in_transaction<T, F, Fut>(
+        &self,
+        completions: Vec<AuditEvent>,
+        change: F,
+    ) -> anyhow::Result<T>
+    where
+        F: FnOnce(sqlx::Transaction<'static, sqlx::Any>) -> Fut + Send + 'static,
+        Fut: Future<Output = anyhow::Result<(sqlx::Transaction<'static, sqlx::Any>, T, Outcome)>>
+            + Send,
+        T: Send + 'static,
+    {
+        let log = self.clone();
+        // Spawned so a cancelled caller cannot stop it between the change, commit and stream.
+        tokio::spawn(async move {
+            let committed = log.commit_with_completions(&completions, change).await;
+            match committed {
+                Ok((value, lines)) => {
+                    for line in lines {
+                        if let Err(error) = log.stream.write(line).await {
+                            tracing::error!(
+                                error = format!("{error:#}"),
+                                "failed to stream a committed admin audit completion"
+                            );
+                        }
+                    }
+                    Ok(value)
+                }
+                Err(error) => {
+                    for completion in completions {
+                        let failed = AuditEvent {
+                            outcome: Outcome::Failed,
+                            ..completion
+                        };
+                        if let Err(error) = log.record(failed).await {
+                            tracing::error!(
+                                error = format!("{error:#}"),
+                                "failed to record a failed admin audit completion"
+                            );
+                        }
+                    }
+                    Err(error)
+                }
+            }
+        })
+        .await
+        .context("join admin audit transaction")?
+    }
+
+    async fn commit_with_completions<T, F, Fut>(
+        &self,
+        completions: &[AuditEvent],
+        change: F,
+    ) -> anyhow::Result<(T, Vec<Map<String, Value>>)>
+    where
+        F: FnOnce(sqlx::Transaction<'static, sqlx::Any>) -> Fut,
+        Fut: Future<Output = anyhow::Result<(sqlx::Transaction<'static, sqlx::Any>, T, Outcome)>>,
+    {
+        let transaction = self.database.pool().begin().await?;
+        let (mut transaction, value, outcome) = change(transaction).await?;
+        let mut lines = Vec::with_capacity(completions.len());
+        for completion in completions {
+            let completion = AuditEvent {
+                outcome,
+                ..completion.clone()
+            };
+            let prepared = Prepared::new(&completion)?;
+            let seq = Database::append_audit_event(
+                &mut transaction,
+                &prepared.columns(&completion),
+                &prepared.event_json,
+            )
+            .await?;
+            lines.push(prepared.line(Some(seq)));
+        }
+        transaction
+            .commit()
+            .await
+            .context("commit admin audit transaction")?;
+        Ok((value, lines))
+    }
+}
+
+/// An event serialized for storage, with the ID and time it is recorded under.
+struct Prepared {
+    id: String,
+    time_ms: i64,
+    /// The stored form, which every streamed line starts from.
+    event: Map<String, Value>,
+    /// `event` serialized for the `event_json` column.
+    event_json: String,
+}
+
+impl Prepared {
+    fn new(event: &AuditEvent) -> anyhow::Result<Self> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = OffsetDateTime::now_utc();
         let time = now.format(&Rfc3339).context("format admin audit time")?;
-        let event_json = serde_json::to_string(&StoredEvent {
+        let Value::Object(stored) = serde_json::to_value(StoredEvent {
             schema: SCHEMA,
             id: &id,
             time,
@@ -507,31 +633,44 @@ impl AuditLog {
             status: event.status,
             request: event.request.as_ref(),
         })
-        .context("serialize admin audit event")?;
-        let seq = self
-            .database
-            .append_audit_event(
-                &AuditColumns {
-                    id: &id,
-                    time_ms: (now.unix_timestamp_nanos() / 1_000_000)
-                        .try_into()
-                        .unwrap_or(i64::MAX),
-                    event: event.event.as_str(),
-                    actor_subject: &event.actor.subject,
-                    action: event.action.as_deref(),
-                    target_id: event
-                        .target
-                        .as_ref()
-                        .and_then(|target| target.id.as_deref()),
-                    outcome: event.outcome.as_str(),
-                },
-                &event_json,
-            )
-            .await?;
-        self.stream
-            .write(published(&AuditRow { seq, event_json })?)
-            .await?;
-        Ok(seq)
+        .context("serialize admin audit event")?
+        else {
+            anyhow::bail!("admin audit event did not serialize to a JSON object");
+        };
+        let event_json = serde_json::to_string(&stored).context("serialize admin audit event")?;
+        Ok(Self {
+            id,
+            time_ms: (now.unix_timestamp_nanos() / 1_000_000)
+                .try_into()
+                .unwrap_or(i64::MAX),
+            event: stored,
+            event_json,
+        })
+    }
+
+    fn columns<'a>(&'a self, event: &'a AuditEvent) -> AuditColumns<'a> {
+        AuditColumns {
+            id: &self.id,
+            time_ms: self.time_ms,
+            event: event.event.as_str(),
+            actor_subject: &event.actor.subject,
+            action: event.action.as_deref(),
+            target_id: event
+                .target
+                .as_ref()
+                .and_then(|target| target.id.as_deref()),
+            outcome: event.outcome.as_str(),
+        }
+    }
+
+    /// The streamed line: the stored form plus the row's `seq`, or without one for
+    /// an event that is streamed but not stored.
+    fn line(self, seq: Option<i64>) -> Map<String, Value> {
+        let mut line = self.event;
+        if let Some(seq) = seq {
+            line.insert("seq".into(), seq.into());
+        }
+        line
     }
 }
 

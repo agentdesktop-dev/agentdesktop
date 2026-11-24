@@ -34,8 +34,10 @@ pub struct AuditRow {
 
 impl Database {
     /// Appends one event and returns its `seq`, which the database assigns.
+    /// Pass the transaction of the change being recorded, so the event commits
+    /// together with it.
     pub async fn append_audit_event(
-        &self,
+        connection: &mut sqlx::AnyConnection,
         columns: &AuditColumns<'_>,
         event_json: &str,
     ) -> anyhow::Result<i64> {
@@ -53,7 +55,7 @@ impl Database {
         .bind(columns.target_id)
         .bind(columns.outcome)
         .bind(event_json)
-        .fetch_one(&self.pool)
+        .fetch_one(connection)
         .await
         .context("append admin audit event")
     }
@@ -120,9 +122,12 @@ mod tests {
                 let database = databases[n % databases.len()].clone();
                 tokio::spawn(async move {
                     let id = uuid::Uuid::new_v4().to_string();
-                    database
-                        .append_audit_event(&columns(&id), &format!(r#"{{"n":{n}}}"#))
-                        .await
+                    Database::append_audit_event(
+                        &mut *database.pool().acquire().await?,
+                        &columns(&id),
+                        &format!(r#"{{"n":{n}}}"#),
+                    )
+                    .await
                 })
             })
             .collect();
@@ -135,17 +140,23 @@ mod tests {
     async fn appends_number_events_in_order_and_list_newest_first() {
         let (database, path) = database().await;
         assert_eq!(
-            database
-                .append_audit_event(&columns("a"), r#"{"n":1}"#)
-                .await
-                .unwrap(),
+            Database::append_audit_event(
+                &mut database.pool().acquire().await.unwrap(),
+                &columns("a"),
+                r#"{"n":1}"#
+            )
+            .await
+            .unwrap(),
             1
         );
         assert_eq!(
-            database
-                .append_audit_event(&columns("b"), r#"{"n":2}"#)
-                .await
-                .unwrap(),
+            Database::append_audit_event(
+                &mut database.pool().acquire().await.unwrap(),
+                &columns("b"),
+                r#"{"n":2}"#
+            )
+            .await
+            .unwrap(),
             2
         );
         let listed = database.list_audit_events(None, 10).await.unwrap();
@@ -178,10 +189,13 @@ mod tests {
     #[tokio::test]
     async fn rows_cannot_be_updated_or_deleted() {
         let (database, path) = database().await;
-        database
-            .append_audit_event(&columns("a"), r#"{"n":1}"#)
-            .await
-            .unwrap();
+        Database::append_audit_event(
+            &mut database.pool().acquire().await.unwrap(),
+            &columns("a"),
+            r#"{"n":1}"#,
+        )
+        .await
+        .unwrap();
         for statement in [
             "UPDATE admin_audit_events SET outcome = 'denied'",
             "DELETE FROM admin_audit_events",
@@ -211,10 +225,13 @@ mod tests {
         let database = Database::connect(&url).await.unwrap();
         let before = stored_seqs(&database).await;
         let id = uuid::Uuid::new_v4().to_string();
-        let seq = database
-            .append_audit_event(&columns(&id), r#"{"n":1}"#)
-            .await
-            .unwrap();
+        let seq = Database::append_audit_event(
+            &mut database.pool().acquire().await.unwrap(),
+            &columns(&id),
+            r#"{"n":1}"#,
+        )
+        .await
+        .unwrap();
         assert!(before.iter().all(|&earlier| earlier < seq));
         for statement in [
             "UPDATE admin_audit_events SET outcome = 'denied'",
@@ -229,5 +246,44 @@ mod tests {
         }
         append_concurrently(&[database.clone(), replica], 100).await;
         assert_unique_seqs(&database, before.len() + 101).await;
+
+        // A change and its completion commit together, or not at all.
+        use crate::audit::{Actor, AuditEvent, AuditLog, EventKind, Outcome};
+        let (audit, _) = AuditLog::in_memory(database.clone());
+        let device_id = uuid::Uuid::new_v4().to_string();
+        let completion = || {
+            vec![AuditEvent::new(
+                EventKind::ActionCompleted,
+                Actor::device(&device_id),
+                Outcome::Succeeded,
+            )]
+        };
+        let count = || async { stored_seqs(&database).await.len() };
+        let stored = count().await;
+        let id = device_id.clone();
+        audit
+            .complete_in_transaction(completion(), move |mut transaction| async move {
+                sqlx::query("INSERT INTO devices (id, hostname, created_at) VALUES ($1, 'h', 0)")
+                    .bind(id)
+                    .execute(&mut *transaction)
+                    .await?;
+                Ok((transaction, (), Outcome::Succeeded))
+            })
+            .await
+            .unwrap();
+        assert_eq!(count().await, stored + 1);
+        assert!(database.get_device(&device_id).await.unwrap().is_some());
+        let rolled_back: anyhow::Result<()> = audit
+            .complete_in_transaction(completion(), |mut transaction| async move {
+                sqlx::query("DELETE FROM devices WHERE hostname = 'h'")
+                    .execute(&mut *transaction)
+                    .await?;
+                anyhow::bail!("change failed after deleting")
+            })
+            .await;
+        assert!(rolled_back.is_err());
+        assert!(database.get_device(&device_id).await.unwrap().is_some());
+        // Only the failed completion, recorded on its own.
+        assert_eq!(count().await, stored + 2);
     }
 }

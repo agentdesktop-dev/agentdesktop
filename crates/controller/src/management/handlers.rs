@@ -21,7 +21,8 @@ use super::{
     },
 };
 use crate::{
-    database::{DeviceDetail, DeviceSummary},
+    audit::Outcome,
+    database::{Database, DeviceDetail, DeviceSummary},
     usage,
 };
 
@@ -109,7 +110,6 @@ pub(super) async fn device(
 }
 
 pub(super) async fn delete_device(
-    State(state): State<ManagementState>,
     auth: Context,
     Path(device_id): Path<String>,
 ) -> Result<StatusCode, HandlerError> {
@@ -119,7 +119,21 @@ pub(super) async fn delete_device(
         resource: Some(&device_id),
     })
     .await?;
-    if !state.database.delete_device(&device_id).await? {
+    let deleted = auth
+        .mutate({
+            let device_id = device_id.clone();
+            move |mut transaction| async move {
+                let deleted = Database::delete_device(&mut transaction, &device_id).await?;
+                let outcome = if deleted {
+                    Outcome::Succeeded
+                } else {
+                    Outcome::NotFound
+                };
+                Ok((transaction, deleted, outcome))
+            }
+        })
+        .await?;
+    if !deleted {
         return Err(HandlerError::NotFound);
     }
     info!(%device_id, "deleted device from controller");

@@ -602,10 +602,10 @@ impl FleetAgentService {
                 .target_name(&completed.hostname)
                 .request(info.clone())
         };
-        // Nothing is admitted until the attempt is recorded (fail closed).
+        // Nothing is admitted until the attempt is streamed (fail closed).
         if let Err(error) = self
             .audit
-            .record(event(EventKind::ActionAttempted, Outcome::Authorized))
+            .stream(event(EventKind::ActionAttempted, Outcome::Authorized))
             .await
         {
             error!(
@@ -614,42 +614,26 @@ impl FleetAgentService {
             );
             return Err(audit_unavailable());
         }
-        // The insert and its completion record run in their own task, so a client
-        // that disconnects cannot drop the handler between them.
-        let response = tokio::spawn({
-            let database = self.database.clone();
-            let audit = self.audit.clone();
-            let completed = completed.clone();
-            let completion = event(EventKind::ActionCompleted, Outcome::Succeeded);
-            let issued = EnrollResponse {
-                device_id: device_id.clone(),
-                client_certificate_pem: issued_certificate.chain_pem,
-                client_certificate_expires_at_unix_seconds: issued_certificate
-                    .expires_at_unix_seconds,
-            };
-            async move {
-                let stored = database.finish_enrollment(&completed, &issued).await;
-                let completion = AuditEvent {
-                    outcome: if stored.is_ok() {
-                        Outcome::Succeeded
-                    } else {
-                        Outcome::Failed
-                    },
-                    ..completion
-                };
-                if let Err(error) = audit.record(completion).await {
-                    error!(
-                        error = format!("{error:#}"),
-                        device_id = issued.device_id,
-                        "failed to record device enrollment completion"
-                    );
-                }
-                stored
-            }
-        })
-        .await
-        .map_err(|error| internal(error.into()))?
-        .map_err(internal)?;
+        // The device and its completion record commit in one transaction, in their
+        // own task, so a client that disconnects cannot separate them.
+        let issued = EnrollResponse {
+            device_id: device_id.clone(),
+            client_certificate_pem: issued_certificate.chain_pem,
+            client_certificate_expires_at_unix_seconds: issued_certificate.expires_at_unix_seconds,
+        };
+        let enrollment = completed.clone();
+        let response = self
+            .audit
+            .complete_in_transaction(
+                vec![event(EventKind::ActionCompleted, Outcome::Succeeded)],
+                move |mut transaction| async move {
+                    let stored =
+                        Database::finish_enrollment(&mut transaction, &enrollment, &issued).await?;
+                    Ok((transaction, stored, Outcome::Succeeded))
+                },
+            )
+            .await
+            .map_err(internal)?;
         match &completed.credential {
             EnrollmentCredential::User(user) => info!(
                 %device_id,
@@ -1439,7 +1423,14 @@ mod tests {
             );
         }
         assert_eq!(counts().await, (2, 2));
-        assert!(database.delete_device(&response.device_id).await.unwrap());
+        assert!(
+            Database::delete_device(
+                &mut database.pool().acquire().await.unwrap(),
+                &response.device_id
+            )
+            .await
+            .unwrap()
+        );
         assert!(
             database
                 .enrollment_receipt(&response.device_id)

@@ -118,7 +118,9 @@ pub struct Context {
 /// Per-request audit state shared by `Context::require` and the middleware.
 struct RequestAudit {
     info: RequestInfo,
-    /// Mutations authorized (and recorded as attempted) during this request.
+    /// Mutations authorized (and recorded as attempted) during this request whose
+    /// completion is not recorded yet. [`Context::mutate`] takes them over;
+    /// otherwise the middleware records them when the handler returns.
     authorized: Mutex<Vec<(String, Target)>>,
     /// Whether any mutation permission was checked, whatever the result.
     mutation_checked: AtomicBool,
@@ -164,8 +166,8 @@ impl Context {
     /// identifier (e.g. a parsed device ID), not an HTTP path. `None` denotes a
     /// collection/global operation.
     ///
-    /// Denials are audited. An allowed mutation is audited as attempted before this
-    /// returns; if that record cannot be written the mutation is refused (503).
+    /// Denials are audited. An allowed mutation is streamed as attempted before this
+    /// returns; if that line cannot be written the mutation is refused (503).
     pub async fn require(&self, access: AccessRequest<'_>) -> Result<(), Error> {
         let result = self
             .provider
@@ -193,7 +195,7 @@ impl Context {
             Ok(()) if mutation => {
                 if let Err(audit_error) = self
                     .audit
-                    .record(event(EventKind::ActionAttempted, Outcome::Authorized))
+                    .stream(event(EventKind::ActionAttempted, Outcome::Authorized))
                     .await
                 {
                     tracing::error!(error = format!("{audit_error:#}"), subject = %self.principal.subject,
@@ -213,6 +215,47 @@ impl Context {
             Ok(()) => {}
         }
         result
+    }
+
+    /// Runs the change authorized by [`Context::require`] and records its
+    /// `action.completed` in the same database transaction, so the change and its
+    /// record commit together or not at all. The transaction runs in its own task:
+    /// once started it finishes even if the request times out or the client goes
+    /// away. Do the change's validation before calling this, so a timeout cannot
+    /// leave it half done.
+    ///
+    /// `change` receives the open transaction and returns it with its result and
+    /// the outcome to record (for example `NotFound` when nothing matched).
+    pub async fn mutate<T, F, Fut>(&self, change: F) -> anyhow::Result<T>
+    where
+        F: FnOnce(sqlx::Transaction<'static, sqlx::Any>) -> Fut + Send + 'static,
+        Fut: std::future::Future<
+                Output = anyhow::Result<(sqlx::Transaction<'static, sqlx::Any>, T, Outcome)>,
+            > + Send,
+        T: Send + 'static,
+    {
+        let authorized = std::mem::take(&mut *self.request.authorized.lock().unwrap());
+        anyhow::ensure!(
+            !authorized.is_empty(),
+            "mutation without an authorized operation; call Context::require first"
+        );
+        let completions = authorized
+            .into_iter()
+            .map(|(action, target)| {
+                let mut completion = AuditEvent::new(
+                    EventKind::ActionCompleted,
+                    Actor::from(&*self.principal),
+                    Outcome::Succeeded,
+                )
+                .action(action)
+                .request(self.request.info.clone());
+                completion.target = Some(target);
+                completion
+            })
+            .collect();
+        self.audit
+            .complete_in_transaction(completions, change)
+            .await
     }
 }
 
@@ -308,30 +351,56 @@ async fn authenticate_request(
     if safe {
         return next.run(request).await;
     }
-    // Mutating requests run to completion in their own task, so a timeout or client
-    // disconnect cannot drop the handler between the mutation and its completion
-    // record.
-    let task = tokio::spawn({
-        let context = context.clone();
-        async move {
-            let response = next.run(request).await;
-            record_completion(&context, response.status()).await;
-            response
+    // The handler runs inside the request timeout. If the request is dropped
+    // after a mutation was authorized but before `Context::mutate` took it over,
+    // the guard records that the mutation never ran.
+    let guard = CancelGuard(context.clone());
+    let response = next.run(request).await;
+    record_completion(&guard.0, response.status()).await;
+    response
+}
+
+/// Records `request_cancelled` for authorized mutations still pending when the
+/// request is dropped. Those mutations never started: `Context::mutate` takes them
+/// over before it changes anything.
+struct CancelGuard(Context);
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        let pending = std::mem::take(&mut *self.0.request.authorized.lock().unwrap());
+        if pending.is_empty() {
+            return;
         }
-    });
-    match task.await {
-        Ok(response) => response,
-        Err(error) => {
-            tracing::error!(%error, path = %context.request.info.path, "admin handler panicked");
-            record_completion(&context, StatusCode::INTERNAL_SERVER_ERROR).await;
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let context = self.0.clone();
+        runtime.spawn(async move {
+            for (action, target) in pending {
+                let mut cancelled = AuditEvent::new(
+                    EventKind::ActionCompleted,
+                    Actor::from(context.principal()),
+                    Outcome::Failed,
+                )
+                .action(action)
+                .reason("request_cancelled")
+                .request(context.request.info.clone());
+                cancelled.target = Some(target);
+                if let Err(error) = context.audit.record(cancelled).await {
+                    tracing::error!(
+                        error = format!("{error:#}"),
+                        "failed to record a cancelled admin action"
+                    );
+                }
+            }
+        });
     }
 }
 
-/// Records the outcome of each mutation authorized during the request, or flags a
-/// mutating request that never checked a mutation permission. The mutation has
-/// already happened, so a failure to record is logged rather than returned.
+/// Records the outcome of each mutation authorized during the request but not
+/// completed through [`Context::mutate`], or flags a mutating request that never
+/// checked a mutation permission. The request has finished, so a failure to record
+/// is logged rather than returned.
 async fn record_completion(context: &Context, status: StatusCode) {
     let authorized = std::mem::take(&mut *context.request.authorized.lock().unwrap());
     let actor = || Actor::from(context.principal());

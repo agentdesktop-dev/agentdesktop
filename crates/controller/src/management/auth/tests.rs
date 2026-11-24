@@ -1,6 +1,6 @@
 use super::providers::local::LocalAccess;
 use super::*;
-use crate::audit::{AuditLog, RequestInfo};
+use crate::audit::{AuditLog, Outcome, RequestInfo};
 use crate::database::Database;
 use crate::management::http::is_loopback_host;
 use agentdesktop_core::config::ControllerAdminAccess;
@@ -976,12 +976,16 @@ fn audited_router(database: Database, audit: AuditLog) -> Router {
     .unwrap()
 }
 
-async fn enrolled_database() -> (Database, std::path::PathBuf) {
-    let (database, path) = database().await;
+async fn enroll(database: &Database, device_id: &str) {
     database
-        .enroll_device("device-1", "host", "https://id.example", "owner", None)
+        .enroll_device(device_id, "host", "https://id.example", "owner", None)
         .await
         .unwrap();
+}
+
+async fn enrolled_database() -> (Database, std::path::PathBuf) {
+    let (database, path) = database().await;
+    enroll(&database, "device-1").await;
     (database, path)
 }
 
@@ -1030,19 +1034,21 @@ async fn device_deletion_is_audited_with_actor_target_and_outcome() {
     assert_eq!(attempted["outcome"], "authorized");
     assert_eq!(completed["event"], "action.completed");
     assert_eq!(completed["outcome"], "succeeded");
-    assert_eq!(completed["status"], 204);
+    // Completed in the delete's transaction, before the HTTP status is known.
+    assert!(completed.get("status").is_none());
     // Streamed lines are numbered per stream, so the SIEM can spot a lost line.
     assert_eq!(attempted["stream"]["seq"], 1);
     assert_eq!(completed["stream"]["seq"], 2);
     assert_eq!(attempted["stream"]["id"], completed["stream"]["id"]);
-    assert!(completed["seq"].as_i64().unwrap() > attempted["seq"].as_i64().unwrap());
+    // Only the completion is stored; the attempt goes to the SIEM alone.
+    assert!(attempted.get("seq").is_none());
+    assert!(completed["seq"].is_i64());
 
     let response = request(router, "/api/v1/devices/device-1", Method::DELETE, headers).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let events = stream_events(&lines);
     let missing = events.last().unwrap();
     assert_eq!(missing["outcome"], "not_found");
-    assert_eq!(missing["status"], 404);
     std::fs::remove_file(path).unwrap();
 }
 
@@ -1107,9 +1113,13 @@ async fn mutations_fail_closed_when_the_audit_log_is_unavailable() {
         bearer("admin"),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    // The attempt reached the SIEM, but the completion could not be stored, so the
+    // delete rolled back.
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert!(database.get_device("device-1").await.unwrap().is_some());
-    assert!(lines.lock().unwrap().is_empty());
+    let events = stream_events(&lines);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["event"], "action.attempted");
     std::fs::remove_file(path).unwrap();
 }
 
@@ -1170,33 +1180,34 @@ async fn audit_api_pages_newest_first() {
     let page = json_body(
         request(
             router.clone(),
-            "/api/v1/audit?limit=4",
+            "/api/v1/audit?limit=2",
             Method::GET,
             bearer("admin"),
         )
         .await,
     )
     .await;
-    assert_eq!(seqs(&page), [6, 5, 4, 3]);
-    assert_eq!(page["next_before"], 3);
+    // One stored completion per delete; attempts are not stored.
+    assert_eq!(seqs(&page), [3, 2]);
+    assert_eq!(page["next_before"], 2);
     assert_eq!(page["events"][0]["target"]["id"], "c");
     assert_eq!(page["events"][0]["schema"], "agentdesktop.audit.v1");
     let page = json_body(
         request(
             router.clone(),
-            "/api/v1/audit?before=3&limit=4",
+            "/api/v1/audit?before=2&limit=2",
             Method::GET,
             bearer("admin"),
         )
         .await,
     )
     .await;
-    assert_eq!(seqs(&page), [2, 1]);
+    assert_eq!(seqs(&page), [1]);
     assert_eq!(page["next_before"], serde_json::Value::Null);
     // Allowed reads, including of the audit log itself, are not recorded.
     let page =
         json_body(request(router, "/api/v1/audit", Method::GET, bearer("admin")).await).await;
-    assert_eq!(seqs(&page), [6, 5, 4, 3, 2, 1]);
+    assert_eq!(seqs(&page), [3, 2, 1]);
     std::fs::remove_file(path).unwrap();
 }
 
@@ -1243,41 +1254,126 @@ async fn served_requests_record_the_peer_address() {
     std::fs::remove_file(path).unwrap();
 }
 
-#[tokio::test]
-async fn completion_is_recorded_when_the_client_goes_away() {
-    let audit = TestAudit::new().await;
-    let auth = Auth::new(Arc::new(LocalAccess), audit.log.clone());
-    let router = Router::new().route(
+/// A `DELETE /slow` route that authorizes a device delete, waits `before`, then
+/// deletes inside `Context::mutate` after waiting `during`.
+fn slow_delete(auth: &Auth, before: u64, during: u64) -> Router {
+    Router::new().route(
         "/slow",
-        auth.authenticate_api(axum::routing::delete(|auth: Context| async move {
+        auth.authenticate_api(axum::routing::delete(move |auth: Context| async move {
             auth.require(AccessRequest {
                 verb: authorization::Verb::Delete,
                 resource_class: "devices",
                 resource: Some("device-1"),
             })
             .await?;
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(before)).await;
+            auth.mutate(move |mut transaction| async move {
+                tokio::time::sleep(std::time::Duration::from_millis(during)).await;
+                let deleted = Database::delete_device(&mut transaction, "device-1").await?;
+                assert!(deleted);
+                Ok((transaction, (), Outcome::Succeeded))
+            })
+            .await
+            .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "failed"))?;
             Ok::<_, Error>(StatusCode::NO_CONTENT)
         })),
-    );
+    )
+}
+
+async fn wait_for_events(audit: &TestAudit, count: usize) -> Vec<serde_json::Value> {
+    for _ in 0..200 {
+        if audit.events().len() >= count {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    audit.events()
+}
+
+async fn abandon(router: Router) {
     let abandoned = tokio::time::timeout(
         std::time::Duration::from_millis(30),
         request(router, "/slow", Method::DELETE, HeaderMap::new()),
     )
     .await;
     assert!(abandoned.is_err(), "the client must give up first");
-    for _ in 0..200 {
-        if audit.events().len() == 2 {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    let events = audit.events();
-    let [attempted, completed] = &events[..] else {
-        panic!("expected attempted and completed events: {events:?}");
+}
+
+#[tokio::test]
+async fn a_request_dropped_before_its_change_is_recorded_as_cancelled() {
+    let audit = TestAudit::new().await;
+    enroll(audit.log.database(), "device-1").await;
+    let auth = Auth::new(Arc::new(LocalAccess), audit.log.clone());
+    abandon(slow_delete(&auth, 100, 0)).await;
+    let events = wait_for_events(&audit, 2).await;
+    let [attempted, cancelled] = &events[..] else {
+        panic!("expected attempted and cancelled events: {events:?}");
     };
     assert_eq!(attempted["outcome"], "authorized");
+    assert_eq!(cancelled["event"], "action.completed");
+    assert_eq!(cancelled["outcome"], "failed");
+    assert_eq!(cancelled["reason"], "request_cancelled");
+    assert_eq!(cancelled["target"]["id"], "device-1");
+    // The handler stopped before mutating.
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(
+        audit
+            .log
+            .database()
+            .get_device("device-1")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn a_change_that_started_finishes_with_its_completion_after_the_client_goes_away() {
+    let audit = TestAudit::new().await;
+    enroll(audit.log.database(), "device-1").await;
+    let auth = Auth::new(Arc::new(LocalAccess), audit.log.clone());
+    abandon(slow_delete(&auth, 0, 100)).await;
+    let events = wait_for_events(&audit, 2).await;
+    let [_, completed] = &events[..] else {
+        panic!("expected attempted and completed events: {events:?}");
+    };
     assert_eq!(completed["outcome"], "succeeded");
-    assert_eq!(completed["status"], 204);
     assert_eq!(completed["target"]["id"], "device-1");
+    assert!(
+        audit
+            .log
+            .database()
+            .get_device("device-1")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn a_change_rolls_back_when_its_completion_cannot_be_stored() {
+    let (database, path) = enrolled_database().await;
+    let (audit, lines) = AuditLog::in_memory(database.clone());
+    // Attempts are stored; completions are refused by the database.
+    sqlx::raw_sql(
+        "CREATE TRIGGER refuse_completions BEFORE INSERT ON admin_audit_events
+         WHEN NEW.event = 'action.completed'
+         BEGIN SELECT RAISE(ABORT, 'refused'); END",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    let response = request(
+        audited_router(database.clone(), audit),
+        "/api/v1/devices/device-1",
+        Method::DELETE,
+        bearer("admin"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(database.get_device("device-1").await.unwrap().is_some());
+    let events = stream_events(&lines);
+    assert_eq!(events.len(), 1, "only the attempt was stored: {events:?}");
+    assert_eq!(events[0]["event"], "action.attempted");
+    std::fs::remove_file(path).unwrap();
 }

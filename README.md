@@ -848,14 +848,22 @@ name such as `devices.delete`), the target, the outcome, the time, and the
 request: method, path, peer address, `User-Agent`, and `X-Forwarded-For` as
 received. A mutation produces two records:
 
-- `action.attempted` is written before the handler acts. If it cannot be
-  written, the request fails with `503 audit_unavailable` and nothing changes.
-- `action.completed` carries the outcome and HTTP status.
+- `action.attempted` is written to stdout before the handler acts. If it cannot
+  be written, the request fails with `503 audit_unavailable` and nothing
+  changes. It is not stored in the table, since the completion is stored with
+  the change itself, so its line has no `seq`.
+- `action.completed` carries the outcome. It is stored in the same database
+  transaction as the change, so the table never shows a change without its
+  completion. Once that transaction starts, it finishes even if the request
+  times out or the client disconnects. A request dropped before its change
+  started is recorded with outcome `failed` and reason `request_cancelled`.
 
-A mutating request that succeeds or fails with a server error without any
-permission check is recorded with outcome `unaudited`. Allowed reads are not
-recorded. Compiled-in authentication providers record their own sign-in,
-sign-out and reauthentication events through `audit::AuditLog`.
+Handlers make their change with `Context::mutate`. A mutating request that
+finishes without it is completed by the router, with the HTTP status; one that
+succeeds or fails with a server error without any permission check is recorded
+with outcome `unaudited`. Allowed reads are not recorded. Compiled-in
+authentication providers record their own sign-in, sign-out and
+reauthentication events through `audit::AuditLog`.
 
 The device-facing fleet API records:
 

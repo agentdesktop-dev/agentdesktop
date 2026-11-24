@@ -786,18 +786,6 @@ export const auditEvents: AuditEvent[] = [
   },
   {
     schema: "agentdesktop.audit.v1",
-    id: "e2",
-    seq: 2,
-    time: new Date((now - 3601) * 1000).toISOString(),
-    event: "action.attempted",
-    actor: operator,
-    action: "devices.delete",
-    target: { class: "devices", id: linuxDevice.id },
-    outcome: "authorized",
-    request: auditRequest,
-  },
-  {
-    schema: "agentdesktop.audit.v1",
     id: "e1",
     seq: 1,
     time: new Date((now - 7200) * 1000).toISOString(),
