@@ -78,6 +78,6 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 toml = "1.1"
 time = "0.3"
-url = { version = "2.5", features = ["serde"] }
+url = { version = "2.5.9", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 x509-parser = "0.18"
