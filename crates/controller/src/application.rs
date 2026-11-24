@@ -7,6 +7,7 @@ use crate::{
     gateway_jwt::{self, GatewayJwtIssuer},
     http_listener::{HttpListener, HttpListenerLimits, HttpListenerTls},
     management::{self, Settings, State},
+    metrics::{self, Telemetry},
     oidc::OidcProvider,
     service::FleetAgentService,
 };
@@ -118,6 +119,17 @@ pub async fn run(
     let device_certificate_issuer = DeviceCertificateIssuer::from_pem(ca_certificate, &ca_key)
         .context("initialize device certificate issuer")?;
     tracing::info!("device certificate issuance enabled");
+    // One meter provider: Prometheus on metricsListen, plus OTLP push when the
+    // standard OTEL_EXPORTER_OTLP_* variables name an endpoint.
+    let telemetry = std::sync::Arc::new(Telemetry::new().context("initialize controller metrics")?);
+    // The fleet gauges cost a database read every 30 s; skip it when nothing exports them.
+    if telemetry.exported(config.metrics_listen.is_some()) {
+        telemetry.spawn_refresh(database.clone(), daemon_config.clone());
+    }
+    let fleet_metrics = telemetry.metrics.clone();
+    let metrics_server = config
+        .metrics_listen
+        .map(|address| metrics::serve(address, telemetry.clone()));
     let service = FleetAgentService::new(
         Some(oidc),
         database,
@@ -127,7 +139,8 @@ pub async fn run(
         &limits,
     )
     .with_enrollment_tokens(enrollment_tokens)
-    .with_usage_collection(usage_ingest.is_some());
+    .with_usage_collection(usage_ingest.is_some())
+    .with_metrics(fleet_metrics);
 
     let certificate = std::fs::read(&tls.certificate)
         .with_context(|| format!("read TLS certificate from {}", tls.certificate.display()))?;
@@ -182,6 +195,14 @@ pub async fn run(
             None => std::future::pending().await,
         }
     };
-    tokio::try_join!(fleet, admin, gateway)?;
+    let metrics = async move {
+        match metrics_server {
+            Some(server) => server.await,
+            None => std::future::pending().await,
+        }
+    };
+    let result = tokio::try_join!(fleet, admin, gateway, metrics);
+    telemetry.shutdown();
+    result?;
     Ok(())
 }

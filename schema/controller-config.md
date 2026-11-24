@@ -50,6 +50,7 @@
 |`gatewayListener.limits.maxConnections`|integer|Open gateway connections allowed in total. At the limit, the connection idle the longest is closed to admit a new one. Defaults to `1024`.|
 |`gatewayListener.listen`|string|Address on which the gateway listener accepts connections. Defaults to `127.0.0.1:8444`.|
 |`gatewayListener.tls`|boolean|Serve HTTPS with the controller certificate from `tls` instead of plain HTTP. Use HTTPS unless gateways reach the listener over loopback or a trusted network: whoever can change the keys a gateway fetches can forge credentials it accepts.|
+|`metricsListen`|string|Address on which the controller serves Prometheus metrics at `/metrics`.<br><br>Unset disables the endpoint. The endpoint has no authentication, so<br>expose it only to the metrics scraper. It reports fleet-wide counts and<br>never device hostnames, users, or tool inputs. OTLP push is configured<br>separately, through the standard `OTEL_EXPORTER_OTLP_*` variables.|
 |`oidc`|object|OpenID Connect settings used for device enrollment and authorization.|
 |`oidc.clientId`|string|Public OpenID Connect client identifier.|
 |`oidc.issuer`|string|Exact OpenID Connect issuer URL.|
