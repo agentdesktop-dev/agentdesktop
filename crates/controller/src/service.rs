@@ -42,6 +42,8 @@ const RENEW_DEVICE_CERTIFICATE_RPC: &str =
     "/agentdesktop.fleet.v1.FleetAgent/RenewDeviceCertificate";
 /// The `action` of enrollment's attempted and completed audit events.
 const ENROLL_DEVICE: &str = "devices.enroll";
+/// The `action` of certificate renewal's attempted and completed audit events.
+const RENEW_DEVICE_CERTIFICATE: &str = "devices.renew_certificate";
 
 #[derive(Clone)]
 pub struct FleetAgentService {
@@ -677,7 +679,9 @@ impl FleetAgentService {
     }
 
     /// Issues a renewed certificate to an authenticated device, failing closed if
-    /// the renewal cannot be audited.
+    /// the renewal cannot be audited. The certificate is signed first, which only
+    /// validates the request: it reaches the device only after the renewal's
+    /// completion is stored.
     async fn renew_certificate(
         &self,
         device_id: &str,
@@ -688,25 +692,37 @@ impl FleetAgentService {
             Status::failed_precondition("device certificate issuance is disabled")
         })?;
         let issued = issuer.issue(device_id, csr_der).map_err(invalid_csr)?;
-        let renewed = AuditEvent::new(
-            EventKind::DeviceCertificateRenewed,
-            Actor::device(device_id),
-            Outcome::Succeeded,
-        )
-        .target(DEVICES, Some(device_id))
-        .request(info);
-        if let Err(error) = self.audit.record(renewed).await {
-            error!(
-                error = format!("{error:#}"),
-                device_id, "refusing certificate renewal that could not be audited"
-            );
-            return Err(audit_unavailable());
-        }
-        info!(device_id, "renewed device certificate");
-        Ok(DeviceCertificateResponse {
+        let response = DeviceCertificateResponse {
             client_certificate_pem: issued.chain_pem,
             expires_at_unix_seconds: issued.expires_at_unix_seconds,
-        })
+        };
+        let attempt = AuditEvent::new(
+            EventKind::ActionAttempted,
+            Actor::device(device_id),
+            Outcome::Authorized,
+        )
+        .action(RENEW_DEVICE_CERTIFICATE)
+        .target(DEVICES, Some(device_id))
+        .request(info);
+        // Nothing changes in the database; the transaction stores the completion.
+        let response = self
+            .audit
+            .mutate(attempt, move |transaction| async move {
+                Ok((transaction, response, Outcome::Succeeded))
+            })
+            .await
+            .map_err(|error| match error {
+                ChangeError::AuditUnavailable(error) => {
+                    error!(
+                        error = format!("{error:#}"),
+                        device_id, "refusing certificate renewal that could not be audited"
+                    );
+                    audit_unavailable()
+                }
+                ChangeError::Failed(error) => internal(error),
+            })?;
+        info!(device_id, "renewed device certificate");
+        Ok(response)
     }
 }
 
@@ -1190,6 +1206,19 @@ mod tests {
             .expect_err("an unaudited enrollment must be refused");
         assert_eq!(status.code(), Code::Unavailable);
         assert!(database.list_devices().await.unwrap().is_empty());
+        assert_refusal_stored(&database, "devices.enroll").await;
+    }
+
+    /// The table, which still works, holds the refused action's closing record.
+    async fn assert_refusal_stored(database: &Database, action: &str) {
+        let rows = database.list_audit_events(None, 10).await.unwrap();
+        let [refused] = &rows[..] else {
+            panic!("expected the refusal: {rows:?}");
+        };
+        assert_eq!(refused.event["event"], "action.completed");
+        assert_eq!(refused.event["action"], action);
+        assert_eq!(refused.event["outcome"], "failed");
+        assert_eq!(refused.event["reason"], "audit_unavailable");
     }
 
     #[tokio::test]
@@ -1204,21 +1233,32 @@ mod tests {
             .await
             .unwrap();
         let events = streamed(&lines);
-        let [renewed] = &events[..] else {
-            panic!("expected one event: {events:?}");
+        let [attempted, completed] = &events[..] else {
+            panic!("expected attempted and completed events: {events:?}");
         };
-        assert_eq!(renewed["event"], "device.certificate_renewed");
-        assert_eq!(renewed["actor"]["kind"], "device");
-        assert_eq!(renewed["actor"]["subject"], device_id);
-        assert_eq!(renewed["target"]["id"], device_id);
-        assert_eq!(renewed["request"]["path"], RENEW_DEVICE_CERTIFICATE_RPC);
+        assert_eq!(attempted["event"], "action.attempted");
+        assert_eq!(completed["event"], "action.completed");
+        assert_eq!(completed["outcome"], "succeeded");
+        for event in [attempted, completed] {
+            assert_eq!(event["action"], "devices.renew_certificate");
+            assert_eq!(event["actor"]["kind"], "device");
+            assert_eq!(event["actor"]["subject"], device_id);
+            assert_eq!(event["target"]["id"], device_id);
+            assert_eq!(event["request"]["path"], RENEW_DEVICE_CERTIFICATE_RPC);
+        }
+    }
 
-        let unaudited = audited_service(&database, None, AuditLog::broken_stream(database.clone()));
-        let status = unaudited
-            .renew_certificate(device_id, &csr, rpc_info(RENEW_DEVICE_CERTIFICATE_RPC))
+    #[tokio::test]
+    async fn certificate_renewal_fails_closed_when_it_cannot_be_audited() {
+        let database = audit_database("audit-renew-closed").await;
+        let service = audited_service(&database, None, AuditLog::broken_stream(database.clone()));
+        let csr = certificate_request(&KeyPair::generate().unwrap());
+        let status = service
+            .renew_certificate("device-1", &csr, rpc_info(RENEW_DEVICE_CERTIFICATE_RPC))
             .await
             .expect_err("an unaudited renewal must be refused");
         assert_eq!(status.code(), Code::Unavailable);
+        assert_refusal_stored(&database, "devices.renew_certificate").await;
     }
 
     #[tokio::test]

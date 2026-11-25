@@ -60,9 +60,6 @@ pub enum EventKind {
     /// request. Failures before that name nobody and are not recorded, because
     /// anyone can cause them on the public fleet API.
     DeviceEnrollmentDenied,
-    /// A device renewed its certificate. Written before the certificate is
-    /// returned; if it cannot be written, the renewal is refused (fail closed).
-    DeviceCertificateRenewed,
 }
 
 impl EventKind {
@@ -75,7 +72,6 @@ impl EventKind {
             Self::AuthLogout => "auth.logout",
             Self::AuthReauthenticate => "auth.reauthenticate",
             Self::DeviceEnrollmentDenied => "device.enrollment_denied",
-            Self::DeviceCertificateRenewed => "device.certificate_renewed",
         }
     }
 }
@@ -517,9 +513,10 @@ impl AuditLog {
         &self.database
     }
 
-    /// Persists the event, then streams it. An error means the event may not have
-    /// reached both sinks; callers about to act must not proceed. The work runs in
-    /// its own task, so a cancelled caller cannot leave a stored event unstreamed.
+    /// Persists the event, then streams it. If it cannot be stored, it is still
+    /// streamed, without a `seq`. An error means the event may not have reached
+    /// both sinks; callers about to act must not proceed. The work runs in its own
+    /// task, so a cancelled caller cannot leave a stored event unstreamed.
     pub async fn record(&self, event: AuditEvent) -> anyhow::Result<i64> {
         let log = self.clone();
         // Spawned so a cancelled caller cannot stop it between the insert and the stream.
@@ -530,14 +527,27 @@ impl AuditLog {
 
     async fn write(&self, event: AuditEvent) -> anyhow::Result<i64> {
         let prepared = Prepared::new(&event)?;
-        let seq = Database::append_audit_event(
-            &mut *self.database.pool().acquire().await?,
-            &prepared.columns(&event),
-            &prepared.event_json,
-        )
-        .await?;
-        self.stream.write(prepared.line(Some(seq))).await?;
-        Ok(seq)
+        let stored = async {
+            Database::append_audit_event(
+                &mut *self.database.pool().acquire().await?,
+                &prepared.columns(&event),
+                &prepared.event_json,
+            )
+            .await
+        }
+        .await;
+        match stored {
+            Ok(seq) => {
+                self.stream.write(prepared.line(Some(seq))).await?;
+                Ok(seq)
+            }
+            Err(error) => Err(match self.stream.write(prepared.line(None)).await {
+                Ok(()) => error.context("admin audit event was streamed but not stored"),
+                Err(stream) => error.context(format!(
+                    "admin audit event was neither stored nor streamed ({stream:#})"
+                )),
+            }),
+        }
     }
 
     /// Runs an audited change: streams `attempt` (`action.attempted`), then runs
@@ -547,7 +557,9 @@ impl AuditLog {
     ///
     /// The attempt is only streamed, not stored: the stored completion is the
     /// table's record of the change, and the SIEM gets a line before the change
-    /// runs. If that line cannot be written, nothing runs (fail closed).
+    /// runs. If that line cannot be written, nothing runs (fail closed), and a
+    /// `failed` completion with reason `audit_unavailable` is recorded wherever it
+    /// still can be, so the refusal shows on the Audit page.
     ///
     /// Everything runs in its own task, so once called it finishes even if the
     /// caller is cancelled (for example by a request timeout); an attempt is
@@ -569,7 +581,18 @@ impl AuditLog {
                 Ok(prepared) => log.stream.write(prepared.line(None)).await,
                 Err(error) => Err(error),
             };
-            streamed.map_err(ChangeError::AuditUnavailable)?;
+            if let Err(error) = streamed {
+                let refused = attempt
+                    .completed(Outcome::Failed)
+                    .reason("audit_unavailable");
+                if let Err(error) = log.record(refused).await {
+                    tracing::error!(
+                        error = format!("{error:#}"),
+                        "failed to record an admin action refused for lack of audit"
+                    );
+                }
+                return Err(ChangeError::AuditUnavailable(error));
+            }
             match log.commit_with_completion(&attempt, change).await {
                 Ok((value, line)) => {
                     if let Err(error) = log.stream.write(line).await {

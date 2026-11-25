@@ -1113,6 +1113,15 @@ async fn mutations_fail_closed_when_the_audit_log_is_unavailable() {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(json_body(response).await["error"], "audit_unavailable");
     assert!(database.get_device("device-1").await.unwrap().is_some());
+    // The refusal still reaches the table, the sink that works.
+    let rows = database.list_audit_events(None, 10).await.unwrap();
+    let [refused] = &rows[..] else {
+        panic!("expected the refusal: {rows:?}");
+    };
+    assert_eq!(refused.event["event"], "action.completed");
+    assert_eq!(refused.event["outcome"], "failed");
+    assert_eq!(refused.event["reason"], "audit_unavailable");
+    assert_eq!(refused.event["target"]["id"], "device-1");
 
     let (audit, lines) = AuditLog::in_memory(database.clone());
     sqlx::raw_sql("DROP TABLE admin_audit_events")
@@ -1127,12 +1136,17 @@ async fn mutations_fail_closed_when_the_audit_log_is_unavailable() {
     )
     .await;
     // The attempt reached the SIEM, but the completion could not be stored, so the
-    // delete rolled back.
+    // delete rolled back. The failure is streamed without a `seq`.
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert!(database.get_device("device-1").await.unwrap().is_some());
     let events = stream_events(&lines);
-    assert_eq!(events.len(), 1, "{events:?}");
-    assert_eq!(events[0]["event"], "action.attempted");
+    let [attempted, failed] = &events[..] else {
+        panic!("expected attempted and failed events: {events:?}");
+    };
+    assert_eq!(attempted["event"], "action.attempted");
+    assert_eq!(failed["event"], "action.completed");
+    assert_eq!(failed["outcome"], "failed");
+    assert!(failed.get("seq").is_none(), "{failed}");
     std::fs::remove_file(path).unwrap();
 }
 
@@ -1400,8 +1414,20 @@ async fn a_change_rolls_back_when_its_completion_cannot_be_stored() {
     .await;
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert!(database.get_device("device-1").await.unwrap().is_some());
+    assert!(
+        database
+            .list_audit_events(None, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // The failed completion could not be stored either, but still reached the SIEM.
     let events = stream_events(&lines);
-    assert_eq!(events.len(), 1, "only the attempt was stored: {events:?}");
-    assert_eq!(events[0]["event"], "action.attempted");
+    let [attempted, failed] = &events[..] else {
+        panic!("expected attempted and failed events: {events:?}");
+    };
+    assert_eq!(attempted["event"], "action.attempted");
+    assert_eq!(failed["outcome"], "failed");
+    assert!(failed.get("seq").is_none(), "{failed}");
     std::fs::remove_file(path).unwrap();
 }

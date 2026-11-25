@@ -850,13 +850,17 @@ received. A mutation produces two records:
 
 - `action.attempted` is written to stdout before the handler acts. If it cannot
   be written, the request fails with `503 audit_unavailable` and nothing
-  changes. It is not stored in the table, since the completion is stored with
-  the change itself, so its line has no `seq`.
+  changes; a `failed` completion with reason `audit_unavailable` is then stored
+  in the table, so the Audit page shows the refusal. The attempt is not stored
+  in the table, since the completion is stored with the change itself, so its
+  line has no `seq`.
 - `action.completed` carries the outcome. It is stored in the same database
   transaction as the change, so the table never shows a change without its
   completion. Once the attempt is written, the change and its completion finish
   even if the request times out or the client disconnects, so an attempt is not
-  left without its completion.
+  left without its completion. If the change or its completion cannot be
+  stored, the change rolls back and a `failed` completion is recorded on its
+  own.
 
 Handlers make every change with `Context::mutate`, which checks the permission,
 writes the attempt and commits the change with its completion.
@@ -882,8 +886,11 @@ The device-facing fleet API records:
   and an unavailable identity provider are not recorded: the first two name
   nobody verified and anyone can cause them on the public fleet API, and an
   outage rejects nothing.
-- `device.certificate_renewed`: a device renewed its certificate. The actor has
-  kind `device` and the device ID as subject. It fails closed like enrollment.
+- `action.attempted` and `action.completed` with action
+  `devices.renew_certificate`: a device renewed its certificate. The actor has
+  kind `device` and the device ID as subject, and the target is the same
+  device. The certificate is returned only after the completion is stored; it
+  fails closed like enrollment.
 
 Records are written to two places:
 
@@ -895,6 +902,9 @@ Records are written to two places:
   (`GET /api/v1/audit?before=<seq>&limit=<n>`, permission `audit.read`). The
   table is append-only: triggers reject `UPDATE` and `DELETE` (and `TRUNCATE` on
   PostgreSQL), and the controller never prunes it.
+
+A record that cannot be stored in the table is still written to stdout, without
+a `seq`.
 
 Each stdout line also carries `stream: { "id": ..., "seq": ... }`. Every
 controller process picks a random stream `id` at startup and numbers its lines

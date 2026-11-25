@@ -30,7 +30,6 @@ const eventLabels: Record<string, string> = {
   "auth.logout": "Signed out",
   "auth.reauthenticate": "Reauthenticated",
   "device.enrollment_denied": "Enrollment denied",
-  "device.certificate_renewed": "Certificate renewed",
 };
 
 export function AuditView({
