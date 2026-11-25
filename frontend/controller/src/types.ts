@@ -200,7 +200,7 @@ export type AuditEvent = {
     issuer: string;
     subject: string;
     client_id?: string;
-    claims_verified_at: number;
+    claims_verified_at?: number;
     email?: string;
     name?: string;
   };

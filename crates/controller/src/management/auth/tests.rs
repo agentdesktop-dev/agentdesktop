@@ -689,7 +689,7 @@ async fn request_context_shares_evidence_and_checks_borrowed_operation_and_resou
         principal.clone(),
         HeaderMap::new(),
         audit.log.clone(),
-        RequestInfo::new(&Method::GET, &"/".parse().unwrap(), &HeaderMap::new(), None),
+        RequestInfo::new(&Method::GET, "/", &HeaderMap::new(), None),
     );
     let extracted = context.clone();
     assert!(Arc::ptr_eq(&context.principal, &extracted.principal));

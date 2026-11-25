@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     fs,
     path::Path,
     sync::Arc,
@@ -79,7 +78,7 @@ struct Claims<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     email_verified: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    idp: Option<&'a BTreeMap<String, serde_json::Value>>,
+    idp: Option<&'a serde_json::Map<String, serde_json::Value>>,
     /// `subscription` when the request is billed to the user's subscription,
     /// so gateway usage records can report it apart from API spend.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -122,7 +121,7 @@ impl GatewayJwtIssuer {
         device_id: &str,
         client_id: &str,
         audience: &str,
-        idp: Option<&BTreeMap<String, serde_json::Value>>,
+        idp: Option<&serde_json::Map<String, serde_json::Value>>,
         subscription: bool,
     ) -> anyhow::Result<(String, u64)> {
         let issued_at = SystemTime::now()
@@ -182,7 +181,7 @@ fn jwks_from_rsa_pem(pem: &[u8], key_id: &str) -> anyhow::Result<GatewayJwks> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, fs};
+    use std::fs;
 
     use aws_lc_rs::{
         encoding::{AsDer, Pkcs8V1Der},
@@ -282,7 +281,7 @@ mod tests {
 
     #[test]
     fn gateway_claims_include_actor_client_and_idp_identity() {
-        let idp = BTreeMap::from([
+        let idp = serde_json::Map::from_iter([
             ("iss".to_owned(), json!("https://idp.example.com")),
             ("sub".to_owned(), json!("user-123")),
             ("email".to_owned(), json!("john@example.com")),

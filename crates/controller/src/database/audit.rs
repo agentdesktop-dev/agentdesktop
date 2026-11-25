@@ -1,7 +1,7 @@
 //! Append-only storage for management audit events.
 //!
 //! The controller has no code that updates or deletes audit rows, and triggers
-//! from the `0005_admin_audit_*` migrations reject `UPDATE` and `DELETE` (and
+//! from the `0007_admin_audit_*` migrations reject `UPDATE` and `DELETE` (and
 //! `TRUNCATE` on PostgreSQL), so a bug, a manual query or an SQL injection
 //! elsewhere cannot edit the history. The table owner can still drop the
 //! triggers; the copy streamed to the SIEM is the tamper-resistant record.
@@ -26,10 +26,13 @@ pub struct AuditColumns<'a> {
     pub outcome: &'a str,
 }
 
-#[derive(Clone, Debug)]
+/// A stored event; it serializes as the event with its `seq` added, as the
+/// audit API serves it.
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct AuditRow {
     pub seq: i64,
-    pub event_json: String,
+    #[serde(flatten)]
+    pub event: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Database {
@@ -75,10 +78,13 @@ impl Database {
         .fetch_all(&self.pool)
         .await
         .context("list admin audit events")?;
-        Ok(rows
-            .into_iter()
-            .map(|(seq, event_json)| AuditRow { seq, event_json })
-            .collect())
+        rows.into_iter()
+            .map(|(seq, event_json)| {
+                let event =
+                    serde_json::from_str(&event_json).context("parse stored admin audit event")?;
+                Ok(AuditRow { seq, event })
+            })
+            .collect()
     }
 }
 
@@ -163,7 +169,7 @@ mod tests {
         assert_eq!(listed.iter().map(|row| row.seq).collect::<Vec<_>>(), [2, 1]);
         let older = database.list_audit_events(Some(2), 10).await.unwrap();
         assert_eq!(older.len(), 1);
-        assert_eq!(older[0].event_json, r#"{"n":1}"#);
+        assert_eq!(older[0].event["n"], 1);
         std::fs::remove_file(path).unwrap();
     }
 
@@ -208,7 +214,7 @@ mod tests {
         }
         let listed = database.list_audit_events(None, 10).await.unwrap();
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].event_json, r#"{"n":1}"#);
+        assert_eq!(listed[0].event["n"], 1);
         std::fs::remove_file(path).unwrap();
     }
 
@@ -251,18 +257,18 @@ mod tests {
         use crate::audit::{Actor, AuditEvent, AuditLog, EventKind, Outcome};
         let (audit, _) = AuditLog::in_memory(database.clone());
         let device_id = uuid::Uuid::new_v4().to_string();
-        let completion = || {
+        let attempt = || {
             vec![AuditEvent::new(
-                EventKind::ActionCompleted,
+                EventKind::ActionAttempted,
                 Actor::device(&device_id),
-                Outcome::Succeeded,
+                Outcome::Authorized,
             )]
         };
         let count = || async { stored_seqs(&database).await.len() };
         let stored = count().await;
         let id = device_id.clone();
         audit
-            .complete_in_transaction(completion(), move |mut transaction| async move {
+            .complete_in_transaction(attempt(), move |mut transaction| async move {
                 sqlx::query("INSERT INTO devices (id, hostname, created_at) VALUES ($1, 'h', 0)")
                     .bind(id)
                     .execute(&mut *transaction)
@@ -274,7 +280,7 @@ mod tests {
         assert_eq!(count().await, stored + 1);
         assert!(database.get_device(&device_id).await.unwrap().is_some());
         let rolled_back: anyhow::Result<()> = audit
-            .complete_in_transaction(completion(), |mut transaction| async move {
+            .complete_in_transaction(attempt(), |mut transaction| async move {
                 sqlx::query("DELETE FROM devices WHERE hostname = 'h'")
                     .execute(&mut *transaction)
                     .await?;

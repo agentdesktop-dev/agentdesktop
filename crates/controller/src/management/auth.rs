@@ -24,7 +24,7 @@ use axum::{
 };
 use serde_json::json;
 
-use crate::audit::{Actor, AuditEvent, AuditLog, EventKind, Outcome, RequestInfo, Target};
+use crate::audit::{Actor, ActorKind, AuditEvent, AuditLog, EventKind, Outcome, RequestInfo};
 use authentication::{Principal, PrincipalKind};
 use authorization::AccessRequest;
 
@@ -118,10 +118,10 @@ pub struct Context {
 /// Per-request audit state shared by `Context::require` and the middleware.
 struct RequestAudit {
     info: RequestInfo,
-    /// Mutations authorized (and recorded as attempted) during this request whose
-    /// completion is not recorded yet. [`Context::mutate`] takes them over;
+    /// The `action.attempted` events of mutations authorized during this request
+    /// whose completion is not recorded yet. [`Context::mutate`] takes them over;
     /// otherwise the middleware records them when the handler returns.
-    authorized: Mutex<Vec<(String, Target)>>,
+    authorized: Mutex<Vec<AuditEvent>>,
     /// Whether any mutation permission was checked, whatever the result.
     mutation_checked: AtomicBool,
 }
@@ -193,24 +193,14 @@ impl Context {
                 }
             }
             Ok(()) if mutation => {
-                if let Err(audit_error) = self
-                    .audit
-                    .stream(event(EventKind::ActionAttempted, Outcome::Authorized))
-                    .await
-                {
+                let attempt = event(EventKind::ActionAttempted, Outcome::Authorized);
+                if let Err(audit_error) = self.audit.stream(&attempt).await {
                     tracing::error!(error = format!("{audit_error:#}"), subject = %self.principal.subject,
                         permission = access.permission(),
                         "refusing admin action that could not be audited");
                     return Err(Error(StatusCode::SERVICE_UNAVAILABLE, "audit_unavailable"));
                 }
-                self.request.authorized.lock().unwrap().push((
-                    access.permission(),
-                    Target {
-                        class: access.resource_class.to_owned(),
-                        id: access.resource.map(str::to_owned),
-                        name: None,
-                    },
-                ));
+                self.request.authorized.lock().unwrap().push(attempt);
             }
             Ok(()) => {}
         }
@@ -239,23 +229,7 @@ impl Context {
             !authorized.is_empty(),
             "mutation without an authorized operation; call Context::require first"
         );
-        let completions = authorized
-            .into_iter()
-            .map(|(action, target)| {
-                let mut completion = AuditEvent::new(
-                    EventKind::ActionCompleted,
-                    Actor::from(&*self.principal),
-                    Outcome::Succeeded,
-                )
-                .action(action)
-                .request(self.request.info.clone());
-                completion.target = Some(target);
-                completion
-            })
-            .collect();
-        self.audit
-            .complete_in_transaction(completions, change)
-            .await
+        self.audit.complete_in_transaction(authorized, change).await
     }
 }
 
@@ -335,7 +309,12 @@ async fn authenticate_request(
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(peer)| *peer);
-    let info = RequestInfo::new(request.method(), request.uri(), request.headers(), peer);
+    let info = RequestInfo::new(
+        request.method(),
+        request.uri().path(),
+        request.headers(),
+        peer,
+    );
     let context = Context::new(
         auth.provider,
         principal,
@@ -374,19 +353,13 @@ impl Drop for CancelGuard {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        let context = self.0.clone();
+        let audit = self.0.audit.clone();
         runtime.spawn(async move {
-            for (action, target) in pending {
-                let mut cancelled = AuditEvent::new(
-                    EventKind::ActionCompleted,
-                    Actor::from(context.principal()),
-                    Outcome::Failed,
-                )
-                .action(action)
-                .reason("request_cancelled")
-                .request(context.request.info.clone());
-                cancelled.target = Some(target);
-                if let Err(error) = context.audit.record(cancelled).await {
+            for attempt in pending {
+                let cancelled = attempt
+                    .completed(Outcome::Failed)
+                    .reason("request_cancelled");
+                if let Err(error) = audit.record(cancelled).await {
                     tracing::error!(
                         error = format!("{error:#}"),
                         "failed to record a cancelled admin action"
@@ -403,7 +376,6 @@ impl Drop for CancelGuard {
 /// is logged rather than returned.
 async fn record_completion(context: &Context, status: StatusCode) {
     let authorized = std::mem::take(&mut *context.request.authorized.lock().unwrap());
-    let actor = || Actor::from(context.principal());
     let mut completions = Vec::new();
     if authorized.is_empty() {
         // 4xx without a check: routing or extraction rejected the request (e.g. 405)
@@ -414,11 +386,14 @@ async fn record_completion(context: &Context, status: StatusCode) {
         tracing::error!(method = %context.request.info.method, path = %context.request.info.path,
             status = status.as_u16(),
             "mutating admin request finished without a mutation permission check");
-        completions.push(AuditEvent::new(
-            EventKind::ActionCompleted,
-            actor(),
-            Outcome::Unaudited,
-        ));
+        completions.push(
+            AuditEvent::new(
+                EventKind::ActionCompleted,
+                Actor::from(context.principal()),
+                Outcome::Unaudited,
+            )
+            .request(context.request.info.clone()),
+        );
     } else {
         let outcome = if status.is_success() || status.is_redirection() {
             Outcome::Succeeded
@@ -427,17 +402,14 @@ async fn record_completion(context: &Context, status: StatusCode) {
         } else {
             Outcome::Failed
         };
-        for (action, target) in authorized {
-            let mut event =
-                AuditEvent::new(EventKind::ActionCompleted, actor(), outcome).action(action);
-            event.target = Some(target);
-            completions.push(event);
-        }
+        completions.extend(
+            authorized
+                .into_iter()
+                .map(|attempt| attempt.completed(outcome)),
+        );
     }
     for event in completions {
-        let event = event
-            .status(status.as_u16())
-            .request(context.request.info.clone());
+        let event = event.status(status.as_u16());
         if let Err(error) = context.audit.record(event).await {
             tracing::error!(error = format!("{error:#}"), subject = %context.principal.subject,
                 path = %context.request.info.path, status = status.as_u16(),
@@ -448,27 +420,18 @@ async fn record_completion(context: &Context, status: StatusCode) {
 
 impl From<&Principal> for Actor {
     fn from(principal: &Principal) -> Self {
-        let claim = |name: &str| {
-            principal
-                .claims
-                .get(name)
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        };
         let (kind, client_id) = match &principal.kind {
-            PrincipalKind::Local => ("local", None),
-            PrincipalKind::Human => ("human", None),
-            PrincipalKind::Service { client_id } => ("service", Some(client_id.clone())),
+            PrincipalKind::Local => (ActorKind::Local, None),
+            PrincipalKind::Human => (ActorKind::Human, None),
+            PrincipalKind::Service { client_id } => (ActorKind::Service, Some(client_id.clone())),
         };
-        Self {
-            kind,
-            issuer: principal.issuer.clone(),
-            subject: principal.subject.clone(),
-            client_id,
-            claims_verified_at: principal.claims_verified_at,
-            email: claim("email"),
-            name: claim("name"),
-        }
+        let mut actor = Actor::new(kind, &principal.issuer, &principal.subject)
+            .with_identity_claims(&principal.claims);
+        actor.client_id = client_id;
+        // Local access verifies no claims and reports 0.
+        actor.claims_verified_at = (kind != ActorKind::Local && principal.claims_verified_at > 0)
+            .then_some(principal.claims_verified_at);
+        actor
     }
 }
 

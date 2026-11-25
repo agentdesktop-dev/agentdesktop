@@ -334,7 +334,7 @@ impl Database {
         hostname: &str,
         enrolled_by_issuer: &str,
         enrolled_by_subject: &str,
-        idp_claims: Option<&BTreeMap<String, serde_json::Value>>,
+        idp_claims: Option<&serde_json::Map<String, serde_json::Value>>,
     ) -> anyhow::Result<()> {
         let idp_claims_json = idp_claims
             .map(serde_json::to_string)
@@ -957,7 +957,7 @@ mod tests {
         let database = Database::connect(&format!("sqlite://{}?mode=rwc", path.display()))
             .await
             .expect("connect test database");
-        let idp_claims = BTreeMap::from([
+        let idp_claims = serde_json::Map::from_iter([
             ("sub".to_owned(), serde_json::json!("subject")),
             ("email".to_owned(), serde_json::json!("john@example.com")),
         ]);
@@ -1100,7 +1100,7 @@ mod tests {
     #[tokio::test]
     async fn the_device_list_and_detail_name_who_enrolled_the_device() {
         let (database, path) = test_database("owner-name").await;
-        let claims = BTreeMap::from([
+        let claims = serde_json::Map::from_iter([
             ("sub".to_owned(), serde_json::json!("subject-2")),
             ("email".to_owned(), serde_json::json!("alex@example.com")),
             ("groups".to_owned(), serde_json::json!(["admins"])),

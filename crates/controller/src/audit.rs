@@ -23,15 +23,12 @@ use std::{
 };
 
 use anyhow::Context as _;
-use axum::http::{HeaderMap, Method, Uri, header};
+use axum::http::{HeaderMap, Method, header};
 use serde::Serialize;
 use serde_json::{Map, Value};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-use crate::database::{
-    Database,
-    audit::{AuditColumns, AuditRow},
-};
+use crate::database::{Database, audit::AuditColumns};
 
 pub const SCHEMA: &str = "agentdesktop.audit.v1";
 
@@ -134,62 +131,89 @@ impl Serialize for Outcome {
 /// tokens' group lists and other personal data into every record.
 #[derive(Clone, Debug, Serialize)]
 pub struct Actor {
-    pub kind: &'static str,
+    pub kind: ActorKind,
     pub issuer: String,
     pub subject: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
-    pub claims_verified_at: i64,
+    /// When a management authentication provider last verified the identity
+    /// claims (`email`, `name`), as Unix seconds. Set only for human and service
+    /// principals of providers that track it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claims_verified_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
 
+/// What kind of credential identified an [`Actor`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActorKind {
+    /// Unauthenticated loopback access in local management mode.
+    Local,
+    Human,
+    /// An app-only credential; see [`Actor::client_id`].
+    Service,
+    /// A device, by the certificate the controller's device CA issued it.
+    Device,
+    /// An operator-signed enrollment token.
+    EnrollmentToken,
+}
+
+impl ActorKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Human => "human",
+            Self::Service => "service",
+            Self::Device => "device",
+            Self::EnrollmentToken => "enrollment_token",
+        }
+    }
+}
+
+impl Serialize for ActorKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 impl Actor {
+    pub fn new(kind: ActorKind, issuer: impl Into<String>, subject: impl Into<String>) -> Self {
+        Self {
+            kind,
+            issuer: issuer.into(),
+            subject: subject.into(),
+            client_id: None,
+            claims_verified_at: None,
+            email: None,
+            name: None,
+        }
+    }
+
+    /// Copies the identifying `email` and `name` claims, when they are strings.
+    pub fn with_identity_claims(mut self, claims: &Map<String, Value>) -> Self {
+        let text = |name| claims.get(name).and_then(Value::as_str).map(str::to_owned);
+        self.email = text("email");
+        self.name = text("name");
+        self
+    }
+
     /// A person who signed in with the enrollment identity provider; `claims` are
     /// the verified ID token claims.
-    pub fn oidc_user(
-        issuer: &str,
-        subject: &str,
-        claims: &std::collections::BTreeMap<String, Value>,
-    ) -> Self {
-        let claim = |name: &str| claims.get(name).and_then(Value::as_str).map(str::to_owned);
-        Self {
-            kind: "human",
-            issuer: issuer.to_owned(),
-            subject: subject.to_owned(),
-            client_id: None,
-            claims_verified_at: OffsetDateTime::now_utc().unix_timestamp(),
-            email: claim("email"),
-            name: claim("name"),
-        }
+    pub fn oidc_user(issuer: &str, subject: &str, claims: &Map<String, Value>) -> Self {
+        Self::new(ActorKind::Human, issuer, subject).with_identity_claims(claims)
     }
 
     /// A device, identified by the certificate the controller's device CA issued it.
     pub fn device(device_id: &str) -> Self {
-        Self {
-            kind: "device",
-            issuer: "device-ca".to_owned(),
-            subject: device_id.to_owned(),
-            client_id: None,
-            claims_verified_at: OffsetDateTime::now_utc().unix_timestamp(),
-            email: None,
-            name: None,
-        }
+        Self::new(ActorKind::Device, "device-ca", device_id)
     }
 
     /// An operator-signed enrollment token, identified by its issuer and token ID.
     pub fn enrollment_token(issuer: &str, id: &str) -> Self {
-        Self {
-            kind: "enrollment_token",
-            issuer: issuer.to_owned(),
-            subject: id.to_owned(),
-            client_id: None,
-            claims_verified_at: OffsetDateTime::now_utc().unix_timestamp(),
-            email: None,
-            name: None,
-        }
+        Self::new(ActorKind::EnrollmentToken, issuer, id)
     }
 }
 
@@ -220,7 +244,8 @@ pub struct RequestInfo {
 }
 
 impl RequestInfo {
-    pub fn new(method: &Method, uri: &Uri, headers: &HeaderMap, peer: Option<SocketAddr>) -> Self {
+    /// `path` is the HTTP path, or the method path of a gRPC call.
+    pub fn new(method: &Method, path: &str, headers: &HeaderMap, peer: Option<SocketAddr>) -> Self {
         let header = |name| {
             headers
                 .get(name)
@@ -229,8 +254,8 @@ impl RequestInfo {
         };
         Self {
             id: uuid::Uuid::new_v4().to_string(),
-            method: method.to_string(),
-            path: truncate(uri.path(), MAX_PATH_LENGTH),
+            method: method.as_str().to_owned(),
+            path: truncate(path, MAX_PATH_LENGTH),
             peer: peer.map(|peer| peer.to_string()),
             forwarded_for: header(header::HeaderName::from_static("x-forwarded-for")),
             user_agent: header(header::USER_AGENT),
@@ -323,6 +348,16 @@ impl AuditEvent {
         self.request = Some(request);
         self
     }
+
+    /// The `action.completed` event of this attempt: the same actor, action,
+    /// target and request, with the given outcome.
+    pub fn completed(&self, outcome: Outcome) -> Self {
+        Self {
+            event: EventKind::ActionCompleted,
+            outcome,
+            ..self.clone()
+        }
+    }
 }
 
 /// The hashed form of an event, stored verbatim as `event_json`.
@@ -342,14 +377,6 @@ struct StoredEvent<'a> {
     status: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     request: Option<&'a RequestInfo>,
-}
-
-/// Stored event plus its `seq`, as streamed and served by the API.
-pub fn published(row: &AuditRow) -> anyhow::Result<Map<String, Value>> {
-    let mut event: Map<String, Value> =
-        serde_json::from_str(&row.event_json).context("parse stored admin audit event")?;
-    event.insert("seq".into(), row.seq.into());
-    Ok(event)
 }
 
 /// Numbers the lines of one stream. The counter is held while the line is
@@ -509,11 +536,12 @@ impl AuditLog {
     /// Used for `action.attempted`: the change's transaction stores its completion
     /// atomically, so only the SIEM needs a line written before the change. An
     /// error means the line may not have been written; the caller must not act.
-    pub async fn stream(&self, event: AuditEvent) -> anyhow::Result<()> {
-        self.stream.write(Prepared::new(&event)?.line(None)).await
+    pub async fn stream(&self, event: &AuditEvent) -> anyhow::Result<()> {
+        self.stream.write(Prepared::new(event)?.line(None)).await
     }
 
-    /// Runs `change` in a database transaction and records `completions` with its
+    /// Runs `change` in a database transaction and records the completions of
+    /// `attempts` with its
     /// outcome in the same transaction, so the change and its `action.completed`
     /// records commit together or not at all. The lines are streamed after the
     /// commit.
@@ -525,7 +553,7 @@ impl AuditLog {
     /// the completions are recorded as `failed` on their own (best effort).
     pub async fn complete_in_transaction<T, F, Fut>(
         &self,
-        completions: Vec<AuditEvent>,
+        attempts: Vec<AuditEvent>,
         change: F,
     ) -> anyhow::Result<T>
     where
@@ -537,7 +565,7 @@ impl AuditLog {
         let log = self.clone();
         // Spawned so a cancelled caller cannot stop it between the change, commit and stream.
         tokio::spawn(async move {
-            let committed = log.commit_with_completions(&completions, change).await;
+            let committed = log.commit_with_completions(&attempts, change).await;
             match committed {
                 Ok((value, lines)) => {
                     for line in lines {
@@ -551,12 +579,8 @@ impl AuditLog {
                     Ok(value)
                 }
                 Err(error) => {
-                    for completion in completions {
-                        let failed = AuditEvent {
-                            outcome: Outcome::Failed,
-                            ..completion
-                        };
-                        if let Err(error) = log.record(failed).await {
+                    for attempt in attempts {
+                        if let Err(error) = log.record(attempt.completed(Outcome::Failed)).await {
                             tracing::error!(
                                 error = format!("{error:#}"),
                                 "failed to record a failed admin audit completion"
@@ -573,7 +597,7 @@ impl AuditLog {
 
     async fn commit_with_completions<T, F, Fut>(
         &self,
-        completions: &[AuditEvent],
+        attempts: &[AuditEvent],
         change: F,
     ) -> anyhow::Result<(T, Vec<Map<String, Value>>)>
     where
@@ -582,12 +606,9 @@ impl AuditLog {
     {
         let transaction = self.database.pool().begin().await?;
         let (mut transaction, value, outcome) = change(transaction).await?;
-        let mut lines = Vec::with_capacity(completions.len());
-        for completion in completions {
-            let completion = AuditEvent {
-                outcome,
-                ..completion.clone()
-            };
+        let mut lines = Vec::with_capacity(attempts.len());
+        for attempt in attempts {
+            let completion = attempt.completed(outcome);
             let prepared = Prepared::new(&completion)?;
             let seq = Database::append_audit_event(
                 &mut transaction,

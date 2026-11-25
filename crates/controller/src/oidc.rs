@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     future::Future,
     sync::{Arc, RwLock},
     time::{Duration, Instant},
@@ -92,7 +91,7 @@ pub enum EnrollmentCredential {
 pub struct EnrolledUser {
     pub issuer: String,
     pub subject: String,
-    pub idp_claims: BTreeMap<String, serde_json::Value>,
+    pub idp_claims: serde_json::Map<String, serde_json::Value>,
 }
 
 pub(crate) fn validate_hostname(hostname: &str) -> anyhow::Result<()> {
@@ -140,7 +139,7 @@ struct IdTokenClaims {
     #[serde(default)]
     nonce: Option<String>,
     #[serde(flatten)]
-    additional: BTreeMap<String, serde_json::Value>,
+    additional: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Deserialize)]

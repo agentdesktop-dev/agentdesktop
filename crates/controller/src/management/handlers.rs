@@ -10,7 +10,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
 use tracing::info;
 
 use super::{
@@ -22,7 +21,7 @@ use super::{
 };
 use crate::{
     audit::Outcome,
-    database::{Database, DeviceDetail, DeviceSummary},
+    database::{Database, DeviceDetail, DeviceSummary, audit::AuditRow},
     usage,
 };
 
@@ -224,7 +223,7 @@ pub(super) struct AuditQuery {
 
 #[derive(Serialize)]
 pub(super) struct AuditPage {
-    events: Vec<Map<String, Value>>,
+    events: Vec<AuditRow>,
     /// Pass as `before` to fetch the next older page; absent on the last page.
     next_before: Option<i64>,
 }
@@ -244,20 +243,16 @@ pub(super) async fn audit_events(
         .limit
         .unwrap_or(AUDIT_PAGE_DEFAULT)
         .clamp(1, AUDIT_PAGE_MAX);
-    let rows = state
+    // One extra row says whether an older page exists; `seq` may have gaps.
+    let mut rows = state
         .database
-        .list_audit_events(query.before, limit)
+        .list_audit_events(query.before, limit + 1)
         .await?;
-    let next_before = rows
-        .last()
-        .filter(|row| rows.len() as i64 == limit && row.seq > 1)
-        .map(|row| row.seq);
-    let events = rows
-        .iter()
-        .map(crate::audit::published)
-        .collect::<anyhow::Result<_>>()?;
+    let more = rows.len() as i64 > limit;
+    rows.truncate(limit as usize);
+    let next_before = rows.last().filter(|_| more).map(|row| row.seq);
     Ok(Json(AuditPage {
-        events,
+        events: rows,
         next_before,
     }))
 }

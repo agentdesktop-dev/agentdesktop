@@ -595,19 +595,17 @@ impl FleetAgentService {
                 return Err(invalid_csr(error));
             }
         };
-        let event = |kind, outcome| {
-            AuditEvent::new(kind, enrollment_actor(completed), outcome)
-                .action(ENROLL_DEVICE)
-                .target(DEVICES, Some(&device_id))
-                .target_name(&completed.hostname)
-                .request(info.clone())
-        };
+        let attempt = AuditEvent::new(
+            EventKind::ActionAttempted,
+            enrollment_actor(completed),
+            Outcome::Authorized,
+        )
+        .action(ENROLL_DEVICE)
+        .target(DEVICES, Some(&device_id))
+        .target_name(&completed.hostname)
+        .request(info);
         // Nothing is admitted until the attempt is streamed (fail closed).
-        if let Err(error) = self
-            .audit
-            .stream(event(EventKind::ActionAttempted, Outcome::Authorized))
-            .await
-        {
+        if let Err(error) = self.audit.stream(&attempt).await {
             error!(
                 error = format!("{error:#}"),
                 %device_id, "refusing device enrollment that could not be audited"
@@ -624,14 +622,11 @@ impl FleetAgentService {
         let enrollment = completed.clone();
         let response = self
             .audit
-            .complete_in_transaction(
-                vec![event(EventKind::ActionCompleted, Outcome::Succeeded)],
-                move |mut transaction| async move {
-                    let stored =
-                        Database::finish_enrollment(&mut transaction, &enrollment, &issued).await?;
-                    Ok((transaction, stored, Outcome::Succeeded))
-                },
-            )
+            .complete_in_transaction(vec![attempt], move |mut transaction| async move {
+                let stored =
+                    Database::finish_enrollment(&mut transaction, &enrollment, &issued).await?;
+                Ok((transaction, stored, Outcome::Succeeded))
+            })
             .await
             .map_err(internal)?;
         match &completed.credential {
@@ -724,9 +719,10 @@ fn enrollment_actor(completed: &CompletedEnrollment) -> Actor {
 }
 
 fn grpc_request_info<T>(request: &Request<T>, path: &'static str) -> RequestInfo {
+    // Every gRPC call is an HTTP/2 POST to the method's path.
     RequestInfo::new(
         &axum::http::Method::POST,
-        &axum::http::Uri::from_static(path),
+        path,
         request.metadata().as_ref(),
         request.remote_addr(),
     )
@@ -1015,7 +1011,10 @@ mod tests {
             credential: EnrollmentCredential::User(EnrolledUser {
                 issuer: "https://id.example".into(),
                 subject: "user-1".into(),
-                idp_claims: [("email".to_owned(), "dev@example.com".into())].into(),
+                idp_claims: serde_json::Map::from_iter([(
+                    "email".to_owned(),
+                    "dev@example.com".into(),
+                )]),
             }),
         }
     }
@@ -1170,7 +1169,6 @@ mod tests {
                 event["actor"],
                 serde_json::json!({
                     "kind": "enrollment_token", "issuer": "ops", "subject": "token-7",
-                    "claims_verified_at": event["actor"]["claims_verified_at"],
                 })
             );
         }
