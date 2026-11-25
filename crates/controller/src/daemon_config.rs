@@ -43,18 +43,20 @@ impl DaemonConfigStore {
     }
 
     pub(crate) fn publish(&self, next: DaemonConfig) -> bool {
-        let unchanged = self.sender.borrow().as_ref().is_some_and(|current| {
-            current.revision == next.revision && current.sha256 == next.sha256
-        });
         *self
             .reload_error
             .write()
             .expect("daemon-config reload status lock poisoned") = None;
-        if unchanged {
-            return false;
-        }
-        self.sender.send_replace(Some(next));
-        true
+        self.sender.send_if_modified(|current| {
+            if current.as_ref().is_some_and(|current| {
+                current.revision > next.revision
+                    || (current.revision == next.revision && current.sha256 == next.sha256)
+            }) {
+                return false;
+            }
+            *current = Some(next);
+            true
+        })
     }
 
     fn record_error(&self, error: &anyhow::Error) {
@@ -230,6 +232,46 @@ mod tests {
     use tokio::time::{Instant, sleep, timeout};
 
     use super::*;
+
+    #[test]
+    fn publishes_only_newer_revisions_or_changed_content_at_the_same_revision() {
+        let config = |revision, hash| DaemonConfig {
+            revision,
+            yaml: vec![hash],
+            sha256: vec![hash],
+        };
+        let store = DaemonConfigStore::new(Some(config(2, 1)));
+        let mut updates = store.subscribe();
+        assert!(!store.publish(config(1, 2)));
+        assert!(!store.publish(config(2, 1)));
+        assert!(!updates.has_changed().unwrap());
+        assert!(store.publish(config(2, 2)));
+        assert!(updates.has_changed().unwrap());
+        updates.borrow_and_update();
+        assert!(store.publish(config(3, 3)));
+        assert!(!store.publish(config(2, 4)));
+        assert_eq!(store.current().unwrap().revision, 3);
+    }
+
+    #[test]
+    fn concurrent_publications_never_leave_an_older_revision() {
+        for _ in 0..100 {
+            let store = DaemonConfigStore::new(None);
+            std::thread::scope(|scope| {
+                for revision in 1..=8 {
+                    let store = store.clone();
+                    scope.spawn(move || {
+                        store.publish(DaemonConfig {
+                            revision,
+                            yaml: vec![],
+                            sha256: vec![],
+                        });
+                    });
+                }
+            });
+            assert_eq!(store.current().unwrap().revision, 8);
+        }
+    }
 
     #[tokio::test]
     async fn watches_atomic_replacements_and_retains_last_good_config() {

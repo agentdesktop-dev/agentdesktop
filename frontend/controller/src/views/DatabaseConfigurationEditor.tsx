@@ -43,7 +43,6 @@ export interface DatabaseConfigurationEditorProps {
   onSelectRevision: (revision: number | null) => void;
   onSave: (request: SaveDaemonConfig) => Promise<ActiveDaemonConfig>;
   onLoadLatest: () => Promise<ActiveDaemonConfig>;
-  onReauthenticate: () => void;
   onSaved: () => void;
 }
 
@@ -68,7 +67,6 @@ export function DatabaseConfigurationEditor({
   onSelectRevision,
   onSave,
   onLoadLatest,
-  onReauthenticate,
   onSaved,
 }: DatabaseConfigurationEditorProps) {
   const [baseYaml, setBaseYaml] = useState(active.yaml ?? "");
@@ -79,6 +77,7 @@ export function DatabaseConfigurationEditor({
   const [builderConfig, setBuilderConfig] =
     useState<DaemonConfigDocument | null>(null);
   const [builderError, setBuilderError] = useState<string | null>(null);
+  const [builderDirty, setBuilderDirty] = useState(false);
   const [message, setMessage] = useState("");
   const [reviewOpen, setReviewOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -87,6 +86,7 @@ export function DatabaseConfigurationEditor({
   const [conflict, setConflict] = useState<ActiveDaemonConfig | null>(null);
   const [savedRevision, setSavedRevision] = useState<number | null>(null);
   const dirty = draft !== baseYaml;
+  const hasUnsavedChanges = dirty || builderDirty || Boolean(message.trim());
   const devicesOnline = (devices ?? []).filter((device) => {
     const now = Math.floor(Date.now() / 1000);
     return device.last_seen_at !== null && now - device.last_seen_at <= 90;
@@ -116,24 +116,26 @@ export function DatabaseConfigurationEditor({
     () =>
       registerNavigationGuard(
         () =>
-          (!dirty && !message.trim()) ||
+          !hasUnsavedChanges ||
           window.confirm("Discard your unsaved configuration changes?"),
       ),
-    [dirty, message],
+    [hasUnsavedChanges],
   );
 
   useEffect(() => {
-    if (!dirty && !message.trim()) return;
+    if (!hasUnsavedChanges) return;
     const warnBeforeUnload = (event: BeforeUnloadEvent) => {
       event.preventDefault();
       event.returnValue = "";
     };
     window.addEventListener("beforeunload", warnBeforeUnload);
     return () => window.removeEventListener("beforeunload", warnBeforeUnload);
-  }, [dirty, message]);
+  }, [hasUnsavedChanges]);
 
   function openBuilder() {
+    if (tab === "builder") return;
     setBuilderError(null);
+    setBuilderDirty(false);
     try {
       setBuilderConfig(parseDaemonConfig(draft));
       setTab("builder");
@@ -147,11 +149,12 @@ export function DatabaseConfigurationEditor({
     }
   }
 
-  function applyBuilderYaml(yaml: string) {
+  function applyBuilderYaml(yaml: string, initialYaml: string) {
     try {
-      setDraft(mergeBuilderYaml(draft, yaml));
+      setDraft(mergeBuilderYaml(draft, initialYaml, yaml));
       setTab("yaml");
       setBuilderConfig(null);
+      setBuilderDirty(false);
       setBuilderError(null);
       setError(null);
     } catch (reason) {
@@ -160,26 +163,31 @@ export function DatabaseConfigurationEditor({
           ? reason.message
           : "Could not apply builder changes.",
       );
+      return false;
     }
   }
 
   async function save() {
-    if (!canUpdate || !dirty || saving) return;
+    if (!canUpdate || !dirty || builderDirty || saving) return;
+    const submittedDraft = draft;
+    const submittedMessage = message;
     setSaving(true);
     setError(null);
     setReauthenticate(false);
     try {
       const saved = await onSave({
         base_revision: baseRevision,
-        yaml: draft,
-        ...(message.trim() ? { message: message.trim() } : {}),
+        yaml: submittedDraft,
+        ...(submittedMessage.trim()
+          ? { message: submittedMessage.trim() }
+          : {}),
       });
-      const savedYaml = saved.yaml ?? draft;
+      const savedYaml = saved.yaml ?? submittedDraft;
       setBaseYaml(savedYaml);
-      setDraft(savedYaml);
+      setDraft((current) => (current === submittedDraft ? savedYaml : current));
       setBaseRevision(saved.revision ?? baseRevision);
       setActiveConfig(saved);
-      setMessage("");
+      setMessage((current) => (current === submittedMessage ? "" : current));
       setReviewOpen(false);
       setConflict(null);
       setSavedRevision(saved.revision);
@@ -210,10 +218,12 @@ export function DatabaseConfigurationEditor({
 
   function reloadConflict() {
     if (!conflict) return;
+    if (!discardBuilderChanges()) return;
     const latestYaml = conflict.yaml ?? "";
     setActiveConfig(conflict);
     setBaseYaml(latestYaml);
     setDraft(latestYaml);
+    setTab("yaml");
     setBaseRevision(conflict.revision ?? 0);
     setConflict(null);
     setMessage("");
@@ -230,10 +240,23 @@ export function DatabaseConfigurationEditor({
   }
 
   function restoreRevision(yaml: string) {
+    if (!discardBuilderChanges()) return;
     setDraft(yaml);
     setTab("yaml");
     setReviewOpen(false);
     setError(null);
+  }
+
+  function discardBuilderChanges() {
+    if (
+      builderDirty &&
+      !window.confirm("Discard your unapplied builder changes?")
+    ) {
+      return false;
+    }
+    setBuilderDirty(false);
+    setBuilderConfig(null);
+    return true;
   }
 
   return (
@@ -252,13 +275,14 @@ export function DatabaseConfigurationEditor({
           <CircleAlert size={14} />
           {error}
           {reauthenticate && (
-            <button
-              type="button"
+            <a
               className="text-button"
-              onClick={onReauthenticate}
+              href="/auth/login?reauthenticate=true"
+              target="_blank"
+              rel="noopener noreferrer"
             >
-              Sign in again
-            </button>
+              Sign in again in a new tab, then return to save
+            </a>
           )}
         </p>
       )}
@@ -314,7 +338,10 @@ export function DatabaseConfigurationEditor({
                   aria-controls="database-config-panel"
                   aria-selected={tab === "yaml"}
                   className={tab === "yaml" ? "active" : ""}
-                  onClick={() => setTab("yaml")}
+                  onClick={() => {
+                    if (tab === "builder" && !discardBuilderChanges()) return;
+                    setTab("yaml");
+                  }}
                 >
                   YAML
                 </button>
@@ -332,7 +359,7 @@ export function DatabaseConfigurationEditor({
                   </button>
                 )}
               </div>
-              {dirty && (
+              {(dirty || builderDirty) && (
                 <span className="config-draft-state dirty" aria-live="polite">
                   Unsaved
                 </span>
@@ -360,14 +387,25 @@ export function DatabaseConfigurationEditor({
                   />
                 </label>
               ) : builderConfig ? (
-                <ConfigurationView
-                  key={`${baseRevision}-${tab}`}
-                  embedded
-                  initialConfig={builderConfig}
-                  onCopy={applyBuilderYaml}
-                  copyLabel="Apply to draft"
-                  copySuccessLabel="Applied"
-                />
+                <>
+                  {builderError && (
+                    <p
+                      className="config-notice config-editor-error"
+                      role="alert"
+                    >
+                      <CircleAlert size={14} />
+                      {builderError}
+                    </p>
+                  )}
+                  <ConfigurationView
+                    embedded
+                    initialConfig={builderConfig}
+                    onCopy={applyBuilderYaml}
+                    onDirtyChange={setBuilderDirty}
+                    copyLabel="Apply to draft"
+                    copySuccessLabel="Applied"
+                  />
+                </>
               ) : (
                 <p className="config-notice config-editor-error" role="alert">
                   <CircleAlert size={14} />
@@ -381,7 +419,7 @@ export function DatabaseConfigurationEditor({
                 <button
                   type="button"
                   className="button primary"
-                  disabled={!dirty || saving}
+                  disabled={!dirty || builderDirty || saving}
                   onClick={() => setReviewOpen((open) => !open)}
                 >
                   <Save size={14} />
@@ -450,7 +488,7 @@ export function DatabaseConfigurationEditor({
                 <button
                   type="button"
                   className="button primary"
-                  disabled={saving}
+                  disabled={saving || builderDirty || !dirty}
                   onClick={() => void save()}
                 >
                   {saving ? "Saving…" : "Save configuration"}
@@ -468,6 +506,11 @@ export function DatabaseConfigurationEditor({
                   <span>{failed ?? 0} failed</span>
                   <span>{waiting ?? 0} not reported</span>
                 </div>
+              )}
+              {devicesError && (
+                <p className="config-history-error">
+                  Could not refresh device status: {devicesError}
+                </p>
               )}
             </section>
           )}
@@ -666,35 +709,109 @@ function parseDaemonConfig(yaml: string): DaemonConfigDocument {
   if (typeof value !== "object" || Array.isArray(value)) {
     throw new Error("The YAML root must be a mapping.");
   }
+  const ancestors = new WeakSet<object>();
+  const visited = new WeakSet<object>();
+  const checkCycles = (item: unknown) => {
+    if (item === null || typeof item !== "object") return;
+    if (ancestors.has(item)) {
+      throw new Error("Cyclic YAML aliases cannot be edited in the builder.");
+    }
+    if (visited.has(item)) return;
+    ancestors.add(item);
+    for (const child of Object.values(item)) checkCycles(child);
+    ancestors.delete(item);
+    visited.add(item);
+  };
+  checkCycles(value);
+  const root = value as Record<string, unknown>;
+  const mapping = (value: unknown, path: string): Record<string, unknown> => {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(`${path} must be a mapping to use the builder.`);
+    }
+    return value as Record<string, unknown>;
+  };
+  const optionalMapping = (value: unknown, path: string) =>
+    value === undefined || value === null ? undefined : mapping(value, path);
+  const optionalString = (value: unknown, path: string) => {
+    if (value !== undefined && value !== null && typeof value !== "string") {
+      throw new Error(`${path} must be a string to use the builder.`);
+    }
+  };
+  const optionalStringList = (value: unknown, path: string) => {
+    if (
+      value !== undefined &&
+      value !== null &&
+      (!Array.isArray(value) ||
+        !value.every((item) => typeof item === "string"))
+    ) {
+      throw new Error(`${path} must be a list of strings to use the builder.`);
+    }
+  };
+  const gateway = optionalMapping(root.llmGateway, "llmGateway");
+  if (gateway) {
+    if (typeof gateway.url !== "string") {
+      throw new Error("llmGateway.url must be a string to use the builder.");
+    }
+    optionalString(gateway.proxyUrl, "llmGateway.proxyUrl");
+    const auth = optionalMapping(
+      gateway.authentication,
+      "llmGateway.authentication",
+    );
+    if (auth) {
+      optionalString(auth.type, "llmGateway.authentication.type");
+      optionalString(auth.audience, "llmGateway.authentication.audience");
+    }
+  }
+  const sandbox = optionalMapping(root.sandbox, "sandbox");
+  const network = optionalMapping(sandbox?.network, "sandbox.network");
+  optionalStringList(network?.allowedDomains, "sandbox.network.allowedDomains");
+  const filesystem = optionalMapping(sandbox?.filesystem, "sandbox.filesystem");
+  optionalStringList(filesystem?.writable, "sandbox.filesystem.writable");
+  optionalStringList(filesystem?.denied, "sandbox.filesystem.denied");
+  const telemetry = optionalMapping(root.telemetry, "telemetry");
+  optionalStringList(telemetry?.events, "telemetry.events");
+  optionalMapping(root.programSelection, "programSelection");
+  const programs = optionalMapping(root.programs, "programs");
+  if (programs) {
+    for (const [name, program] of Object.entries(programs)) {
+      optionalMapping(program, `programs.${name}`);
+    }
+  }
   return value as DaemonConfigDocument;
 }
 
-export function mergeBuilderYaml(source: string, builderYaml: string): string {
+export function mergeBuilderYaml(
+  source: string,
+  initialBuilderYaml: string,
+  builderYaml: string,
+): string {
   const sourceDocument = parseDocument(source);
+  const initialDocument = parseDocument(initialBuilderYaml);
   const builderDocument = parseDocument(builderYaml);
-  if (sourceDocument.errors.length > 0) {
-    throw new Error(
-      sourceDocument.errors.map((error) => error.message).join("\n"),
-    );
-  }
-  if (builderDocument.errors.length > 0) {
-    throw new Error(
-      builderDocument.errors.map((error) => error.message).join("\n"),
-    );
-  }
-  for (const key of [
-    "llmGateway",
-    "sandbox",
-    "telemetry",
-    "programSelection",
-    "programs",
-  ]) {
-    if (builderDocument.has(key)) {
-      sourceDocument.set(key, builderDocument.get(key, true));
-    } else {
-      sourceDocument.delete(key);
+  for (const document of [sourceDocument, initialDocument, builderDocument]) {
+    if (document.errors.length > 0) {
+      throw new Error(document.errors.map((error) => error.message).join("\n"));
     }
   }
+  const isMapping = (value: unknown): value is Record<string, unknown> =>
+    value !== null && typeof value === "object" && !Array.isArray(value);
+  function applyChanges(before: unknown, after: unknown, path: string[]) {
+    if (isMapping(before) && isMapping(after)) {
+      for (const key of new Set([
+        ...Object.keys(before),
+        ...Object.keys(after),
+      ])) {
+        applyChanges(before[key], after[key], [...path, key]);
+      }
+    } else if (JSON.stringify(before) !== JSON.stringify(after)) {
+      if (after === undefined) {
+        sourceDocument.deleteIn(path);
+      } else {
+        sourceDocument.setIn(path, after);
+      }
+    }
+  }
+  applyChanges(initialDocument.toJS(), builderDocument.toJS(), []);
   return sourceDocument.toString();
 }
 

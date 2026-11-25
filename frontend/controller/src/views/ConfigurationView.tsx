@@ -14,7 +14,11 @@ import type { AgentDraft, AgentKind, DaemonConfigDocument } from "../types";
 export interface ConfigurationViewProps {
   initialConfig?: DaemonConfigDocument | null;
   embedded?: boolean;
-  onCopy?: (yaml: string) => Promise<void> | void;
+  onCopy?: (
+    yaml: string,
+    initialYaml: string,
+  ) => Promise<boolean> | Promise<void> | boolean | void;
+  onDirtyChange?: (dirty: boolean) => void;
   copyLabel?: string;
   copySuccessLabel?: string;
 }
@@ -23,11 +27,14 @@ export function ConfigurationView({
   initialConfig,
   embedded = false,
   onCopy,
+  onDirtyChange,
   copyLabel = "Copy",
   copySuccessLabel = "Copied",
 }: ConfigurationViewProps) {
   const addAgentMenu = useRef<HTMLDetailsElement>(null);
   const initializedFromController = useRef(false);
+  const initialYaml = useRef<string | null>(null);
+  const [initialized, setInitialized] = useState(initialConfig === undefined);
   const [gateway, setGateway] = useState(true);
   const [gatewayUrl, setGatewayUrl] = useState("https://gateway.example.com");
   const [gatewayProxyUrl, setGatewayProxyUrl] = useState("");
@@ -81,7 +88,10 @@ export function ConfigurationView({
       return;
     }
     initializedFromController.current = true;
-    if (!initialConfig) return;
+    if (!initialConfig) {
+      setInitialized(true);
+      return;
+    }
 
     const llmGateway = initialConfig.llmGateway;
     const events = new Set(initialConfig.telemetry?.events ?? []);
@@ -110,7 +120,14 @@ export function ConfigurationView({
       initialConfig.programSelection?.allowUserChoice === true,
     );
     setAgents(agentDrafts(initialConfig.programs));
+    setInitialized(true);
   }, [initialConfig]);
+
+  useEffect(() => {
+    if (!initialized) return;
+    if (initialYaml.current === null) initialYaml.current = yaml;
+    onDirtyChange?.(yaml !== initialYaml.current);
+  }, [initialized, onDirtyChange, yaml]);
 
   useEffect(() => {
     const closeMenu = (event: PointerEvent) => {
@@ -125,7 +142,7 @@ export function ConfigurationView({
 
   async function copyYaml() {
     if (onCopy) {
-      await onCopy(yaml);
+      if ((await onCopy(yaml, initialYaml.current ?? yaml)) === false) return;
     } else {
       await navigator.clipboard.writeText(yaml);
     }

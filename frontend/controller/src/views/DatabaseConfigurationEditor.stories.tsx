@@ -1,6 +1,15 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fireEvent, fn, userEvent } from "storybook/test";
+import {
+  expect,
+  fireEvent,
+  fn,
+  spyOn,
+  userEvent,
+  waitFor,
+} from "storybook/test";
+import { parse } from "yaml";
 import { ApiError } from "../auth";
+import { navigate } from "../router";
 import { ControllerStoryFrame } from "../stories/ControllerStoryFrame";
 import { macDevice } from "../stories/fixtures";
 import type {
@@ -91,7 +100,6 @@ const meta = {
       revision: base_revision + 1,
     })),
     onLoadLatest: fn(async () => active),
-    onReauthenticate: fn(),
     onSaved: fn(),
   },
 } satisfies Meta<typeof DatabaseConfigurationEditor>;
@@ -175,6 +183,129 @@ export const BuilderPreservesUnmanagedYaml: Story = {
   },
 };
 
+export const BuilderPreservesGatewayAuthentication: Story = {
+  args: {
+    active: {
+      ...active,
+      yaml: [
+        "llmGateway:",
+        "  url: https://gateway.example.com",
+        "  authentication:",
+        "    type: controllerJwt",
+        "    audience: fleet",
+        "    allowedClientIds: [claude-code]",
+        "  githubOAuth:",
+        "    source: request",
+        "programs: {}",
+      ].join("\n"),
+    },
+  },
+  play: async ({ canvas }) => {
+    await userEvent.click(canvas.getByRole("tab", { name: "Builder" }));
+    await userEvent.click(canvas.getByText("Telemetry"));
+    await userEvent.click(canvas.getByText("New session"));
+    fireEvent.change(canvas.getByLabelText("JWT audience"), {
+      target: { value: "updated-fleet" },
+    });
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Apply to draft" }),
+    );
+    const result = parse((draftEditor(canvas) as HTMLTextAreaElement).value);
+    await expect(result.llmGateway.authentication.allowedClientIds).toEqual([
+      "claude-code",
+    ]);
+    await expect(result.llmGateway.authentication.audience).toBe(
+      "updated-fleet",
+    );
+    await expect(result.llmGateway.githubOAuth).toEqual({ source: "request" });
+    await expect(result.telemetry.events).toEqual(["session.new"]);
+  },
+};
+
+export const BuilderPreservesOidc: Story = {
+  args: {
+    active: {
+      ...active,
+      yaml: [
+        "llmGateway:",
+        "  url: https://gateway.example.com",
+        "  authentication:",
+        "    type: oidc",
+        "    issuer: https://issuer.example.com",
+        "    clientId: client",
+        "programs: {}",
+      ].join("\n"),
+    },
+  },
+  play: async ({ canvas }) => {
+    await userEvent.click(canvas.getByRole("tab", { name: "Builder" }));
+    fireEvent.change(canvas.getByLabelText("Gateway URL"), {
+      target: { value: "https://new.example.com" },
+    });
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Apply to draft" }),
+    );
+    const result = parse((draftEditor(canvas) as HTMLTextAreaElement).value);
+    await expect(result.llmGateway.url).toBe("https://new.example.com");
+    await expect(result.llmGateway.authentication).toEqual({
+      type: "oidc",
+      issuer: "https://issuer.example.com",
+      clientId: "client",
+    });
+  },
+};
+
+export const InvalidBuilderInputKeepsYaml: Story = {
+  play: async ({ canvas }) => {
+    const invalid = "sandbox:\n  network:\n    allowedDomains: example.com\n";
+    fireEvent.change(draftEditor(canvas), { target: { value: invalid } });
+    await userEvent.click(canvas.getByRole("tab", { name: "Builder" }));
+    await expect(canvas.getByRole("alert")).toHaveTextContent(
+      "sandbox.network.allowedDomains must be a list of strings",
+    );
+    await userEvent.click(canvas.getByRole("tab", { name: "YAML" }));
+    await expect(draftEditor(canvas)).toHaveValue(invalid);
+    const cyclic = "programs:\n  claudeCode: &loop\n    recursive: *loop\n";
+    fireEvent.change(draftEditor(canvas), { target: { value: cyclic } });
+    await userEvent.click(canvas.getByRole("tab", { name: "Builder" }));
+    await expect(canvas.getByRole("alert")).toHaveTextContent(
+      "Cyclic YAML aliases cannot be edited",
+    );
+    await userEvent.click(canvas.getByRole("tab", { name: "YAML" }));
+    await expect(draftEditor(canvas)).toHaveValue(cyclic);
+  },
+};
+
+export const WarnsBeforeDiscardingBuilderChanges: Story = {
+  play: async ({ canvas }) => {
+    const confirm = spyOn(window, "confirm").mockReturnValue(false);
+    try {
+      await userEvent.click(canvas.getByRole("tab", { name: "Builder" }));
+      await userEvent.click(canvas.getByText("Telemetry"));
+      await userEvent.click(canvas.getByText("New session"));
+      await expect(canvas.getByText("Unsaved")).toBeVisible();
+      const beforeUnload = new Event("beforeunload", { cancelable: true });
+      window.dispatchEvent(beforeUnload);
+      await expect(beforeUnload.defaultPrevented).toBe(true);
+      navigate("/devices");
+      await expect(confirm).toHaveBeenCalledOnce();
+      await userEvent.click(canvas.getByRole("tab", { name: "YAML" }));
+      await expect(confirm).toHaveBeenCalledTimes(2);
+      await expect(
+        canvas.getByRole("tab", { name: "Builder" }),
+      ).toHaveAttribute("aria-selected", "true");
+      await expect(
+        canvas.getByRole("checkbox", { name: /New session/ }),
+      ).toBeChecked();
+      confirm.mockReturnValue(true);
+      await userEvent.click(canvas.getByRole("tab", { name: "YAML" }));
+      await expect(draftEditor(canvas)).toHaveValue(yaml);
+    } finally {
+      confirm.mockRestore();
+    }
+  },
+};
+
 function draftEditor(
   canvas: Parameters<NonNullable<Story["play"]>>[0]["canvas"],
 ) {
@@ -189,6 +320,74 @@ async function reviewAndSave(canvas: Parameters<typeof draftEditor>[0]) {
 }
 
 const draftYaml = "programs: {}\n";
+
+let finishSave: ((value: ActiveDaemonConfig) => void) | undefined;
+
+export const KeepsEditsMadeDuringSave: Story = {
+  args: {
+    onSave: fn<Save>(
+      () =>
+        new Promise<ActiveDaemonConfig>((resolve) => {
+          finishSave = resolve;
+        }),
+    ),
+  },
+  play: async ({ canvas }) => {
+    fireEvent.change(draftEditor(canvas), { target: { value: draftYaml } });
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Review changes" }),
+    );
+    await userEvent.click(canvas.getByText("Add revision note"));
+    const note = canvas.getByRole("textbox", { name: "Revision note" });
+    fireEvent.change(note, { target: { value: "first note" } });
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Save configuration" }),
+    );
+    const nextDraft = "inventoryInterval: 30m\nprograms: {}\n";
+    fireEvent.change(draftEditor(canvas), { target: { value: nextDraft } });
+    fireEvent.change(note, { target: { value: "next note" } });
+    finishSave?.({ ...active, revision: 8, yaml: draftYaml });
+    await expect(await canvas.findByText("Revision 8 saved")).toBeVisible();
+    await expect(draftEditor(canvas)).toHaveValue(nextDraft);
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Review changes" }),
+    );
+    await userEvent.click(canvas.getByText("Edit revision note"));
+    await expect(
+      canvas.getByRole("textbox", { name: "Revision note" }),
+    ).toHaveValue("next note");
+    await waitFor(() => expect(canvas.getByText("Unsaved")).toBeVisible());
+  },
+};
+
+export const KeepsBuilderEditsMadeDuringSave: Story = {
+  args: {
+    onSave: fn<Save>(
+      () =>
+        new Promise<ActiveDaemonConfig>((resolve) => {
+          finishSave = resolve;
+        }),
+    ),
+  },
+  play: async ({ canvas }) => {
+    fireEvent.change(draftEditor(canvas), { target: { value: draftYaml } });
+    await reviewAndSave(canvas);
+    await userEvent.click(canvas.getByRole("tab", { name: "Builder" }));
+    await userEvent.click(canvas.getByText("Telemetry"));
+    await userEvent.click(canvas.getByText("New session"));
+    finishSave?.({ ...active, revision: 8, yaml: draftYaml });
+    await expect(await canvas.findByText("Revision 8 saved")).toBeVisible();
+    await expect(
+      canvas.getByRole("checkbox", { name: /New session/ }),
+    ).toBeChecked();
+    await expect(canvas.getByText("Unsaved")).toBeVisible();
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Apply to draft" }),
+    );
+    const result = parse((draftEditor(canvas) as HTMLTextAreaElement).value);
+    await expect(result.telemetry.events).toEqual(["session.new"]);
+  },
+};
 
 export const KeepsDraftAfterConflict: Story = {
   args: {
@@ -245,16 +444,31 @@ export const OffersFreshSignIn: Story = {
     onSave: fn<Save>(async () => {
       throw new ApiError(403, "reauthentication_required");
     }),
-    onReauthenticate: fn(),
   },
-  play: async ({ args, canvas }) => {
+  play: async ({ canvas }) => {
     fireEvent.change(draftEditor(canvas), { target: { value: draftYaml } });
-    await reviewAndSave(canvas);
     await userEvent.click(
-      await canvas.findByRole("button", { name: "Sign in again" }),
+      canvas.getByRole("button", { name: "Review changes" }),
     );
-    await expect(args.onReauthenticate).toHaveBeenCalledOnce();
+    await userEvent.click(canvas.getByText("Add revision note"));
+    fireEvent.change(canvas.getByRole("textbox", { name: "Revision note" }), {
+      target: { value: "Keep this note" },
+    });
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Save configuration" }),
+    );
+    const link = await canvas.findByRole("link", {
+      name: "Sign in again in a new tab, then return to save",
+    });
+    await expect(link).toHaveAttribute("target", "_blank");
+    await expect(link).toHaveAttribute(
+      "href",
+      "/auth/login?reauthenticate=true",
+    );
     await expect(draftEditor(canvas)).toHaveValue(draftYaml);
+    await expect(
+      canvas.getByRole("textbox", { name: "Revision note" }),
+    ).toHaveValue("Keep this note");
   },
 };
 

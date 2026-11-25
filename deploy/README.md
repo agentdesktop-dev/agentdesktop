@@ -42,7 +42,10 @@ configuration through the management API. In database mode, edits and restores
 are recorded as new revisions and shared by controller replicas. The save
 review warns if any enrolled daemon reports an older version than the
 controller. Saving is still allowed, but older daemons may not understand new
-configuration fields.
+configuration fields. The UI refreshes device rollout status while the editor
+is open. Apply builder changes to the draft before saving; the UI warns before
+discarding unapplied changes. If a save requires fresh authentication, sign in
+in the new tab and return to the editor to retry without losing the draft.
 
 When using `existingConfigSecret`, include `daemonConfig: { database: {} }` in
 the Secret's `controller.yaml` to enable database mode. To seed from a separate

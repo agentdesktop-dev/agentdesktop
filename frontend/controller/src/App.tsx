@@ -270,7 +270,11 @@ function UsagePage() {
   );
 
   useEffect(() => {
-    window.history.replaceState(null, "", `/usage?${pageSearch}`);
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `/usage?${pageSearch}`,
+    );
   }, [pageSearch]);
 
   return (
@@ -297,18 +301,15 @@ function UsagePage() {
 function ConfigurationPage() {
   const { request, session } = useAuth();
   const [refreshKey, setRefreshKey] = useState(0);
+  const [devicesRefreshKey, setDevicesRefreshKey] = useState(0);
   const [selectedRevision, setSelectedRevision] = useState<number | null>(null);
   const [historyBefore, setHistoryBefore] = useState<number | null>(null);
   const [historyRows, setHistoryRows] = useState<DaemonConfigRevisionSummary[]>(
     [],
   );
   const [lastHistoryPageSize, setLastHistoryPageSize] = useState(0);
-  const query = useApi<ActiveDaemonConfig>(
-    `/api/v1/daemon-config?refresh=${refreshKey}`,
-  );
-  const devicesQuery = useApi<Device[]>(
-    `/api/v1/devices?refresh=${refreshKey}`,
-  );
+  const query = useApi<ActiveDaemonConfig>("/api/v1/daemon-config");
+  const devicesQuery = useApi<Device[]>("/api/v1/devices", devicesRefreshKey);
   const historyPath =
     query.data?.source === "database"
       ? `/api/v1/daemon-config/revisions?limit=50&refresh=${refreshKey}${
@@ -333,6 +334,15 @@ function ConfigurationPage() {
   const historyPage = historyQuery.data?.revisions;
 
   useEffect(() => {
+    if (query.data?.source !== "database") return;
+    const timer = window.setInterval(
+      () => setDevicesRefreshKey((current) => current + 1),
+      10_000,
+    );
+    return () => window.clearInterval(timer);
+  }, [query.data?.source]);
+
+  useEffect(() => {
     if (!historyPage) return;
     setHistoryRows((current) =>
       historyBefore === null ? historyPage : [...current, ...historyPage],
@@ -346,6 +356,7 @@ function ConfigurationPage() {
     setLastHistoryPageSize(0);
     setSelectedRevision(null);
     setRefreshKey((current) => current + 1);
+    setDevicesRefreshKey((current) => current + 1);
   }
 
   async function saveConfiguration(input: {
@@ -399,9 +410,6 @@ function ConfigurationPage() {
         onSelectRevision={setSelectedRevision}
         onSave={saveConfiguration}
         onLoadLatest={loadLatestConfiguration}
-        onReauthenticate={() => {
-          window.location.assign("/auth/login?reauthenticate=true");
-        }}
         onSaved={refreshConfiguration}
       />
     );

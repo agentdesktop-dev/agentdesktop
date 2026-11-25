@@ -58,7 +58,6 @@ jobs:
           platforms: ${{ matrix.platform }}
           build-args: AGENTDESKTOP_VERSION=${{ inputs.version }}
           tags: ${{ env.CONTROLLER_IMAGE }}
-          build-args: AGENTDESKTOP_VERSION=${{ inputs.version }}
           outputs: type=image,push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=controller-${{ env.PLATFORM_PAIR }}
           cache-to: type=gha,scope=controller-${{ env.PLATFORM_PAIR }},mode=max
