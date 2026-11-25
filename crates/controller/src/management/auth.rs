@@ -1,14 +1,15 @@
 //! Management security boundary.
 //!
 //! Shared middleware asks the provider to verify credentials and attaches `Context`. Handlers alone call
-//! `Context::require` with the operation and any concrete resource ID.
+//! `Context::require` (reads) or `Context::mutate` (audited changes) with the operation and any
+//! concrete resource ID.
 //! The built-in provider grants loopback-only local access; a compiled-in provider
 //! can supply remote authentication and its own permission decisions.
 
 use std::{
     net::SocketAddr,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -24,7 +25,9 @@ use axum::{
 };
 use serde_json::json;
 
-use crate::audit::{Actor, ActorKind, AuditEvent, AuditLog, EventKind, Outcome, RequestInfo};
+use crate::audit::{
+    Actor, ActorKind, AuditEvent, AuditLog, ChangeError, EventKind, Outcome, RequestInfo,
+};
 use authentication::{Principal, PrincipalKind};
 use authorization::AccessRequest;
 
@@ -74,8 +77,8 @@ pub trait Provider: Send + Sync {
     /// fresh sign-in.
     fn routes(&self) -> Router;
     /// Verify credentials and return identity evidence, without deciding whether that
-    /// identity may perform any particular operation. `Context::require` delegates
-    /// those checks to `check`.
+    /// identity may perform any particular operation. `Context::require` and
+    /// `Context::mutate` delegate those checks to `check`.
     /// `None` means no authenticated identity; malformed/invalid credentials return
     /// an error. Browser mode must reject API-only service credentials.
     async fn authenticate(
@@ -83,7 +86,8 @@ pub trait Provider: Send + Sync {
         headers: &HeaderMap,
         mode: RequestMode,
     ) -> Result<Option<Principal>, Error>;
-    /// Full operation check called by handlers through Context::require. The provider
+    /// Full operation check called by handlers through `Context::require` or
+    /// `Context::mutate`. The provider
     /// evaluates permission policy and any credential-specific requirement such as
     /// recent authentication; requests have already passed the router's origin check.
     ///
@@ -115,15 +119,20 @@ pub struct Context {
     request: Arc<RequestAudit>,
 }
 
-/// Per-request audit state shared by `Context::require` and the middleware.
+/// Per-request audit state shared by `Context` and the middleware.
 struct RequestAudit {
     info: RequestInfo,
-    /// The `action.attempted` events of mutations authorized during this request
-    /// whose completion is not recorded yet. [`Context::mutate`] takes them over;
-    /// otherwise the middleware records them when the handler returns.
-    authorized: Mutex<Vec<AuditEvent>>,
-    /// Whether any mutation permission was checked, whatever the result.
+    /// Whether [`Context::mutate`] checked a mutation permission, whatever the
+    /// result.
     mutation_checked: AtomicBool,
+}
+
+/// Why [`Context::mutate`] made no change.
+pub enum MutateError {
+    /// Denied (403), or refused because it could not be audited (503).
+    Refused(Error),
+    /// The change failed and was rolled back.
+    Failed(anyhow::Error),
 }
 
 impl Context {
@@ -156,67 +165,57 @@ impl Context {
             audit,
             request: Arc::new(RequestAudit {
                 info: request,
-                authorized: Mutex::default(),
                 mutation_checked: AtomicBool::new(false),
             }),
         }
     }
 
-    /// Check before reading protected data or mutating state. `resource` is a domain
-    /// identifier (e.g. a parsed device ID), not an HTTP path. `None` denotes a
-    /// collection/global operation.
+    /// Check before reading protected data. `resource` is a domain identifier
+    /// (e.g. a parsed device ID), not an HTTP path. `None` denotes a
+    /// collection/global operation. Denials are audited; allowed reads are not.
     ///
-    /// Denials are audited. An allowed mutation is streamed as attempted before this
-    /// returns; if that line cannot be written the mutation is refused (503).
+    /// Mutations must use [`Context::mutate`], which audits them; a mutating
+    /// verb here is refused with 500.
     pub async fn require(&self, access: AccessRequest<'_>) -> Result<(), Error> {
-        let result = self
-            .provider
-            .check(&self.principal, &self.headers, access)
-            .await;
-        let mutation = access.verb.is_mutation();
-        if mutation {
-            self.request.mutation_checked.store(true, Ordering::Relaxed);
+        if access.verb.is_mutation() {
+            tracing::error!(
+                permission = access.permission(),
+                "mutation checked with Context::require; use Context::mutate"
+            );
+            return Err(Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "unaudited_mutation",
+            ));
         }
-        let event = |kind: EventKind, outcome| {
-            AuditEvent::new(kind, Actor::from(&*self.principal), outcome)
-                .action(access.permission())
-                .target(access.resource_class, access.resource)
-                .request(self.request.info.clone())
-        };
-        match &result {
-            Err(error) => {
-                let denied = event(EventKind::AuthorizationDenied, Outcome::Denied).reason(error.1);
-                if let Err(audit_error) = self.audit.record(denied).await {
-                    tracing::error!(error = format!("{audit_error:#}"), subject = %self.principal.subject,
-                        permission = access.permission(), reason = error.1,
-                        "failed to record admin authorization denial");
-                }
-            }
-            Ok(()) if mutation => {
-                let attempt = event(EventKind::ActionAttempted, Outcome::Authorized);
-                if let Err(audit_error) = self.audit.stream(&attempt).await {
-                    tracing::error!(error = format!("{audit_error:#}"), subject = %self.principal.subject,
-                        permission = access.permission(),
-                        "refusing admin action that could not be audited");
-                    return Err(Error(StatusCode::SERVICE_UNAVAILABLE, "audit_unavailable"));
-                }
-                self.request.authorized.lock().unwrap().push(attempt);
-            }
-            Ok(()) => {}
-        }
-        result
+        self.authorize(access).await
     }
 
-    /// Runs the change authorized by [`Context::require`] and records its
-    /// `action.completed` in the same database transaction, so the change and its
-    /// record commit together or not at all. The transaction runs in its own task:
-    /// once started it finishes even if the request times out or the client goes
-    /// away. Do the change's validation before calling this, so a timeout cannot
-    /// leave it half done.
+    /// Checks a mutation and runs it as one audited change. `resource` is as for
+    /// [`Context::require`].
+    ///
+    /// A denial is audited and returned. If allowed, `action.attempted` is
+    /// streamed, then `change` runs in a database transaction that also stores
+    /// the `action.completed` record, so the change and its record commit
+    /// together or not at all. If the attempt cannot be streamed, nothing runs
+    /// (503). Once allowed, the rest runs in its own task: it finishes even if
+    /// the request times out or the client goes away. Do the change's validation
+    /// inside `change`, or before calling this.
     ///
     /// `change` receives the open transaction and returns it with its result and
     /// the outcome to record (for example `NotFound` when nothing matched).
-    pub async fn mutate<T, F, Fut>(&self, change: F) -> anyhow::Result<T>
+    //
+    // Every mutation so far is a change to the controller database. One that is
+    // not (an extension's own storage, an external system) would need a sibling,
+    // e.g. `perform(access, future)`: authorize, stream the attempt, run the
+    // future in its own task, then `AuditLog::record` its completion from the
+    // future's result. It would lose atomicity (the completion is a separate
+    // write), so a crash between the change and its completion leaves only the
+    // attempt; that is what `action.attempted` exists to show.
+    pub async fn mutate<T, F, Fut>(
+        &self,
+        access: AccessRequest<'_>,
+        change: F,
+    ) -> Result<T, MutateError>
     where
         F: FnOnce(sqlx::Transaction<'static, sqlx::Any>) -> Fut + Send + 'static,
         Fut: std::future::Future<
@@ -224,12 +223,52 @@ impl Context {
             > + Send,
         T: Send + 'static,
     {
-        let authorized = std::mem::take(&mut *self.request.authorized.lock().unwrap());
-        anyhow::ensure!(
-            !authorized.is_empty(),
-            "mutation without an authorized operation; call Context::require first"
+        debug_assert!(
+            access.verb.is_mutation(),
+            "Context::mutate with a read verb"
         );
-        self.audit.complete_in_transaction(authorized, change).await
+        self.request.mutation_checked.store(true, Ordering::Relaxed);
+        self.authorize(access).await.map_err(MutateError::Refused)?;
+        let attempt = self.event(EventKind::ActionAttempted, Outcome::Authorized, access);
+        match self.audit.mutate(attempt, change).await {
+            Ok(value) => Ok(value),
+            Err(ChangeError::AuditUnavailable(error)) => {
+                tracing::error!(error = format!("{error:#}"), subject = %self.principal.subject,
+                    permission = access.permission(),
+                    "refusing admin action that could not be audited");
+                Err(MutateError::Refused(Error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "audit_unavailable",
+                )))
+            }
+            Err(ChangeError::Failed(error)) => Err(MutateError::Failed(error)),
+        }
+    }
+
+    /// Asks the provider, and audits a denial.
+    async fn authorize(&self, access: AccessRequest<'_>) -> Result<(), Error> {
+        let result = self
+            .provider
+            .check(&self.principal, &self.headers, access)
+            .await;
+        if let Err(error) = &result {
+            let denied = self
+                .event(EventKind::AuthorizationDenied, Outcome::Denied, access)
+                .reason(error.1);
+            if let Err(audit_error) = self.audit.record(denied).await {
+                tracing::error!(error = format!("{audit_error:#}"), subject = %self.principal.subject,
+                    permission = access.permission(), reason = error.1,
+                    "failed to record admin authorization denial");
+            }
+        }
+        result
+    }
+
+    fn event(&self, kind: EventKind, outcome: Outcome, access: AccessRequest<'_>) -> AuditEvent {
+        AuditEvent::new(kind, Actor::from(&*self.principal), outcome)
+            .action(access.permission())
+            .target(access.resource_class, access.resource)
+            .request(self.request.info.clone())
     }
 }
 
@@ -330,91 +369,34 @@ async fn authenticate_request(
     if safe {
         return next.run(request).await;
     }
-    // The handler runs inside the request timeout. If the request is dropped
-    // after a mutation was authorized but before `Context::mutate` took it over,
-    // the guard records that the mutation never ran.
-    let guard = CancelGuard(context.clone());
     let response = next.run(request).await;
-    record_completion(&guard.0, response.status()).await;
+    flag_unchecked_mutation(&context, response.status()).await;
     response
 }
 
-/// Records `request_cancelled` for authorized mutations still pending when the
-/// request is dropped. Those mutations never started: `Context::mutate` takes them
-/// over before it changes anything.
-struct CancelGuard(Context);
-
-impl Drop for CancelGuard {
-    fn drop(&mut self) {
-        let pending = std::mem::take(&mut *self.0.request.authorized.lock().unwrap());
-        if pending.is_empty() {
-            return;
-        }
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        let audit = self.0.audit.clone();
-        runtime.spawn(async move {
-            for attempt in pending {
-                let cancelled = attempt
-                    .completed(Outcome::Failed)
-                    .reason("request_cancelled");
-                if let Err(error) = audit.record(cancelled).await {
-                    tracing::error!(
-                        error = format!("{error:#}"),
-                        "failed to record a cancelled admin action"
-                    );
-                }
-            }
-        });
+/// Records a mutating request that finished without going through
+/// [`Context::mutate`], which audits every mutation itself. The request has
+/// finished, so a failure to record is logged rather than returned.
+async fn flag_unchecked_mutation(context: &Context, status: StatusCode) {
+    // 4xx without a check: routing or extraction rejected the request (e.g. 405)
+    // before any handler logic ran.
+    if context.request.mutation_checked.load(Ordering::Relaxed) || status.is_client_error() {
+        return;
     }
-}
-
-/// Records the outcome of each mutation authorized during the request but not
-/// completed through [`Context::mutate`], or flags a mutating request that never
-/// checked a mutation permission. The request has finished, so a failure to record
-/// is logged rather than returned.
-async fn record_completion(context: &Context, status: StatusCode) {
-    let authorized = std::mem::take(&mut *context.request.authorized.lock().unwrap());
-    let mut completions = Vec::new();
-    if authorized.is_empty() {
-        // 4xx without a check: routing or extraction rejected the request (e.g. 405)
-        // before any handler logic ran.
-        if context.request.mutation_checked.load(Ordering::Relaxed) || status.is_client_error() {
-            return;
-        }
-        tracing::error!(method = %context.request.info.method, path = %context.request.info.path,
-            status = status.as_u16(),
-            "mutating admin request finished without a mutation permission check");
-        completions.push(
-            AuditEvent::new(
-                EventKind::ActionCompleted,
-                Actor::from(context.principal()),
-                Outcome::Unaudited,
-            )
-            .request(context.request.info.clone()),
-        );
-    } else {
-        let outcome = if status.is_success() || status.is_redirection() {
-            Outcome::Succeeded
-        } else if status == StatusCode::NOT_FOUND {
-            Outcome::NotFound
-        } else {
-            Outcome::Failed
-        };
-        completions.extend(
-            authorized
-                .into_iter()
-                .map(|attempt| attempt.completed(outcome)),
-        );
-    }
-    for event in completions {
-        let event = event.status(status.as_u16());
-        if let Err(error) = context.audit.record(event).await {
-            tracing::error!(error = format!("{error:#}"), subject = %context.principal.subject,
-                path = %context.request.info.path, status = status.as_u16(),
-                "failed to record admin action completion");
-        }
+    tracing::error!(method = %context.request.info.method, path = %context.request.info.path,
+        status = status.as_u16(),
+        "mutating admin request finished without a mutation permission check");
+    let event = AuditEvent::new(
+        EventKind::ActionCompleted,
+        Actor::from(context.principal()),
+        Outcome::Unaudited,
+    )
+    .status(status.as_u16())
+    .request(context.request.info.clone());
+    if let Err(error) = context.audit.record(event).await {
+        tracing::error!(error = format!("{error:#}"), subject = %context.principal.subject,
+            path = %context.request.info.path, status = status.as_u16(),
+            "failed to record an unaudited admin mutation");
     }
 }
 

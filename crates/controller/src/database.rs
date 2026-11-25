@@ -376,7 +376,7 @@ impl Database {
     /// Commits the device and its retry receipt together. Concurrent enrollments
     /// for the same principal/key return the first committed certificate.
     /// Runs in the caller's transaction, which also records the enrollment's
-    /// audit completion (see `AuditLog::complete_in_transaction`).
+    /// audit completion (see `AuditLog::mutate`).
     pub async fn finish_enrollment(
         transaction: &mut sqlx::AnyConnection,
         completed: &CompletedEnrollment,

@@ -254,21 +254,21 @@ mod tests {
         assert_unique_seqs(&database, before.len() + 101).await;
 
         // A change and its completion commit together, or not at all.
-        use crate::audit::{Actor, AuditEvent, AuditLog, EventKind, Outcome};
+        use crate::audit::{Actor, AuditEvent, AuditLog, ChangeError, EventKind, Outcome};
         let (audit, _) = AuditLog::in_memory(database.clone());
         let device_id = uuid::Uuid::new_v4().to_string();
         let attempt = || {
-            vec![AuditEvent::new(
+            AuditEvent::new(
                 EventKind::ActionAttempted,
                 Actor::device(&device_id),
                 Outcome::Authorized,
-            )]
+            )
         };
         let count = || async { stored_seqs(&database).await.len() };
         let stored = count().await;
         let id = device_id.clone();
         audit
-            .complete_in_transaction(attempt(), move |mut transaction| async move {
+            .mutate(attempt(), move |mut transaction| async move {
                 sqlx::query("INSERT INTO devices (id, hostname, created_at) VALUES ($1, 'h', 0)")
                     .bind(id)
                     .execute(&mut *transaction)
@@ -279,15 +279,15 @@ mod tests {
             .unwrap();
         assert_eq!(count().await, stored + 1);
         assert!(database.get_device(&device_id).await.unwrap().is_some());
-        let rolled_back: anyhow::Result<()> = audit
-            .complete_in_transaction(attempt(), |mut transaction| async move {
+        let rolled_back: Result<(), ChangeError> = audit
+            .mutate(attempt(), |mut transaction| async move {
                 sqlx::query("DELETE FROM devices WHERE hostname = 'h'")
                     .execute(&mut *transaction)
                     .await?;
                 anyhow::bail!("change failed after deleting")
             })
             .await;
-        assert!(rolled_back.is_err());
+        assert!(matches!(rolled_back, Err(ChangeError::Failed(_))));
         assert!(database.get_device(&device_id).await.unwrap().is_some());
         // Only the failed completion, recorded on its own.
         assert_eq!(count().await, stored + 2);

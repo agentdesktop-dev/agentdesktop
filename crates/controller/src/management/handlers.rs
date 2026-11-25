@@ -15,7 +15,7 @@ use tracing::info;
 use super::{
     Settings, State as ManagementState,
     auth::{
-        Context, Error,
+        Context, Error, MutateError,
         authorization::{self, AccessRequest, Verb},
     },
 };
@@ -112,14 +112,13 @@ pub(super) async fn delete_device(
     auth: Context,
     Path(device_id): Path<String>,
 ) -> Result<StatusCode, HandlerError> {
-    auth.require(AccessRequest {
+    let access = AccessRequest {
         verb: Verb::Delete,
         resource_class: authorization::DEVICES,
         resource: Some(&device_id),
-    })
-    .await?;
+    };
     let deleted = auth
-        .mutate({
+        .mutate(access, {
             let device_id = device_id.clone();
             move |mut transaction| async move {
                 let deleted = Database::delete_device(&mut transaction, &device_id).await?;
@@ -281,6 +280,15 @@ impl From<Error> for HandlerError {
 impl From<anyhow::Error> for HandlerError {
     fn from(error: anyhow::Error) -> Self {
         Self::Internal(error)
+    }
+}
+
+impl From<MutateError> for HandlerError {
+    fn from(error: MutateError) -> Self {
+        match error {
+            MutateError::Refused(error) => Self::Auth(error),
+            MutateError::Failed(error) => Self::Internal(error),
+        }
     }
 }
 

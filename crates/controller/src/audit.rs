@@ -45,9 +45,8 @@ pub enum EventKind {
     /// are rare operator actions, so it adds one line per change. Streamed to the
     /// SIEM only, not stored: the completion commits with the change itself.
     ActionAttempted,
-    /// The mutation's outcome, linked to its attempt by `request.id`. Carries the
-    /// HTTP status only when the router completes it (the handler did not use
-    /// `Context::mutate`).
+    /// The mutation's outcome, linked to its attempt by `request.id`. Only an
+    /// `unaudited` completion, recorded by the router, carries the HTTP status.
     ActionCompleted,
     /// Interactive sign-in. Recorded by providers, not by the controller.
     AuthLogin,
@@ -472,6 +471,15 @@ pub struct AuditLog {
     stream: Stream,
 }
 
+/// Why [`AuditLog::mutate`] made no change.
+#[derive(Debug)]
+pub enum ChangeError {
+    /// The attempt could not be streamed, so the change did not run.
+    AuditUnavailable(anyhow::Error),
+    /// The change, its completion record or the commit failed; nothing was kept.
+    Failed(anyhow::Error),
+}
+
 impl AuditLog {
     pub fn new(database: Database) -> Self {
         Self {
@@ -532,30 +540,22 @@ impl AuditLog {
         Ok(seq)
     }
 
-    /// Streams the event to the SIEM without storing it, so its line has no `seq`.
-    /// Used for `action.attempted`: the change's transaction stores its completion
-    /// atomically, so only the SIEM needs a line written before the change. An
-    /// error means the line may not have been written; the caller must not act.
-    pub async fn stream(&self, event: &AuditEvent) -> anyhow::Result<()> {
-        self.stream.write(Prepared::new(event)?.line(None)).await
-    }
-
-    /// Runs `change` in a database transaction and records the completions of
-    /// `attempts` with its
-    /// outcome in the same transaction, so the change and its `action.completed`
-    /// records commit together or not at all. The lines are streamed after the
-    /// commit.
+    /// Runs an audited change: streams `attempt` (`action.attempted`), then runs
+    /// `change` in a database transaction that also stores the attempt's
+    /// `action.completed`, so the change and its record commit together or not at
+    /// all. The completion's line is streamed after the commit.
     ///
-    /// The work runs in its own task, so it finishes even if the caller is
-    /// cancelled (for example by a request timeout). `change` receives the open
-    /// transaction and hands it back with its result and the outcome to record.
-    /// If it fails or the transaction cannot commit, nothing it did is kept, and
-    /// the completions are recorded as `failed` on their own (best effort).
-    pub async fn complete_in_transaction<T, F, Fut>(
-        &self,
-        attempts: Vec<AuditEvent>,
-        change: F,
-    ) -> anyhow::Result<T>
+    /// The attempt is only streamed, not stored: the stored completion is the
+    /// table's record of the change, and the SIEM gets a line before the change
+    /// runs. If that line cannot be written, nothing runs (fail closed).
+    ///
+    /// Everything runs in its own task, so once called it finishes even if the
+    /// caller is cancelled (for example by a request timeout); an attempt is
+    /// never left without its completion. `change` receives the open transaction
+    /// and hands it back with its result and the outcome to record. If it fails
+    /// or the transaction cannot commit, nothing it did is kept, and the
+    /// completion is recorded as `failed` on its own (best effort).
+    pub async fn mutate<T, F, Fut>(&self, attempt: AuditEvent, change: F) -> Result<T, ChangeError>
     where
         F: FnOnce(sqlx::Transaction<'static, sqlx::Any>) -> Fut + Send + 'static,
         Fut: Future<Output = anyhow::Result<(sqlx::Transaction<'static, sqlx::Any>, T, Outcome)>>
@@ -563,66 +563,64 @@ impl AuditLog {
         T: Send + 'static,
     {
         let log = self.clone();
-        // Spawned so a cancelled caller cannot stop it between the change, commit and stream.
+        // Spawned so a cancelled caller cannot stop it between the attempt, change, commit and stream.
         tokio::spawn(async move {
-            let committed = log.commit_with_completions(&attempts, change).await;
-            match committed {
-                Ok((value, lines)) => {
-                    for line in lines {
-                        if let Err(error) = log.stream.write(line).await {
-                            tracing::error!(
-                                error = format!("{error:#}"),
-                                "failed to stream a committed admin audit completion"
-                            );
-                        }
+            let streamed = match Prepared::new(&attempt) {
+                Ok(prepared) => log.stream.write(prepared.line(None)).await,
+                Err(error) => Err(error),
+            };
+            streamed.map_err(ChangeError::AuditUnavailable)?;
+            match log.commit_with_completion(&attempt, change).await {
+                Ok((value, line)) => {
+                    if let Err(error) = log.stream.write(line).await {
+                        tracing::error!(
+                            error = format!("{error:#}"),
+                            "failed to stream a committed admin audit completion"
+                        );
                     }
                     Ok(value)
                 }
                 Err(error) => {
-                    for attempt in attempts {
-                        if let Err(error) = log.record(attempt.completed(Outcome::Failed)).await {
-                            tracing::error!(
-                                error = format!("{error:#}"),
-                                "failed to record a failed admin audit completion"
-                            );
-                        }
+                    if let Err(error) = log.record(attempt.completed(Outcome::Failed)).await {
+                        tracing::error!(
+                            error = format!("{error:#}"),
+                            "failed to record a failed admin audit completion"
+                        );
                     }
-                    Err(error)
+                    Err(ChangeError::Failed(error))
                 }
             }
         })
         .await
-        .context("join admin audit transaction")?
+        .map_err(|error| {
+            ChangeError::Failed(anyhow::Error::new(error).context("join admin audit change"))
+        })?
     }
 
-    async fn commit_with_completions<T, F, Fut>(
+    async fn commit_with_completion<T, F, Fut>(
         &self,
-        attempts: &[AuditEvent],
+        attempt: &AuditEvent,
         change: F,
-    ) -> anyhow::Result<(T, Vec<Map<String, Value>>)>
+    ) -> anyhow::Result<(T, Map<String, Value>)>
     where
         F: FnOnce(sqlx::Transaction<'static, sqlx::Any>) -> Fut,
         Fut: Future<Output = anyhow::Result<(sqlx::Transaction<'static, sqlx::Any>, T, Outcome)>>,
     {
         let transaction = self.database.pool().begin().await?;
         let (mut transaction, value, outcome) = change(transaction).await?;
-        let mut lines = Vec::with_capacity(attempts.len());
-        for attempt in attempts {
-            let completion = attempt.completed(outcome);
-            let prepared = Prepared::new(&completion)?;
-            let seq = Database::append_audit_event(
-                &mut transaction,
-                &prepared.columns(&completion),
-                &prepared.event_json,
-            )
-            .await?;
-            lines.push(prepared.line(Some(seq)));
-        }
+        let completion = attempt.completed(outcome);
+        let prepared = Prepared::new(&completion)?;
+        let seq = Database::append_audit_event(
+            &mut transaction,
+            &prepared.columns(&completion),
+            &prepared.event_json,
+        )
+        .await?;
         transaction
             .commit()
             .await
             .context("commit admin audit transaction")?;
-        Ok((value, lines))
+        Ok((value, prepared.line(Some(seq))))
     }
 }
 

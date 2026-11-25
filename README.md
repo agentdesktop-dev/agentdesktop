@@ -854,14 +854,16 @@ received. A mutation produces two records:
   the change itself, so its line has no `seq`.
 - `action.completed` carries the outcome. It is stored in the same database
   transaction as the change, so the table never shows a change without its
-  completion. Once that transaction starts, it finishes even if the request
-  times out or the client disconnects. A request dropped before its change
-  started is recorded with outcome `failed` and reason `request_cancelled`.
+  completion. Once the attempt is written, the change and its completion finish
+  even if the request times out or the client disconnects, so an attempt is not
+  left without its completion.
 
-Handlers make their change with `Context::mutate`. A mutating request that
-finishes without it is completed by the router, with the HTTP status; one that
-succeeds or fails with a server error without any permission check is recorded
-with outcome `unaudited`. Allowed reads are not recorded. Compiled-in
+Handlers make every change with `Context::mutate`, which checks the permission,
+writes the attempt and commits the change with its completion.
+`Context::require` is for reads and refuses a mutating permission with
+`500 unaudited_mutation`. A mutating request that succeeds or fails with a
+server error without going through `Context::mutate` is recorded with outcome
+`unaudited` and the HTTP status. Allowed reads are not recorded. Compiled-in
 authentication providers record their own sign-in, sign-out and
 reauthentication events through `audit::AuditLog`.
 

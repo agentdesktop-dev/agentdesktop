@@ -150,7 +150,7 @@ async fn handlers_own_operations_and_axum_selects_the_matching_handler() {
             resource_class: "devices",
             resource: None,
         };
-        auth.require(access).await?;
+        empty_mutation(&auth, access).await?;
         Ok(access.permission())
     }
     let audit = TestAudit::new().await;
@@ -191,6 +191,19 @@ async fn handlers_own_operations_and_axum_selects_the_matching_handler() {
     }
 }
 
+/// Authorizes and audits a change that does nothing, for tests of routing and
+/// authorization.
+async fn empty_mutation(auth: &Context, access: AccessRequest<'_>) -> Result<(), Error> {
+    auth.mutate(access, |transaction| async {
+        Ok((transaction, (), Outcome::Succeeded))
+    })
+    .await
+    .map_err(|error| match error {
+        MutateError::Refused(error) => error,
+        MutateError::Failed(error) => panic!("empty mutation failed: {error:#}"),
+    })
+}
+
 fn app(auth: &Auth) -> Router {
     crate::management::http::Policy::Local.apply(
         Router::new()
@@ -207,12 +220,12 @@ fn app(auth: &Auth) -> Router {
                 }))
                 .merge(
                     auth.authenticate_api(axum::routing::delete(|auth: Context| async move {
-                        auth.require(AccessRequest {
+                        let access = AccessRequest {
                             verb: authorization::Verb::Delete,
                             resource_class: "devices",
                             resource: None,
-                        })
-                        .await?;
+                        };
+                        empty_mutation(&auth, access).await?;
                         Ok::<_, Error>(StatusCode::NO_CONTENT)
                     })),
                 ),
@@ -1135,6 +1148,17 @@ async fn mutations_without_a_permission_check_are_flagged() {
         .route(
             "/read-only",
             auth.authenticate_api(get(|| async { "data" })),
+        )
+        .route(
+            "/require-delete",
+            auth.authenticate_api(axum::routing::delete(|auth: Context| async move {
+                auth.require(AccessRequest {
+                    verb: authorization::Verb::Delete,
+                    resource_class: "devices",
+                    resource: None,
+                })
+                .await
+            })),
         );
     let response = request(router.clone(), "/unchecked", Method::POST, HeaderMap::new()).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -1149,9 +1173,18 @@ async fn mutations_without_a_permission_check_are_flagged() {
     assert_eq!(unchecked["actor"]["kind"], "local");
     assert_eq!(unchecked["request"]["path"], "/unchecked");
 
-    let response = request(router, "/read-only", Method::POST, HeaderMap::new()).await;
+    let response = request(router.clone(), "/read-only", Method::POST, HeaderMap::new()).await;
     assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
     assert_eq!(audit.events().len(), 1);
+
+    // `require` refuses mutating verbs: a mutation must go through `mutate`.
+    let response = request(router, "/require-delete", Method::DELETE, HeaderMap::new()).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(json_body(response).await["error"], "unaudited_mutation");
+    let events = audit.events();
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert_eq!(events[1]["outcome"], "unaudited");
+    assert_eq!(events[1]["status"], 500);
 }
 
 #[tokio::test]
@@ -1254,20 +1287,19 @@ async fn served_requests_record_the_peer_address() {
     std::fs::remove_file(path).unwrap();
 }
 
-/// A `DELETE /slow` route that authorizes a device delete, waits `before`, then
-/// deletes inside `Context::mutate` after waiting `during`.
+/// A `DELETE /slow` route that waits `before`, then deletes a device through
+/// `Context::mutate` after waiting `during` inside the change.
 fn slow_delete(auth: &Auth, before: u64, during: u64) -> Router {
     Router::new().route(
         "/slow",
         auth.authenticate_api(axum::routing::delete(move |auth: Context| async move {
-            auth.require(AccessRequest {
+            tokio::time::sleep(std::time::Duration::from_millis(before)).await;
+            let access = AccessRequest {
                 verb: authorization::Verb::Delete,
                 resource_class: "devices",
                 resource: Some("device-1"),
-            })
-            .await?;
-            tokio::time::sleep(std::time::Duration::from_millis(before)).await;
-            auth.mutate(move |mut transaction| async move {
+            };
+            auth.mutate(access, move |mut transaction| async move {
                 tokio::time::sleep(std::time::Duration::from_millis(during)).await;
                 let deleted = Database::delete_device(&mut transaction, "device-1").await?;
                 assert!(deleted);
@@ -1300,22 +1332,18 @@ async fn abandon(router: Router) {
 }
 
 #[tokio::test]
-async fn a_request_dropped_before_its_change_is_recorded_as_cancelled() {
+async fn a_request_dropped_before_its_mutation_records_nothing() {
     let audit = TestAudit::new().await;
     enroll(audit.log.database(), "device-1").await;
     let auth = Auth::new(Arc::new(LocalAccess), audit.log.clone());
     abandon(slow_delete(&auth, 100, 0)).await;
-    let events = wait_for_events(&audit, 2).await;
-    let [attempted, cancelled] = &events[..] else {
-        panic!("expected attempted and cancelled events: {events:?}");
-    };
-    assert_eq!(attempted["outcome"], "authorized");
-    assert_eq!(cancelled["event"], "action.completed");
-    assert_eq!(cancelled["outcome"], "failed");
-    assert_eq!(cancelled["reason"], "request_cancelled");
-    assert_eq!(cancelled["target"]["id"], "device-1");
-    // The handler stopped before mutating.
+    // Past the point where the handler would have mutated.
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let events = audit.events();
+    assert!(
+        events.is_empty(),
+        "no attempt without its change: {events:?}"
+    );
     assert!(
         audit
             .log

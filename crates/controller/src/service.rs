@@ -23,7 +23,7 @@ use agentdesktop_core::config::{LlmGatewayAuthentication, ProgramsConfig};
 use agentdesktop_usage::UsageError;
 
 use crate::{
-    audit::{Actor, AuditEvent, AuditLog, EventKind, Outcome, RequestInfo},
+    audit::{Actor, AuditEvent, AuditLog, ChangeError, EventKind, Outcome, RequestInfo},
     daemon_config::DaemonConfigStore,
     database::{Database, DevicePrincipal},
     device_ca::DeviceCertificateIssuer,
@@ -604,31 +604,33 @@ impl FleetAgentService {
         .target(DEVICES, Some(&device_id))
         .target_name(&completed.hostname)
         .request(info);
-        // Nothing is admitted until the attempt is streamed (fail closed).
-        if let Err(error) = self.audit.stream(&attempt).await {
-            error!(
-                error = format!("{error:#}"),
-                %device_id, "refusing device enrollment that could not be audited"
-            );
-            return Err(audit_unavailable());
-        }
-        // The device and its completion record commit in one transaction, in their
-        // own task, so a client that disconnects cannot separate them.
         let issued = EnrollResponse {
             device_id: device_id.clone(),
             client_certificate_pem: issued_certificate.chain_pem,
             client_certificate_expires_at_unix_seconds: issued_certificate.expires_at_unix_seconds,
         };
         let enrollment = completed.clone();
+        // Nothing is admitted until the attempt is streamed (fail closed). The device
+        // and its completion record commit in one transaction, in their own task,
+        // so a client that disconnects cannot separate them.
         let response = self
             .audit
-            .complete_in_transaction(vec![attempt], move |mut transaction| async move {
+            .mutate(attempt, move |mut transaction| async move {
                 let stored =
                     Database::finish_enrollment(&mut transaction, &enrollment, &issued).await?;
                 Ok((transaction, stored, Outcome::Succeeded))
             })
             .await
-            .map_err(internal)?;
+            .map_err(|error| match error {
+                ChangeError::AuditUnavailable(error) => {
+                    error!(
+                        error = format!("{error:#}"),
+                        %device_id, "refusing device enrollment that could not be audited"
+                    );
+                    audit_unavailable()
+                }
+                ChangeError::Failed(error) => internal(error),
+            })?;
         match &completed.credential {
             EnrollmentCredential::User(user) => info!(
                 %device_id,
