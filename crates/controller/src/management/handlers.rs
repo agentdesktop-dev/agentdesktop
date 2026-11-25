@@ -125,17 +125,27 @@ pub(super) async fn delete_device(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Serialize)]
+pub(super) struct SettingsResponse {
+    #[serde(flatten)]
+    settings: Settings,
+    version: &'static str,
+}
+
 pub(super) async fn settings(
     State(state): State<ManagementState>,
     auth: Context,
-) -> Result<Json<Settings>, HandlerError> {
+) -> Result<Json<SettingsResponse>, HandlerError> {
     auth.require(AccessRequest {
         verb: Verb::Read,
         resource_class: authorization::SETTINGS,
         resource: None,
     })
     .await?;
-    Ok(Json(state.settings))
+    Ok(Json(SettingsResponse {
+        settings: state.settings,
+        version: agentdesktop_core::VERSION,
+    }))
 }
 
 pub(super) async fn usage_report(

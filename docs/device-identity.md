@@ -371,12 +371,13 @@ report inventory, telemetry, and usage. It gets no LLM gateway credential,
 which needs a signed-in user. To see which devices a token enrolled, search
 the controller's device list for its ID.
 
-Deleting a token-enrolled device in the controller UI does not keep it out.
-The daemon discards the rejected identity and enrolls again with the same
-token file, under a new device ID. To remove one device, first delete the
-token file on the device (or uninstall the daemon), then delete the device in
-the controller UI. Revoking the token's `jti` cuts off every device it
-enrolled.
+Deleting a token-enrolled device in the controller UI removes its record but
+does not keep the device out. The controller rejects the device's next
+`Connect` as an unknown device, so the daemon discards its identity and
+enrolls again with the same token, under a new device ID. To remove one device,
+first delete the token file on the device (or uninstall the daemon), then
+delete the device in the controller UI. Revoking the token's `jti` cuts off
+every device it enrolled.
 
 ### Controller validation
 
@@ -496,7 +497,7 @@ device identity.
 | Enrollment fails (IdP error, state mismatch, timeout, controller rejects) | Retry with backoff. Status returns to `starting`. A daemon with an enrollment token never falls back to sign-in. |
 | IdP rejects the refresh token | Delete the local identity and enroll again. The app reports the session as expired. |
 | Token refresh fails because of the network or an IdP outage | Keep the identity and retry with backoff. |
-| Controller returns `Unauthenticated` on the `Connect` stream, at open or later (unknown device certificate, or the IdP rejects the access token) | Delete the local identity and enroll again. |
+| Controller returns `Unauthenticated` on the `Connect` stream, at open or later (unknown device certificate, or the IdP rejects the access token) | Delete the local identity and enroll again. A daemon with an enrollment token enrolls again with the token file. |
 | Controller returns `PermissionDenied` to a token-enrolled device (its token was revoked or its issuer removed) | Keep the identity and reconnect with backoff. The app reports the token as no longer accepted. If the token file has changed since the device enrolled, delete the identity and enroll again with the new token. |
 | Controller returns another error, such as `PermissionDenied` (subject mismatch) or `Unavailable` (IdP unreachable at open), or the stream closes | Keep the identity and reconnect with backoff. |
 | Certificate renewal fails | Keep the current certificate and try again before the next session. |

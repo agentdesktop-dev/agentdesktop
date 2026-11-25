@@ -13,7 +13,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { macosArchitecture } from "./package-macos-architecture.mjs";
+import {
+  distributionForArchitecture,
+  installerHostArchitecture,
+  macosArchitecture,
+} from "./package-macos-architecture.mjs";
 import { normalizeTauriArguments } from "./package-tauri.mjs";
 
 const nativeDirectory = path.resolve(
@@ -36,6 +40,46 @@ test("names native and Rust target architectures consistently", () => {
   assert.equal(macosArchitecture("aarch64-apple-darwin"), "arm64");
   assert.equal(macosArchitecture("x86_64-apple-darwin"), "amd64");
   assert.throws(() => macosArchitecture(undefined, "riscv64"));
+});
+
+test("declares each package's architecture to the macOS Installer", () => {
+  assert.equal(installerHostArchitecture("arm64"), "arm64");
+  assert.equal(installerHostArchitecture("amd64"), "x86_64");
+  assert.throws(() => installerHostArchitecture("riscv64"));
+
+  const source = readFileSync(
+    path.join(macosDirectory, "distribution.xml"),
+    "utf8",
+  );
+  assert.doesNotMatch(source, /hostArchitectures/);
+  const arm64 = distributionForArchitecture(source, "arm64");
+  assert.match(arm64, /<options\b[^>]*\shostArchitectures="arm64"\s*\/>/);
+  assert.match(
+    distributionForArchitecture(source, "amd64"),
+    /<options\b[^>]*\shostArchitectures="x86_64"\s*\/>/,
+  );
+  // Only the options element changes.
+  assert.equal(arm64.replace(/\shostArchitectures="arm64"/, ""), source);
+  assert.throws(
+    () => distributionForArchitecture(arm64, "arm64"),
+    /hostArchitectures/,
+  );
+  assert.throws(
+    () => distributionForArchitecture("<installer-gui-script/>", "arm64"),
+    /<options\/>/,
+  );
+});
+
+test("packaging passes productbuild the distribution for the package's architecture", () => {
+  const script = readFileSync(
+    path.join(import.meta.dirname, "package-macos.mjs"),
+    "utf8",
+  );
+  assert.match(script, /distributionForArchitecture\(/);
+  assert.doesNotMatch(
+    script,
+    /"--distribution",\s*path\.join\(macosDirectory, "distribution\.xml"\)/,
+  );
 });
 
 test("forwards the target option to Tauri instead of Cargo", () => {
@@ -122,9 +166,17 @@ test("builds a branded installer with the original component identity and script
       readFileSync(logo).toString("base64"),
     ),
   );
+  const distributionPath = path.join(directory, "distribution.xml");
+  writeFileSync(
+    distributionPath,
+    distributionForArchitecture(
+      readFileSync(path.join(macosDirectory, "distribution.xml"), "utf8"),
+      "arm64",
+    ),
+  );
   run("/usr/bin/productbuild", [
     "--distribution",
-    path.join(macosDirectory, "distribution.xml"),
+    distributionPath,
     "--resources",
     resources,
     "--package-path",
@@ -139,6 +191,8 @@ test("builds a branded installer with the original component identity and script
     "utf8",
   );
   assert.match(distribution, /<title>agentdesktop<\/title>/);
+  // Installs natively on Apple silicon, without Rosetta 2.
+  assert.match(distribution, /hostArchitectures="arm64"/);
   assert.match(distribution, /<welcome file="welcome.html"\s*\/>/);
   const welcome = readFileSync(
     path.join(expanded, "Resources", "welcome.html"),
