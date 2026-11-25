@@ -68,6 +68,7 @@ use tonic::{
 use tower_layer::Layer;
 
 use super::{ThrottledWarning, address_key, has_device_certificate, is_connect};
+use crate::metrics::{Limit, LimitMetrics, ListenerMetrics, Outcome};
 
 /// Connection admission and idle limits for one listener.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -93,6 +94,7 @@ pub struct Connections {
 struct Shared {
     /// Names the listener in logs, e.g. `fleet`.
     listener: &'static str,
+    metrics: ListenerMetrics,
     total_cap: ThrottledWarning,
     per_address_cap: ThrottledWarning,
     evictions: ThrottledWarning,
@@ -261,10 +263,17 @@ impl State {
 }
 
 impl Connections {
-    pub(crate) fn new(limits: ConnectionLimits, listener: &'static str) -> Self {
+    /// The registry for the listener named `listener` (e.g. `fleet`), which
+    /// counts the limits that act in `metrics`.
+    pub(crate) fn new(
+        limits: ConnectionLimits,
+        listener: &'static str,
+        metrics: &LimitMetrics,
+    ) -> Self {
         Self {
             shared: Arc::new(Shared {
                 listener,
+                metrics: metrics.listener(listener),
                 total_cap: ThrottledWarning::new(),
                 per_address_cap: ThrottledWarning::new(),
                 evictions: ThrottledWarning::new(),
@@ -334,7 +343,14 @@ impl Connections {
             // Room comes from the address's own connections only, so a client
             // at its cap never closes another client's connection. The one it
             // replaces frees a slot under the total cap too.
-            if !state.evict_idle_from(address) {
+            if state.evict_idle_from(address) {
+                self.shared
+                    .metrics
+                    .hit(Limit::ConnectionsPerAddress, Outcome::Evicted);
+            } else {
+                self.shared
+                    .metrics
+                    .hit(Limit::ConnectionsPerAddress, Outcome::Rejected);
                 if let Some(closed) = self.shared.per_address_cap.event(Instant::now()) {
                     tracing::warn!(
                         listener = self.shared.listener,
@@ -345,15 +361,24 @@ impl Connections {
                 }
                 return None;
             }
-        } else if state.open.len() >= self.shared.max_connections && !state.evict_idle() {
-            if let Some(closed) = self.shared.total_cap.event(Instant::now()) {
-                tracing::warn!(
-                    listener = self.shared.listener,
-                    closed_since_last_warning = closed,
-                    "closed new connections at the connection limit with no connection idle"
-                );
+        } else if state.open.len() >= self.shared.max_connections {
+            if state.evict_idle() {
+                self.shared
+                    .metrics
+                    .hit(Limit::MaxConnections, Outcome::Evicted);
+            } else {
+                self.shared
+                    .metrics
+                    .hit(Limit::MaxConnections, Outcome::Rejected);
+                if let Some(closed) = self.shared.total_cap.event(Instant::now()) {
+                    tracing::warn!(
+                        listener = self.shared.listener,
+                        closed_since_last_warning = closed,
+                        "closed new connections at the connection limit with no connection idle"
+                    );
+                }
+                return None;
             }
-            return None;
         }
         state.per_address.entry(address).or_default().count += 1;
         let (evict, evicted) = oneshot::channel();
@@ -375,6 +400,7 @@ impl Connections {
             },
         );
         state.mark_idle(peer, &activity);
+        self.shared.metrics.connection_opened();
         Some((activity, evicted))
     }
 
@@ -395,6 +421,8 @@ impl Connections {
                 state.per_address.remove(&address);
             }
         }
+        // Every registered connection is released once, when it closes.
+        self.shared.metrics.connection_closed();
     }
 
     /// Records a request on `peer`'s connection; a `busy` one keeps the
@@ -537,6 +565,15 @@ impl LimitedConnection {
             };
             if deadline <= Instant::now() {
                 self.closed = true;
+                let limit = if self.activity.used.load(Ordering::Acquire) {
+                    Limit::IdleConnection
+                } else {
+                    Limit::FirstRequest
+                };
+                self.connections
+                    .shared
+                    .metrics
+                    .hit(limit, Outcome::TimedOut);
                 tracing::debug!(
                     listener = self.connections.shared.listener,
                     peer = %self.peer,

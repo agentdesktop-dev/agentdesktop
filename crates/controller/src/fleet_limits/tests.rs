@@ -24,6 +24,7 @@ use tonic::{
 use super::{
     Connections, DeviceStreams, FLEET_LIMITS, FleetLimits, RPC_CLASSES, RpcClass, rpc_class,
 };
+use crate::metrics::{Limit, LimitMetrics, Outcome, Telemetry};
 
 /// Fails the test, instead of hanging it, when the server never ends the wait.
 async fn bounded<T>(call: impl std::future::Future<Output = T>) -> T {
@@ -86,7 +87,7 @@ impl FleetAgent for Slow {
         &self,
         request: Request<Streaming<AgentMessage>>,
     ) -> Result<Response<Self::ConnectStream>, Status> {
-        let stream = DeviceStreams::new(&FLEET_LIMITS)
+        let stream = DeviceStreams::new(&FLEET_LIMITS, &LimitMetrics::disabled())
             .admit_open("device")
             .expect("the first open is admitted")
             .open(request);
@@ -117,12 +118,22 @@ async fn serve_tracked(
     tls: Option<ServerTlsConfig>,
     service: impl FleetAgent,
 ) -> (SocketAddr, Connections) {
+    serve_measured(limits, tls, service, &LimitMetrics::disabled()).await
+}
+
+/// Like `serve_tracked`, counting the limits that act in `metrics`.
+async fn serve_measured(
+    limits: FleetLimits,
+    tls: Option<ServerTlsConfig>,
+    service: impl FleetAgent,
+    metrics: &LimitMetrics,
+) -> (SocketAddr, Connections) {
     // As the controller does at startup, so TLS works whichever rustls
     // backends the test build enables.
     crate::install_rustls_provider();
     // The controller's own listener, so these tests exercise what it runs.
     let listener = limits
-        .listener(SocketAddr::from(([127, 0, 0, 1], 0)), tls)
+        .listener(SocketAddr::from(([127, 0, 0, 1], 0)), tls, metrics)
         .unwrap();
     let address = listener.local_address();
     let connections = listener.connections().clone();
@@ -175,12 +186,14 @@ async fn a_request_that_runs_too_long_is_ended() {
         request: Duration::from_millis(200),
         ..FLEET_LIMITS
     };
-    let address = serve(
+    let telemetry = Telemetry::new().unwrap();
+    let (address, _) = serve_measured(
         limits,
         None,
         Slow {
             delay: Duration::from_secs(30),
         },
+        &telemetry.limits(),
     )
     .await;
 
@@ -193,6 +206,43 @@ async fn a_request_that_runs_too_long_is_ended() {
     .expect_err("a request outlived the request timeout");
 
     assert_eq!(error.code(), Code::Cancelled, "{error}");
+    assert_eq!(
+        telemetry.hits("fleet", Limit::RequestTimeout, Outcome::TimedOut),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_request_ended_by_its_own_deadline_is_not_counted() {
+    let limits = FleetLimits {
+        request: Duration::from_secs(4),
+        ..FLEET_LIMITS
+    };
+    let telemetry = Telemetry::new().unwrap();
+    let (address, _) = serve_measured(
+        limits,
+        None,
+        Slow {
+            delay: Duration::from_secs(30),
+        },
+        &telemetry.limits(),
+    )
+    .await;
+    let mut request = Request::new(LoginConfigurationRequest {});
+    request.set_timeout(Duration::from_millis(200));
+
+    let error = bounded(client(address).await.get_login_configuration(request))
+        .await
+        .expect_err("a request outlived its own deadline");
+
+    // Tonic ended it at the client's deadline, the shorter one. The client
+    // gives up there too, so give the server time to drop the request.
+    assert_eq!(error.code(), Code::Cancelled, "{error}");
+    time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        telemetry.hits("fleet", Limit::RequestTimeout, Outcome::TimedOut),
+        0
+    );
 }
 
 #[tokio::test]
@@ -203,7 +253,8 @@ async fn the_request_timeout_does_not_end_an_open_stream() {
     };
     // Each message arrives after more than the request timeout.
     let delay = limits.request * 2;
-    let address = serve(limits, None, Slow { delay }).await;
+    let telemetry = Telemetry::new().unwrap();
+    let (address, _) = serve_measured(limits, None, Slow { delay }, &telemetry.limits()).await;
     let (_outbound, receiver) = mpsc::channel::<AgentMessage>(1);
 
     let mut stream = bounded(client(address).await.connect(ReceiverStream::new(receiver)))
@@ -217,6 +268,10 @@ async fn the_request_timeout_does_not_end_an_open_stream() {
             .unwrap_or_else(|error| panic!("stream ended at message {message}: {error}"));
         assert!(received.is_some(), "stream closed at message {message}");
     }
+    assert_eq!(
+        telemetry.hits("fleet", Limit::RequestTimeout, Outcome::TimedOut),
+        0
+    );
 }
 
 #[tokio::test]
@@ -339,12 +394,14 @@ fn small_messages() -> FleetLimits {
 
 #[tokio::test]
 async fn an_oversized_enrollment_request_is_rejected() {
-    let address = serve(
+    let telemetry = Telemetry::new().unwrap();
+    let (address, _) = serve_measured(
         small_messages(),
         None,
         Slow {
             delay: Duration::ZERO,
         },
+        &telemetry.limits(),
     )
     .await;
 
@@ -356,6 +413,18 @@ async fn an_oversized_enrollment_request_is_rejected() {
     .expect_err("an oversized enrollment request was accepted");
 
     assert_eq!(error.code(), Code::OutOfRange, "{error}");
+    assert_eq!(
+        telemetry.hits(
+            "fleet",
+            Limit::UnauthenticatedMessageBytes,
+            Outcome::Rejected
+        ),
+        1
+    );
+    assert_eq!(
+        telemetry.hits("fleet", Limit::MaxMessageBytes, Outcome::Rejected),
+        0
+    );
 }
 
 /// The device that `Pki`'s device certificate identifies.
@@ -414,11 +483,21 @@ async fn serve_mtls_with(
     pki: &Pki,
     service: impl FleetAgent,
 ) -> (SocketAddr, Connections) {
+    serve_mtls_measured(limits, pki, service, &LimitMetrics::disabled()).await
+}
+
+/// Like `serve_mtls_with`, counting the limits that act in `metrics`.
+async fn serve_mtls_measured(
+    limits: FleetLimits,
+    pki: &Pki,
+    service: impl FleetAgent,
+    metrics: &LimitMetrics,
+) -> (SocketAddr, Connections) {
     let tls = ServerTlsConfig::new()
         .identity(pki.server.clone())
         .client_ca_root(pki.ca.clone())
         .client_auth_optional(true);
-    serve_tracked(limits, Some(tls), service).await
+    serve_measured(limits, Some(tls), service, metrics).await
 }
 
 /// A TLS endpoint for `address`, presenting the device certificate when `device`.
@@ -452,7 +531,16 @@ fn renewal(bytes: usize) -> RenewDeviceCertificateRequest {
 #[tokio::test]
 async fn device_calls_keep_the_larger_message_limit() {
     let pki = pki();
-    let (address, _) = serve_mtls(small_messages(), &pki).await;
+    let telemetry = Telemetry::new().unwrap();
+    let (address, _) = serve_mtls_measured(
+        small_messages(),
+        &pki,
+        Slow {
+            delay: Duration::ZERO,
+        },
+        &telemetry.limits(),
+    )
+    .await;
     let mut client = tls_client(address, &pki, true).await;
 
     // Over the unauthenticated limit but within the device limit: reaches the handler.
@@ -460,17 +548,42 @@ async fn device_calls_keep_the_larger_message_limit() {
         .await
         .expect_err("the test service rejects every renewal");
     assert_eq!(within.code(), Code::Unimplemented, "{within}");
+    assert_eq!(
+        telemetry.hits("fleet", Limit::MaxMessageBytes, Outcome::Rejected),
+        0
+    );
 
     let over = bounded(client.renew_device_certificate(renewal(4096)))
         .await
         .expect_err("an oversized device request was accepted");
     assert_eq!(over.code(), Code::OutOfRange, "{over}");
+    assert_eq!(
+        telemetry.hits("fleet", Limit::MaxMessageBytes, Outcome::Rejected),
+        1
+    );
+    assert_eq!(
+        telemetry.hits(
+            "fleet",
+            Limit::UnauthenticatedMessageBytes,
+            Outcome::Rejected
+        ),
+        0
+    );
 }
 
 #[tokio::test]
 async fn callers_without_a_device_certificate_get_the_small_limit_on_every_call() {
     let pki = pki();
-    let (address, _) = serve_mtls(small_messages(), &pki).await;
+    let telemetry = Telemetry::new().unwrap();
+    let (address, _) = serve_mtls_measured(
+        small_messages(),
+        &pki,
+        Slow {
+            delay: Duration::ZERO,
+        },
+        &telemetry.limits(),
+    )
+    .await;
     let mut client = tls_client(address, &pki, false).await;
 
     let error = bounded(client.renew_device_certificate(renewal(512)))
@@ -478,6 +591,18 @@ async fn callers_without_a_device_certificate_get_the_small_limit_on_every_call(
         .expect_err("a large request without a certificate reached the handler");
 
     assert_eq!(error.code(), Code::OutOfRange, "{error}");
+    assert_eq!(
+        telemetry.hits(
+            "fleet",
+            Limit::UnauthenticatedMessageBytes,
+            Outcome::Rejected
+        ),
+        1
+    );
+    assert_eq!(
+        telemetry.hits("fleet", Limit::MaxMessageBytes, Outcome::Rejected),
+        0
+    );
 }
 
 #[tokio::test]
@@ -603,12 +728,14 @@ async fn stays_open(mut stream: TcpStream) -> bool {
 async fn at_the_per_address_cap_the_addresses_longest_idle_connection_makes_room() {
     let mut limits = FLEET_LIMITS;
     limits.configured.connections_per_address = 2;
-    let address = serve(
+    let telemetry = Telemetry::new().unwrap();
+    let (address, _) = serve_measured(
         limits,
         None,
         Slow {
             delay: Duration::ZERO,
         },
+        &telemetry.limits(),
     )
     .await;
     let oldest = TcpStream::connect(address).await.unwrap();
@@ -620,6 +747,14 @@ async fn at_the_per_address_cap_the_addresses_longest_idle_connection_makes_room
 
     bounded(until_closed(oldest)).await;
     assert!(stays_open(newest).await, "the new connection was refused");
+    assert_eq!(
+        telemetry.hits("fleet", Limit::ConnectionsPerAddress, Outcome::Evicted),
+        1
+    );
+    assert_eq!(
+        telemetry.hits("fleet", Limit::ConnectionsPerAddress, Outcome::Rejected),
+        0
+    );
     drop(newer);
 }
 
@@ -628,12 +763,14 @@ async fn at_the_per_address_cap_a_new_connection_is_closed_when_every_connection
     let pki = pki();
     let mut limits = FLEET_LIMITS;
     limits.configured.connections_per_address = 1;
-    let (address, _) = serve_mtls_with(
+    let telemetry = Telemetry::new().unwrap();
+    let (address, _) = serve_mtls_measured(
         limits,
         &pki,
         Slow {
             delay: Duration::from_millis(500),
         },
+        &telemetry.limits(),
     )
     .await;
     let (_outbound, receiver) = mpsc::channel::<AgentMessage>(1);
@@ -651,6 +788,14 @@ async fn at_the_per_address_cap_a_new_connection_is_closed_when_every_connection
 
     // The busy connection was kept.
     assert!(bounded(stream.message()).await.unwrap().is_some());
+    assert_eq!(
+        telemetry.hits("fleet", Limit::ConnectionsPerAddress, Outcome::Rejected),
+        1
+    );
+    assert_eq!(
+        telemetry.hits("fleet", Limit::ConnectionsPerAddress, Outcome::Evicted),
+        0
+    );
 }
 
 #[test]
@@ -660,7 +805,8 @@ fn at_its_cap_an_address_evicts_only_its_own_idle_connections() {
     let mut limits = FLEET_LIMITS;
     limits.configured.max_connections = 2;
     limits.configured.connections_per_address = 1;
-    let connections = Connections::new(limits.connection_limits(), "fleet");
+    let telemetry = Telemetry::new().unwrap();
+    let connections = Connections::new(limits.connection_limits(), "fleet", &telemetry.limits());
     let first_address = |port| SocketAddr::from(([192, 0, 2, 1], port));
     let (_first, mut first_evicted) = connections
         .register(first_address(1))
@@ -675,6 +821,14 @@ fn at_its_cap_an_address_evicts_only_its_own_idle_connections() {
     assert!(connections.register(first_address(2)).is_some());
     assert_eq!(first_evicted.try_recv(), Ok(()));
     assert_eq!(other_evicted.try_recv(), Err(TryRecvError::Empty));
+    assert_eq!(
+        telemetry.hits("fleet", Limit::ConnectionsPerAddress, Outcome::Evicted),
+        1
+    );
+    assert_eq!(
+        telemetry.hits("fleet", Limit::MaxConnections, Outcome::Evicted),
+        0
+    );
 
     // A busy connection is never evicted, so its address is refused.
     let _busy = connections
@@ -686,6 +840,10 @@ fn at_its_cap_an_address_evicts_only_its_own_idle_connections() {
             .is_none()
     );
     assert_eq!(other_evicted.try_recv(), Err(TryRecvError::Empty));
+    assert_eq!(
+        telemetry.hits("fleet", Limit::ConnectionsPerAddress, Outcome::Rejected),
+        1
+    );
 }
 
 #[test]
@@ -694,7 +852,11 @@ fn a_connection_made_idle_by_its_last_request_is_evictable_at_its_address_cap() 
 
     let mut limits = FLEET_LIMITS;
     limits.configured.connections_per_address = 1;
-    let connections = Connections::new(limits.connection_limits(), "fleet");
+    let connections = Connections::new(
+        limits.connection_limits(),
+        "fleet",
+        &LimitMetrics::disabled(),
+    );
     let peer = |port| SocketAddr::from(([192, 0, 2, 1], port));
     let (_first, mut first_evicted) = connections.register(peer(1)).expect("first connection");
     let busy = connections
@@ -713,7 +875,11 @@ fn a_connection_made_idle_by_its_last_request_is_evictable_at_its_address_cap() 
 fn a_request_without_a_device_certificate_does_not_keep_its_connection_from_eviction() {
     let mut limits = FLEET_LIMITS;
     limits.configured.max_connections = 1;
-    let connections = Connections::new(limits.connection_limits(), "fleet");
+    let connections = Connections::new(
+        limits.connection_limits(),
+        "fleet",
+        &LimitMetrics::disabled(),
+    );
     let (_anonymous, mut evicted) = connections
         .register(SocketAddr::from(([192, 0, 2, 1], 1)))
         .expect("first connection");
@@ -737,8 +903,13 @@ fn at_either_cap_the_longest_idle_connection_is_evicted_not_the_oldest() {
     total_cap.configured.max_connections = 2;
     let mut address_cap = FLEET_LIMITS;
     address_cap.configured.connections_per_address = 2;
-    for limits in [total_cap, address_cap] {
-        let connections = Connections::new(limits.connection_limits(), "fleet");
+    for (limits, limit) in [
+        (total_cap, Limit::MaxConnections),
+        (address_cap, Limit::ConnectionsPerAddress),
+    ] {
+        let telemetry = Telemetry::new().unwrap();
+        let connections =
+            Connections::new(limits.connection_limits(), "fleet", &telemetry.limits());
         let peer = |port| SocketAddr::from(([192, 0, 2, 1], port));
         let (_oldest, mut oldest_evicted) = connections.register(peer(1)).expect("oldest");
         let (_newer, mut newer_evicted) = connections.register(peer(2)).expect("newer");
@@ -752,6 +923,15 @@ fn at_either_cap_the_longest_idle_connection_is_evicted_not_the_oldest() {
         assert!(connections.register(peer(3)).is_some());
         assert_eq!(newer_evicted.try_recv(), Ok(()));
         assert_eq!(oldest_evicted.try_recv(), Err(TryRecvError::Empty));
+        // The cap that was reached counts the eviction, and not the other.
+        let other = if limit == Limit::MaxConnections {
+            Limit::ConnectionsPerAddress
+        } else {
+            Limit::MaxConnections
+        };
+        assert_eq!(telemetry.hits("fleet", limit, Outcome::Evicted), 1);
+        assert_eq!(telemetry.hits("fleet", other, Outcome::Evicted), 0);
+        assert_eq!(telemetry.hits("fleet", limit, Outcome::Rejected), 0);
     }
 }
 
@@ -767,7 +947,11 @@ fn at_either_cap_a_connection_with_a_recent_anonymous_request_is_evicted_last() 
     let mut address_cap = FLEET_LIMITS;
     address_cap.configured.connections_per_address = 2;
     for limits in [total_cap, address_cap] {
-        let connections = Connections::new(limits.connection_limits(), "fleet");
+        let connections = Connections::new(
+            limits.connection_limits(),
+            "fleet",
+            &LimitMetrics::disabled(),
+        );
         let peer = |port| SocketAddr::from(([192, 0, 2, 1], port));
         let (_oldest, mut oldest_evicted) = connections.register(peer(1)).expect("oldest");
         let (_newer, mut newer_evicted) = connections.register(peer(2)).expect("newer");
@@ -792,7 +976,11 @@ fn at_either_cap_a_connection_with_a_recent_anonymous_request_is_evicted_last() 
 fn a_request_on_an_evicted_connection_is_not_counted() {
     let mut limits = FLEET_LIMITS;
     limits.configured.max_connections = 1;
-    let connections = Connections::new(limits.connection_limits(), "fleet");
+    let connections = Connections::new(
+        limits.connection_limits(),
+        "fleet",
+        &LimitMetrics::disabled(),
+    );
     let peer = |last| SocketAddr::from(([192, 0, 2, last], 1));
     let (_first, mut first_evicted) = connections.register(peer(1)).expect("first connection");
     assert!(connections.register(peer(2)).is_some());
@@ -804,7 +992,11 @@ fn a_request_on_an_evicted_connection_is_not_counted() {
 
 #[test]
 fn the_idle_maps_hold_only_idle_connections() {
-    let connections = Connections::new(FLEET_LIMITS.connection_limits(), "fleet");
+    let connections = Connections::new(
+        FLEET_LIMITS.connection_limits(),
+        "fleet",
+        &LimitMetrics::disabled(),
+    );
     let peer = |port| SocketAddr::from(([192, 0, 2, 1], port));
     let _first = connections.register(peer(1)).expect("first connection");
     let _second = connections.register(peer(2)).expect("second connection");
@@ -824,7 +1016,11 @@ fn an_evicted_connection_stays_out_of_the_idle_maps_when_its_anonymous_request_e
 
     let mut limits = FLEET_LIMITS;
     limits.configured.max_connections = 1;
-    let connections = Connections::new(limits.connection_limits(), "fleet");
+    let connections = Connections::new(
+        limits.connection_limits(),
+        "fleet",
+        &LimitMetrics::disabled(),
+    );
     let peer = |last| SocketAddr::from(([192, 0, 2, last], 1));
     let (_first, mut first_evicted) = connections.register(peer(1)).expect("first connection");
     let request = connections
@@ -845,12 +1041,14 @@ fn an_evicted_connection_stays_out_of_the_idle_maps_when_its_anonymous_request_e
 async fn at_the_total_cap_the_longest_idle_connection_makes_room() {
     let mut limits = FLEET_LIMITS;
     limits.configured.max_connections = 2;
-    let address = serve(
+    let telemetry = Telemetry::new().unwrap();
+    let (address, _) = serve_measured(
         limits,
         None,
         Slow {
             delay: Duration::ZERO,
         },
+        &telemetry.limits(),
     )
     .await;
     let oldest = TcpStream::connect(address).await.unwrap();
@@ -862,6 +1060,14 @@ async fn at_the_total_cap_the_longest_idle_connection_makes_room() {
 
     bounded(until_closed(oldest)).await;
     assert!(stays_open(newest).await, "the new connection was refused");
+    assert_eq!(
+        telemetry.hits("fleet", Limit::MaxConnections, Outcome::Evicted),
+        1
+    );
+    assert_eq!(
+        telemetry.hits("fleet", Limit::MaxConnections, Outcome::Rejected),
+        0
+    );
     drop(newer);
 }
 
@@ -870,12 +1076,14 @@ async fn at_the_total_cap_a_new_connection_is_closed_when_every_connection_is_bu
     let pki = pki();
     let mut limits = FLEET_LIMITS;
     limits.configured.max_connections = 1;
-    let (address, _) = serve_mtls_with(
+    let telemetry = Telemetry::new().unwrap();
+    let (address, _) = serve_mtls_measured(
         limits,
         &pki,
         Slow {
             delay: Duration::from_millis(500),
         },
+        &telemetry.limits(),
     )
     .await;
     let (_outbound, receiver) = mpsc::channel::<AgentMessage>(1);
@@ -891,8 +1099,17 @@ async fn at_the_total_cap_a_new_connection_is_closed_when_every_connection_is_bu
     let newcomer = TcpStream::connect(address).await.unwrap();
     bounded(until_closed(newcomer)).await;
 
-    // The busy connection was kept.
+    // The busy connection was kept, and the refused one never counted.
     assert!(bounded(stream.message()).await.unwrap().is_some());
+    assert_eq!(telemetry.connections("fleet"), 1);
+    assert_eq!(
+        telemetry.hits("fleet", Limit::MaxConnections, Outcome::Rejected),
+        1
+    );
+    assert_eq!(
+        telemetry.hits("fleet", Limit::MaxConnections, Outcome::Evicted),
+        0
+    );
 }
 
 #[tokio::test]
@@ -944,12 +1161,14 @@ async fn a_connection_that_never_sends_anything_is_closed() {
 async fn a_connection_that_never_makes_a_request_is_closed() {
     let mut limits = FLEET_LIMITS;
     limits.first_request = Duration::from_millis(200);
-    let address = serve(
+    let telemetry = Telemetry::new().unwrap();
+    let (address, _) = serve_measured(
         limits,
         None,
         Slow {
             delay: Duration::ZERO,
         },
+        &telemetry.limits(),
     )
     .await;
     let mut stream = TcpStream::connect(address).await.unwrap();
@@ -958,6 +1177,14 @@ async fn a_connection_that_never_makes_a_request_is_closed() {
     stream.write_all(PREFACE).await.unwrap();
 
     bounded(until_closed(stream)).await;
+    assert_eq!(
+        telemetry.hits("fleet", Limit::FirstRequest, Outcome::TimedOut),
+        1
+    );
+    assert_eq!(
+        telemetry.hits("fleet", Limit::IdleConnection, Outcome::TimedOut),
+        0
+    );
 }
 
 #[tokio::test]
@@ -966,12 +1193,14 @@ async fn a_connection_idle_after_its_last_request_is_closed() {
     // Far past the test's bound, so only the idle close can end the connection.
     limits.first_request = Duration::from_secs(60);
     limits.idle_connection = Duration::from_millis(200);
-    let (address, connections) = serve_tracked(
+    let telemetry = Telemetry::new().unwrap();
+    let (address, connections) = serve_measured(
         limits,
         None,
         Slow {
             delay: Duration::ZERO,
         },
+        &telemetry.limits(),
     )
     .await;
     let mut client = client(address).await;
@@ -986,6 +1215,14 @@ async fn a_connection_idle_after_its_last_request_is_closed() {
         }
     })
     .await;
+    assert_eq!(
+        telemetry.hits("fleet", Limit::IdleConnection, Outcome::TimedOut),
+        1
+    );
+    assert_eq!(
+        telemetry.hits("fleet", Limit::FirstRequest, Outcome::TimedOut),
+        0
+    );
 }
 
 #[tokio::test]
@@ -1384,6 +1621,7 @@ fn limits_out_of_range_are_refused_where_they_are_built() {
 }
 
 mod enrollment {
+    use crate::metrics::{Limit, LimitMetrics, Outcome, Telemetry};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
     use tokio::time::Instant;
@@ -1407,7 +1645,7 @@ mod enrollment {
 
     #[test]
     fn a_peer_gets_its_burst_then_one_request_per_refill() {
-        let limiter = EnrollmentLimiter::new(&limits(64, 3));
+        let limiter = EnrollmentLimiter::new(&limits(64, 3), &LimitMetrics::disabled());
         let start = Instant::now();
 
         for _ in 0..3 {
@@ -1424,7 +1662,7 @@ mod enrollment {
 
     #[test]
     fn peers_have_separate_budgets() {
-        let limiter = EnrollmentLimiter::new(&limits(64, 1));
+        let limiter = EnrollmentLimiter::new(&limits(64, 1), &LimitMetrics::disabled());
         let now = Instant::now();
 
         assert!(limiter.take(peer(1), now));
@@ -1434,7 +1672,7 @@ mod enrollment {
 
     #[test]
     fn a_full_bucket_is_never_overfilled() {
-        let limiter = EnrollmentLimiter::new(&limits(64, 2));
+        let limiter = EnrollmentLimiter::new(&limits(64, 2), &LimitMetrics::disabled());
         let start = Instant::now();
 
         assert!(limiter.take(peer(1), start));
@@ -1447,7 +1685,8 @@ mod enrollment {
 
     #[tokio::test]
     async fn requests_in_progress_are_capped_until_one_finishes() {
-        let limiter = EnrollmentLimiter::new(&limits(2, 60));
+        let telemetry = Telemetry::new().unwrap();
+        let limiter = EnrollmentLimiter::new(&limits(2, 60), &telemetry.limits());
         let address = |last| Some(SocketAddr::new(peer(last), 4000));
 
         let first = limiter.admit(address(1)).expect("first request");
@@ -1456,6 +1695,14 @@ mod enrollment {
             .admit(address(3))
             .expect_err("third request admitted");
         assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+        assert_eq!(
+            telemetry.hits("fleet", Limit::EnrollmentInFlight, Outcome::Rejected),
+            1
+        );
+        assert_eq!(
+            telemetry.hits("fleet", Limit::EnrollmentRate, Outcome::Rejected),
+            0
+        );
 
         drop(first);
         let _third = limiter
@@ -1465,18 +1712,31 @@ mod enrollment {
 
     #[tokio::test]
     async fn a_rate_limited_peer_is_rejected_with_resource_exhausted() {
-        let limiter = EnrollmentLimiter::new(&limits(64, 1));
+        let telemetry = Telemetry::new().unwrap();
+        let limiter = EnrollmentLimiter::new(&limits(64, 1), &telemetry.limits());
         let address = Some(SocketAddr::new(peer(1), 4000));
 
         let _first = limiter.admit(address).expect("first request");
+        assert_eq!(
+            telemetry.hits("fleet", Limit::EnrollmentRate, Outcome::Rejected),
+            0
+        );
         let error = limiter.admit(address).expect_err("second request admitted");
 
         assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+        assert_eq!(
+            telemetry.hits("fleet", Limit::EnrollmentRate, Outcome::Rejected),
+            1
+        );
+        assert_eq!(
+            telemetry.hits("fleet", Limit::EnrollmentInFlight, Outcome::Rejected),
+            0
+        );
     }
 
     #[tokio::test]
     async fn enrolling_spends_the_address_budget() {
-        let limiter = EnrollmentLimiter::new(&limits(64, 1));
+        let limiter = EnrollmentLimiter::new(&limits(64, 1), &LimitMetrics::disabled());
         let address = Some(SocketAddr::new(peer(1), 4000));
         let _configuration = limiter.admit(address).expect("login configuration");
 
@@ -1497,7 +1757,8 @@ mod enrollment {
 
     #[tokio::test]
     async fn enrolling_waits_for_a_slot() {
-        let limiter = EnrollmentLimiter::new(&one_slot(Duration::from_secs(5)));
+        let limiter =
+            EnrollmentLimiter::new(&one_slot(Duration::from_secs(5)), &LimitMetrics::disabled());
         let other = limiter.admit(None).expect("other request");
         let waiting = tokio::spawn({
             let limiter = limiter.clone();
@@ -1516,17 +1777,23 @@ mod enrollment {
 
     #[tokio::test]
     async fn enrolling_gives_up_after_the_wait() {
-        let limiter = EnrollmentLimiter::new(&one_slot(Duration::from_millis(50)));
+        let telemetry = Telemetry::new().unwrap();
+        let limiter =
+            EnrollmentLimiter::new(&one_slot(Duration::from_millis(50)), &telemetry.limits());
         let _other = limiter.admit(None).expect("other request");
 
         let error = limiter.admit_enrollment(None).await.expect_err("admitted");
 
         assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+        assert_eq!(
+            telemetry.hits("fleet", Limit::EnrollmentInFlight, Outcome::Rejected),
+            1
+        );
     }
 
     #[tokio::test]
     async fn requests_without_a_peer_address_still_count_against_the_cap() {
-        let limiter = EnrollmentLimiter::new(&limits(1, 60));
+        let limiter = EnrollmentLimiter::new(&limits(1, 60), &LimitMetrics::disabled());
 
         let _first = limiter.admit(None).expect("first request");
         assert!(limiter.admit(None).is_err());
@@ -1539,7 +1806,7 @@ mod enrollment {
 
     #[test]
     fn the_peer_table_stays_bounded_while_addresses_keep_changing() {
-        let limiter = EnrollmentLimiter::new(&limits(64, 1));
+        let limiter = EnrollmentLimiter::new(&limits(64, 1), &LimitMetrics::disabled());
         let now = Instant::now();
 
         for index in 0..5 * PEERS_PER_GENERATION {
@@ -1551,7 +1818,7 @@ mod enrollment {
 
     #[test]
     fn a_peer_seen_recently_keeps_its_spent_budget_when_the_table_turns_over() {
-        let limiter = EnrollmentLimiter::new(&limits(64, 1));
+        let limiter = EnrollmentLimiter::new(&limits(64, 1), &LimitMetrics::disabled());
         let now = Instant::now();
         assert!(limiter.take(peer(1), now));
 
@@ -1569,7 +1836,7 @@ mod enrollment {
 
     #[test]
     fn addresses_in_one_ipv6_64_share_a_budget() {
-        let limiter = EnrollmentLimiter::new(&limits(64, 1));
+        let limiter = EnrollmentLimiter::new(&limits(64, 1), &LimitMetrics::disabled());
         let now = Instant::now();
 
         assert!(limiter.take(v6("2001:db8:1:2::1"), now));
@@ -1586,6 +1853,7 @@ mod enrollment {
 }
 
 mod device_streams {
+    use crate::metrics::{Limit, LimitMetrics, Outcome, Telemetry};
     use tokio::{
         sync::mpsc,
         time::{self, Instant},
@@ -1600,7 +1868,7 @@ mod device_streams {
     type Silent = DeviceStream<tokio_stream::Pending<Result<(), Status>>>;
 
     fn streams() -> DeviceStreams {
-        DeviceStreams::new(&FLEET_LIMITS)
+        DeviceStreams::new(&FLEET_LIMITS, &LimitMetrics::disabled())
     }
 
     /// Limits that give each device `burst` messages, refilled at one per `refill`.
@@ -1692,9 +1960,42 @@ mod device_streams {
         assert!(matches!(ended, StreamEvent::Ended), "{ended:?}");
     }
 
+    #[tokio::test]
+    async fn a_stream_that_exceeds_the_message_size_limit_counts_only_that_failure() {
+        let telemetry = Telemetry::new().unwrap();
+        let streams = DeviceStreams::new(&FLEET_LIMITS, &telemetry.limits());
+        let count = || telemetry.hits("fleet", Limit::MaxMessageBytes, Outcome::Rejected);
+
+        // Any other failure of the request stream is not a size limit.
+        let mut stream = open(
+            &streams,
+            "device-a",
+            tokio_stream::iter([Err::<(), _>(Status::internal("reset"))]),
+        );
+        let failed = stream.next::<()>().await;
+        assert!(matches!(failed, StreamEvent::Failed(_)), "{failed:?}");
+        assert_eq!(count(), 0);
+
+        // Decoding gives a message over the size limit `OUT_OF_RANGE`.
+        let mut stream = open(
+            &streams,
+            "device-b",
+            tokio_stream::iter([Err::<(), _>(Status::out_of_range("too large"))]),
+        );
+        let failed = stream.next::<()>().await;
+        assert!(
+            matches!(&failed, StreamEvent::Failed(status) if status.code() == Code::OutOfRange),
+            "{failed:?}"
+        );
+        assert_eq!(count(), 1);
+    }
+
     #[test]
     fn a_device_gets_its_message_burst_then_the_refill_rate() {
-        let streams = DeviceStreams::new(&message_budget(3, Duration::from_secs(1)));
+        let streams = DeviceStreams::new(
+            &message_budget(3, Duration::from_secs(1)),
+            &LimitMetrics::disabled(),
+        );
         let stream = open_silent(&streams, "device-a");
         let budget = &stream.registration;
         let start = Instant::now();
@@ -1716,7 +2017,10 @@ mod device_streams {
 
     #[test]
     fn a_message_read_before_the_budget_refills_delays_the_next_one() {
-        let streams = DeviceStreams::new(&message_budget(1, Duration::from_secs(1)));
+        let streams = DeviceStreams::new(
+            &message_budget(1, Duration::from_secs(1)),
+            &LimitMetrics::disabled(),
+        );
         let stream = open_silent(&streams, "device-a");
         let budget = &stream.registration;
         let start = Instant::now();
@@ -1734,7 +2038,8 @@ mod device_streams {
 
     #[test]
     fn an_absurdly_long_refill_caps_the_wait() {
-        let streams = DeviceStreams::new(&message_budget(1, Duration::MAX));
+        let streams =
+            DeviceStreams::new(&message_budget(1, Duration::MAX), &LimitMetrics::disabled());
         let stream = open_silent(&streams, "device-a");
         let start = Instant::now();
 
@@ -1746,7 +2051,10 @@ mod device_streams {
 
     #[test]
     fn reconnecting_does_not_reset_the_message_budget() {
-        let streams = DeviceStreams::new(&message_budget(2, Duration::from_secs(3600)));
+        let streams = DeviceStreams::new(
+            &message_budget(2, Duration::from_secs(3600)),
+            &LimitMetrics::disabled(),
+        );
         let now = Instant::now();
         let first = open_silent(&streams, "device-a");
         assert_eq!(first.registration.spend_message(now), None);
@@ -1766,24 +2074,120 @@ mod device_streams {
 
     #[tokio::test(start_paused = true)]
     async fn messages_past_the_burst_are_read_at_the_refill_rate() {
-        let streams = DeviceStreams::new(&message_budget(2, Duration::from_secs(1)));
+        let telemetry = Telemetry::new().unwrap();
+        let streams = DeviceStreams::new(
+            &message_budget(2, Duration::from_secs(1)),
+            &telemetry.limits(),
+        );
         let inbound = tokio_stream::iter([1, 2, 3, 4].map(Ok::<_, Status>));
         let mut stream = open(&streams, "device-a", inbound);
         let start = Instant::now();
 
-        for (message, read_after) in [(1, 0), (2, 0), (3, 1), (4, 2)] {
+        // Every message is sent at once, so the two past the burst were held
+        // back until the budget refilled.
+        for (message, read_after, held_back) in [(1, 0, 0), (2, 0, 0), (3, 1, 1), (4, 2, 2)] {
             let read = stream.next().await;
             assert!(
                 matches!(read, StreamEvent::Message(read) if read == message),
                 "{read:?}"
             );
             assert_eq!(start.elapsed().as_secs(), read_after, "message {message}");
+            assert_eq!(
+                telemetry.hits("fleet", Limit::DeviceMessageRate, Outcome::Throttled),
+                held_back,
+                "message {message}"
+            );
         }
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_read_cancelled_while_it_waits_for_the_budget_counts_once() {
+        let telemetry = Telemetry::new().unwrap();
+        let streams = DeviceStreams::new(
+            &message_budget(1, Duration::from_secs(1)),
+            &telemetry.limits(),
+        );
+        let inbound = tokio_stream::iter([1, 2].map(Ok::<_, Status>));
+        let mut stream = open(&streams, "device-a", inbound);
+        assert!(matches!(stream.next().await, StreamEvent::Message(1)));
+
+        // As the session's `select!` does when another event comes first.
+        let cancelled = time::timeout(Duration::from_millis(500), stream.next()).await;
+        assert!(
+            cancelled.is_err(),
+            "read before the budget refilled: {cancelled:?}"
+        );
+        let read = stream.next().await;
+
+        assert!(matches!(read, StreamEvent::Message(2)), "{read:?}");
+        assert_eq!(
+            telemetry.hits("fleet", Limit::DeviceMessageRate, Outcome::Throttled),
+            1
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_device_that_spends_its_budget_and_pauses_is_not_held_back() {
+        let telemetry = Telemetry::new().unwrap();
+        let streams = DeviceStreams::new(
+            &message_budget(1, Duration::from_secs(1)),
+            &telemetry.limits(),
+        );
+        let (device, inbound) = mpsc::channel(1);
+        let mut stream = open(&streams, "device-a", ReceiverStream::new(inbound));
+        device.send(Ok::<_, Status>(1)).await.unwrap();
+        assert!(matches!(stream.next().await, StreamEvent::Message(1)));
+
+        // The budget refills after 1 s, but the next message comes at 5 s.
+        tokio::spawn(async move {
+            time::sleep(Duration::from_secs(5)).await;
+            device.send(Ok(2)).await.unwrap();
+        });
+        let start = Instant::now();
+        let read = stream.next().await;
+
+        assert!(matches!(read, StreamEvent::Message(2)), "{read:?}");
+        assert_eq!(start.elapsed().as_secs(), 5);
+        assert_eq!(
+            telemetry.hits("fleet", Limit::DeviceMessageRate, Outcome::Throttled),
+            0
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_device_within_its_refill_rate_is_not_held_back() {
+        let telemetry = Telemetry::new().unwrap();
+        let streams = DeviceStreams::new(
+            &message_budget(1, Duration::from_secs(1)),
+            &telemetry.limits(),
+        );
+        let (device, inbound) = mpsc::channel(1);
+        let mut stream = open(&streams, "device-a", ReceiverStream::new(inbound));
+
+        // A burst of 1 spends the whole budget on every message, but each
+        // comes after the refill.
+        for message in 1..=3 {
+            device.send(Ok::<_, Status>(message)).await.unwrap();
+            let read = stream.next().await;
+            assert!(
+                matches!(read, StreamEvent::Message(read) if read == message),
+                "{read:?}"
+            );
+            time::sleep(Duration::from_secs(2)).await;
+        }
+
+        assert_eq!(
+            telemetry.hits("fleet", Limit::DeviceMessageRate, Outcome::Throttled),
+            0
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn waiting_for_a_message_does_not_spend_the_budget() {
-        let streams = DeviceStreams::new(&message_budget(1, Duration::from_secs(3600)));
+        let streams = DeviceStreams::new(
+            &message_budget(1, Duration::from_secs(3600)),
+            &LimitMetrics::disabled(),
+        );
         let (device, inbound) = mpsc::channel(1);
         let mut stream = open(&streams, "device-a", ReceiverStream::new(inbound));
         let waited = time::timeout(Duration::from_secs(1), stream.next()).await;
@@ -1799,7 +2203,10 @@ mod device_streams {
 
     #[tokio::test(start_paused = true)]
     async fn a_stream_waiting_for_its_budget_is_still_replaced() {
-        let streams = DeviceStreams::new(&message_budget(1, Duration::from_secs(3600)));
+        let streams = DeviceStreams::new(
+            &message_budget(1, Duration::from_secs(3600)),
+            &LimitMetrics::disabled(),
+        );
         let inbound = tokio_stream::iter([1, 2].map(Ok::<_, Status>));
         let mut stream = open(&streams, "device-a", inbound);
         let first = stream.next().await;
@@ -1822,15 +2229,24 @@ mod device_streams {
     fn a_device_that_opens_streams_too_often_is_refused() {
         let mut limits = FLEET_LIMITS;
         limits.stream_open_burst = 2;
-        let streams = DeviceStreams::new(&limits);
+        let telemetry = Telemetry::new().unwrap();
+        let streams = DeviceStreams::new(&limits, &telemetry.limits());
 
         streams.admit_open("device-a").expect("first open");
         streams.admit_open("device-a").expect("second open");
+        assert_eq!(
+            telemetry.hits("fleet", Limit::StreamOpenRate, Outcome::Rejected),
+            0
+        );
         let Err(error) = streams.admit_open("device-a") else {
             panic!("third open admitted");
         };
 
         assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+        assert_eq!(
+            telemetry.hits("fleet", Limit::StreamOpenRate, Outcome::Rejected),
+            1
+        );
         streams
             .admit_open("device-b")
             .expect("another device is unaffected");
@@ -1840,6 +2256,7 @@ mod device_streams {
 /// The controller's own fleet service behind the fleet limits, with its
 /// identity provider on a local port.
 mod fleet_service {
+    use crate::metrics::{Limit, Outcome, Telemetry};
     use std::{
         net::SocketAddr,
         path::PathBuf,
@@ -1867,7 +2284,7 @@ mod fleet_service {
 
     use super::{
         super::{Connections, FLEET_LIMITS, FleetLimits},
-        DEVICE_ID, Pki, bounded, pki, serve_mtls_with, tls_client, until_open_at_most,
+        DEVICE_ID, Pki, bounded, pki, serve_mtls_measured, tls_client, until_open_at_most,
     };
     use crate::{
         daemon_config::DaemonConfigStore, database::Database, oidc::OidcProvider,
@@ -1975,12 +2392,23 @@ mod fleet_service {
         }
     }
 
+    /// The daemon configuration `Controller` sends each device.
+    fn configuration() -> DaemonConfig {
+        DaemonConfig {
+            revision: 1,
+            yaml: b"{}".to_vec(),
+            sha256: Vec::new(),
+        }
+    }
+
     /// The controller's fleet service, signing users in with an
     /// `IdentityProvider`, with `DEVICE_ID` enrolled and a daemon configuration
     /// to send it.
     struct Controller {
         limits: FleetLimits,
         service: FleetAgentService,
+        /// What the fleet service and its listener count.
+        telemetry: Telemetry,
         idp: IdentityProvider,
         database: PathBuf,
     }
@@ -2000,22 +2428,20 @@ mod fleet_service {
                 .enroll_device(DEVICE_ID, "host", &idp.issuer, SUBJECT, None)
                 .await
                 .unwrap();
-            let config = DaemonConfig {
-                revision: 1,
-                yaml: b"{}".to_vec(),
-                sha256: Vec::new(),
-            };
+            let telemetry = Telemetry::new().unwrap();
             let service = FleetAgentService::new(
                 Some(idp.client().await),
                 devices,
-                DaemonConfigStore::new(Some(config)),
+                DaemonConfigStore::new(Some(configuration())),
                 None,
                 None,
                 &limits,
+                &telemetry.limits(),
             );
             Self {
                 limits,
                 service,
+                telemetry,
                 idp,
                 database,
             }
@@ -2024,7 +2450,18 @@ mod fleet_service {
         /// Serves the fleet service on the fleet listener, over TLS with
         /// `pki`'s device CA.
         async fn serve(&self, pki: &Pki) -> (SocketAddr, Connections) {
-            serve_mtls_with(self.limits, pki, self.service.clone()).await
+            serve_mtls_measured(
+                self.limits,
+                pki,
+                self.service.clone(),
+                &self.telemetry.limits(),
+            )
+            .await
+        }
+
+        /// How often the fleet listener's `limit` acted with `outcome`.
+        fn hits(&self, limit: Limit, outcome: Outcome) -> u64 {
+            self.telemetry.hits("fleet", limit, outcome)
         }
 
         fn enrollment(&self) -> Enrollment {
@@ -2111,21 +2548,34 @@ mod fleet_service {
         bounded(until_open_at_most(&connections, 0)).await;
     }
 
+    /// Calls `Connect` as `DEVICE_ID`. The session lasts until the returned
+    /// sender is dropped.
+    async fn connect(
+        address: SocketAddr,
+        pki: &Pki,
+    ) -> (
+        mpsc::Sender<AgentMessage>,
+        Result<Streaming<ControllerMessage>, Status>,
+    ) {
+        let (outbound, receiver) = mpsc::channel::<AgentMessage>(1);
+        let mut request = Request::new(ReceiverStream::new(receiver));
+        request
+            .metadata_mut()
+            .insert("authorization", AUTHORIZATION.parse().unwrap());
+        let session = bounded(tls_client(address, pki, true).await.connect(request))
+            .await
+            .map(tonic::Response::into_inner);
+        (outbound, session)
+    }
+
     /// Opens a `Connect` session as `DEVICE_ID` and reads the configuration
     /// it starts with. The session lasts until the returned sender is dropped.
     async fn open_session(
         address: SocketAddr,
         pki: &Pki,
     ) -> (mpsc::Sender<AgentMessage>, Streaming<ControllerMessage>) {
-        let (outbound, receiver) = mpsc::channel::<AgentMessage>(1);
-        let mut request = Request::new(ReceiverStream::new(receiver));
-        request
-            .metadata_mut()
-            .insert("authorization", AUTHORIZATION.parse().unwrap());
-        let mut session = bounded(tls_client(address, pki, true).await.connect(request))
-            .await
-            .expect("open the session")
-            .into_inner();
+        let (outbound, session) = connect(address, pki).await;
+        let mut session = session.expect("open the session");
         let config = bounded(session.message())
             .await
             .expect("receive the configuration");
@@ -2154,6 +2604,25 @@ mod fleet_service {
         assert!(quiet.is_err(), "the newer session ended: {quiet:?}");
     }
 
+    /// A device that reopens `Connect` past its open budget is refused, and
+    /// the fleet service counts it.
+    #[tokio::test]
+    async fn a_device_that_reopens_its_session_too_often_is_refused() {
+        let mut limits = FLEET_LIMITS;
+        limits.stream_open_burst = 1;
+        let controller = Controller::start(limits).await;
+        let pki = pki();
+        let (address, _) = controller.serve(&pki).await;
+        let (_device, _session) = open_session(address, &pki).await;
+        assert_eq!(controller.hits(Limit::StreamOpenRate, Outcome::Rejected), 0);
+
+        let (_outbound, session) = connect(address, &pki).await;
+        let refused = session.expect_err("a second session opened");
+
+        assert_eq!(refused.code(), Code::ResourceExhausted, "{refused}");
+        assert_eq!(controller.hits(Limit::StreamOpenRate, Outcome::Rejected), 1);
+    }
+
     /// `EnrollDevice` holds its in-flight slot while it waits on the identity
     /// provider, and frees it when it ends.
     #[tokio::test]
@@ -2164,6 +2633,10 @@ mod fleet_service {
         assert_eq!(controller.idp.held_request().await, "/keys");
 
         controller.enrollment().assert_full().await;
+        assert_eq!(
+            controller.hits(Limit::EnrollmentInFlight, Outcome::Rejected),
+            2
+        );
 
         running.abort();
         let _ = running.await;

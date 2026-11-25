@@ -39,6 +39,14 @@ data:
 {{ toYaml . | indent 8 }}
       {{- end }}
     {{- end }}
+    {{- if .Values.metricsListener.enabled }}
+    metricsListener:
+      listen: 0.0.0.0:{{ .Values.metricsListener.port }}
+      {{- with .Values.metricsListener.limits }}
+      limits:
+{{ toYaml . | indent 8 }}
+      {{- end }}
+    {{- end }}
     {{- with .Values.daemonConfig }}
     daemonConfig:
       path: /etc/agentdesktop/config/daemon.yaml

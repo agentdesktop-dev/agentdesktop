@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{
     daemon_config::{self, DaemonConfigStore},
     database::Database,
@@ -7,10 +9,11 @@ use crate::{
     gateway_jwt::{self, GatewayJwtIssuer},
     http_listener::{HttpListener, HttpListenerLimits, HttpListenerTls},
     management::{self, Settings, State},
+    metrics::{LimitMetrics, Telemetry},
     oidc::OidcProvider,
     service::FleetAgentService,
 };
-use agentdesktop_core::config::ControllerConfig;
+use agentdesktop_core::config::{ControllerConfig, ControllerMetricsListener};
 use agentdesktop_usage::UsageIngest;
 use anyhow::Context;
 use tonic::{
@@ -34,6 +37,7 @@ pub async fn run(
     management::auth(&config.admin_listener.access, &extensions)?;
     // Out-of-range fleet limits fail here too, before any network setup.
     let limits = FleetLimits::from_config(&config.fleet_listener.limits)?;
+    let metrics = Metrics::new(config.metrics_listener.as_ref())?;
     let tls = config.tls.files();
     let daemon_config = match &config.daemon_config {
         Some(daemon) => Some(daemon_config::load(&daemon.path, daemon.revision)?),
@@ -125,6 +129,7 @@ pub async fn run(
         gateway_jwt_issuer,
         Some(device_certificate_issuer),
         &limits,
+        &metrics.limits,
     )
     .with_enrollment_tokens(enrollment_tokens)
     .with_usage_collection(usage_ingest.is_some());
@@ -144,7 +149,7 @@ pub async fn run(
         .client_ca_root(Certificate::from_pem(client_ca))
         .client_auth_optional(true);
     let fleet_listen = config.fleet_listener.listen;
-    let fleet_listener = limits.listener(fleet_listen, Some(tls_config))?;
+    let fleet_listener = limits.listener(fleet_listen, Some(tls_config), &metrics.limits)?;
     // Started only with gatewayJwt: the gateway listener serves its JWKS.
     let gateway_listener = gateway_jwks
         .map(|jwks| {
@@ -158,11 +163,12 @@ pub async fn run(
                 listener.limits.connections_per_address,
             );
             anyhow::Ok((
-                HttpListener::bind("gateway", listener.listen, tls, limits)?,
+                HttpListener::bind("gateway", listener.listen, tls, limits, &metrics.limits)?,
                 jwks,
             ))
         })
         .transpose()?;
+    let metrics_listener = metrics.bind(config.metrics_listener.as_ref())?;
 
     tracing::info!(listen = %fleet_listen, "fleet controller listening");
     let fleet = async move {
@@ -175,13 +181,142 @@ pub async fn run(
             .await
             .context("serve fleet gRPC API")
     };
-    let admin = management::serve(admin_state, config.admin_listener, extensions);
+    let admin = management::serve(
+        admin_state,
+        config.admin_listener,
+        extensions,
+        &metrics.limits,
+    );
     let gateway = async move {
         match gateway_listener {
             Some((listener, jwks)) => listener.serve(gateway_jwt::routes(jwks)).await,
             None => std::future::pending().await,
         }
     };
-    tokio::try_join!(fleet, admin, gateway)?;
+    let metrics_listener = async move {
+        match metrics_listener {
+            Some((listener, telemetry)) => listener.serve(telemetry.router()).await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::try_join!(fleet, admin, gateway, metrics_listener)?;
     Ok(())
+}
+
+/// The controller's metrics, recorded only when the metrics listener serves
+/// them.
+struct Metrics {
+    telemetry: Option<Arc<Telemetry>>,
+    /// The instruments for the listeners and the fleet service: no-ops without
+    /// a metrics listener.
+    limits: LimitMetrics,
+}
+
+impl Metrics {
+    fn new(listener: Option<&ControllerMetricsListener>) -> anyhow::Result<Self> {
+        let telemetry = listener
+            .map(|_| Telemetry::new().map(Arc::new))
+            .transpose()?;
+        let limits = telemetry
+            .as_ref()
+            .map_or_else(LimitMetrics::disabled, |telemetry| telemetry.limits());
+        Ok(Self { telemetry, limits })
+    }
+
+    /// Binds the metrics listener, which counts its own connections too.
+    fn bind(
+        &self,
+        listener: Option<&ControllerMetricsListener>,
+    ) -> anyhow::Result<Option<(HttpListener, Arc<Telemetry>)>> {
+        listener
+            .zip(self.telemetry.clone())
+            .map(|(listener, telemetry)| {
+                let limits = HttpListenerLimits::new(
+                    listener.limits.max_connections,
+                    listener.limits.connections_per_address,
+                );
+                anyhow::Ok((
+                    HttpListener::bind("metrics", listener.listen, None, limits, &self.limits)?,
+                    telemetry,
+                ))
+            })
+            .transpose()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{net::SocketAddr, time::Duration};
+
+    use agentdesktop_core::config::{ControllerMetricsLimitsConfig, ControllerMetricsListener};
+
+    use super::Metrics;
+    use crate::metrics::{FLEET_LISTENER, Limit, Outcome};
+
+    #[test]
+    fn without_a_metrics_listener_nothing_is_recorded_or_served() {
+        let metrics = Metrics::new(None).unwrap();
+
+        assert!(metrics.telemetry.is_none());
+        assert!(metrics.bind(None).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn the_metrics_listener_serves_what_the_limits_record() {
+        let config = ControllerMetricsListener {
+            listen: SocketAddr::from(([127, 0, 0, 1], 0)),
+            limits: ControllerMetricsLimitsConfig::default(),
+        };
+        let metrics = Metrics::new(Some(&config)).unwrap();
+        let (listener, telemetry) = metrics
+            .bind(Some(&config))
+            .unwrap()
+            .expect("a metrics listener");
+        let address = listener.local_address().unwrap();
+        tokio::spawn(listener.serve(telemetry.router()));
+        // Through the instruments `run` hands to the fleet listener and service.
+        metrics
+            .limits
+            .listener(FLEET_LISTENER)
+            .hit(Limit::RequestTimeout, Outcome::TimedOut);
+
+        let body = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/metrics"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        let sample = |name: &str, labels: &[&str]| -> &str {
+            body.lines()
+                .find(|line| {
+                    line.starts_with(&format!("{name}{{"))
+                        && labels.iter().all(|label| line.contains(label))
+                })
+                .unwrap_or_else(|| panic!("no {name} with {labels:?} in:\n{body}"))
+        };
+
+        assert!(
+            sample(
+                "agentdesktop_limit_hits_total",
+                &[
+                    "agentdesktop_listener=\"fleet\"",
+                    "agentdesktop_limit_name=\"request_timeout\"",
+                ],
+            )
+            .ends_with(" 1")
+        );
+        // The scrape's own connection, counted by the metrics listener.
+        assert!(
+            sample(
+                "agentdesktop_connections",
+                &["agentdesktop_listener=\"metrics\""]
+            )
+            .ends_with(" 1")
+        );
+    }
 }

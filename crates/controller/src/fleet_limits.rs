@@ -7,7 +7,9 @@
 use std::{
     collections::HashMap,
     convert::Infallible,
+    future::Future,
     net::{IpAddr, Ipv6Addr, SocketAddr},
+    pin::Pin,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -29,7 +31,8 @@ use tokio::{
 };
 use tokio_stream::StreamExt as _;
 use tonic::{
-    Status,
+    Code, Status,
+    body::Body,
     codegen::{Service, http},
     server::NamedService,
     service::Routes,
@@ -38,7 +41,9 @@ use tonic::{
         server::{TcpConnectInfo, TcpIncoming, TlsConnectInfo},
     },
 };
-use tower_layer::{Identity, Stack};
+use tower_layer::{Identity, Layer, Stack};
+
+use crate::metrics::{FLEET_LISTENER, Limit, LimitMetrics, ListenerMetrics, Outcome};
 
 mod connections;
 
@@ -57,7 +62,8 @@ pub struct FleetLimits {
     pub tls_handshake: Duration,
     /// Time a request handler has to produce its response. A streaming RPC's
     /// response is produced once the stream opens, so this does not end
-    /// established streams such as `Connect`.
+    /// established streams such as `Connect`. Tonic enforces it, and
+    /// `CountTimeouts` counts the requests it ends.
     pub request: Duration,
     /// How often an HTTP/2 PING checks a connection, and how long an unanswered
     /// PING waits before the connection is closed.
@@ -143,20 +149,27 @@ impl FleetLimits {
     /// Binds the fleet listener on `address`, over TLS when `tls` is given,
     /// with every connection and request limit applied. The listener serves
     /// the fleet service with its message limits (`FleetListener::serve`).
+    /// The limits that act are counted in `metrics`.
     pub fn listener(
         &self,
         address: SocketAddr,
         tls: Option<ServerTlsConfig>,
+        metrics: &LimitMetrics,
     ) -> anyhow::Result<FleetListener> {
         // The listener and the request layer share one registry: the listener
         // admits and closes connections, and the layer marks them busy.
-        let connections = Connections::new(self.connection_limits(), "fleet");
+        let connections = Connections::new(self.connection_limits(), FLEET_LISTENER, metrics);
+        let metrics = metrics.listener(FLEET_LISTENER);
         let mut server = Server::builder()
             .timeout(self.request)
             .http2_keepalive_interval(Some(self.keepalive_interval))
             .http2_keepalive_timeout(Some(self.keepalive_timeout))
             .max_concurrent_streams(self.concurrent_streams_per_connection)
             .http2_max_local_error_reset_streams(Some(self.error_resets_per_connection))
+            .layer(CountTimeouts {
+                timeout: self.request,
+                metrics: metrics.clone(),
+            })
             .layer(connections.track_requests());
         if let Some(tls) = tls {
             server = server
@@ -175,11 +188,16 @@ impl FleetLimits {
             server,
             incoming: connections.incoming(incoming),
             local_address,
+            metrics,
         })
     }
 
     /// The fleet gRPC service with message size limits applied.
-    fn fleet_service<T: FleetAgent>(&self, service: T) -> FleetService<T> {
+    fn fleet_service<T: FleetAgent>(
+        &self,
+        service: T,
+        metrics: ListenerMetrics,
+    ) -> FleetService<T> {
         let service = Arc::new(service);
         FleetService {
             unauthenticated: FleetAgentServer::from_arc(service.clone())
@@ -188,6 +206,7 @@ impl FleetLimits {
             devices: FleetAgentServer::from_arc(service)
                 .max_decoding_message_size(self.configured.max_message_bytes)
                 .max_encoding_message_size(self.configured.max_message_bytes),
+            metrics,
         }
     }
 
@@ -205,9 +224,10 @@ impl FleetLimits {
 /// The bound fleet listener, from `FleetLimits::listener`.
 pub struct FleetListener {
     limits: FleetLimits,
-    server: Server<Stack<TrackRequests, Identity>>,
+    server: Server<Stack<TrackRequests, Stack<CountTimeouts, Identity>>>,
     incoming: LimitedIncoming<TcpIncoming>,
     local_address: SocketAddr,
+    metrics: ListenerMetrics,
 }
 
 impl FleetListener {
@@ -225,7 +245,7 @@ impl FleetListener {
     ) -> Result<(), tonic::transport::Error> {
         let mut server = self.server;
         server
-            .add_routes(routes.add_service(self.limits.fleet_service(service)))
+            .add_routes(routes.add_service(self.limits.fleet_service(service, self.metrics)))
             .serve_with_incoming(self.incoming)
             .await
     }
@@ -242,6 +262,7 @@ impl FleetListener {
 struct FleetService<T> {
     unauthenticated: FleetAgentServer<T>,
     devices: FleetAgentServer<T>,
+    metrics: ListenerMetrics,
 }
 
 impl<T> Clone for FleetService<T> {
@@ -249,6 +270,7 @@ impl<T> Clone for FleetService<T> {
         Self {
             unauthenticated: self.unauthenticated.clone(),
             devices: self.devices.clone(),
+            metrics: self.metrics.clone(),
         }
     }
 }
@@ -312,13 +334,17 @@ fn has_device_certificate<B>(request: &http::Request<B>) -> bool {
         .is_some_and(|certificates| !certificates.is_empty())
 }
 
+type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+
 impl<T, B> Service<http::Request<B>> for FleetService<T>
 where
-    FleetAgentServer<T>: Service<http::Request<B>, Error = Infallible>,
+    FleetAgentServer<T>:
+        Service<http::Request<B>, Response = http::Response<Body>, Error = Infallible>,
+    <FleetAgentServer<T> as Service<http::Request<B>>>::Future: Send + 'static,
 {
-    type Response = <FleetAgentServer<T> as Service<http::Request<B>>>::Response;
+    type Response = http::Response<Body>;
     type Error = Infallible;
-    type Future = <FleetAgentServer<T> as Service<http::Request<B>>>::Future;
+    type Future = BoxFuture<Result<Self::Response, Self::Error>>;
 
     fn poll_ready(&mut self, context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         match self.unauthenticated.poll_ready(context) {
@@ -328,10 +354,118 @@ where
     }
 
     fn call(&mut self, request: http::Request<B>) -> Self::Future {
-        if is_enrollment(request.uri().path()) || !has_device_certificate(&request) {
-            self.unauthenticated.call(request)
-        } else {
-            self.devices.call(request)
+        let (response, limit) =
+            if is_enrollment(request.uri().path()) || !has_device_certificate(&request) {
+                (
+                    self.unauthenticated.call(request),
+                    Limit::UnauthenticatedMessageBytes,
+                )
+            } else {
+                (self.devices.call(request), Limit::MaxMessageBytes)
+            };
+        let metrics = self.metrics.clone();
+        Box::pin(async move {
+            let response = response.await?;
+            // A request over the size limit fails to decode before its handler
+            // runs, and tonic answers `OUT_OF_RANGE` with the status kept on
+            // the response. No handler returns that code. A `Connect` message
+            // over the limit fails the stream instead (`DeviceStream::next`).
+            if response
+                .extensions()
+                .get::<Status>()
+                .is_some_and(|status| status.code() == Code::OutOfRange)
+            {
+                metrics.hit(limit, Outcome::Rejected);
+            }
+            Ok(response)
+        })
+    }
+}
+
+/// Counts the requests that tonic's request timeout (`FleetLimits::request`)
+/// ends. Tonic applies that timeout outside every layer we add, so this layer
+/// can't see the response it gives, only the request dropped unanswered.
+/// Tonic's timeout is the shorter of `timeout` and the client's own
+/// `grpc-timeout`, so a request dropped before `timeout` was ended by its
+/// client, and isn't counted.
+#[derive(Clone)]
+pub(crate) struct CountTimeouts {
+    timeout: Duration,
+    metrics: ListenerMetrics,
+}
+
+impl<S> Layer<S> for CountTimeouts {
+    type Service = TimeoutsCounted<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        TimeoutsCounted {
+            inner,
+            timeout: self.timeout,
+            metrics: self.metrics.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct TimeoutsCounted<S> {
+    inner: S,
+    timeout: Duration,
+    metrics: ListenerMetrics,
+}
+
+impl<S> Service<http::Request<Body>> for TimeoutsCounted<S>
+where
+    S: Service<http::Request<Body>>,
+    S::Future: Send + 'static,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = BoxFuture<Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(context)
+    }
+
+    fn call(&mut self, request: http::Request<Body>) -> Self::Future {
+        let mut unanswered = Unanswered {
+            started: Instant::now(),
+            timeout: self.timeout,
+            metrics: Some(self.metrics.clone()),
+        };
+        let response = self.inner.call(request);
+        Box::pin(async move {
+            let response = response.await;
+            unanswered.answer();
+            response
+        })
+    }
+}
+
+/// How much sooner than `CountTimeouts` tonic starts its timeout's clock: it
+/// starts it just before it passes the request in.
+const TIMEOUT_SLACK: Duration = Duration::from_millis(10);
+
+/// A request in progress, counted as timed out if it's dropped unanswered at
+/// the deadline.
+struct Unanswered {
+    started: Instant,
+    timeout: Duration,
+    /// `None` once the request is answered.
+    metrics: Option<ListenerMetrics>,
+}
+
+impl Unanswered {
+    fn answer(&mut self) {
+        self.metrics = None;
+    }
+}
+
+impl Drop for Unanswered {
+    fn drop(&mut self) {
+        if let Some(metrics) = &self.metrics
+            && self.started.elapsed() + TIMEOUT_SLACK >= self.timeout
+        {
+            metrics.hit(Limit::RequestTimeout, Outcome::TimedOut);
         }
     }
 }
@@ -362,6 +496,7 @@ pub(crate) struct EnrollmentLimiter {
     burst: u32,
     refill: Duration,
     completion_wait: Duration,
+    metrics: ListenerMetrics,
 }
 
 /// Enrollment buckets by address, in two generations. When the current
@@ -459,13 +594,14 @@ impl Bucket {
 }
 
 impl EnrollmentLimiter {
-    pub(crate) fn new(limits: &FleetLimits) -> Self {
+    pub(crate) fn new(limits: &FleetLimits, metrics: &LimitMetrics) -> Self {
         Self {
             in_flight: Arc::new(Semaphore::new(limits.configured.enrollment_in_flight)),
             peers: Arc::default(),
             burst: limits.configured.enrollment_burst,
             refill: limits.configured.enrollment_refill,
             completion_wait: limits.enrollment_completion_wait,
+            metrics: metrics.listener(FLEET_LISTENER),
         }
     }
 
@@ -476,7 +612,7 @@ impl EnrollmentLimiter {
         self.in_flight
             .clone()
             .try_acquire_owned()
-            .map_err(|_| in_flight_refusal())
+            .map_err(|_| self.in_flight_refusal())
     }
 
     /// Admits one `EnrollDevice` from `peer`. It spends the address's budget
@@ -493,7 +629,7 @@ impl EnrollmentLimiter {
             .await
         {
             Ok(Ok(permit)) => Ok(permit),
-            _ => Err(in_flight_refusal()),
+            _ => Err(self.in_flight_refusal()),
         }
     }
 
@@ -506,6 +642,7 @@ impl EnrollmentLimiter {
         if let Some(peer) = peer
             && !self.take(peer.ip(), Instant::now())
         {
+            self.metrics.hit(Limit::EnrollmentRate, Outcome::Rejected);
             if let Some(refused) = ENROLLMENT_RATE.event(Instant::now()) {
                 tracing::warn!(
                     latest_address = %address_key(peer.ip()),
@@ -529,16 +666,18 @@ impl EnrollmentLimiter {
             )
             .take(now)
     }
-}
 
-fn in_flight_refusal() -> Status {
-    if let Some(refused) = ENROLLMENT_IN_FLIGHT.event(Instant::now()) {
-        tracing::warn!(
-            refused_since_last_warning = refused,
-            "refused enrollment requests with every in-flight slot taken"
-        );
+    fn in_flight_refusal(&self) -> Status {
+        self.metrics
+            .hit(Limit::EnrollmentInFlight, Outcome::Rejected);
+        if let Some(refused) = ENROLLMENT_IN_FLIGHT.event(Instant::now()) {
+            tracing::warn!(
+                refused_since_last_warning = refused,
+                "refused enrollment requests with every in-flight slot taken"
+            );
+        }
+        Status::resource_exhausted("too many enrollment requests in progress; retry later")
     }
-    Status::resource_exhausted("too many enrollment requests in progress; retry later")
 }
 
 /// `Connect` state by device. A device has at most one open stream: opening a
@@ -551,6 +690,7 @@ pub(crate) struct DeviceStreams {
     devices: Arc<Mutex<HashMap<String, DeviceState>>>,
     next: Arc<AtomicU64>,
     limits: FleetLimits,
+    metrics: ListenerMetrics,
 }
 
 struct DeviceState {
@@ -584,11 +724,12 @@ impl DeviceState {
 const MAX_TRACKED_DEVICES: usize = 100_000;
 
 impl DeviceStreams {
-    pub(crate) fn new(limits: &FleetLimits) -> Self {
+    pub(crate) fn new(limits: &FleetLimits, metrics: &LimitMetrics) -> Self {
         Self {
             devices: Arc::default(),
             next: Arc::default(),
             limits: *limits,
+            metrics: metrics.listener(FLEET_LISTENER),
         }
     }
 
@@ -620,6 +761,7 @@ impl DeviceStreams {
                 device_id: device_id.to_owned(),
             })
         } else {
+            self.metrics.hit(Limit::StreamOpenRate, Outcome::Rejected);
             if let Some(refused) = STREAM_OPENS.event(Instant::now()) {
                 tracing::warn!(
                     latest_device_id = device_id,
@@ -702,9 +844,13 @@ impl<S> DeviceStream<S> {
     /// device to replace this one. A device that has spent its message budget
     /// is not read from until the budget refills; HTTP/2 flow control then
     /// makes it wait to send, so a busy device is slowed down rather than
-    /// disconnected.
+    /// disconnected. A message the device had already sent when the budget
+    /// refilled was held back, and counts as `device_message_rate`. A message
+    /// larger than the HTTP/2 stream window (1 MiB) can't be sent ahead in
+    /// full, so it isn't counted.
     ///
-    /// Cancel-safe: a message is spent from the budget only when one is read.
+    /// Cancel-safe: a message is spent from the budget, and counted as held
+    /// back, only when one is read.
     pub(crate) async fn next<T>(&mut self) -> StreamEvent<T>
     where
         S: Stream<Item = Result<T, Status>> + Unpin,
@@ -718,27 +864,55 @@ impl<S> DeviceStream<S> {
         let Some(replaced) = superseded else {
             return StreamEvent::Superseded;
         };
+        // Also says whether the message was held back: already sent when the
+        // budget refilled.
         let read = async {
             let ready = registration.bucket().next_token(Instant::now());
-            if let Some(ready) = ready {
-                tokio::time::sleep_until(ready).await;
+            let Some(ready) = ready else {
+                return (false, inbound.next().await);
+            };
+            tokio::time::sleep_until(ready).await;
+            match std::future::poll_fn(|context| {
+                Poll::Ready(Pin::new(&mut *inbound).poll_next(context))
+            })
+            .await
+            {
+                Poll::Ready(message) => (true, message),
+                Poll::Pending => (false, inbound.next().await),
             }
-            inbound.next().await
         };
         tokio::select! {
             _ = replaced => {
                 *superseded = None;
                 StreamEvent::Superseded
             }
-            message = read => match message {
+            (held, message) = read => match message {
                 Some(Ok(message)) => {
+                    if held {
+                        registration.held_back();
+                    }
                     registration.spend_message(Instant::now());
                     StreamEvent::Message(message)
                 }
-                Some(Err(status)) => StreamEvent::Failed(status),
+                Some(Err(status)) => {
+                    // The only status decoding gives a message over the size
+                    // limit.
+                    if status.code() == Code::OutOfRange {
+                        registration
+                            .streams
+                            .metrics
+                            .hit(Limit::MaxMessageBytes, Outcome::Rejected);
+                    }
+                    StreamEvent::Failed(status)
+                }
                 None => StreamEvent::Ended,
             },
         }
+    }
+
+    /// The fleet listener's metrics, for limits the session applies itself.
+    pub(crate) fn metrics(&self) -> &ListenerMetrics {
+        &self.registration.streams.metrics
     }
 }
 
@@ -761,17 +935,21 @@ impl Registration {
     /// Spends one message from the device's budget. Returns when the budget
     /// allows the next one: `None` when it allows it now.
     fn spend_message(&self, now: Instant) -> Option<Instant> {
-        let next = self.bucket().spend(now);
-        if next.is_some()
-            && let Some(throttled) = DEVICE_MESSAGES.event(now)
-        {
+        self.bucket().spend(now)
+    }
+
+    /// Counts a message that was read only once the device's budget refilled.
+    fn held_back(&self) {
+        self.streams
+            .metrics
+            .hit(Limit::DeviceMessageRate, Outcome::Throttled);
+        if let Some(throttled) = DEVICE_MESSAGES.event(Instant::now()) {
             tracing::warn!(
                 latest_device_id = %self.device_id,
                 throttled_since_last_warning = throttled,
                 "slowed reading from devices that send messages faster than their budget"
             );
         }
-        next
     }
 }
 

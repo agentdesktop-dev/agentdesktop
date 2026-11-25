@@ -247,6 +247,7 @@ mod tests {
             std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             None,
             crate::http_listener::HttpListenerLimits::new(1024, 64),
+            &crate::metrics::LimitMetrics::disabled(),
         )
         .unwrap();
         let address = listener.local_address().unwrap();

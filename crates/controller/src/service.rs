@@ -31,6 +31,7 @@ use crate::{
         DeviceStream, DeviceStreams, EnrollmentLimiter, FleetLimits, StreamEvent, ThrottledWarning,
     },
     gateway_jwt::GatewayJwtIssuer,
+    metrics::{Limit, LimitMetrics, ListenerMetrics, Outcome},
     oidc::{CompletedEnrollment, EnrollmentCredential, OidcPrincipal, OidcProvider},
 };
 
@@ -50,7 +51,7 @@ pub struct FleetAgentService {
 impl FleetAgentService {
     /// `limits` sets the enrollment and `Connect` limits; pass the ones from
     /// the controller configuration (`FleetLimits::from_config`), the same the
-    /// fleet listener uses.
+    /// fleet listener uses. The limits that act are counted in `metrics`.
     pub fn new(
         oidc: Option<OidcProvider>,
         database: Database,
@@ -58,6 +59,7 @@ impl FleetAgentService {
         gateway_jwt_issuer: Option<GatewayJwtIssuer>,
         device_certificate_issuer: Option<DeviceCertificateIssuer>,
         limits: &FleetLimits,
+        metrics: &LimitMetrics,
     ) -> Self {
         Self {
             oidc,
@@ -67,8 +69,8 @@ impl FleetAgentService {
             gateway_jwt_issuer,
             device_certificate_issuer,
             usage_enabled: false,
-            enrollment: EnrollmentLimiter::new(limits),
-            device_streams: DeviceStreams::new(limits),
+            enrollment: EnrollmentLimiter::new(limits, metrics),
+            device_streams: DeviceStreams::new(limits, metrics),
         }
     }
 
@@ -367,20 +369,17 @@ impl ConnectSession {
         }
     }
 
-    /// Sends `config` to the device without waiting for room: a device that
-    /// stopped reading would hold the session forever.
+    /// Sends `config` to the device without waiting for room.
     fn send_config(&self, config: DaemonConfig) -> ControlFlow<()> {
         let message = ControllerMessage {
             message: Some(controller_message::Message::DaemonConfig(config)),
         };
-        match self.responses.try_send(Ok(message)) {
-            Ok(()) => ControlFlow::Continue(()),
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                warn!(device_id = %self.device_id, "closing stream after the device stopped reading it");
-                ControlFlow::Break(())
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => ControlFlow::Break(()),
-        }
+        queue_response(
+            &self.responses,
+            message,
+            &self.device_id,
+            self.stream.metrics(),
+        )
     }
 
     /// Checks the stream's access token again, and closes the stream unless it
@@ -457,6 +456,29 @@ impl ConnectSession {
     fn close(&self, status: Status) -> ControlFlow<()> {
         let _ = self.responses.try_send(Err(status));
         ControlFlow::Break(())
+    }
+}
+
+/// Queues `message` on a device's `Connect` stream without waiting for room,
+/// and ends the session when the queue is full: a device that stopped reading
+/// would otherwise hold the session forever.
+fn queue_response(
+    responses: &mpsc::Sender<Result<ControllerMessage, Status>>,
+    message: ControllerMessage,
+    device_id: &str,
+    metrics: &ListenerMetrics,
+) -> ControlFlow<()> {
+    match responses.try_send(Ok(message)) {
+        Ok(()) => ControlFlow::Continue(()),
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            metrics.hit(Limit::ConnectResponseBuffer, Outcome::Closed);
+            warn!(
+                device_id = %device_id,
+                "closing stream after the device stopped reading it"
+            );
+            ControlFlow::Break(())
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => ControlFlow::Break(()),
     }
 }
 
@@ -822,11 +844,51 @@ mod tests {
     use rcgen::{CertificateParams, KeyPair};
     use tonic::Code;
 
+    use std::ops::ControlFlow;
+
+    use agentdesktop_proto::fleet::ControllerMessage;
+    use tokio::sync::mpsc;
+
     use super::{
-        FleetAgentService, authenticate_enrolled_user, device_id_from_certificate,
+        FleetAgentService, authenticate_enrolled_user, device_id_from_certificate, queue_response,
         subscription_is_configured_for_client,
     };
-    use crate::{daemon_config::DaemonConfigStore, database::Database, oidc::OidcPrincipal};
+    use crate::{
+        daemon_config::DaemonConfigStore,
+        database::Database,
+        metrics::{Limit, Outcome, Telemetry},
+        oidc::OidcPrincipal,
+    };
+
+    #[test]
+    fn a_response_buffer_that_is_full_closes_the_stream_and_is_counted() {
+        let telemetry = Telemetry::new().unwrap();
+        let metrics = telemetry.limits().listener("fleet");
+        let count = || telemetry.hits("fleet", Limit::ConnectResponseBuffer, Outcome::Closed);
+        let (responses, mut receiver) = mpsc::channel(1);
+
+        // Room left: the message is queued and nothing is counted.
+        assert_eq!(
+            queue_response(&responses, ControllerMessage::default(), "device", &metrics),
+            ControlFlow::Continue(())
+        );
+        assert_eq!(count(), 0);
+
+        // The device has not read the queued message, so the queue is full.
+        assert_eq!(
+            queue_response(&responses, ControllerMessage::default(), "device", &metrics),
+            ControlFlow::Break(())
+        );
+        assert_eq!(count(), 1);
+
+        // A stream the device already closed is not a full buffer.
+        receiver.close();
+        assert_eq!(
+            queue_response(&responses, ControllerMessage::default(), "device", &metrics),
+            ControlFlow::Break(())
+        );
+        assert_eq!(count(), 1);
+    }
 
     #[tokio::test]
     async fn enrollment_rpc_is_user_bound_idempotent_and_durable() {
@@ -861,6 +923,7 @@ mod tests {
             Some(issuer.clone()),
             &crate::fleet_limits::FleetLimits::from_config(&Default::default())
                 .expect("default limits"),
+            &crate::metrics::LimitMetrics::disabled(),
         );
         for _ in 0..1100 {
             service
@@ -993,6 +1056,7 @@ mod tests {
             Some(issuer),
             &crate::fleet_limits::FleetLimits::from_config(&Default::default())
                 .expect("default limits"),
+            &crate::metrics::LimitMetrics::disabled(),
         );
         assert_eq!(
             restarted
@@ -1076,6 +1140,7 @@ mod tests {
                 Some(certificates.clone()),
                 &crate::fleet_limits::FleetLimits::from_config(&Default::default())
                     .expect("default limits"),
+                &crate::metrics::LimitMetrics::disabled(),
             )
             .with_enrollment_tokens(Some(tokens.tokens(revoked_ids)))
         };
@@ -1226,6 +1291,7 @@ mod tests {
             None,
             None,
             &full,
+            &crate::metrics::LimitMetrics::disabled(),
         );
 
         // Without the limiter these fail later, with "OIDC enrollment is disabled".
@@ -1269,6 +1335,7 @@ mod tests {
             None,
             &crate::fleet_limits::FleetLimits::from_config(&Default::default())
                 .expect("default limits"),
+            &crate::metrics::LimitMetrics::disabled(),
         );
         let principal = |issuer: &str, subject: &str| OidcPrincipal {
             issuer: issuer.to_owned(),
@@ -1319,6 +1386,7 @@ mod tests {
             None,
             &crate::fleet_limits::FleetLimits::from_config(&Default::default())
                 .expect("default limits"),
+            &crate::metrics::LimitMetrics::disabled(),
         );
 
         let enrolled = service.enrolled_principal(device_id).await.unwrap();

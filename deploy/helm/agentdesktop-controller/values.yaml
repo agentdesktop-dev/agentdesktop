@@ -56,6 +56,22 @@ gatewayListener:
     # Defaults to 443 with tls, otherwise 80.
     port: ""
 
+# The controller's metrics listener and its Service, <release>-metrics. It
+# serves GET /metrics in the Prometheus text format over plain HTTP: how often
+# each listener's limits refused, closed or slowed something, and the
+# connections open on each listener. Off by default. With existingConfigSecret,
+# that configuration must set metricsListener.listen to 0.0.0.0:<port>.
+metricsListener:
+  enabled: false
+  port: 9464
+  limits: {}
+  service:
+    type: ClusterIP
+    port: 9464
+    # Annotations on the Service, e.g. prometheus.io/scrape: "true" for a
+    # scraper that discovers targets by annotation.
+    annotations: {}
+
 # Daemon configuration distributed to enrolled devices. Leave empty to
 # disable managed configuration.
 daemonConfig: {}
@@ -103,6 +119,13 @@ networkPolicy:
       # binds it to loopback, so this matters only when existingConfigSecret
       # sets a non-loopback adminListen. Empty denies all ingress to it.
       # Defaults to pods in the release namespace.
+      from:
+      - podSelector: {}
+    metrics:
+      # Sources allowed to reach the metrics port, when metricsListener is
+      # enabled. A scraper in another namespace needs a namespaceSelector here.
+      # Empty denies all ingress to it. Defaults to pods in the release
+      # namespace.
       from:
       - podSelector: {}
   egress:

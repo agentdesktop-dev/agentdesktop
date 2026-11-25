@@ -10,6 +10,15 @@ to 0.0.0.0:{{ .Values.gatewayListener.port }}{{ if .Values.gatewayListener.tls }
 {{- end }}
 
 {{ end -}}
+{{ if .Values.metricsListener.enabled -}}
+Prometheus scrapes the controller's metrics from Service:
+  http://{{ include "agentdesktop-controller.metricsServiceName" . }}.{{ .Release.Namespace }}.svc:{{ .Values.metricsListener.service.port }}/metrics
+{{- if .Values.existingConfigSecret }}
+The configuration in {{ .Values.existingConfigSecret }} must set metricsListener.listen
+to 0.0.0.0:{{ .Values.metricsListener.port }}.
+{{- end }}
+
+{{ end -}}
 The management UI binds to loopback and is not exposed by the Service. Open it
 with:
   kubectl port-forward deployment/{{ include "agentdesktop-controller.fullname" . }} 8080:8080
