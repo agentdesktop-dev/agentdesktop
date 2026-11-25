@@ -11,17 +11,38 @@ use serde_json::Value;
 
 use crate::provider::metadata;
 
+const NPM_PACKAGE: &str = "@anthropic-ai/claude-code";
+
 /// `settings_path` is the managed settings file the reconciler writes, so a
 /// `daemon.claudeCode.config` override is inventoried from the same place.
 pub(super) fn discover(settings_path: &Path) -> Option<Agent> {
     let executable = metadata::find_executable("claude", executable_candidates())?;
     Some(Agent {
-        version: metadata::version_after_component(&executable, "versions"),
+        version: version(&executable),
         executable,
         kind: ClaudeCode::ID.to_owned(),
         mcp_servers: discover_mcp_servers(settings_path),
         skills: metadata::discover_skills(skill_roots()),
     })
+}
+
+/// The native installer keeps each build under `versions/<version>`; an npm
+/// install has the version only in the `@anthropic-ai/claude-code` manifest.
+///
+/// An npm install resolves into `node_modules`. Under a Node version manager
+/// that path has a `versions` component of its own, which names the Node
+/// release, so the native layout is read only outside `node_modules`.
+fn version(executable: &Path) -> Option<String> {
+    let npm_install = executable.canonicalize().is_ok_and(|resolved| {
+        resolved
+            .components()
+            .any(|component| component.as_os_str() == "node_modules")
+    });
+    if npm_install {
+        return metadata::npm_package_version(executable, NPM_PACKAGE);
+    }
+    metadata::version_after_component(executable, "versions")
+        .or_else(|| metadata::npm_package_version(executable, NPM_PACKAGE))
 }
 
 fn executable_candidates() -> Vec<PathBuf> {
@@ -243,8 +264,73 @@ mod tests {
 
     use super::{
         managed_mcp_servers_from_value, managed_settings_sources, mcp_servers_from_value,
-        merged_managed_mcp_servers,
+        merged_managed_mcp_servers, version,
     };
+
+    #[test]
+    fn version_comes_from_the_native_installer_layout() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("share/claude/versions/2.1.327");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, "").unwrap();
+
+        assert_eq!(version(&executable).as_deref(), Some("2.1.327"));
+    }
+
+    #[test]
+    fn version_comes_from_the_npm_manifest_when_installed_with_npm() {
+        let prefix = tempfile::tempdir().unwrap();
+        let package = prefix
+            .path()
+            .join("lib/node_modules/@anthropic-ai/claude-code");
+        fs::create_dir_all(package.join("bin")).unwrap();
+        fs::write(
+            package.join("package.json"),
+            r#"{"name":"@anthropic-ai/claude-code","version":"2.1.327"}"#,
+        )
+        .unwrap();
+        fs::write(package.join("bin/claude.exe"), "").unwrap();
+        fs::create_dir_all(prefix.path().join("bin")).unwrap();
+        let launcher = prefix.path().join("bin/claude");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(package.join("bin/claude.exe"), &launcher).unwrap();
+        #[cfg(not(unix))]
+        fs::copy(package.join("bin/claude.exe"), &launcher).unwrap();
+
+        assert_eq!(version(&launcher).as_deref(), Some("2.1.327"));
+    }
+
+    /// nvm and nodenv keep Node itself under `versions/<node release>`.
+    #[cfg(unix)]
+    #[test]
+    fn version_ignores_the_node_release_of_a_node_version_manager() {
+        let home = tempfile::tempdir().unwrap();
+        for node in [".nvm/versions/node/v22.11.0", ".nodenv/versions/22.11.0"] {
+            let prefix = home.path().join(node);
+            let package = prefix.join("lib/node_modules/@anthropic-ai/claude-code");
+            fs::create_dir_all(package.join("bin")).unwrap();
+            fs::write(
+                package.join("package.json"),
+                r#"{"name":"@anthropic-ai/claude-code","version":"2.1.327"}"#,
+            )
+            .unwrap();
+            fs::write(package.join("bin/claude.exe"), "").unwrap();
+            fs::create_dir_all(prefix.join("bin")).unwrap();
+            let launcher = prefix.join("bin/claude");
+            std::os::unix::fs::symlink(package.join("bin/claude.exe"), &launcher).unwrap();
+
+            assert_eq!(version(&launcher).as_deref(), Some("2.1.327"), "{node}");
+        }
+    }
+
+    #[test]
+    fn version_is_none_without_a_versioned_path_or_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("claude");
+        fs::write(&executable, "").unwrap();
+
+        assert_eq!(version(&executable), None);
+    }
 
     fn write_managed_servers(path: &Path, servers: serde_json::Value) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();

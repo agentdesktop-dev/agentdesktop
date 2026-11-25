@@ -93,6 +93,35 @@ pub(super) fn json_package_version(path: &Path, expected_name: &str) -> Option<S
     (metadata.name.as_deref() == Some(expected_name)).then_some(metadata.version)
 }
 
+/// The version from an npm package's manifest next to its launcher.
+///
+/// npm links `<prefix>/bin/<name>` into `<prefix>/lib/node_modules/<package>`,
+/// so the manifest sits in an ancestor of the resolved launcher or in a
+/// `node_modules` directory next to one. A manifest of any other package is
+/// ignored, and an install without a manifest reports no version.
+pub(super) fn npm_package_version(executable: &Path, package: &str) -> Option<String> {
+    let mut candidates = BTreeSet::new();
+    for executable in [
+        Some(executable.to_path_buf()),
+        executable.canonicalize().ok(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let Some(parent) = executable.parent() else {
+            continue;
+        };
+        for directory in parent.ancestors().take(4) {
+            candidates.insert(directory.join("package.json"));
+            candidates.insert(directory.join(format!("node_modules/{package}/package.json")));
+            candidates.insert(directory.join(format!("lib/node_modules/{package}/package.json")));
+        }
+    }
+    candidates
+        .into_iter()
+        .find_map(|path| json_package_version(&path, package))
+}
+
 pub(super) fn json_package_name(path: &Path) -> Option<String> {
     json_package_metadata(path)?.name
 }

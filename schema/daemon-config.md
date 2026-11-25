@@ -109,5 +109,5 @@
 |`sandbox.filesystem.writable`|[]string|Additional paths sandboxed commands may modify.|
 |`sandbox.network`|object|Network destinations available to sandboxed commands.|
 |`sandbox.network.allowedDomains`|[]string|Domains sandboxed commands may contact. An empty set disables network access.|
-|`telemetry`|object|Telemetry collected from managed developer tools.|
+|`telemetry`|object|Telemetry collected from managed developer tools. Events go to the<br>controller, so a local configuration file may set this only together<br>with `controller`.|
 |`telemetry.events`|[]enum|Event names to collect. `tool.use.input` implies `tool.use` and includes tool arguments.<br>Possible values: `session.new`, `tool.use`, `tool.use.input`.|
