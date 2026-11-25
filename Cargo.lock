@@ -136,7 +136,6 @@ dependencies = [
  "opentelemetry_sdk",
  "pem-rfc7468",
  "prometheus",
- "prost",
  "rand",
  "rcgen",
  "reqwest",

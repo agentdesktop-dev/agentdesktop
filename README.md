@@ -833,14 +833,14 @@ Every series a listener can record is served from startup, at 0.
 | `enrollment_in_flight` | fleet | `rejected` | An enrollment request refused with `enrollmentInFlight` requests already in progress |
 | `stream_open_rate` | fleet | `rejected` | A `Connect` stream refused because its device opens them too often |
 | `device_message_rate` | fleet | `throttled` | A device message held back by `deviceMessageBurst` and `deviceMessageRefill`: the device had sent it before its budget refilled |
-| `max_message_bytes` | fleet | `rejected`, `closed` | A device message over `maxMessageBytes`, or a message to a device on its `Connect` stream over it, which closes the stream (a daemon configuration that large reaches no device) |
+| `max_message_bytes` | fleet | `rejected` | A device message over `maxMessageBytes` |
 | `unauthenticated_message_bytes` | fleet | `rejected` | A request over 64 KiB from a caller without a device certificate, such as enrollment |
 | `request_timeout` | fleet | `timed_out` | A request whose handler took over 30 s to respond |
 | `connect_response_buffer` | fleet | `closed` | A `Connect` stream closed because its device stopped reading it |
 
 TLS handshake timeouts, the HTTP/2 limits that the server library enforces
 itself (streams per connection, protocol-error resets, keepalive PINGs), a
-response to a single request over `maxMessageBytes`, and a held-back device
+message from the controller over `maxMessageBytes`, and a held-back device
 message larger than the 1 MiB HTTP/2 stream window are not counted.
 
 The controller management UI/API accepts unauthenticated access only on a

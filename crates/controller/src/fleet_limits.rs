@@ -62,9 +62,8 @@ pub struct FleetLimits {
     pub tls_handshake: Duration,
     /// Time a request handler has to produce its response. A streaming RPC's
     /// response is produced once the stream opens, so this does not end
-    /// established streams such as `Connect`. Enforced by `RequestTimeout`
-    /// rather than tonic's own timeout, which runs outside every layer we add
-    /// and so cannot be counted.
+    /// established streams such as `Connect`. Tonic enforces it, and
+    /// `CountTimeouts` counts the requests it ends.
     pub request: Duration,
     /// How often an HTTP/2 PING checks a connection, and how long an unanswered
     /// PING waits before the connection is closed.
@@ -162,12 +161,12 @@ impl FleetLimits {
         let connections = Connections::new(self.connection_limits(), FLEET_LISTENER, metrics);
         let metrics = metrics.listener(FLEET_LISTENER);
         let mut server = Server::builder()
+            .timeout(self.request)
             .http2_keepalive_interval(Some(self.keepalive_interval))
             .http2_keepalive_timeout(Some(self.keepalive_timeout))
             .max_concurrent_streams(self.concurrent_streams_per_connection)
             .http2_max_local_error_reset_streams(Some(self.error_resets_per_connection))
-            // Outside the request tracking, where tonic's own timeout was.
-            .layer(RequestTimeout {
+            .layer(CountTimeouts {
                 timeout: self.request,
                 metrics: metrics.clone(),
             })
@@ -225,7 +224,7 @@ impl FleetLimits {
 /// The bound fleet listener, from `FleetLimits::listener`.
 pub struct FleetListener {
     limits: FleetLimits,
-    server: Server<Stack<TrackRequests, Stack<RequestTimeout, Identity>>>,
+    server: Server<Stack<TrackRequests, Stack<CountTimeouts, Identity>>>,
     incoming: LimitedIncoming<TcpIncoming>,
     local_address: SocketAddr,
     metrics: ListenerMetrics,
@@ -383,22 +382,23 @@ where
     }
 }
 
-/// Ends a request whose handler has not produced its response within
-/// `timeout`, with the response tonic's own timeout gives (`CANCELLED`,
-/// "Timeout expired"), and counts it. Tonic still ends a request at the
-/// deadline its client sets (`grpc-timeout`), outside this layer; that is the
-/// client's limit, not counted here.
+/// Counts the requests that tonic's request timeout (`FleetLimits::request`)
+/// ends. Tonic applies that timeout outside every layer we add, so this layer
+/// can't see the response it gives, only the request dropped unanswered.
+/// Tonic's timeout is the shorter of `timeout` and the client's own
+/// `grpc-timeout`, so a request dropped before `timeout` was ended by its
+/// client, and isn't counted.
 #[derive(Clone)]
-pub(crate) struct RequestTimeout {
+pub(crate) struct CountTimeouts {
     timeout: Duration,
     metrics: ListenerMetrics,
 }
 
-impl<S> Layer<S> for RequestTimeout {
-    type Service = TimedRequests<S>;
+impl<S> Layer<S> for CountTimeouts {
+    type Service = TimeoutsCounted<S>;
 
     fn layer(&self, inner: S) -> Self::Service {
-        TimedRequests {
+        TimeoutsCounted {
             inner,
             timeout: self.timeout,
             metrics: self.metrics.clone(),
@@ -407,18 +407,18 @@ impl<S> Layer<S> for RequestTimeout {
 }
 
 #[derive(Clone)]
-pub(crate) struct TimedRequests<S> {
+pub(crate) struct TimeoutsCounted<S> {
     inner: S,
     timeout: Duration,
     metrics: ListenerMetrics,
 }
 
-impl<S> Service<http::Request<Body>> for TimedRequests<S>
+impl<S> Service<http::Request<Body>> for TimeoutsCounted<S>
 where
-    S: Service<http::Request<Body>, Response = http::Response<Body>>,
+    S: Service<http::Request<Body>>,
     S::Future: Send + 'static,
 {
-    type Response = http::Response<Body>;
+    type Response = S::Response;
     type Error = S::Error;
     type Future = BoxFuture<Result<Self::Response, Self::Error>>;
 
@@ -427,17 +427,46 @@ where
     }
 
     fn call(&mut self, request: http::Request<Body>) -> Self::Future {
-        let response = tokio::time::timeout(self.timeout, self.inner.call(request));
-        let metrics = self.metrics.clone();
+        let mut unanswered = Unanswered {
+            started: Instant::now(),
+            timeout: self.timeout,
+            metrics: Some(self.metrics.clone()),
+        };
+        let response = self.inner.call(request);
         Box::pin(async move {
-            match response.await {
-                Ok(response) => response,
-                Err(_) => {
-                    metrics.hit(Limit::RequestTimeout, Outcome::TimedOut);
-                    Ok(Status::cancelled("Timeout expired").into_http())
-                }
-            }
+            let response = response.await;
+            unanswered.answer();
+            response
         })
+    }
+}
+
+/// How much sooner than `CountTimeouts` tonic starts its timeout's clock: it
+/// starts it just before it passes the request in.
+const TIMEOUT_SLACK: Duration = Duration::from_millis(10);
+
+/// A request in progress, counted as timed out if it's dropped unanswered at
+/// the deadline.
+struct Unanswered {
+    started: Instant,
+    timeout: Duration,
+    /// `None` once the request is answered.
+    metrics: Option<ListenerMetrics>,
+}
+
+impl Unanswered {
+    fn answer(&mut self) {
+        self.metrics = None;
+    }
+}
+
+impl Drop for Unanswered {
+    fn drop(&mut self) {
+        if let Some(metrics) = &self.metrics
+            && self.started.elapsed() + TIMEOUT_SLACK >= self.timeout
+        {
+            metrics.hit(Limit::RequestTimeout, Outcome::TimedOut);
+        }
     }
 }
 
@@ -884,15 +913,6 @@ impl<S> DeviceStream<S> {
     /// The fleet listener's metrics, for limits the session applies itself.
     pub(crate) fn metrics(&self) -> &ListenerMetrics {
         &self.registration.streams.metrics
-    }
-
-    /// The largest message the session may send the device.
-    pub(crate) fn max_message_bytes(&self) -> usize {
-        self.registration
-            .streams
-            .limits
-            .configured
-            .max_message_bytes
     }
 }
 

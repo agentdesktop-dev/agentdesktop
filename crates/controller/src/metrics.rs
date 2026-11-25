@@ -274,8 +274,7 @@ pub(crate) enum Limit {
     StreamOpenRate,
     /// `fleetListener.limits.deviceMessageBurst` and `deviceMessageRefill`.
     DeviceMessageRate,
-    /// `fleetListener.limits.maxMessageBytes`, for a message from a device
-    /// (`rejected`) or to one on its `Connect` stream (`closed`).
+    /// `fleetListener.limits.maxMessageBytes`, for a message from a device.
     MaxMessageBytes,
     /// The message limit for callers without a device certificate.
     UnauthenticatedMessageBytes,
@@ -325,9 +324,9 @@ impl Limit {
             Self::EnrollmentRate
             | Self::EnrollmentInFlight
             | Self::StreamOpenRate
+            | Self::MaxMessageBytes
             | Self::UnauthenticatedMessageBytes => &[Outcome::Rejected],
             Self::DeviceMessageRate => &[Outcome::Throttled],
-            Self::MaxMessageBytes => &[Outcome::Rejected, Outcome::Closed],
             Self::ConnectResponseBuffer => &[Outcome::Closed],
         }
     }
@@ -431,7 +430,7 @@ mod tests {
         // The connection limits on every listener, and the fleet API's own on
         // the fleet listener.
         assert_eq!(hits("admin"), vec!["0"; 6], "{body}");
-        assert_eq!(hits(FLEET_LISTENER), vec!["0"; 15], "{body}");
+        assert_eq!(hits(FLEET_LISTENER), vec!["0"; 14], "{body}");
         for listener in ["admin", FLEET_LISTENER] {
             assert_eq!(
                 telemetry.sample("agentdesktop_connections", &[(LISTENER, listener)]),

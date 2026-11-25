@@ -8,7 +8,6 @@ use agentdesktop_proto::fleet::{
     enroll_device_request::Credential, fleet_agent_server::FleetAgent,
 };
 use futures_core::Stream;
-use prost::Message as _;
 use sha2::{Digest, Sha256};
 use tokio::{
     sync::{mpsc, watch},
@@ -293,7 +292,7 @@ impl FleetAgent for FleetAgentService {
             )),
             None => None,
         };
-        let (responses, receiver) = response_queue();
+        let (responses, receiver) = mpsc::channel(8);
         let session = ConnectSession {
             device_id,
             daemon_updates: self.daemon_config.subscribe(),
@@ -310,19 +309,6 @@ impl FleetAgent for FleetAgentService {
 /// How often an open `Connect` stream checks its access token again.
 const ACCESS_TOKEN_RECHECK: Duration = Duration::from_secs(5 * 60);
 
-/// Messages queued on a device's `Connect` stream before the session decides
-/// the device stopped reading it.
-const QUEUED_RESPONSES: usize = 8;
-
-type Responses = mpsc::Sender<Result<ControllerMessage, Status>>;
-
-/// The queue behind a device's `Connect` stream. It has one slot more than
-/// `QUEUED_RESPONSES`, kept for the status that closes the stream, so that
-/// status reaches the device even when the queue is otherwise full.
-fn response_queue() -> (Responses, mpsc::Receiver<Result<ControllerMessage, Status>>) {
-    mpsc::channel(QUEUED_RESPONSES + 1)
-}
-
 /// A device's `Connect` session, run by its own task. The task owns the
 /// response stream: it ends when the device's request stream ends, the device
 /// goes away, or the session closes the stream for cause. Configuration is
@@ -330,7 +316,7 @@ fn response_queue() -> (Responses, mpsc::Receiver<Result<ControllerMessage, Stat
 struct ConnectSession {
     device_id: String,
     stream: DeviceStream,
-    responses: Responses,
+    responses: mpsc::Sender<Result<ControllerMessage, Status>>,
     daemon_updates: watch::Receiver<Option<DaemonConfig>>,
     database: Database,
     /// The identity provider and the access token the stream opened with.
@@ -392,7 +378,6 @@ impl ConnectSession {
             &self.responses,
             message,
             &self.device_id,
-            self.stream.max_message_bytes(),
             self.stream.metrics(),
         )
     }
@@ -467,8 +452,7 @@ impl ConnectSession {
         ControlFlow::Continue(())
     }
 
-    /// Ends the stream with `status`, after the messages already queued. The
-    /// queue keeps a slot for it (`response_queue`).
+    /// Ends the stream with `status`, dropped if the device is not reading.
     fn close(&self, status: Status) -> ControlFlow<()> {
         let _ = self.responses.try_send(Err(status));
         ControlFlow::Break(())
@@ -476,53 +460,25 @@ impl ConnectSession {
 }
 
 /// Queues `message` on a device's `Connect` stream without waiting for room,
-/// and ends the session when `QUEUED_RESPONSES` messages wait unread: a device
-/// that stopped reading would otherwise hold the session forever.
-///
-/// A message over `max_message_bytes` ends the session too. Tonic would fail
-/// the stream when it encoded the message, with the status only in the
-/// stream's trailers, so it is checked here, where it can be counted and logged.
+/// and ends the session when the queue is full: a device that stopped reading
+/// would otherwise hold the session forever.
 fn queue_response(
-    responses: &Responses,
+    responses: &mpsc::Sender<Result<ControllerMessage, Status>>,
     message: ControllerMessage,
     device_id: &str,
-    max_message_bytes: usize,
     metrics: &ListenerMetrics,
 ) -> ControlFlow<()> {
-    let size = message.encoded_len();
-    if size > max_message_bytes {
-        if responses.is_closed() {
-            return ControlFlow::Break(());
-        }
-        metrics.hit(Limit::MaxMessageBytes, Outcome::Closed);
-        if let Some(closed) = OVERSIZED_RESPONSES.event(time::Instant::now()) {
-            error!(
-                latest_device_id = %device_id,
-                size,
-                max_message_bytes,
-                closed_since_last_warning = closed,
-                "closed streams whose next message to the device is over maxMessageBytes"
-            );
-        }
-        let _ = responses.try_send(Err(Status::out_of_range(format!(
-            "the controller's message is {size} bytes, over its {max_message_bytes}-byte limit"
-        ))));
-        return ControlFlow::Break(());
-    }
-    // The last slot is kept for a closing status.
-    if responses.capacity() <= 1 && !responses.is_closed() {
-        metrics.hit(Limit::ConnectResponseBuffer, Outcome::Closed);
-        warn!(
-            device_id = %device_id,
-            "closing stream after the device stopped reading it"
-        );
-        return ControlFlow::Break(());
-    }
     match responses.try_send(Ok(message)) {
         Ok(()) => ControlFlow::Continue(()),
-        // The device closed its stream. The queue has room: the session is its
-        // only sender.
-        Err(_) => ControlFlow::Break(()),
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            metrics.hit(Limit::ConnectResponseBuffer, Outcome::Closed);
+            warn!(
+                device_id = %device_id,
+                "closing stream after the device stopped reading it"
+            );
+            ControlFlow::Break(())
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => ControlFlow::Break(()),
     }
 }
 
@@ -849,11 +805,6 @@ fn invalid_csr(err: anyhow::Error) -> Status {
 /// unavailable.
 static RECHECK_UNAVAILABLE: ThrottledWarning = ThrottledWarning::new();
 
-/// `Connect` streams closed because a message to the device was over
-/// `maxMessageBytes`. Every device's stream fails the same way, on every
-/// reconnect, until the daemon configuration shrinks.
-static OVERSIZED_RESPONSES: ThrottledWarning = ThrottledWarning::new();
-
 fn invalid_access_token(err: anyhow::Error) -> Status {
     warn!(error = %err, "OIDC access token rejected");
     access_token_status(&err)
@@ -895,12 +846,11 @@ mod tests {
 
     use std::ops::ControlFlow;
 
-    use agentdesktop_proto::fleet::{ControllerMessage, DaemonConfig, controller_message};
-    use prost::Message as _;
+    use agentdesktop_proto::fleet::ControllerMessage;
+    use tokio::sync::mpsc;
 
     use super::{
-        FleetAgentService, QUEUED_RESPONSES, authenticate_enrolled_user,
-        device_id_from_certificate, queue_response, response_queue,
+        FleetAgentService, authenticate_enrolled_user, device_id_from_certificate, queue_response,
         subscription_is_configured_for_client,
     };
     use crate::{
@@ -910,83 +860,34 @@ mod tests {
         oidc::OidcPrincipal,
     };
 
-    /// Room for any message the response buffer test sends.
-    const MAX_MESSAGE_BYTES: usize = 1024;
-
     #[test]
     fn a_response_buffer_that_is_full_closes_the_stream_and_is_counted() {
         let telemetry = Telemetry::new().unwrap();
         let metrics = telemetry.limits().listener("fleet");
         let count = || telemetry.hits("fleet", Limit::ConnectResponseBuffer, Outcome::Closed);
-        let (responses, mut receiver) = response_queue();
-        let queue = || {
-            queue_response(
-                &responses,
-                ControllerMessage::default(),
-                "device",
-                MAX_MESSAGE_BYTES,
-                &metrics,
-            )
-        };
+        let (responses, mut receiver) = mpsc::channel(1);
 
-        // Room left: each message is queued and nothing is counted.
-        for _ in 0..QUEUED_RESPONSES {
-            assert_eq!(queue(), ControlFlow::Continue(()));
-        }
+        // Room left: the message is queued and nothing is counted.
+        assert_eq!(
+            queue_response(&responses, ControllerMessage::default(), "device", &metrics),
+            ControlFlow::Continue(())
+        );
         assert_eq!(count(), 0);
 
-        // The device has read none of them, so it stopped reading.
-        assert_eq!(queue(), ControlFlow::Break(()));
+        // The device has not read the queued message, so the queue is full.
+        assert_eq!(
+            queue_response(&responses, ControllerMessage::default(), "device", &metrics),
+            ControlFlow::Break(())
+        );
         assert_eq!(count(), 1);
 
         // A stream the device already closed is not a full buffer.
         receiver.close();
-        assert_eq!(queue(), ControlFlow::Break(()));
-        assert_eq!(count(), 1);
-    }
-
-    #[test]
-    fn a_message_over_the_size_limit_closes_the_stream_and_is_counted() {
-        let telemetry = Telemetry::new().unwrap();
-        let metrics = telemetry.limits().listener("fleet");
-        let count = || telemetry.hits("fleet", Limit::MaxMessageBytes, Outcome::Closed);
-        let (responses, mut receiver) = response_queue();
-        let config = |bytes: usize| ControllerMessage {
-            message: Some(controller_message::Message::DaemonConfig(DaemonConfig {
-                revision: 1,
-                yaml: vec![b'#'; bytes],
-                sha256: Vec::new(),
-            })),
-        };
-        let within = config(100);
-        let limit = within.encoded_len();
-
-        // At the limit: queued and not counted, until the device has a full
-        // queue of them unread.
-        for _ in 0..QUEUED_RESPONSES {
-            assert_eq!(
-                queue_response(&responses, within.clone(), "device", limit, &metrics),
-                ControlFlow::Continue(())
-            );
-        }
-        assert_eq!(count(), 0);
-
-        // Over it: the stream ends, instead of tonic failing it when it
-        // encodes the message, and the device is told why even though the
-        // queue is full.
         assert_eq!(
-            queue_response(&responses, config(101), "device", limit, &metrics),
+            queue_response(&responses, ControllerMessage::default(), "device", &metrics),
             ControlFlow::Break(())
         );
         assert_eq!(count(), 1);
-        for _ in 0..QUEUED_RESPONSES {
-            assert!(receiver.try_recv().unwrap().is_ok());
-        }
-        let status = receiver
-            .try_recv()
-            .unwrap()
-            .expect_err("the oversized message was queued");
-        assert_eq!(status.code(), Code::OutOfRange, "{status}");
     }
 
     #[tokio::test]

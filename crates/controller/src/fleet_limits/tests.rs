@@ -213,6 +213,39 @@ async fn a_request_that_runs_too_long_is_ended() {
 }
 
 #[tokio::test]
+async fn a_request_ended_by_its_own_deadline_is_not_counted() {
+    let limits = FleetLimits {
+        request: Duration::from_secs(4),
+        ..FLEET_LIMITS
+    };
+    let telemetry = Telemetry::new().unwrap();
+    let (address, _) = serve_measured(
+        limits,
+        None,
+        Slow {
+            delay: Duration::from_secs(30),
+        },
+        &telemetry.limits(),
+    )
+    .await;
+    let mut request = Request::new(LoginConfigurationRequest {});
+    request.set_timeout(Duration::from_millis(200));
+
+    let error = bounded(client(address).await.get_login_configuration(request))
+        .await
+        .expect_err("a request outlived its own deadline");
+
+    // Tonic ended it at the client's deadline, the shorter one. The client
+    // gives up there too, so give the server time to drop the request.
+    assert_eq!(error.code(), Code::Cancelled, "{error}");
+    time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        telemetry.hits("fleet", Limit::RequestTimeout, Outcome::TimedOut),
+        0
+    );
+}
+
+#[tokio::test]
 async fn the_request_timeout_does_not_end_an_open_stream() {
     let limits = FleetLimits {
         request: Duration::from_millis(200),
@@ -2236,7 +2269,7 @@ mod fleet_service {
 
     use agentdesktop_proto::fleet::{
         AgentMessage, ControllerMessage, DaemonConfig, EnrollDeviceRequest,
-        LoginConfigurationRequest, controller_message, enroll_device_request::Credential,
+        LoginConfigurationRequest, enroll_device_request::Credential,
         fleet_agent_server::FleetAgent,
     };
     use axum::{
@@ -2244,7 +2277,6 @@ mod fleet_service {
         response::{IntoResponse, Response},
     };
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-    use prost::Message as _;
     use serde_json::json;
     use tokio::{sync::mpsc, time};
     use tokio_stream::wrappers::ReceiverStream;
@@ -2589,41 +2621,6 @@ mod fleet_service {
 
         assert_eq!(refused.code(), Code::ResourceExhausted, "{refused}");
         assert_eq!(controller.hits(Limit::StreamOpenRate, Outcome::Rejected), 1);
-    }
-
-    /// A configuration over `maxMessageBytes` ends the device's session with
-    /// the controller's own status, from exactly the size tonic would refuse.
-    #[tokio::test]
-    async fn a_configuration_over_the_message_limit_ends_the_session_and_is_counted() {
-        let pki = pki();
-        let size = ControllerMessage {
-            message: Some(controller_message::Message::DaemonConfig(configuration())),
-        }
-        .encoded_len();
-
-        // At the limit, the configuration is sent.
-        let mut limits = FLEET_LIMITS;
-        limits.configured.max_message_bytes = size;
-        let controller = Controller::start(limits).await;
-        let (address, _) = controller.serve(&pki).await;
-        let _session = open_session(address, &pki).await;
-        assert_eq!(controller.hits(Limit::MaxMessageBytes, Outcome::Closed), 0);
-
-        // One byte over, the session ends before tonic would fail it.
-        limits.configured.max_message_bytes = size - 1;
-        let controller = Controller::start(limits).await;
-        let (address, _) = controller.serve(&pki).await;
-        let (_outbound, session) = connect(address, &pki).await;
-        let closed = bounded(session.expect("open the session").message())
-            .await
-            .expect_err("the configuration was sent");
-
-        assert_eq!(closed.code(), Code::OutOfRange, "{closed}");
-        assert!(
-            closed.message().starts_with("the controller's message is"),
-            "{closed}"
-        );
-        assert_eq!(controller.hits(Limit::MaxMessageBytes, Outcome::Closed), 1);
     }
 
     /// `EnrollDevice` holds its in-flight slot while it waits on the identity
