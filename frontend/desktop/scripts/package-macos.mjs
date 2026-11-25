@@ -19,7 +19,7 @@ import {
 } from "./package-macos-architecture.mjs";
 import {
   createTauriVersionConfig,
-  normalizeTauriArguments,
+  resolveMacosPackageMode,
 } from "./package-tauri.mjs";
 
 if (process.platform !== "darwin") {
@@ -34,7 +34,8 @@ const nativeDirectory = path.join(
   "agentdesktop",
 );
 const macosDirectory = path.join(nativeDirectory, "macos");
-const forwardedArguments = normalizeTauriArguments(process.argv.slice(2));
+const packageMode = resolveMacosPackageMode(process.argv.slice(2));
+const forwardedArguments = packageMode.arguments;
 const targetIndex = forwardedArguments.indexOf("--target");
 const target =
   targetIndex === -1 ? undefined : forwardedArguments[targetIndex + 1];
@@ -59,30 +60,32 @@ const configuredVersion = JSON.parse(
   readFileSync(path.join(nativeDirectory, "tauri.conf.json"), "utf8"),
 ).version;
 const version = process.env.AGENTDESKTOP_VERSION ?? configuredVersion;
-const versionConfig = createTauriVersionConfig(
-  process.env.AGENTDESKTOP_VERSION,
-);
-const tauriExecutable = path.join(
-  desktopDirectory,
-  "node_modules",
-  ".bin",
-  "tauri",
-);
-
-try {
-  run(
-    tauriExecutable,
-    [
-      "build",
-      "--bundles",
-      "app",
-      ...forwardedArguments,
-      ...versionConfig.arguments,
-    ],
-    { cwd: nativeDirectory },
+if (packageMode.buildApplication) {
+  const versionConfig = createTauriVersionConfig(
+    process.env.AGENTDESKTOP_VERSION,
   );
-} finally {
-  versionConfig.cleanup();
+  const tauriExecutable = path.join(
+    desktopDirectory,
+    "node_modules",
+    ".bin",
+    "tauri",
+  );
+
+  try {
+    run(
+      tauriExecutable,
+      [
+        "build",
+        "--bundles",
+        "app",
+        ...forwardedArguments,
+        ...versionConfig.arguments,
+      ],
+      { cwd: nativeDirectory },
+    );
+  } finally {
+    versionConfig.cleanup();
+  }
 }
 
 const targetDirectory = path.resolve(
@@ -102,6 +105,10 @@ const applicationPath = path.join(
 );
 if (!existsSync(applicationPath)) {
   throw new Error(`macOS application bundle not found: ${applicationPath}`);
+}
+if (!packageMode.buildPackage) {
+  console.log(`Created ${applicationPath}`);
+  process.exit(0);
 }
 
 const architecture = macosArchitecture(target);

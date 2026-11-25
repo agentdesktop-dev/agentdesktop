@@ -18,7 +18,10 @@ import {
   installerHostArchitecture,
   macosArchitecture,
 } from "./package-macos-architecture.mjs";
-import { normalizeTauriArguments } from "./package-tauri.mjs";
+import {
+  normalizeTauriArguments,
+  resolveMacosPackageMode,
+} from "./package-tauri.mjs";
 
 const nativeDirectory = path.resolve(
   import.meta.dirname,
@@ -90,6 +93,42 @@ test("forwards the target option to Tauri instead of Cargo", () => {
   assert.deepEqual(
     normalizeTauriArguments(["--target", "x86_64-apple-darwin"]),
     ["--target", "x86_64-apple-darwin"],
+  );
+});
+
+test("build-only builds the app bundle without packaging it", () => {
+  const mode = resolveMacosPackageMode([
+    "--",
+    "--build-only",
+    "--target",
+    "aarch64-apple-darwin",
+  ]);
+
+  assert.equal(mode.buildApplication, true);
+  assert.equal(mode.buildPackage, false);
+  assert.deepEqual(mode.arguments, ["--target", "aarch64-apple-darwin"]);
+});
+
+test("bundle-only packages a signed app bundle without rebuilding it", () => {
+  const mode = resolveMacosPackageMode([
+    "--bundle-only",
+    "--target",
+    "x86_64-apple-darwin",
+  ]);
+
+  assert.equal(mode.buildApplication, false);
+  assert.equal(mode.buildPackage, true);
+  assert.deepEqual(mode.arguments, ["--target", "x86_64-apple-darwin"]);
+});
+
+test("default macOS mode builds and packages", () => {
+  const mode = resolveMacosPackageMode(["--target", "aarch64-apple-darwin"]);
+
+  assert.equal(mode.buildApplication, true);
+  assert.equal(mode.buildPackage, true);
+  assert.throws(
+    () => resolveMacosPackageMode(["--build-only", "--bundle-only"]),
+    /cannot be combined/,
   );
 });
 
