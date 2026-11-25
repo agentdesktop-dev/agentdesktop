@@ -43,25 +43,18 @@ export function OverviewView({ data }: { data: Overview }) {
           )}
         </section>
         <section className="card config-summary">
-          <CardHeader
-            title="Daemon configuration"
-            description="Controller-wide rollout"
-          />
+          <CardHeader title="Daemon configuration" />
           <div className="config-summary-body">
             <strong>
               {data.active_revision ? `r${data.active_revision}` : "—"}
             </strong>
             <div>
               <h3>
-                {data.active_revision
-                  ? `Revision ${data.active_revision} active`
-                  : "No active configuration"}
+                {data.active_revision ? "Active" : "No active configuration"}
               </h3>
-              <p>
-                {data.active_revision
-                  ? "Sent to agents when they connect."
-                  : "Start the controller with a daemon config to begin a rollout."}
-              </p>
+              {!data.active_revision && (
+                <p>Save a configuration to start rollout.</p>
+              )}
             </div>
           </div>
           <Link href="/configuration" className="config-link">

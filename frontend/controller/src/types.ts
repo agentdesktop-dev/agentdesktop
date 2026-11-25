@@ -177,5 +177,40 @@ export type DaemonConfigDocument = {
 };
 
 export type ActiveDaemonConfig = {
+  controller_version?: string;
   config: DaemonConfigDocument | null;
+  yaml: string | null;
+  revision: number | null;
+  sha256: string | null;
+  source: "file" | "database" | null;
+  writable: boolean;
+  created_at: number | null;
+  author: DaemonConfigAuthor | null;
+  message: string | null;
+  reload_error: string | null;
+  changed?: boolean;
+};
+
+export type DaemonConfigAuthor = {
+  kind: "local" | "human" | "service" | "seed" | "file";
+  issuer: string;
+  subject: string;
+  client_id: string | null;
+  display: string | null;
+};
+
+export type DaemonConfigRevisionSummary = {
+  revision: number;
+  sha256: string;
+  created_at: number;
+  author: DaemonConfigAuthor;
+  message: string;
+};
+
+export type DaemonConfigRevision = DaemonConfigRevisionSummary & {
+  yaml: string;
+};
+
+export type DaemonConfigRevisionList = {
+  revisions: DaemonConfigRevisionSummary[];
 };

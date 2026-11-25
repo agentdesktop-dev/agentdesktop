@@ -19,8 +19,10 @@
 |`adminListener.listen`|string|Address on which the management listener accepts connections. Defaults to `127.0.0.1:8080`. Local access requires a loopback address.|
 |`allowInsecureDev`|boolean|Permit a non-HTTPS OIDC issuer for isolated local development.<br><br>This escape hatch is only appropriate for isolated local development.|
 |`daemonConfig`|object|Daemon configuration distributed to enrolled devices.|
+|`daemonConfig.database`|object|Store the fleet configuration in the controller database.|
+|`daemonConfig.database.seedPath`|string|YAML file imported once when the revision table is empty.<br><br>Relative paths are resolved from the controller configuration directory.|
 |`daemonConfig.path`|string|Path to the watched YAML configuration distributed to enrolled devices.<br><br>Relative paths are resolved from the controller configuration directory.<br>Valid file changes are published to connected devices automatically.|
-|`daemonConfig.revision`|integer|Monotonically increasing revision assigned to the daemon configuration.|
+|`daemonConfig.revision`|integer|Monotonically increasing revision assigned to the daemon configuration.<br><br>Applies to file mode only. Older configurations that omit it start at 1.|
 |`databaseUrl`|string|SQLite or PostgreSQL URL used for controller state.|
 |`enrollmentTokens`|object|Unattended device enrollment with operator-signed tokens. Disabled when unset.|
 |`enrollmentTokens.audience`|string|Audience (`aud`) every enrollment token must carry.|
