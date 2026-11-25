@@ -21,25 +21,63 @@ const WINDOWS_PACKAGE_MODES = {
   },
 };
 
-export function resolveWindowsPackageMode(arguments_) {
+const MACOS_PACKAGE_MODES = {
+  // Build the app bundle with the release version; signing happens next.
+  "--build-only": {
+    buildApplication: true,
+    buildPackage: false,
+  },
+  // Package an already-signed app bundle without rebuilding or rewriting it.
+  "--bundle-only": {
+    buildApplication: false,
+    buildPackage: true,
+  },
+};
+
+function resolvePackageMode(modes, defaultMode, arguments_) {
   const normalizedArguments = normalizeTauriArguments(arguments_);
-  const flags = Object.keys(WINDOWS_PACKAGE_MODES).filter((flag) =>
+  const flags = Object.keys(modes).filter((flag) =>
     normalizedArguments.includes(flag),
   );
   if (flags.length > 1) {
     throw new Error(`${flags.join(" and ")} cannot be combined`);
   }
-  const mode = WINDOWS_PACKAGE_MODES[flags[0]] ?? {
-    buildService: true,
-    command: ["build"],
-    requireApplication: false,
-  };
+  const mode = modes[flags[0]] ?? defaultMode;
   return {
     ...mode,
-    arguments: normalizedArguments.filter(
-      (argument) => !(argument in WINDOWS_PACKAGE_MODES),
-    ),
+    arguments: normalizedArguments.filter((argument) => !(argument in modes)),
   };
+}
+
+export function resolveWindowsPackageMode(arguments_) {
+  return resolvePackageMode(
+    WINDOWS_PACKAGE_MODES,
+    {
+      buildService: true,
+      command: ["build"],
+      requireApplication: false,
+    },
+    arguments_,
+  );
+}
+
+export function resolveMacosPackageMode(arguments_) {
+  return resolvePackageMode(
+    MACOS_PACKAGE_MODES,
+    {
+      buildApplication: true,
+      buildPackage: true,
+    },
+    arguments_,
+  );
+}
+
+// WiX only accepts numeric versions, so a pre-release or build-metadata
+// version (1.2.3-rc.1) gets an MSI version of its release core (1.2.3).
+export function msiVersion(version) {
+  const match = /^(\d+)\.(\d+)\.(\d+)([-+].*)?$/.exec(version ?? "");
+  if (!match?.[4]) return undefined;
+  return `${match[1]}.${match[2]}.${match[3]}`;
 }
 
 export function createTauriVersionConfig(version) {
@@ -55,7 +93,15 @@ export function createTauriVersionConfig(version) {
   // Tauri parses file-based `--config` overrides as TOML.
   const directory = mkdtempSync(path.join(tmpdir(), "agentdesktop-tauri-"));
   const configPath = path.join(directory, "release.toml");
-  writeFileSync(configPath, `version = ${JSON.stringify(version)}\n`, "utf8");
+  const wixVersion = msiVersion(version);
+  writeFileSync(
+    configPath,
+    `version = ${JSON.stringify(version)}\n` +
+      (wixVersion
+        ? `\n[bundle.windows.wix]\nversion = ${JSON.stringify(wixVersion)}\n`
+        : ""),
+    "utf8",
+  );
 
   return {
     arguments: ["--config", configPath],

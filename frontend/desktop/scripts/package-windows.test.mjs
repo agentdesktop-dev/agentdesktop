@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   createTauriVersionConfig,
+  msiVersion,
   resolveWindowsPackageMode,
 } from "./package-tauri.mjs";
 
@@ -44,6 +45,23 @@ test("writes the Tauri release version to a temporary config file", () => {
   }
 
   assert.equal(existsSync(config.path), false);
+});
+
+test("gives a pre-release version a numeric MSI version", () => {
+  assert.equal(msiVersion("1.2.3"), undefined);
+  assert.equal(msiVersion("1.2.3-rc.1"), "1.2.3");
+  assert.equal(msiVersion("1.2.3-rc.1.nonprod.42"), "1.2.3");
+  assert.equal(msiVersion("1.2.3+build.7"), "1.2.3");
+
+  const config = createTauriVersionConfig("1.2.3-nonprod.42");
+  try {
+    assert.equal(
+      readFileSync(config.path, "utf8"),
+      'version = "1.2.3-nonprod.42"\n\n[bundle.windows.wix]\nversion = "1.2.3"\n',
+    );
+  } finally {
+    config.cleanup();
+  }
 });
 
 test("build-only compiles both executables without bundling", () => {
