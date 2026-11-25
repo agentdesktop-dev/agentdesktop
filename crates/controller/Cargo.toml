@@ -38,7 +38,7 @@ tokio-stream.workspace = true
 tonic.workspace = true
 tower-layer.workspace = true
 tracing.workspace = true
-time.workspace = true
+time = { workspace = true, features = ["formatting"] }
 url.workspace = true
 uuid.workspace = true
 x509-parser.workspace = true

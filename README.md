@@ -839,6 +839,85 @@ rejected until you do. In the controller configuration, `fleetListen` is now
 `fleetListener.listen` and `adminListen` is now `adminListener.listen`; the old
 keys are rejected.
 
+### Management audit log
+
+The controller records every management mutation and every denied management
+request. Each record has the actor (credential kind, issuer, subject and, when
+the identity provider supplies them, email and name), the action (a permission
+name such as `devices.delete`), the target, the outcome, the time, and the
+request: method, path, peer address, `User-Agent`, and `X-Forwarded-For` as
+received. A mutation produces two records:
+
+- `action.attempted` is written to stdout before the handler acts. If it cannot
+  be written, the request fails with `503 audit_unavailable` and nothing
+  changes; a `failed` completion with reason `audit_unavailable` is then stored
+  in the table, so the Audit page shows the refusal. The attempt is not stored
+  in the table, since the completion is stored with the change itself, so its
+  line has no `seq`.
+- `action.completed` carries the outcome. It is stored in the same database
+  transaction as the change, so the table never shows a change without its
+  completion. Once the attempt is written, the change and its completion finish
+  even if the request times out or the client disconnects, so an attempt is not
+  left without its completion. If the change or its completion cannot be
+  stored, the change rolls back and a `failed` completion is recorded on its
+  own.
+
+Handlers make every change with `Context::mutate`, which checks the permission,
+writes the attempt and commits the change with its completion.
+`Context::require` is for reads and refuses a mutating permission with
+`500 unaudited_mutation`. A mutating request that succeeds or fails with a
+server error without going through `Context::mutate` is recorded with outcome
+`unaudited` and the HTTP status. Allowed reads are not recorded. Compiled-in
+authentication providers record their own sign-in, sign-out and
+reauthentication events through `audit::AuditLog`.
+
+The device-facing fleet API records:
+
+- `action.attempted` and `action.completed` with action `devices.enroll`: a
+  device enrolled. The actor is the signed-in user, or for a token enrollment
+  the token (kind `enrollment_token`, its issuer and ID). The target is the new
+  device, with the hostname it reported. The device is admitted only after the
+  attempt is recorded; if it cannot be, the daemon gets `unavailable`. A retry
+  answered from the enrollment receipt records nothing.
+- `device.enrollment_denied`: an enrollment was refused after the user's ID
+  token was verified. The reason is `nonce_mismatch`, `nonce_missing`,
+  `access_token_rejected`, `token_subject_mismatch` or
+  `invalid_certificate_request`. Earlier failures, rejected enrollment tokens
+  and an unavailable identity provider are not recorded: the first two name
+  nobody verified and anyone can cause them on the public fleet API, and an
+  outage rejects nothing.
+- `action.attempted` and `action.completed` with action
+  `devices.renew_certificate`: a device renewed its certificate. The actor has
+  kind `device` and the device ID as subject, and the target is the same
+  device. The certificate is returned only after the completion is stored; it
+  fails closed like enrollment.
+
+Records are written to two places:
+
+- **Stdout**, one JSON object per line, synchronously and separately from
+  operational logs (`LOG_FORMAT` does not affect them). Route lines whose
+  `schema` is `agentdesktop.audit.v1` to your SIEM with the cluster's log
+  shipper.
+- **The `admin_audit_events` table**, shown on the controller's Audit page
+  (`GET /api/v1/audit?before=<seq>&limit=<n>`, permission `audit.read`). The
+  table is append-only: triggers reject `UPDATE` and `DELETE` (and `TRUNCATE` on
+  PostgreSQL), and the controller never prunes it.
+
+A record that cannot be stored in the table is still written to stdout, without
+a `seq`.
+
+Each stdout line also carries `stream: { "id": ..., "seq": ... }`. Every
+controller process picks a random stream `id` at startup and numbers its lines
+1, 2, 3, ... in the order it writes them. A number is used up even when its line
+fails to write, so a gap within one stream means a line was lost on the way to
+the SIEM; alert on such gaps in the SIEM. A restart starts a new stream at 1.
+The record's own `seq` orders the Audit page and may have gaps, so it says
+nothing about missing events.
+
+Someone with database access can drop the triggers and edit the table, so treat
+the SIEM as the record of truth. On PostgreSQL, also revoke `UPDATE`, `DELETE`
+and `TRUNCATE` on `admin_audit_events` from roles that do not need them.
+
 ### Configuration status
 
 Each apply reports the outcome for every managed program, next to the

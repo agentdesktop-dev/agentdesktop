@@ -1618,6 +1618,45 @@ code {
   }
 }
 
+.audit-table .icon-button:hover {
+  color: var(--ink);
+  background: var(--hover);
+}
+
+.audit-detail-row,
+.audit-detail-row:hover {
+  cursor: default;
+  background: var(--surface);
+}
+
+tbody tr.audit-detail-row td {
+  height: auto;
+  padding: 0;
+  white-space: normal;
+}
+
+.audit-detail-row pre {
+  margin: 0;
+  padding: 14px 18px;
+  max-height: 360px;
+  overflow: auto;
+  color: var(--ink);
+  background: var(--code-surface);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.audit-load-more {
+  align-self: center;
+}
+
+.audit-load-error {
+  margin: 0;
+  color: var(--red);
+  font-size: 12px;
+  text-align: center;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

@@ -1,5 +1,9 @@
 use anyhow::Context;
-use sqlx::{AnyPool, any::AnyPoolOptions};
+use sqlx::{
+    AnyPool,
+    any::AnyPoolOptions,
+    migrate::{Migration, Migrator},
+};
 use std::{collections::BTreeMap, path::PathBuf};
 
 use agentdesktop_core::model::{LocalModel, McpServer, ModelRuntime, Skill};
@@ -13,6 +17,8 @@ use crate::{
     oidc::{CompletedEnrollment, EnrolledUser, EnrollmentCredential},
 };
 use serde::Serialize;
+
+pub mod audit;
 
 #[derive(Clone)]
 pub struct Database {
@@ -271,15 +277,42 @@ pub(crate) fn readable_name(idp_claims: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Every file in `migrations/`. Most run on every database; see [`migrator`].
+static MIGRATIONS: Migrator = sqlx::migrate!();
+
+/// Database-specific migration files end in `_sqlite` or `_postgres` (e.g.
+/// `0005_admin_audit_sqlite.sql` and `0005_admin_audit_postgres.sql`, with the same
+/// version) and run only on that database. All other files run on both.
+fn migrator(url: &str) -> anyhow::Result<Migrator> {
+    let backend = if url.starts_with("postgres") {
+        "postgres"
+    } else if url.starts_with("sqlite") {
+        "sqlite"
+    } else {
+        anyhow::bail!("unsupported database URL; expected sqlite: or postgres:");
+    };
+    let applies = |migration: &&Migration| match ["sqlite", "postgres"]
+        .into_iter()
+        .find(|only| migration.description.ends_with(&format!(" {only}")))
+    {
+        Some(only) => only == backend,
+        None => true,
+    };
+    Ok(Migrator::with_migrations(
+        MIGRATIONS.iter().filter(applies).cloned().collect(),
+    ))
+}
+
 impl Database {
     pub async fn connect(url: &str) -> anyhow::Result<Self> {
+        let migrator = migrator(url)?;
         sqlx::any::install_default_drivers();
         let pool = AnyPoolOptions::new()
             .max_connections(10)
             .connect(url)
             .await
             .with_context(|| format!("connect to database {url}"))?;
-        sqlx::migrate!()
+        migrator
             .run(&pool)
             .await
             .context("run database migrations")?;
@@ -301,7 +334,7 @@ impl Database {
         hostname: &str,
         enrolled_by_issuer: &str,
         enrolled_by_subject: &str,
-        idp_claims: Option<&BTreeMap<String, serde_json::Value>>,
+        idp_claims: Option<&serde_json::Map<String, serde_json::Value>>,
     ) -> anyhow::Result<()> {
         let idp_claims_json = idp_claims
             .map(serde_json::to_string)
@@ -342,8 +375,10 @@ impl Database {
 
     /// Commits the device and its retry receipt together. Concurrent enrollments
     /// for the same principal/key return the first committed certificate.
+    /// Runs in the caller's transaction, which also records the enrollment's
+    /// audit completion (see `AuditLog::mutate`).
     pub async fn finish_enrollment(
-        &self,
+        transaction: &mut sqlx::AnyConnection,
         completed: &CompletedEnrollment,
         response: &agentdesktop_proto::fleet::EnrollResponse,
     ) -> anyhow::Result<agentdesktop_proto::fleet::EnrollResponse> {
@@ -361,7 +396,6 @@ impl Database {
             response.client_certificate_expires_at_unix_seconds,
         ))
         .context("encode device enrollment receipt")?;
-        let mut transaction = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO devices
                 (id, hostname, created_at, last_seen_at, enrolled_by_issuer,
@@ -393,9 +427,7 @@ impl Database {
                 .bind(&response.device_id)
                 .fetch_one(&mut *transaction)
                 .await?;
-        let response = decode_enrollment_receipt(&receipt)?;
-        transaction.commit().await?;
-        Ok(response)
+        decode_enrollment_receipt(&receipt)
     }
 
     pub async fn device_principal(&self, device_id: &str) -> anyhow::Result<DevicePrincipal> {
@@ -559,10 +591,15 @@ impl Database {
         }))
     }
 
-    pub async fn delete_device(&self, device_id: &str) -> anyhow::Result<bool> {
+    /// Runs in the caller's transaction, which also records the deletion's audit
+    /// completion (see `Context::mutate`).
+    pub async fn delete_device(
+        connection: &mut sqlx::AnyConnection,
+        device_id: &str,
+    ) -> anyhow::Result<bool> {
         let result = sqlx::query("DELETE FROM devices WHERE id = $1")
             .bind(device_id)
-            .execute(&self.pool)
+            .execute(connection)
             .await
             .context("delete device")?;
         Ok(result.rows_affected() > 0)
@@ -873,6 +910,37 @@ fn unix_time_seconds() -> i64 {
 mod tests {
     use std::{collections::BTreeMap, path::PathBuf};
 
+    #[test]
+    fn each_database_runs_shared_and_its_own_migrations_once_per_version() {
+        for (url, own, other) in [
+            (
+                "sqlite://controller.db",
+                "admin audit sqlite",
+                "admin audit postgres",
+            ),
+            (
+                "postgres://localhost/controller",
+                "admin audit postgres",
+                "admin audit sqlite",
+            ),
+        ] {
+            let migrator = super::migrator(url).unwrap();
+            let descriptions: Vec<_> = migrator.iter().map(|m| m.description.as_ref()).collect();
+            assert!(descriptions.contains(&"controller"), "{url}");
+            assert!(descriptions.contains(&own), "{url}");
+            assert!(!descriptions.contains(&other), "{url}");
+            let mut versions: Vec<_> = migrator.iter().map(|m| m.version).collect();
+            let count = versions.len();
+            versions.dedup();
+            assert_eq!(
+                versions.len(),
+                count,
+                "{url} has two migrations with one version"
+            );
+        }
+        assert!(super::migrator("mysql://localhost/controller").is_err());
+    }
+
     use agentdesktop_proto::fleet::{
         ConfigState, ConfigStatus, Discovery, Inventory, LocalModel, McpServer, ModelRuntime,
         ProgramState, ProgramStatus, Skill, TelemetryEvent, ToolUseEvent, telemetry_event,
@@ -889,7 +957,7 @@ mod tests {
         let database = Database::connect(&format!("sqlite://{}?mode=rwc", path.display()))
             .await
             .expect("connect test database");
-        let idp_claims = BTreeMap::from([
+        let idp_claims = serde_json::Map::from_iter([
             ("sub".to_owned(), serde_json::json!("subject")),
             ("email".to_owned(), serde_json::json!("john@example.com")),
         ]);
@@ -1032,7 +1100,7 @@ mod tests {
     #[tokio::test]
     async fn the_device_list_and_detail_name_who_enrolled_the_device() {
         let (database, path) = test_database("owner-name").await;
-        let claims = BTreeMap::from([
+        let claims = serde_json::Map::from_iter([
             ("sub".to_owned(), serde_json::json!("subject-2")),
             ("email".to_owned(), serde_json::json!("alex@example.com")),
             ("groups".to_owned(), serde_json::json!(["admins"])),
@@ -1348,8 +1416,7 @@ mod tests {
         assert_eq!(count_rows().await, 1);
 
         assert!(
-            database
-                .delete_device("device")
+            Database::delete_device(&mut database.pool().acquire().await.unwrap(), "device")
                 .await
                 .expect("delete device")
         );

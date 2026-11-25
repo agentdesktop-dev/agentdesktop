@@ -62,6 +62,8 @@ impl AccessRequest<'_> {
 /// (see `AccessRequest::covered_by_admin_read`).
 pub const ADMIN: &str = "admin";
 pub const DEVICES: &str = "devices";
+/// The management audit log.
+pub const AUDIT: &str = "audit";
 pub const DAEMON_CONFIG: &str = "daemon-config";
 pub const SETTINGS: &str = "settings";
 pub const USAGE: &str = "usage";
@@ -77,6 +79,7 @@ pub const OPERATIONS: &[(Verb, &str)] = &[
     (Verb::Read, DAEMON_CONFIG),
     (Verb::Read, SETTINGS),
     (Verb::Read, USAGE),
+    (Verb::Read, AUDIT),
 ];
 
 /// Permission names for `OPERATIONS`, as reported to the UI.

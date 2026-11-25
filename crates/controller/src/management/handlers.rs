@@ -9,18 +9,19 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use super::{
     Settings, State as ManagementState,
     auth::{
-        Context, Error,
+        Context, Error, MutateError,
         authorization::{self, AccessRequest, Verb},
     },
 };
 use crate::{
-    database::{DeviceDetail, DeviceSummary},
+    audit::Outcome,
+    database::{Database, DeviceDetail, DeviceSummary, audit::AuditRow},
     usage,
 };
 
@@ -108,17 +109,29 @@ pub(super) async fn device(
 }
 
 pub(super) async fn delete_device(
-    State(state): State<ManagementState>,
     auth: Context,
     Path(device_id): Path<String>,
 ) -> Result<StatusCode, HandlerError> {
-    auth.require(AccessRequest {
+    let access = AccessRequest {
         verb: Verb::Delete,
         resource_class: authorization::DEVICES,
         resource: Some(&device_id),
-    })
-    .await?;
-    if !state.database.delete_device(&device_id).await? {
+    };
+    let deleted = auth
+        .mutate(access, {
+            let device_id = device_id.clone();
+            move |mut transaction| async move {
+                let deleted = Database::delete_device(&mut transaction, &device_id).await?;
+                let outcome = if deleted {
+                    Outcome::Succeeded
+                } else {
+                    Outcome::NotFound
+                };
+                Ok((transaction, deleted, outcome))
+            }
+        })
+        .await?;
+    if !deleted {
         return Err(HandlerError::NotFound);
     }
     info!(%device_id, "deleted device from controller");
@@ -197,6 +210,52 @@ pub(super) async fn daemon_config(
     Ok(Json(ActiveDaemonConfig { config }))
 }
 
+const AUDIT_PAGE_DEFAULT: i64 = 100;
+const AUDIT_PAGE_MAX: i64 = 200;
+
+#[derive(Deserialize)]
+pub(super) struct AuditQuery {
+    /// Return events with a smaller `seq` than this, for paging back in time.
+    before: Option<i64>,
+    limit: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub(super) struct AuditPage {
+    events: Vec<AuditRow>,
+    /// Pass as `before` to fetch the next older page; absent on the last page.
+    next_before: Option<i64>,
+}
+
+pub(super) async fn audit_events(
+    State(state): State<ManagementState>,
+    auth: Context,
+    Query(query): Query<AuditQuery>,
+) -> Result<Json<AuditPage>, HandlerError> {
+    auth.require(AccessRequest {
+        verb: Verb::Read,
+        resource_class: authorization::AUDIT,
+        resource: None,
+    })
+    .await?;
+    let limit = query
+        .limit
+        .unwrap_or(AUDIT_PAGE_DEFAULT)
+        .clamp(1, AUDIT_PAGE_MAX);
+    // One extra row says whether an older page exists; `seq` may have gaps.
+    let mut rows = state
+        .database
+        .list_audit_events(query.before, limit + 1)
+        .await?;
+    let more = rows.len() as i64 > limit;
+    rows.truncate(limit as usize);
+    let next_before = rows.last().filter(|_| more).map(|row| row.seq);
+    Ok(Json(AuditPage {
+        events: rows,
+        next_before,
+    }))
+}
+
 fn unix_time_seconds() -> i64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -221,6 +280,15 @@ impl From<Error> for HandlerError {
 impl From<anyhow::Error> for HandlerError {
     fn from(error: anyhow::Error) -> Self {
         Self::Internal(error)
+    }
+}
+
+impl From<MutateError> for HandlerError {
+    fn from(error: MutateError) -> Self {
+        match error {
+            MutateError::Refused(error) => Self::Auth(error),
+            MutateError::Failed(error) => Self::Internal(error),
+        }
     }
 }
 
