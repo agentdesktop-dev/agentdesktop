@@ -39,8 +39,8 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["http1"
 rustls = { version = "0.23", default-features = false, features = ["std", "aws_lc_rs", "tls12"] }
 hyper-util = { version = "0.1", features = ["service", "tokio"] }
 memchr = "2.8"
-notify = "8.2"
-notify-debouncer-full = "0.7"
+notify = "9.0"
+notify-debouncer-full = "0.8"
 jsonwebtoken = { version = "12.0", features = ["aws_lc_rs"] }
 json5 = "1.3"
 jsonc-parser = { version = "0.34", default-features = false, features = ["cst", "serde_json"] }
