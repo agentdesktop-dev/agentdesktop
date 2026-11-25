@@ -688,13 +688,15 @@ async fn forward(
         Some(agentdesktop_core::config::LlmGatewayAuthentication::ControllerJwt {
             audience,
             ..
-        }) => crate::user_session::credential_owner(&state.state_dir).map(|device_id| {
-            let mut key = format!("{client_id}\u{0}{}\u{0}{audience}", gateway.url);
-            if subscription {
-                key.push_str("\0subscription");
-            }
-            (key, device_id)
-        }),
+        }) => crate::session::credential_owner(&state.state_dir)
+            .await
+            .map(|device_id| {
+                let mut key = format!("{client_id}\u{0}{}\u{0}{audience}", gateway.url);
+                if subscription {
+                    key.push_str("\0subscription");
+                }
+                (key, device_id)
+            }),
         _ => None,
     };
     let mut retried = false;

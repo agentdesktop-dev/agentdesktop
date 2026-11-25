@@ -27,9 +27,10 @@ use crate::{
     enrollment::EnrollmentState,
     gateway_oidc, program_choice,
     reconcile::{Reconciler, apply_program_choice, configured_programs},
-    remote, subscription,
+    remote,
+    session::SignIn,
+    subscription,
     tick::{self, CurrentConfig, TickStatus},
-    user_session::UserSessions,
 };
 
 #[derive(Clone)]
@@ -43,9 +44,9 @@ pub struct AppState {
     pub oidc_callback_listen: Option<SocketAddr>,
     pub telemetry: Option<mpsc::Sender<TelemetryEvent>>,
     pub logout: Option<mpsc::Sender<remote::LogoutRequest>>,
-    /// Signs a user in and out on a device enrolled with an enrollment
-    /// token; `None` without a controller.
-    pub user_sessions: Option<UserSessions>,
+    /// Signs a user in on a device enrolled with an enrollment token; `None`
+    /// without a controller.
+    pub sign_in: Option<SignIn>,
     /// This device's usage, recorded by the daemon itself (`daemon.usage`).
     pub usage: Option<UsageStore>,
     /// The device user's program choice; `None` serves no program routes.
@@ -396,8 +397,8 @@ async fn discover(State(state): State<AppState>) -> Json<Discovery> {
 }
 
 async fn enrollment(State(state): State<AppState>) -> Json<EnrollmentStatus> {
-    Json(match &state.user_sessions {
-        Some(sessions) => sessions.status().await,
+    Json(match &state.sign_in {
+        Some(sign_in) => sign_in.status().await,
         None => state.enrollment.get().await,
     })
 }
@@ -407,37 +408,33 @@ async fn enrollment(State(state): State<AppState>) -> Json<EnrollmentStatus> {
 async fn login(
     State(state): State<AppState>,
 ) -> Result<Json<EnrollmentStatus>, (StatusCode, String)> {
-    let sessions = state.user_sessions.as_ref().ok_or_else(|| {
+    let sign_in = state.sign_in.as_ref().ok_or_else(|| {
         (
             StatusCode::FAILED_DEPENDENCY,
             "daemon has no controller to sign in to".to_owned(),
         )
     })?;
-    if sessions.status().await.user.is_none() {
-        return Err((
-            StatusCode::CONFLICT,
+    let status = sign_in.status().await;
+    if status.user.is_none() {
+        let message = if status.status != "enrolled" {
+            "the device is not enrolled yet"
+        } else {
             "only a device enrolled with an enrollment token has a separate user sign-in"
-                .to_owned(),
-        ));
+        };
+        return Err((StatusCode::CONFLICT, message.to_owned()));
     }
-    sessions
-        .sign_in()
+    sign_in
+        .start()
         .await
         .map(Json)
         .map_err(|error| (StatusCode::BAD_GATEWAY, format!("{error:#}")))
 }
 
 async fn logout(State(state): State<AppState>) -> Result<StatusCode, (StatusCode, String)> {
-    // A device enrolled with an enrollment token stays enrolled: logging out
-    // signs out its user. The device identity is not the user's to remove.
-    if let Some(sessions) = &state.user_sessions
-        && sessions.status().await.user.is_some()
-    {
-        sessions
-            .sign_out()
-            .await
-            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")))?;
-        return Ok(StatusCode::NO_CONTENT);
+    // Whether the device stays enrolled depends on how it enrolled; the
+    // controller session decides (`session::sign_out`).
+    if let Some(sign_in) = &state.sign_in {
+        sign_in.cancel().await;
     }
     let sender = state.logout.as_ref().ok_or_else(|| {
         (
@@ -492,7 +489,7 @@ async fn llm_gateway_credential(
             allowed_client_ids,
         }) = &gateway.authentication
         && allowed_client_ids.contains(&query.client_id)
-        && let Some(device_id) = crate::user_session::credential_owner(&state.state_dir)
+        && let Some(device_id) = crate::session::credential_owner(&state.state_dir).await
     {
         let key = format!("{}\0{}\0{audience}", query.client_id, gateway.url);
         return cache
@@ -827,7 +824,7 @@ mod tests {
             oidc_callback_listen: None,
             telemetry: None,
             logout: None,
-            user_sessions: None,
+            sign_in: None,
             usage: None,
             programs: None,
         };

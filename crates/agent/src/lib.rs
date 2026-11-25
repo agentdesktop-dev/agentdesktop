@@ -16,10 +16,10 @@ pub mod reconcile;
 pub mod remote;
 pub mod secret_store;
 pub mod secure_fs;
+pub mod session;
 pub mod subscription;
 mod subscription_oauth;
 mod tick;
-pub mod user_session;
 
 #[cfg(windows)]
 mod windows_security;

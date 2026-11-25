@@ -65,6 +65,37 @@ export const OmitsEnrolledByWithoutAReadableName: Story = {
   },
 };
 
+export const ShowsTheUserSignedInOnATokenEnrolledDevice: Story = {
+  args: {
+    device: {
+      ...deviceDetail,
+      enrollment_token_issuer: "fleet-operator",
+    },
+  },
+  play: async ({ canvas }) => {
+    await expect(canvas.getByText("Signed-in user")).toBeVisible();
+    await expect(canvas.queryByText("Enrolled by")).not.toBeInTheDocument();
+    await expect(canvas.getByText("fleet-operator")).toBeVisible();
+  },
+};
+
+export const ShowsNoUserOnASignedOutTokenEnrolledDevice: Story = {
+  args: {
+    device: {
+      ...deviceDetail,
+      enrolled_by_issuer: "",
+      enrolled_by_subject: "",
+      enrolled_by_name: null,
+      enrollment_token_issuer: "fleet-operator",
+    },
+  },
+  play: async ({ canvas }) => {
+    await expect(canvas.queryByText("Enrolled by")).not.toBeInTheDocument();
+    await expect(canvas.getByText("Signed-in user")).toBeVisible();
+    await expect(canvas.getByText("None")).toBeVisible();
+  },
+};
+
 export const BrowsesDiscoveredCapabilities: Story = {
   play: async ({ canvas }) => {
     await userEvent.click(

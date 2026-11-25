@@ -123,7 +123,7 @@ sequenceDiagram
     Controller->>Controller: Otherwise sign CSR with device CA (30 days, client auth)
     Controller->>Controller: Store device and enrollment receipt with hostname, issuer, subject, IdP claims
     Controller-->>Daemon: device_id, certificate chain, expiry
-    Daemon->>Daemon: Save certificate to identity.json. Save private key and tokens to the secret store
+    Daemon->>Daemon: Save certificate to identity.json and the session to session.json. Save private key and tokens to the secret store
     end
 
     rect rgba(36, 120, 200, 0.08)
@@ -188,7 +188,7 @@ sequenceDiagram
     Note over User,App: Logout
     User->>App: Log out
     App->>Daemon: POST /v1/logout
-    Daemon->>Daemon: Delete identity.json, device key, and OIDC tokens. Stop enforcing the controller configuration
+    Daemon->>Daemon: Delete identity.json, session.json, device key, and OIDC tokens. Stop enforcing the controller configuration
     Daemon->>Daemon: Return to enrollment
     end
 ```
@@ -351,8 +351,9 @@ over mTLS with the access token as Bearer. The controller:
    device, replacing a user who signed in before. Shared devices have one
    device record and the user who signed in last.
 
-The daemon stores the user's tokens apart from the device identity, in
-`user-session.json` and the secret store. It sends the access token only on
+The daemon stores the user's session as it does on any device (see
+[Local storage](#local-storage)), apart from the device identity. It sends
+the access token only on
 `GetLlmGatewayCredential`, which the controller checks against the signed-in
 user: `PERMISSION_DENIED` for another user, and `UNAUTHENTICATED` when the
 IdP rejects the token. `Connect`, `RenewDeviceCertificate`, and
@@ -361,7 +362,7 @@ reporting when the user's session ends.
 
 `POST /v1/logout` (`agentdesktop sign-out`) on a token-enrolled device signs
 the user out and keeps the device enrolled. The daemon deletes the user's
-tokens and calls `DetachUser`, which clears the user at the controller. If the
+session and calls `DetachUser`, which clears the user at the controller. If the
 controller cannot be reached, it keeps naming the user on the device until the
 next sign-in or sign-out, but it issues no gateway credential, because that
 takes the user's access token.
@@ -406,12 +407,30 @@ tokens until the access token expires, so the user does not sign in again.
 
 ### Local storage
 
-The daemon stores non-secret metadata (device ID, certificate, certificate
-expiry, token endpoint, client ID) in `identity.json` in its state directory.
+The daemon keeps the device identity and the session of the user signed in
+on the device apart, in its state directory:
+
+- `identity.json` holds the device ID, the certificate and its expiry, and
+  how the device enrolled (a user's sign-in or an enrollment token).
+- `session.json` holds the session's ID, token endpoint, and client ID.
+
 The device private key and the OIDC tokens are kept in the platform secret
 store, keyed by device ID. If the stored identity cannot be read, for example
 after the app's code signature changed, the daemon discards it and enrolls
-again.
+again. A session that cannot be read ends like one whose refresh token the
+IdP rejects.
+
+Every device goes through the same session lifecycle: sign-in, refresh, and
+sign-out. How the device enrolled decides only what the session is for. On a
+device a user enrolled, every controller call carries the session's access
+token, and the device's enrollment ends with the session. On a device enrolled
+with an enrollment token, only `GetLlmGatewayCredential` carries it, and the
+device stays enrolled when the session ends.
+
+An `identity.json` written by an earlier version, which held the session's
+token endpoint and client ID itself, is rewritten on first load, and the
+session moves to `session.json`. An earlier version cannot read the new
+`identity.json`; after a downgrade the device enrolls again.
 
 ## Controller sessions
 

@@ -51,6 +51,12 @@ message EnrollDeviceRequest {
 // browser sign-in, the ID token's nonce must be the base64url SHA-256 of the
 // device certificate's SubjectPublicKeyInfo
 // (agentdesktop_proto::enrollment_nonce), as it is for EnrollDevice.
+//
+// The ID token is in the body, as in EnrollDeviceRequest, because it is not a
+// credential for the call: the access token in the authorization header is,
+// and it is what later calls (GetLlmGatewayCredential) carry. The ID token is
+// a one-time statement of who signed in, with the nonce that ties the sign-in
+// to this device's key, and there is no standard header for it.
 message AttachUserRequest {
   string id_token = 1;
 }

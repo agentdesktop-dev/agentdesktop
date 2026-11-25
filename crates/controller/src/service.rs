@@ -542,9 +542,9 @@ impl FleetAgentService {
         Ok(())
     }
 
-    /// Authenticates `device_id` as a device enrolled with a token. Only
-    /// these devices have a user signed in or out after enrollment: any other
-    /// device belongs to the user who enrolled it.
+    /// Checks that `device_id` was enrolled with an enrollment token that is
+    /// still accepted, which is what `AttachUser` and `DetachUser` require.
+    /// It checks the device alone: no user's token is involved.
     async fn authenticate_token_enrolled_device(&self, device_id: &str) -> Result<(), Status> {
         let enrolled = self.enrolled_principal(device_id).await?;
         let token = enrolled.enrollment_token.as_ref().ok_or_else(|| {

@@ -38,7 +38,7 @@ use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use crate::windows_security::SecurityDescriptor;
 use crate::{
     api, enrollment::EnrollmentState, gateway_oidc, inventory_watch::InventoryWatch, llm_proxy,
-    reconcile, remote, secure_fs, user_session::UserSessions,
+    reconcile, remote, secure_fs, session::SignIn,
 };
 
 #[cfg(unix)]
@@ -630,8 +630,8 @@ where
         ));
     }
     let has_controller = config.controller.is_some();
-    let user_sessions = config.controller.clone().map(|controller| {
-        UserSessions::new(
+    let sign_in = config.controller.clone().map(|controller| {
+        SignIn::new(
             controller,
             args.state_dir.clone(),
             enrollment.clone(),
@@ -650,7 +650,7 @@ where
         oidc_callback_listen: args.oidc_callback_listen,
         telemetry,
         logout,
-        user_sessions,
+        sign_in,
         usage: usage_store,
         programs: Some(program_control),
     };
@@ -1705,7 +1705,7 @@ programs:
             oidc_callback_listen: None,
             telemetry: None,
             logout: None,
-            user_sessions: None,
+            sign_in: None,
             usage: None,
             programs: None,
         });
@@ -1845,7 +1845,7 @@ programs:
             oidc_callback_listen: None,
             telemetry: None,
             logout: None,
-            user_sessions: None,
+            sign_in: None,
             usage: store,
             programs: None,
         });
@@ -1932,7 +1932,7 @@ programs:
             oidc_callback_listen: None,
             telemetry: None,
             logout: None,
-            user_sessions: None,
+            sign_in: None,
             usage: None,
             programs: None,
         });

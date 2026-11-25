@@ -96,7 +96,7 @@ async fn streams_opaque_requests_with_current_credentials() {
                     inventory_interval: Duration::from_secs(60), controller: None, llm_proxy: None,
                     usage_receiver: None },
                 discovery, enrollment: EnrollmentState::new(false), state_dir: dir.path().to_owned(),
-                oidc_callback_listen: None, telemetry: None, logout: None, user_sessions: None,
+                oidc_callback_listen: None, telemetry: None, logout: None, sign_in: None,
                 usage: None,
                 programs: None,
             };
@@ -835,7 +835,7 @@ async fn pairing_is_checked_before_configuration_is_read() {
             oidc_callback_listen: None,
             telemetry: None,
             logout: None,
-            user_sessions: None,
+            sign_in: None,
             usage: None,
             programs: None,
         };
@@ -1217,7 +1217,7 @@ async fn controller_jwt_state(
         oidc_callback_listen: None,
         telemetry: None,
         logout: None,
-        user_sessions: None,
+        sign_in: None,
         usage: None,
         programs: None,
     };
@@ -1294,7 +1294,7 @@ async fn request_source_state(address: std::net::SocketAddr) -> (tempfile::TempD
         oidc_callback_listen: None,
         telemetry: None,
         logout: None,
-        user_sessions: None,
+        sign_in: None,
         usage: None,
         programs: None,
     };
@@ -1365,7 +1365,7 @@ async fn capi_controller_jwt_state(
         oidc_callback_listen: None,
         telemetry: None,
         logout: None,
-        user_sessions: None,
+        sign_in: None,
         usage: None,
         programs: None,
     };

@@ -28,9 +28,9 @@ use url::Url;
 use crate::{
     enrollment::{EnrollmentState, LoginPrompt},
     gateway_oidc,
-    identity::{Identity, OAuthCredentials},
+    identity::{Enrollment, Identity},
     remote,
-    user_session::UserSession,
+    session::{OAuthCredentials, Session},
 };
 
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -288,30 +288,34 @@ pub(crate) struct TokenResponse {
     pub(crate) token_type: String,
 }
 
+/// Enrolls the device by signing a user in, which starts the session of the
+/// user the device then belongs to.
 pub async fn enroll(
     controller: &ControllerConnectionConfig,
     enrollment: &EnrollmentState,
     callback_listen: Option<SocketAddr>,
     open_browser: bool,
-) -> anyhow::Result<Identity> {
-    let mut client = remote::client(controller, None).await?;
+) -> anyhow::Result<(Identity, Session)> {
+    let client = remote::client(controller, None).await?;
     let config = client
+        .clone()
         .get_login_configuration(LoginConfigurationRequest {})
         .await
         .context("get controller login configuration (controller and agent must support the same enrollment protocol)")?
         .into_inner();
-    // The key exists only locally until sign-in completes; its hash is the
-    // browser nonce, which ties the sign-in to this key for the controller.
+    // The key exists only locally until sign-in completes.
     let (device_key, csr) = device_csr()?;
-    let prompt = LoginPrompt::Enrollment(enrollment);
-    let tokens = if controller.device_authorization {
-        device_authorization_login(&config, prompt).await?
-    } else {
-        let nonce = agentdesktop_proto::enrollment_nonce(&device_key.subject_public_key_info());
-        browser_login(&config, prompt, callback_listen, open_browser, &nonce).await?
-    };
+    let sign_in = sign_in(
+        controller,
+        &config,
+        LoginPrompt::Enrollment(enrollment),
+        callback_listen,
+        open_browser,
+        &device_key,
+    )
+    .await?;
     enrollment.set("enrolling").await;
-    complete_enrollment(&mut client, config, &device_key, &csr, tokens).await
+    complete_enrollment(&client, &device_key, &csr, sign_in).await
 }
 
 /// Enrolls with the operator-signed token at `token_path`; no user signs in.
@@ -347,9 +351,7 @@ pub async fn enroll_with_token(
         client_private_key_pem: device_key.serialize_pem(),
         client_certificate_expires_at_unix_seconds: response
             .client_certificate_expires_at_unix_seconds,
-        oauth: None,
-        oauth_token_endpoint: String::new(),
-        oauth_client_id: String::new(),
+        enrollment: Enrollment::EnrollmentToken,
     })
 }
 
@@ -362,95 +364,124 @@ pub async fn attach_user(
     enrollment: &EnrollmentState,
     callback_listen: Option<SocketAddr>,
     open_browser: bool,
-) -> anyhow::Result<UserSession> {
-    let mut client = remote::client(controller, Some(identity)).await?;
+) -> anyhow::Result<Session> {
+    let client = remote::client(controller, Some(identity)).await?;
     let config = client
+        .clone()
         .get_login_configuration(LoginConfigurationRequest {})
         .await
         .context("get controller login configuration")?
         .into_inner();
-    let prompt = LoginPrompt::User(enrollment);
-    let tokens = if controller.device_authorization {
-        device_authorization_login(&config, prompt).await?
-    } else {
-        // As at enrollment, the device key's hash is the browser nonce, which
-        // ties the sign-in to this device for the controller.
-        let device_key = KeyPair::from_pem(&identity.client_private_key_pem)
-            .context("parse device TLS private key")?;
-        let nonce = agentdesktop_proto::enrollment_nonce(&device_key.subject_public_key_info());
-        browser_login(&config, prompt, callback_listen, open_browser, &nonce).await?
+    let device_key = KeyPair::from_pem(&identity.client_private_key_pem)
+        .context("parse device TLS private key")?;
+    let sign_in = sign_in(
+        controller,
+        &config,
+        LoginPrompt::User(enrollment),
+        callback_listen,
+        open_browser,
+        &device_key,
+    )
+    .await?;
+    let body = AttachUserRequest {
+        id_token: sign_in.id_token.clone(),
     };
-    let login_started = unix_time_seconds();
-    let expires_at_unix_seconds = login_started.saturating_add(tokens.expires_in);
+    sign_in
+        .call("user sign-in", body, |request| {
+            let mut client = client.clone();
+            async move { client.attach_user(request).await }
+        })
+        .await
+        .context("sign in user on device")?;
+    Ok(sign_in.session)
+}
+
+/// A sign-in the user completed, which the controller is told about next.
+struct SignIn {
+    /// The session the sign-in starts.
+    session: Session,
+    /// Tells the controller who signed in.
+    id_token: String,
+    authorization: tonic::metadata::MetadataValue<tonic::metadata::Ascii>,
+}
+
+/// Signs a user in with the controller's identity provider, either in the
+/// browser or with device authorization, depending on the controller
+/// configuration. For a browser sign-in the hash of `device_key` is the
+/// nonce, which ties the sign-in to this device's key for the controller.
+async fn sign_in(
+    controller: &ControllerConnectionConfig,
+    config: &LoginConfiguration,
+    prompt: LoginPrompt<'_>,
+    callback_listen: Option<SocketAddr>,
+    open_browser: bool,
+    device_key: &KeyPair,
+) -> anyhow::Result<SignIn> {
+    let tokens = if controller.device_authorization {
+        device_authorization_login(config, prompt).await?
+    } else {
+        let nonce = agentdesktop_proto::enrollment_nonce(&device_key.subject_public_key_info());
+        browser_login(config, prompt, callback_listen, open_browser, &nonce).await?
+    };
+    let signed_in = unix_time_seconds();
     let id_token = tokens
         .id_token
         .context("OIDC token response did not contain an ID token")?;
     let refresh_token = tokens
         .refresh_token
         .context("OIDC token response did not contain a refresh token")?;
-    let authorization = bearer(&tokens.access_token)?;
-    let body = AttachUserRequest { id_token };
-    retry_with_sign_in(expires_at_unix_seconds, "user sign-in", || {
-        let mut request = tonic::Request::new(body.clone());
-        request
-            .metadata_mut()
-            .insert("authorization", authorization.clone());
-        request.set_timeout(Duration::from_secs(15));
-        let mut client = client.clone();
-        async move { client.attach_user(request).await }
-    })
-    .await
-    .context("sign in user on device")?;
-    Ok(UserSession {
-        id: random_secret(),
-        oauth: OAuthCredentials {
-            access_token: tokens.access_token,
-            refresh_token,
-            expires_at_unix_seconds,
+    Ok(SignIn {
+        authorization: format!("Bearer {}", tokens.access_token)
+            .parse()
+            .context("encode OIDC access token")?,
+        id_token,
+        session: Session {
+            id: random_secret(),
+            oauth: OAuthCredentials {
+                access_token: tokens.access_token,
+                refresh_token,
+                expires_at_unix_seconds: signed_in.saturating_add(tokens.expires_in),
+            },
+            token_endpoint: config.token_endpoint.clone(),
+            client_id: config.client_id.clone(),
         },
-        oauth_token_endpoint: config.token_endpoint,
-        oauth_client_id: config.client_id,
     })
 }
 
-fn bearer(
-    access_token: &str,
-) -> anyhow::Result<tonic::metadata::MetadataValue<tonic::metadata::Ascii>> {
-    format!("Bearer {access_token}")
-        .parse()
-        .context("encode OIDC access token")
-}
-
-/// Calls the controller with the tokens of a sign-in the user just completed.
-/// The call is retried while the controller cannot answer and the access
-/// token is still valid, so an interruption does not send the user back to
-/// sign-in.
-async fn retry_with_sign_in<T, F, Fut>(
-    access_token_expires_at_unix_seconds: u64,
-    what: &str,
-    mut call: F,
-) -> Result<T, tonic::Status>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Result<tonic::Response<T>, tonic::Status>>,
-{
-    let mut delay = Duration::from_secs(1);
-    loop {
-        match call().await {
-            Ok(response) => return Ok(response.into_inner()),
-            Err(error)
-                if matches!(
-                    error.code(),
-                    tonic::Code::Unavailable
-                        | tonic::Code::DeadlineExceeded
-                        | tonic::Code::ResourceExhausted
-                ) && unix_time_seconds() < access_token_expires_at_unix_seconds =>
-            {
-                tracing::warn!(%error, "{what} interrupted; retrying with the same sign-in");
-                tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(Duration::from_secs(30));
+impl SignIn {
+    /// Calls the controller with this sign-in's access token. The call is
+    /// retried while the controller cannot answer and the access token is
+    /// still valid, so an interruption does not send the user back to
+    /// sign-in.
+    async fn call<B, T, F, Fut>(&self, what: &str, body: B, mut send: F) -> Result<T, tonic::Status>
+    where
+        B: Clone,
+        F: FnMut(tonic::Request<B>) -> Fut,
+        Fut: Future<Output = Result<tonic::Response<T>, tonic::Status>>,
+    {
+        let mut delay = Duration::from_secs(1);
+        loop {
+            let mut request = tonic::Request::new(body.clone());
+            request
+                .metadata_mut()
+                .insert("authorization", self.authorization.clone());
+            request.set_timeout(Duration::from_secs(15));
+            match send(request).await {
+                Ok(response) => return Ok(response.into_inner()),
+                Err(error)
+                    if matches!(
+                        error.code(),
+                        tonic::Code::Unavailable
+                            | tonic::Code::DeadlineExceeded
+                            | tonic::Code::ResourceExhausted
+                    ) && unix_time_seconds() < self.session.oauth.expires_at_unix_seconds =>
+                {
+                    tracing::warn!(%error, "{what} interrupted; retrying with the same sign-in");
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(Duration::from_secs(30));
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) => return Err(error),
         }
     }
 }
@@ -575,63 +606,40 @@ fn device_csr() -> anyhow::Result<(KeyPair, CertificateSigningRequest)> {
 }
 
 async fn complete_enrollment(
-    client: &mut FleetAgentClient<Channel>,
-    config: LoginConfiguration,
+    client: &FleetAgentClient<Channel>,
     device_key: &KeyPair,
     csr: &CertificateSigningRequest,
-    tokens: TokenResponse,
-) -> anyhow::Result<Identity> {
-    let login_started = unix_time_seconds();
-    let id_token = tokens
-        .id_token
-        .context("OIDC token response did not contain an ID token")?;
-    let refresh_token = tokens
-        .refresh_token
-        .context("OIDC token response did not contain a refresh token")?;
-
+    sign_in: SignIn,
+) -> anyhow::Result<(Identity, Session)> {
     let body = EnrollDeviceRequest {
         hostname: remote::hostname(),
         certificate_signing_request_der: csr.der().as_ref().to_vec(),
-        credential: Some(Credential::IdToken(id_token)),
+        credential: Some(Credential::IdToken(sign_in.id_token.clone())),
     };
-    let authorization = bearer(&tokens.access_token)?;
     // A retry also sends the same CSR, so the controller answers it with the
     // certificate it issued the first time.
-    let response = retry_with_sign_in(
-        login_started.saturating_add(tokens.expires_in),
-        "device enrollment",
-        || {
-            let mut request = tonic::Request::new(body.clone());
-            request
-                .metadata_mut()
-                .insert("authorization", authorization.clone());
-            request.set_timeout(Duration::from_secs(15));
+    let response = sign_in
+        .call("device enrollment", body, |request| {
             let mut client = client.clone();
             async move { client.enroll_device(request).await }
-        },
-    )
-    .await
-    .context("enroll authenticated device")?;
+        })
+        .await
+        .context("enroll authenticated device")?;
 
     let client_certificate_pem = String::from_utf8(response.client_certificate_pem)
         .context("controller returned a non-UTF-8 device certificate")?;
     if client_certificate_pem.is_empty() {
         anyhow::bail!("controller returned an empty device certificate");
     }
-    Ok(Identity {
+    let identity = Identity {
         device_id: response.device_id,
         client_certificate_pem,
         client_private_key_pem: device_key.serialize_pem(),
         client_certificate_expires_at_unix_seconds: response
             .client_certificate_expires_at_unix_seconds,
-        oauth: Some(OAuthCredentials {
-            access_token: tokens.access_token,
-            refresh_token,
-            expires_at_unix_seconds: login_started.saturating_add(tokens.expires_in),
-        }),
-        oauth_token_endpoint: config.token_endpoint,
-        oauth_client_id: config.client_id,
-    })
+        enrollment: Enrollment::UserSignIn,
+    };
+    Ok((identity, sign_in.session))
 }
 
 pub(crate) async fn exchange_authorization_code(
@@ -754,17 +762,6 @@ pub(crate) async fn poll_device_token(
     }
 }
 
-pub async fn refresh(identity: &mut Identity) -> anyhow::Result<()> {
-    let endpoint = &identity.oauth_token_endpoint;
-    let client_id = &identity.oauth_client_id;
-    let current = identity
-        .oauth
-        .as_ref()
-        .context("device has no OIDC session to refresh")?;
-    let response = refresh_access_token(endpoint, client_id, &current.refresh_token).await?;
-    apply_refreshed_tokens(identity, response)
-}
-
 pub(crate) async fn refresh_access_token(
     endpoint: &str,
     client_id: &str,
@@ -790,22 +787,6 @@ pub(crate) async fn refresh_access_token(
         bail!("OIDC token endpoint returned unsupported token type");
     }
     Ok(response)
-}
-
-fn apply_refreshed_tokens(identity: &mut Identity, response: TokenResponse) -> anyhow::Result<()> {
-    if !response.token_type.eq_ignore_ascii_case("Bearer") {
-        bail!("OIDC token endpoint returned unsupported token type");
-    }
-    let current = identity
-        .oauth
-        .take()
-        .context("device has no OIDC session to refresh")?;
-    identity.oauth = Some(OAuthCredentials {
-        access_token: response.access_token,
-        refresh_token: response.refresh_token.unwrap_or(current.refresh_token),
-        expires_at_unix_seconds: unix_time_seconds().saturating_add(response.expires_in),
-    });
-    Ok(())
 }
 
 fn unix_time_seconds() -> u64 {
@@ -1145,10 +1126,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        AuthorizationPage, DevicePoll, TokenResponse, apply_refreshed_tokens,
-        classify_device_token_error, continue_subscription_page, poll_device_token,
+        AuthorizationPage, DevicePoll, classify_device_token_error, continue_subscription_page,
+        poll_device_token,
     };
-    use crate::identity::{Identity, OAuthCredentials};
 
     #[derive(Clone)]
     struct EnrollmentController {
@@ -1424,9 +1404,10 @@ mod tests {
                 .await
                 .unwrap();
             if approved {
-                let identity = result.unwrap();
+                let (identity, session) = result.unwrap();
                 assert_eq!(identity.device_id, "device-1");
-                assert_eq!(identity.oauth.unwrap().access_token, "access-token");
+                assert_eq!(identity.enrollment, super::Enrollment::UserSignIn);
+                assert_eq!(session.oauth.access_token, "access-token");
                 assert_eq!(requests.lock().await.len(), 2);
                 assert_eq!(enrollment.get().await.status, "enrolling");
                 let request = requests.lock().await[0].clone();
@@ -1496,7 +1477,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(identity.device_id, "token-device");
-        assert!(identity.oauth.is_none());
+        assert_eq!(identity.enrollment, super::Enrollment::EnrollmentToken);
         assert!(identity.client_private_key_pem.contains("PRIVATE KEY"));
         server.abort();
     }
@@ -1821,38 +1802,5 @@ mod tests {
         assert_eq!(skipped.matches("class=\"check complete\"").count(), 1);
         assert!(skipped.contains("class=\"check skipped\""));
         assert!(skipped.contains("Skipped"));
-    }
-
-    #[test]
-    fn refresh_replaces_rotated_oauth_credentials() {
-        let mut identity = Identity {
-            device_id: "device".to_owned(),
-            client_certificate_pem: "certificate".to_owned(),
-            client_private_key_pem: "key".to_owned(),
-            client_certificate_expires_at_unix_seconds: u64::MAX,
-            oauth: Some(OAuthCredentials {
-                access_token: "old-access".to_owned(),
-                refresh_token: "old-refresh".to_owned(),
-                expires_at_unix_seconds: 0,
-            }),
-            oauth_token_endpoint: "https://idp.example/token".to_owned(),
-            oauth_client_id: "client".to_owned(),
-        };
-
-        apply_refreshed_tokens(
-            &mut identity,
-            TokenResponse {
-                access_token: "new-access".to_owned(),
-                id_token: None,
-                refresh_token: Some("new-refresh".to_owned()),
-                expires_in: 600,
-                token_type: "Bearer".to_owned(),
-            },
-        )
-        .unwrap();
-        let oauth = identity.oauth.unwrap();
-        assert_eq!(oauth.access_token, "new-access");
-        assert_eq!(oauth.refresh_token, "new-refresh");
-        assert!(oauth.expires_at_unix_seconds > 0);
     }
 }

@@ -27,6 +27,7 @@ export const macDevice: Device = {
   enrolled_by_issuer: "https://issuer.example",
   enrolled_by_subject: "developer@example.com",
   enrolled_by_name: "developer@example.com",
+  enrollment_token_issuer: null,
   config_revision: 4,
   config_state: 1,
   config_error: null,
