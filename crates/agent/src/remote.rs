@@ -11,7 +11,7 @@ use anyhow::{Context, bail};
 use rcgen::{CertificateParams, ExtendedKeyUsagePurpose, KeyPair, KeyUsagePurpose};
 use sha2::{Digest, Sha256};
 use tokio::{
-    sync::{Mutex, RwLock, mpsc, oneshot, watch},
+    sync::{RwLock, mpsc, oneshot, watch},
     time,
 };
 use tokio_stream::wrappers::ReceiverStream;
@@ -43,10 +43,10 @@ use crate::{
     oidc,
     reconcile::Reconciler,
     secure_fs,
+    session::{self, Session},
     tick::{CurrentConfig, TickStatus},
 };
 
-static OAUTH_REFRESH_MUTEX: Mutex<()> = Mutex::const_new(());
 const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
 
@@ -248,6 +248,7 @@ pub async fn run(
             Some(request) = logout.recv() => {
                 logout_between_sessions(
                     request,
+                    &controller,
                     &state_dir.join("identity.json"),
                     &enrollment,
                     &controller_status,
@@ -262,6 +263,7 @@ pub async fn run(
 
 async fn logout_between_sessions(
     request: LogoutRequest,
+    controller: &ControllerConnectionConfig,
     identity_path: &Path,
     enrollment: &EnrollmentState,
     controller_status: &ControllerConnectionState,
@@ -271,6 +273,7 @@ async fn logout_between_sessions(
         Ok(Some(identity)) => {
             complete_logout(
                 request,
+                controller,
                 identity_path,
                 &identity,
                 enrollment,
@@ -291,7 +294,7 @@ async fn logout_between_sessions(
                 error = %format!("{error:#}"),
                 "removing unreadable device identity on sign-out"
             );
-            match identity::discard(identity_path) {
+            match identity::discard(identity_path).await {
                 Ok(()) => {
                     controller_status.reset().await;
                     complete_unenrolled_logout(request, enrollment).await;
@@ -335,7 +338,7 @@ async fn run_session(
                     error = %format!("{error:#}"),
                     "stored device identity is unreadable, for example after the app's code signature changed; removing it and restarting enrollment"
                 );
-                identity::discard(&identity_path)?;
+                identity::discard(&identity_path).await?;
                 enrollment.set("starting").await;
                 None
             }
@@ -347,29 +350,33 @@ async fn run_session(
                 identity
             }
             None => {
-                let identity = enroll_with_retry(
+                let (identity, user_session) = enroll_with_retry(
                     &controller.address,
                     enrollment,
                     logout,
                     INITIAL_RETRY_DELAY,
                     || async {
                         match &controller.enrollment_token_path {
-                            Some(path) => {
-                                oidc::enroll_with_token(controller, enrollment, path).await
-                            }
-                            None => {
-                                oidc::enroll(
-                                    controller,
-                                    enrollment,
-                                    oidc_callback_listen,
-                                    open_browser,
-                                )
+                            Some(path) => oidc::enroll_with_token(controller, enrollment, path)
                                 .await
-                            }
+                                .map(|identity| (identity, None)),
+                            None => oidc::enroll(
+                                controller,
+                                enrollment,
+                                oidc_callback_listen,
+                                open_browser,
+                            )
+                            .await
+                            .map(|(identity, session)| (identity, Some(session))),
                         }
                     },
                 )
                 .await;
+                // The session first: a device that is its user's is only
+                // enrolled together with their session.
+                if let Some(user_session) = &user_session {
+                    session::save(state_dir, &identity.device_id, user_session).await?;
+                }
                 identity::save(&identity_path, &identity)?;
                 enrollment.set("enrolled").await;
                 info!(device_id = %identity.device_id, "enrolled device");
@@ -379,26 +386,66 @@ async fn run_session(
 
         let mut delay = INITIAL_RETRY_DELAY;
         let mut auth_recovery = ControllerAuthRecovery::Ready;
+        // The user's session, which every call carries on a device that is
+        // the user's. Any other device authenticates with its certificate.
+        let mut user_session: Option<Session> = None;
         loop {
             let force_refresh = auth_recovery == ControllerAuthRecovery::RefreshRequired;
-            let refresh_result = tokio::select! {
-                result = refresh_oauth(&mut identity, &identity_path, force_refresh) => result,
-                Some(request) = logout.recv() => {
-                    if complete_logout(request, &identity_path, &identity, enrollment, controller_status, &channels.current).await {
-                        break;
+            if identity.enrollment.belongs_to_user() {
+                let rejected = user_session
+                    .as_ref()
+                    .filter(|_| force_refresh)
+                    .map(|session| session.oauth.access_token.clone());
+                let refresh_result = tokio::select! {
+                    result = session::current(state_dir, &identity.device_id, rejected.as_deref()) => result,
+                    Some(request) = logout.recv() => {
+                        if complete_logout(request, controller, &identity_path, &identity, enrollment, controller_status, &channels.current).await {
+                            break;
+                        }
+                        continue;
                     }
-                    continue;
-                }
-            };
-            match refresh_result {
-                Ok(()) => {
-                    if force_refresh {
-                        auth_recovery = ControllerAuthRecovery::Refreshed;
+                };
+                let session_ended = match refresh_result {
+                    Ok(Some(current)) => {
+                        user_session = Some(current);
+                        None
                     }
-                }
-                Err(error) if is_oauth_refresh_rejected(&error) => {
-                    let error_chain = format!("{error:#}");
-                    identity::delete(&identity_path, &identity.device_id)?;
+                    Ok(None) => Some("the user's OIDC session ended".to_owned()),
+                    Err(error) if is_oauth_refresh_rejected(&error) => Some(format!("{error:#}")),
+                    Err(error) if is_transient_refresh_failure(&error) => {
+                        // Network failures and token endpoint outages are transient: the
+                        // stored refresh token is still valid, so keep the identity and retry
+                        // instead of tearing down the controller integration.
+                        warn!(
+                            controller = %controller.address,
+                            retry_in_seconds = delay.as_secs(),
+                            error = %format!("{error:#}"),
+                            "OIDC access token refresh failed; retaining current identity and retrying"
+                        );
+                        if wait_before_retry(
+                            delay,
+                            logout,
+                            controller,
+                            &identity_path,
+                            &identity,
+                            enrollment,
+                            controller_status,
+                            &channels.current,
+                        )
+                        .await
+                        {
+                            break;
+                        }
+                        delay = next_retry_delay(delay);
+                        continue;
+                    }
+                    // Local session store failures and unsupported token types are not
+                    // fixed by waiting; let the supervisor report them as failed.
+                    Err(error) => return Err(error),
+                };
+                // The device is the user's, so its enrollment ends with their session.
+                if let Some(error_chain) = session_ended {
+                    identity::delete(&identity_path, &identity.device_id).await?;
                     enrollment.set("starting").await;
                     controller_status
                         .mark_disconnected(Some(ControllerConnectionError::SessionExpired))
@@ -407,42 +454,16 @@ async fn run_session(
                         controller = %controller.address,
                         identity_path = %identity_path.display(),
                         error = %error_chain,
-                        "OIDC refresh token was rejected; removed local identity and restarting enrollment"
+                        "the user's OIDC session ended; removed local identity and restarting enrollment"
                     );
                     break;
                 }
-                Err(error) if is_transient_refresh_failure(&error) => {
-                    // Network failures and token endpoint outages are transient: the
-                    // stored refresh token is still valid, so keep the identity and retry
-                    // instead of tearing down the controller integration.
-                    warn!(
-                        controller = %controller.address,
-                        retry_in_seconds = delay.as_secs(),
-                        error = %format!("{error:#}"),
-                        "OIDC access token refresh failed; retaining current identity and retrying"
-                    );
-                    if wait_before_retry(
-                        delay,
-                        logout,
-                        &identity_path,
-                        &identity,
-                        enrollment,
-                        controller_status,
-                        &channels.current,
-                    )
-                    .await
-                    {
-                        break;
-                    }
-                    delay = next_retry_delay(delay);
-                    continue;
-                }
-                // Local identity store failures and unsupported token types are not
-                // fixed by waiting; let the supervisor report them as failed.
-                Err(error) => return Err(error),
+            }
+            if force_refresh {
+                auth_recovery = ControllerAuthRecovery::Refreshed;
             }
             if certificate_needs_renewal(&identity) {
-                match renew_device_certificate(controller, &identity).await {
+                match renew_device_certificate(controller, &identity, user_session.as_ref()).await {
                     Ok(renewed) => {
                         identity::save(&identity_path, &renewed)?;
                         identity = renewed;
@@ -458,6 +479,7 @@ async fn run_session(
                 result = connect(
                     controller,
                     &identity,
+                    user_session.as_ref(),
                     discovered,
                     state_dir,
                     reconciler,
@@ -467,7 +489,7 @@ async fn run_session(
                     &mut auth_recovery,
                 ) => Some(result),
                 Some(request) = logout.recv() => {
-                    if complete_logout(request, &identity_path, &identity, enrollment, controller_status, &channels.current).await {
+                    if complete_logout(request, controller, &identity_path, &identity, enrollment, controller_status, &channels.current).await {
                         None
                     } else {
                         continue;
@@ -493,7 +515,7 @@ async fn run_session(
                         );
                         continue;
                     }
-                    identity::delete(&identity_path, &identity.device_id)?;
+                    identity::delete(&identity_path, &identity.device_id).await?;
                     enrollment.set("starting").await;
                     controller_status
                         .mark_disconnected(Some(ControllerConnectionError::IdentityRejected))
@@ -523,6 +545,7 @@ async fn run_session(
             if wait_before_retry(
                 delay,
                 logout,
+                controller,
                 &identity_path,
                 &identity,
                 enrollment,
@@ -539,10 +562,12 @@ async fn run_session(
 }
 
 /// Sleeps for `delay`, completing any logout request that arrives meanwhile.
-/// Returns `true` when the local session was logged out.
+/// Returns `true` when logging out removed the device identity.
+#[allow(clippy::too_many_arguments)]
 async fn wait_before_retry(
     delay: Duration,
     logout: &mut mpsc::Receiver<LogoutRequest>,
+    controller: &ControllerConnectionConfig,
     identity_path: &Path,
     identity: &Identity,
     enrollment: &EnrollmentState,
@@ -552,7 +577,7 @@ async fn wait_before_retry(
     tokio::select! {
         _ = time::sleep(delay) => false,
         Some(request) = logout.recv() => {
-            complete_logout(request, identity_path, identity, enrollment, controller_status, current).await
+            complete_logout(request, controller, identity_path, identity, enrollment, controller_status, current).await
         }
     }
 }
@@ -608,17 +633,30 @@ fn next_retry_delay(delay: Duration) -> Duration {
     (delay * 2).min(MAX_RETRY_DELAY)
 }
 
+/// Signs the user out ([`session::sign_out`]). Returns `true` when that
+/// removed the device identity, which it does on a device that is the
+/// user's; any other device stays enrolled.
 async fn complete_logout(
     request: LogoutRequest,
+    controller: &ControllerConnectionConfig,
     identity_path: &Path,
     identity: &Identity,
     enrollment: &EnrollmentState,
     controller_status: &ControllerConnectionState,
     current: &watch::Sender<Option<CurrentConfig>>,
 ) -> bool {
-    let result = identity::delete(identity_path, &identity.device_id)
-        .map_err(|error| format!("remove local organization identity: {error:#}"));
-    if result.is_ok() {
+    let unenrolls = identity.enrollment.belongs_to_user();
+    let result = session::sign_out(controller, identity_path, identity)
+        .await
+        .map_err(|error| {
+            if unenrolls {
+                format!("remove local organization identity: {error:#}")
+            } else {
+                format!("sign out the user: {error:#}")
+            }
+        });
+    let unenrolled = unenrolls && result.is_ok();
+    if unenrolled {
         // The organization's configuration is no longer enforced by the
         // reconcile tick; the managed files stay until the next configuration.
         current.send_replace(None);
@@ -626,9 +664,8 @@ async fn complete_logout(
         controller_status.reset().await;
         info!(device_id = %identity.device_id, "logged out local organization session");
     }
-    let logged_out = result.is_ok();
     let _ = request.completion.send(result);
-    logged_out
+    unenrolled
 }
 
 fn is_unauthenticated(error: &anyhow::Error) -> bool {
@@ -637,7 +674,7 @@ fn is_unauthenticated(error: &anyhow::Error) -> bool {
         .is_some_and(|status| status.code() == tonic::Code::Unauthenticated)
 }
 
-fn is_oauth_refresh_rejected(error: &anyhow::Error) -> bool {
+pub(crate) fn is_oauth_refresh_rejected(error: &anyhow::Error) -> bool {
     error
         .chain()
         .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
@@ -668,10 +705,10 @@ pub async fn llm_gateway_credential(
     client_id: &str,
     subscription: bool,
 ) -> anyhow::Result<agentdesktop_core::model::LlmGatewayCredential> {
-    let mut identity =
+    let identity =
         identity::load(&state_dir.join("identity.json"))?.context("device is not enrolled")?;
-    let identity_path = state_dir.join("identity.json");
-    refresh_oauth(&mut identity, &identity_path, false).await?;
+    // On any device the credential is for the user signed in on it.
+    let user_session = session::current(state_dir, &identity.device_id, None).await?;
     // The refresh above is not cut off (its result is saved); the controller
     // connection and call are bounded together.
     let call = async {
@@ -680,7 +717,7 @@ pub async fn llm_gateway_credential(
             client_id: client_id.to_owned(),
             subscription,
         });
-        authenticate_request(&identity, &mut request)?;
+        authenticate_request(user_session.as_ref(), &mut request)?;
         client
             .get_llm_gateway_credential(request)
             .await
@@ -710,16 +747,20 @@ pub async fn device_usage(
     range: &str,
     utc_offset_minutes: i32,
 ) -> anyhow::Result<DeviceUsage> {
-    let identity_path = state_dir.join("identity.json");
-    let mut identity = identity::load(&identity_path)?.context("device is not enrolled")?;
-    refresh_oauth(&mut identity, &identity_path, false).await?;
+    let identity =
+        identity::load(&state_dir.join("identity.json"))?.context("device is not enrolled")?;
+    let user_session = if identity.enrollment.belongs_to_user() {
+        session::current(state_dir, &identity.device_id, None).await?
+    } else {
+        None
+    };
     let call = async {
         let mut client = client(controller, Some(&identity)).await?;
         let mut request = Request::new(DeviceUsageRequest {
             range: range.to_owned(),
             utc_offset_minutes,
         });
-        authenticate_request(&identity, &mut request)?;
+        authenticate_request(user_session.as_ref(), &mut request)?;
         anyhow::Ok(client.get_device_usage(request).await)
     };
     let result = tokio::time::timeout(USAGE_CALL_TIMEOUT, call)
@@ -792,6 +833,7 @@ fn usage_totals_from_proto(totals: Option<proto::UsageTotals>) -> UsageTotals {
 async fn connect(
     controller: &ControllerConnectionConfig,
     identity: &Identity,
+    user_session: Option<&Session>,
     discovered: &mut watch::Receiver<Arc<AgentDiscovery>>,
     state_dir: &Path,
     reconciler: &Reconciler,
@@ -813,7 +855,7 @@ async fn connect(
     let mut pending_persist: Option<(u64, Vec<u8>)> = None;
     let (sender, receiver) = mpsc::channel(16);
     let mut request = Request::new(ReceiverStream::new(receiver));
-    authenticate_request(identity, &mut request)?;
+    authenticate_request(user_session, &mut request)?;
 
     let mut inbound = open_stream(&mut client, request, CONTROLLER_TIMEOUTS.stream_open).await?;
     // Opening the stream succeeded only after the controller authenticated it.
@@ -838,10 +880,8 @@ async fn connect(
     info!(address = %controller.address, "connected to controller");
     controller_status.mark_connected().await;
     let mut heartbeat = time::interval(controller.heartbeat_interval);
-    let reconnect_at = identity
-        .oauth
-        .as_ref()
-        .map(|oauth| oauth.expires_at_unix_seconds.saturating_sub(60));
+    let reconnect_at =
+        user_session.map(|session| session.oauth.expires_at_unix_seconds.saturating_sub(60));
     let oauth_reconnect = time::sleep(Duration::from_secs(
         reconnect_at
             .unwrap_or_default()
@@ -1324,16 +1364,18 @@ fn controller_ca(path: &Path) -> anyhow::Result<Certificate> {
     Ok(Certificate::from_pem(pem))
 }
 
-/// Adds the user's access token. A token-enrolled device has none: its
-/// client certificate alone authenticates it.
-fn authenticate_request<T>(identity: &Identity, request: &mut Request<T>) -> anyhow::Result<()> {
-    let Some(oauth) = &identity.oauth else {
+/// Adds the access token of `user_session`, the session the call carries.
+/// Without one, the client certificate alone authenticates the device.
+fn authenticate_request<T>(
+    user_session: Option<&Session>,
+    request: &mut Request<T>,
+) -> anyhow::Result<()> {
+    let Some(user_session) = user_session else {
         return Ok(());
     };
-    let access_token = &oauth.access_token;
     request.metadata_mut().insert(
         "authorization",
-        format!("Bearer {access_token}")
+        format!("Bearer {}", user_session.oauth.access_token)
             .parse()
             .context("encode OIDC access token")?,
     );
@@ -1343,6 +1385,7 @@ fn authenticate_request<T>(identity: &Identity, request: &mut Request<T>) -> any
 async fn renew_device_certificate(
     controller: &ControllerConnectionConfig,
     identity: &Identity,
+    user_session: Option<&Session>,
 ) -> anyhow::Result<Identity> {
     let key_pem = &identity.client_private_key_pem;
     let key = KeyPair::from_pem(key_pem).context("parse device TLS private key")?;
@@ -1356,7 +1399,7 @@ async fn renew_device_certificate(
     let mut request = Request::new(RenewDeviceCertificateRequest {
         certificate_signing_request_der: csr.der().as_ref().to_vec(),
     });
-    authenticate_request(identity, &mut request)?;
+    authenticate_request(user_session, &mut request)?;
     let response = client
         .renew_device_certificate(request)
         .await
@@ -1372,49 +1415,8 @@ async fn renew_device_certificate(
         client_certificate_pem: certificate,
         client_private_key_pem: key_pem.to_owned(),
         client_certificate_expires_at_unix_seconds: response.expires_at_unix_seconds,
-        oauth: identity.oauth.clone(),
-        oauth_token_endpoint: identity.oauth_token_endpoint.clone(),
-        oauth_client_id: identity.oauth_client_id.clone(),
+        enrollment: identity.enrollment,
     })
-}
-
-async fn refresh_oauth(
-    identity: &mut Identity,
-    identity_path: &Path,
-    force: bool,
-) -> anyhow::Result<()> {
-    let Some(oauth) = &identity.oauth else {
-        return Ok(());
-    };
-    if force || oauth.expires_at_unix_seconds <= unix_time_seconds().saturating_add(120) {
-        let _guard = OAUTH_REFRESH_MUTEX.lock().await;
-        match identity::load(identity_path) {
-            Ok(Some(stored))
-                if stored.oauth.as_ref().is_some_and(|stored| {
-                    stored.expires_at_unix_seconds > unix_time_seconds().saturating_add(120)
-                        && (!force || stored.access_token != oauth.access_token)
-                }) =>
-            {
-                *identity = stored;
-                return Ok(());
-            }
-            Ok(_) => {}
-            // The identity in memory still works. Refresh it, and the save below
-            // replaces the stored copy that can no longer be read.
-            Err(error) if identity::is_unreadable(&error) => {
-                warn!(
-                    device_id = %identity.device_id,
-                    error = %format!("{error:#}"),
-                    "stored device identity is unreadable; refreshing from the in-memory copy"
-                );
-            }
-            Err(error) => return Err(error),
-        }
-        oidc::refresh(identity).await?;
-        identity::save(identity_path, identity).context("persist rotated OIDC refresh token")?;
-        info!(device_id = %identity.device_id, "refreshed OIDC access token");
-    }
-    Ok(())
 }
 
 fn certificate_needs_renewal(identity: &Identity) -> bool {

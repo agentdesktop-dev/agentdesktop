@@ -27,7 +27,9 @@ use crate::{
     enrollment::EnrollmentState,
     gateway_oidc, program_choice,
     reconcile::{Reconciler, apply_program_choice, configured_programs},
-    remote, subscription,
+    remote,
+    session::SignIn,
+    subscription,
     tick::{self, CurrentConfig, TickStatus},
 };
 
@@ -42,6 +44,9 @@ pub struct AppState {
     pub oidc_callback_listen: Option<SocketAddr>,
     pub telemetry: Option<mpsc::Sender<TelemetryEvent>>,
     pub logout: Option<mpsc::Sender<remote::LogoutRequest>>,
+    /// Signs a user in on a device enrolled with an enrollment token; `None`
+    /// without a controller.
+    pub sign_in: Option<SignIn>,
     /// This device's usage, recorded by the daemon itself (`daemon.usage`).
     pub usage: Option<UsageStore>,
     /// The device user's program choice; `None` serves no program routes.
@@ -206,6 +211,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/remote-config", get(remote_config))
         .route("/v1/discovery", get(discover))
         .route("/v1/enrollment", get(enrollment))
+        .route("/v1/login", post(login))
         .route("/v1/logout", post(logout))
         .route("/v1/telemetry", post(telemetry))
         .route("/v1/llm-gateway/credential", get(llm_gateway_credential))
@@ -391,10 +397,45 @@ async fn discover(State(state): State<AppState>) -> Json<Discovery> {
 }
 
 async fn enrollment(State(state): State<AppState>) -> Json<EnrollmentStatus> {
-    Json(state.enrollment.get().await)
+    Json(match &state.sign_in {
+        Some(sign_in) => sign_in.status().await,
+        None => state.enrollment.get().await,
+    })
+}
+
+/// Starts the sign-in of a user on a device enrolled with an enrollment
+/// token, and answers with the page where the user signs in.
+async fn login(
+    State(state): State<AppState>,
+) -> Result<Json<EnrollmentStatus>, (StatusCode, String)> {
+    let sign_in = state.sign_in.as_ref().ok_or_else(|| {
+        (
+            StatusCode::FAILED_DEPENDENCY,
+            "daemon has no controller to sign in to".to_owned(),
+        )
+    })?;
+    let status = sign_in.status().await;
+    if status.user.is_none() {
+        let message = if status.status != "enrolled" {
+            "the device is not enrolled yet"
+        } else {
+            "only a device enrolled with an enrollment token has a separate user sign-in"
+        };
+        return Err((StatusCode::CONFLICT, message.to_owned()));
+    }
+    sign_in
+        .start()
+        .await
+        .map(Json)
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("{error:#}")))
 }
 
 async fn logout(State(state): State<AppState>) -> Result<StatusCode, (StatusCode, String)> {
+    // Whether the device stays enrolled depends on how it enrolled; the
+    // controller session decides (`session::sign_out`).
+    if let Some(sign_in) = &state.sign_in {
+        sign_in.cancel().await;
+    }
     let sender = state.logout.as_ref().ok_or_else(|| {
         (
             StatusCode::FAILED_DEPENDENCY,
@@ -439,8 +480,8 @@ async fn llm_gateway_credential(
     })?;
     // Pi executes its helper on every request. Reuse the proxy's 60 s cache
     // for controller identities; OIDC and subscription flows keep their own
-    // refresh behavior. Read identity.json on each call so logout/re-enrollment
-    // cannot reuse another device's token.
+    // refresh behavior. Read the credential's owner on each call so a logout,
+    // a re-enrollment or another user's sign-in cannot reuse an earlier token.
     if !program_uses_subscription(&effective, &query.client_id)
         && let Some(gateway) = effective.llm_gateway.as_ref()
         && let Some(LlmGatewayAuthentication::ControllerJwt {
@@ -448,8 +489,7 @@ async fn llm_gateway_credential(
             allowed_client_ids,
         }) = &gateway.authentication
         && allowed_client_ids.contains(&query.client_id)
-        && let Ok(Some(device_id)) =
-            crate::identity::load_device_id(&state.state_dir.join("identity.json"))
+        && let Some(device_id) = crate::session::credential_owner(&state.state_dir).await
     {
         let key = format!("{}\0{}\0{audience}", query.client_id, gateway.url);
         return cache
@@ -784,6 +824,7 @@ mod tests {
             oidc_callback_listen: None,
             telemetry: None,
             logout: None,
+            sign_in: None,
             usage: None,
             programs: None,
         };

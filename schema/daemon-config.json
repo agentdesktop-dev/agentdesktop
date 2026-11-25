@@ -173,11 +173,11 @@
           "type": "string"
         },
         "deviceAuthorization": {
-          "description": "Enroll with the OAuth 2.0 Device Authorization Grant (RFC 8628) instead\nof a browser redirect to a local callback.\n\nUse this on hosts without a local browser, such as servers reached over\nSSH. The daemon logs a verification URL and user code to approve from\nany other device. The identity provider must support device\nauthorization for the controller's client. The daemon must be able to\nreach the IdP's device-authorization and token endpoints directly.",
+          "description": "Enroll with the OAuth 2.0 Device Authorization Grant (RFC 8628) instead\nof a browser redirect to a local callback.\n\nUse this on hosts without a local browser, such as servers reached over\nSSH. The daemon logs a verification URL and user code to approve from\nany other device. The identity provider must support device\nauthorization for the controller's client. The daemon must be able to\nreach the IdP's device-authorization and token endpoints directly.\n\nWith `enrollmentTokenPath`, this is how a user signs in on the device\nafter it enrolled.",
           "type": "boolean"
         },
         "enrollmentTokenPath": {
-          "description": "Path to a file holding an enrollment token signed by an issuer the\ncontroller trusts (`enrollmentTokens`).\n\nThe daemon enrolls with this token instead of a user sign-in, so a\ndevice management system can enroll devices unattended. Cannot be\ncombined with `deviceAuthorization`.",
+          "description": "Path to a file holding an enrollment token signed by an issuer the\ncontroller trusts (`enrollmentTokens`).\n\nThe daemon enrolls with this token instead of a user sign-in, so a\ndevice management system can enroll devices unattended. A user can\nsign in on the device afterwards.",
           "type": [
             "string",
             "null"

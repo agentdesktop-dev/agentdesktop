@@ -32,6 +32,12 @@ pub enum ClientCommand {
     /// Sign in to the LLM gateway with OIDC device authorization and print
     /// the verification URL and code to approve from any device.
     Login,
+    /// Sign a user in on a device that was enrolled with an enrollment token,
+    /// and print the URL where the user signs in.
+    SignIn,
+    /// Sign out. A device enrolled with an enrollment token stays enrolled;
+    /// any other device returns to enrollment.
+    SignOut,
     /// List the programs this device's configuration manages, or choose which
     /// of them Agentdesktop manages.
     Programs {
@@ -92,12 +98,29 @@ pub async fn run(command: ClientCommand, socket: PathBuf) -> anyhow::Result<()> 
         ClientCommand::Enrollment => {
             let enrollment: EnrollmentStatus = client::get(&socket, "/v1/enrollment").await?;
             println!("{}", enrollment.status);
+            if let Some(user) = enrollment.user {
+                println!("User: {user}");
+            }
             if let Some(url) = enrollment.authorization_url {
                 println!("Sign in at: {url}");
             }
             if let Some(code) = enrollment.user_code {
                 println!("Code: {code}");
             }
+        }
+        ClientCommand::SignIn => {
+            let enrollment: EnrollmentStatus = client::post(&socket, "/v1/login").await?;
+            println!("{}", enrollment.user.as_deref().unwrap_or("signedOut"));
+            if let Some(url) = enrollment.authorization_url {
+                println!("Sign in at: {url}");
+            }
+            if let Some(code) = enrollment.user_code {
+                println!("Code: {code}");
+            }
+        }
+        ClientCommand::SignOut => {
+            client::post_json(&socket, "/v1/logout", &()).await?;
+            println!("signedOut");
         }
         ClientCommand::Login => {
             let login: LlmGatewayLoginStatus =

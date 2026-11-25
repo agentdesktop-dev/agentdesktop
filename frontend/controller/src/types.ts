@@ -25,8 +25,13 @@ export type Device = {
   last_seen_at: number | null;
   enrolled_by_issuer: string;
   enrolled_by_subject: string;
-  /** Readable name of the user who enrolled the device, when the IdP gave one. */
+  /**
+   * Readable name of the user who enrolled the device, when the IdP gave one.
+   * On a device enrolled with an enrollment token, the user signed in on it.
+   */
   enrolled_by_name?: string | null;
+  /** Issuer of the enrollment token the device enrolled with, if it did. */
+  enrollment_token_issuer?: string | null;
   config_revision: number | null;
   config_state: number | null;
   config_error: string | null;

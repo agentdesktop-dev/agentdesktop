@@ -195,6 +195,23 @@ impl OidcProvider {
         device_key_nonce: &str,
     ) -> anyhow::Result<CompletedEnrollment> {
         validate_hostname(&hostname)?;
+        let user = self
+            .authenticate_user(id_token, access_token, device_key_nonce)
+            .await?;
+        Ok(CompletedEnrollment {
+            hostname,
+            credential: EnrollmentCredential::User(user),
+        })
+    }
+
+    /// Authenticates a user signing in on a device. `device_key_nonce` is
+    /// [`agentdesktop_proto::enrollment_nonce`] of the device's key.
+    pub async fn authenticate_user(
+        &self,
+        id_token: &str,
+        access_token: &str,
+        device_key_nonce: &str,
+    ) -> anyhow::Result<EnrolledUser> {
         if id_token.is_empty() || access_token.is_empty() {
             bail!("ID token and access token are required");
         }
@@ -210,14 +227,14 @@ impl OidcProvider {
             .context("validate OIDC ID token")?
             .claims;
         // A browser sign-in carries the nonce the agent derived from the device
-        // key, so only a sign-in made for this key can enroll it. The device
+        // key, so only a sign-in made for this key is accepted for it. The device
         // authorization grant has no nonce; tokens without one are accepted only
         // when the IdP offers that grant, as they were before.
         match claims.nonce.as_deref() {
             Some(nonce) if nonce == device_key_nonce => {}
-            Some(_) => bail!("ID token nonce is not bound to the enrolling device key"),
+            Some(_) => bail!("ID token nonce is not bound to the device key"),
             None if self.inner.device_authorization_endpoint.is_some() => {}
-            None => bail!("ID token has no nonce bound to the enrolling device key"),
+            None => bail!("ID token has no nonce bound to the device key"),
         }
         let access_principal = self.authenticate_access_token(access_token).await?;
         if access_principal.subject != claims.sub {
@@ -230,13 +247,10 @@ impl OidcProvider {
             idp_claims.insert("nonce".to_owned(), nonce.into());
         }
 
-        Ok(CompletedEnrollment {
-            hostname,
-            credential: EnrollmentCredential::User(EnrolledUser {
-                issuer: access_principal.issuer,
-                subject: access_principal.subject,
-                idp_claims,
-            }),
+        Ok(EnrolledUser {
+            issuer: access_principal.issuer,
+            subject: access_principal.subject,
+            idp_claims,
         })
     }
 

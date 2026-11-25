@@ -38,7 +38,12 @@ pub struct DeviceSummary {
     /// Readable name of the user who enrolled the device (their email, else
     /// their preferred username, else their name), when the identity provider
     /// supplied one. Only this derived value is returned, never the raw claims.
+    /// On a device enrolled with an enrollment token, the `enrolled_by_*`
+    /// fields name the user signed in on it, if any.
     pub enrolled_by_name: Option<String>,
+    /// The issuer of the enrollment token the device enrolled with; `None`
+    /// for a device a user enrolled by signing in.
+    pub enrollment_token_issuer: Option<String>,
     pub config_revision: Option<i64>,
     pub config_state: Option<i64>,
     pub config_error: Option<String>,
@@ -59,6 +64,7 @@ struct DeviceRow {
     enrolled_by_issuer: String,
     enrolled_by_subject: String,
     idp_claims_json: Option<String>,
+    enrollment_token_issuer: Option<String>,
     config_revision: Option<i64>,
     config_state: Option<i64>,
     config_error: Option<String>,
@@ -79,6 +85,7 @@ impl From<DeviceRow> for DeviceSummary {
             enrolled_by_issuer: row.enrolled_by_issuer,
             enrolled_by_subject: row.enrolled_by_subject,
             enrolled_by_name: row.idp_claims_json.as_deref().and_then(readable_name),
+            enrollment_token_issuer: row.enrollment_token_issuer,
             config_revision: row.config_revision,
             config_state: row.config_state,
             config_error: row.config_error,
@@ -436,20 +443,50 @@ impl Database {
         })
     }
 
+    /// Sets the user signed in on a device that was enrolled with an
+    /// enrollment token, or clears it with `None`.
+    pub async fn set_device_user(
+        &self,
+        device_id: &str,
+        user: Option<&EnrolledUser>,
+    ) -> anyhow::Result<()> {
+        let idp_claims = user
+            .map(|user| serde_json::to_string(&user.idp_claims))
+            .transpose()
+            .context("encode verified IdP claims")?;
+        let updated = sqlx::query(
+            "UPDATE devices
+             SET enrolled_by_issuer = $2, enrolled_by_subject = $3, idp_claims_json = $4
+             WHERE id = $1 AND enrollment_token_issuer IS NOT NULL",
+        )
+        .bind(device_id)
+        .bind(user.map_or("", |user| &user.issuer))
+        .bind(user.map_or("", |user| &user.subject))
+        .bind(idp_claims)
+        .execute(&self.pool)
+        .await
+        .context("update device user")?;
+        if updated.rows_affected() == 0 {
+            anyhow::bail!("device {device_id} was not enrolled with an enrollment token");
+        }
+        Ok(())
+    }
+
     pub async fn list_devices(&self) -> anyhow::Result<Vec<DeviceSummary>> {
         let rows: Vec<DeviceRow> = sqlx::query_as(
             "SELECT d.id, d.hostname, d.os, d.architecture, d.agent_version,
                     d.created_at, d.last_seen_at, d.enrolled_by_issuer,
-                    d.enrolled_by_subject, d.idp_claims_json, cs.revision AS config_revision,
-                    cs.state AS config_state, cs.error AS config_error,
+                    d.enrolled_by_subject, d.idp_claims_json, d.enrollment_token_issuer,
+                    cs.revision AS config_revision, cs.state AS config_state,
+                    cs.error AS config_error,
                     cs.updated_at AS config_updated_at, COUNT(x.kind) AS discovery_count
              FROM devices d
              LEFT JOIN device_config_status cs ON cs.device_id = d.id
              LEFT JOIN discoveries x ON x.device_id = d.id
              GROUP BY d.id, d.hostname, d.os, d.architecture, d.agent_version,
                       d.created_at, d.last_seen_at, d.enrolled_by_issuer,
-                      d.enrolled_by_subject, d.idp_claims_json, cs.revision, cs.state,
-                      cs.error, cs.updated_at
+                      d.enrolled_by_subject, d.idp_claims_json, d.enrollment_token_issuer,
+                      cs.revision, cs.state, cs.error, cs.updated_at
              ORDER BY d.last_seen_at DESC, d.hostname ASC",
         )
         .fetch_all(&self.pool)
@@ -475,8 +512,9 @@ impl Database {
         let device: Option<DeviceRow> = sqlx::query_as(
             "SELECT d.id, d.hostname, d.os, d.architecture, d.agent_version,
                     d.created_at, d.last_seen_at, d.enrolled_by_issuer,
-                    d.enrolled_by_subject, d.idp_claims_json, cs.revision AS config_revision,
-                    cs.state AS config_state, cs.error AS config_error,
+                    d.enrolled_by_subject, d.idp_claims_json, d.enrollment_token_issuer,
+                    cs.revision AS config_revision, cs.state AS config_state,
+                    cs.error AS config_error,
                     cs.updated_at AS config_updated_at, COUNT(x.kind) AS discovery_count
              FROM devices d
              LEFT JOIN device_config_status cs ON cs.device_id = d.id
@@ -484,8 +522,8 @@ impl Database {
              WHERE d.id = $1
              GROUP BY d.id, d.hostname, d.os, d.architecture, d.agent_version,
                       d.created_at, d.last_seen_at, d.enrolled_by_issuer,
-                      d.enrolled_by_subject, d.idp_claims_json, cs.revision, cs.state,
-                      cs.error, cs.updated_at",
+                      d.enrolled_by_subject, d.idp_claims_json, d.enrollment_token_issuer,
+                      cs.revision, cs.state, cs.error, cs.updated_at",
         )
         .bind(device_id)
         .fetch_optional(&self.pool)
@@ -1073,6 +1111,55 @@ mod tests {
             "raw claims must not reach the API: {json}"
         );
         assert!(!json.contains("idp_claims"), "claims column leaked: {json}");
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn the_device_list_tells_a_signed_in_user_from_who_enrolled_the_device() {
+        let (database, path) = test_database("token-user").await;
+        sqlx::query("UPDATE devices SET enrollment_token_issuer = 'operator' WHERE id = 'device'")
+            .execute(database.pool())
+            .await
+            .expect("mark the device as enrolled with a token");
+        let user = crate::oidc::EnrolledUser {
+            issuer: "issuer".to_owned(),
+            subject: "subject-3".to_owned(),
+            idp_claims: BTreeMap::from([(
+                "email".to_owned(),
+                serde_json::json!("sam@example.com"),
+            )]),
+        };
+        database
+            .set_device_user("device", Some(&user))
+            .await
+            .expect("sign in a user");
+
+        let devices = database.list_devices().await.expect("list devices");
+        assert_eq!(
+            devices[0].enrollment_token_issuer.as_deref(),
+            Some("operator")
+        );
+        assert_eq!(
+            devices[0].enrolled_by_name.as_deref(),
+            Some("sam@example.com")
+        );
+
+        database
+            .set_device_user("device", None)
+            .await
+            .expect("sign the user out");
+        let detail = database
+            .get_device("device")
+            .await
+            .expect("load device")
+            .expect("device exists");
+        assert_eq!(
+            detail.device.enrollment_token_issuer.as_deref(),
+            Some("operator")
+        );
+        assert_eq!(detail.device.enrolled_by_name, None);
 
         drop(database);
         let _ = std::fs::remove_file(path);

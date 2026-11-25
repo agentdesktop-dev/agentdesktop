@@ -64,10 +64,32 @@ export function DeviceView({
     (total, runtime) => total + runtime.models.length,
     0,
   );
+  // A device enrolled with an enrollment token has no user of its own; the
+  // user fields name whoever is signed in on it.
+  const tokenIssuer = device.enrollment_token_issuer;
   // Shown only when the identity provider gave a readable name.
   const enrolledBy: Array<[string, string]> = device.enrolled_by_name
-    ? [["Enrolled by", device.enrolled_by_name]]
+    ? [
+        [
+          tokenIssuer ? "Signed-in user" : "Enrolled by",
+          device.enrolled_by_name,
+        ],
+      ]
     : [];
+  const enrollmentIdentity: Array<[string, string]> = tokenIssuer
+    ? [
+        ["Enrollment token issuer", tokenIssuer],
+        ...(device.enrolled_by_subject
+          ? ([
+              ["Signed-in user issuer", device.enrolled_by_issuer],
+              ["Signed-in user subject", device.enrolled_by_subject],
+            ] as Array<[string, string]>)
+          : ([["Signed-in user", "None"]] as Array<[string, string]>)),
+      ]
+    : [
+        ["Issuer", device.enrolled_by_issuer],
+        ["Subject", device.enrolled_by_subject],
+      ];
   return (
     <div className="stack">
       <Link href="/devices" className="back-link">
@@ -253,12 +275,7 @@ export function DeviceView({
           title="Enrollment identity"
           description="Identity captured when this device joined the fleet"
         />
-        <DefinitionList
-          entries={[
-            ["Issuer", device.enrolled_by_issuer || "Enrollment token"],
-            ["Subject", device.enrolled_by_subject || "Device credential"],
-          ]}
-        />
+        <DefinitionList entries={enrollmentIdentity} />
       </section>
       {canDelete && (
         <section className="danger-zone">

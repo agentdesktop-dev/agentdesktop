@@ -53,6 +53,12 @@ impl FleetAgent for Controller {
     async fn get_device_usage(&self, _: Request<DeviceUsageRequest>) -> Reply<DeviceUsageResponse> {
         Err(tonic::Status::unimplemented("not used"))
     }
+    async fn attach_user(&self, _: Request<AttachUserRequest>) -> Reply<AttachUserResponse> {
+        Err(tonic::Status::unimplemented("not used"))
+    }
+    async fn detach_user(&self, _: Request<DetachUserRequest>) -> Reply<DetachUserResponse> {
+        Err(tonic::Status::unimplemented("not used"))
+    }
     type ConnectStream = ReceiverStream<Result<ControllerMessage, tonic::Status>>;
     async fn connect(
         &self,
@@ -153,15 +159,25 @@ impl Fixture {
             client_certificate_pem: cert.cert.pem(),
             client_private_key_pem: cert.signing_key.serialize_pem(),
             client_certificate_expires_at_unix_seconds: unix_time_seconds() + 30 * 86400,
-            oauth: Some(crate::identity::OAuthCredentials {
-                access_token: "stale".to_owned(),
-                refresh_token: "refresh-stale".to_owned(),
-                // A server rejection must force refresh even before our local deadline.
-                expires_at_unix_seconds: unix_time_seconds() + 3600,
-            }),
-            oauth_token_endpoint: token_endpoint,
-            oauth_client_id: "test-client".to_owned(),
+            enrollment: identity::Enrollment::UserSignIn,
         };
+        session::save(
+            path,
+            "existing-device",
+            &Session {
+                id: "session".to_owned(),
+                oauth: session::OAuthCredentials {
+                    access_token: "stale".to_owned(),
+                    refresh_token: "refresh-stale".to_owned(),
+                    // A server rejection must force refresh even before our local deadline.
+                    expires_at_unix_seconds: unix_time_seconds() + 3600,
+                },
+                token_endpoint,
+                client_id: "test-client".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
         identity::save(&path.join("identity.json"), &identity).unwrap();
         let (events_sender, events) = mpsc::unbounded_channel();
         let controller = Controller {
@@ -234,6 +250,12 @@ impl Fixture {
             .unwrap()
             .unwrap()
     }
+    async fn stored_session(&self) -> Session {
+        session::current(self.directory.path(), "existing-device", None)
+            .await
+            .unwrap()
+            .unwrap()
+    }
 }
 
 #[tokio::test]
@@ -245,7 +267,10 @@ async fn rejected_access_token_refreshes_without_discarding_enrollment() {
         "{event:?}"
     );
     assert_eq!(fixture.refreshes.load(Ordering::SeqCst), 1);
-    assert_eq!(fixture.stored().oauth.unwrap().refresh_token, "rotated-1");
+    assert_eq!(
+        fixture.stored_session().await.oauth.refresh_token,
+        "rotated-1"
+    );
     assert_eq!(fixture.stored().device_id, "existing-device");
 }
 
@@ -258,7 +283,10 @@ async fn transient_refresh_failure_preserves_enrollment_until_recovery() {
         "{event:?}"
     );
     assert_eq!(fixture.refreshes.load(Ordering::SeqCst), 2);
-    assert_eq!(fixture.stored().oauth.unwrap().refresh_token, "rotated-2");
+    assert_eq!(
+        fixture.stored_session().await.oauth.refresh_token,
+        "rotated-2"
+    );
 }
 
 #[tokio::test]
@@ -270,6 +298,7 @@ async fn rejected_refresh_token_still_requires_enrollment() {
     ));
     assert_eq!(fixture.refreshes.load(Ordering::SeqCst), 1);
     assert!(!fixture.directory.path().join("identity.json").exists());
+    assert!(!fixture.directory.path().join("session.json").exists());
 }
 
 #[tokio::test]
@@ -296,5 +325,8 @@ async fn accepted_stream_resets_recovery_for_the_next_token_expiry() {
         "{event:?}"
     );
     assert_eq!(fixture.refreshes.load(Ordering::SeqCst), 2);
-    assert_eq!(fixture.stored().oauth.unwrap().refresh_token, "rotated-2");
+    assert_eq!(
+        fixture.stored_session().await.oauth.refresh_token,
+        "rotated-2"
+    );
 }

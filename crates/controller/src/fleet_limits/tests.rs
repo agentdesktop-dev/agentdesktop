@@ -1,11 +1,11 @@
 use std::{net::SocketAddr, pin::Pin, time::Duration};
 
 use agentdesktop_proto::fleet::{
-    AgentMessage, ControllerMessage, DeviceCertificateResponse, DeviceUsageRequest,
-    DeviceUsageResponse, EnrollDeviceRequest, EnrollResponse, LlmGatewayCredentialRequest,
-    LlmGatewayCredentialResponse, LoginConfiguration, LoginConfigurationRequest,
-    RenewDeviceCertificateRequest, fleet_agent_client::FleetAgentClient,
-    fleet_agent_server::FleetAgent,
+    AgentMessage, AttachUserRequest, AttachUserResponse, ControllerMessage, DetachUserRequest,
+    DetachUserResponse, DeviceCertificateResponse, DeviceUsageRequest, DeviceUsageResponse,
+    EnrollDeviceRequest, EnrollResponse, LlmGatewayCredentialRequest, LlmGatewayCredentialResponse,
+    LoginConfiguration, LoginConfigurationRequest, RenewDeviceCertificateRequest,
+    fleet_agent_client::FleetAgentClient, fleet_agent_server::FleetAgent,
 };
 use futures_core::Stream;
 use tokio::{
@@ -79,6 +79,20 @@ impl FleetAgent for Slow {
         &self,
         _: Request<DeviceUsageRequest>,
     ) -> Result<Response<DeviceUsageResponse>, Status> {
+        Err(Status::unimplemented("test"))
+    }
+
+    async fn attach_user(
+        &self,
+        _: Request<AttachUserRequest>,
+    ) -> Result<Response<AttachUserResponse>, Status> {
+        Err(Status::unimplemented("test"))
+    }
+
+    async fn detach_user(
+        &self,
+        _: Request<DetachUserRequest>,
+    ) -> Result<Response<DetachUserResponse>, Status> {
         Err(Status::unimplemented("test"))
     }
 

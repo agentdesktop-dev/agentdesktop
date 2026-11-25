@@ -66,8 +66,10 @@ export function Desktop() {
               managedDevice={model.managedDevice}
               discovery={model.discovery}
               isLoggingOut={model.isLoggingOut}
+              isSigningIn={model.isManaging}
               onCopy={model.copyDiagnostics}
               onLogout={model.logout}
+              onSignIn={model.signIn}
             />
           ) : showingUsage ? (
             <UsageView

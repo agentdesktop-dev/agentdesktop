@@ -16,6 +16,7 @@ pub mod reconcile;
 pub mod remote;
 pub mod secret_store;
 pub mod secure_fs;
+pub mod session;
 pub mod subscription;
 mod subscription_oauth;
 mod tick;

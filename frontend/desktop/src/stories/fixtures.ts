@@ -122,6 +122,8 @@ export const unconfiguredDevice: ManagedDeviceSnapshot = {
   organizationName: null,
   enrollment: "unconfigured",
   detail: null,
+  user: null,
+  userCode: null,
 };
 
 export const approvedDevice: ManagedDeviceSnapshot = {
@@ -129,6 +131,8 @@ export const approvedDevice: ManagedDeviceSnapshot = {
   organizationName: "Acme Engineering",
   enrollment: "approved",
   detail: null,
+  user: null,
+  userCode: null,
 };
 
 export const pendingDevice: ManagedDeviceSnapshot = {
@@ -136,6 +140,8 @@ export const pendingDevice: ManagedDeviceSnapshot = {
   organizationName: "Acme Engineering",
   enrollment: "pending",
   detail: null,
+  user: null,
+  userCode: null,
 };
 
 export const rejectedDevice: ManagedDeviceSnapshot = {
@@ -143,6 +149,14 @@ export const rejectedDevice: ManagedDeviceSnapshot = {
   organizationName: "Acme Engineering",
   enrollment: "rejected",
   detail: "Your administrator rejected this enrollment request.",
+  user: null,
+  userCode: null,
+};
+
+/** Enrolled with an enrollment token; no user has signed in. */
+export const tokenEnrolledDevice: ManagedDeviceSnapshot = {
+  ...approvedDevice,
+  user: "signedOut",
 };
 
 const mcpServers = [
