@@ -68,6 +68,18 @@ export const genericNameDevice: Device = {
   enrolled_by_name: "sam.okafor@example.com",
 };
 
+// Enrolled by a device management system with an enrollment token: no user.
+export const tokenDevice: Device = {
+  ...macDevice,
+  id: "device-token-11223344",
+  hostname: "kiosk-01",
+  enrolled_by_issuer: "",
+  enrolled_by_subject: "",
+  enrolled_by_name: null,
+  enrollment_token_issuer: "jamf",
+  enrollment_token_id: "batch-2026-11",
+};
+
 export const devices = [
   macDevice,
   linuxDevice,

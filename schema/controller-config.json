@@ -280,12 +280,22 @@
       "type": "object",
       "properties": {
         "name": {
-          "description": "Issuer (`iss`) of the tokens this key verifies.",
+          "description": "Issuer (`iss`) of the tokens this issuer's keys verify.",
           "type": "string"
         },
         "publicKeyPath": {
-          "description": "Path to the PEM-encoded public key: ECDSA P-256 or P-384, Ed25519, or\nRSA of at least 2048 bits. Tokens must be signed with an algorithm of\nthe key's type.\n\nRelative paths are resolved from the controller configuration directory.",
-          "type": "string"
+          "description": "Path to the PEM-encoded public key: ECDSA P-256 or P-384, Ed25519, or\nRSA of at least 2048 bits. Tokens must be signed with an algorithm of\nthe key's type. Set this or `publicKeys`, not both.\n\nRelative paths are resolved from the controller configuration directory.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "publicKeys": {
+          "description": "Several public keys, for example an old and a new one while rotating\nkeys. Set this or `publicKeyPath`, not both.\n\nGive every key an `id` to require tokens to name their key in the\n`kid` header, or give none to accept a token that any key verifies.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ControllerEnrollmentTokenKey"
+          }
         },
         "revokedIds": {
           "description": "Token IDs (`jti`) that are no longer accepted. Devices enrolled with\none of them are rejected as well.",
@@ -297,8 +307,27 @@
       },
       "additionalProperties": false,
       "required": [
-        "name",
-        "publicKeyPath"
+        "name"
+      ]
+    },
+    "ControllerEnrollmentTokenKey": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Key ID that tokens signed with this key carry in their `kid` header.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Path to the PEM-encoded public key, of the same types as\n`publicKeyPath`.\n\nRelative paths are resolved from the controller configuration directory.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path"
       ]
     },
     "ControllerEnrollmentTokensConfig": {

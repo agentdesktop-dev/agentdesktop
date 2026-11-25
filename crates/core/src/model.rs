@@ -112,6 +112,9 @@ pub enum ControllerConnectionError {
     IdentityRejected,
     /// The organization session could not be refreshed; the daemon is re-enrolling.
     SessionExpired,
+    /// The controller no longer accepts the device's enrollment token; the
+    /// daemon keeps its identity and retries.
+    TokenNotAccepted,
     /// A local error (for example, the identity store) ended the controller
     /// session; the daemon is restarting it.
     LocalError,

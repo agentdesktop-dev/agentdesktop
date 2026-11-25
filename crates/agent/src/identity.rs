@@ -27,6 +27,9 @@ pub struct Identity {
     pub oauth: Option<OAuthCredentials>,
     pub oauth_token_endpoint: String,
     pub oauth_client_id: String,
+    /// SHA-256 (base64url) of the enrollment token the device enrolled with,
+    /// so a changed token file can be detected. `None` for a user sign-in.
+    pub enrollment_token_sha256: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -37,6 +40,8 @@ struct StoredIdentity {
     client_certificate_expires_at_unix_seconds: u64,
     oauth_token_endpoint: String,
     oauth_client_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    enrollment_token_sha256: Option<String>,
 }
 
 #[cfg(target_os = "linux")]
@@ -109,6 +114,7 @@ pub fn load(path: &Path) -> anyhow::Result<Option<Identity>> {
         oauth,
         oauth_token_endpoint: stored.oauth_token_endpoint,
         oauth_client_id: stored.oauth_client_id,
+        enrollment_token_sha256: stored.enrollment_token_sha256,
     }))
 }
 
@@ -170,6 +176,7 @@ pub fn save(path: &Path, identity: &Identity) -> anyhow::Result<()> {
         identity.client_certificate_expires_at_unix_seconds,
         &identity.oauth_token_endpoint,
         &identity.oauth_client_id,
+        identity.enrollment_token_sha256.as_deref(),
     )
 }
 
@@ -297,6 +304,7 @@ fn write_metadata(
     client_certificate_expires_at_unix_seconds: u64,
     oauth_token_endpoint: &str,
     oauth_client_id: &str,
+    enrollment_token_sha256: Option<&str>,
 ) -> anyhow::Result<()> {
     let parent = path.parent().context("identity path has no parent")?;
     secure_fs::ensure_private_dir(parent)?;
@@ -306,6 +314,7 @@ fn write_metadata(
         client_certificate_expires_at_unix_seconds,
         oauth_token_endpoint: oauth_token_endpoint.to_owned(),
         oauth_client_id: oauth_client_id.to_owned(),
+        enrollment_token_sha256: enrollment_token_sha256.map(str::to_owned),
     };
     secure_fs::atomic_write(path, &serde_json::to_vec_pretty(&stored)?, 0o600)
 }
@@ -339,6 +348,7 @@ mod tests {
             }),
             oauth_token_endpoint: "https://issuer.example/token".to_owned(),
             oauth_client_id: "client-1".to_owned(),
+            enrollment_token_sha256: None,
         }
     }
 
@@ -391,6 +401,7 @@ mod tests {
             oauth: None,
             oauth_token_endpoint: String::new(),
             oauth_client_id: String::new(),
+            enrollment_token_sha256: Some("token-hash".to_owned()),
             ..test_identity()
         };
 
@@ -400,6 +411,10 @@ mod tests {
         let loaded = load(&path).unwrap().unwrap();
         assert_eq!(loaded.client_private_key_pem, "private-key");
         assert!(loaded.oauth.is_none());
+        assert_eq!(
+            loaded.enrollment_token_sha256.as_deref(),
+            Some("token-hash")
+        );
 
         delete(&path, "device-1").unwrap();
         assert_eq!(secret_count(&directory), 0);

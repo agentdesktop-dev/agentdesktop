@@ -39,6 +39,10 @@ pub struct DeviceSummary {
     /// their preferred username, else their name), when the identity provider
     /// supplied one. Only this derived value is returned, never the raw claims.
     pub enrolled_by_name: Option<String>,
+    /// Issuer of the enrollment token the device enrolled with, if any.
+    pub enrollment_token_issuer: Option<String>,
+    /// ID (`jti`) of the enrollment token the device enrolled with, if any.
+    pub enrollment_token_id: Option<String>,
     pub config_revision: Option<i64>,
     pub config_state: Option<i64>,
     pub config_error: Option<String>,
@@ -59,6 +63,8 @@ struct DeviceRow {
     enrolled_by_issuer: String,
     enrolled_by_subject: String,
     idp_claims_json: Option<String>,
+    enrollment_token_issuer: Option<String>,
+    enrollment_token_id: Option<String>,
     config_revision: Option<i64>,
     config_state: Option<i64>,
     config_error: Option<String>,
@@ -79,6 +85,8 @@ impl From<DeviceRow> for DeviceSummary {
             enrolled_by_issuer: row.enrolled_by_issuer,
             enrolled_by_subject: row.enrolled_by_subject,
             enrolled_by_name: row.idp_claims_json.as_deref().and_then(readable_name),
+            enrollment_token_issuer: row.enrollment_token_issuer,
+            enrollment_token_id: row.enrollment_token_id,
             config_revision: row.config_revision,
             config_state: row.config_state,
             config_error: row.config_error,
@@ -440,7 +448,8 @@ impl Database {
         let rows: Vec<DeviceRow> = sqlx::query_as(
             "SELECT d.id, d.hostname, d.os, d.architecture, d.agent_version,
                     d.created_at, d.last_seen_at, d.enrolled_by_issuer,
-                    d.enrolled_by_subject, d.idp_claims_json, cs.revision AS config_revision,
+                    d.enrolled_by_subject, d.idp_claims_json, d.enrollment_token_issuer,
+                    d.enrollment_token_id, cs.revision AS config_revision,
                     cs.state AS config_state, cs.error AS config_error,
                     cs.updated_at AS config_updated_at, COUNT(x.kind) AS discovery_count
              FROM devices d
@@ -448,7 +457,8 @@ impl Database {
              LEFT JOIN discoveries x ON x.device_id = d.id
              GROUP BY d.id, d.hostname, d.os, d.architecture, d.agent_version,
                       d.created_at, d.last_seen_at, d.enrolled_by_issuer,
-                      d.enrolled_by_subject, d.idp_claims_json, cs.revision, cs.state,
+                      d.enrolled_by_subject, d.idp_claims_json, d.enrollment_token_issuer,
+                      d.enrollment_token_id, cs.revision, cs.state,
                       cs.error, cs.updated_at
              ORDER BY d.last_seen_at DESC, d.hostname ASC",
         )
@@ -475,7 +485,8 @@ impl Database {
         let device: Option<DeviceRow> = sqlx::query_as(
             "SELECT d.id, d.hostname, d.os, d.architecture, d.agent_version,
                     d.created_at, d.last_seen_at, d.enrolled_by_issuer,
-                    d.enrolled_by_subject, d.idp_claims_json, cs.revision AS config_revision,
+                    d.enrolled_by_subject, d.idp_claims_json, d.enrollment_token_issuer,
+                    d.enrollment_token_id, cs.revision AS config_revision,
                     cs.state AS config_state, cs.error AS config_error,
                     cs.updated_at AS config_updated_at, COUNT(x.kind) AS discovery_count
              FROM devices d
@@ -484,7 +495,8 @@ impl Database {
              WHERE d.id = $1
              GROUP BY d.id, d.hostname, d.os, d.architecture, d.agent_version,
                       d.created_at, d.last_seen_at, d.enrolled_by_issuer,
-                      d.enrolled_by_subject, d.idp_claims_json, cs.revision, cs.state,
+                      d.enrolled_by_subject, d.idp_claims_json, d.enrollment_token_issuer,
+                      d.enrollment_token_id, cs.revision, cs.state,
                       cs.error, cs.updated_at",
         )
         .bind(device_id)
@@ -1073,6 +1085,67 @@ mod tests {
             "raw claims must not reach the API: {json}"
         );
         assert!(!json.contains("idp_claims"), "claims column leaked: {json}");
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn the_device_list_and_detail_name_the_enrollment_token() {
+        use crate::{
+            enrollment_token::EnrollmentToken,
+            oidc::{CompletedEnrollment, EnrollmentCredential},
+        };
+
+        let (database, path) = test_database("enrollment-token").await;
+        database
+            .finish_enrollment(
+                &CompletedEnrollment {
+                    hostname: "kiosk".to_owned(),
+                    credential: EnrollmentCredential::Token(EnrollmentToken {
+                        issuer: "jamf".to_owned(),
+                        id: "batch-1".to_owned(),
+                    }),
+                },
+                &agentdesktop_proto::fleet::EnrollResponse {
+                    device_id: "token-device".to_owned(),
+                    client_certificate_pem: b"certificate".to_vec(),
+                    client_certificate_expires_at_unix_seconds: 1,
+                },
+            )
+            .await
+            .expect("enroll a device with a token");
+
+        let devices = database.list_devices().await.expect("list devices");
+        let token_device = devices
+            .iter()
+            .find(|d| d.id == "token-device")
+            .expect("token-enrolled device");
+        assert_eq!(
+            token_device.enrollment_token_issuer.as_deref(),
+            Some("jamf")
+        );
+        assert_eq!(token_device.enrollment_token_id.as_deref(), Some("batch-1"));
+        let user_device = devices
+            .iter()
+            .find(|d| d.id == "device")
+            .expect("user-enrolled device");
+        assert_eq!(user_device.enrollment_token_issuer, None);
+        assert_eq!(user_device.enrollment_token_id, None);
+
+        let detail = database
+            .get_device("token-device")
+            .await
+            .expect("load device")
+            .expect("device exists");
+        assert_eq!(
+            detail.device.enrollment_token_issuer.as_deref(),
+            Some("jamf")
+        );
+        assert_eq!(
+            detail.device.enrollment_token_id.as_deref(),
+            Some("batch-1")
+        );
 
         drop(database);
         let _ = std::fs::remove_file(path);

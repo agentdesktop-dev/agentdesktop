@@ -46,8 +46,16 @@ export function DeviceTable({
                 <div className="device-cell">
                   <div>
                     <strong>{device.hostname || "Unnamed device"}</strong>
-                    {device.enrolled_by_name && (
+                    {device.enrolled_by_name ? (
                       <span title="Enrolled by">{device.enrolled_by_name}</span>
+                    ) : (
+                      device.enrollment_token_id && (
+                        <span
+                          title={`Enrolled with token ${device.enrollment_token_id} from ${device.enrollment_token_issuer ?? "an unknown issuer"}`}
+                        >
+                          Token {device.enrollment_token_id}
+                        </span>
+                      )
                     )}
                     <span>{device.id.slice(0, 8)}</span>
                   </div>

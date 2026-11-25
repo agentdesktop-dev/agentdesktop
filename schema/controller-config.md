@@ -25,8 +25,11 @@
 |`enrollmentTokens`|object|Unattended device enrollment with operator-signed tokens. Disabled when unset.|
 |`enrollmentTokens.audience`|string|Audience (`aud`) every enrollment token must carry.|
 |`enrollmentTokens.issuers`|[]object|Token issuers the controller trusts.|
-|`enrollmentTokens.issuers[].name`|string|Issuer (`iss`) of the tokens this key verifies.|
-|`enrollmentTokens.issuers[].publicKeyPath`|string|Path to the PEM-encoded public key: ECDSA P-256 or P-384, Ed25519, or<br>RSA of at least 2048 bits. Tokens must be signed with an algorithm of<br>the key's type.<br><br>Relative paths are resolved from the controller configuration directory.|
+|`enrollmentTokens.issuers[].name`|string|Issuer (`iss`) of the tokens this issuer's keys verify.|
+|`enrollmentTokens.issuers[].publicKeyPath`|string|Path to the PEM-encoded public key: ECDSA P-256 or P-384, Ed25519, or<br>RSA of at least 2048 bits. Tokens must be signed with an algorithm of<br>the key's type. Set this or `publicKeys`, not both.<br><br>Relative paths are resolved from the controller configuration directory.|
+|`enrollmentTokens.issuers[].publicKeys`|[]object|Several public keys, for example an old and a new one while rotating<br>keys. Set this or `publicKeyPath`, not both.<br><br>Give every key an `id` to require tokens to name their key in the<br>`kid` header, or give none to accept a token that any key verifies.|
+|`enrollmentTokens.issuers[].publicKeys[].id`|string|Key ID that tokens signed with this key carry in their `kid` header.|
+|`enrollmentTokens.issuers[].publicKeys[].path`|string|Path to the PEM-encoded public key, of the same types as<br>`publicKeyPath`.<br><br>Relative paths are resolved from the controller configuration directory.|
 |`enrollmentTokens.issuers[].revokedIds`|[]string|Token IDs (`jti`) that are no longer accepted. Devices enrolled with<br>one of them are rejected as well.|
 |`fleetListener`|object|Listener for the device-facing gRPC fleet API.|
 |`fleetListener.limits`|object|Limits on the fleet API that depend on the deployment.|

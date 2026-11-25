@@ -27,6 +27,10 @@ export type Device = {
   enrolled_by_subject: string;
   /** Readable name of the user who enrolled the device, when the IdP gave one. */
   enrolled_by_name?: string | null;
+  /** Issuer of the enrollment token the device enrolled with, if any. */
+  enrollment_token_issuer?: string | null;
+  /** ID (`jti`) of the enrollment token the device enrolled with, if any. */
+  enrollment_token_id?: string | null;
   config_revision: number | null;
   config_state: number | null;
   config_error: string | null;

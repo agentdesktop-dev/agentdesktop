@@ -815,18 +815,54 @@ pub struct ControllerEnrollmentTokensConfig {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ControllerEnrollmentTokenIssuer {
-    /// Issuer (`iss`) of the tokens this key verifies.
+    /// Issuer (`iss`) of the tokens this issuer's keys verify.
     pub name: String,
     /// Path to the PEM-encoded public key: ECDSA P-256 or P-384, Ed25519, or
     /// RSA of at least 2048 bits. Tokens must be signed with an algorithm of
-    /// the key's type.
+    /// the key's type. Set this or `publicKeys`, not both.
     ///
     /// Relative paths are resolved from the controller configuration directory.
-    pub public_key_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_key_path: Option<PathBuf>,
+    /// Several public keys, for example an old and a new one while rotating
+    /// keys. Set this or `publicKeyPath`, not both.
+    ///
+    /// Give every key an `id` to require tokens to name their key in the
+    /// `kid` header, or give none to accept a token that any key verifies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub public_keys: Vec<ControllerEnrollmentTokenKey>,
     /// Token IDs (`jti`) that are no longer accepted. Devices enrolled with
     /// one of them are rejected as well.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revoked_ids: Vec<String>,
+}
+
+impl ControllerEnrollmentTokenIssuer {
+    /// The issuer's public keys, with their IDs when they have them.
+    pub fn keys(&self) -> impl Iterator<Item = (Option<&str>, &Path)> {
+        self.public_key_path
+            .iter()
+            .map(|path| (None, path.as_path()))
+            .chain(
+                self.public_keys
+                    .iter()
+                    .map(|key| (key.id.as_deref(), key.path.as_path())),
+            )
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerEnrollmentTokenKey {
+    /// Path to the PEM-encoded public key, of the same types as
+    /// `publicKeyPath`.
+    ///
+    /// Relative paths are resolved from the controller configuration directory.
+    pub path: PathBuf,
+    /// Key ID that tokens signed with this key carry in their `kid` header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
 }
 
 /// Controller-owned daemon configuration file and its revision.
@@ -1630,7 +1666,12 @@ pub fn load_controller(path: &Path) -> anyhow::Result<ControllerConfig> {
     }
     if let Some(tokens) = &mut config.enrollment_tokens {
         for issuer in &mut tokens.issuers {
-            resolve_relative(&mut issuer.public_key_path, directory);
+            if let Some(path) = &mut issuer.public_key_path {
+                resolve_relative(path, directory);
+            }
+            for key in &mut issuer.public_keys {
+                resolve_relative(&mut key.path, directory);
+            }
         }
     }
     if let Some(gateway) = &mut config.gateway_jwt {
@@ -1705,6 +1746,7 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
             if !names.insert(&issuer.name) {
                 anyhow::bail!("enrollmentTokens.issuers.{} is defined twice", issuer.name);
             }
+            validate_enrollment_token_keys(issuer)?;
         }
     }
     if let Some(gateway) = &config.gateway_jwt {
@@ -1773,6 +1815,39 @@ pub fn parse_controller(contents: &str) -> anyhow::Result<ControllerConfig> {
         }
     }
     Ok(config)
+}
+
+fn validate_enrollment_token_keys(issuer: &ControllerEnrollmentTokenIssuer) -> anyhow::Result<()> {
+    let name = &issuer.name;
+    match (&issuer.public_key_path, issuer.public_keys.is_empty()) {
+        (Some(_), false) => anyhow::bail!(
+            "enrollmentTokens.issuers.{name} sets both publicKeyPath and publicKeys; set one"
+        ),
+        (None, true) => anyhow::bail!(
+            "enrollmentTokens.issuers.{name} needs publicKeyPath or a non-empty publicKeys"
+        ),
+        _ => {}
+    }
+    let ids = issuer
+        .public_keys
+        .iter()
+        .filter_map(|key| key.id.as_deref())
+        .collect::<Vec<_>>();
+    if !ids.is_empty() && ids.len() != issuer.public_keys.len() {
+        anyhow::bail!(
+            "enrollmentTokens.issuers.{name}.publicKeys must give every key an id, or none"
+        );
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for id in ids {
+        if id.trim().is_empty() {
+            anyhow::bail!("enrollmentTokens.issuers.{name}.publicKeys has an empty id");
+        }
+        if !seen.insert(id) {
+            anyhow::bail!("enrollmentTokens.issuers.{name}.publicKeys uses id {id} twice");
+        }
+    }
+    Ok(())
 }
 
 fn validate_admin_authenticated(admin: &ControllerAdminAuthenticated) -> anyhow::Result<()> {
@@ -2661,6 +2736,55 @@ controller:
             ),
         ] {
             let error = controller(invalid).expect_err("invalid enrollment tokens accepted");
+            assert!(error.to_string().contains(message), "{error}");
+        }
+    }
+
+    #[test]
+    fn controller_enrollment_token_issuers_take_one_key_or_a_list() {
+        let issuer = |keys: &str| {
+            parse_controller(&format!(
+                "tls: /etc/agentdesktop/tls\noidc:\n  issuer: https://idp.example.com\n  clientId: agentdesktop\nenrollmentTokens:\n  audience: fleet\n  issuers:\n    - name: jamf\n{keys}"
+            ))
+        };
+        let tokens = issuer(
+            "      publicKeys:\n        - path: old.pem\n          id: '2026'\n        - path: new.pem\n          id: '2027'\n",
+        )
+        .expect("a list of keys with ids")
+        .enrollment_tokens
+        .unwrap();
+        let keys: Vec<_> = tokens.issuers[0].keys().collect();
+        assert_eq!(
+            keys,
+            [
+                (Some("2026"), std::path::Path::new("old.pem")),
+                (Some("2027"), std::path::Path::new("new.pem")),
+            ]
+        );
+        issuer("      publicKeys:\n        - path: old.pem\n        - path: new.pem\n")
+            .expect("a list of keys without ids");
+
+        for (invalid, message) in [
+            (
+                "      publicKeyPath: a.pem\n      publicKeys:\n        - path: b.pem\n",
+                "sets both publicKeyPath and publicKeys",
+            ),
+            ("      revokedIds: []\n", "needs publicKeyPath"),
+            ("      publicKeys: []\n", "needs publicKeyPath"),
+            (
+                "      publicKeys:\n        - path: a.pem\n          id: a\n        - path: b.pem\n",
+                "every key an id, or none",
+            ),
+            (
+                "      publicKeys:\n        - path: a.pem\n          id: ' '\n",
+                "has an empty id",
+            ),
+            (
+                "      publicKeys:\n        - path: a.pem\n          id: a\n        - path: b.pem\n          id: a\n",
+                "uses id a twice",
+            ),
+        ] {
+            let error = issuer(invalid).expect_err("invalid issuer keys accepted");
             assert!(error.to_string().contains(message), "{error}");
         }
     }

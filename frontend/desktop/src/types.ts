@@ -40,6 +40,7 @@ export type ControllerConnectionError =
   | "unreachable"
   | "identityRejected"
   | "sessionExpired"
+  | "tokenNotAccepted"
   | "localError"
   | "unknown";
 

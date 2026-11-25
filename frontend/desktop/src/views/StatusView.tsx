@@ -68,6 +68,8 @@ function describeControllerError(
       return "Device identity was rejected; re-enrolling";
     case "sessionExpired":
       return "Organization session expired; re-enrolling";
+    case "tokenNotAccepted":
+      return "This device's enrollment token is no longer accepted; retrying";
     case "localError":
       return "agentdesktop hit a local error; restarting the controller session";
     default:

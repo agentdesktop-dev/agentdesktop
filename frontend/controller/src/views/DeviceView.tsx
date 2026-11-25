@@ -253,12 +253,7 @@ export function DeviceView({
           title="Enrollment identity"
           description="Identity captured when this device joined the fleet"
         />
-        <DefinitionList
-          entries={[
-            ["Issuer", device.enrolled_by_issuer || "Enrollment token"],
-            ["Subject", device.enrolled_by_subject || "Device credential"],
-          ]}
-        />
+        <DefinitionList entries={enrollmentIdentity(device)} />
       </section>
       {canDelete && (
         <section className="danger-zone">
@@ -409,6 +404,30 @@ function DeleteDeviceDialog({
       </div>
     </dialog>
   );
+}
+
+function enrollmentIdentity(device: DeviceDetail): Array<[string, string]> {
+  const user: Array<[string, string]> = device.enrolled_by_subject
+    ? [
+        ["Issuer", device.enrolled_by_issuer],
+        ["Subject", device.enrolled_by_subject],
+      ]
+    : [];
+  if (device.enrollment_token_id) {
+    return [
+      ["Method", "Enrollment token"],
+      ["Token issuer", device.enrollment_token_issuer ?? "Unknown"],
+      ["Token ID", device.enrollment_token_id],
+      ...user,
+    ];
+  }
+  if (device.enrolled_by_issuer && device.enrolled_by_subject) {
+    return [["Method", "User sign-in"], ...user];
+  }
+  return [
+    ["Issuer", device.enrolled_by_issuer || "Enrollment token"],
+    ["Subject", device.enrolled_by_subject || "Device credential"],
+  ];
 }
 
 function friendlyEvent(kind: string) {

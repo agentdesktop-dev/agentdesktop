@@ -271,7 +271,9 @@ daemon's controller connection. The IdP must advertise a
 
 A device management system can enroll devices with no user involved. The
 operator signs a token once, the controller trusts the operator's public key,
-and every device receives the same token file.
+and every device receives the same token file. Token enrollment works
+alongside sign-in, not instead of it: the controller still requires its
+`oidc` section.
 
 The token is a JWT signed with an algorithm of the issuer's key type: ES256
 or ES384 for an ECDSA P-256 or P-384 key, EdDSA for an Ed25519 key, and
@@ -297,6 +299,23 @@ enrollmentTokens:
       revokedIds: []
 ```
 
+An issuer can have several keys instead, for example while rotating its
+signing key. List them in `publicKeys` in place of `publicKeyPath`:
+
+```yaml
+    - name: mdm
+      publicKeys:
+        - path: enrollment/mdm-2026.pub.pem
+        - path: enrollment/mdm-2027.pub.pem
+```
+
+A token is accepted when any of the keys verifies it. To require tokens to
+name their key, give every key an `id`; each token must then carry that ID in
+its `kid` header, and only that key is tried. To rotate a key, add the new
+key, switch the device management system to tokens signed with it, and then
+remove the old key. Devices that already enrolled are not affected, because
+after enrollment a device authenticates with its certificate, not the token.
+
 The daemon reads the token from a file that only it can read:
 
 ```yaml
@@ -305,6 +324,11 @@ controller:
   caCertificatePath: /etc/agentdesktop/ca.pem
   enrollmentTokenPath: /etc/agentdesktop/enrollment-token
 ```
+
+Anyone who can read the token can enroll devices, so restrict the file to the
+daemon's user: mode `0600` on macOS and Linux, SYSTEM and Administrators on
+Windows. On macOS and Linux the daemon logs a warning when other users can
+access it.
 
 With `enrollmentTokenPath` set, the daemon skips `GetLoginConfiguration` and
 sign-in. It generates the device key and calls `EnrollDevice` with the token
@@ -320,16 +344,40 @@ and no user has signed in.
 
 To revoke a token, add its `jti` to the issuer's `revokedIds` and restart the
 controller. The token no longer enrolls devices, and the devices it enrolled
-are rejected as `Unauthenticated`. Removing the issuer rejects every device
-it enrolled. A rejected daemon discards its identity and retries enrollment
-with backoff. It reads the token file on every attempt, so it enrolls again
-once the file holds a token the controller accepts.
+are rejected as `PermissionDenied`. Because the controller still knows these
+devices, they keep their identity and retry, so taking the `jti` out of
+`revokedIds` again brings them back under the same device IDs. Removing the
+issuer, or `enrollmentTokens` altogether, does the same to every device the
+issuer enrolled. To move devices to a new token instead, replace their token
+file: a daemon whose token is rejected enrolls again when the file no longer
+holds the token it enrolled with. The daemon stores only a SHA-256 of that
+token, never the token itself.
+
+`exp` and `revokedIds` do different things:
+
+| | New enrollments | Devices already enrolled |
+| --- | --- | --- |
+| Token past its `exp` | Rejected | Keep working |
+| Token's `jti` in `revokedIds` | Rejected | Rejected as `PermissionDenied` |
+
+Give tokens an `exp` and mint a replacement before it passes. That limits how
+long a copied token is useful without touching the devices it enrolled. Use
+`revokedIds` when a token leaked and the devices it enrolled cannot be trusted
+either.
+
+Until it expires or is revoked, anyone holding a leaked token can enroll
+devices. Such a device receives the fleet's daemon configuration and can
+report inventory, telemetry, and usage. It gets no LLM gateway credential,
+which needs a signed-in user. To see which devices a token enrolled, search
+the controller's device list for its ID.
 
 Deleting a token-enrolled device in the controller UI removes its record but
 does not keep the device out. The controller rejects the device's next
 `Connect` as an unknown device, so the daemon discards its identity and
-enrolls again with the same token, under a new device ID. To keep a device
-out, remove the token file from it before deleting it, or revoke the token.
+enrolls again with the same token, under a new device ID. To remove one device,
+first delete the token file on the device (or uninstall the daemon), then
+delete the device in the controller UI. Revoking the token's `jti` cuts off
+every device it enrolled.
 
 ### Controller validation
 
@@ -449,7 +497,8 @@ device identity.
 | Enrollment fails (IdP error, state mismatch, timeout, controller rejects) | Retry with backoff. Status returns to `starting`. A daemon with an enrollment token never falls back to sign-in. |
 | IdP rejects the refresh token | Delete the local identity and enroll again. The app reports the session as expired. |
 | Token refresh fails because of the network or an IdP outage | Keep the identity and retry with backoff. |
-| Controller returns `Unauthenticated` on the `Connect` stream, at open or later (unknown device certificate, the IdP rejects the access token, or the device's enrollment token is no longer accepted) | Delete the local identity and enroll again. A daemon with an enrollment token enrolls again with the token file. |
+| Controller returns `Unauthenticated` on the `Connect` stream, at open or later (unknown device certificate, or the IdP rejects the access token) | Delete the local identity and enroll again. A daemon with an enrollment token enrolls again with the token file. |
+| Controller returns `PermissionDenied` to a token-enrolled device (its token was revoked or its issuer removed) | Keep the identity and reconnect with backoff. The app reports the token as no longer accepted. If the token file has changed since the device enrolled, delete the identity and enroll again with the new token. |
 | Controller returns another error, such as `PermissionDenied` (subject mismatch) or `Unavailable` (IdP unreachable at open), or the stream closes | Keep the identity and reconnect with backoff. |
 | Certificate renewal fails | Keep the current certificate and try again before the next session. |
 
