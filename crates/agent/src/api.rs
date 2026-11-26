@@ -1078,6 +1078,7 @@ programs:
                 None,
                 Some(root.join("pi/models.json")),
                 Some(root.join("pi/settings.json")),
+                Some(root.join("muse/settings.json")),
                 root.join("bin/agentdesktop"),
                 root.join("agentdesktop.sock"),
             )

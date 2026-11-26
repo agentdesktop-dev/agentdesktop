@@ -7,8 +7,8 @@ pub(crate) use plan::grants_beyond;
 
 use crate::provider::{
     Provider, ReconcileContext, claude_code::ClaudeCode, claude_desktop::ClaudeDesktop,
-    codex::Codex, copilot::Copilot, cursor::Cursor, grok::Grok, ollama::Ollama, opencode::OpenCode,
-    pi::Pi, vscode::VsCode,
+    codex::Codex, copilot::Copilot, cursor::Cursor, grok::Grok, muse::Muse, ollama::Ollama,
+    opencode::OpenCode, pi::Pi, vscode::VsCode,
 };
 use agentdesktop_core::{
     config::{DaemonConfig, ProgramsConfig},
@@ -68,6 +68,7 @@ impl Reconciler {
         vscode_settings_path: Option<PathBuf>,
         pi_models_path: Option<PathBuf>,
         pi_settings_path: Option<PathBuf>,
+        muse_settings_path: Option<PathBuf>,
         credential_helper: PathBuf,
         socket: PathBuf,
     ) -> Self {
@@ -110,6 +111,9 @@ impl Reconciler {
                 Box::new(Pi {
                     models_path: pi_models_path,
                     settings_path: pi_settings_path,
+                }),
+                Box::new(Muse {
+                    settings_path: muse_settings_path,
                 }),
                 Box::new(Ollama),
             ]),
@@ -685,7 +689,7 @@ fn outcome(program: &'static str, state: ProgramState, detail: String) -> Progra
 
 /// The provider IDs of every program a configuration can manage, in provider
 /// order: the programs a device user can choose.
-pub const MANAGED_PROGRAMS: [&str; 8] = [
+pub const MANAGED_PROGRAMS: [&str; 9] = [
     ClaudeCode::ID,
     ClaudeDesktop::ID,
     Codex::ID,
@@ -694,6 +698,7 @@ pub const MANAGED_PROGRAMS: [&str; 8] = [
     Copilot::ID,
     VsCode::ID,
     Pi::ID,
+    Muse::ID,
 ];
 
 /// `config` without the configured programs `choice` leaves out, and those
@@ -729,6 +734,7 @@ pub fn apply_program_choice<'a>(
         copilot,
         vscode,
         pi,
+        muse,
     } = &mut chosen.programs;
     let mut opted_out = Vec::new();
     leave_out(claude_code, ClaudeCode::ID, choice, &mut opted_out);
@@ -739,6 +745,7 @@ pub fn apply_program_choice<'a>(
     leave_out(copilot, Copilot::ID, choice, &mut opted_out);
     leave_out(vscode, VsCode::ID, choice, &mut opted_out);
     leave_out(pi, Pi::ID, choice, &mut opted_out);
+    leave_out(muse, Muse::ID, choice, &mut opted_out);
     (Cow::Owned(chosen), opted_out)
 }
 
@@ -755,6 +762,7 @@ pub fn programs_use_llm_gateway(programs: &ProgramsConfig) -> bool {
         copilot,
         vscode,
         pi,
+        muse,
     } = programs;
     [
         claude_code.as_ref().map(|program| program.use_llm_gateway),
@@ -767,6 +775,7 @@ pub fn programs_use_llm_gateway(programs: &ProgramsConfig) -> bool {
         copilot.as_ref().map(|program| program.use_llm_gateway),
         vscode.as_ref().map(|program| program.use_llm_gateway),
         pi.as_ref().map(|program| program.use_llm_gateway),
+        muse.as_ref().map(|program| program.use_llm_gateway),
     ]
     .into_iter()
     .any(|uses| uses == Some(true))
@@ -784,6 +793,7 @@ pub fn configured_programs(programs: &ProgramsConfig) -> Vec<&'static str> {
         copilot,
         vscode,
         pi,
+        muse,
     } = programs;
     [
         (claude_code.is_some(), ClaudeCode::ID),
@@ -794,6 +804,7 @@ pub fn configured_programs(programs: &ProgramsConfig) -> Vec<&'static str> {
         (copilot.is_some(), Copilot::ID),
         (vscode.is_some(), VsCode::ID),
         (pi.is_some(), Pi::ID),
+        (muse.is_some(), Muse::ID),
     ]
     .into_iter()
     .filter_map(|(configured, id)| configured.then_some(id))
@@ -964,6 +975,7 @@ programs:
     model: selected
   pi:
     model: selected
+  muse: {}
   copilot:
     models:
       selected: {}
@@ -977,6 +989,7 @@ programs:
             ("claude-desktop", "claude-desktop", false),
             ("grok", "grok", false),
             ("pi", "pi", true),
+            ("muse", "muse", true),
             ("copilot", "copilot", true),
             ("vscode", "vscode", true),
         ];
@@ -1154,6 +1167,7 @@ programs:
             None,
             Some(root.join("pi/models.json")),
             Some(root.join("pi/settings.json")),
+            Some(root.join("muse/settings.json")),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
@@ -1228,6 +1242,7 @@ programs:
             None,
             Some(root.join("pi/models.json")),
             Some(root.join("pi/settings.json")),
+            Some(root.join("muse/settings.json")),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         )
@@ -1285,6 +1300,7 @@ programs:
             Some(chat_models.with_file_name("settings.json")),
             Some(root.join("pi/models.json")),
             Some(root.join("pi/settings.json")),
+            Some(root.join("muse/settings.json")),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         )
@@ -1359,6 +1375,7 @@ programs:
             None,
             Some(root.join("pi/models.json")),
             Some(root.join("pi/settings.json")),
+            Some(root.join("muse/settings.json")),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         );
@@ -1441,6 +1458,7 @@ programs:
                 None,
                 Some(root.join("pi/models.json")),
                 Some(root.join("pi/settings.json")),
+                Some(root.join("muse/settings.json")),
                 root.join("bin/agentdesktop"),
                 root.join("agentdesktop.sock"),
             );
@@ -1859,6 +1877,7 @@ programs:
             Some(root.join("vscode/User/settings.json")),
             Some(root.join("pi/models.json")),
             Some(root.join("pi/settings.json")),
+            Some(root.join("muse/settings.json")),
             root.join("bin/agentdesktop"),
             root.join("agentdesktop.sock"),
         )
@@ -2110,7 +2129,7 @@ programs:
     #[test]
     fn managed_programs_are_every_program_key() {
         let every = parse_daemon(
-            "programs: { claudeCode: {}, claudeDesktop: {}, codex: {}, openCode: {}, grok: {}, copilot: {}, vscode: {}, pi: {} }",
+            "programs: { claudeCode: {}, claudeDesktop: {}, codex: {}, openCode: {}, grok: {}, copilot: {}, vscode: {}, pi: {}, muse: {} }",
         )
         .unwrap();
         assert_eq!(
@@ -2534,6 +2553,7 @@ programs:
             "vscode",
             "opencode",
             "pi",
+            "muse",
         ] {
             assert!(
                 program_outcome(&report, absent).is_none(),

@@ -76,6 +76,11 @@ pub(super) struct MergeOptions {
     /// JSON pointers to values managed as a whole, rather than merged
     /// additively; removal restores the user's original value.
     pub(super) replace_paths: &'static [&'static str],
+    /// Top-level keys the merge may add that stay when removal leaves other
+    /// content in the file, for a file its program rejects without them (a
+    /// required schema version). They still go when the file created by the
+    /// merge is removed.
+    pub(super) retain_on_removal: &'static [&'static str],
 }
 
 impl Default for MergeOptions {
@@ -86,6 +91,7 @@ impl Default for MergeOptions {
             redact_diff: false,
             format: JsonFormat::Json,
             replace_paths: &[],
+            retain_on_removal: &[],
         }
     }
 }
@@ -335,6 +341,15 @@ pub(super) fn plan_remove_with(
     }
     let empty = settings.as_object().is_some_and(serde_json::Map::is_empty)
         || settings.as_array().is_some_and(Vec::is_empty);
+    if !empty && let Some(object) = settings.as_object_mut() {
+        for key in options.retain_on_removal {
+            if !object.contains_key(*key)
+                && let Some(value) = state.after.get(*key)
+            {
+                object.insert((*key).to_owned(), value.clone());
+            }
+        }
+    }
     let proposed = if state.created && empty {
         None
     } else {
@@ -688,6 +703,66 @@ mod tests {
         )
         .unwrap();
         assert!(plan.has_conflicts(), "comments are not rewritten silently");
+    }
+
+    #[test]
+    fn retained_keys_stay_with_user_content_and_go_with_a_created_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let state = state_path(&path);
+        let options = MergeOptions {
+            retain_on_removal: &["schema_version"],
+            ..MergeOptions::default()
+        };
+        let managed = || json!({"schema_version": 1, "managed": true});
+        let merge = || {
+            let plan = ReconcilePlan::default();
+            plan_merge_with(&path, &state, managed(), false, "x", "Test", options, &plan).unwrap();
+            plan.apply().unwrap();
+        };
+        let remove = || {
+            let plan = ReconcilePlan::default();
+            assert!(plan_remove_with(&path, &state, "x", "Test", options, &plan).unwrap());
+            plan.apply().unwrap();
+        };
+        let read = || -> Value { serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap() };
+
+        // Nothing but managed values: the created file goes, retained key included.
+        merge();
+        remove();
+        assert!(!path.exists());
+
+        // The user added a setting to the created file: the key stays with it.
+        merge();
+        std::fs::write(
+            &path,
+            r#"{"schema_version":1,"managed":true,"user":"keep"}"#,
+        )
+        .unwrap();
+        remove();
+        assert_eq!(read(), json!({"schema_version": 1, "user": "keep"}));
+        std::fs::remove_file(&path).unwrap();
+
+        // A key the user already had is theirs, with or without the option.
+        std::fs::write(&path, r#"{"schema_version":1,"user":"keep"}"#).unwrap();
+        merge();
+        remove();
+        assert_eq!(read(), json!({"schema_version": 1, "user": "keep"}));
+
+        // Without the option the key the merge added is removed.
+        std::fs::remove_file(&path).unwrap();
+        let plan = ReconcilePlan::default();
+        plan_merge(&path, &state, managed(), false, "x", "Test", &plan).unwrap();
+        plan.apply().unwrap();
+        std::fs::write(
+            &path,
+            r#"{"schema_version":1,"managed":true,"user":"keep"}"#,
+        )
+        .unwrap();
+        let plan = ReconcilePlan::default();
+        assert!(plan_remove(&path, &state, "x", "Test", &plan).unwrap());
+        plan.apply().unwrap();
+        assert_eq!(read(), json!({"user": "keep"}));
     }
 
     #[test]

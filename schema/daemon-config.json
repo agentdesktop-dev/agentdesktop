@@ -281,6 +281,11 @@
           "$ref": "#/$defs/LlmProxyStartupConfig",
           "default": {}
         },
+        "muse": {
+          "description": "Muse Code paths.",
+          "$ref": "#/$defs/MuseStartupConfig",
+          "default": {}
+        },
         "oidcCallbackListen": {
           "description": "Override the OIDC callback bind address.",
           "type": [
@@ -559,6 +564,43 @@
       },
       "additionalProperties": false
     },
+    "MuseConfig": {
+      "description": "Settings reconciled into Muse Code's user `settings.json`.\n\nWith an LLM gateway, agentdesktop owns the whole `endpoint_transport`\nobject: the gateway URL and, when the gateway authenticates callers, a\n`bearer_command` that runs the agentdesktop credential helper. The user's\nown `endpoint_transport` is restored on cleanup. Muse Code reads these\nsettings only from the user's file under `$XDG_CONFIG_HOME/muse` (or\n`~/.config/muse`), so management requires `--user`. System daemons skip it.",
+      "type": "object",
+      "properties": {
+        "managedConfig": {
+          "description": "Arbitrary values merged into Muse Code's `settings.json`.\n\nUse Muse Code's native snake_case setting keys. Generated values take\nprecedence, and `schema_version` cannot be set here.",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "model": {
+          "description": "Default model ID saved as Muse Code's `model` setting.\n\nOptional: when unset, Muse Code keeps the user's saved model or the\ndefault from the model catalog served through the gateway.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "useLlmGateway": {
+          "description": "Whether this program uses the top-level LLM gateway.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "MuseStartupConfig": {
+      "description": "Local Muse Code paths.",
+      "type": "object",
+      "properties": {
+        "settings": {
+          "description": "Settings file. Defaults to `$XDG_CONFIG_HOME/muse/settings.json`, then\n`~/.config/muse/settings.json`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "OpenCodeApi": {
       "description": "OpenAI API dialect OpenCode uses for the managed LLM gateway provider.",
       "oneOf": [
@@ -764,6 +806,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/GrokConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "muse": {
+          "description": "Muse Code managed configuration.\n\nManaged in user mode (`--user`); system daemons skip it with an inactive reason.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MuseConfig"
             },
             {
               "type": "null"
