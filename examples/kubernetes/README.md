@@ -41,13 +41,13 @@ experimental in Agentgateway 1.4 and must be enabled explicitly:
 export AGENTGATEWAY_VERSION=v1.4.1
 
 helm upgrade --install agentgateway-crds \
-  oci://cr.agentgateway.dev/agentgateway-crds \
+  oci://cr.agentgateway.dev/charts/agentgateway-crds \
   --version "${AGENTGATEWAY_VERSION}" \
   --namespace agentgateway-system \
   --create-namespace
 
 helm upgrade --install agentgateway \
-  oci://cr.agentgateway.dev/agentgateway \
+  oci://cr.agentgateway.dev/charts/agentgateway \
   --version "${AGENTGATEWAY_VERSION}" \
   --namespace agentgateway-system \
   --values examples/kubernetes/agentgateway-values.yaml

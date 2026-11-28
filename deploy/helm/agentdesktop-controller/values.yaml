@@ -10,6 +10,13 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
+# Additional environment variables for the controller container.
+extraEnv: []
+# Additional volume mounts for the controller container.
+extraVolumeMounts: []
+# Additional volumes for the controller pod.
+extraVolumes: []
+
 # This chart does not deploy PostgreSQL. Point this URL at an existing
 # database. Prefer existingConfigSecret when the URL contains credentials.
 databaseUrl: ""
