@@ -44,6 +44,10 @@ spec:
           containerPort: {{ .Values.gatewayListener.port }}
           protocol: TCP
         {{- end }}
+        {{- with .Values.extraEnv }}
+        env:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -58,6 +62,9 @@ spec:
         - name: tls
           mountPath: /etc/agentdesktop/tls
           readOnly: true
+        {{- with .Values.extraVolumeMounts }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       volumes:
       - name: config
         {{- if .Values.existingConfigSecret }}
@@ -73,6 +80,9 @@ spec:
       - name: tls
         secret:
           secretName: {{ required "tlsSecretName is required" .Values.tlsSecretName }}
+      {{- with .Values.extraVolumes }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

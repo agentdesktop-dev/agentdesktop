@@ -44,6 +44,28 @@ Services need: `fleetListener.listen: 0.0.0.0:8443`, and with `gatewayJwt`,
 chart's value). The controller defaults both to loopback.
 See `values.yaml` for all chart settings.
 
+The controller container can receive additional environment variables and
+volume mounts, with the corresponding volumes added to its pod. For example,
+to mount an additional CA bundle from an existing ConfigMap:
+
+```yaml
+extraEnv:
+  - name: SSL_CERT_FILE
+    value: /etc/ssl/certs/custom-ca.pem
+extraVolumes:
+  - name: custom-ca
+    configMap:
+      name: custom-ca-bundle
+extraVolumeMounts:
+  - name: custom-ca
+    mountPath: /etc/ssl/certs/custom-ca.pem
+    subPath: ca.pem
+    readOnly: true
+```
+
+The selected environment variable and bundle path must be supported by the
+container's TLS client.
+
 The `<release>` Service exposes only the TLS-protected fleet API. With
 `gatewayJwt`, the chart adds a `<release>-gateway` ClusterIP Service for LLM
 gateways, which serves only the gateway JWKS; point gateways' JWKS URL at it.
